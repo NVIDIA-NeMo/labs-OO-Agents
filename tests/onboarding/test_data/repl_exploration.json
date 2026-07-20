@@ -1,0 +1,55 @@
+{
+  "test_cases": [
+    {
+      "id": "unknown_data_structure",
+      "capability": "repl_usage",
+      "task": "Process self.data (structure unknown)",
+      "expected_behavior": {
+        "should_use_repl": true,
+        "repl_commands": ["type(self.data)", "print(self.data)", "len(self.data)"],
+        "stores_in_context": true,
+        "tool_used": "repl_command"
+      },
+      "difficulty": "medium",
+      "tags": ["exploration", "unknown_structure"]
+    },
+    {
+      "id": "verify_initialization",
+      "capability": "repl_usage",
+      "task": "Process data if it's initialized",
+      "expected_behavior": {
+        "should_use_repl": true,
+        "repl_commands": ["self.data is not None", "hasattr(self, 'data')"],
+        "stores_in_context": false,
+        "tool_used": "repl_command"
+      },
+      "difficulty": "medium",
+      "tags": ["verification", "conditional"]
+    },
+    {
+      "id": "simple_no_repl",
+      "capability": "repl_usage",
+      "task": "Set status to completed",
+      "expected_behavior": {
+        "should_use_repl": false,
+        "tool_used": "code_generation"
+      },
+      "difficulty": "easy",
+      "tags": ["simple_task", "no_exploration"]
+    },
+    {
+      "id": "preview_large_data",
+      "capability": "repl_usage",
+      "task": "Process large documents",
+      "expected_behavior": {
+        "should_use_repl": true,
+        "repl_commands": ["[d[:100] for d in self.docs]", "len(self.docs)"],
+        "stores_in_context": true,
+        "context_key": "doc_preview",
+        "tool_used": "repl_command"
+      },
+      "difficulty": "medium",
+      "tags": ["data_preview", "large_data"]
+    }
+  ]
+}

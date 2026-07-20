@@ -1,0 +1,2 @@
+{"args": [], "kwargs": {"name": "alpha", "size": 5}, "expected": {"name": "alpha", "size": 5}}
+{"args": [], "kwargs": {"name": "beacon", "size": 12}, "expected": {"name": "beacon", "size": 12}}

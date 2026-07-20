@@ -1,0 +1,68 @@
+# Capability Tests - 4 agent test types
+name: capability
+description: "NeMo OO Agents capability tests with 4 agent types"
+
+# Models to sweep across all tests
+models:
+  - nvidia_nim/openai/gpt-oss-20b
+  - nvidia_nim/qwen/qwen3-next-80b-a3b-instruct
+
+test_suite:
+  # -----------------------------
+  # Sentiment Tests (SentimentAgent)
+  # -----------------------------
+
+  - name: sentiment_single
+    description: "Single text sentiment classification"
+    agent:
+      module: test_agents.capability_tests
+      class: SentimentAgent
+    method: classify_single
+    data_file: util/e2e_optimization/src/e2e_optimization/examples/capability/data_sentiment_single.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+
+  - name: sentiment_batch
+    description: "Batch sentiment classification (10 texts)"
+    agent:
+      module: test_agents.capability_tests
+      class: SentimentAgent
+    method: classify_batch
+    data_file: util/e2e_optimization/src/e2e_optimization/examples/capability/data_sentiment_batch.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+
+  # -----------------------------
+  # Calculate Tests (CalculateAgent)
+  # -----------------------------
+
+  - name: calculate_single
+    description: "Single multiplication"
+    agent:
+      module: test_agents.capability_tests
+      class: CalculateAgent
+    method: calculate_single
+    data_file: util/e2e_optimization/src/e2e_optimization/examples/capability/data_calculate_single.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+
+  - name: calculate_batch
+    description: "Batch multiplication (10 pairs)"
+    agent:
+      module: test_agents.capability_tests
+      class: CalculateAgent
+    method: calculate_batch
+    data_file: util/e2e_optimization/src/e2e_optimization/examples/capability/data_calculate_batch.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+
+# Output
+output_dir: util/e2e_optimization/experiments

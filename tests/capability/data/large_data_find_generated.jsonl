@@ -1,0 +1,2 @@
+{"args": [], "kwargs": {"test_case": "find_found", "marker": "SECRET_MARKER_42"}, "expected": {"found": true, "position": 570000, "data_length": 790016}}
+{"args": [], "kwargs": {"test_case": "find_not_found", "marker": "HIDDEN_TOKEN_XYZ"}, "expected": {"found": false, "position": -1, "data_length": 540000}}

@@ -1,0 +1,2 @@
+{"args": [], "kwargs": {"context": "<preview>[0, 1, 2, 3, 4, ... 90 items not shown ..., 95, 96, 97, 98, 99]</preview>", "question": "How many items are in the list total?"}, "expected": "100"}
+{"args": [], "kwargs": {"context": "<preview>{'data': ['a', 'b', 'c', ... 47 items not shown ..., 'x', 'y', 'z']}</preview>", "question": "How many items are in the 'data' list?"}, "expected": "53"}

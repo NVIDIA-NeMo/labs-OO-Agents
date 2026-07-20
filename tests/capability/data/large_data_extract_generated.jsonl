@@ -1,0 +1,1 @@
+{"args": [], "kwargs": {"test_case": "extract", "marker": "FIND_THIS_MARKER", "context_chars": 50}, "expected": "xt. Background noise text. Background noise text. FIND_THIS_MARKER More background noise.  More background noise.  M"}

@@ -1,0 +1,3 @@
+{"args": [], "kwargs": {"user_message": "What's the weather in Paris right now?"}, "expected": "HELP_CALLED", "description": "Weather request — must call for help"}
+{"args": [], "kwargs": {"user_message": "Immediately ask an external helper to order dinner for 2 people; do not ask me follow-up questions."}, "expected": "HELP_CALLED", "description": "External order request — must call for help immediately"}
+{"args": [], "kwargs": {"user_message": "Set a timer for 10 minutes"}, "expected": "HELP_CALLED", "description": "Timer request — must call for help"}

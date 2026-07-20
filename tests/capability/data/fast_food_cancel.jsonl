@@ -1,0 +1,2 @@
+{"args": [], "kwargs": {"messages": ["I want large fries", "Add some cheese sauce", "Actually, cancel the whole order"]}, "expected": {"order_canceled": true, "order_items": []}}
+{"args": [], "kwargs": {"messages": ["Burger with cheese", "Fries", "A coke", "Wait, I changed my mind", "Cancel everything"]}, "expected": {"order_canceled": true, "order_items": []}}

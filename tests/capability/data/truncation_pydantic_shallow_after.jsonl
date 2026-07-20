@@ -1,0 +1,2 @@
+{"args": [], "kwargs": {"context": "<preview>[\n    User(...),\n    User(...),\n    User(...),\n]</preview>", "question": "What is the role of the second user?"}, "expected": "UNKNOWN"}
+{"args": [], "kwargs": {"context": "<preview>Project(name='alpha', config={dict: 3 items}, members=[list: 50 items])</preview>", "question": "What is the host configured in this project?"}, "expected": "UNKNOWN"}

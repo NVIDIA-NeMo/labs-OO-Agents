@@ -1,0 +1,2 @@
+{"args": [], "kwargs": {"a": 2, "b": 5, "calculation": "compute a plus b"}, "expected": 7}
+{"args": [], "kwargs": {"a": 7, "b": 8, "calculation": "multiply a by b"}, "expected": 56}

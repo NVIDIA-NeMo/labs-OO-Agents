@@ -1,0 +1,1 @@
+{"args": [], "kwargs": {"user_message": "analyze and validate this data", "values": [1, 2, 3, 4, 5]}, "expected": {"agents_called": ["Analyzer", "Validator"], "results": {"Analyzer": {"sum": 15, "mean": 3.0, "count": 5}, "Validator": {"all_positive": true, "no_duplicates": true, "is_sorted": true}}}}

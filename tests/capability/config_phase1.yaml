@@ -1,0 +1,199 @@
+# Phase 1: Trusted Subset — Capability Tests
+#
+# 5 simple, deterministic tests to validate the foundation:
+#   sentiment_single, calculate_simple, calculate_complex, json_qa_lookup, json_qa_reasoning, error_recovery
+#
+# Run:
+#   nooa eval --config tests/capability/config_phase1.yaml --runs 3
+#
+# Single model:
+#   nooa eval --config tests/capability/config_phase1.yaml --models claude-haiku-azure
+#
+# Debug single test:
+#   nooa eval --config tests/capability/config_phase1.yaml --test sentiment_single --limit 1
+#
+# See: docs/scratch/capability-test-fix-plan.md
+
+name: capability-phase1
+no_cache: true
+description: "Phase 1 trusted subset — validate foundation before expanding"
+
+# =============================================================================
+# MODELS — resolved from the unifiedllm registry.
+# NVIDIA aliases ship in the nemo-oo-agents-nvidia package — install it (or the [nvidia] extra). No env var needed.
+# =============================================================================
+
+agent_models:
+  # - qwen3-next-80b-a3b-instruct
+  - nemotron3-nano-30b
+  # - gpt-oss-120b
+  # - gpt-5-mini
+  - gpt-5.2
+  - claude-haiku-azure
+  # - bedrock-claude-sonnet-4-5-v1
+  # - gemini-2.5-flash-lite
+  # - gemini-3-pro
+  # - nemotron-super-3-preview
+
+output_dir: results/phase1
+pass_threshold: 0.8
+
+# =============================================================================
+# TEST SUITE — Phase 1: 5 trusted tests
+# =============================================================================
+
+test_suite:
+  # ---------------------------------------------------------------------------
+  # 1. sentiment_single — simplest possible test
+  #    Single text → "positive"/"negative"/"neutral"
+  #    Should answer directly (internal mode), no code needed
+  # ---------------------------------------------------------------------------
+  - name: sentiment_single
+    description: "Single sentiment classification - should answer directly"
+    tier: stable
+    agent:
+      module: tests.capability.agents.sentiment_single
+      class: SentimentSingleAgent
+    method: classify
+    data_file: tests/capability/data/sentiment_single.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 0.5
+      - name: mode_check
+        class: ModeSelectionScorer
+        weight: 0.5
+        expected: internal
+
+  # ---------------------------------------------------------------------------
+  # 2. calculate_simple — basic arithmetic from natural language
+  #    "compute a plus b" → 7
+  #    Tests numeric output, no mode constraint
+  # ---------------------------------------------------------------------------
+  - name: calculate_simple
+    description: "Simple arithmetic calculations"
+    tier: stable
+    agent:
+      module: tests.capability.agents.calculate_single
+      class: CalculateSingleAgent
+    method: calculate
+    data_file: tests/capability/data/calculate_simple.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+
+  # ---------------------------------------------------------------------------
+  # 3. calculate_complex — multi-step math requiring code execution
+  #    "Compute the GCD of a and b, then multiply by 789" → 3945
+  #    Must use code path (too complex for mental math)
+  # ---------------------------------------------------------------------------
+  - name: calculate_complex
+    description: "Complex multi-step calculations - should write code"
+    tier: stable
+    agent:
+      module: tests.capability.agents.calculate_single
+      class: CalculateSingleAgent
+    method: calculate
+    data_file: tests/capability/data/calculate_complex.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 0.5
+      - name: mode_check
+        class: ModeSelectionScorer
+        weight: 0.5
+        expected: code
+
+  # ---------------------------------------------------------------------------
+  # 4a. json_qa_lookup — pure field extraction (no arithmetic)
+  #     "Is Bob full-time?", "Is movie available for streaming?"
+  #     Answer is directly visible in a JSON field — should answer directly
+  # ---------------------------------------------------------------------------
+  - name: json_qa_lookup
+    description: "JSON field lookups - answer visible in data, no computation needed"
+    tier: frontier
+    agent:
+      module: tests.capability.agents.json_qa
+      class: JsonQAAgent
+    method: answer_question
+    data_file: tests/capability/data/json_qa_lookup.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 0.5
+      - name: mode_check
+        class: ModeSelectionScorer
+        weight: 0.5
+        expected: internal
+
+  # ---------------------------------------------------------------------------
+  # 4b. json_qa_reasoning — numeric comparison requiring reasoning
+  #     "Is salary > 100k?", "Is movie > 2 hours?"
+  #     Involves arithmetic/unit conversion — code execution is acceptable
+  # ---------------------------------------------------------------------------
+  - name: json_qa_reasoning
+    description: "JSON questions requiring numeric comparison - code is acceptable"
+    tier: stable
+    agent:
+      module: tests.capability.agents.json_qa
+      class: JsonQAAgent
+    method: answer_question
+    data_file: tests/capability/data/json_qa_reasoning.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+
+  # ---------------------------------------------------------------------------
+  # 5. error_recovery — retry on transient failure
+  #    Tests error handling + LLM judge
+  #    First test with LLMMethodologyScorer to validate judges work
+  # ---------------------------------------------------------------------------
+  - name: error_recovery
+    description: "Error recovery - should retry after transient weather API failure"
+    tier: stable
+    agent:
+      module: tests.capability.agents.error_recovery
+      class: WeatherLookupAgentWrapper
+    method: get_temperature
+    data_file: tests/capability/data/error_recovery.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 0.5
+      - name: methodology
+        class: LLMMethodologyScorer
+        weight: 0.5
+        rubric: |
+          Evaluate if the agent recognizes a temporary failure and attempts to recover from it.
+
+          Task: {input}
+
+          Code Executions:
+          {executions}
+
+          IMPORTANT: The agent works in a multi-turn session where each "Execution N" is a separate
+          turn. A retry can happen ACROSS executions. Look at the pattern across ALL executions,
+          not just within a single code block.
+
+          Return passed=true if ALL of the following are true:
+          1. The agent doesn't give up after the first failure (i.e., there are multiple executions)
+          2. A retry attempt is made, in ANY of these forms:
+            - The agent executes a later code block that calls the same or similar operation as a
+              failed earlier block (multi-turn retry)
+            - The agent calls a wrapper/helper that re-invokes the failed operation
+            - The agent implements explicit retry/loop logic within a single code block
+          3. The agent doesn't read the source code of the failing function
+
+          Do NOT fail the agent for normal interface discovery such as doc(), help(),
+          inspect.signature(), or inspect.iscoroutinefunction(). Those reveal the callable
+          interface, not the hidden implementation. Fail source inspection only when the
+          trace clearly shows implementation/source-code access, such as inspect.getsource(),
+          opening/reading the defining source file, or printing/dumping function source.
+
+          Return passed=false ONLY if:
+          - There is only one execution (no retry at all), OR
+          - The agent gives up without retrying the failed operation, OR
+          - The agent reads/dumps the implementation source code of the failing function
+        model: nemotron3-nano-30b

@@ -1,0 +1,4 @@
+{"args": [], "kwargs": {"context": "List(len=100, items=[0, 1, 2, 3, 4, ..., 95, 96, 97, 98, 99])", "question": "How many items are in the list total?"}, "expected": "100"}
+{"args": [], "kwargs": {"context": "{'data': List(len=53, items=['a', 'b', 'c', ..., 'x', 'y', 'z'])}", "question": "How many items are in the 'data' list?"}, "expected": "53"}
+{"args": [], "kwargs": {"context": "Dict(len=100, items={'k0': 0, 'k1': 1, ..., 'k98': 98, 'k99': 99})", "question": "How many keys in the dict total?"}, "expected": "100"}
+{"args": [], "kwargs": {"context": "Tuple(len=8, items=(0, 1, 2, ..., 5, 6, 7))", "question": "How many items in the tuple?"}, "expected": "8"}

@@ -1,0 +1,2 @@
+{"args": [], "kwargs": {"user_message": "transform to CSV format", "values": [1, 2, 3, 4, 5]}, "expected": {"agents_called": ["Transformer"], "results": {"Transformer": "1,2,3,4,5"}}}
+{"args": [], "kwargs": {"user_message": "convert to JSON", "values": [10, 20, 30]}, "expected": {"agents_called": ["Transformer"], "results": {"Transformer": "[10, 20, 30]"}}}

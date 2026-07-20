@@ -1,0 +1,291 @@
+[project]
+name = "nemo-labs-oo-agents"
+# Version is derived from git tags at build time by uv-dynamic-versioning
+# (see [build-system] and [tool.uv-dynamic-versioning] below). On a tag
+# `vX.Y.Z` the published wheel is `X.Y.Z`; between tags, dunamai produces
+# a PEP 440 dev pre-release like `X.Y.(Z+1).dev<distance-from-tag>`.
+dynamic = ["version"]
+description = "Code-generating agent orchestration system with event sourcing and serialized execution"
+license = {text = "Apache-2.0"}
+readme = "README.md"
+authors = [
+    {name = "NVIDIA NeMo Team"}
+]
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "pydantic>=2.5.0",
+    # context_blocks + unifiedllm now ship as nooa.context_blocks /
+    # nooa.unifiedllm subpackages — pull their formerly-external deps in.
+    # >=1.84.0: CVE-2026-49468 (Critical, proxy-server RCE) is fixed in 1.84.0;
+    # also keeps us past the yanked 1.82.7/1.82.8 (March 2026 backdoor).
+    "litellm>=1.84.0",
+    # from mcp-nemo-oo-agents (now internal)
+    "httpx>=0.27.0",
+    "openinference-instrumentation-litellm>=0.1.30",
+    "python-gitlab>=8.3.0",
+]
+
+[project.scripts]
+trace-explorer = "nooa.trace_explorer:main"
+
+[project.entry-points."nooa.skills"]
+"nemo.shell" = "nooa.tools.shell_tools:ShellTools"
+"nemo.todo" = "nooa.tools.todo:TodoManager"
+"nemo.context" = "nooa.runtime.context:ContextApi"
+"nemo.events" = "nooa.runtime.events:EventsApi"
+"nemo.producers" = "nooa.runtime.producers_skill:ProducersSkill"
+"nemo.web" = "nooa.tools.web_publisher:WebPublisher"
+"nemo.libwriting" = "nooa.tools.library_writing_lib:SkillWriting"
+"nemo.methodwriting" = "nooa.tools.method_writing_lib:MethodWriting"
+
+[tool.uv.sources]
+eval_pipeline = { workspace = true }
+nemo-labs-oo-agents-cli = { workspace = true }
+nemo-labs-oo-agents-memory = { workspace = true }
+nemo-labs-oo-agents-bench = { workspace = true }
+# nvidia-nat-nemo-oo-agents: external plugin, not in workspace
+
+[tool.uv]
+# Extra index URLs to search for packages (in addition to PyPI)
+# Ignore packages uploaded less than 7 days ago to mitigate supply-chain attacks
+exclude-newer = "2026-07-03T00:00:00Z"
+# Match the package's supported Python range and LiteLLM's stable releases.
+environments = [
+    "python_full_version >= '3.12' and python_full_version < '3.14'",
+]
+
+[tool.uv.workspace]
+members = [
+    "util/eval_pipeline",
+    "packages/nooa-cli",
+    "packages/nooa-memory",
+    "packages/nooa-bench",
+]
+
+
+[project.optional-dependencies]
+# ARC-AGI-3 example agent (examples/arc_agi_3): the public ARC-AGI-3 SDK + deps.
+# Install with `pip install "nemo-oo-agents[arc]"` (or `uv sync --extra arc`).
+arc = [
+    "arc-agi>=0.9.8",
+    "arcengine>=0.9.3",
+    "pillow>=10.0",   # visual grid-as-image feature (solver_agent)
+    "rich>=13.0",     # live viewer (viewer.py)
+]
+tracing = [
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    "openinference-instrumentation>=0.1.42",
+    "openinference-semantic-conventions>=0.1.9",
+    "openinference-instrumentation-litellm>=0.1.28",
+]
+viewer = [
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.20.0",
+    "python-dotenv>=1.0.0",
+    "python-multipart>=0.0.5",
+]
+# trace_explorer is now nooa.trace_explorer (internal, no extra deps)
+sandbox = [
+    "openshell",
+]
+# mcp lives at nooa.mcp; install with `uv sync --extra mcp`
+# (kept optional so glibc<2.28 hosts can `uv sync` without pulling
+# pydantic-core wheels that only target manylinux_2_28). See issue 189.
+mcp = [
+    "mcp>=1.0.0",
+]
+# NeMo Flow integration (guardrails, intercepts, event subscribers, ATIF
+# export). The upstream package was renamed from nemo-flow to nemo-relay.
+# See src/nooa/nemo_flow_middleware.py and examples/quickstart/15_nemo_relay.py.
+nemo-relay = [
+    "nemo-relay>=0.4.0",
+]
+
+# CLI/TUI ship as a separate package: `uv add nemo-labs-oo-agents-cli`.
+# Data-science stack for the LLM REPL: `uv add nemo-labs-oo-agents-cli[datascience]`.
+# Web-served TUI (`nooa term`):     `uv add nemo-labs-oo-agents-cli[web]`.
+
+[build-system]
+requires = ["hatchling>=1.26.0", "uv-dynamic-versioning>=0.14.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
+
+[tool.uv-dynamic-versioning]
+vcs = "git"
+style = "pep440"
+# bump = true: between tags, produce `X.Y.(Z+1).dev<distance>` rather than
+# `X.Y.Z.post<distance>` — these sort ABOVE the latest stable, so `--pre`
+# consumers get the freshest dev rather than something that sorts below a
+# release that has already shipped.
+bump = true
+# metadata = false: drop the `+g<sha>` local segment. PyPI rejects local
+# segments; GitLab accepts them. Dropping keeps the wheels portable.
+metadata = false
+# Used when no tag is reachable yet (initial bootstrap before the first
+# `vX.Y.Z` tag is cut). Once a tag exists, this is ignored.
+fallback-version = "0.2.0"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nooa"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"THIRD_PARTY_NOTICES.md" = "THIRD_PARTY_NOTICES.md"
+
+[dependency-groups]
+trace-viewer = [
+    "uvicorn>=0.38.0",
+    "python-dotenv>=1.0.0",
+    "fastapi>=0.123.4",
+    "pyyaml>=6.0.0",
+    "watchfiles>=1.0.0",
+    "python-multipart>=0.0.20",
+]
+dev = [
+    {include-group = "trace-viewer"},
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-rerunfailures>=14.0",
+    "pytest-cov>=4.0.0",
+    "mypy>=1.7.0",
+    "ruff>=0.14.14",
+    "httpx[socks]>=0.28.1",
+    "opentelemetry-exporter-otlp-proto-http>=1.39.1",
+    "eval_pipeline",
+    # Workspace packages — keep bench + cli + memory installed/editable in dev sync
+    "nemo-labs-oo-agents-cli",
+    "nemo-labs-oo-agents-memory",
+    "nemo-labs-oo-agents-bench",
+    "pre-commit>=4.5.0",
+    "pyright>=1.1.408",
+    "pytest-cov>=7.1.0",
+    "pyte>=0.8.2",
+    "ptyprocess>=0.7.0",
+    # Data-science libs exercised by core tests (REPL scoping, return-type
+    # adapters, doc adapters). Previously installed transitively via the
+    # benchmarks package, which moved to nooa-dev.
+    "pandas>=2.0.0",
+    "matplotlib>=3.8.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = [
+    "tests",
+    "tests/agentdoc",
+    "tests/viewer",
+    "tests/context_blocks",
+    "tests/unifiedllm",
+    "tests/tracing",
+    "tests/test_mcp",
+    "packages/nooa-cli/tests/cli",
+    "packages/nooa-cli/tests/integration",
+    "packages/nooa-bench/tests",
+    "tests/trace_explorer",
+]
+pythonpath = [
+    "src",
+    "packages/nooa-cli/src",
+]
+addopts = "-v --tb=short --import-mode=importlib -m 'not integration and not stress'"
+markers = [
+    "integration: marks tests as integration tests that make real API calls (run with '-m integration')",
+    "provider_compat_ollama: marks live Ollama provider compatibility tests",
+    "provider_compat_vllm: marks live vLLM provider compatibility tests",
+    "stress: marks tests as stress/load tests that simulate high concurrency (run with '-m stress')",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:litellm.*",
+    "ignore::DeprecationWarning:aiohttp.*",
+    "ignore:coroutine.*was never awaited:RuntimeWarning",
+    "ignore:Pydantic serializer warnings:UserWarning",
+    "ignore::FutureWarning:nooa.strategies",
+]
+
+[tool.coverage.run]
+source = ["src/nooa", "packages/nooa-cli/src/nooa_cli"]
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+precision = 1
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@(abc\\.)?abstractmethod",
+    "if __name__ == .__main__.:",
+    "\\.\\.\\.",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_no_return = true
+warn_unreachable = true
+# Disable call-arg errors for __init_subclass__ (PEP 487 keyword arguments)
+# return and body errors for ellipsis methods
+disable_error_code = ["empty-body", "return", "call-arg"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["worktrees", ".vscode-server", ".claude", "examples/arc_agi_3/arc_agi_3"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"*.ipynb" = ["E402"]  # Notebooks often have config before imports
+# Tests intentionally use legacy typing syntax (Optional[X], Union[X,Y], Generic[T])
+# to verify that _get_complex_type() handles those annotation forms correctly.
+"tests/test_pure_functions_gl105.py" = ["UP007", "UP045", "UP046"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["nooa", "eval_pipeline", "evaluation", "agentdoc"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+venvPath = "."
+venv = ".venv"
+# Resolve workspace packages when IDE uses project root (same as pytest pythonpath)
+extraPaths = [
+    "src",
+    "packages/nooa-cli/src",
+]
+include = [
+    "src",
+    "packages"
+]
+# Excluded from pyright:
+# - benchmarks: pre-existing typing debt unrelated to core (clean up later).
+# - cli: pre-existing typing debt that surfaces when CLI is type-checked as
+#   its own package; clean up alongside benchmarks.
+# - nat_oo_agents: external NAT plugin; imports nat.* which is not a dev dep.
+exclude = [
+    "packages/nooa-cli",
+    "packages/nat_oo_agents",
+]
+# Pydantic discriminated unions require narrowing event_type in subclasses
+reportIncompatibleVariableOverride = false

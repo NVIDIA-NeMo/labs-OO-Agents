@@ -1,0 +1,2 @@
+{"args": [], "kwargs": {"context": "<dict len=2>{'records': <list len=200>[{'id': 0}, {'id': 1}, ..., {'id': 199}]</list>, 'meta': {'version': '2.4', 'count': 200}}</dict>", "question": "How many records are there?"}, "expected": "200"}
+{"args": [], "kwargs": {"context": "<dict len=3>{'users': <list len=50>[User(id=0), User(id=1), ..., User(id=49)]</list>, 'admins': <list len=5>[User(id=100), ..., User(id=104)]</list>, 'count': 55}</dict>", "question": "How many users (not admins) are there?"}, "expected": "50"}

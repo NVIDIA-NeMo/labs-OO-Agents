@@ -1,0 +1,73 @@
+{
+  "test_cases": [
+    {
+      "id": "import_to_tool",
+      "capability": "validation_retry",
+      "task": "Get data from URL",
+      "initial_error": {
+        "type": "forbidden_import",
+        "code": "import requests\ndata = requests.get('http://example.com')",
+        "message": "Import statements are not allowed"
+      },
+      "expected_fix": {
+        "contains": ["await self.tools.http_request", "http://example.com"],
+        "not_contains": ["import"],
+        "validation_passes": true
+      },
+      "difficulty": "medium",
+      "tags": ["import_error", "tool_replacement"]
+    },
+    {
+      "id": "lambda_to_function",
+      "capability": "validation_retry",
+      "task": "Sort items by priority",
+      "initial_error": {
+        "type": "forbidden_lambda",
+        "code": "sorted_items = sorted(items, key=lambda x: x['priority'])",
+        "message": "Lambda expressions are not allowed"
+      },
+      "expected_fix": {
+        "contains": ["def ", "return ", "['priority']"],
+        "pattern": "def.*\\(.*\\):.*return.*\\['priority'\\]",
+        "not_contains": ["lambda"],
+        "validation_passes": true
+      },
+      "difficulty": "medium",
+      "tags": ["lambda_error", "function_replacement"]
+    },
+    {
+      "id": "exec_to_direct",
+      "capability": "validation_retry",
+      "task": "Execute dynamic code",
+      "initial_error": {
+        "type": "forbidden_exec",
+        "code": "exec(code_string)",
+        "message": "exec/eval/compile are not allowed"
+      },
+      "expected_fix": {
+        "contains": ["# direct code without exec"],
+        "not_contains": ["exec", "eval", "compile"],
+        "validation_passes": true
+      },
+      "difficulty": "medium",
+      "tags": ["exec_error", "direct_code"]
+    },
+    {
+      "id": "getattr_to_direct",
+      "capability": "validation_retry",
+      "task": "Set status dynamically",
+      "initial_error": {
+        "type": "forbidden_reflection",
+        "code": "setattr(self, 'status', 'done')",
+        "message": "getattr/setattr/delattr are not allowed"
+      },
+      "expected_fix": {
+        "contains": ["self.status = 'done'"],
+        "not_contains": ["setattr", "getattr"],
+        "validation_passes": true
+      },
+      "difficulty": "medium",
+      "tags": ["reflection_error", "direct_assignment"]
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+{"args": [], "kwargs": {"context": "[0, 1, 2, 3, 4, ..., 95, 96, 97, 98, 99]  # len=100", "question": "How many items are in the list total?"}, "expected": "100"}
+{"args": [], "kwargs": {"context": "{'data': ['a', 'b', 'c', ..., 'x', 'y', 'z']  # len=53}", "question": "How many items are in the 'data' list?"}, "expected": "53"}

@@ -1,0 +1,87 @@
+# ARC-AGI-3 COMPETITION fleet — nemo-oo MEMORY-system knowledge variant,
+# WITH visual grid input (the settled grid is also shown to the model as a color
+# PNG each turn; visual: additive). One shared scorecard across all 25 games =
+# one leaderboard entry.
+#
+#   python examples/arc_agi_3/run_multi.py --config examples/arc_agi_3/configs/competition.yaml
+#
+# Needs ARC_API_KEY in .env. run_multi mints ONE scorecard via scorecard_broker.py
+# and propagates its ALB session cookies to every game (competition allows only
+# one open scorecard per API key). Run this separately from competition_md
+# (each fleet is its own scorecard / leaderboard entry).
+name: competition
+operation_mode: competition
+
+# Model + effort. The agent-visible surface is anonymised regardless of mode.
+model: openai/openai/gpt-5.5
+reasoning_effort: xhigh        # primary effort (effort-ladder rung 0)
+
+# Skill: which skills/<name>/SKILL.md the agent loads as its <arc_skill> block.
+# interactive-game-solver = lean world-model solver (encode → latent z, predict, search).
+# grid-game-solver = full structured playbook.
+skill: interactive-game-solver
+
+variants: [memory]
+seeded: false
+
+# Visual grid input. additive = show the grid as a PNG IN ADDITION to the hex grid
+# (the hex text stays). png_scale is pixels per cell, so a 64x64 grid renders at
+# (png_scale*64)x(png_scale*64); 8-16 is a good range.
+visual: additive
+png_scale: 8
+
+# Concurrency + per-run caps. Shared scorecard makes parallel play safe.
+# All 25 games at once — host has ample headroom; the practical limit is LLM
+# gateway rate limits (429 -> retry storms), which the effort ladder + retry
+# config absorb. Lower this if you see sustained 429s.
+parallel: 25
+max_turns: null               # unlimited turns; env-steps is the main bound
+max_env_steps: 5000
+
+# Wall-clock cap for the whole fleet (seconds). 7200 = 2h.
+# When reached, run_multi stops every running game, closes the scorecard, and
+# writes the summary (shutdown_reason: wall_clock_deadline).
+max_wall_seconds: 7200
+
+# Silence ladder (seconds of agent silence) — the harness NEVER deliberately ends a
+# game. effort downshift (600, agent-side) < nudge (900) < urgent respond-now nudge
+# (1200) < force-advance a default action after fallback_window more seconds of
+# silence (default action priority: UNDO > last action > random non-RESET).
+effort_ladder: "600:medium"
+nudge_after: 900
+turn_timeout: 1200
+fallback_window: 90
+
+# Animation-event frames: full record in trajectory(); a count-only summary in the
+# agent's state note.
+event_prompt: count
+
+reflect_every: 8
+allowed_game_overs: -1        # unlimited auto-RESETs after GAME_OVER
+
+games:
+  - ar25
+  - bp35
+  - cd82
+  - cn04
+  - dc22
+  - ft09
+  - g50t
+  - ka59
+  - lf52
+  - lp85
+  - ls20
+  - m0r0
+  - r11l
+  - re86
+  - s5i5
+  - sb26
+  - sc25
+  - sk48
+  - sp80
+  - su15
+  - tn36
+  - tr87
+  - tu93
+  - vc33
+  - wa30

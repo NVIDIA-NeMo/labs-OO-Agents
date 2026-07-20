@@ -1,0 +1,7 @@
+{"args": [], "kwargs": {"context": "{\"items\": list(len=100, items=[42, 17, 89, 33, 8, ..., 56, 71, 12, 45, 28])}", "question": "How many items are in the 'items' list total?"}, "expected": 100}
+{"args": [], "kwargs": {"context": "{\"items\": list(len=100, items=[42, 17, 89, 33, 8, ..., 56, 71, 12, 45, 28])}", "question": "What is the minimum value in 'items'?"}, "expected": null}
+{"args": [], "kwargs": {"context": "{\"items\": list(len=100, items=[42, 17, 89, 33, 8, ..., 56, 71, 12, 45, 28])}", "question": "What is the first item in 'items'?"}, "expected": 42}
+{"args": [], "kwargs": {"context": "{\"items\": list(len=100, items=[42, 17, 89, 33, 8, ..., 56, 71, 12, 45, 28])}", "question": "What is the value at index 49 in 'items' (i.e. the 50th item, 1-indexed)?"}, "expected": null}
+{"args": [], "kwargs": {"context": "{\"items\": list(len=100, items=[42, 17, 89, 33, 8, ..., 56, 71, 12, 45, 28])}", "question": "What is the value at index 2 in 'items' (i.e. the 3rd item, 1-indexed)?"}, "expected": 89}
+{"args": [], "kwargs": {"context": "{\"items\": list(len=100, items=[42, 17, 89, 33, 8, ..., 56, 71, 12, 45, 28])}", "question": "What is the value at index 8 in 'items' (i.e. the 9th item, 1-indexed)?"}, "expected": null}
+{"args": [], "kwargs": {"context": "{\"items\": list(len=100, items=[42, 17, 89, 33, 8, ..., 56, 71, 12, 45, 28])}", "question": "What is the value at index 98 in 'items' (i.e. the 99th item, 1-indexed)?"}, "expected": 45}

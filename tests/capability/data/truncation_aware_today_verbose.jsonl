@@ -1,0 +1,7 @@
+{"args": [], "kwargs": {"context": "[42, 17, 89, 33, 8, ... 90 items not shown ..., 56, 71, 12, 45, 28]", "question": "How many items are in the list total?"}, "expected": 100}
+{"args": [], "kwargs": {"context": "[42, 17, 89, 33, 8, ... 90 items not shown ..., 56, 71, 12, 45, 28]", "question": "What is the minimum value across all items in the list?"}, "expected": null}
+{"args": [], "kwargs": {"context": "[42, 17, 89, 33, 8, ... 90 items not shown ..., 56, 71, 12, 45, 28]", "question": "What is the first item in the list?"}, "expected": 42}
+{"args": [], "kwargs": {"context": "[42, 17, 89, 33, 8, ... 90 items not shown ..., 56, 71, 12, 45, 28]", "question": "What is the value of the 50th item in the list (1-indexed)?"}, "expected": null}
+{"args": [], "kwargs": {"context": "[42, 17, 89, 33, 8, ... 90 items not shown ..., 56, 71, 12, 45, 28]", "question": "What is the value of the 3rd item in the list (1-indexed)?"}, "expected": 89}
+{"args": [], "kwargs": {"context": "[42, 17, 89, 33, 8, ... 90 items not shown ..., 56, 71, 12, 45, 28]", "question": "What is the value of the 9th item in the list (1-indexed)?"}, "expected": null}
+{"args": [], "kwargs": {"context": "[42, 17, 89, 33, 8, ... 90 items not shown ..., 56, 71, 12, 45, 28]", "question": "What is the value of the 99th item in the list (1-indexed)?"}, "expected": 45}

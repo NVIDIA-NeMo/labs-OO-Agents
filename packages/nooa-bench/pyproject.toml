@@ -1,0 +1,36 @@
+[project]
+name = "nemo-labs-oo-agents-bench"
+# Version is derived from git tags at build time by uv-dynamic-versioning.
+dynamic = ["version"]
+description = "Benchmark agent (BenchAgent) and Harbor runner for the NOOA framework — reproduces the tech report's SWE-bench and Terminal-Bench results"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.12"
+dependencies = [
+    "nemo-labs-oo-agents>=0.2.0",
+    "nemo-labs-oo-agents-cli>=0.2.0",
+    "click>=8.1",
+]
+
+[project.scripts]
+nemo-harbor = "nooa_bench.runner:main"
+
+[tool.uv.sources]
+nemo-labs-oo-agents = { workspace = true }
+nemo-labs-oo-agents-cli = { workspace = true }
+
+[build-system]
+requires = ["hatchling>=1.26.0", "uv-dynamic-versioning>=0.14.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
+
+[tool.uv-dynamic-versioning]
+vcs = "git"
+style = "pep440"
+bump = true
+metadata = false
+fallback-version = "0.2.0"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nooa_bench"]

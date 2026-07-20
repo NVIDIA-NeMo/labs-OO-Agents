@@ -1,0 +1,3 @@
+{"args": [], "kwargs": {"user_message": "Hi Amy, how are you?"}, "expected": "NO_HELP", "description": "Simple greeting — should answer directly without calling for help"}
+{"args": [], "kwargs": {"user_message": "Tell me a fun fact about dolphins"}, "expected": "NO_HELP", "description": "General knowledge — should answer directly without calling for help"}
+{"args": [], "kwargs": {"user_message": "What is the capital of France?"}, "expected": "NO_HELP", "description": "General knowledge — should answer directly without calling for help"}

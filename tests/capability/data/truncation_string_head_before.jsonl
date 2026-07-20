@@ -1,0 +1,2 @@
+{"args": [], "kwargs": {"context": "log='''2024-01-01 INFO startup\n2024-01-01 INFO connecting to db:5432\n2024-01-01 ERROR authentication failed for user='deploy''''+8500", "question": "What error occurred?"}, "expected": "authentication failed"}
+{"args": [], "kwargs": {"context": "raw='''Headers: Content-Type: application/json\\nAuthorization: Bearer abc123\\nUser-Agent: client/1.0''+12000", "question": "What is the Content-Type?"}, "expected": "application/json"}

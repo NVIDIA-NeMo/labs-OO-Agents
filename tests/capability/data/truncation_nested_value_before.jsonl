@@ -1,0 +1,2 @@
+{"args": [], "kwargs": {"context": "{'config': {'host': 'db', 'port': 5432, 'timeout': 30, 'ssl': True}, 'records': [{'id': 0}, {'id': 1}, {'id': 2}, ... 47 items not shown ..., {'id': 49}]}", "question": "What is the value of port?"}, "expected": "5432"}
+{"args": [], "kwargs": {"context": "{'metadata': {'version': '2.4.1', 'author': 'Bob'}, 'data': ['a', 'b', 'c', ... 197 items not shown ..., 'x', 'y', 'z']}", "question": "Who is the author?"}, "expected": "Bob"}

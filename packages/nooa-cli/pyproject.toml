@@ -1,0 +1,92 @@
+[project]
+name = "nemo-labs-oo-agents-cli"
+# Version is derived from git tags at build time by uv-dynamic-versioning.
+dynamic = ["version"]
+description = "CLI and TUI for nemo-oo-agents (`nooa` command, web terminal, agent REPL)"
+license = {text = "Apache-2.0"}
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    # Floor reflects the actual minimum-compatible core (bump when the cli
+    # starts to require a newer core API). No auto-lockstep — published
+    # wheels declare what they actually need, not what was co-released.
+    "nemo-labs-oo-agents>=0.2.0",
+    "click>=8.1.0",
+    "ipython>=9.12.0",
+    # prompt-toolkit and rich were only transitive (via ipython and litellm
+    # respectively); declare them explicitly so we don't break if those
+    # transitive paths change.
+    "prompt-toolkit>=3.0.41,<3.1.0",
+    "rich>=13.0.0",
+    # Used directly in tui/agent.py and tui/models.py
+    "pydantic>=2.5.0",
+    # CLI/TUI config files
+    "pyyaml>=6.0",
+    # MCP is a first-class TUI capability (self.mcp / MCPRegistry, /mcp command,
+    # mcp_auto_connect). It stays optional in the *core* package for issue-189
+    # glibc<2.28 hosts, but the CLI already hard-depends on pydantic, so that
+    # rationale doesn't apply here — make it a hard dep of the TUI package.
+    "mcp>=1.0.0",
+]
+
+[project.scripts]
+nooa = "nooa_cli:main"
+
+[project.entry-points."nooa.skills"]
+"nemo.repo" = "nooa_cli.tools.repo_tools:RepoTools"
+
+[project.optional-dependencies]
+# AST-aware code analysis for RepoTools (tree-sitter grammars).
+# The CLI works without these — RepoTools falls back to regex.
+ast = [
+    "tree-sitter>=0.23.0",
+    "tree-sitter-python>=0.23.0",
+    "tree-sitter-javascript>=0.23.0",
+    "tree-sitter-typescript>=0.23.0",
+    "tree-sitter-go>=0.23.0",
+    "tree-sitter-rust>=0.23.0",
+]
+# Data-science stack pre-loaded into the agent's REPL execution namespace
+# (np, pd, px, go, scipy, sklearn). Soft-imported via try/except in
+# TUI agent REPLs work without these too;
+# they exist purely so LLM-generated CodeAct cells can use these libs
+# without first failing on a missing import.
+datascience = [
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "plotly>=5.0.0",
+    "scipy>=1.10.0",
+    "scikit-learn>=1.3.0",
+]
+# Web-served TUI (`nooa term`): uvicorn + ptyprocess + fastapi, plus
+# the data-science stack so the LLM has the same REPL capabilities as
+# in the local terminal.
+web = [
+    "nemo-labs-oo-agents-cli[datascience]",
+    "uvicorn[standard]>=0.34.0",
+    "ptyprocess>=0.7.0",
+    "fastapi>=0.123.4",
+]
+
+[tool.uv.sources]
+nemo-labs-oo-agents = { workspace = true }
+
+[build-system]
+requires = ["hatchling>=1.26.0", "uv-dynamic-versioning>=0.14.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
+
+[tool.uv-dynamic-versioning]
+vcs = "git"
+style = "pep440"
+bump = true
+metadata = false
+fallback-version = "0.2.0"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nooa_cli"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"../../THIRD_PARTY_NOTICES.md" = "THIRD_PARTY_NOTICES.md"

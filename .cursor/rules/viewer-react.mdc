@@ -1,0 +1,154 @@
+---
+description: Coding standards for the React viewer frontend
+globs:
+  - packages/nemo-oo-agents-viewer/frontend-react/**
+alwaysApply: false
+---
+
+# Viewer React Frontend
+
+## Stack
+
+- Vite 8, React 19, TypeScript, Tailwind CSS 4, highlight.js
+- No framework-level state management — use `useState`, `useReducer`, `useContext`, `useRef`
+- React Router v7 for client-side routing (SPA mode)
+- Package manager: npm
+
+## Building
+
+The `dist/` directory is committed to git so that installing from the git repo works without Node.js. After any frontend change, rebuild and commit.
+
+**Important:** CI uses `node:22-slim`. If your local Node version differs (check with `node --version`), the minified bundle output will differ and CI will fail. Always use the Docker method to build for commits:
+
+```bash
+docker run --rm -v "$PWD/packages/nemo-oo-agents-viewer/frontend-react:/app" -w /app node:22-slim sh -c "npm ci --ignore-scripts && npm run build && chown -R $(id -u):$(id -g) dist/"
+```
+
+For local dev iteration (not committing dist), you can use your local Node:
+
+```bash
+cd packages/nemo-oo-agents-viewer/frontend-react
+npm run build
+```
+
+CI rebuilds dist/ with `node:22-slim` and fails if the output differs from what's committed. The build is deterministic within the same Node version, so always use the Docker method above for commits.
+
+## Styling
+
+- **Tailwind-first.** Use Tailwind utility classes for all styling. Avoid inline `style={{}}` unless Tailwind cannot express it (e.g., dynamic computed values from JS). Use Tailwind arbitrary values like `grid-cols-[auto_1fr]` or `max-w-[13rem]` instead of inline styles when possible.
+- **No emojis or special characters** in UI text. Use plain text labels like "Back", "Sandbox", "Error". Use HTML entities for simple symbols like `&#9666;` (left triangle).
+- **Consistent badge styling.** Event type badges use `bg-purple-900 text-purple-200 text-xs font-semibold` with `px-1.5 py-0.5 rounded`.
+
+## Dependencies
+
+- **No third-party UI libraries.** Use native HTML elements, Tailwind, and custom components.
+- **New npm dependencies require justification** and must have a permissive license (MIT, BSD, Apache-2.0). Check before adding.
+- Prefer browser-native APIs (HTML5 drag-and-drop, `navigator.clipboard`, `IntersectionObserver`) over libraries.
+
+## URL State and Navigation
+
+- **Filter, sort, and pagination state lives in URL search params** for shareability.
+- **Always use `{ replace: true }` on `setSearchParams`** for filter/sort/page changes. This prevents each parameter tweak from creating a new browser history entry, so the back button navigates between pages rather than between filter states.
+- Use `sessionStorage` for transient data that should survive page refresh but not be in the URL (e.g., playground messages).
+- Use `localStorage` for persistent user preferences (sidebar collapsed state, column config, timeline height).
+
+## Flex Layout
+
+- Fixed-width elements in flex rows (buttons, badges, nav controls) must use `shrink-0 whitespace-nowrap` to prevent wrapping when the container is narrow.
+- The flexible element (typically the title/name) should use `truncate min-w-0` to absorb overflow with an ellipsis.
+- Flex containers with truncating children need `min-w-0` on the container.
+
+## Tables (DataTable)
+
+- Tables use the generic `DataTable` component with server-side sorting and pagination.
+- Pass `onSort` and `onPageChange` for server-side control. Without `onSort`, DataTable falls back to client-side sorting.
+- Use `session_id` or another guaranteed-unique field as the `getKey` — never composite keys that might collide.
+- Checkbox selection is opt-in via `checkedKeys`, `onCheckChange`, `onCheckAll` props.
+- Column metadata (available columns, unique values for filter dropdowns) comes from the server, not client-side discovery.
+
+## React Patterns
+
+- **No direct DOM manipulation.** Don't use `document.querySelector`, `element.style`, or `requestAnimationFrame` to toggle DOM state. Lift state into React and pass it as props.
+- **Use refs for focus management** (e.g., forwarding a ref to an input for keyboard shortcut focus). Don't use `document.querySelector` to find inputs.
+- **Clean up side effects.** Clear timeouts/intervals in `useEffect` cleanup. Store timeout IDs in refs.
+- **Avoid unused variables.** Remove dead refs, unused imports, and commented-out code.
+
+## Plugin System
+
+Plugins render trace events by type. Each plugin is a React component that receives `PluginProps`.
+
+### Creating a new plugin
+
+1. Create `src/components/plugins/MyPlugin.tsx`:
+
+```tsx
+import type { PluginProps } from './registry';
+import { CodeBox } from '@/components/shared/CodeBox';
+
+export function MyPlugin({ event, viewState, rawJsonOpen }: PluginProps) {
+  const attrs = event.attributes || {};
+
+  if (viewState === 'collapsed') {
+    return (
+      <div className="flex items-center gap-2 text-sm">
+        <span className="px-1.5 py-0.5 rounded bg-purple-900 text-purple-200 text-xs font-semibold">
+          MY TYPE
+        </span>
+        <span className="text-gray-300 truncate">one-line summary</span>
+      </div>
+    );
+  }
+
+  // concise and expanded views
+  return (
+    <div>
+      <div className="flex items-center gap-3 text-xs text-gray-400 mb-2">
+        <span className="px-1.5 py-0.5 rounded bg-purple-900 text-purple-200 text-xs font-semibold">
+          My Type
+        </span>
+      </div>
+      {/* render content based on attrs */}
+      {viewState === 'expanded' && (
+        <details className="mt-2" open={rawJsonOpen}>
+          <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-300">
+            Raw JSON
+          </summary>
+          <CodeBox code={JSON.stringify(event, null, 2)} language="json" />
+        </details>
+      )}
+    </div>
+  );
+}
+```
+
+2. Register in `src/components/plugins/index.ts`:
+
+```tsx
+import { MyPlugin } from './MyPlugin';
+registerPlugin('span.my_type', MyPlugin);
+```
+
+### PluginProps
+
+- `event: TraceEvent` — the normalized event with `type`, `timestamp`, `ids`, `attributes`, `body`, `_span_data`
+- `viewState: 'collapsed' | 'concise' | 'expanded'` — current display state (changed by explicit row controls or keyboard shortcuts)
+- `searchQuery?: string` — active text search for highlighting
+- `rawJsonOpen?: boolean` — whether the Raw JSON details should be open (controlled by keyboard shortcut `r`)
+- `viewControls?: ReactNode` — optional inline controls for toggling view state, rendered in the event header after the timestamp. Only passed for concise/expanded views; collapsed mode is handled by `EventItem`.
+
+### Plugin conventions
+
+- **collapsed**: single-line summary with type badge, key info, duration. No code blocks.
+- **concise**: header + most important content (last input message, output, result).
+- **expanded**: all content + metadata + Raw JSON `<details>` section.
+- Use `CodeBox` for syntax-highlighted content. Use `language="markdown"` for LLM text, `"python"` for code, `"json"` for structured data.
+- Extract data from `event.attributes` (flat key-value pairs from OTLP). Dotted keys like `llm.input_messages.0.message.role` are single keys, not nested objects.
+- The Raw JSON `<details>` must use `open={rawJsonOpen}` to stay in sync with keyboard toggle.
+
+### Plugin matching
+
+Plugins are matched by event type string:
+- **Exact match**: `registerPlugin('span.eval', EvalPlugin)` matches `span.eval`
+- **Prefix match**: `span.method` also matches `span.method.classify`, `span.method.run`, etc.
+- **Wildcard**: `registerPlugin('span.*', SpanPlugin)` as a fallback for any `span.` type
+- Priority: exact > prefix > wildcard > `DefaultPlugin`

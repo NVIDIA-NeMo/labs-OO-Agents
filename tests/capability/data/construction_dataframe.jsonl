@@ -1,0 +1,2 @@
+{"args": [], "kwargs": {"rows": [{"name": "ada", "score": 10}, {"name": "bo", "score": 7}]}, "expected": [{"name": "ada", "score": 10}, {"name": "bo", "score": 7}]}
+{"args": [], "kwargs": {"rows": [{"city": "oslo", "pop": 700}, {"city": "lima", "pop": 900}, {"city": "cairo", "pop": 1000}]}, "expected": [{"city": "oslo", "pop": 700}, {"city": "lima", "pop": 900}, {"city": "cairo", "pop": 1000}]}

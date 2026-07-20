@@ -1,0 +1,91 @@
+# NeMo OO Agents Capability Tests - Inline Model Configuration
+#
+# This config uses inline model specs for full traceability.
+# All model parameters are explicit - no hidden defaults.
+#
+# Run with:
+#   uv run python -m eval_pipeline --config tests/capability/config_inline.yaml
+
+name: capability_inline
+description: "NeMo OO Agents capability tests with inline model specs"
+
+# Inline model specifications (full traceability)
+models:
+  - id: gpt-oss-20b
+    model_name: openai/nvidia/openai/gpt-oss-20b
+    endpoint: https://inference-api.nvidia.com/v1
+    api_key_env: NVIDIA_INFERENCE_API_KEY
+    max_tokens: 16384
+
+  - id: qwen3-80b
+    model_name: openai/qwen/qwen3-next-80b-a3b-instruct
+    endpoint: https://integrate.api.nvidia.com/v1
+    api_key_env: NVIDIA_API_KEY
+    max_tokens: 8192
+
+  - id: claude-haiku
+    model_name: openai/aws/anthropic/claude-haiku-4-5-v1
+    endpoint: https://inference-api.nvidia.com/v1
+    api_key_env: NVIDIA_INFERENCE_API_KEY
+    max_tokens: 8192
+
+  - id: nemotron3-nano-30b
+    model_name: openai/nvidia/nvidia/Nemotron-3-Nano-30B-A3B
+    endpoint: https://inference-api.nvidia.com/v1
+    api_key_env: NVIDIA_INFERENCE_API_KEY
+    max_tokens: 16384
+
+output_dir: experiments/capability_eval/results
+
+test_suite:
+  # ===========================================================================
+  # SCALE AWARENESS - Answer vs Code
+  # ===========================================================================
+
+  - name: sentiment_single
+    description: "Single sentiment classification - should answer directly"
+    agent:
+      module: tests.capability.agents.sentiment
+      class: SentimentAgent
+    method: classify_single
+    data_file: experiments/capability_eval/data/sentiment_single.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+
+  - name: sentiment_batch
+    description: "Batch sentiment classification - should write code loop"
+    agent:
+      module: tests.capability.agents.sentiment
+      class: SentimentAgent
+    method: classify_batch
+    data_file: experiments/capability_eval/data/sentiment_batch.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+
+  - name: calculate_single
+    description: "Single multiplication - should answer directly"
+    agent:
+      module: tests.capability.agents.calculate
+      class: CalculateAgent
+    method: calculate_single
+    data_file: experiments/capability_eval/data/calculate_single.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+
+  - name: calculate_batch
+    description: "Batch multiplication - should write code loop"
+    agent:
+      module: tests.capability.agents.calculate
+      class: CalculateAgent
+    method: calculate_batch
+    data_file: experiments/capability_eval/data/calculate_batch.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0

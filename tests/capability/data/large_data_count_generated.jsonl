@@ -1,0 +1,1 @@
+{"args": [], "kwargs": {"test_case": "count", "pattern": "ALPHA"}, "expected": {"count": 20000, "data_length": 320000}}

@@ -1,0 +1,1 @@
+{"args": [], "kwargs": {"notes": ["The secret password is 'elephant'", "Meeting scheduled for Tuesday at 3pm", "Project budget: $50,000"], "question": "What is the secret password? Return only the password and nothing else."}, "expected": {"answer": "elephant"}}

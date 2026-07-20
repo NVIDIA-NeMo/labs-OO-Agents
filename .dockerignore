@@ -1,0 +1,119 @@
+# .dockerignore - Exclude files not needed in Docker images
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# CI/CD
+.gitlab-ci.yml
+.github/
+
+# Development and IDE
+.vscode/
+.idea/
+.cursor/
+.cursorrules
+.claude/
+*.swp
+*.swo
+CLAUDE.md
+
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+tests/
+test_*.py
+*_test.py
+
+# Documentation
+docs/
+*.md
+!README.md
+!**/README.md
+*.pdf
+journal/
+
+# Examples and experiments
+examples/
+experiments/
+scratch/
+
+# Results and traces
+results/
+traces/
+trace/
+tmp/
+*.jsonl
+*.noo-eval.jsonl
+*.006summary.json
+
+# Virtual environments and caches
+.venv/
+venv/
+env/
+ENV/
+.uv-cache/
+.ruff_cache/
+.mypy_cache/
+
+# Environment files (may contain secrets!)
+.env
+.env.*
+!.env.example
+!.env.template
+secrets.env
+local_config.yaml
+*.local.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# Temporal
+temporal/
+.temporal/
+
+# Specific large/unnecessary directories
+util/prompt-optimization/
+3P/
+3p/
+trash/
+debug_http_logs/
+
+# Keep important files (override any wildcards above)
+!pyproject.toml
+!uv.lock
+!requirements.txt

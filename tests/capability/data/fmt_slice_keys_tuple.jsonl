@@ -1,0 +1,7 @@
+{"args": [], "kwargs": {"context": "tuple(len=100, [:5]=(42, 17, 89, 33, 8), [-5:]=(56, 71, 12, 45, 28))", "question": "How many items are in the tuple total?"}, "expected": 100}
+{"args": [], "kwargs": {"context": "tuple(len=100, [:5]=(42, 17, 89, 33, 8), [-5:]=(56, 71, 12, 45, 28))", "question": "What is the minimum value across all items in the tuple?"}, "expected": null}
+{"args": [], "kwargs": {"context": "tuple(len=100, [:5]=(42, 17, 89, 33, 8), [-5:]=(56, 71, 12, 45, 28))", "question": "What is the first item in the tuple?"}, "expected": 42}
+{"args": [], "kwargs": {"context": "tuple(len=100, [:5]=(42, 17, 89, 33, 8), [-5:]=(56, 71, 12, 45, 28))", "question": "What is the value of the 50th item in the tuple (1-indexed)?"}, "expected": null}
+{"args": [], "kwargs": {"context": "tuple(len=100, [:5]=(42, 17, 89, 33, 8), [-5:]=(56, 71, 12, 45, 28))", "question": "What is the value of the 3rd item in the tuple (1-indexed)?"}, "expected": 89}
+{"args": [], "kwargs": {"context": "tuple(len=100, [:5]=(42, 17, 89, 33, 8), [-5:]=(56, 71, 12, 45, 28))", "question": "What is the value of the 9th item in the tuple (1-indexed)?"}, "expected": null}
+{"args": [], "kwargs": {"context": "tuple(len=100, [:5]=(42, 17, 89, 33, 8), [-5:]=(56, 71, 12, 45, 28))", "question": "What is the value of the 99th item in the tuple (1-indexed)?"}, "expected": 45}

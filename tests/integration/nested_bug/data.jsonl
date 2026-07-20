@@ -1,0 +1,3 @@
+{"args": [], "kwargs": {"value": 42}, "expected": "hello hello 42!!"}
+{"args": [], "kwargs": {"value": 7}, "expected": "hello hello 7!!"}
+{"args": [], "kwargs": {"value": 100}, "expected": "hello hello 100!!"}

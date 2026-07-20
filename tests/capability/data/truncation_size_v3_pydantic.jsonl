@@ -1,0 +1,2 @@
+{"args": [], "kwargs": {"context": "Team(name='alpha', members=<list len=50>['aaa', 'bbb', 'ccc', ..., 'www', 'xxx']</list>, status='active')", "question": "How many members are in team alpha?"}, "expected": "50"}
+{"args": [], "kwargs": {"context": "Project(name='beta', tasks=<list len=120>[Task(id=0), Task(id=1), ..., Task(id=119)]</list>, owner='Alice')", "question": "How many tasks does the project have?"}, "expected": "120"}

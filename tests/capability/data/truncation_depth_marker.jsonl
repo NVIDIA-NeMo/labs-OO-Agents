@@ -1,0 +1,4 @@
+{"args": [], "kwargs": {"context": "{'name': 'alpha', 'config': {dict: 3 items}, 'status': 'active'}", "question": "What is the status?"}, "expected": "active"}
+{"args": [], "kwargs": {"context": "{'name': 'alpha', 'config': {dict: 3 items}, 'status': 'active'}", "question": "What is the host configured?"}, "expected": "UNKNOWN"}
+{"args": [], "kwargs": {"context": "Project(name='beta', members=[list: 50 items], owner='Alice')", "question": "Who owns this project?"}, "expected": "Alice"}
+{"args": [], "kwargs": {"context": "Project(name='beta', members=[list: 50 items], owner='Alice')", "question": "What is the third member of the project?"}, "expected": "UNKNOWN"}

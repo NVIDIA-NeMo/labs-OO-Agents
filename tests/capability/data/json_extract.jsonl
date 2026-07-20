@@ -1,0 +1,1 @@
+{"args": [], "kwargs": {"json_str": "{\"products\": [{\"name\": \"Laptop\", \"price\": 999.99, \"specs\": {\"ram\": \"16GB\", \"cpu\": \"Intel i7\"}}, {\"name\": \"Mouse\", \"price\": 29.99, \"specs\": {\"dpi\": 1600}}]}", "path": "products.0.specs.cpu"}, "expected": "Intel i7"}

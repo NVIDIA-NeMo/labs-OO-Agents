@@ -1,0 +1,3 @@
+{"args": [], "kwargs": {"text": "I absolutely love this product, it exceeded all my expectations!"}, "expected": "positive"}
+{"args": [], "kwargs": {"text": "This is the worst experience I've ever had."}, "expected": "negative"}
+{"args": [], "kwargs": {"text": "The package arrived on Tuesday."}, "expected": "neutral"}

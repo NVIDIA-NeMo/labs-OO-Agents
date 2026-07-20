@@ -1,0 +1,1 @@
+{"args": [], "kwargs": {"user_message": "transform to CSV and validate", "values": [1, 2, 3, 4, 5]}, "expected": {"agents_called": ["Transformer", "Validator"], "results": {"Transformer": "1,2,3,4,5", "Validator": {"all_positive": true, "no_duplicates": true, "is_sorted": true}}}}

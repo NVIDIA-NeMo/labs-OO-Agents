@@ -1,0 +1,5 @@
+{"args": [], "kwargs": {"context": "{'name': 'log_stream', 'data': <generator>, 'count_so_far': 42}", "question": "What is the value of 'count_so_far'?"}, "expected": 42}
+{"args": [], "kwargs": {"context": "{'name': 'log_stream', 'data': <generator>, 'count_so_far': 42}", "question": "What is the first value yielded by 'data'?"}, "expected": null}
+{"args": [], "kwargs": {"context": "{'name': 'log_stream', 'data': <generator>, 'count_so_far': 42}", "question": "How many items are in 'data' total?"}, "expected": null}
+{"args": [], "kwargs": {"context": "Job(name='nightly', logs=<generator>, exit_code=0)", "question": "What is the exit_code?"}, "expected": 0}
+{"args": [], "kwargs": {"context": "Job(name='nightly', logs=<generator>, exit_code=0)", "question": "What is the first log line?"}, "expected": null}

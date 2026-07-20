@@ -1,0 +1,404 @@
+# Rust toolchain (installed for nemo_flow PyO3 build)
+.cargo/
+.rustup/
+
+# Node.js dependencies (never commit)
+node_modules/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+!packages/nemo-oo-agents-viewer/frontend-react/dist/
+!src/nooa/viewer/frontend-react/dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+# Exception: allow util/*/lib/ directories (our code, not build artifacts)
+!util/*/lib/
+!util/**/lib/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
+#   However, in case of collaboration, if having platform-specific dependencies or dependencies
+#   having no cross-platform support, pipenv may install dependencies that don't work, or not
+#   install all needed dependencies.
+#Pipfile.lock
+
+# PEP 582; used by e.g. github.com/David-OConnor/pyflow
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.env.*
+!.env.example
+!.env.template
+.venv
+.venv-macos
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# uv cache directory
+.uv-cache/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# IDEs
+.vscode/*
+.vscode-server/*
+.idea/*
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporal
+temporal/
+.temporal/
+
+# Custom
+secrets.env
+local_config.yaml
+
+# Security: JWT tokens and API keys
+**/test-nvauth.py
+**/debug-auth*.py
+# JWT token patterns (eyJ...)
+eyJ*
+
+# Third-party dependencies
+3P/
+3p/
+
+# Trash folder for temporary files
+trash/
+
+# Tools directory (generated traces) - only root level
+/tools/
+
+# Agent trace files and results (root level)
+/trace/
+/traces/
+/results/
+trace*.json
+!trace_viewer_config.json
+/tmp/
+
+# NeMo OO Agents generated trace and evaluation files (anywhere)
+*.noo-eval.jsonl
+*.006summary.json
+# Exception: Allow trace fixtures for testing/eval
+!evaluation/fixtures/**/*.noo-eval.jsonl
+
+# Interface output markdown (experiment results)
+docs/interface_output/
+
+# Trace viewer config backups
+**/trace_viewer_config.json.backup
+
+# Local config overrides (user-specific, not tracked)
+**/*.local.json
+
+# Bridge watchpoint file (runtime job monitoring, not tracked)
+.bridge_watch.json
+
+# Slurm job output files (runtime artifacts, not tracked)
+*.err
+*.out
+
+# Cursor IDE rules (keep local but don't track)
+.cursorrules
+
+# PDFs
+*.pdf
+packages/.venv/
+
+# Experimental implementations (on experimental-implementations branch)
+composer-packages/
+gpt-packages/
+trace_tui/
+NEW_AGENT_TUI.md
+RUN_NEW_AGENT_TUI.md
+SETUP_QWEN_TUI.md
+TUI_INTEGRATION_SUMMARY.md
+run-new-tui.sh
+test-tui-debug.py
+test-tui.sh
+scratch/ALIGNMENT_SUMMARY.md
+scratch/DESIGN_ALIGNMENT_REPORT.md
+packages/nemo_oo_agents-core/src/nemo_oo_agents/cli.py
+packages/nemo_oo_agents-tui/src/nemo_oo_agents_tui/cli.py
+
+# Prompt optimization experiment results
+util/prompt-optimization/results/*.json
+util/prompt-optimization/results/*.jsonl
+util/prompt-optimization/results/*/*.json
+util/prompt-optimization/results/*/*.jsonl
+util/prompt-optimization/traces/
+util/prompt-optimization/traces_test/
+
+# Eval pipeline experiments and data
+util/e2e_optimization/experiments/
+util/e2e_optimization/src/e2e_optimization/examples/**/*.jsonl
+util/e2e_optimization/src/e2e_optimization/examples/**/results/
+# Exception: allow data_*.jsonl (test datasets)
+!util/e2e_optimization/src/e2e_optimization/examples/**/data_*.jsonl
+util/eval_pipeline/experiments/
+
+# Experiment test result directories
+experiments/tau_bench_test*/
+experiments/**/results/
+
+traces.db
+traces.db-wal
+traces.db-shm
+# Large result files
+experiments/**/results/
+
+# Test files
+test_arxiv_fetch.py
+trigger_librarian_fetch.py
+experiments/evaluation-ablations/*.db
+experiments/evaluation-ablations/test_case_*/
+experiments/evaluation-ablations/test.csv
+experiments/evaluation-ablations/test.json
+agents/**/traces/
+
+# Claude Code settings (user-specific)
+.claude/settings.json
+
+# Claude Code runtime directories (cache, sessions, IDE state, plugins, skills)
+.claude/backups/
+.claude/history.jsonl
+.claude/cache/
+.claude/file-history/
+.claude/ide/
+.claude/plugins/
+.claude/policy-limits.json
+.claude/projects/
+.claude/sessions/
+.claude/shell-snapshots/
+.claude.json
+
+# Agent runtime directory
+.agents/
+
+# Shell history
+.bash_history
+
+# User-level XDG config/local dirs (injected by sandbox/environment)
+.config/
+.local/
+
+# Rust toolchain (installed by rustup for nemo-flow build)
+.cargo/
+.rustup/
+
+# VS Code Server (remote development runtime)
+.vscode-server/
+
+debug_http_logs/
+
+# SWE-bench evaluation logs (generated during test runs)
+**/logs/run_evaluation/
+
+# Trace analyzer batch results
+**/analysis_batch/
+
+# Claude Code local settings (personal, not shared)
+.claude/settings.local.json
+.claude/agents
+
+# Claude Code sandbox artifacts (created at runtime, not project files)
+.srt-settings.json
+# Debug handler dumps (written to cwd on SIGUSR2)
+debug_dump_*.txt
+# NeMo OO project directory (libraries, traces, config)
+.nemo_oo/
+.nooa/
+.nemo_oo_agents/
+# Shell config stubs (empty read-only files injected by sandbox)
+.zshrc
+.zprofile
+.bash_profile
+.bashrc
+.profile
+.gitconfig
+.ripgreprc
+.idea
+.vscode
+# Git internal stubs (root-level sandbox artifacts only)
+/HEAD
+/config
+/hooks
+/objects
+/refs
+# pytest temp directories
+pytest-of-*/
+experiments/evaluation-ablations/task_temp/
+
+# DABStep experiment outputs (top-level scratch directory)
+/dabstep/
+
+# Harbor generated task directories (regenerated via `harbor adapter run`)
+util/harbor/tasks/
+
+# OpenSkills workspace files
+.openskills/
+
+# Local lockfile
+prpm.lock
+
+# Git worktrees
+.worktrees/
+worktrees/
+
+# Bridge session ID file — written by slack bridge into each agent worktree root
+.claude_session_id
+
+sft_data/**/*.jsonl
+
+# Git credentials (must not be committed)
+.git-credentials
+-e
+# Bridge watchpoint file — per-worktree, never committed
+.bridge_watch.json
+
+.claude/backups
+.claude/file-history
+.claude/projects
+.claude/shell-snapshots
+.claude/telemetry
+./claude/sessions
+./claude/cache
+./claude/plugins
+
+.local/
+.config/
+util/harbor/tasks/terminal_bench/
+
+# WTF skills (generated by wtf install-skills)
+.claude/skills/wtf*
+tests/integration/fixtures/*.db
+tests/integration/fixtures/*.lock
+
+# Worktree directories
+.wt-*
+
+# Throwaway benchmark smoke-test configs
+util/harbor/tb1_opus_smoke.yaml
+util/harbor/tb1_ultra_smoke.yaml
+.claude/scheduled_tasks.lock
+.commit_msg
+
+# LoCoMo benchmark data (downloaded on demand, not vendored)
+examples/memory_bench/data/
+
+# Local scratch/working files (never commit)
+.scratch/

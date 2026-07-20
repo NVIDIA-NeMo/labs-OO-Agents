@@ -1,0 +1,2 @@
+{"args": [], "kwargs": {"context": "<dict len=4>{\"name\": \"alpha\", \"items\": <list len=80>[\"a\", \"b\", \"c\", ..., \"x\", \"y\", \"z\"]</list>, \"version\": \"1.0\", \"active\": true}</dict>", "question": "How many items are in the list?"}, "expected": "80"}
+{"args": [], "kwargs": {"context": "<dict len=2>{\"results\": <list len=42>[{\"id\": 1}, {\"id\": 2}, ..., {\"id\": 42}]</list>, \"total\": 42}</dict>", "question": "How many results are there?"}, "expected": "42"}

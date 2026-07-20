@@ -1,0 +1,60 @@
+# ARC-AGI-3 OFFLINE multi-run config — memory variant WITH visual grid input
+# (the settled grid is also shown to the model as a color PNG each turn; visual: additive).
+# Good for local comparison and testing on a handful of games.
+# Launch with:  python examples/arc_agi_3/run_multi.py --config examples/arc_agi_3/configs/offline.yaml
+name: offline
+operation_mode: offline
+
+# Model + effort (agent-visible surface is anonymised regardless). Single model;
+# `effort_ladder` steps reasoning_effort DOWN as a turn runs long (below).
+model: openai/openai/gpt-5.5
+reasoning_effort: xhigh    # primary effort (effort-ladder rung 0)
+
+# Skill: which skills/<name>/SKILL.md the agent loads as its <arc_skill> block.
+# interactive-game-solver = lean world-model solver (encode → latent z, predict, search).
+# grid-game-solver = full structured playbook.
+skill: interactive-game-solver
+
+variants: [memory]
+seeded: false
+
+# Visual grid input. additive = show the grid as a PNG IN ADDITION to the hex grid
+# (the hex text stays). png_scale is pixels per cell, so a 64x64 grid renders at
+# (png_scale*64)x(png_scale*64); 8-16 is a good range.
+visual: additive
+png_scale: 8
+
+# Concurrency + per-run caps.
+parallel: 4
+max_turns: null          # unlimited turns; env-steps is the main bound
+max_env_steps: 5000
+
+# Wall-clock cap for the whole fleet (seconds). 7200 = 2h.
+# For shorter test runs override on the CLI: --max-wall-seconds 3600.
+max_wall_seconds: 7200
+
+# Silence ladder, in seconds of agent silence (all measured from the last action
+# batch) — the harness NEVER deliberately ends a game. effort downshift (600,
+# agent-side) < nudge (900) < urgent respond-now nudge (1200) < force-advance a
+# default action after fallback_window more seconds of silence.
+effort_ladder: "600:medium"  # reasoning_effort -> medium after 600s in a turn
+nudge_after: 900             # harness writes one reminder state after 900s
+turn_timeout: 1200           # agent_timeout (urgent nudge) after 1200s
+fallback_window: 90          # then force a default action after 90s more silence
+
+# Animation-event frames: full record in trajectory(); a count-only summary in the
+# agent's state note.
+event_prompt: count
+
+reflect_every: 8
+allowed_game_overs: -1    # unlimited auto-RESETs after GAME_OVER
+
+games:
+  - cd82
+  - cn04
+  - ka59
+  - r11l
+  - tr87
+  - ar25
+  - vc33
+  - ls20

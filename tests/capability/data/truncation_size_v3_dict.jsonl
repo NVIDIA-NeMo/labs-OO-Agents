@@ -1,0 +1,2 @@
+{"args": [], "kwargs": {"context": "<dict len=100>{'k0': 0, 'k1': 1, 'k2': 2, 'k3': 3, ..., 'k97': 97, 'k98': 98, 'k99': 99}</dict>", "question": "How many keys in the dict total?"}, "expected": "100"}
+{"args": [], "kwargs": {"context": "<dict len=53>{'a': 1, 'b': 2, 'c': 3, ..., 'x': 24, 'y': 25, 'z': 26}</dict>", "question": "How many keys in the dict total?"}, "expected": "53"}

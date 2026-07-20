@@ -1,0 +1,815 @@
+# NeMo OO Agents Capability Tests - eval_pipeline Configuration
+#
+# This experiment tests nooa core capabilities:
+# 1. Scale awareness - when to answer directly vs write code
+# 2. Generation methods - when to use `...` for LLM judgment
+# 3. REPL exploration - using introspection for complex state
+# 4. Subagent routing - creating and coordinating child agents
+# 5. Stateful multi-turn - maintaining state across method calls
+#
+# Run with:
+#   python -m eval_pipeline --config experiments/capability_eval/config.yaml --runs 3
+#
+# Run subset:
+#   python -m eval_pipeline --config experiments/capability_eval/config.yaml --test sentiment_single,calculate_simple
+#
+# Debug LLM judge decisions:
+#   export DEBUG_JUDGE_INPUT=./tmp/judge_debug
+#   python -m eval_pipeline --config ... --test large_data_find --limit 1
+#   cat ./tmp/judge_debug/judge_input_*.txt
+#   (See docs/debug-llm-judge.md for details)
+#
+# NOTE: Some tests use ExactMatchScorer as a placeholder. For production use,
+# implement custom scorers for router and stateful tests that evaluate:
+# - Router tests: Correct sub-agent selection, parameter extraction, calls_made tracking
+# - Stateful tests: Multi-turn conversation flow, state updates, final state verification
+# See util/eval_pipeline/src/eval_pipeline/scorers/ for scorer implementation examples.
+
+name: capability
+no_cache: true
+description: "NeMo OO Agents capability tests for prompt optimization"
+
+# =============================================================================
+# OPTIMIZATION SETTINGS - Parameters for the optimization loop
+# =============================================================================
+
+optimization:
+  n_runs: 9           # Eval runs per iteration (for consistency analysis)
+  n_samples: 3        # FRONTIER samples (router traces are huge even with compact mode)
+  parallel: 40        # Max concurrent samples for eval_pipeline
+  max_trace_lines: 1000  # null = no truncation
+  compact_traces: true  # Only show new messages each turn (saves ~60% tokens)
+
+  # Reflection prompt template (edit this file to customize the prompt)
+  prompt_template: reflection_prompt.md.template
+
+  # Reflection LLM - references a key from the 'models' section below
+  reflect_model: claude-opus
+  reflect_temperature: 0.7
+
+  # Trace analyzer LLM (small/fast model for analyzing individual traces)
+  # References a key from the 'models' section below
+  analyzer_model: nemotron3-nano-30b
+  analyzer_max_trace_chars: 80000  # Truncate traces to fit context window (~20k tokens)
+
+# =============================================================================
+# OPTIMIZATION TARGET - File containing the strategy templates to evolve
+# =============================================================================
+
+target_files:
+  - agents/strategy.py  # Relative to this config file
+
+# =============================================================================
+# MODELS — resolved from the unifiedllm registry.
+#
+# NVIDIA-internal aliases (claude-haiku-azure, nemotron3-nano-30b, gpt-5.2, etc.)
+# ship in the nemo-oo-agents-nvidia package; install it (or the [nvidia]
+# extra) and the aliases resolve automatically. Run
+# `nooa config show` to inspect which YAML files are loading.
+#
+# Any model name supported by litellm also works as-is.
+# =============================================================================
+
+# 8-model matrix: (Gemini, Nemotron, Claude, OpenAI) × (Big, Small).
+# Gemini entries use the preview endpoints — gemini-3-pro wasn't authorized
+# for our API key when these were added.
+agent_models:
+  - claude-haiku
+  - claude-opus-4-8
+  - gemini-3.1-pro-preview
+  - gemini-3.5-flash
+  - glm-5.2
+  - gpt-5.4-mini
+  - gpt-5.5
+  - kimi-k2.6
+  - nemotron-3-ultra
+  - nemotron3-nano-30b
+
+output_dir: results  # Relative to this config file
+
+# Minimum weighted score to pass (default 0.5)
+# Set to 0.8 for stricter evaluation - requires majority of scorers to pass
+pass_threshold: 0.8
+
+test_suite:
+  # ===========================================================================
+  # SCALE AWARENESS - Answer vs Code (7 tests)
+  # ===========================================================================
+
+  - name: sentiment_single
+    description: "Single sentiment classification — penalizes recursion and naive classifiers"
+    tier: stable
+    agent:
+      module: tests.capability.agents.sentiment_single
+      class: SentimentSingleAgent
+    method: classify
+    data_file: tests/capability/data/sentiment_single.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 0.5
+      - name: methodology
+        class: LLMMethodologyScorer
+        weight: 0.5
+        model: claude-haiku
+        rubric: |
+          Evaluate if the agent classified sentiment using its own understanding.
+
+          Task input: {input}
+          Code Executions: {executions}
+          Final output: {output}
+
+          Return passed=true if:
+          - The agent used its own language understanding to classify sentiment
+          - BOTH direct answers (no code) and code-as-interface are acceptable
+
+          Return passed=false ONLY if:
+          - The agent tried to call self.classify() (recursion)
+          - The agent wrote a naive rule-based classifier (if/elif keyword checks)
+          - The agent imported NLP libraries to build a classifier
+
+          Important: answering directly WITHOUT code is fine. Do NOT penalize
+          lack of code execution.
+
+  - name: sentiment_batch
+    description: "Batch sentiment classification - should write code loop"
+    tier: frontier
+    agent:
+      module: tests.capability.agents.sentiment_batch
+      class: SentimentBatchAgent
+    method: classify
+    data_file: tests/capability/data/sentiment_batch.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+
+  - name: calculate_simple
+    description: "Simple arithmetic calculations"
+    tier: stable
+    agent:
+      module: tests.capability.agents.calculate_single
+      class: CalculateSingleAgent
+    method: calculate
+    data_file: tests/capability/data/calculate_simple.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+
+  - name: calculate_complex
+    description: "Complex multi-step calculations - should write code"
+    tier: stable
+    agent:
+      module: tests.capability.agents.calculate_single
+      class: CalculateSingleAgent
+    method: calculate
+    data_file: tests/capability/data/calculate_complex.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 0.5
+      - name: mode_check
+        class: ModeSelectionScorer
+        weight: 0.5
+        expected: code
+
+  - name: calculate_batch
+    description: "Batch natural language calculations - should write code loop"
+    tier: frontier
+    agent:
+      module: tests.capability.agents.calculate_batch
+      class: CalculateBatchAgent
+    method: calculate
+    data_file: tests/capability/data/calculate_batch.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+
+  - name: json_qa_lookup
+    description: "JSON field lookups - correctness only (answer visible in data)"
+    tier: stable
+    agent:
+      module: tests.capability.agents.json_qa
+      class: JsonQAAgent
+    method: answer_question
+    data_file: tests/capability/data/json_qa_lookup.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+
+  - name: json_qa_reasoning
+    description: "JSON questions requiring numeric comparison - code is acceptable"
+    tier: stable
+    agent:
+      module: tests.capability.agents.json_qa
+      class: JsonQAAgent
+    method: answer_question
+    data_file: tests/capability/data/json_qa_reasoning.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+
+  - name: json_extract
+    description: "Extract nested JSON data - should write code"
+    tier: stable
+    agent:
+      module: tests.capability.agents.json_extract
+      class: JsonExtractAgent
+    method: extract
+    data_file: tests/capability/data/json_extract.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+
+  # ===========================================================================
+  # NEEDLE-IN-HAYSTACK - REPL + Semantic Search (1 test)
+  # ===========================================================================
+
+  - name: needle_in_haystack
+    description: "Find negative sentiment in large data - requires REPL exploration"
+    tier: stable
+    agent:
+      module: tests.capability.agents.needle
+      class: NeedleTestWrapper
+    method: _call_agent
+    data_file: tests/capability/data/needle_in_haystack.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+
+  - name: error_recovery
+    description: "Error recovery - should retry after transient weather API failure"
+    tier: stable
+    agent:
+      module: tests.capability.agents.error_recovery
+      class: WeatherLookupAgentWrapper
+    method: get_temperature
+    data_file: tests/capability/data/error_recovery.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 0.5
+      - name: methodology
+        class: LLMMethodologyScorer
+        weight: 0.5
+        rubric: |
+          Evaluate if the agent recognizes a temporary failure and attempts to recover from it.
+
+          Task: {input}
+
+          Code Executions:
+          {executions}
+
+          IMPORTANT: The agent works in a multi-turn session where each "Execution N" is a separate
+          turn. A retry can happen ACROSS executions. Look at the pattern across ALL executions,
+          not just within a single code block.
+
+          Return passed=true if ALL of the following are true:
+          1. The agent doesn't give up after the first failure (i.e., there are multiple executions)
+          2. A retry attempt is made, in ANY of these forms:
+            - The agent executes a later code block that calls the same or similar operation as a
+              failed earlier block (multi-turn retry)
+            - The agent calls a wrapper/helper that re-invokes the failed operation
+            - The agent implements explicit retry/loop logic within a single code block
+          3. The agent doesn't read the source code of the failing function
+
+          Do NOT fail the agent for normal interface discovery such as doc(), help(),
+          inspect.signature(), or inspect.iscoroutinefunction(). Those reveal the callable
+          interface, not the hidden implementation. Fail source inspection only when the
+          trace clearly shows implementation/source-code access, such as inspect.getsource(),
+          opening/reading the defining source file, or printing/dumping function source.
+
+          Return passed=false ONLY if:
+          - There is only one execution (no retry at all), OR
+          - The agent gives up without retrying the failed operation, OR
+          - The agent reads/dumps the implementation source code of the failing function
+        model: nemotron3-nano-30b
+
+  - name: repl_exploration
+    description: "REPL exploration - should use REPL exploration to find a secret message"
+    tier: stable
+    agent:
+      module: tests.capability.agents.repl_exploration
+      class: ReplExplorationTestAgent
+    method: retrieve_secret_message
+    data_file: tests/capability/data/repl_exploration.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+
+  - name: refinement
+    description: "Refinement - should use refinement to get the ingredients for a recipe"
+    tier: frontier
+    agent:
+      module: tests.capability.agents.refinement
+      class: RefinementTestAgent
+    method: _order_recipe_ingredients_with_result_parsing
+    data_file: tests/capability/data/refinement.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+
+  - name: task_decomposition
+    description: "Task Decomposition - should use task decomposition and reuse helper methods"
+    tier: stable
+    agent:
+      module: tests.capability.agents.task_decomposition
+      class: TaskDecompositionTestAgent
+    method: parse_normalize_and_validate_records
+    data_file: tests/capability/data/task_decomposition.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 0.5
+      - name: methodology
+        class: LLMMethodologyScorer
+        weight: 0.5
+        rubric: |
+          Evaluate if the agent uses helper methods and reuses them for various tasks.
+
+          Task: {input}
+
+          Code Executions:
+          {executions}
+
+          Return passed=true if:
+          1. The agent uses helper methods
+          2. The agent uses the same helper method for parsing user.created, product.created and equipment.bought or has general helper function for processing all records
+          3. The agent uses the same helper method for normalizing product.description and equipment.description or has general helper function for processing all records
+
+        model: nemotron3-nano-30b
+
+  # ===========================================================================
+  # SUBAGENT ROUTING - Child agents + asyncio.gather (5 tests)
+  # ===========================================================================
+
+  - name: router_analyze
+    description: "Route to single specialist - Analyzer"
+    tier: stable
+    agent:
+      module: tests.capability.agents.router
+      class: RouterTestWrapper
+    method: process
+    data_file: tests/capability/data/router_analyze.jsonl
+    scorers:
+      # TODO: Need custom scorer to check calls_made
+      - name: result_check
+        class: ExactMatchScorer  # Placeholder
+        weight: 1.0
+
+  - name: router_validate
+    description: "Route to single specialist - Validator"
+    tier: stable
+    agent:
+      module: tests.capability.agents.router
+      class: RouterTestWrapper
+    method: process
+    data_file: tests/capability/data/router_validate.jsonl
+    scorers:
+      - name: result_check
+        class: ExactMatchScorer  # Placeholder
+        weight: 1.0
+
+  - name: router_transform
+    description: "Route with parameter extraction - Transformer + format"
+    tier: stable
+    agent:
+      module: tests.capability.agents.router
+      class: RouterTestWrapper
+    method: process
+    data_file: tests/capability/data/router_transform.jsonl
+    scorers:
+      - name: result_check
+        class: ExactMatchScorer  # Placeholder
+        weight: 1.0
+
+  - name: router_multi_analyze_validate
+    description: "Route to multiple specialists - should use gather"
+    tier: stable
+    agent:
+      module: tests.capability.agents.router
+      class: RouterTestWrapper
+    method: process
+    data_file: tests/capability/data/router_multi_analyze_validate.jsonl
+    scorers:
+      - name: result_check
+        class: ExactMatchScorer  # Placeholder
+        weight: 1.0
+
+  - name: router_multi_transform_validate
+    description: "Route with param extraction + multiple specialists"
+    tier: stable
+    agent:
+      module: tests.capability.agents.router
+      class: RouterTestWrapper
+    method: process
+    data_file: tests/capability/data/router_multi_transform_validate.jsonl
+    scorers:
+      - name: result_check
+        class: ExactMatchScorer  # Placeholder
+        weight: 1.0
+
+  # ===========================================================================
+  # STATEFUL MULTI-TURN - Fast food ordering (2 tests)
+  # ===========================================================================
+
+  - name: fast_food_order
+    description: "Multi-turn order flow - modify + confirm"
+    tier: frontier
+    agent:
+      module: tests.capability.agents.order
+      class: OrderTestWrapper
+    method: run_conversation
+    data_file: tests/capability/data/fast_food_order.jsonl
+    scorers:
+      - name: result_check
+        class: tests.capability.agents.order.FastFoodOrderScorer
+        weight: 1.0
+
+  - name: fast_food_cancel
+    description: "Multi-turn cancel flow"
+    tier: stable
+    agent:
+      module: tests.capability.agents.order
+      class: OrderTestWrapper
+    method: run_conversation
+    data_file: tests/capability/data/fast_food_cancel.jsonl
+    scorers:
+      - name: result_check
+        class: tests.capability.agents.order.FastFoodOrderScorer
+        weight: 1.0
+
+  # ===========================================================================
+  # WP-2: INTROSPECTION EFFECTIVENESS - Tool discovery via doc(self)
+  # ===========================================================================
+
+  - name: employee_lookup
+    description: "Employee salary lookup - requires chaining subagents with data dependency (name → employee_id → salary)"
+    tier: stable
+    agent:
+      module: tests.capability.agents.employee_lookup
+      class: EmployeeSalaryAgent
+    method: get_employee_salary
+    data_file: tests/capability/data/employee_lookup.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+
+  # ===========================================================================
+  # CONTEXT API - Dynamic context block management
+  # ===========================================================================
+
+  - name: context_notes
+    description: "Note-taking with context persistence - requires pinning render_notes() into context"
+    tier: frontier
+    agent:
+      module: tests.capability.agents.context_notes
+      class: NoteTakingTestWrapper
+    method: run_test
+    data_file: tests/capability/data/context_notes.jsonl
+    scorers:
+      - name: answer_match
+        class: ExactMatchScorer
+        weight: 0.6
+
+      - name: context_api_usage
+        class: LLMJudgeScorer
+        weight: 0.4
+        model: claude-haiku
+        rubric: |
+          Evaluate if the agent pinned rendered notes into context.
+
+          Context blocks created: {output[context_blocks]}
+          Dynamic blocks (key -> expression): {output[dynamic_blocks]}
+
+          The agent has self.notes with add_note() and render_notes() methods.
+          It should have pinned rendered notes into context so they're visible
+          in subsequent calls, using either:
+          - self.context.set_dynamic("notes", "self.notes.render_notes()")  [preferred]
+          - self.context["notes"] = self.notes.render_notes()  [also acceptable]
+
+          Return passed=true if:
+          - dynamic_blocks contains an entry referencing render_notes, OR
+          - context_blocks is non-empty (agent used context API with notes)
+
+          Return passed=false if:
+          - No context blocks were created (agent never used the Context API)
+
+  # ===========================================================================
+  # TRUNCATION SYSTEM - Large data handling with multi-layer truncation
+  # ===========================================================================
+
+  - name: large_data_find
+    description: "Find marker in very large data (500KB+) - tests prefill & stdout truncation"
+    tier: stable
+    agent:
+      module: tests.capability.agents.large_data_wrapper
+      class: LargeDataTestWrapper
+    method: call_agent
+    data_file: tests/capability/data/large_data_find_generated.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 0.5
+
+      - name: efficiency_check
+        class: LLMJudgeScorer
+        weight: 0.5
+        model: nemotron3-nano-30b
+        skip_prefill: true
+        rubric: |
+          Evaluate if the agent handled large data efficiently.
+
+          Generated code:
+          ```python
+          {code}
+          ```
+
+          The task requires finding a marker in very large data (500KB-800KB).
+
+          Return passed=true if:
+          - Agent used string methods like .find(), .index(), .count(), len() directly
+          - Agent did NOT try to print() the entire data parameter
+          - Agent did NOT try to display or examine the full data
+          - Agent used efficient operations (O(n) string search, not O(n²) loops)
+
+          Return passed=false if:
+          - Agent tried to print(data) or display the full data
+          - Agent used inefficient approaches (character-by-character loops)
+          - Agent failed to use built-in string methods
+
+  - name: large_data_extract
+    description: "Extract context around marker in large data - tests smart slicing"
+    tier: stable
+    agent:
+      module: tests.capability.agents.large_data_wrapper
+      class: LargeDataTestWrapper
+    method: call_agent
+    data_file: tests/capability/data/large_data_extract_generated.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 0.5
+
+      - name: slicing_check
+        class: LLMJudgeScorer
+        weight: 0.5
+        model: nemotron3-nano-30b
+        skip_prefill: true
+        rubric: |
+          Evaluate if the agent used efficient string slicing.
+
+          Generated code:
+          ```python
+          {code}
+          ```
+
+          The task requires extracting N characters before and after a marker in large data.
+
+          Return passed=true if:
+          - Agent found the marker position first
+          - Agent used string slicing like data[pos-N:pos+len(marker)+N]
+          - Agent did NOT print the entire data
+
+          Return passed=false if:
+          - Agent tried to print or process the entire data
+          - Agent didn't use slicing to extract just the needed portion
+
+  - name: large_data_count
+    description: "Count pattern in large data - tests efficient counting"
+    tier: stable
+    agent:
+      module: tests.capability.agents.large_data_wrapper
+      class: LargeDataTestWrapper
+    method: call_agent
+    data_file: tests/capability/data/large_data_count_generated.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 0.5
+
+      - name: counting_check
+        class: LLMJudgeScorer
+        weight: 0.5
+        model: nemotron3-nano-30b
+        skip_prefill: true
+        rubric: |
+          Evaluate if the agent counted efficiently.
+
+          Generated code:
+          ```python
+          {code}
+          ```
+
+          The task requires counting pattern occurrences in large data.
+
+          Return passed=true if:
+          - Agent used .count() method or efficient counting
+          - Agent did NOT print the entire data
+          - Agent calculated data length with len()
+
+          Return passed=false if:
+          - Agent tried to print or display the full data
+          - Agent used inefficient manual counting loops
+
+  # ===========================================================================
+  # STRUCTURED OUTPUT - PredictStrategy with composed Pydantic models
+  # ===========================================================================
+
+  - name: structured_combined_extraction
+    description: "Extract and compose nested Pydantic models, checking both schema and values"
+    tier: stable
+    agent:
+      module: tests.capability.agents.structured_output
+      class: PredictAgent
+    method: process_review
+    data_file: tests/capability/data/structured_combined_extraction.jsonl
+    scorers:
+      - name: type_match
+        class: TypeMatchScorer
+        weight: 0.25
+      - name: value_match
+        class: tests.capability.agents.structured_output.StructuredCombinedValueScorer
+        weight: 0.75
+
+  # ===========================================================================
+  # TOOL CALL TRANSLATION - Agent method calling via execute_python
+  # ===========================================================================
+
+  - name: fast_agent_help
+    description: "Help delegation - must call self.call_for_help()"
+    tier: stable
+    agent:
+      module: tests.capability.agents.fast_agent_help
+      class: FastHelpAgentWrapper
+    method: reply
+    data_file: tests/capability/data/fast_agent_help.jsonl
+    scorers:
+      - name: help_behavior
+        class: eval_pipeline.scoring.FastAgentHelpScorer
+        weight: 1.0
+        expect_help: true
+
+  - name: fast_agent_no_help
+    description: "Direct answer - should answer without calling for help"
+    tier: stable
+    agent:
+      module: tests.capability.agents.fast_agent_help
+      class: FastHelpAgentWrapper
+    method: reply
+    data_file: tests/capability/data/fast_agent_no_help.jsonl
+    scorers:
+      - name: help_behavior
+        class: eval_pipeline.scoring.FastAgentHelpScorer
+        weight: 1.0
+        expect_help: false
+
+  - name: fast_agent_help_translate
+    description: "Help delegation with tool-call translation"
+    tier: stable
+    agent:
+      module: tests.capability.agents.fast_agent_help
+      class: FastHelpAgentTranslateWrapper
+    method: reply
+    data_file: tests/capability/data/fast_agent_help.jsonl
+    scorers:
+      - name: help_behavior
+        class: eval_pipeline.scoring.FastAgentHelpScorer
+        weight: 1.0
+        expect_help: true
+
+  - name: fast_agent_no_help_translate
+    description: "Direct answer with tool-call translation"
+    tier: stable
+    agent:
+      module: tests.capability.agents.fast_agent_help
+      class: FastHelpAgentTranslateWrapper
+    method: reply
+    data_file: tests/capability/data/fast_agent_no_help.jsonl
+    scorers:
+      - name: help_behavior
+        class: eval_pipeline.scoring.FastAgentHelpScorer
+        weight: 1.0
+        expect_help: false
+
+  # ===========================================================================
+  # TRUNCATION COMPREHENSION - reading the truncation 3.0 marker family (6 tests)
+  #
+  # The system prompt now documents the marker shape, so agents should do
+  # *better* on these than the experimental matrix in
+  # docs/design/truncation-3.0-experiment-summary.md (which ran without the
+  # system-prompt guidance).
+  #
+  # Predict tests measure: can the model parse a `type(len=N, ...)` marker,
+  # answer only when the result is determinable from the rendered data, and
+  # return is_answerable=false for elided/hidden values.
+  #
+  # CodeAct tests measure: given a truncated prefill, does the model use
+  # `execute_python` against the underlying value (which is *not* truncated)
+  # to compute real answers (real min, real 50th item, etc.)?
+  # ===========================================================================
+
+  # 8 tests: 4 Predict + 4 CodeAct, picked to span the marker family without
+  # blowing up the regular suite.
+  # Predict measures marker comprehension (parse and answer only when the
+  # rendered data is sufficient); CodeAct measures real-data leverage via execute_python.
+
+  - name: truncation_list_predict
+    description: "Predict on slice_keys list marker — head/tail visible, elided refused"
+    tier: stable
+    agent: {module: tests.capability.agents.realfmt_predict, class: RealFmtAgent}
+    method: answer
+    data_file: tests/capability/data/realfmt_slice_keys_list_predict.jsonl
+    scorers: [{name: exact_match, class: ExactMatchScorer, weight: 1.0}]
+
+  - name: truncation_dict_predict
+    description: "Predict on dict items wrapper"
+    tier: stable
+    agent: {module: tests.capability.agents.realfmt_predict, class: RealFmtAgent}
+    method: answer
+    data_file: tests/capability/data/realfmt_lower_dict_predict.jsonl
+    scorers: [{name: exact_match, class: ExactMatchScorer, weight: 1.0}]
+
+  - name: truncation_nested_predict
+    description: "Predict on nested dict-of-lists — recursive marker dispatch"
+    tier: stable
+    agent: {module: tests.capability.agents.realfmt_predict, class: RealFmtAgent}
+    method: answer
+    data_file: tests/capability/data/realfmt_nested_predict.jsonl
+    scorers: [{name: exact_match, class: ExactMatchScorer, weight: 1.0}]
+
+  - name: truncation_list_codeact
+    description: "CodeAct on slice_keys list — model computes real answers from underlying data"
+    tier: stable
+    agent: {module: tests.capability.agents.realfmt_codeact, class: RealFmtAgent}
+    method: answer
+    data_file: tests/capability/data/realfmt_slice_keys_list_codeact.jsonl
+    scorers: [{name: exact_match, class: ExactMatchScorer, weight: 1.0}]
+
+  - name: truncation_set_codeact
+    description: "CodeAct on set items wrapper — biggest predict→codeact lift in the matrix"
+    tier: stable
+    agent: {module: tests.capability.agents.realfmt_codeact, class: RealFmtAgent}
+    method: answer
+    data_file: tests/capability/data/realfmt_lower_set_codeact.jsonl
+    scorers: [{name: exact_match, class: ExactMatchScorer, weight: 1.0}]
+
+  - name: truncation_nested_codeact
+    description: "CodeAct on nested dict-of-lists — recurse into team data via execute_python"
+    tier: stable
+    agent: {module: tests.capability.agents.realfmt_codeact, class: RealFmtAgent}
+    method: answer
+    data_file: tests/capability/data/realfmt_nested_codeact.jsonl
+    scorers: [{name: exact_match, class: ExactMatchScorer, weight: 1.0}]
+
+  - name: truncation_dict_codeact
+    description: "CodeAct on dict items wrapper — model computes real answers from underlying data"
+    tier: stable
+    agent: {module: tests.capability.agents.realfmt_codeact, class: RealFmtAgent}
+    method: answer
+    data_file: tests/capability/data/realfmt_lower_dict_codeact.jsonl
+    scorers: [{name: exact_match, class: ExactMatchScorer, weight: 1.0}]
+
+  - name: truncation_set_predict
+    description: "Predict on set items wrapper — membership/count from visible elements, refuse on elided"
+    tier: stable
+    agent: {module: tests.capability.agents.realfmt_predict, class: RealFmtAgent}
+    method: answer
+    data_file: tests/capability/data/realfmt_lower_set_predict.jsonl
+    scorers: [{name: exact_match, class: ExactMatchScorer, weight: 1.0}]
+
+  # ===========================================================================
+  # COMPLEX RETURN-TYPE CONSTRUCTION (CodeAct) — construction guidance for types
+  # with no JSON schema (Any-fallback). DataFrame exercises the curated pandas
+  # define_doc adapter; Widget (novel, no adapter) exercises the auto-doc fallback.
+  # ===========================================================================
+  - name: construction_dataframe
+    description: "CodeAct builds & returns a pd.DataFrame (curated pandas define_doc adapter)"
+    tier: stable
+    agent: {module: tests.capability.agents.construction, class: ConstructionAgent}
+    method: build_table
+    data_file: tests/capability/data/construction_dataframe.jsonl
+    scorers:
+      - name: construction
+        class: tests.capability.agents.construction.ConstructionScorer
+        weight: 1.0
+
+  - name: construction_widget
+    description: "CodeAct builds & returns a novel non-Pydantic Widget via auto-doc fallback (no adapter)"
+    tier: frontier
+    agent: {module: tests.capability.agents.construction, class: ConstructionAgent}
+    method: build_widget
+    data_file: tests/capability/data/construction_widget.jsonl
+    scorers:
+      - name: construction
+        class: tests.capability.agents.construction.ConstructionScorer
+        weight: 1.0

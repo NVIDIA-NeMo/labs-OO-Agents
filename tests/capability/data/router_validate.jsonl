@@ -1,0 +1,2 @@
+{"args": [], "kwargs": {"user_message": "validate this data", "values": [1, 2, 3, 4, 5]}, "expected": {"agents_called": ["Validator"], "results": {"Validator": {"all_positive": true, "no_duplicates": true, "is_sorted": true}}}}
+{"args": [], "kwargs": {"user_message": "check if this is valid", "values": [-1, 2, 2, 5]}, "expected": {"agents_called": ["Validator"], "results": {"Validator": {"all_positive": false, "no_duplicates": false, "is_sorted": true}}}}

@@ -1,0 +1,7 @@
+{"args": [], "kwargs": {"context": "dict(len=100, items={0: 42, 1: 17, 2: 89, 3: 33, 4: 8, ..., 95: 56, 96: 71, 97: 12, 98: 45, 99: 28})", "question": "How many keys are in the dict total?"}, "expected": 100}
+{"args": [], "kwargs": {"context": "dict(len=100, items={0: 42, 1: 17, 2: 89, 3: 33, 4: 8, ..., 95: 56, 96: 71, 97: 12, 98: 45, 99: 28})", "question": "What is the minimum value across all values in the dict?"}, "expected": null}
+{"args": [], "kwargs": {"context": "dict(len=100, items={0: 42, 1: 17, 2: 89, 3: 33, 4: 8, ..., 95: 56, 96: 71, 97: 12, 98: 45, 99: 28})", "question": "What is the value at key 0?"}, "expected": 42}
+{"args": [], "kwargs": {"context": "dict(len=100, items={0: 42, 1: 17, 2: 89, 3: 33, 4: 8, ..., 95: 56, 96: 71, 97: 12, 98: 45, 99: 28})", "question": "What is the value at key 49?"}, "expected": null}
+{"args": [], "kwargs": {"context": "dict(len=100, items={0: 42, 1: 17, 2: 89, 3: 33, 4: 8, ..., 95: 56, 96: 71, 97: 12, 98: 45, 99: 28})", "question": "What is the value at key 2?"}, "expected": 89}
+{"args": [], "kwargs": {"context": "dict(len=100, items={0: 42, 1: 17, 2: 89, 3: 33, 4: 8, ..., 95: 56, 96: 71, 97: 12, 98: 45, 99: 28})", "question": "What is the value at key 8?"}, "expected": null}
+{"args": [], "kwargs": {"context": "dict(len=100, items={0: 42, 1: 17, 2: 89, 3: 33, 4: 8, ..., 95: 56, 96: 71, 97: 12, 98: 45, 99: 28})", "question": "What is the value at key 98?"}, "expected": 45}

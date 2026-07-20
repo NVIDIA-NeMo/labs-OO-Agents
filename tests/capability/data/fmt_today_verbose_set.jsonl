@@ -1,0 +1,7 @@
+{"args": [], "kwargs": {"context": "{42, 17, 89, 33, 8, ... +90 items}", "question": "How many elements are in the set total?"}, "expected": 100}
+{"args": [], "kwargs": {"context": "{42, 17, 89, 33, 8, ... +90 items}", "question": "What is the minimum value across all elements in the set?"}, "expected": null}
+{"args": [], "kwargs": {"context": "{42, 17, 89, 33, 8, ... +90 items}", "question": "Is the value 42 in the set? (1 for yes, 0 for no)"}, "expected": 1}
+{"args": [], "kwargs": {"context": "{42, 17, 89, 33, 8, ... +90 items}", "question": "Is the value 999 in the set? (1 for yes, 0 for no, return None if you cannot tell)"}, "expected": null}
+{"args": [], "kwargs": {"context": "{42, 17, 89, 33, 8, ... +90 items}", "question": "Is the value 89 in the set? (1 for yes, 0 for no)"}, "expected": 1}
+{"args": [], "kwargs": {"context": "{42, 17, 89, 33, 8, ... +90 items}", "question": "Is the value 1 in the set? (1 for yes, 0 for no, return None if you cannot tell)"}, "expected": null}
+{"args": [], "kwargs": {"context": "{42, 17, 89, 33, 8, ... +90 items}", "question": "Is the value 28 in the set? (1 for yes, 0 for no)"}, "expected": 1}

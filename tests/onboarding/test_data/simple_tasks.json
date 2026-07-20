@@ -1,0 +1,69 @@
+{
+  "test_cases": [
+    {
+      "id": "simple_assignment",
+      "capability": "code_generation",
+      "task": "Set self.status to 'completed'",
+      "expected_behavior": {
+        "contains": ["self.status = 'completed'"],
+        "not_contains": ["import", "exec", "eval", "lambda"],
+        "validation_passes": true,
+        "tool_used": "code_generation"
+      },
+      "difficulty": "easy",
+      "tags": ["assignment", "state_mutation"]
+    },
+    {
+      "id": "simple_tool_call",
+      "capability": "code_generation",
+      "task": "Call self.tools.search with query 'python tutorial'",
+      "expected_behavior": {
+        "contains": ["await self.tools.search", "'python tutorial'"],
+        "not_contains": ["import requests", "import urllib"],
+        "validation_passes": true,
+        "tool_used": "code_generation"
+      },
+      "difficulty": "easy",
+      "tags": ["tool_call", "async"]
+    },
+    {
+      "id": "simple_loop",
+      "capability": "code_generation",
+      "task": "Iterate through self.items and print each item",
+      "expected_behavior": {
+        "contains": ["for item in self.items:", "print(item)"],
+        "not_contains": ["lambda", "import"],
+        "validation_passes": true,
+        "tool_used": "code_generation"
+      },
+      "difficulty": "easy",
+      "tags": ["loop", "iteration"]
+    },
+    {
+      "id": "simple_conditional",
+      "capability": "code_generation",
+      "task": "If self.count > 10, set self.status to 'high', else set to 'low'",
+      "expected_behavior": {
+        "contains": ["if self.count > 10:", "self.status ="],
+        "not_contains": ["lambda", "exec"],
+        "validation_passes": true,
+        "tool_used": "code_generation"
+      },
+      "difficulty": "easy",
+      "tags": ["conditional", "state_mutation"]
+    },
+    {
+      "id": "message_with_expansion",
+      "capability": "message_streams",
+      "task": "Process items and report count in message",
+      "expected_behavior": {
+        "message_present": true,
+        "message_contains": ["{len("],
+        "variable_expansion": true,
+        "tool_used": "code_generation"
+      },
+      "difficulty": "easy",
+      "tags": ["message", "variable_expansion"]
+    }
+  ]
+}

@@ -1,0 +1,1200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>NeMo OO Agents — Self-evolving harness</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,700&family=IBM+Plex+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --bg:#070708;
+    --bg-2:#0e0f10;
+    --panel:#101113;
+    --line:#1d1f22;
+    --ink:#f4f5f2;
+    --dim:#8b8f8a;
+    --dimmer:#5a5e59;
+    --green:#76b900;          /* NVIDIA green */
+    --green-soft:#a3e635;
+    --gold:#d8c08a;
+    --maxw:100%;
+    --pad:clamp(48px,4.6vw,80px);
+  }
+
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family:"IBM Plex Sans",sans-serif;
+    font-weight:300;
+    -webkit-font-smoothing:antialiased;
+    overflow:hidden;
+    cursor:default;
+  }
+
+  /* ---------- atmosphere ---------- */
+  .grid-bg{
+    position:fixed;inset:0;z-index:0;pointer-events:none;
+    background-image:
+      linear-gradient(to right, rgba(255,255,255,.022) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(255,255,255,.022) 1px, transparent 1px);
+    background-size:64px 64px;
+    mask-image:radial-gradient(ellipse 90% 80% at 70% 30%, #000 35%, transparent 100%);
+  }
+  .glow{
+    position:fixed;z-index:0;pointer-events:none;border-radius:50%;
+    filter:blur(120px);opacity:.5;
+  }
+  .glow.a{width:620px;height:620px;top:-220px;right:-120px;
+    background:radial-gradient(circle,rgba(118,185,0,.20),transparent 65%);}
+  .glow.b{width:520px;height:520px;bottom:-220px;left:-160px;
+    background:radial-gradient(circle,rgba(118,185,0,.08),transparent 65%);}
+  .noise{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.035;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");}
+
+  /* ---------- deck shell — fixed 16:9 stage, scaled to fit ---------- */
+  .stage{position:fixed;inset:0;z-index:2;display:flex;align-items:center;justify-content:center}
+  .deck{position:relative;width:1280px;height:720px;flex:0 0 auto;
+    transform:scale(var(--scale,1));transform-origin:center center}
+  .slide{
+    position:absolute;inset:0;
+    display:none;
+    flex-direction:column;justify-content:center;
+    padding:var(--pad);
+    opacity:0;
+  }
+  .slide.active{display:flex;animation:slidein .55s cubic-bezier(.2,.7,.2,1) both}
+  @keyframes slidein{from{opacity:0}to{opacity:1}}
+  .wrap{width:100%;max-width:var(--maxw);margin:0 auto}
+
+  /* staggered child reveal */
+  .slide.active [data-r]{opacity:0;transform:translateY(14px);
+    animation:rise .6s cubic-bezier(.2,.7,.2,1) forwards}
+  .slide.active [data-r="1"]{animation-delay:.10s}
+  .slide.active [data-r="2"]{animation-delay:.20s}
+  .slide.active [data-r="3"]{animation-delay:.30s}
+  .slide.active [data-r="4"]{animation-delay:.40s}
+  .slide.active [data-r="5"]{animation-delay:.50s}
+  .slide.active [data-r="6"]{animation-delay:.60s}
+  @keyframes rise{to{opacity:1;transform:none}}
+
+  /* ---------- type ---------- */
+  .kicker{
+    font-family:"JetBrains Mono",monospace;
+    font-size:12px;font-weight:500;letter-spacing:.28em;text-transform:uppercase;
+    color:var(--green);display:flex;align-items:center;gap:14px;margin-bottom:30px;
+  }
+  .kicker .num{color:var(--dimmer)}
+  .kicker::before{content:"";width:26px;height:1px;background:var(--green)}
+
+  h1{font-family:"Bricolage Grotesque",sans-serif;font-weight:700;
+    font-size:clamp(44px,7.4vw,104px);line-height:.95;letter-spacing:-.025em}
+  h2{font-family:"Bricolage Grotesque",sans-serif;font-weight:600;
+    font-size:clamp(30px,4.4vw,58px);line-height:1.02;letter-spacing:-.02em}
+  .lede{font-size:clamp(17px,1.7vw,22px);color:var(--dim);font-weight:300;
+    line-height:1.55;max-width:62ch;margin-top:26px}
+  p{line-height:1.6}
+  .accent{color:var(--green)}
+  .em{color:var(--ink);font-weight:500}
+  strong{font-weight:600;color:var(--ink)}
+
+  /* ---------- code ---------- */
+  pre,code,.mono{font-family:"JetBrains Mono",monospace}
+  .code{
+    background:linear-gradient(180deg,var(--panel),#0b0c0d);
+    border:1px solid var(--line);border-radius:12px;
+    padding:24px 28px;font-size:clamp(11.5px,1.04vw,14.5px);line-height:1.7;
+    overflow:hidden;position:relative;
+    box-shadow:0 24px 60px -30px rgba(0,0,0,.9);
+  }
+  .code pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+  .code::before{content:"";position:absolute;left:0;top:18px;bottom:18px;width:2px;
+    background:linear-gradient(var(--green),transparent);border-radius:2px;opacity:.5}
+  .code .c{color:var(--dimmer);font-style:italic}     /* comment */
+  .code .kw{color:#8fb3d9}                              /* keyword */
+  .code .ty{color:var(--green-soft)}                   /* type */
+  .code .doc{color:var(--gold)}                        /* docstring / prompt */
+  .code .el{color:var(--green);font-weight:700;
+    text-shadow:0 0 16px rgba(118,185,0,.6)}           /* the ellipsis */
+  .code .fn{color:#e8e8e2}
+  .code .mut{color:var(--dim)}
+  .tag{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:11px;
+    letter-spacing:.12em;text-transform:uppercase;color:var(--green);
+    border:1px solid rgba(118,185,0,.35);border-radius:100px;padding:5px 12px}
+
+  /* ---------- layout helpers ---------- */
+  .split{display:grid;grid-template-columns:1.05fr .95fr;gap:clamp(30px,4vw,64px);align-items:center}
+  .split.wide-left{grid-template-columns:1.25fr .75fr}
+  @media(max-width:900px){.split{grid-template-columns:1fr;gap:28px}}
+
+  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:36px}
+  @media(max-width:900px){.cards{grid-template-columns:1fr}}
+  .card{
+    background:var(--bg-2);border:1px solid var(--line);border-radius:12px;
+    padding:24px 22px;transition:border-color .3s,transform .3s;
+  }
+  .card:hover{border-color:rgba(118,185,0,.45);transform:translateY(-3px)}
+  .card .big{font-family:"JetBrains Mono",monospace;font-size:26px;color:var(--green);margin-bottom:12px}
+  .card h3{font-family:"Bricolage Grotesque",sans-serif;font-weight:600;font-size:19px;margin-bottom:8px}
+  .card p{color:var(--dim);font-size:14.5px;line-height:1.55}
+
+  ul.clean{list-style:none;margin-top:26px;display:flex;flex-direction:column;gap:18px}
+  ul.clean li{padding-left:30px;position:relative;font-size:clamp(16px,1.45vw,19px);
+    color:var(--dim);line-height:1.5}
+  ul.clean li::before{content:"";position:absolute;left:0;top:.55em;width:9px;height:9px;
+    background:var(--green);border-radius:2px;transform:rotate(45deg)}
+  ul.clean li .em{color:var(--ink)}
+
+  /* compare table */
+  table.cmp{width:100%;border-collapse:collapse;margin-top:34px;font-size:clamp(14px,1.3vw,17px)}
+  table.cmp th,table.cmp td{text-align:left;padding:16px 18px;border-bottom:1px solid var(--line);vertical-align:top}
+  table.cmp th{font-family:"JetBrains Mono",monospace;font-size:12px;letter-spacing:.14em;
+    text-transform:uppercase;color:var(--dim);font-weight:500}
+  table.cmp td:first-child{font-family:"JetBrains Mono",monospace;color:var(--green);white-space:nowrap;font-size:.92em}
+  table.cmp td{color:var(--dim)}table.cmp td .em{color:var(--ink)}
+
+  .annot{display:flex;flex-direction:column;gap:20px;margin-top:6px}
+  .annot .row{display:flex;gap:16px;align-items:flex-start}
+  .annot .sym{font-family:"JetBrains Mono",monospace;color:var(--green);font-weight:700;
+    font-size:18px;min-width:96px}
+  .annot .row p{color:var(--dim);font-size:15.5px;line-height:1.5}
+  .annot .row p b{color:var(--ink);font-weight:500}
+
+  /* ---------- title slide ---------- */
+  .title-meta{display:flex;align-items:center;gap:18px;margin-bottom:42px}
+  .nv-mark{display:flex;align-items:center;gap:11px;font-family:"JetBrains Mono",monospace;
+    font-size:13px;letter-spacing:.18em;text-transform:uppercase;color:var(--ink)}
+  .nv-eye{width:30px;height:18px;border-radius:50%/60%;
+    background:var(--green);box-shadow:0 0 24px rgba(118,185,0,.55);
+    position:relative}
+  .nv-eye::after{content:"";position:absolute;inset:5px 9px;background:var(--bg);border-radius:50%/60%}
+  .title-foot{margin-top:54px;display:flex;gap:42px;flex-wrap:wrap;
+    font-family:"JetBrains Mono",monospace;font-size:13px;color:var(--dim)}
+  .title-foot b{color:var(--green);font-weight:500}
+
+  /* ---------- chrome ---------- */
+  .bar{position:fixed;left:0;top:0;height:2px;background:var(--green);
+    box-shadow:0 0 12px var(--green);z-index:30;transition:width .45s cubic-bezier(.2,.7,.2,1)}
+  .hud{position:fixed;z-index:30;bottom:26px;right:var(--pad);
+    font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--dim);
+    display:flex;align-items:center;gap:10px}
+  .hud b{color:var(--ink);font-weight:500}
+  .hud .of{color:var(--dimmer)}
+  .brand{position:fixed;z-index:30;bottom:26px;left:var(--pad);
+    font-family:"JetBrains Mono",monospace;font-size:12px;letter-spacing:.16em;
+    text-transform:uppercase;color:var(--dimmer)}
+  .brand b{color:var(--green)}
+  .dots{position:fixed;z-index:30;top:50%;right:24px;transform:translateY(-50%);
+    display:flex;flex-direction:column;gap:11px}
+  .dots button{width:8px;height:8px;border-radius:50%;border:none;cursor:pointer;
+    background:var(--line);padding:0;transition:.3s}
+  .dots button.on{background:var(--green);box-shadow:0 0 10px var(--green);transform:scale(1.3)}
+  .hint{position:fixed;z-index:30;bottom:26px;left:50%;transform:translateX(-50%);
+    font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--dimmer);
+    letter-spacing:.1em;transition:opacity .6s}
+  .hint.gone{opacity:0}
+  kbd{border:1px solid var(--line);border-radius:5px;padding:1px 7px;color:var(--dim);background:var(--bg-2)}
+  .present-btn{position:fixed;z-index:31;top:22px;right:22px;width:38px;height:38px;border-radius:9px;
+    border:1px solid var(--line);background:var(--bg-2);color:var(--dim);cursor:pointer;
+    font-size:15px;line-height:1;display:flex;align-items:center;justify-content:center;
+    transition:opacity .3s,border-color .25s,color .25s}
+  .present-btn:hover{border-color:rgba(118,185,0,.55);color:var(--green)}
+  /* presentation mode — hide deck chrome, keep the thin progress bar */
+  body.presenting .brand,
+  body.presenting .hud,
+  body.presenting .dots,
+  body.presenting .hint{opacity:0;pointer-events:none}
+  body.presenting .present-btn{opacity:.12}
+  body.presenting .present-btn:hover{opacity:1}
+
+  /* ---------- execution flow ---------- */
+  .flowlbl{font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.16em;
+    text-transform:uppercase;color:var(--dim);margin:30px 0 15px;display:flex;align-items:center;gap:12px}
+  .flowlbl::before{content:"";width:22px;height:1px;background:var(--dimmer)}
+  .flowlbl code{color:var(--green)}
+  .flow{display:flex;align-items:center;gap:11px;flex-wrap:wrap}
+  .flow .node{border:1px solid var(--line);background:var(--bg-2);border-radius:10px;
+    padding:13px 18px;font-size:15px;color:var(--ink);white-space:nowrap;font-weight:400}
+  .flow .node em{font-family:"JetBrains Mono",monospace;color:var(--green);font-style:normal;font-weight:700}
+  .flow .node.hot{border-color:rgba(118,185,0,.55);color:var(--green);
+    box-shadow:inset 0 0 0 1px rgba(118,185,0,.16),0 16px 40px -28px rgba(118,185,0,.6)}
+  .flow .node.ghost{border-style:dashed;border-color:rgba(118,185,0,.5);
+    background:transparent;color:var(--green);font-family:"JetBrains Mono",monospace;font-size:13px}
+  .flow .ar{color:var(--green);font-family:"JetBrains Mono",monospace;font-size:18px}
+  .loopcap{color:var(--dim);font-size:13.5px;line-height:1.5;margin-top:13px;max-width:80ch}
+  .loopcap code{color:var(--green);font-family:"JetBrains Mono",monospace;font-size:.92em}
+
+  /* ---------- context-window diagram ---------- */
+  .ctxwin{margin-top:34px}
+  .winhead{display:flex;justify-content:space-between;align-items:center;
+    font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.18em;
+    text-transform:uppercase;color:var(--dim);margin-bottom:12px}
+  .winhead .flow{color:var(--green)}
+  .zones,.brackets{display:grid;grid-template-columns:.85fr 1.5fr .9fr;gap:10px}
+  .zone{border:1px solid var(--line);border-radius:12px;padding:22px 22px 20px;
+    position:relative;overflow:hidden;background:var(--bg-2);min-height:178px}
+  .zone .ztag{font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.16em;
+    text-transform:uppercase;color:var(--green);margin-bottom:14px}
+  .zone .zname{font-family:"Bricolage Grotesque",sans-serif;font-weight:600;font-size:21px;
+    line-height:1.05;margin-bottom:9px}
+  .zone .zsub{color:var(--dim);font-size:13.5px;line-height:1.5;margin-bottom:16px}
+  .zone code{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--green-soft);
+    background:rgba(118,185,0,.08);border:1px solid rgba(118,185,0,.18);
+    border-radius:6px;padding:4px 9px;display:inline-block}
+  .zone::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px}
+  .z-static::before{background:var(--green);opacity:.35}
+  .z-events::before{background:var(--green);opacity:.6}
+  .z-dynamic{border-color:rgba(118,185,0,.55);
+    box-shadow:inset 0 0 0 1px rgba(118,185,0,.16), 0 22px 50px -30px rgba(118,185,0,.55)}
+  .z-dynamic::before{background:var(--green);box-shadow:0 0 14px var(--green)}
+  .z-dynamic .zname{color:var(--green)}
+  .brackets{margin-top:12px}
+  .bk{font-family:"JetBrains Mono",monospace;font-size:11.5px;letter-spacing:.04em;
+    color:var(--dim);text-align:center;padding-top:13px;position:relative}
+  .bk::before{content:"";position:absolute;top:0;left:8px;right:8px;height:9px;
+    border:1px solid var(--line);border-bottom:none;border-radius:7px 7px 0 0}
+  .bk-cache{grid-column:1 / 3}
+  .bk-cache b{color:var(--green)}
+  .bk-live{color:var(--green)}
+  .bk-live::before{border-color:rgba(118,185,0,.5)}
+  @media(max-width:900px){.zones,.brackets{grid-template-columns:1fr}.brackets{display:none}.zone{min-height:0}}
+
+  /* ---------- turn-by-turn animation ---------- */
+  .turnbar{display:flex;align-items:center;gap:13px;margin-top:32px;
+    font-family:"JetBrains Mono",monospace;font-size:13px;color:var(--green)}
+  .turnbar .step{min-width:128px}
+  .turnbar .tcount{color:var(--dim);margin-left:auto}
+  .turnbar .tcount b{color:var(--ink)}
+  .llm-dot{width:10px;height:10px;border-radius:50%;background:var(--line);transition:.3s;flex:0 0 auto}
+  .llm-dot.on{background:var(--green);box-shadow:0 0 14px var(--green)}
+  .ctxstack{border:1px solid var(--line);border-radius:14px;overflow:hidden;
+    font-family:"JetBrains Mono",monospace;font-size:12.5px;
+    background:linear-gradient(180deg,var(--panel),#0b0c0d);
+    box-shadow:0 24px 60px -30px rgba(0,0,0,.9)}
+  .ctxstack .seg{padding:14px 17px;border-bottom:1px solid var(--line)}
+  .ctxstack .seg:last-child{border-bottom:none}
+  .seg-h{display:flex;justify-content:space-between;align-items:center;
+    font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim);margin-bottom:9px}
+  .seg-static .seg-h,.seg-dyn .seg-h{color:var(--green)}
+  .badge{font-size:9px;border:1px solid var(--line);border-radius:100px;padding:2px 9px;color:var(--dim);letter-spacing:.08em}
+  .badge.cache{color:var(--green);border-color:rgba(118,185,0,.4)}
+  .ctxstack .row{color:var(--dim);padding:3px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ctxstack .row .tag{color:#8fb3d9}
+  .events-body{display:flex;flex-direction:column;gap:2px;min-height:128px;max-height:152px;overflow:hidden;justify-content:flex-end}
+  .ev{animation:evin .45s cubic-bezier(.2,.7,.2,1) both}
+  @keyframes evin{from{opacity:0;transform:translateY(-7px)}to{opacity:1;transform:none}}
+  .events-body .row.code{color:var(--dim)}
+  .events-body .row.out{color:var(--ink)}
+  .events-body .row.out .tag{color:var(--green)}
+  .events-body .val{color:var(--green-soft)}
+  .seg-dyn{background:rgba(118,185,0,.045)}
+  .seg-dyn .row .val{color:var(--green-soft)}
+  .seg-dyn.flash{animation:dynflash .7s}
+  @keyframes dynflash{0%{background:rgba(118,185,0,.24)}100%{background:rgba(118,185,0,.045)}}
+
+  /* ---------- innovations list ---------- */
+  .innov{margin-top:28px;display:flex;flex-direction:column}
+  .innov .ln{display:grid;grid-template-columns:52px 1fr;gap:22px;align-items:start;
+    padding:15px 4px;border-top:1px solid var(--line);transition:border-color .3s}
+  .innov .ln:last-child{border-bottom:1px solid var(--line)}
+  .innov .ln:hover{border-top-color:rgba(118,185,0,.5)}
+  .innov .ix{font-family:"JetBrains Mono",monospace;color:var(--green);font-size:15px;padding-top:3px}
+  .innov .ti{font-family:"Bricolage Grotesque",sans-serif;font-weight:600;font-size:clamp(17px,1.55vw,21px);line-height:1.05}
+  .innov .ti code{font-family:"JetBrains Mono",monospace;color:var(--green);font-size:.78em;font-weight:500}
+  .innov .de{color:var(--dim);font-size:14px;line-height:1.5;margin-top:5px;max-width:64ch}
+  .innov .de .em{color:var(--ink)}
+
+  /* ---------- compare strip (vs) ---------- */
+  .vs{margin-top:26px;display:flex;flex-direction:column;gap:11px}
+  .vs .opt{border:1px solid var(--line);border-radius:10px;padding:15px 18px 15px 128px;
+    position:relative;font-size:14.5px;color:var(--dim);line-height:1.5}
+  .vs .opt .lab{position:absolute;left:18px;top:15px;font-family:"JetBrains Mono",monospace;
+    font-size:10.5px;letter-spacing:.12em;text-transform:uppercase}
+  .vs .bad{border-style:dashed}
+  .vs .bad .lab{color:var(--dimmer)}
+  .vs .good{border-color:rgba(118,185,0,.45);background:rgba(118,185,0,.04)}
+  .vs .good .lab{color:var(--green)}
+  .vs .opt .em{color:var(--ink);font-weight:500}
+
+  /* ---------- backup / TUI ---------- */
+  .divider .wrap{text-align:left;position:relative;z-index:1}
+  .divider .eyebrow{font-family:"JetBrains Mono",monospace;font-size:12px;letter-spacing:.3em;
+    text-transform:uppercase;color:var(--green);margin-bottom:24px}
+  .divider .secnum{position:absolute;top:50%;right:6vw;transform:translateY(-50%);
+    font-family:"Bricolage Grotesque",sans-serif;font-weight:700;line-height:.8;
+    font-size:clamp(160px,30vw,460px);color:rgba(118,185,0,.07);z-index:0;pointer-events:none;user-select:none}
+  /* love / hate two-column for the lessons section */
+  .duo{display:grid;grid-template-columns:1fr 1fr;gap:clamp(24px,4vw,56px);margin-top:30px}
+  @media(max-width:900px){.duo{grid-template-columns:1fr;gap:24px}}
+  .duo h3{font-family:"JetBrains Mono",monospace;font-size:12px;letter-spacing:.14em;
+    text-transform:uppercase;margin-bottom:16px}
+  .duo .love h3{color:var(--green)}
+  .duo .hate h3{color:var(--dim)}
+  .pipe{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:34px}
+  .producers{display:flex;flex-direction:column;gap:9px}
+  .chip{border:1px solid var(--line);background:var(--bg-2);border-radius:9px;padding:9px 15px;
+    font-size:13.5px;white-space:nowrap}
+  .chip b{color:var(--green);font-weight:500}
+  .qbox{border:1px dashed rgba(118,185,0,.5);border-radius:11px;padding:13px 17px;color:var(--green);
+    font-family:"JetBrains Mono",monospace;font-size:13px;text-align:center;line-height:1.5}
+  .qbox small{display:block;color:var(--dim);font-size:11px;margin-top:3px}
+  /* generated appendix feature slides */
+  .feat h2{font-size:clamp(25px,3.4vw,44px)}
+  .feat .lede{font-size:clamp(14.5px,1.4vw,18px);margin-top:18px}
+  .feat .code{font-size:clamp(11px,1.02vw,14px);align-self:stretch}
+  .feat .clean{margin-top:18px;gap:9px}
+  .feat .clean li{font-size:clamp(13.5px,1.2vw,16px);padding-left:26px}
+  .feat .clean li::before{top:.5em;width:7px;height:7px}
+  .grid6{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:34px}
+  .grid6 .idea{display:flex;flex-direction:column;gap:6px;padding:20px 22px;border-radius:14px;
+    background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.07)}
+  .grid6 .idea .n{font-family:var(--mono,monospace);font-size:13px;letter-spacing:.04em;color:var(--accent,#76b900);opacity:.9}
+  .grid6 .idea b{font-size:clamp(16px,1.5vw,21px);letter-spacing:-.01em}
+  .grid6 .idea span:last-child{font-size:clamp(12.5px,1.15vw,15px);line-height:1.45;color:#aeb4be}
+  .grid6 .idea code{font-family:var(--mono,monospace);font-size:.92em;color:#cdd3dc}
+  .feat.nocode .wrap{max-width:880px}
+
+
+  /* follow-on deck additions */
+  .mini-link{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--dim);margin-top:22px}
+  .mini-link a{color:var(--green);text-decoration:none;border-bottom:1px solid rgba(118,185,0,.35)}
+  .triad{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:30px}
+  .triad .card{min-height:150px}
+  .stacklist{display:flex;flex-direction:column;gap:12px;margin-top:28px}
+  .stackitem{display:grid;grid-template-columns:190px 1fr;gap:20px;align-items:start;border:1px solid var(--line);border-radius:12px;padding:15px 18px;background:rgba(255,255,255,.025)}
+  .stackitem b{font-family:"JetBrains Mono",monospace;color:var(--green);font-size:13px;font-weight:500}
+  .stackitem span{color:var(--dim);font-size:15px;line-height:1.45}
+  .casegrid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:30px}
+  .casegrid .card{min-height:250px}
+  .formula{font-family:"Bricolage Grotesque",sans-serif;font-size:clamp(32px,4.4vw,58px);line-height:1.05;letter-spacing:-.02em;margin-top:34px}
+  .formula code{font-family:"JetBrains Mono",monospace;color:var(--green);font-size:.72em}
+  .plus{color:var(--green);padding:0 .18em}
+  .arrowbig{color:var(--green);padding:0 .25em}
+  .smallnote{color:var(--dim);font-size:13.5px;line-height:1.45;margin-top:16px;max-width:76ch}
+  .srgrid{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:28px;align-items:stretch}
+  .srgrid .code{font-size:clamp(10.5px,.98vw,13.5px)}
+  .srgrid.compact{grid-template-columns:1.08fr .92fr;gap:18px;margin-top:20px}
+  .srgrid.compact .code{font-size:clamp(10px,.86vw,12px);padding:18px 22px;line-height:1.55}
+  .srgrid.compact .renderbox{font-size:11.8px;line-height:1.5;padding:17px 20px}
+  .renderbox{background:linear-gradient(180deg,var(--panel),#0b0c0d);border:1px solid rgba(118,185,0,.38);border-radius:12px;padding:20px 22px;font-family:"JetBrains Mono",monospace;font-size:12.5px;line-height:1.6;color:var(--dim);box-shadow:0 24px 60px -30px rgba(0,0,0,.9)}
+  .renderbox h3{font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--green);margin-bottom:12px;font-weight:500}
+  .renderbox .line{border-top:1px solid var(--line);padding-top:8px;margin-top:8px}
+  .renderbox .tag{color:#8fb3d9;border:none;padding:0;font-size:12px;letter-spacing:0;text-transform:none}
+  .renderbox .val{color:var(--green-soft)}
+  .srlabel{font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--green);margin-bottom:10px}
+  @media(max-width:900px){.triad,.casegrid{grid-template-columns:1fr}.stackitem{grid-template-columns:1fr}}
+
+  @media(max-width:900px){.dots{display:none}}
+</style>
+</head>
+<body>
+  <div class="grid-bg"></div>
+  <div class="glow a"></div><div class="glow b"></div>
+  <div class="noise"></div>
+
+  <div class="bar" id="bar"></div>
+
+  <div class="stage" id="stage">
+  <main class="deck" id="deck">
+
+    <!-- 1 — TITLE -->
+    <section class="slide">
+      <div class="wrap">
+        <div class="title-meta" data-r="1">
+          <span class="nv-mark"><span class="nv-eye"></span> NVIDIA · NeMo</span>
+        </div>
+        <h1 data-r="2">NeMo OO as a<br><span class="accent">self-evolving harness</span></h1>
+        <p class="lede" data-r="3">How named queues, skills, context blocks, and ordinary Python turn an agent into a harness that can react, debug, extend itself, and keep working.</p>
+        <div class="title-foot" data-r="4">
+          <span>Reusable harness patterns</span>
+          <span>GitLab Pages · <b>self-evolving-harness</b></span>
+        </div>
+      </div>
+    </section>
+
+
+    <!-- 1b — AUDIENCE FRAME -->
+    <section class="slide">
+      <div class="wrap split">
+        <div>
+          <div class="kicker" data-r="1"><span class="num">00</span> Audience frame</div>
+          <h2 data-r="2">Building an<br><span class="accent">agent harness</span>.</h2>
+          <p class="lede" data-r="3">The hard part is not one more tool call. It is the harness around the model: intake, background work, long-lived state, extension points, context assembly, and a path for the agent to improve its own tools.</p>
+          <ul class="clean" data-r="4">
+            <li><span class="em">React to software systems:</span> tests, CI, review, issue trackers, logs, peers.</li>
+            <li><span class="em">Keep state outside the prompt:</span> queues, handles, snapshots, typed objects — then render only the useful projection.</li>
+            <li><span class="em">Let capabilities become code:</span> plugins the agent can read, edit, test, reload, and expose as context.</li>
+            <li><span class="em">Interleave agentic loops and orchestration:</span> let Python own the outer control flow while generation methods handle judgment, synthesis, and code acting.</li>
+          </ul>
+        </div>
+        <div class="code" data-r="5"><pre><span class="kw">class</span> <span class="ty">HarnessAgent</span>(<span class="ty">Agent</span>):
+    shell: <span class="ty">ShellTools</span>
+    repo: <span class="ty">RepoTools</span>
+    todo: <span class="ty">TodoManager</span>
+    queue_manager: <span class="ty">QueueManager</span>
+    skills: <span class="ty">SkillRegistry</span>
+    context: <span class="ty">ContextApi</span>
+
+    <span class="kw">async def</span> <span class="fn">handle</span>(self, notification):
+        <span class="doc">"""Turn events into useful work."""</span>
+        <span class="el">...</span></pre></div>
+      </div>
+    </section>
+
+    <!-- 2 — SIX IDEAS REFRESH -->
+    <section class="slide">
+      <div class="wrap">
+        <div class="kicker" data-r="1"><span class="num">01</span> Refresh</div>
+        <h2 data-r="2">What are<br><span class="accent">NeMo OO Agents</span>?</h2>
+        <p class="lede" data-r="3" style="max-width:82ch">NeMo OO Agents is a Python harness where an agent is an object, generation methods are methods, tools are attributes, events become rendered context, and skills are editable libraries. The model sees source-shaped APIs and rendered runtime state in the same prompt.</p>
+        <div class="grid6" data-r="4">
+          <div class="idea"><span class="n">01</span><b>Typed methods</b><span>Signatures and Pydantic models are the task contract: typed inputs, typed outputs, validation, and docs.</span></div>
+          <div class="idea"><span class="n">02</span><b>Pass by reference</b><span>Arguments are live Python values — dataframes, meshes, handles — not stringified prompt blobs.</span></div>
+          <div class="idea"><span class="n">03</span><b>Code as action</b><span>CodeAct emits Python; the REPL executes it; outputs become events the next turn can reason over.</span></div>
+          <div class="idea"><span class="n">04</span><b>Loop engineering</b><span>Plain Python orchestration composes with generation methods: <code>for</code>, <code>if</code>, <code>asyncio.gather</code>.</span></div>
+          <div class="idea"><span class="n">05</span><b>Object state</b><span>Long-lived state lives on <code>self</code>, managers, handles, snapshots — not only in the context window.</span></div>
+          <div class="idea"><span class="n">06</span><b>Context blocks</b><span>Static, events, and dynamic blocks rebuild the model's world every turn with cache-friendly ordering.</span></div>
+        </div>
+        <div class="mini-link" data-r="5">Overview deck: <a href="./index.html">public/index.html</a></div>
+      </div>
+    </section>
+
+    <!-- 3 — CONTEXT ANIMATION REUSE -->
+    <section class="slide" data-anim="turn">
+      <div class="wrap split">
+        <div>
+          <div class="kicker" data-r="1"><span class="num">02</span> Context rebuild</div>
+          <h2 data-r="2">Context is<br><span class="accent">rebuilt</span> every turn.</h2>
+          <p class="lede" data-r="3">Static context is the cacheable API and rules. Events are the append-only trace of what happened. Dynamic context is live Python state rendered just in time. This is why background jobs, slash commands, and state changes all become actionable without a new protocol.</p>
+          <div class="turnbar" data-r="4">
+            <span class="llm-dot"></span>
+            <span class="step" id="turnStep">render context</span>
+            <span class="tcount">turn <b id="turnNo">1</b></span>
+          </div>
+        </div>
+        <div class="ctxstack" data-r="3">
+          <div class="seg seg-static">
+            <div class="seg-h"><span>system · static</span><span class="badge cache">cached ✓</span></div>
+            <div class="row"><span class="tag">&lt;self&gt;</span> doc(self): queues, skills, tools</div>
+          </div>
+          <div class="seg seg-events">
+            <div class="seg-h"><span>events · append-only</span><span class="badge" id="evCount">0 shown</span></div>
+            <div class="events-body" id="evBody"></div>
+          </div>
+          <div class="seg seg-dyn">
+            <div class="seg-h"><span>&lt;context&gt; · dynamic</span><span class="badge">re-rendered</span></div>
+            <div class="row"><span class="tag">&lt;queues expr="self.queue_manager.status()"&gt;</span> <span class="val" id="dynStep">1/7</span></div>
+            <div class="row"><span class="tag">&lt;skills expr="self.skills.status()"&gt;</span> <span class="val" id="dynTok">7,100</span> tokens left</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+
+    <!-- 3c — EVENTS ARE RENDERED CONTEXT -->
+    <!-- §2 — BUILDING DIVIDER -->
+    <section class="slide divider">
+      <div class="secnum">2</div>
+      <div class="wrap">
+        <div class="eyebrow" data-r="1">Building</div>
+        <h1 data-r="2">How we built a<br><span class="accent">self-evolving agent with nemo-oo</span></h1>
+        <p class="lede" data-r="3">The core is a small async main loop. The power comes from what can plug into it.</p>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div class="wrap">
+        <div>
+          <div class="kicker" data-r="1"><span class="num">03</span> Main loop</div>
+          <h2 data-r="2">Everything arrives as a<br><span class="accent">named queue</span>.</h2>
+          <p class="lede" data-r="3" style="max-width:82ch"><code>handle(notification)</code> is the async intake point. The important move is source-to-context symmetry: the source reads a Python dict; the rendered turn shows which producer woke the agent.</p>
+          <div class="srgrid compact" data-r="4">
+            <div>
+              <div class="srlabel">source</div>
+              <div class="code"><pre><span class="kw">async def</span> <span class="fn">handle</span>(self, notification):
+    msgs = notification.get(<span class="doc">"user_messages"</span>, [])
+    mr   = notification.get(<span class="doc">"mr-318"</span>, [])
+    mesh = notification.get(<span class="doc">"mesh"</span>, [])
+
+    <span class="kw">if</span> mr:
+        <span class="kw">await</span> self.fix_ci_failure(mr[-1])
+        <span class="kw">return</span> <span class="ty">RespondResult</span>(kind=<span class="doc">"WAIT"</span>)
+
+    <span class="kw">if</span> mesh:
+        <span class="kw">await</span> self.reply_to_peer(mesh[-1])
+        <span class="kw">return</span> <span class="ty">RespondResult</span>(kind=<span class="doc">"WAIT"</span>)</pre></div>
+            </div>
+            <div>
+              <div class="srlabel">rendered input</div>
+              <div class="renderbox"><h3>dispatcher turn anatomy</h3>
+notification = {<br>
+&nbsp;&nbsp;<span class="val">"mr-318"</span>: [<br>
+&nbsp;&nbsp;&nbsp;&nbsp;"❌ !318: job failed — test-core"<br>
+&nbsp;&nbsp;]<br>
+}<br><br>
+<span class="tag">&lt;queues&gt;</span><br>
+mr-318: 0 pending<br>
+mesh: 2 pending<br>
+⚡ monitor !318 → mr-318 (running)</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 6 — CHANNELS AND BACKGROUND JOBS -->
+    <section class="slide">
+      <div class="wrap split">
+        <div>
+          <div class="kicker" data-r="1"><span class="num">04</span> Async behavior</div>
+          <h2 data-r="2">Async without a<br><span class="accent">special agent DSL</span>.</h2>
+          <p class="lede" data-r="3">A queue-mode channel buffers values and can be drained by the dispatcher or by agent code mid-turn. An event-mode channel writes into the event log and wakes the dispatcher. <code>spawn()</code> runs coroutines or async generators in the background and routes outputs to a channel.</p>
+          <ul class="clean" data-r="4">
+            <li><span class="em">Backpressure point:</span> every item has a name and a consumer.</li>
+            <li><span class="em">Visibility:</span> queue status is a dynamic context block.</li>
+            <li><span class="em">Control:</span> handles expose state, buffered values, and cancellation.</li>
+          </ul>
+        </div>
+        <div class="code" data-r="5"><pre>ch = self.queue_manager.queue(<span class="doc">"ci"</span>)
+
+h = self.queue_manager.spawn(
+    self.producers.monitor(<span class="doc">"make test"</span>),
+    channel=<span class="doc">"ci"</span>,
+    buffer=<span class="mut">100</span>,
+    label=<span class="doc">"pytest monitor"</span>,
+)
+
+<span class="c"># later: dispatcher wakes with</span>
+notification == {<span class="doc">"ci"</span>: [line]}
+
+<span class="c"># prompt also sees</span>
+<span class="doc">&lt;queues expr="self.queue_manager.status()"&gt;</span></pre></div>
+      </div>
+    </section>
+
+    <!-- 7 — MID-DISTRIBUTION PYTHON -->
+    <section class="slide">
+      <div class="wrap">
+        <div class="kicker" data-r="1"><span class="num">05</span> API shape</div>
+        <h2 data-r="2">The API is deliberately<br><span class="accent">mid-distribution Python</span>.</h2>
+        <p class="lede" data-r="3" style="max-width:78ch">The model should not have to learn your bespoke graph runtime, YAML orchestration language, or new effect system. It already knows objects, methods, docstrings, async, queues, files, tests, and context managers.</p>
+        <div class="vs" data-r="4">
+          <div class="opt bad"><span class="lab">less fluent</span> invent a new planning DSL, then teach the model the semantics and all the edge cases.</div>
+          <div class="opt good"><span class="lab">nemo-oo</span> expose a Python object with real managers: <span class="em">self.todo</span>, <span class="em">self.shell</span>, <span class="em">self.queue_manager</span>, <span class="em">self.context</span>, <span class="em">self.skills</span>.</div>
+          <div class="opt good"><span class="lab">payoff</span> framework extensions are just Python too — a skill can add queues, context blocks, slash commands, types, subagents, and lifecycle hooks.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- §3 — SKILLS DIVIDER -->
+    <section class="slide divider">
+      <div class="secnum">3</div>
+      <div class="wrap">
+        <div class="eyebrow" data-r="1">Skills</div>
+        <h1 data-r="2">Plugins the agent<br><span class="accent">can edit</span>.</h1>
+        <p class="lede" data-r="3">A skill is not a prompt snippet. It is a Python library with lifecycle, dependencies, commands, context, tests, and source the agent can edit.</p>
+      </div>
+    </section>
+
+    <!-- 9 — SKILL LIFECYCLE -->
+    <section class="slide">
+      <div class="wrap split">
+        <div>
+          <div class="kicker" data-r="1"><span class="num">06</span> Skill registry</div>
+          <h2 data-r="2">Discover, load,<br><span class="accent">activate</span>.</h2>
+          <p class="lede" data-r="3">The registry separates “available on disk” from “attached to the object” from “visible to the model.” That means tools can exist, be hidden, become visible, and disappear without restarting the session.</p>
+          <div class="stacklist" data-r="4">
+            <div class="stackitem"><b>discover</b><span>Entry points, external skill dirs, local libs, text skills, Python skill files.</span></div>
+            <div class="stackitem"><b>load</b><span>Instantiate, attach as <code>self.&lt;name&gt;</code>, call <code>skill.attach(self)</code>, keep hidden by default.</span></div>
+            <div class="stackitem"><b>activate</b><span>Resolve <code>requires</code>, unhide from <code>doc(self)</code>, register dynamic context blocks, refresh slash commands.</span></div>
+          </div>
+        </div>
+        <div class="code" data-r="5"><pre><span class="kw">class</span> <span class="ty">SkillRegistry</span>(<span class="ty">Skill</span>):
+    <span class="doc">"""Manages skill discovery, loading,
+    and activation."""</span>
+
+    context_block = (
+        <span class="doc">"skills"</span>,
+        <span class="doc">"self.skills.status()"</span>,
+    )
+
+    <span class="kw">def</span> <span class="fn">activate</span>(self, patterns):
+        self.load(not_loaded)
+        self._resolve_deps(name)
+        self._unhide_skill(name)
+        self._register_context_block(name)
+        refresh_skill_commands()</pre></div>
+      </div>
+    </section>
+
+    <!-- 10 — SKILL ANATOMY -->
+    <section class="slide">
+      <div class="wrap">
+        <div class="kicker" data-r="1"><span class="num">07</span> Skill anatomy</div>
+        <h2 data-r="2">A plugin changes both<br><span class="accent">source</span> and <span class="accent">rendered context</span>.</h2>
+        <p class="lede" data-r="3" style="max-width:82ch">Skills are libraries: exported types, helpers, lifecycle hooks, context blocks, and slash commands. Activation changes what appears in <code>doc(self)</code>; execution changes what appears in events and dynamic context.</p>
+        <div class="srgrid" data-r="4">
+          <div>
+            <div class="srlabel">source</div>
+            <div class="code"><pre><span class="kw">class</span> <span class="ty">AgentMesh</span>(<span class="ty">Skill</span>):
+    DEFAULT_INBOX_CHANNEL = <span class="doc">"mesh"</span>
+
+    <span class="kw">def</span> <span class="fn">attach</span>(self, agent):
+        <span class="kw">super</span>().attach(agent)
+        em.on(<span class="doc">"TuiSessionResumed"</span>,
+              self._on_session_resumed)
+
+    <span class="mut">@</span><span class="fn">slash_command</span>(<span class="doc">"mesh-connect"</span>,
+        argument_hint=<span class="doc">"&lt;server&gt; [handle] [user]"</span>)
+    <span class="kw">async def</span> <span class="fn">mesh_connect_command</span>(self, args):
+        <span class="el">...</span></pre></div>
+          </div>
+          <div>
+            <div class="srlabel">rendered API/context</div>
+            <div class="renderbox"><h3>doc(self.agent_mesh)</h3>
+class AgentMesh:<br>
+&nbsp;&nbsp;async def connect(server=None, *, inbox_channel=None) -&gt; str<br>
+&nbsp;&nbsp;async def register(name, username, working_on="") -&gt; str<br>
+&nbsp;&nbsp;async def send(to, message, json_payload=None) -&gt; int<br>
+&nbsp;&nbsp;async def mesh_connect_command(args="") -&gt; str<br><br>
+<span class="tag">&lt;slash_commands&gt;</span><br>
+/mesh-connect &lt;server&gt; [handle] [user]<br>
+/mesh-list<br>
+/mesh-gen-ca<br>
+/mesh-gen-client</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- §4 — CASE STUDIES DIVIDER -->
+    <section class="slide divider">
+      <div class="secnum">4</div>
+      <div class="wrap">
+        <div class="eyebrow" data-r="1">Case studies</div>
+        <h1 data-r="2">Three Skills,<br><span class="accent">one harness pattern</span>.</h1>
+        <p class="lede" data-r="3">GitLab CI, Agent Mesh, and Session Search are agent-built Skills: ordinary Python libraries the agent developed for its own use, tested, hot-reloaded, and activated without restarting the harness.</p>
+      </div>
+    </section>
+
+    <!-- 11 — CASE STUDY MAP -->
+    <section class="slide">
+      <div class="wrap">
+        <div class="kicker" data-r="1"><span class="num">08</span> Case studies</div>
+        <h2 data-r="2">The same primitives<br><span class="accent">scale out</span>.</h2>
+        <div class="casegrid" data-r="3">
+          <div class="card">
+            <div class="big">CI</div>
+            <h3>GitLab monitor</h3>
+            <p>Turns merge requests into a live work queue: CI failures, human review comments, conflicts, and merge/close transitions arrive only when the agent needs to act.</p>
+          </div>
+          <div class="card">
+            <div class="big">mesh</div>
+            <h3>Agent mesh</h3>
+            <p>Turns other agents into named producers: a durable identity, channels, reconnect, inbox pump, and slash commands all hang off one Skill.</p>
+          </div>
+          <div class="card">
+            <div class="big">fts</div>
+            <h3>Session Search</h3>
+            <p>Turns past event logs into a searchable memory layer with typed event objects, FTS ranking, turn navigation, todo search, and repro export.</p>
+          </div>
+        </div>
+        <p class="smallnote" data-r="4">The punchline: these were developed by the agent for the agent. Because they are ordinary libraries, the agent can inspect, edit, test, hot-reload, and keep using them in the same running session.</p>
+      </div>
+    </section>
+
+    <!-- 12 — GITLAB GOAL -->
+    <section class="slide">
+      <div class="wrap split">
+        <div>
+          <div class="kicker" data-r="1"><span class="num">09</span> GitLab CI · goal</div>
+          <h2 data-r="2">Make CI and review<br><span class="accent">interrupt-driven</span>.</h2>
+          <p class="lede" data-r="3">The goal is not “call the GitLab API.” The goal is to babysit an MR until it is merged: surface failing jobs, reviewer comments, conflicts, new pipelines, recovery, and final merge/close — while staying quiet when nothing actionable happened.</p>
+          <ul class="clean" data-r="4">
+            <li><span class="em">The slash command does real work:</span> parses the MR, creates the queue, and starts the monitor.</li>
+            <li><span class="em">The agent does not set up plumbing:</span> it just reacts when the monitor returns to the queue.</li>
+            <li><span class="em">Notifications are semantic:</span> “job failed”, “reviewer commented”, “conflicts detected”.</li>
+          </ul>
+        </div>
+        <div class="code" data-r="5"><pre><span class="mut">@</span><span class="fn">slash_command</span>(<span class="doc">"monitor"</span>, argument_hint=<span class="doc">"&lt;mr&gt;"</span>)
+<span class="kw">def</span> <span class="fn">monitor</span>(self, mr_ref, *, auto_rebase=<span class="kw">True</span>):
+    channel_name = <span class="doc">f"mr-{iid}"</span>
+    qm.queue(channel_name, replace=<span class="kw">True</span>)
+    qm.spawn(
+        self.monitor_until_merged(project, iid),
+        channel=channel_name,
+        buffer=<span class="mut">50</span>,
+    )
+    <span class="c"># after this, the agent just waits/reacts</span>
+    <span class="kw">return</span> <span class="doc">"👀 Monitoring !{iid}"</span></pre></div>
+      </div>
+    </section>
+
+    <!-- 13 — GITLAB TYPES -->
+    <section class="slide">
+      <div class="wrap split wide-left">
+        <div>
+          <div class="kicker" data-r="1"><span class="num">10</span> GitLab CI · types</div>
+          <h2 data-r="2">The API returns<br><span class="accent">typed facts</span>, not scraped text.</h2>
+          <p class="lede" data-r="3">The skill wraps python-gitlab behind an async-first client and dataclasses. The model sees objects with named fields: MR state, pipeline ID, job status, thread notes, rebase result, issue metadata, milestone metadata.</p>
+          <div class="stacklist" data-r="4">
+            <div class="stackitem"><b>MRSummary</b><span><code>iid</code>, source/target branch, merge status, conflicts, pipeline status/id, URL.</span></div>
+            <div class="stackitem"><b>JobInfo</b><span><code>id</code>, <code>name</code>, <code>status</code>, <code>stage</code>, web URL — enough to route failures.</span></div>
+            <div class="stackitem"><b>UnresolvedThread</b><span>discussion ID, file/line, and typed <code>ThreadNote</code>s with author/body/bot flag.</span></div>
+          </div>
+        </div>
+        <div class="code" data-r="5"><pre><span class="mut">@</span><span class="ty">dataclass</span>
+<span class="kw">class</span> <span class="ty">MRSummary</span>:
+    iid: <span class="ty">int</span>
+    title: <span class="ty">str</span>
+    state: <span class="ty">str</span>
+    source_branch: <span class="ty">str</span>
+    target_branch: <span class="ty">str</span>
+    merge_status: <span class="ty">str</span>
+    has_conflicts: <span class="ty">bool</span>
+    pipeline_status: <span class="ty">str</span> | <span class="kw">None</span>
+    pipeline_id: <span class="ty">int</span> | <span class="kw">None</span>
+    web_url: <span class="ty">str</span></pre></div>
+      </div>
+    </section>
+
+    <!-- 14 — GITLAB HARNESS PRIMITIVES -->
+    <section class="slide">
+      <div class="wrap">
+        <div class="kicker" data-r="1"><span class="num">11</span> GitLab CI · harness use</div>
+        <h2 data-r="2">Queues make CI<br><span class="accent">reactive</span>.</h2>
+        <div class="triad" data-r="3">
+          <div class="card"><div class="big">queue</div><h3>MR channel</h3><p><code>qm.queue("mr-318", replace=True)</code> creates a named stream. The next dispatcher wake receives <code>{"mr-318": [item]}</code>.</p></div>
+          <div class="card"><div class="big">spawn</div><h3>Async generator</h3><p><code>monitor_until_merged()</code> sleeps, polls, and yields only actionable transitions. <code>buffer=50</code> keeps recent history.</p></div>
+          <div class="card"><div class="big">/</div><h3>User command</h3><p><code>/monitor !318</code> is validated by a real method. The returned string tells the agent what was started.</p></div>
+        </div>
+        <div class="flowlbl" data-r="4"><code>monitor_until_merged()</code> emits only when action is needed</div>
+        <div class="flow" data-r="5">
+          <div class="node">MR poll</div><div class="ar">→</div>
+          <div class="node hot">failed job</div><div class="ar">→</div>
+          <div class="node">queue item</div><div class="ar">→</div>
+          <div class="node hot">agent turn</div>
+          <div class="node ghost">running/success stays quiet</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 15 — AGENT MESH GOAL -->
+    <section class="slide">
+      <div class="wrap split">
+        <div>
+          <div class="kicker" data-r="1"><span class="num">12</span> Agent Mesh · goal</div>
+          <h2 data-r="2">Make agents<br><span class="accent">addressable peers</span>.</h2>
+          <p class="lede" data-r="3">Multi-agent systems need addressable peers: reviewer, fixer, release bot, benchmark bot. The mesh skill gives each one a durable handle, roster, direct messages, shared channels, and reconnection.</p>
+          <ul class="clean" data-r="4">
+            <li><span class="em">Identity:</span> stored handle + ownership token survive restarts.</li>
+            <li><span class="em">Topology:</span> send to one agent or to <code>#channels</code>.</li>
+            <li><span class="em">Reliability:</span> reconnect and re-subscribe are skill behavior, not prompt instructions.</li>
+          </ul>
+        </div>
+        <div class="code" data-r="5"><pre><span class="c"># one-time config, then normal Python</span>
+self.agent_mesh.set_server(<span class="doc">"mesh.internal:8765"</span>)
+
+<span class="kw">await</span> self.agent_mesh.connect()
+<span class="kw">await</span> self.agent_mesh.register(
+    <span class="doc">"alice"</span>, <span class="doc">"pfurgale"</span>, <span class="doc">"auth refactor"</span>
+)
+<span class="kw">await</span> self.agent_mesh.send(
+    <span class="doc">"#backend"</span>, <span class="doc">"deploying in 10"</span>,
+    json_payload={<span class="doc">"eta"</span>: <span class="mut">600</span>},
+)</pre></div>
+      </div>
+    </section>
+
+    <!-- 16 — AGENT MESH LIFECYCLE -->
+    <section class="slide">
+      <div class="wrap split wide-left">
+        <div>
+          <div class="kicker" data-r="1"><span class="num">13</span> Agent Mesh · lifecycle</div>
+          <h2 data-r="2">Lifecycle hooks carry<br><span class="accent">durable behavior</span>.</h2>
+          <p class="lede" data-r="3">On attach, the skill subscribes to session-resume and can auto-reconnect when stored credentials exist. On detach, it unsubscribes. This is the harness evolving: connection policy lives in code, not in every prompt.</p>
+          <div class="stacklist" data-r="4">
+            <div class="stackitem"><b>attach(agent)</b><span>Register <code>TuiSessionResumed</code>, store unsubscribe callback, trigger reconnect after hot reload/session restore.</span></div>
+            <div class="stackitem"><b>connect()</b><span>Resolve stored config, open client, create inbox channel, spawn inbox pump.</span></div>
+            <div class="stackitem"><b>detach()</b><span>Remove event subscription and let the Skill base detach from the agent.</span></div>
+          </div>
+        </div>
+        <div class="code" data-r="5"><pre><span class="kw">def</span> <span class="fn">attach</span>(self, agent):
+    <span class="kw">super</span>().attach(agent)
+    em = agent.event_manager
+    em.register_event_type(<span class="ty">TuiSessionResumed</span>)
+    self._unsub_resumed = em.on(
+        <span class="doc">"TuiSessionResumed"</span>,
+        self._on_session_resumed,
+    )
+
+    <span class="kw">if</span> self.stored_name() <span class="kw">and</span> self.stored_token():
+        self._on_session_resumed(<span class="kw">None</span>)</pre></div>
+      </div>
+    </section>
+
+    <!-- 17 — AGENT MESH QUEUES COMMANDS CONTEXT -->
+    <section class="slide">
+      <div class="wrap">
+        <div class="kicker" data-r="1"><span class="num">14</span> Agent Mesh · harness use</div>
+        <h2 data-r="2">Remote messages become<br><span class="accent">local queue items</span>.</h2>
+        <div class="triad" data-r="3">
+          <div class="card"><div class="big">mesh</div><h3>Inbox queue</h3><p><code>connect()</code> creates or uses the <code>mesh</code> channel. A background pump forwards every inbound message onto it.</p></div>
+          <div class="card"><div class="big">/</div><h3>Operator commands</h3><p><code>/mesh-connect</code>, <code>/mesh-list</code>, <code>/mesh-gen-ca</code>, and <code>/mesh-gen-client</code> are real async methods with argument handling.</p></div>
+          <div class="card"><div class="big">ctx</div><h3>Dynamic awareness</h3><p>The queue-status context tells the model when mesh is running or pending. Roster/list calls return typed dictionaries the agent can reason over.</p></div>
+        </div>
+        <div class="flowlbl" data-r="4">same dispatcher shape</div>
+        <div class="flow" data-r="5">
+          <div class="node">peer sends</div><div class="ar">→</div>
+          <div class="node">MeshClient.inbox()</div><div class="ar">→</div>
+          <div class="node hot">queue "mesh"</div><div class="ar">→</div>
+          <div class="node hot">notification["mesh"]</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 18 — SESSION SEARCH GOAL -->
+    <section class="slide">
+      <div class="wrap split">
+        <div>
+          <div class="kicker" data-r="1"><span class="num">15</span> Session Search · goal</div>
+          <h2 data-r="2">Make the harness<br><span class="accent">remember its own runs</span>.</h2>
+          <p class="lede" data-r="3">Session Search is the “framework is just Python” case study. It gives an agent memory over its own past traces: SQLite FTS over historical event logs and todos, returning structured objects it can navigate, cite, and export.</p>
+          <ul class="clean" data-r="4">
+            <li><span class="em">Find failures:</span> search <code>PythonOutput</code> errors across sessions.</li>
+            <li><span class="em">Recover context:</span> jump from one event to the whole turn or call ID.</li>
+            <li><span class="em">Package evidence:</span> export a repro slice from the event DB.</li>
+          </ul>
+        </div>
+        <div class="code" data-r="5"><pre>view = self.session_search.open(<span class="doc">"d2a3557e"</span>)
+
+hits = view.search_events(
+    <span class="doc">"KeyError"</span>,
+    event_types=[<span class="doc">"PythonOutput"</span>],
+    field=<span class="doc">"error"</span>,
+)
+
+turn = view.get_turn(<span class="mut">1264</span>)
+view.export_repro(
+    <span class="doc">"repro.json"</span>,
+    tag_range=(<span class="mut">1260</span>, <span class="mut">1265</span>),
+)</pre></div>
+      </div>
+    </section>
+
+    <!-- 19 — SESSION SEARCH TYPES -->
+    <section class="slide">
+      <div class="wrap split wide-left">
+        <div>
+          <div class="kicker" data-r="1"><span class="num">16</span> Session Search · types</div>
+          <h2 data-r="2">Search returns<br><span class="accent">rich objects</span>.</h2>
+          <p class="lede" data-r="3">The FTS index is an implementation detail. The agent receives dataclasses with typed accessors: content, stdout, stderr, error, function, arguments, call ID, snippets, rank, and session ID.</p>
+          <div class="stacklist" data-r="4">
+            <div class="stackitem"><b>Event</b><span>Typed accessors over a JSON event row; readable <code>repr</code> for context.</span></div>
+            <div class="stackitem"><b>TodoHit</b><span>Search result across saved todos, status, notes, and comments.</span></div>
+            <div class="stackitem"><b>SessionView</b><span>Single-session interface: metadata, FTS search, structured navigation, repro export.</span></div>
+          </div>
+        </div>
+        <div class="code" data-r="5"><pre><span class="mut">@</span><span class="ty">dataclass</span>
+<span class="kw">class</span> <span class="ty">Event</span>:
+    tag: <span class="ty">str</span>
+    event_type: <span class="ty">str</span>
+    event_id: <span class="ty">str</span>
+    status: <span class="ty">str</span>
+    data: <span class="ty">dict</span>
+    session_id: <span class="ty">str</span> = <span class="doc">""</span>
+    snippet: <span class="ty">str</span> = <span class="doc">""</span>
+    rank: <span class="ty">float</span> = <span class="mut">0.0</span>
+
+    <span class="kw">def</span> <span class="fn">summary</span>(self) -&gt; <span class="ty">str</span>: <span class="el">...</span></pre></div>
+      </div>
+    </section>
+
+    <!-- 20 — SESSION SEARCH HARNESS PRIMITIVES -->
+    <section class="slide">
+      <div class="wrap">
+        <div class="kicker" data-r="1"><span class="num">17</span> Session Search · harness use</div>
+        <h2 data-r="2">No queue required:<br><span class="accent">just Python</span> can extend the harness.</h2>
+        <div class="triad" data-r="3">
+          <div class="card"><div class="big">types</div><h3>Events as data</h3><p>Event JSON becomes typed objects and accessors, so the model can ask precise questions instead of grep strings.</p></div>
+          <div class="card"><div class="big">ctx</div><h3>Context on demand</h3><p>The skill does not need a permanent context block; retrieved events can be written into <code>self.context</code> for the current investigation.</p></div>
+          <div class="card"><div class="big">life</div><h3>Editable extension</h3><p>It is a normal Skill library: add slash commands, add a context block, or add indexing fields without framework changes.</p></div>
+        </div>
+        <div class="flowlbl" data-r="4">pure Python extension path</div>
+        <div class="flow" data-r="5">
+          <div class="node">session DB</div><div class="ar">→</div>
+          <div class="node">SQLite FTS5</div><div class="ar">→</div>
+          <div class="node hot">Event objects</div><div class="ar">→</div>
+          <div class="node hot">new agent capability</div>
+        </div>
+      </div>
+    </section>
+
+
+    <!-- 20b — CASE STUDIES AS RENDERED CONTEXT -->
+    <section class="slide">
+      <div class="wrap">
+        <div class="kicker" data-r="1"><span class="num">17a</span> Case studies · rendered context</div>
+        <h2 data-r="2">Each Skill turns source state<br>into <span class="accent">model-visible context</span>.</h2>
+        <p class="lede" data-r="3" style="max-width:82ch">This is the core harness pattern: keep the real state in Python objects, queues, handles, databases, and clients; render the actionable slice into the next turn.</p>
+        <div class="srgrid" data-r="4">
+          <div>
+            <div class="srlabel">source state</div>
+            <div class="code"><pre><span class="c"># GitLab CI</span>
+h = qm.spawn(monitor_until_merged(...),
+             channel=<span class="doc">"mr-318"</span>, buffer=<span class="mut">50</span>)
+
+<span class="c"># Agent Mesh</span>
+self._pump_job = qm.spawn(
+    self._pump_inbox(), channel=<span class="doc">"mesh"</span>
+)
+
+<span class="c"># Session Search</span>
+view = SessionView(db)
+hits = view.search_events(
+    <span class="doc">"KeyError"</span>, field=<span class="doc">"error"</span>)</pre></div>
+          </div>
+          <div>
+            <div class="srlabel">rendered to the model</div>
+            <div class="renderbox"><h3>next-turn projection</h3>
+<span class="tag">&lt;queues&gt;</span><br>
+mr-318: 1 pending<br>
+mesh: 2 pending<br>
+⚡ monitor !318 → mr-318 (running)<br><br>
+<span class="tag">&lt;sys tag="412"&gt;</span><br>
+QueueOutput(source="mesh", value_type="MeshMessage", value_preview="@reviewer: try rebase")<br><br>
+<span class="tag">&lt;session_search_hits&gt;</span><br>
+Event([1264] PythonOutput | error="KeyError: retry_policy")</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 21 — CASE STUDY SYNTHESIS -->
+    <section class="slide">
+      <div class="wrap">
+        <div class="kicker" data-r="1"><span class="num">18</span> Synthesis</div>
+        <h2 data-r="2">What makes these<br><span class="accent">powerful</span>?</h2>
+        <table class="cmp" data-r="3">
+          <tr><th>Primitive</th><th>GitLab CI</th><th>Agent Mesh</th><th>Session Search</th></tr>
+          <tr><td>types</td><td>MRs, jobs, threads, rebases</td><td>roster/messages/config identity</td><td>events, todos, session views</td></tr>
+          <tr><td>queues</td><td>one MR channel per monitor</td><td>inbox pump to <code>mesh</code></td><td>not needed; callable query API</td></tr>
+          <tr><td>commands</td><td><code>/monitor &lt;mr&gt;</code></td><td><code>/mesh-connect</code>, <code>/mesh-list</code>, cert ops</td><td>ready to add; already API-first</td></tr>
+          <tr><td>context</td><td>queue status shows active monitors</td><td>queue status + live roster calls</td><td>retrieved events become context</td></tr>
+          <tr><td>lifecycle</td><td>background generator until merged</td><td>attach/resume reconnect, detach cleanup</td><td>open/close DB views, reindex migrations</td></tr>
+          <tr><td>agent-built</td><td>written/tested as a Skill, then hot-reloaded</td><td>extended live with commands + reconnect hooks</td><td>added as searchable memory without restart</td></tr>
+        </table>
+        <p class="smallnote" data-r="4">No bespoke framework support or restart is required. The agent grows the harness from the inside: write the Skill, test it, reload it, activate it, then keep working with the new capability on <code>self</code>.</p>
+      </div>
+    </section>
+
+    <!-- 12 — SELF EVOLUTION LOOP -->
+    <section class="slide">
+      <div class="wrap split">
+        <div>
+          <div class="kicker" data-r="1"><span class="num">19</span> Self evolution</div>
+          <h2 data-r="2">The harness can<br><span class="accent">teach itself</span>.</h2>
+          <p class="lede" data-r="3">This is how the case-study Skills were built: the agent discovered missing capabilities, wrote or edited Skill libraries for itself, added tests, reloaded them, activated them, and kept working. The new behavior becomes part of <code>self</code>; the new status becomes part of context; the new commands become part of the UI — no system restart.</p>
+          <ul class="clean" data-r="4">
+            <li><span class="em">Reusable learning:</span> save patterns as a <code>Skill</code>, not another prompt note.</li>
+            <li><span class="em">Runtime upgrade:</span> hot reload avoids stopping the session.</li>
+            <li><span class="em">Prompt upgrade:</span> activation changes what the model can see and call.</li>
+          </ul>
+        </div>
+        <div class="code" data-r="5"><pre><span class="c"># discover a missing operation</span>
+await self.libs.create(<span class="doc">"trace_tools"</span>)
+
+<span class="c"># edit ordinary Python files</span>
+await self.shell.replace(match, new_text)
+
+<span class="c"># verify before believing</span>
+await self.shell.run(<span class="doc">"uv run pytest tests/trace_tools"</span>)
+
+<span class="c"># load into the running harness</span>
+self.libs.reload(<span class="doc">"trace_tools"</span>)
+self.skills.activate([<span class="doc">"local.trace_tools"</span>])</pre></div>
+      </div>
+    </section>
+
+
+    <!-- 12b — HARNESS TAKEAWAY -->
+    <section class="slide">
+      <div class="wrap split">
+        <div>
+          <div class="kicker" data-r="1"><span class="num">19a</span> Takeaway for agent harnesses</div>
+          <h2 data-r="2">Design the harness as<br><span class="accent">source + renderers</span>.</h2>
+          <p class="lede" data-r="3">Do not put everything in the prompt. Put durable facts in source-level abstractions the model already understands, then build narrow renderers that show the live state needed for the next action.</p>
+          <ul class="clean" data-r="4">
+            <li><span class="em">Source owns behavior:</span> queues, hooks, clients, DBs, retries, tests.</li>
+            <li><span class="em">Rendered context owns awareness:</span> active jobs, pending items, available APIs, recent failures.</li>
+            <li><span class="em">The agent can improve both:</span> edit the source, then validate the rendered context changed.</li>
+          </ul>
+        </div>
+        <div class="renderbox" data-r="5"><h3>the pattern</h3>
+Python source<br>
+&nbsp;&nbsp;↓ exposes<br>
+<code>doc(self)</code> APIs<br>
+&nbsp;&nbsp;↓ mutates<br>
+queues / events / snapshots / DBs<br>
+&nbsp;&nbsp;↓ rendered by<br>
+context blocks<br>
+&nbsp;&nbsp;↓ read by<br>
+the next model turn</div>
+      </div>
+    </section>
+
+    <!-- 13 — SUMMARY -->
+    <section class="slide">
+      <div class="wrap">
+        <div class="kicker" data-r="1"><span class="num">20</span> Summary</div>
+        <h2 data-r="2">Self-evolving harness<br><span class="accent">as an equation</span>.</h2>
+        <div class="formula" data-r="3">
+          <code>event queues</code><span class="plus">+</span><code>skills</code><span class="plus">+</span><code>context blocks</code><span class="arrowbig">→</span><br>an agent that can extend its own operating system
+        </div>
+        <div class="cards" data-r="4">
+          <div class="card"><div class="big">queues</div><h3>React to the world</h3><p>Every producer enters through the same named-channel contract.</p></div>
+          <div class="card"><div class="big">skills</div><h3>Grow capabilities</h3><p>Plugins are code, docs, commands, hooks, dependencies, and subagents.</p></div>
+          <div class="card"><div class="big">context</div><h3>Rebuild awareness</h3><p>Static API, event history, and live dynamic state become the next turn.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- QUESTIONS -->
+    <section class="slide divider">
+      <div class="wrap">
+        <div class="eyebrow" data-r="1">— Questions —</div>
+        <h1 data-r="2">Questions?</h1>
+      </div>
+    </section>
+</main>
+  </div>
+
+  <!-- chrome -->
+  <div class="brand"><b>//</b> nemo-oo-agents · self-evolving harness</div>
+  <div class="hud"><b id="cur">01</b> <span class="of">/</span> <span id="tot">13</span></div>
+  <nav class="dots" id="dots"></nav>
+  <button class="present-btn" id="presentBtn" title="Slideshow (F)" aria-label="Start slideshow">⛶</button>
+  <div class="hint" id="hint"><kbd>←</kbd> <kbd>→</kbd> &nbsp;navigate &nbsp;·&nbsp; <kbd>F</kbd> &nbsp;slideshow</div>
+
+<script>
+  // Pages deck intentionally stops at the Questions slide; backup/generated appendix slides are omitted.
+  const slides=[...document.querySelectorAll('.slide')];
+  const dotsWrap=document.getElementById('dots');
+  const bar=document.getElementById('bar');
+  const cur=document.getElementById('cur');
+  const hint=document.getElementById('hint');
+  let i=0;
+
+  slides.forEach((_,n)=>{
+    const b=document.createElement('button');
+    b.setAttribute('aria-label','Slide '+(n+1));
+    b.addEventListener('click',()=>go(n));
+    dotsWrap.appendChild(b);
+  });
+  const dots=[...dotsWrap.children];
+  document.getElementById('tot').textContent=String(slides.length).padStart(2,'0');
+
+  // auto-number kickers in document order; opt out / override with data-num
+  let kn=0;
+  document.querySelectorAll('.kicker .num').forEach(el=>{
+    el.textContent = el.dataset.num !== undefined && el.dataset.num !== ''
+      ? el.dataset.num : String(++kn).padStart(2,'0');
+  });
+
+  // ---- turn-by-turn animation ----
+  const anim=(()=>{
+    let timer=null,phase=0,turn=1;const T=1200;
+    // render context folds the previous result back in (re-render = next render)
+    const phases=['render context','call LLM','run code'];
+    const turns=[
+      {code:"notification.get('ci', [])", out:'value=<span class="val">[]</span>'},
+      {code:"self.queue_manager.spawn(job, channel='ci')", out:'value=<span class="val">JobHandle(running)</span>'},
+      {code:"self.skills.activate(['nvzurich.gitlab_ci'])", out:'stdout=<span class="val">skill visible ✓</span>'},
+      {code:"await self.user_messages.get()", out:'stdout=<span class="val">next request</span>'},
+      {code:"return_result(RespondResult(kind='WAIT'))", out:'value=<span class="val">dispatcher waits</span>'},
+    ];
+    const $=id=>document.getElementById(id);
+    function flashDyn(){const d=document.querySelector('.seg-dyn');if(!d)return;d.classList.remove('flash');void d.offsetWidth;d.classList.add('flash');}
+    function setDyn(){const q=['idle','ci: 1 pending','slash_commands: 1','mesh: 2','waiting'];$('dynStep').textContent=q[(turn-1)%q.length];$('dynTok').textContent=(8+turn)+' active';}
+    function paint(){$('turnStep').textContent=phases[phase];$('turnNo').textContent=turn;document.querySelector('.llm-dot').classList.toggle('on',phases[phase]==='call LLM');}
+    function addRow(html,cls){const body=$('evBody');const row=document.createElement('div');row.className='row ev '+cls;row.innerHTML=html;body.appendChild(row);while(body.children.length>4)body.removeChild(body.firstChild);$('evCount').textContent=body.children.length+' shown';}
+    function reset(){turn=1;phase=0;$('evBody').innerHTML='';$('evCount').textContent='0 shown';setDyn();flashDyn();paint();}
+    function tick(){
+      phase=(phase+1)%phases.length;
+      const t=turns[(turn-1)%turns.length];
+      if(phases[phase]==='render context'){            // also the re-render of last turn
+        turn++;
+        if(turn>turns.length){clearInterval(timer);timer=null;setTimeout(()=>{reset();timer=setInterval(tick,T);},1600);return;}
+        setDyn();flashDyn();                            // dynamic tail recomputes — flashes once
+      } else if(phases[phase]==='call LLM'){
+        addRow('<span class="tag">&lt;agent&gt;</span> '+t.code,'code');
+      } else if(phases[phase]==='run code'){
+        addRow('<span class="tag">&lt;sys&gt;</span> PythonOutput('+t.out+')','out');
+      }
+      paint();
+    }
+    return {start(){this.stop();reset();timer=setInterval(tick,T);},stop(){if(timer){clearInterval(timer);timer=null;}}};
+  })();
+
+  const deckEl=document.getElementById('deck');
+  function fit(){
+    const s=Math.min(innerWidth/1280, innerHeight/720);
+    deckEl.style.setProperty('--scale', s);
+  }
+  addEventListener('resize', fit);
+  fit();
+
+  function render(){
+    slides.forEach((s,n)=>s.classList.toggle('active',n===i));
+    dots.forEach((d,n)=>d.classList.toggle('on',n===i));
+    bar.style.width=((i+1)/slides.length*100)+'%';
+    cur.textContent=String(i+1).padStart(2,'0');
+    location.hash=i+1;
+    if(slides[i].dataset.anim==='turn') anim.start(); else anim.stop();
+  }
+  function go(n){ i=Math.max(0,Math.min(slides.length-1,n)); render(); }
+  function next(){ if(i<slides.length-1) go(i+1); }
+  function prev(){ if(i>0) go(i-1); }
+
+  // ---- slideshow / fullscreen presentation mode ----
+  const presentBtn=document.getElementById('presentBtn');
+  const fsEl=document.documentElement;
+  function isFs(){return !!(document.fullscreenElement||document.webkitFullscreenElement);}
+  function togglePresent(){
+    if(isFs()){ (document.exitFullscreen||document.webkitExitFullscreen).call(document); }
+    else { (fsEl.requestFullscreen||fsEl.webkitRequestFullscreen).call(fsEl); }
+  }
+  function syncPresent(){
+    const on=isFs();
+    document.body.classList.toggle('presenting',on);
+    presentBtn.textContent=on?'✕':'⛶';
+    presentBtn.setAttribute('aria-label',on?'Exit slideshow':'Start slideshow');
+  }
+  presentBtn.addEventListener('click',e=>{e.stopPropagation();togglePresent();});
+  document.addEventListener('fullscreenchange',syncPresent);
+  document.addEventListener('webkitfullscreenchange',syncPresent);
+
+  addEventListener('keydown',e=>{
+    if(['ArrowRight','ArrowDown','PageDown',' '].includes(e.key)){e.preventDefault();next();}
+    else if(['ArrowLeft','ArrowUp','PageUp'].includes(e.key)){e.preventDefault();prev();}
+    else if(e.key==='Home'){go(0);} else if(e.key==='End'){go(slides.length-1);}
+    else if(e.key==='f'||e.key==='F'){e.preventDefault();togglePresent();}
+    if(e.key!=='Tab') hint.classList.add('gone');
+  });
+  // click navigation (ignore links/buttons)
+  addEventListener('click',e=>{
+    if(e.target.closest('.dots,a,button,.code')) return;
+    (e.clientX < innerWidth*0.32 ? prev : next)();
+    hint.classList.add('gone');
+  });
+  setTimeout(()=>hint.classList.add('gone'),5200);
+
+  const start=parseInt(location.hash.replace('#',''),10);
+  if(start>=1&&start<=slides.length) i=start-1;
+  render();
+</script>
+</body>
+</html>

@@ -1,0 +1,204 @@
+# Phase 2: Code-Path Tests — Capability Tests
+#
+# Tests: sentiment_batch, calculate_batch, json_extract,
+#   repl_exploration, needle_in_haystack, large_data_find, large_data_extract, large_data_count
+#
+# Run:
+#   nooa eval --config tests/capability/config_phase2.yaml --runs 3
+#
+# Single model:
+#   nooa eval --config tests/capability/config_phase2.yaml --models claude-haiku-azure
+#
+# Debug single test:
+#   nooa eval --config tests/capability/config_phase2.yaml --test sentiment_batch --limit 1
+
+name: capability-phase2
+no_cache: true
+description: "Phase 2 code-path tests — batch, JSON, REPL, needle, large-data truncation"
+
+# =============================================================================
+# MODELS — resolved from the unifiedllm registry.
+# NVIDIA aliases ship in the nemo-oo-agents-nvidia package — install it (or the [nvidia] extra). No env var needed.
+# =============================================================================
+
+agent_models:
+  - nemotron3-nano-30b
+  - gpt-5.2
+  - claude-haiku-azure
+
+output_dir: results/phase2
+pass_threshold: 0.8
+
+# =============================================================================
+# TEST SUITE — Phase 2: code-path, REPL, needle, large-data
+# =============================================================================
+
+test_suite:
+  - name: sentiment_batch
+    description: "Batch sentiment classification - should write code loop"
+    tier: frontier
+    agent:
+      module: tests.capability.agents.sentiment_batch
+      class: SentimentBatchAgent
+    method: classify
+    data_file: tests/capability/data/sentiment_batch.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+  - name: calculate_batch
+    description: "Batch natural language calculations - should write code loop"
+    tier: frontier
+    agent:
+      module: tests.capability.agents.calculate_batch
+      class: CalculateBatchAgent
+    method: calculate
+    data_file: tests/capability/data/calculate_batch.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+  - name: json_extract
+    description: "Extract nested JSON data - should write code"
+    tier: stable
+    agent:
+      module: tests.capability.agents.json_extract
+      class: JsonExtractAgent
+    method: extract
+    data_file: tests/capability/data/json_extract.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+  - name: repl_exploration
+    description: "REPL exploration - should use REPL exploration to find a secret message"
+    tier: stable
+    agent:
+      module: tests.capability.agents.repl_exploration
+      class: ReplExplorationTestAgent
+    method: retrieve_secret_message
+    data_file: tests/capability/data/repl_exploration.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+
+  - name: needle_in_haystack
+    description: "Find negative sentiment in large data - requires REPL exploration"
+    tier: stable
+    agent:
+      module: tests.capability.agents.needle
+      class: NeedleTestWrapper
+    method: _call_agent
+    data_file: tests/capability/data/needle_in_haystack.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0
+  - name: large_data_find
+    description: "Find marker in very large data (500KB+) - tests prefill & stdout truncation"
+    tier: stable
+    agent:
+      module: tests.capability.agents.large_data_wrapper
+      class: LargeDataTestWrapper
+    method: call_agent
+    data_file: tests/capability/data/large_data_find_generated.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 0.5
+      - name: efficiency_check
+        class: LLMJudgeScorer
+        weight: 0.5
+        model: nemotron3-nano-30b
+        skip_prefill: true
+        rubric: |
+          Evaluate if the agent handled large data efficiently.
+
+          Generated code:
+          ```python
+          {code}
+          ```
+
+          The task requires finding a marker in very large data (500KB-800KB).
+
+          Return passed=true if:
+          - Agent used string methods like .find(), .index(), .count(), len() directly
+          - Agent did NOT try to print() the entire data parameter
+          - Agent did NOT try to display or examine the full data
+          - Agent used efficient operations (O(n) string search, not O(n²) loops)
+
+          Return passed=false if:
+          - Agent tried to print(data) or display the full data
+          - Agent used inefficient approaches (character-by-character loops)
+          - Agent failed to use built-in string methods
+  - name: large_data_extract
+    description: "Extract context around marker in large data - tests smart slicing"
+    tier: stable
+    agent:
+      module: tests.capability.agents.large_data_wrapper
+      class: LargeDataTestWrapper
+    method: call_agent
+    data_file: tests/capability/data/large_data_extract_generated.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 0.5
+      - name: slicing_check
+        class: LLMJudgeScorer
+        weight: 0.5
+        model: nemotron3-nano-30b
+        skip_prefill: true
+        rubric: |
+          Evaluate if the agent used efficient string slicing.
+
+          Generated code:
+          ```python
+          {code}
+          ```
+
+          The task requires extracting N characters before and after a marker in large data.
+
+          Return passed=true if:
+          - Agent found the marker position first
+          - Agent used string slicing like data[pos-N:pos+len(marker)+N]
+          - Agent did NOT print the entire data
+
+          Return passed=false if:
+          - Agent tried to print or process the entire data
+          - Agent didn't use slicing to extract just the needed portion
+  - name: large_data_count
+    description: "Count pattern in large data - tests efficient counting"
+    tier: stable
+    agent:
+      module: tests.capability.agents.large_data_wrapper
+      class: LargeDataTestWrapper
+    method: call_agent
+    data_file: tests/capability/data/large_data_count_generated.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 0.5
+      - name: counting_check
+        class: LLMJudgeScorer
+        weight: 0.5
+        model: nemotron3-nano-30b
+        skip_prefill: true
+        rubric: |
+          Evaluate if the agent counted efficiently.
+
+          Generated code:
+          ```python
+          {code}
+          ```
+
+          The task requires counting pattern occurrences in large data.
+
+          Return passed=true if:
+          - Agent used .count() method or efficient counting
+          - Agent did NOT print the entire data
+          - Agent calculated data length with len()
+
+          Return passed=false if:
+          - Agent tried to print or display the full data
+          - Agent used inefficient manual counting loops

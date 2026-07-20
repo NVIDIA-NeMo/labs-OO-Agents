@@ -1,0 +1,86 @@
+# Nested Agent History Bug Reproduction
+#
+# Tests the bug where nested agent calls cause tool_call_id ordering issues.
+# See docs/bugs/nested-agent-history-ordering-bug.md for details.
+#
+# Run with:
+#   python -m eval_pipeline --config tests/integration/nested_bug/config.yaml
+#   python -m eval_pipeline --config tests/integration/nested_bug/config.yaml --models qwen-7b
+
+name: nested_history_bug
+description: "Reproduce nested agent history ordering bug across providers"
+
+# =============================================================================
+# MODELS - Using exact names from util/config/models.yaml
+# =============================================================================
+
+models:
+  # Nemotron 3 Nano 30B - reasoning model (NVIDIA internal)
+  nemotron-nano:
+    model_name: openai/nvidia/nvidia/Nemotron-3-Nano-30B-A3B
+    endpoint: https://inference-api.nvidia.com/v1
+    api_key_env: NVIDIA_INFERENCE_API_KEY
+    max_tokens: 4096
+
+  # Claude Haiku - small model (NVIDIA internal - inference-api.nvidia.com)
+  claude-haiku:
+    model_name: openai/aws/anthropic/claude-haiku-4-5-v1
+    endpoint: https://inference-api.nvidia.com/v1
+    api_key_env: NVIDIA_INFERENCE_API_KEY
+    max_tokens: 4096
+
+  # Gemini Flash Lite - small model (NVIDIA internal - inference-api.nvidia.com)
+  gemini-flash:
+    model_name: openai/gcp/google/gemini-2.5-flash-lite
+    endpoint: https://inference-api.nvidia.com/v1
+    api_key_env: NVIDIA_INFERENCE_API_KEY
+    max_tokens: 4096
+
+  # GPT-5.1 - OpenAI via Azure through NVIDIA internal
+  gpt-5:
+    model_name: openai/azure/openai/gpt-5.1
+    endpoint: https://inference-api.nvidia.com/v1
+    api_key_env: NVIDIA_INFERENCE_API_KEY
+    max_tokens: 4096
+    temperature: 1.0
+
+  # o4-mini - OpenAI via Azure through NVIDIA internal
+  o4-mini:
+    model_name: openai/azure/openai/o4-mini
+    endpoint: https://inference-api.nvidia.com/v1
+    api_key_env: NVIDIA_INFERENCE_API_KEY
+    max_tokens: 4096
+    temperature: 1.0
+
+  # GPT-OSS 120B - NVIDIA internal model (fixed format from capability_eval)
+  gpt-oss-120b:
+    model_name: openai/nvidia/openai/gpt-oss-120b
+    endpoint: https://inference-api.nvidia.com/v1
+    api_key_env: NVIDIA_INFERENCE_API_KEY
+    max_tokens: 65384
+    reasoning_effort: medium
+    max_thinking_tokens: 4096
+
+# Models to run by default (must support tool calling)
+agent_models:
+  - nemotron-nano
+  - claude-haiku
+  - gemini-flash
+  - gpt-5
+  - o4-mini
+  - gpt-oss-120b
+
+output_dir: results/nested_bug
+
+test_suite:
+  - name: nested_delegation
+    description: "Test nested agent call (outer calls inner method)"
+    agent:
+      module: tests.integration.nested_bug.agents
+      class: NestedBugAgent
+    method: outer_method
+    data_file: tests/integration/nested_bug/data.jsonl
+    scorers:
+      - name: exact_match
+        class: ExactMatchScorer
+        weight: 1.0

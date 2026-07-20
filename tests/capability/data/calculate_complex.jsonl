@@ -1,0 +1,2 @@
+{"args": [], "kwargs": {"a": 98765, "b": 43210, "calculation": "Compute the GCD of a and b, then multiply by 789"}, "expected": 3945}
+{"args": [], "kwargs": {"a": 35, "b": 1234, "calculation": "Compute the a-th Fibonacci number (0-indexed), then multiply by b"}, "expected": 11386691810}

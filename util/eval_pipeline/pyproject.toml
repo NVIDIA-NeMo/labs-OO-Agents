@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eval_pipeline"
+version = "0.2.0"
+description = "Evaluation pipeline for agent testing"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "pyyaml>=6.0",
+    "nemo-labs-oo-agents[viewer]",
+    "uvicorn[standard]>=0.20.0",
+    "fastapi>=0.109.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+# Standard src layout
+[tool.uv.sources]
+nemo-labs-oo-agents = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eval_pipeline"]
+# Test-only fixture loaded by subprocess-worker tests via editable install;
+# it imports private tracing internals and must not ship in the wheel.
+exclude = ["src/eval_pipeline/_test_fixtures.py"]
+
+# Include yaml config files in package
+[tool.hatch.build.targets.wheel.force-include]
+"../../THIRD_PARTY_NOTICES.md" = "THIRD_PARTY_NOTICES.md"
+"src/eval_pipeline/models.yaml" = "eval_pipeline/models.yaml"
+"src/eval_pipeline/config.yaml" = "eval_pipeline/config.yaml"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

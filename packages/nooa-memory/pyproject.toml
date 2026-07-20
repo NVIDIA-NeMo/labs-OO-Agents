@@ -1,0 +1,43 @@
+[project]
+name = "nemo-labs-oo-agents-memory"
+# Version is derived from git tags at build time by uv-dynamic-versioning.
+dynamic = ["version"]
+description = "Long-term memory system for nooa agents (ships with the ARC-AGI-3 example; not yet published)"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "nemo-labs-oo-agents>=0.2.0",
+    "pydantic>=2.5.0",
+    "numpy>=1.24.0",
+]
+
+# Optional ANN vector backends (sqlite-vec, chromadb) are imported lazily by
+# vector_backends.py and deliberately NOT declared as an extra: `uv sync
+# --all-extras` in CI would otherwise install the heavy chromadb stack that
+# the numpy default backend makes unnecessary.
+
+[project.entry-points."nooa.skills"]
+"nemo.memory" = "nooa_memory.memory_skill:MemorySkill"
+
+[tool.uv.sources]
+nemo-labs-oo-agents = { workspace = true }
+
+[build-system]
+requires = ["hatchling>=1.26.0", "uv-dynamic-versioning>=0.14.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
+
+[tool.uv-dynamic-versioning]
+vcs = "git"
+style = "pep440"
+bump = true
+metadata = false
+fallback-version = "0.2.0"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nooa_memory"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"../../THIRD_PARTY_NOTICES.md" = "THIRD_PARTY_NOTICES.md"

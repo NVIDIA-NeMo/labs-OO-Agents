@@ -1,0 +1,23 @@
+# Minimal Harbor configuration for the NOOA bench agent.
+# Run from the repo root:
+#   PYTHONPATH=examples/benchmarks harbor run --config examples/benchmarks/harbor_minimal.yaml
+jobs_dir: /tmp/harbor_jobs
+n_attempts: 1
+orchestrator:
+  type: local
+  n_concurrent_trials: 1
+environment:
+  type: apptainer
+  kwargs:
+    apptainer_binary: apptainer
+agents:
+  - import_path: harbor_adapter:NooaBenchAgent
+    # NVIDIA inference gateway (OpenAI-compatible); needs NVIDIA_INFERENCE_API_KEY.
+    model_name: openai/nvidia/nvidia/nemotron-3-ultra-preview
+    kwargs:
+      git_url: https://github.com/NVIDIA-NeMo/labs-OO-Agents.git
+      api_base: https://inference-api.nvidia.com/v1
+      # git_ref: main          # optional branch/tag/SHA
+      # agent_type: bench      # registry key in packages/nooa-bench
+datasets:
+  - path: /path/to/your/tasks/

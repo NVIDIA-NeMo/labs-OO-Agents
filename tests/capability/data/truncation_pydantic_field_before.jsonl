@@ -1,0 +1,3 @@
+{"args": [], "kwargs": {"context": "User(name='Alice', age=30, role='admin')", "question": "What is Alice's role?"}, "expected": "admin"}
+{"args": [], "kwargs": {"context": "Server(host='db.example.com', port=5432, ssl=True, max_connections=100)", "question": "What port is the server on?"}, "expected": "5432"}
+{"args": [], "kwargs": {"context": "Team(name='alpha', members=['aaa', 'bbb', 'ccc', ... 45 items not shown ..., 'www', 'xxx'], status='active')", "question": "What is the status of team alpha?"}, "expected": "active"}

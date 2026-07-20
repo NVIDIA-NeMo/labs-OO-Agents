@@ -1,0 +1,7 @@
+@import 'tailwindcss';
+@import 'highlight.js/styles/vs2015.css';
+
+body {
+  @apply bg-gray-950 text-gray-200 antialiased;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}

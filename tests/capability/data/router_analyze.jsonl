@@ -1,0 +1,2 @@
+{"args": [], "kwargs": {"user_message": "analyze this data", "values": [1, 2, 3, 4, 5]}, "expected": {"agents_called": ["Analyzer"], "results": {"Analyzer": {"sum": 15, "mean": 3.0, "count": 5}}}}
+{"args": [], "kwargs": {"user_message": "please analyze these numbers", "values": [10, 20, 30]}, "expected": {"agents_called": ["Analyzer"], "results": {"Analyzer": {"sum": 60, "mean": 20.0, "count": 3}}}}
