@@ -4,7 +4,7 @@
 
 # NeMo Object Oriented Agents
 
-[![NVIDIA](https://img.shields.io/badge/made%20by-NVIDIA-76B900)](https://www.nvidia.com/)
+[![nemo-labs | NVIDIA](https://img.shields.io/badge/nemo--labs-NVIDIA-76B900)](https://www.nvidia.com/)
 [![Paper](https://img.shields.io/badge/paper-arXiv-b31b1b?logo=arxiv&logoColor=white)](PAPER_URL)
 [![Blog](https://img.shields.io/badge/blog-coming%20soon-lightgrey)](BLOG_URL)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
@@ -21,12 +21,10 @@
 
 NeMo OO Agents (NOOA) is a model-agnostic Python framework for building reliable AI agents. Traditional agent frameworks scatter your code across prompt templates, tool schemas, callback handlers, and workflow graphs. NOOA collapses all of that into a single Python class:
 
-- **Classes are agents.** Fields are state, methods are capabilities, docstrings are prompts, type annotations are contracts.
-- **`...` bodies are LLM-driven.** A method whose body is `...` becomes an agentic loop; a real body stays deterministic Python. The boundary is one character wide and visible in the source.
-- **Live objects, not serialized prompts.** Arguments are passed by reference. A method can accept a million-row dataframe or a live database handle — the model sees a bounded preview and operates on the real object.
-- **Code as action.** By default, the model acts by writing Python in a Jupyter-style REPL that has access to `self`, imports, and helpers — no bespoke tool schemas.
-- **Typed I/O with auto-retry.** Return values (Pydantic, dataclass, TypedDict, primitives) are validated on the way out; the harness reprompts on failure.
-- **Explicit, model-callable context.** Static and dynamic context blocks, plus a typed event history, are Pythonic APIs available to both the developer and the model.
+- **Agents are Python classes.** Fields are state, methods are capabilities, docstrings are prompts, type annotations are contracts.
+- **`...` bodies are LLM-driven.** A method with `...` becomes an agentic loop; a real body stays deterministic Python. The boundary is one character wide.
+- **Code as action.** The model acts by writing Python in a Jupyter-style REPL with access to `self`, imports, and helpers — no bespoke tool schemas.
+- **Pythonic and agent-ready.** Typed I/O with auto-retry, live-object arguments passed by reference, and model-callable context and event APIs — designed for agents from the ground up.
 
 The result: agents you can test, trace, refactor, and version — **just like the rest of your software**.
 
@@ -66,62 +64,33 @@ cd my-agent-project
 uv add nemo-labs-oo-agents
 ```
 
-The distribution package is `nemo-labs-oo-agents`; the Python import package is `nooa`.
-
-Then set your API key (any [LiteLLM-supported](https://docs.litellm.ai/) model works):
-
-```bash
-echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env       # or OPENAI_API_KEY, GEMINI_API_KEY, ...
-```
-
-That's it — jump to the [Quick Start](#quick-start).
-
-### Advanced Installation
-
-For a local editable installation, clone the repo and sync the development environment with `uv`:
-
-```bash
-git clone ssh://git@gitlab-master.nvidia.com:12051/interactive-agents/nemo_oo_agents.git
-cd nemo_oo_agents
-uv sync --group dev
-```
-
-This installs the core framework, workspace packages, development tools, the `nooa` CLI,
-and the trace viewer runtime in the repo's `.venv`. Run CLI commands through `uv`:
-
-```bash
-uv run nooa --help
-uv run nooa start-dev       # trace viewer on http://localhost:5001
-```
-
 If you want the CLI without a source checkout, install the separate CLI package:
 
 ```bash
 uv add nemo-labs-oo-agents-cli
 ```
 
-<details>
-<summary><strong>Contributor details</strong> — tests, lint, optional integrations</summary>
+## Quick Start
 
-**Contributor setup** — enable pre-commit hooks and run the test/lint suite:
+### Choose a model
 
-```bash
-uv run pre-commit install
-uv run pytest                # run tests
-uv run ruff check            # lint
-uv run pyright               # type check
+Pick any [LiteLLM-supported](https://docs.litellm.ai/) model — hosted or local:
+
+```python
+from nooa.unifiedllm.registry import get_llm_client
+
+llm = get_llm_client("claude-haiku-4-5")                                            # Anthropic (after `export ANTHROPIC_API_KEY=...`)
+llm = get_llm_client("gpt-5-mini")                                                  # OpenAI    (after `export OPENAI_API_KEY=...`)
+llm = get_llm_client("ollama_chat/qwen3:1.7b", api_base="http://localhost:11434")   # Ollama    (no key)
+llm = get_llm_client("hosted_vllm/Qwen/Qwen3-1.7B", api_base="http://localhost:8000/v1")  # vLLM (no key)
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.
-
-</details>
-
-## Quick Start
+### Your first agent
 
 ***Agents are Python objects***. Methods with `...` bodies are **generation methods** — implemented at runtime by an LLM-driven strategy. The signature defines the contract; the docstring is the prompt.
 
 ```python
-from nooa.util.quickstart import *
+from nooa import Agent
 
 
 class FeedbackAgent(Agent, llm=llm):
@@ -147,6 +116,8 @@ uv run python examples/quickstart/01_first_generation_method.py
 
 Rename `analyze_feedback` to `analyze_feedback_briefly` and the output changes — your method name, parameters, and docstring *are* the prompt.
 
+Ready for more? See [**examples/**](examples/README.md) for the full progressive tutorial — structured output, tools, strategies, tracing, context blocks, MCP, and more.
+
 ### See what your agent is doing
 
 Every LLM call, code execution, and method invocation is traced by default — orchestrators, generation methods, and helpers, with parent-child spans preserved. If you installed the CLI and viewer dependencies, start the trace viewer and open the run in your browser:
@@ -163,6 +134,34 @@ If the viewer isn't running, tracing is silently disabled — no configuration n
 - **[Paper](PAPER_URL)** — design principles, harness details, capability tests, and SWE-bench Verified / Terminal-Bench 2.0 results.
 - **[Blog post](BLOG_URL)** — WIP.
 - **[CLAUDE.md](CLAUDE.md)** — conventions used inside this repo (helpful when reading the source).
+
+## Contributing
+
+For a local editable install, clone the repo and sync the development environment with `uv`:
+
+```bash
+git clone ssh://git@gitlab-master.nvidia.com:12051/interactive-agents/nemo_oo_agents.git
+cd nemo_oo_agents
+uv sync --group dev
+```
+
+This installs the core framework, workspace packages, development tools, the `nooa` CLI, and the trace viewer runtime in the repo's `.venv`. Run CLI commands through `uv`:
+
+```bash
+uv run nooa --help
+uv run nooa start-dev       # trace viewer on http://localhost:5001
+```
+
+Enable pre-commit hooks and run the test/lint suite:
+
+```bash
+uv run pre-commit install
+uv run pytest                # run tests
+uv run ruff check            # lint
+uv run pyright               # type check
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.
 
 ## Citation
 
