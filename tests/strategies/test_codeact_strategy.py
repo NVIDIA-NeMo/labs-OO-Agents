@@ -2277,9 +2277,6 @@ class TestCodeActInlineReturnResult:
     async def test_inline_return_result_not_caught_by_except_exception(self):
         """return_result() inside try block should not be caught by 'except Exception'.
 
-        This is a regression test for GitLab issue #55:
-        https://gitlab.com/nvidia/cloudnative/ai-workflow/nooa/-/issues/55
-
         The _ReturnResultSignal inherits from BaseException (not Exception), so it
         should NOT be caught by 'except Exception:' blocks. This ensures that
         when the LLM writes defensive code like:
@@ -2601,9 +2598,6 @@ class TestCodeActNoneReturnType:
 
     These tests verify that methods with `-> None` return type work correctly,
     completing the task without requiring a result value.
-
-    Regression tests for GitLab issue #59:
-    https://gitlab.com/nvidia/cloudnative/ai-workflow/nooa/-/issues/59
     """
 
     @pytest.mark.asyncio

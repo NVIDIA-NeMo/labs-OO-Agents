@@ -7,8 +7,6 @@ that need LLM generation) don't properly track parent-child relationships in the
 agent call stack. The issue is in actor.py: _agent_call_stack is only pushed/popped
 when is_nested=True, but the first method never pushes because is_nested=False for it.
 So child methods get parent_call_id=None instead of the parent's call_id.
-
-Refs: gitlab#81
 """
 
 import pytest

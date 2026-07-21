@@ -164,30 +164,6 @@ Source/Homepage: https://github.com/pandas-dev/pandas
 
 This package does not declare third-party runtime dependencies. It provides NVIDIA model-alias configuration discovered by the core package.
 
-## `nat-oo-agents`
-
-nemo-oo-agents - Apache License 2.0
-Attribution Statements: NVIDIA includes `nemo-oo-agents` under the Apache License 2.0 for use with NVIDIA OO Agents.
-License Text(https://spdx.org/licenses/Apache-2.0.html)
-Source/Homepage: https://github.com/NVIDIA-NeMo/labs-OO-Agents
-
-nvidia-nat-core - Apache License 2.0
-Attribution Statements: NVIDIA includes `nvidia-nat-core` under the Apache License 2.0 for use with NVIDIA OO Agents.
-License Text(https://spdx.org/licenses/Apache-2.0.html)
-Source/Homepage: https://github.com/NVIDIA/NeMo-Agent-Toolkit
-
-pydantic - MIT License
-Attribution Statements: NVIDIA includes `pydantic` under the MIT License for use with NVIDIA OO Agents.
-License Text(https://spdx.org/licenses/MIT.html)
-Source/Homepage: https://github.com/pydantic/pydantic
-
-python-dotenv - BSD 3-Clause License
-Attribution Statements: NVIDIA includes `python-dotenv` under the BSD 3-Clause License for use with NVIDIA OO Agents.
-License Text(https://spdx.org/licenses/BSD-3-Clause.html)
-Source/Homepage: https://github.com/theskumar/python-dotenv
-
----
-
 ## `eval_pipeline`
 
 fastapi - MIT License

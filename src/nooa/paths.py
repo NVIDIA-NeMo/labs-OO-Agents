@@ -45,9 +45,8 @@ def get_user_dir(*parts: str) -> Path:
     """Return the user-global NVIDIA OO Agents directory, optionally joined with *parts*.
 
     Location is ``~/.config/nooa/`` on every platform (honoring
-    ``XDG_CONFIG_HOME`` when set), so the path is predictable and the
-    installer (``install.sh``) and the runtime always resolve the same
-    place. Override the entire base with ``NEMO_OO_USER_DIR``.
+    ``XDG_CONFIG_HOME`` when set), so the path is predictable. Override
+    the entire base with ``NEMO_OO_USER_DIR``.
 
     Examples::
 

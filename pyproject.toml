@@ -43,7 +43,6 @@ eval_pipeline = { workspace = true }
 nemo-labs-oo-agents-cli = { workspace = true }
 nemo-labs-oo-agents-memory = { workspace = true }
 nemo-labs-oo-agents-bench = { workspace = true }
-# nvidia-nat-nemo-oo-agents: external plugin, not in workspace
 
 [tool.uv]
 # Extra index URLs to search for packages (in addition to PyPI)
@@ -279,13 +278,10 @@ include = [
     "packages"
 ]
 # Excluded from pyright:
-# - benchmarks: pre-existing typing debt unrelated to core (clean up later).
 # - cli: pre-existing typing debt that surfaces when CLI is type-checked as
-#   its own package; clean up alongside benchmarks.
-# - nat_oo_agents: external NAT plugin; imports nat.* which is not a dev dep.
+#   its own package.
 exclude = [
     "packages/nooa-cli",
-    "packages/nat_oo_agents",
 ]
 # Pydantic discriminated unions require narrowing event_type in subclasses
 reportIncompatibleVariableOverride = false

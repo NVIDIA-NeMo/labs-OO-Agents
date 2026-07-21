@@ -7,9 +7,6 @@ under the enclosing agent-method span.
 Before the fix, ``before_agent_call`` chose its parent solely from ``parent_call_id``
 (nearest enclosing *method*), so such calls became siblings of the long ``generation``
 span and rendered "at the end" of the loop instead of at their true position.
-
-Refs: gitlab#254 (root cause). See
-.development/docs/design/issue-254b-codeexec-method-parenting.md
 """
 
 import json
