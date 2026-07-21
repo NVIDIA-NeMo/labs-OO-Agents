@@ -56,19 +56,34 @@ Read the paper for the design principles and evaluation results: [Nemo OO Agents
 
 ## Installation
 
-Install the core distribution into a Python project with [uv](https://docs.astral.sh/uv/getting-started/installation/):
+Install directly from GitHub with [uv](https://docs.astral.sh/uv/getting-started/installation/). Add the **core** framework to a new (or existing) Python project:
 
 ```bash
 uv init my-agent-project
 cd my-agent-project
-uv add nemo-labs-oo-agents
+
+uv add "nemo-labs-oo-agents @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@main"
 ```
 
-If you want the CLI without a source checkout, install the separate CLI package:
+<details>
+<summary><b>Optional sub-packages</b> — CLI + TUI, memory, evaluation pipeline</summary>
+
+<br />
+
+All of these live in the same repo and are addressed with `#subdirectory=…`.
 
 ```bash
-uv add nemo-labs-oo-agents-cli
+# CLI + TUI (beta): the `nooa` command, agent REPL, trace viewer, TUI
+uv add "nemo-labs-oo-agents-cli @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@main#subdirectory=packages/nooa-cli"
+
+# Long-term memory subsystem (MemoryManager)
+uv add "nemo-labs-oo-agents-memory @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@main#subdirectory=packages/nooa-memory"
+
+# Evaluation pipeline for agent testing
+uv add "eval_pipeline @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@main#subdirectory=util/eval_pipeline"
 ```
+
+</details>
 
 ## Quick Start
 
@@ -140,8 +155,8 @@ If the viewer isn't running, tracing is silently disabled — no configuration n
 For a local editable install, clone the repo and sync the development environment with `uv`:
 
 ```bash
-git clone ssh://git@gitlab-master.nvidia.com:12051/interactive-agents/nemo_oo_agents.git
-cd nemo_oo_agents
+git clone https://github.com/NVIDIA-NeMo/labs-OO-Agents.git
+cd labs-OO-Agents
 uv sync --group dev
 ```
 
