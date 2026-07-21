@@ -6,7 +6,7 @@
 NeMo Flow (the ``nemo_relay`` package — renamed from ``nemo_flow``) is a
 multi-language agent runtime that adds execution scope management, lifecycle
 events, and a configurable middleware pipeline (guardrails/intercepts) to every
-LLM call and tool execution in NeMo OO Agents.
+LLM call and tool execution in NVIDIA OO Agents.
 
 This example shows how to:
   1. Register an LLM request intercept (inject a system header into every request)
@@ -20,7 +20,7 @@ This version uses the event-middleware integration — NeMo Flow is wired throug
 ``event_manager.intercept()`` rather than global hooks.
 
 Prerequisites:
-  Install NeMo OO Agents with the nemo-flow extra (public PyPI wheels):
+  Install NVIDIA OO Agents with the nemo-flow extra (public PyPI wheels):
 
     uv sync --extra nemo-relay
 
@@ -133,7 +133,7 @@ class ReturnTypeDemoAgent(Agent, llm=llm):
         ...
 
     async def return_pydantic(self) -> Summary:
-        """Return a Summary about NeMo OO Agents with title 'NeMo OO Agents' and 2 short key points."""
+        """Return a Summary about NVIDIA OO Agents with title 'NVIDIA OO Agents' and 2 short key points."""
         ...
 
     async def return_string(self) -> str:

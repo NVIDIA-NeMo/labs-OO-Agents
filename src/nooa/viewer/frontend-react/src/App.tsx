@@ -12,7 +12,7 @@ function NavBar() {
   return (
     <nav className="border-b border-gray-800 bg-gray-950/80 backdrop-blur sticky top-0 z-50">
       <div className="max-w-[100rem] mx-auto px-4 flex items-center h-12 gap-6">
-        <span className="text-sm font-semibold text-gray-300 tracking-tight">NeMo OO Agents Viewer</span>
+        <span className="text-sm font-semibold text-gray-300 tracking-tight">NVIDIA OO Agents Viewer</span>
         <div className="flex gap-1">
           <NavLink
             to="/eval"

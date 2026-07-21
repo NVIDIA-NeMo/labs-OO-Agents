@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Opt-in long-term memory subsystem for NeMo OO Agents.
+"""Opt-in long-term memory subsystem for NVIDIA OO Agents.
 
 A brain-inspired, fully *additive* memory add-on: spontaneous association
 (similarity recall injected each turn), deliberate recall (conscious tools),

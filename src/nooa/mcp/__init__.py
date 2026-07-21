@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""MCP (Model Context Protocol) tool integration for NeMo OO Agents.
+"""MCP (Model Context Protocol) tool integration for NVIDIA OO Agents.
 
 This package provides tools for connecting to MCP servers and using their tools
 as agent capabilities.

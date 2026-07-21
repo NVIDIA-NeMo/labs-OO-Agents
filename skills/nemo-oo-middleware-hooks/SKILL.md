@@ -1,6 +1,6 @@
 ---
 name: nemo-oo-middleware-hooks
-description: Intercept and observe NeMo OO agent execution — middleware via event_manager.intercept() (guardrails, input/output transforms, blocking), event observers via event_manager.on() (react to Task/Error/LLMComplete/turn events), and the InstrumentationHooks protocol for observability backends. Use when adding guardrails, redacting or rewriting prompts, blocking or faking an LLM call or code execution, rate-limiting agent methods, subscribing to lifecycle events, or wiring custom telemetry.
+description: Intercept and observe NVIDIA OO agent execution — middleware via event_manager.intercept() (guardrails, input/output transforms, blocking), event observers via event_manager.on() (react to Task/Error/LLMComplete/turn events), and the InstrumentationHooks protocol for observability backends. Use when adding guardrails, redacting or rewriting prompts, blocking or faking an LLM call or code execution, rate-limiting agent methods, subscribing to lifecycle events, or wiring custom telemetry.
 compatibility: nemo-oo-agents core package
 ---
 

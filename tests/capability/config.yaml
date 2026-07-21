@@ -1,4 +1,4 @@
-# NeMo OO Agents Capability Tests - eval_pipeline Configuration
+# NVIDIA OO Agents Capability Tests - eval_pipeline Configuration
 #
 # This experiment tests nooa core capabilities:
 # 1. Scale awareness - when to answer directly vs write code
@@ -27,7 +27,7 @@
 
 name: capability
 no_cache: true
-description: "NeMo OO Agents capability tests for prompt optimization"
+description: "NVIDIA OO Agents capability tests for prompt optimization"
 
 # =============================================================================
 # OPTIMIZATION SETTINGS - Parameters for the optimization loop

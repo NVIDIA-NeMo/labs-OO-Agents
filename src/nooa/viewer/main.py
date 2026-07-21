@@ -144,7 +144,7 @@ async def lifespan(app: FastAPI):
         log.info("Shutdown complete")
 
 
-app = FastAPI(title="NeMo OO Agents Viewer", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="NVIDIA OO Agents Viewer", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

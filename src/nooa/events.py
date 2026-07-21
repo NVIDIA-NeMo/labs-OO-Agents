@@ -9,7 +9,7 @@ Events flow through EventManager.add() for:
 
 Design: phase-2-strategy-middleware.md
 
-NeMo OO Agents events extend context-blocks EventBase and add specialized types
+NVIDIA OO Agents events extend context-blocks EventBase and add specialized types
 for the code generation pipeline (task, error, feedback).
 
 Rendering: Events are rendered using pformat(event). Fields with repr=False
@@ -53,7 +53,7 @@ class ExecutionSignal(BaseException):
     pass
 
 
-# === NeMo OO Agents-specific events ===
+# === NVIDIA OO Agents-specific events ===
 
 
 class Task(EventBase):  # type: ignore[misc]

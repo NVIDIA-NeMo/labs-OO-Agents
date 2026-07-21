@@ -1,6 +1,6 @@
 ---
 name: nemo-oo-tools-and-skills
-description: Give a NeMo OO agent capabilities — methods as tools, built-in tools (ShellTools, TodoManager), MCP servers, agent skills (Skill/TextSkill/SkillRegistry), and multimodal media. Use when adding tools or external integrations to an agent, wiring MCP, or packaging reusable guidance as an agent skill.
+description: Give a NVIDIA OO agent capabilities — methods as tools, built-in tools (ShellTools, TodoManager), MCP servers, agent skills (Skill/TextSkill/SkillRegistry), and multimodal media. Use when adding tools or external integrations to an agent, wiring MCP, or packaging reusable guidance as an agent skill.
 compatibility: nemo-oo-agents core package; [mcp] extra for MCP
 ---
 

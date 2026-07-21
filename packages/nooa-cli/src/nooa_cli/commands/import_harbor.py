@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Import NeMo OO Agents OTLP traces from a Harbor job directory into the viewer.
+"""Import NVIDIA OO Agents OTLP traces from a Harbor job directory into the viewer.
 
 Walks a Harbor job directory (or any directory containing one), finds all
 traces under ``artifacts/traces/*.jsonl``, enriches them with Harbor metadata
@@ -407,7 +407,7 @@ def command(
     batch_bytes: int,
     eval_only: bool,
 ):
-    """Import NeMo OO Agents OTLP traces from a Harbor job directory.
+    """Import NVIDIA OO Agents OTLP traces from a Harbor job directory.
 
     \b
     PATH can be:

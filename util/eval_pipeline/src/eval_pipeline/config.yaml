@@ -1,6 +1,6 @@
 # Capability Tests - 4 agent test types
 name: capability
-description: "NeMo OO Agents capability tests with 4 agent types"
+description: "NVIDIA OO Agents capability tests with 4 agent types"
 
 # Models to sweep across all tests
 models:

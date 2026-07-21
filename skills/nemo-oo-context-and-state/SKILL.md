@@ -1,6 +1,6 @@
 ---
 name: nemo-oo-context-and-state
-description: Manage what a NeMo OO agent sees and remembers — context blocks, event history and queries, history summarization, and persistent memory/storage. Use when pinning information into the system prompt, querying past events, bounding context growth in long conversations, or persisting agent state.
+description: Manage what a NVIDIA OO agent sees and remembers — context blocks, event history and queries, history summarization, and persistent memory/storage. Use when pinning information into the system prompt, querying past events, bounding context growth in long conversations, or persisting agent state.
 compatibility: nemo-oo-agents core package
 ---
 

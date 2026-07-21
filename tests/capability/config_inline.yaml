@@ -1,4 +1,4 @@
-# NeMo OO Agents Capability Tests - Inline Model Configuration
+# NVIDIA OO Agents Capability Tests - Inline Model Configuration
 #
 # This config uses inline model specs for full traceability.
 # All model parameters are explicit - no hidden defaults.
@@ -7,7 +7,7 @@
 #   uv run python -m eval_pipeline --config tests/capability/config_inline.yaml
 
 name: capability_inline
-description: "NeMo OO Agents capability tests with inline model specs"
+description: "NVIDIA OO Agents capability tests with inline model specs"
 
 # Inline model specifications (full traceability)
 models:

@@ -1,6 +1,6 @@
 ---
 name: nemo-oo-agentdoc
-description: Make NeMo OO agent types render beautiful documentation for the LLM — doc(), spec(), hidden, Annotated field descriptions, and pformat/pprint tuning. Use when designing Pydantic models/dataclasses the LLM will see, controlling what appears in doc(self), hiding internals, adding field descriptions, fixing noisy or missing type docs, or tuning value truncation.
+description: Make NVIDIA OO agent types render beautiful documentation for the LLM — doc(), spec(), hidden, Annotated field descriptions, and pformat/pprint tuning. Use when designing Pydantic models/dataclasses the LLM will see, controlling what appears in doc(self), hiding internals, adding field descriptions, fixing noisy or missing type docs, or tuning value truncation.
 compatibility: nemo-oo-agents core package (agentdoc ships inside it — import from nooa.agentdoc)
 ---
 

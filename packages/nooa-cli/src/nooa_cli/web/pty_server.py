@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""PTY-based web terminal server for NeMo OO Agents.
+"""PTY-based web terminal server for NVIDIA OO Agents.
 
 Serves an xterm.js browser terminal that connects to a real PTY running the
-NeMo OO Agents TUI, with a rich content side-channel for plots/HTML.
+NVIDIA OO Agents TUI, with a rich content side-channel for plots/HTML.
 
 Endpoints:
   GET  /        — xterm.js UI (HTML embedded)
@@ -42,7 +42,7 @@ _HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>NeMo OO Agents — Terminal</title>
+<title>NVIDIA OO Agents — Terminal</title>
 <!-- xterm.js -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css"/>
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
@@ -133,7 +133,7 @@ _HTML = r"""<!DOCTYPE html>
       <span class="dot dot-red"></span>
       <span class="dot dot-yellow"></span>
       <span class="dot dot-green"></span>
-      <span id="term-title">NeMo OO Agents</span>
+      <span id="term-title">NVIDIA OO Agents</span>
     </div>
     <div id="terminal"></div>
   </div>
@@ -497,7 +497,7 @@ def create_pty_app(
                 pass
 
     app = FastAPI(
-        title="NeMo OO Agents Terminal",
+        title="NVIDIA OO Agents Terminal",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,

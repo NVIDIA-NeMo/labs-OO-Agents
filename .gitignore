@@ -190,7 +190,7 @@ trace*.json
 !trace_viewer_config.json
 /tmp/
 
-# NeMo OO Agents generated trace and evaluation files (anywhere)
+# NVIDIA OO Agents generated trace and evaluation files (anywhere)
 *.noo-eval.jsonl
 *.006summary.json
 # Exception: Allow trace fixtures for testing/eval

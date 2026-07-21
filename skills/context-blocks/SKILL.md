@@ -1,6 +1,6 @@
 ---
 name: context-blocks
-description: "How to manage context blocks (system prompt sections) in NeMo OO Agents. Use when configuring what appears in an agent's LLM prompt — adding, overriding, suppressing, or positioning blocks. Covers the unified Context API, well-known framework keys, and the declarative/runtime interface."
+description: "How to manage context blocks (system prompt sections) in NVIDIA OO Agents. Use when configuring what appears in an agent's LLM prompt — adding, overriding, suppressing, or positioning blocks. Covers the unified Context API, well-known framework keys, and the declarative/runtime interface."
 compatibility: nooa >= 0.x (context-block-controls branch)
 metadata:
   skill_type: api-reference

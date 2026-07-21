@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Summarization agents for NeMo OO Agents.
+"""Summarization agents for NVIDIA OO Agents.
 
-This module provides agent-based event summarization following the NeMo OO Agents pattern.
+This module provides agent-based event summarization following the NVIDIA OO Agents pattern.
 Summarizers are proper agents that subscribe to a parent's event manager and use
 LLM-generated code to produce summaries.
 

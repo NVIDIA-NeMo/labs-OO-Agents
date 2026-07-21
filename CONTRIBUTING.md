@@ -1,4 +1,4 @@
-# Contributing to NeMo OO Agents
+# Contributing to NVIDIA OO Agents
 
 ## Developer Certificate of Origin
 
@@ -54,7 +54,7 @@ Signed-off-by: Jane Smith <jane.smith@example.com>
 
 ## How to contribute
 
-This repository is the public, open-source home of NeMo OO Agents. Development is
+This repository is the public, open-source home of NVIDIA OO Agents. Development is
 maintained by the NVIDIA team, and external contributions are welcomed through the
 standard pull-request flow.
 

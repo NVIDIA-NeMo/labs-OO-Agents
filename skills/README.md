@@ -1,6 +1,6 @@
-# Coding-agent skills for authoring NeMo OO Agents
+# Coding-agent skills for authoring NVIDIA OO Agents
 
-Portable `SKILL.md` bundles for coding agents (Claude Code, Cursor, Codex, or any Agent Skills host) that help developers **author application agents with** the NeMo OO Agents framework, capture traces, and debug runs with the trace viewer and trace explorer.
+Portable `SKILL.md` bundles for coding agents (Claude Code, Cursor, Codex, or any Agent Skills host) that help developers **author application agents with** the NVIDIA OO Agents framework, capture traces, and debug runs with the trace viewer and trace explorer.
 
 These are instructions *for coding agents about the framework* — not `nooa.Skill` runtime skills (though the file format is compatible with `TextSkill`, see Validate below).
 

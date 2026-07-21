@@ -1,4 +1,4 @@
-# NeMo OO Agents Reference
+# NVIDIA OO Agents Reference
 
 Quick reference for paths, examples, commands, and configuration.
 
@@ -66,7 +66,7 @@ For deeper understanding, see these topic-specific docs:
 
 ## Logging
 
-NeMo OO Agents uses Python's standard `logging` module throughout.  Every module
+NVIDIA OO Agents uses Python's standard `logging` module throughout.  Every module
 creates a logger with `logging.getLogger(__name__)`, producing a hierarchy
 rooted at `nooa`.
 

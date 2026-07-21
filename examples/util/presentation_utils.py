@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Presentation utilities for NeMo OO Agents Jupyter slides.
+"""Presentation utilities for NVIDIA OO Agents Jupyter slides.
 
 Usage in notebook:
     from presentation_utils import setup, trace, agent_pprint, list_traces

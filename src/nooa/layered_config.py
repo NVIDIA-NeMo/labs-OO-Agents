@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Shared layered-config discovery for NeMo OO Agents.
+"""Shared layered-config discovery for NVIDIA OO Agents.
 
 One mental model for *every* config file the project ships — LLM aliases
 (``llm_config.yaml``), TUI settings (``settings.yaml``), and secrets

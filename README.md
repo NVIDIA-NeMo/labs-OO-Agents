@@ -1,6 +1,6 @@
-# NeMo OO Agents (NOOA) Framework
+# NVIDIA OO Agents (NOOA) Framework
 
-**What if your Python methods could think?** With the NeMo Object-Oriented Agents (NOOA) framework, they can. Write AI agents using familiar Python OOP—no new paradigms to learn. Define method signatures with type hints and docstrings, and your methods automatically become intelligent agents that can reason, execute code, and even create new methods to decompose complex tasks.
+**What if your Python methods could think?** With the NVIDIA Object-Oriented Agents (NOOA) framework, they can. Write AI agents using familiar Python OOP—no new paradigms to learn. Define method signatures with type hints and docstrings, and your methods automatically become intelligent agents that can reason, execute code, and even create new methods to decompose complex tasks.
 
 ## Why the NOOA Framework?
 

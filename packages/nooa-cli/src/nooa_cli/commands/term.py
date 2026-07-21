@@ -3,7 +3,7 @@
 """Web terminal command for nooa CLI.
 
 Launches an xterm.js browser terminal connected to a real PTY running the
-NeMo OO Agents TUI.  A rich content side-channel lets the agent push Plotly
+NVIDIA OO Agents TUI.  A rich content side-channel lets the agent push Plotly
 plots, HTML, and images to a collapsible browser panel while the terminal
 session runs normally.
 
@@ -110,10 +110,10 @@ def command(
     port: int,
     no_auth: bool,
 ):
-    """Launch the NeMo OO Agents web terminal (xterm.js + rich side-channel).
+    """Launch the NVIDIA OO Agents web terminal (xterm.js + rich side-channel).
 
     Opens an xterm.js terminal in your browser connected to a real PTY running
-    the NeMo OO Agents TUI.  The agent can push Plotly plots, HTML, and images
+    the NVIDIA OO Agents TUI.  The agent can push Plotly plots, HTML, and images
     to a collapsible side panel using the WebPublisher tool
     (``self.web.plot(fig)``).
 
@@ -181,7 +181,7 @@ def command(
     url = f"http://{host}:{port}"
     if auth_token is not None:
         url += f"/?token={auth_token}"
-    click.echo(f"Starting NeMo OO Agents web terminal at {url}")
+    click.echo(f"Starting NVIDIA OO Agents web terminal at {url}")
     click.echo(f"PTY command: {' '.join(tui_argv)}")
     if not _is_loopback(host):
         if auth_token is not None:

@@ -102,7 +102,7 @@ def command(
     python: bool,
     continue_session: str | None,
 ):
-    """Launch the NeMo OO Agents TUI (Text User Interface).
+    """Launch the NVIDIA OO Agents TUI (Text User Interface).
 
     Interactive REPL for chatting with agents, running commands, and managing
     skills and MCP servers.

@@ -1,4 +1,4 @@
-# NeMo OO Agents Framework
+# NVIDIA OO Agents Framework
 
 Python framework for building AI agents. An agent is a Python object — its methods are its capabilities.
 

@@ -1,10 +1,10 @@
 ---
 name: nemo-oo-agent-authoring
-description: Author agents with the NeMo OO Agents (nooa) framework. Use when writing or modifying an Agent subclass, agentic methods (ellipsis bodies), docstring prompts, structured output contracts, strategy selection (CodeAct/Predict), visibility control, orchestrators, or subagent composition.
+description: Author agents with the NVIDIA OO Agents (nooa) framework. Use when writing or modifying an Agent subclass, agentic methods (ellipsis bodies), docstring prompts, structured output contracts, strategy selection (CodeAct/Predict), visibility control, orchestrators, or subagent composition.
 compatibility: Python >= 3.12, uv, nemo-oo-agents core package (CLI: nooa)
 ---
 
-# Authoring NeMo OO Agents (nooa)
+# Authoring NVIDIA OO Agents (nooa)
 
 An agent is a Python class; its methods are its capabilities. Three rules drive everything:
 

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Well-known filesystem paths for NeMo OO Agents.
+"""Well-known filesystem paths for NVIDIA OO Agents.
 
 Two root directories:
 
@@ -42,7 +42,7 @@ def find_project_root() -> Path:
 
 
 def get_user_dir(*parts: str) -> Path:
-    """Return the user-global NeMo OO Agents directory, optionally joined with *parts*.
+    """Return the user-global NVIDIA OO Agents directory, optionally joined with *parts*.
 
     Location is ``~/.config/nooa/`` on every platform (honoring
     ``XDG_CONFIG_HOME`` when set), so the path is predictable and the
@@ -66,7 +66,7 @@ def get_user_dir(*parts: str) -> Path:
 
 
 def get_project_dir(*parts: str) -> Path:
-    """Return the project-local NeMo OO Agents directory, optionally joined with *parts*.
+    """Return the project-local NVIDIA OO Agents directory, optionally joined with *parts*.
 
     Defaults to ``<project-root>/.nooa/`` where the project root is
     the nearest ancestor directory containing a ``pyproject.toml``.  Override

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""OpenInference instrumentation for NeMo OO Agents.
+"""OpenInference instrumentation for NVIDIA OO Agents.
 
 Composable exporter architecture with exporter-agnostic session routing.
 
@@ -113,7 +113,7 @@ exporters = exporters_mod
 
 
 class NemoOOAgentsInstrumentor:
-    """OpenTelemetry instrumentor for NeMo OO Agents.
+    """OpenTelemetry instrumentor for NVIDIA OO Agents.
 
     Instruments nooa framework to emit OpenTelemetry spans with
     OpenInference semantic conventions.
