@@ -34,18 +34,22 @@ from nooa import Agent, strategy, PredictStrategy
 class SupportAgent(Agent):
     """You are a support agent for a customer service system."""
 
-    order_db: OrderDB                                        # model-visible state
+    # Model-visible state.
+    order_db: OrderDB
 
-    def is_refund_eligible(self, order: Order) -> bool:      # deterministic tool
+    # Deterministic tool.
+    def is_refund_eligible(self, order: Order) -> bool:
         """Return whether an order is eligible for a refund."""
         return order.delivered and order.days_since_delivery <= 30
 
+    # Single-shot LLM call.
     @strategy(PredictStrategy())
-    async def classify(self, message: str) -> TicketKind:    # single-shot LLM call
+    async def classify(self, message: str) -> TicketKind:
         """Classify the customer message into the best ticket kind."""
         ...
 
-    async def triage(                                        # CodeAct loop (default)
+    # CodeAct loop (default).
+    async def triage(
         self, message: str, photo: Image | None, order: Order | None
     ) -> Ticket:
         """Triage a customer message and create a support ticket."""
