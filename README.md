@@ -31,6 +31,7 @@ The result: agents you can test, trace, refactor, and version — **just like th
 ```python
 from nooa import Agent, strategy, PredictStrategy
 
+# The agent is a Python class.
 class SupportAgent(Agent):
     """You are a support agent for a customer service system."""
 
