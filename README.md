@@ -11,9 +11,6 @@
 
 **[Quick Start](#quick-start)** &nbsp;·&nbsp; **[Examples](examples/README.md)** &nbsp;·&nbsp; **[Paper](PAPER_URL)**
 
-<!-- TODO: add hero image at assets/hero.png -->
-<!-- <img src="assets/hero.png" alt="NeMo OO Agents at a glance" width="720"> -->
-
 <br />
 
 </div>
@@ -21,43 +18,34 @@
 
 NeMo OO Agents (NOOA) is a model-agnostic Python framework for building reliable AI agents. Traditional agent frameworks scatter your code across prompt templates, tool schemas, callback handlers, and workflow graphs. NOOA collapses all of that into a single Python class:
 
+```python
+from nooa import Agent
+
+# The agent is a Python object.
+class SupportAgent(Agent):
+    """You are a support agent."""
+
+    # State lives on the object. Fields are typed.
+    order_db: OrderDB
+
+    # Ordinary method. Just Python.
+    def is_refund_eligible(self, order: Order) -> bool:
+        return order.delivered and order.days_since_delivery <= 30
+
+    # Agentic method: the runtime hands this to an LLM.
+    async def triage(self, message: str, order: Order) -> Ticket:
+        """Create a typed support ticket."""
+        ...
+```
+
+**What's happening here:**
+
 - **Agents are Python classes.** Fields are state, methods are capabilities, docstrings are prompts, type annotations are contracts.
 - **`...` bodies are LLM-driven.** A method with `...` becomes an agentic loop; a real body stays deterministic Python. The boundary is one character wide.
 - **Code as action.** The model acts by writing Python in a Jupyter-style REPL with access to `self`, imports, and helpers — no bespoke tool schemas.
 - **Pythonic and agent-ready.** Typed I/O with auto-retry, live-object arguments passed by reference, and model-callable context and event APIs — designed for agents from the ground up.
 
-The result: agents you can test, trace, refactor, and version — **just like the rest of your software**.
-
-```python
-from nooa import Agent, strategy, PredictStrategy
-
-# The agent is a Python class.
-class SupportAgent(Agent):
-    """You are a support agent for a customer service system."""
-
-    # Model-visible state.
-    order_db: OrderDB
-
-    # Deterministic tool.
-    def is_refund_eligible(self, order: Order) -> bool:
-        """Return whether an order is eligible for a refund."""
-        return order.delivered and order.days_since_delivery <= 30
-
-    # Single-shot LLM call.
-    @strategy(PredictStrategy())
-    async def classify(self, message: str) -> TicketKind:
-        """Classify the customer message into the best ticket kind."""
-        ...
-
-    # CodeAct loop (default).
-    async def triage(
-        self, message: str, photo: Image | None, order: Order | None
-    ) -> Ticket:
-        """Triage a customer message and create a support ticket."""
-        ...
-```
-
-Read the paper for the design principles and evaluation results: [Nemo OO Agents: Native Python Object-Oriented Agents](PAPER_URL).
+The result: agents you can test, trace, refactor, and version — **just like the rest of your software**. Read the paper for the design principles and evaluation results: [Nemo OO Agents: Native Python Object-Oriented Agents](PAPER_URL).
 
 ## Installation
 
