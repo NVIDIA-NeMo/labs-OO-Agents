@@ -6,9 +6,8 @@ Only ``id``, ``type``, ``content`` and ``created_at`` are required; every
 descriptor, metadata field and edge is optional with a sane default, so a
 memory can be a one-line fact or a fully-annotated, graph-linked episode.
 
-Grounding (see ``docs/design/memory-system/research-notes.md``): the type
-taxonomy follows Tulving/Squire (episodic/semantic/procedural + prospective +
-working); descriptors (importance/salience/confidence/mood) follow the
+The type taxonomy follows Tulving/Squire (episodic/semantic/procedural +
+prospective + working); descriptors (importance/salience/confidence/mood) follow the
 poignancy/emotional-tagging literature; ``access_log``/``strength`` feed the
 ACT-R base-level activation and the Ebbinghaus spaced-repetition decay.
 """

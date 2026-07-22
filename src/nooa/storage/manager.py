@@ -11,7 +11,6 @@ underneath. This separation means swapping storage (``/clear``,
 ``/session new``, etc.) preserves subscribers and middleware on the
 agent's stable EventManager — only the persistence target changes.
 
-See docs/plans/2026-03-10-serialization.md for the full design.
 """
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable

@@ -17,7 +17,6 @@
 #   export DEBUG_JUDGE_INPUT=./tmp/judge_debug
 #   python -m eval_pipeline --config ... --test large_data_find --limit 1
 #   cat ./tmp/judge_debug/judge_input_*.txt
-#   (See docs/debug-llm-judge.md for details)
 #
 # NOTE: Some tests use ExactMatchScorer as a placeholder. For production use,
 # implement custom scorers for router and stateful tests that evaluate:
@@ -705,9 +704,8 @@ test_suite:
   # TRUNCATION COMPREHENSION - reading the truncation 3.0 marker family (6 tests)
   #
   # The system prompt now documents the marker shape, so agents should do
-  # *better* on these than the experimental matrix in
-  # docs/design/truncation-3.0-experiment-summary.md (which ran without the
-  # system-prompt guidance).
+  # *better* on these than the historical experimental matrix that ran without
+  # the system-prompt guidance.
   #
   # Predict tests measure: can the model parse a `type(len=N, ...)` marker,
   # answer only when the result is determinable from the rendered data, and

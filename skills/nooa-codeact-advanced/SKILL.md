@@ -74,7 +74,7 @@ Two independent mechanisms — set them separately:
 
 Context budget: `max_context_tokens` — or, when unset and the model exposes a context window, half the *usable* window (`(context_window - reserved_output) // 2`, where `reserved_output` is the call's `max_tokens`, else `TruncationConfig.response_reserve_tokens`, default 4096; setting `response_reserve_tokens=0` disables the auto-derived budget). Over-budget triggers **whole-block eviction** of SYSTEM context blocks — newest non-`static` user blocks first, marked `EVICTED: over context budget` in place. Static framework blocks (`system_prompt`, `self`) are never evicted. No token counter is required: eviction sizes blocks as `chars × ratio`, where the ratio is calibrated from each provider response's reported prompt tokens (cold-start ~4 chars/token before the first response). Inspect usage via `agent.context_stats` — token figures are provider-reported (`prompt_tokens`); the context-vs-events breakdown is attributed by character share and `ctx N%` is measured against the usable window.
 
-**Dead/stale knobs**: `max_event_tokens` and `min_preserved_events` are read by nothing — events are never evicted by the renderer. `docs/guides/truncation.md` documents a removed field schema (`max_block_chars`, `max_stdout_chars`, ...) — trust `config/truncation_config.py`, not that guide.
+**Dead/stale knobs**: `max_event_tokens` and `min_preserved_events` are read by nothing — events are never evicted by the renderer. Older notes may mention removed flat fields such as `max_block_chars` or `max_stdout_chars`; trust `config/truncation_config.py`.
 
 ## Restricting generated code (`RestrictionsConfig`)
 

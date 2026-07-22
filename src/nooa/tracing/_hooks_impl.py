@@ -139,7 +139,7 @@ class SpanKind:
 
 
 # Viewer plugin hint attribute — tells the trace viewer which rendering plugin to use.
-# The attribute name is an arbitrary convention; see docs/trace-plugin-convention.md.
+# The attribute name is an arbitrary convention shared by exporters and the viewer.
 VIEWER_PLUGIN_ATTR = "nooa.viewer.plugin"
 
 
@@ -583,9 +583,8 @@ class OpenInferenceHooks:
             span.set_status(Status(StatusCode.OK))
             try:
                 # JSON-encoded {stdout, stderr, returned_value} — gives the
-                # ATIF exporter a parseable observation source. See
-                # ``.development/docs/design/issue-215-atif-v1.7-compliance.md``
-                # (F1a). Falls back to the generic repr serializer when the
+                # ATIF exporter a parseable observation source. Falls back to
+                # the generic repr serializer when the
                 # result doesn't look like an ExecutionResult.
                 if any(hasattr(result, attr) for attr in ("stdout", "stderr", "returned_value")):
                     result_str = self._safe_serialize_execution_result(result)

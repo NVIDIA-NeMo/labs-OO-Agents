@@ -121,7 +121,7 @@ class MyAgent(MemoryToolsMixin, Agent, llm=llm): ...
 MemoryManager.install(agent, config=MemoryConfig(enabled=True))
 ```
 
-See `docs/design/memory-system/design.md` and `examples/advanced/memory.py`.
+See `examples/advanced/memory.py` and `examples/quickstart/12_memory.py`.
 
 ## Pitfalls
 

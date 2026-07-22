@@ -134,7 +134,7 @@ async def analyze(self, text: str) -> Analysis:
 
 - Prefer a typed `BaseModel` over raw `dict`/`list` — it gives the LLM a schema to target.
 - For an annotated free-form string: `-> Annotated[str, "Your answer"]`.
-- When the LLM generates code, validate it in the model: a `@field_validator` that calls `ast.parse()` turns syntax errors into automatic retries (see `docs/guides/structured-output.md`).
+- When the LLM generates code, validate it in the model: a `@field_validator` that calls `ast.parse()` turns syntax errors into automatic retries.
 - Types used in signatures must be defined or imported at **module level** so they exist in the CodeAct execution namespace.
 
 ## Strategies
@@ -227,6 +227,6 @@ Most bugs are visible in the rendered prompt. For runtime behavior, capture trac
 
 ## Where to look
 
-- Guides: `docs/guides/prompt-mechanics.md`, `strategies.md`, `structured-output.md`, `writing-generation-methods.md`, `single-vs-multi-agent.md`.
+- Examples: `examples/README.md` and `examples/quickstart/`.
 - Runnable examples: `examples/quickstart/01`–`15`.
 - Related skills: `nooa-codeact-advanced`, `nooa-context-and-state`, `nooa-tools-and-skills`, `nooa-agentdoc`, `nooa-channels`, `nooa-capturing-traces`, `nooa-trace-viewer`, `nooa-trace-explorer`.

@@ -13,7 +13,7 @@ need no LLM and run by default:
 
 An optional ``reasoner`` callable enables the generative abstraction step (abstract
 episodes -> skills); when absent that step is skipped so reflection stays fully
-offline-testable. See ``docs/design/memory-system/design.md`` §4.2.4.
+offline-testable.
 """
 
 from __future__ import annotations

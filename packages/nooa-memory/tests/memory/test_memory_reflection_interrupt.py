@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Interruptible consolidation: per-item stop checks, idempotent resume,
-reasoner gating, and the manager's idle-reflection bookkeeping.
-(Design: docs/design/memory-system/design-idle-reflection.md §4/§9.)"""
+reasoner gating, and the manager's idle-reflection bookkeeping."""
 
 import pytest
 from nooa_memory import (
