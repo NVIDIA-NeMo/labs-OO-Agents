@@ -11,9 +11,9 @@ workspace/project paths explicitly:
 * ``memory_edges``  — the directed, typed association graph.
 
 The vector index is abstracted behind ``VectorIndex`` so the brute-force numpy
-default can later be swapped for ``sqlite-vec`` / Chroma without touching callers
-(``docs/design/memory-system/design.md`` §4.5). The default ``NumpyVectorIndex``
-does exact cosine KNN in memory over L2-normalised vectors.
+default can later be swapped for ``sqlite-vec`` / Chroma without touching callers.
+The default ``NumpyVectorIndex`` does exact cosine KNN in memory over
+L2-normalised vectors.
 """
 
 from __future__ import annotations

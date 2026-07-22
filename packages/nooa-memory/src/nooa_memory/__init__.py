@@ -20,8 +20,6 @@ Quick start::
     agent = MyAgent()
     MemoryManager.install(agent, config=MemoryConfig(enabled=True))
     agent.remember("Deploy with `make ship`.", type="skill", importance="HIGH")
-
-See ``docs/design/memory-system/design.md`` for the full design.
 """
 
 from nooa_memory.config import (

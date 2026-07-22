@@ -1,7 +1,6 @@
 # Nested Agent History Bug Reproduction
 #
 # Tests the bug where nested agent calls cause tool_call_id ordering issues.
-# See docs/bugs/nested-agent-history-ordering-bug.md for details.
 #
 # Run with:
 #   python -m eval_pipeline --config tests/integration/nested_bug/config.yaml

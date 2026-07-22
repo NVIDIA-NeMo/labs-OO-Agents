@@ -11,8 +11,6 @@
 #
 # Debug single test:
 #   nooa eval --config tests/capability/config_phase1.yaml --test sentiment_single --limit 1
-#
-# See: docs/scratch/capability-test-fix-plan.md
 
 name: capability-phase1
 no_cache: true

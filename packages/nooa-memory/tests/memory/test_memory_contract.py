@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The agent-facing contract: the injected guide matches the host's real API,
 recalled lines carry usable ids, and the tool boundary raises instead of
-silently recovering. (Fixes from the dogfooding analysis —
-docs/design/memory-system/agent-facing-memory-description-analysis.md.)"""
+silently recovering."""
 
 import re
 

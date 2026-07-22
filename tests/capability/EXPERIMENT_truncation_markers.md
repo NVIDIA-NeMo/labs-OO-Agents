@@ -1,6 +1,6 @@
 # Experiment: Truncation Marker Comprehension
 
-**Goal.** Find a marker design and an agent schema that LLMs can use *without* a system prompt teaching the format. Inform the design of [Truncation 3.0](../../docs/design/truncation-3.0.md).
+**Goal.** Find a marker design and an agent schema that LLMs can use *without* a system prompt teaching the format. Inform pformat truncation marker design.
 
 **Headline outcome.** Two independent decisions matter, in roughly equal measure:
 
@@ -411,7 +411,6 @@ Flagship models close most of this gap on their own: claude-sonnet hits 100%, ot
 
 ## Related artifacts
 
-- Design doc: [docs/design/truncation-3.0.md](../../docs/design/truncation-3.0.md)
 - Test agent: [tests/capability/agents/truncation_comprehension.py](agents/truncation_comprehension.py)
 - Test config: [tests/capability/config_truncation.yaml](config_truncation.yaml)
 - Test fixtures: `tests/capability/data/truncation_aware_*.jsonl`, `tests/capability/data/truncation_str_v*.jsonl`

@@ -14,7 +14,6 @@ block, and the ``race()`` primitive. Channels still live as direct
 agent attributes for producer/consumer code; the manager is for
 registration + aggregation.
 
-Design doc: docs/design/reactive-agent-queues.md (MR !134).
 """
 
 import asyncio

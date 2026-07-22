@@ -191,7 +191,7 @@ async def task(self, data: str):
     ...
 ```
 
-See `docs/guides/writing-generation-methods.md` for more details.
+For deeper authoring guidance, see `skills/nooa-agent-authoring/SKILL.md`.
 
 ## Python & Dependencies
 
@@ -205,4 +205,3 @@ See `docs/guides/writing-generation-methods.md` for more details.
 ## Experiments
 
 All experiments in `experiments/` **must** have a `README.md` covering: research question, experiment design, key metrics, how to run, and results summary (updated after runs with quantitative findings).
-

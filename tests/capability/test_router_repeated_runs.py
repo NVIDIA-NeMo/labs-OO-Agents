@@ -30,8 +30,6 @@ REMAINING HYPOTHESES:
 2. Timing-dependent ContextVar corruption
 3. Something in real LLM client response handling
 4. Resource exhaustion in file handle caching
-
-See docs/scratch/rca-missing-trace-files.md for full analysis.
 """
 
 import asyncio

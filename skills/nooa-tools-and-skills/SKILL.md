@@ -73,7 +73,7 @@ class MyAgent(Agent, llm=llm):
 - SKILL.md frontmatter: required `name`, `description`; optional `compatibility`, `metadata`, `user-invocable`, `allowed-tools` — Claude-Code-compatible format.
 - Bulk discovery/activation is `SkillRegistry(agent)` + `discover_skills_dirs([...])` / `activate([...])`. **`SkillManager` does not exist** — `README`/`examples/quickstart/10_skills.py` referencing `SkillManager.install(...)` are stale.
 - `@slash_command` on a `Skill` method marks it user-invocable via a host that reads the agent's `slash_commands` queue (see `InteractiveAgent`).
-- Docstring conventions and the full guide: `docs/skills-guide.md`.
+- Docstring conventions: see `skills/nooa-agent-authoring/SKILL.md` and `AGENTS.md`.
 
 ## MCP servers
 
