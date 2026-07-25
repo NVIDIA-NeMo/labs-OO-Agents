@@ -1,14 +1,12 @@
 # `nooa_memory` — long-term memory for agents
 
-An **opt-in, additive, brain-inspired long-term memory subsystem** for NeMo OO
+An **opt-in, additive, brain-inspired long-term memory subsystem** for nooa
 Agents. Toggle it on per agent; it changes no core framework code. Its defining
 idea: **the agent authors and curates its own memories** through native tools —
 rather than a harness extracting them behind the agent's back.
 
-- Full design + cognitive-science grounding: [`docs/design/memory-system/design.md`](../../../docs/design/memory-system/design.md)
-  and the research appendix [`research-notes.md`](../../../docs/design/memory-system/research-notes.md).
 - Runnable demos + measured results: [`examples/memory_bench/`](../../../examples/memory_bench/)
-  and the quickstart [`examples/quickstart/11_memory.py`](../../../examples/quickstart/11_memory.py).
+  and the quickstart [`examples/quickstart/12_memory.py`](../../../examples/quickstart/12_memory.py).
 
 ---
 
@@ -448,5 +446,5 @@ Tests: [`tests/memory/`](../../../tests/memory/).
 - `numpy`/`sqlite-vec` backends are exact/brute-force — fine to ~10⁵ vectors; beyond
   that prefer a Chroma backend.
 
-See [`docs/design/memory-system/design.md`](../../../docs/design/memory-system/design.md)
-for the full rationale, open questions, and cognitive-science references.
+See [`examples/memory_bench/`](../../../examples/memory_bench/) for runnable
+benchmarks and measured behavior.

@@ -1,7 +1,7 @@
 ---
-name: nemo-oo-middleware-hooks
+name: nooa-middleware-hooks
 description: Intercept and observe NVIDIA OO agent execution — middleware via event_manager.intercept() (guardrails, input/output transforms, blocking), event observers via event_manager.on() (react to Task/Error/LLMComplete/turn events), and the InstrumentationHooks protocol for observability backends. Use when adding guardrails, redacting or rewriting prompts, blocking or faking an LLM call or code execution, rate-limiting agent methods, subscribing to lifecycle events, or wiring custom telemetry.
-compatibility: nemo-oo-agents core package
+compatibility: nooa package
 ---
 
 # Middleware and Hooks
@@ -14,7 +14,7 @@ Three interception surfaces, one decision rule:
 | **Observers** | `agent.event_manager.on(event_type, fn)` | no — fire-and-forget after the event is recorded | isolated | per-agent |
 | **InstrumentationHooks** | `set_hooks(obj)` (`nooa.runtime.hooks`) | no — observational timing/tracing pairs | swallowed + logged, overhead metered | one global slot per async context |
 
-Rule of thumb: enforcing or transforming → `intercept()`; reacting → `on()`; building an observability backend → you probably want a tracing exporter (`nemo-oo-capturing-traces`), not raw hooks — the tracing system already occupies the hooks slot.
+Rule of thumb: enforcing or transforming → `intercept()`; reacting → `on()`; building an observability backend → you probably want a tracing exporter (`nooa-capturing-traces`), not raw hooks — the tracing system already occupies the hooks slot.
 
 ## Middleware (`intercept`)
 
@@ -64,7 +64,7 @@ agent.event_manager.on("*", audit)                 # wildcard: every event
 ```
 
 - Useful runtime-only events (never rendered to the model): `BeforeTurn` / `AfterTurn` (per generation turn; `AfterTurn.is_final` marks method completion) and `LLMComplete` (tokens, cost, model_name, tool_calls, reasoning metadata per round-trip — emitted precisely so you don't need `intercept("llm_call")` just to read LLM metrics).
-- Model-visible events (`Task`, `Message`, `Error`, `PythonOutput`, ...) are observable the same way — see `nemo-oo-context-and-state` for the full list.
+- Model-visible events (`Task`, `Message`, `Error`, `PythonOutput`, ...) are observable the same way — see `nooa-context-and-state` for the full list.
 - The summarizers are the house pattern: subscribe to `AfterTurn` to *schedule* work, apply it at the next `BeforeTurn` (`agents/summarization.py:159-160`).
 
 ## InstrumentationHooks (`set_hooks`)
@@ -97,6 +97,6 @@ set_hooks(TimingHooks())   # set_hooks(None) removes
 
 ## Related skills
 
-- `nemo-oo-context-and-state` — the event model that `on()` observes; `EventQuery` filtering.
-- `nemo-oo-capturing-traces` — the tracing system that occupies the hooks slot; exporters are usually the right telemetry surface.
-- `nemo-oo-codeact-advanced` — what `execute_python` middleware wraps (validator pipeline, restrictions, cells).
+- `nooa-context-and-state` — the event model that `on()` observes; `EventQuery` filtering.
+- `nooa-capturing-traces` — the tracing system that occupies the hooks slot; exporters are usually the right telemetry surface.
+- `nooa-codeact-advanced` — what `execute_python` middleware wraps (validator pipeline, restrictions, cells).

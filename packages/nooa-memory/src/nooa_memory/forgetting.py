@@ -9,7 +9,6 @@
   (and which are old enough, not a protected type, and not high-importance) are
   pruned — archived (tombstoned) by default, or hard-deleted.
 
-See ``docs/design/memory-system/design.md`` §4.2.5.
 """
 
 from __future__ import annotations

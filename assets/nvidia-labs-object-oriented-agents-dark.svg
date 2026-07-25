@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200"
+     height="120"
+     viewBox="0 0 1200 120"
+     role="img"
+     aria-labelledby="title desc">
+  <title id="title">NVIDIA-labs Object Oriented Agents</title>
+  <desc id="desc">Single-line wordmark with the initials N O O A highlighted in NVIDIA green</desc>
+
+  <style>
+    .wordmark {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      font-size: 54px;
+      font-weight: 700;
+      letter-spacing: -0.8px;
+    }
+    .accent { fill: #76B900; }
+    .normal { fill: #F0F6FC; }
+  </style>
+
+  <text x="600" y="78" text-anchor="middle" class="wordmark">
+    <tspan class="accent">N</tspan><tspan class="normal">VIDIA-labs </tspan><tspan class="accent">O</tspan><tspan class="normal">bject </tspan><tspan class="accent">O</tspan><tspan class="normal">riented </tspan><tspan class="accent">A</tspan><tspan class="normal">gents</tspan>
+  </text>
+</svg>

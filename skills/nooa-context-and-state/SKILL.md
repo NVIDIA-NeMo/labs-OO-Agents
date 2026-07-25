@@ -1,7 +1,7 @@
 ---
-name: nemo-oo-context-and-state
+name: nooa-context-and-state
 description: Manage what a NVIDIA OO agent sees and remembers — context blocks, event history and queries, history summarization, and persistent memory/storage. Use when pinning information into the system prompt, querying past events, bounding context growth in long conversations, or persisting agent state.
-compatibility: nemo-oo-agents core package
+compatibility: nooa package
 ---
 
 # Context, Events, and State
@@ -121,7 +121,7 @@ class MyAgent(MemoryToolsMixin, Agent, llm=llm): ...
 MemoryManager.install(agent, config=MemoryConfig(enabled=True))
 ```
 
-See `docs/design/memory-system/design.md` and `examples/advanced/memory.py`.
+See `examples/advanced/memory.py` and `examples/quickstart/12_memory.py`.
 
 ## Pitfalls
 
@@ -132,5 +132,5 @@ See `docs/design/memory-system/design.md` and `examples/advanced/memory.py`.
 
 ## Related skills
 
-- `nemo-oo-agent-authoring` — the core authoring model this builds on.
-- `nemo-oo-capturing-traces` — events vs spans: traces are the observability view of the same run.
+- `nooa-agent-authoring` — the core authoring model this builds on.
+- `nooa-capturing-traces` — events vs spans: traces are the observability view of the same run.

@@ -1,7 +1,7 @@
 ---
-name: nemo-oo-capturing-traces
+name: nooa-capturing-traces
 description: Capture execution traces from NVIDIA OO Agents. Use when instrumenting an agent run, writing traces to JSONL files, sending traces to the viewer or an OTLP/Langfuse/Phoenix backend, controlling which methods are traced, or when traces are mysteriously missing.
-compatibility: nemo-oo-agents core package; the [tracing] extra (opentelemetry + openinference) for exporters
+compatibility: nooa package; the [tracing] extra (opentelemetry + openinference) for exporters
 ---
 
 # Capturing Traces
@@ -105,7 +105,7 @@ Files are OTLP JSON Lines: each line is one `{"resourceSpans": [...]}` object. T
 
 ## Pitfalls
 
-- **Do NOT use** `from openinference_instrumentation_nemo_oo_agents import enable_tracing` or `enable_tracing(trace_dir=...)` — both appear in older docs/comments but do not exist. Tracing lives in `nooa.tracing`; `trace_dir` is an argument of `exporters.jsonl()`, and `enable_tracing()` returns `None`.
+- **Do NOT use** legacy OpenInference instrumentation imports or `enable_tracing(trace_dir=...)` — both appear in older docs/comments but do not exist. Tracing lives in `nooa.tracing`; `trace_dir` is an argument of `exporters.jsonl()`, and `enable_tracing()` returns `None`.
 - Auto-tracing is attempted once per process. If the viewer wasn't running when the first `Agent` was constructed, later agents won't retry — call `enable_tracing(...)` explicitly or restart with the viewer up.
 - For short scripts, call `flush_traces()` before exit; batch exporters flush on a ~1s schedule and a fast exit can drop the tail of a trace.
 - Logic that runs *outside* agent methods (module-level preprocessing, `main()` helpers) is invisible in traces. Keep interesting logic inside agent methods so failures leave trace evidence.
@@ -123,5 +123,5 @@ flush_traces()
 
 ## Related skills
 
-- `nemo-oo-trace-viewer` — run the web viewer and browse captured traces.
-- `nemo-oo-trace-explorer` — programmatic/CLI trace analysis and root-cause debugging.
+- `nooa-trace-viewer` — run the web viewer and browse captured traces.
+- `nooa-trace-explorer` — programmatic/CLI trace analysis and root-cause debugging.

@@ -1,8 +1,7 @@
-# NeMo OO Agents — Examples
+# NVIDIA OO Agents — Examples
 
 A progressive tour of the framework. Each step is a standalone, copy-paste-runnable file under [`quickstart/`](quickstart/).
 
-> The examples use `from nooa.util.quickstart import *`, which bundles common imports (`Agent`, `llm`, `BaseModel`, `strategy`, `autorun`, …) for brevity.
 
 **Contents**
 
@@ -58,7 +57,7 @@ llm = get_llm_client("gemini/gemini-2.5-flash")     # Google (needs GEMINI_API_K
 
 Provider packages can register bundled model aliases automatically through the `nooa.bundled_configs` entry-point group. To customize the registry, run `nooa config eject`, drop an `llm_config.yaml` in your project's `.nooa/`, or point `NEMO_OO_LLM_CONFIG` at one or more YAML files. See [`src/nooa/unifiedllm/registry.py`](../src/nooa/unifiedllm/registry.py) for the YAML schema.
 
-> **Key insight.** In NeMo OO Agents, your method name, parameters, and docstring ARE the prompt. Rename `analyze_feedback` to `analyze_feedback_briefly` or `give_detailed_feedback_analysis` — the output changes accordingly, without touching any other code.
+> **Key insight.** In NVIDIA OO Agents, your method name, parameters, and docstring ARE the prompt. Rename `analyze_feedback` to `analyze_feedback_briefly` or `give_detailed_feedback_analysis` — the output changes accordingly, without touching any other code.
 
 ```bash
 uv run python examples/quickstart/01_first_generation_method.py
@@ -66,7 +65,7 @@ uv run python examples/quickstart/01_first_generation_method.py
 
 ## Step 2: Structured outputs
 
-Use any Pydantic model as the return type. NeMo OO Agents validates outputs and auto-retries on error; the LLM sees the validation message and corrects itself.
+Use any Pydantic model as the return type. NVIDIA OO Agents validates outputs and auto-retries on error; the LLM sees the validation message and corrects itself.
 
 ```python
 from typing import Literal

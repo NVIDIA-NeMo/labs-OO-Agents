@@ -191,7 +191,7 @@ async def task(self, data: str):
     ...
 ```
 
-See `docs/guides/writing-generation-methods.md` for more details.
+For deeper authoring guidance, see `skills/nooa-agent-authoring/SKILL.md`.
 
 ## Python & Dependencies
 
@@ -215,4 +215,3 @@ Standard commands live in `README.md` / `CONTRIBUTING.md` (`uv sync --group dev`
 - **Tests.** `uv run pytest -m "not integration and not stress"` is the default suite (~6500 tests, ~3 min). The `integration` marker makes real LLM API calls and needs a provider key; leave it deselected unless a key is set.
 - **LLM key needed for generation methods / examples.** Generation methods (`...` bodies) and the `examples/quickstart/*.py` scripts call a real provider. Set one of `NVIDIA_API_KEY`, `OPENAI_API_KEY`, or `NVIDIA_INFERENCE_API_KEY` (selection logic in `src/nooa/util/quickstart.py`); without a key the examples raise a clear missing-key error. Deterministic (non-`...`) agent methods run without any key, but an `Agent` subclass still requires an `llm=` client at construction even if it never calls it (e.g. `get_llm_client("gpt-5-mini")` — no API call happens until a generation method runs).
 - **Trace viewer.** `uv run nooa start-dev` serves the trace + eval viewer at http://localhost:5001 and receives OTLP at `/v1/traces`. When it is running, agent tracing auto-exports to it (no config); when nothing listens, tracing is silently disabled. Trace DB is `~/.config/nooa/traces.db`.
-

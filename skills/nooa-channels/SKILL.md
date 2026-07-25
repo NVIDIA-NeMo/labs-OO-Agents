@@ -1,7 +1,7 @@
 ---
-name: nemo-oo-channels
+name: nooa-channels
 description: Reactive input for NVIDIA OO agents — Channel/QueueManager for queued and event-mode input, race() turn dispatch, spawn() background jobs with JobHandle, and the bundled producers (monitor a shell command, cron ticks, one-shot timers, file tails). Use when an agent must react to external input mid-run — user messages, CI output, timers, job completions — or when building an interactive/long-running agent loop.
-compatibility: nemo-oo-agents core package
+compatibility: nooa package
 ---
 
 # Channels: Reactive Agent Input
@@ -76,11 +76,11 @@ qm.spawn(run_job(some_coro(), job_id="batch-7"), channel="jobs")    # {"job_id":
 - `QueueManager` is hidden from the LLM by default; expose deliberately (`spec(self, "queue_manager", hidden=False)`) or, better, expose only the `reader` attributes and keep `put`/`spawn` on the Python side.
 - Registration order is priority order for `race()` — register the highest-priority channel (usually user messages) first.
 - Don't `await channel.get()` (producer object) from LLM code — give the LLM the `.reader`, whose `get(timeout=...)` can't deadlock a cell.
-- The dispatcher belongs in a pure-Python orchestrator method (`run()` above) — see "Orchestrators are pure Python" in `nemo-oo-agent-authoring`.
+- The dispatcher belongs in a pure-Python orchestrator method (`run()` above) — see "Orchestrators are pure Python" in `nooa-agent-authoring`.
 - `spawn()` requires the channel to already exist (`ValueError` otherwise).
 
 ## Related skills
 
-- `nemo-oo-agent-authoring` — the orchestrator pattern the dispatch loop lives in.
-- `nemo-oo-context-and-state` — `QueueOutput`/`StreamEnd`/`JobError` are events; query them like any others.
-- `nemo-oo-middleware-hooks` — `on()` observers if you only need to react to recorded events, not consume input.
+- `nooa-agent-authoring` — the orchestrator pattern the dispatch loop lives in.
+- `nooa-context-and-state` — `QueueOutput`/`StreamEnd`/`JobError` are events; query them like any others.
+- `nooa-middleware-hooks` — `on()` observers if you only need to react to recorded events, not consume input.

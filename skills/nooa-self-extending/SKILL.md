@@ -1,7 +1,7 @@
 ---
-name: nemo-oo-self-extending
+name: nooa-self-extending
 description: Let NVIDIA OO agents extend themselves — persistent skill libraries the agent writes and hot-reloads (SkillWriting / self.libs, LibraryManager), in-cell helper functions and standalone @strategy sub-calls (MethodWriting), and @slash_command user actions. Use when an agent should accumulate reusable code across sessions, define its own helpers or LLM-powered sub-functions at runtime, or ship user-typed /commands from a skill.
-compatibility: nemo-oo-agents core package
+compatibility: nooa package
 ---
 
 # Self-Extending Agents
@@ -33,7 +33,7 @@ return_result(codes)
 
 Standalone functions (`nooa.standalone`) are `@strategy`-decorated async functions **without `self`** — each call runs on a fresh agent stub (no shared state, history discarded after the call; context blocks via the decorator's `ScopedContext`, `llm=` via the decorator or inherited from the calling context). They work in module code too, not just generated cells — the lightest way to get an LLM-powered function without defining an Agent class.
 
-Helpers defined in cells persist as REPL locals for the rest of the method call but are never attached to the agent (attaching callables to `self` is validator-rejected — see `nemo-oo-codeact-advanced`).
+Helpers defined in cells persist as REPL locals for the rest of the method call but are never attached to the agent (attaching callables to `self` is validator-rejected — see `nooa-codeact-advanced`).
 
 ## Persistent libraries (`SkillWriting` / `self.libs`)
 
@@ -86,6 +86,6 @@ class MySkill(Skill):
 
 ## Related skills
 
-- `nemo-oo-tools-and-skills` — the Skill/TextSkill/SkillRegistry model these libraries plug into.
-- `nemo-oo-codeact-advanced` — the validator rules that shape what generated code may define.
-- `nemo-oo-agent-authoring` — standalone `@strategy` functions share generation-method semantics (docstring prompt, return-type contract).
+- `nooa-tools-and-skills` — the Skill/TextSkill/SkillRegistry model these libraries plug into.
+- `nooa-codeact-advanced` — the validator rules that shape what generated code may define.
+- `nooa-agent-authoring` — standalone `@strategy` functions share generation-method semantics (docstring prompt, return-type contract).

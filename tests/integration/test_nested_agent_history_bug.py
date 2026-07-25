@@ -9,8 +9,6 @@ Bug: When outer execute_python code calls a nested agent method, the tool
 result for execute_python is added AFTER the nested agent's events. This
 violates OpenAI/Gemini's requirement that tool results reference tool_call_ids
 from the immediately preceding assistant message.
-
-See: docs/bugs/nested-agent-history-ordering-bug.md
 """
 
 import json

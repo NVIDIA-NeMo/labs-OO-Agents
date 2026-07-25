@@ -407,6 +407,9 @@ def spa_catchall(request: Request, path: str):
 if __name__ == "__main__":
     import uvicorn
 
-    port = int(os.environ.get("NEMO_OO_TRACE_VIEWER_PORT", "5001"))
+    port = int(
+        os.environ.get("NOOA_TRACE_VIEWER_PORT")
+        or os.environ.get("NEMO_OO_TRACE_VIEWER_PORT", "5001")
+    )
     log.info("Starting viewer on port %d", port)
     uvicorn.run(app, host="0.0.0.0", port=port)

@@ -10,8 +10,6 @@ explicit `<preview>...</preview>` and `<truncated>...</truncated>` wrappers).
 The hypothesis: small LLMs (Haiku, Gemini Flash, Nemotron Nano, Qwen 35B)
 should improve on the `after` fixtures relative to `before`. If they
 don't, the proposed marker design isn't earning its complexity.
-
-See docs/design/truncation-3.0.md.
 """
 
 from typing import Annotated

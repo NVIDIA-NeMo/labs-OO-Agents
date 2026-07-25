@@ -1,7 +1,7 @@
 ---
-name: nemo-oo-trace-viewer
+name: nooa-trace-viewer
 description: Run and use the NVIDIA OO Agents trace viewer — the web UI + OTLP receiver for browsing agent traces and eval results. Use when starting the viewer, importing/exporting/deleting traces, querying the viewer's REST API, or wiring an agent run so traces show up at localhost:5001.
-compatibility: nemo-oo-agents with the [viewer] extra (fastapi, uvicorn); nemo-oo-agents-cli for the `nooa` commands
+compatibility: nooa package with the [viewer] extra (fastapi, uvicorn); nooa-cli for the `nooa` commands
 ---
 
 # Trace Viewer
@@ -19,14 +19,14 @@ nooa start-dev --host 127.0.0.1                 # default host is 0.0.0.0
 
 Stop with Ctrl-C. If deps are missing: `uv sync --extra viewer`. If the port is busy, the command reports the offending PID.
 
-- **Database resolution**: `--db` > `$NEMO_OO_TRACE_DB` > `~/.config/nooa/traces.db`.
-- Alternate entry point: `python -m nooa.viewer` (this path honors `$NEMO_OO_TRACE_VIEWER_PORT`, default 5001; `start-dev` uses `--port` instead). DB default for the raw module is `./traces.db` — prefer `start-dev`.
+- **Database resolution**: `--db` > `$NOOA_TRACE_DB` > `~/.config/nooa/traces.db`.
+- Alternate entry point: `python -m nooa.viewer` (this path honors `$NOOA_TRACE_VIEWER_PORT`, default 5001; `start-dev` uses `--port` instead). DB default for the raw module is `./traces.db` — prefer `start-dev`.
 
 ## End-to-end workflow
 
 ```bash
 nooa start-dev                                # terminal 1
-uv run python my_agent.py                        # terminal 2 — auto-traced (see nemo-oo-capturing-traces)
+uv run python my_agent.py                        # terminal 2 — auto-traced (see nooa-capturing-traces)
 open http://localhost:5001/traces                # browse the session
 ```
 
@@ -90,17 +90,17 @@ Base: `http://localhost:5001`. Most useful endpoints:
 | `GET /api/eval/experiment/{id}/summary`, `.../tests` | eval results |
 | `POST /v1/traces` | OTLP JSON ingest (what agents/import use) |
 | `POST /v1/sync` | block until the ingest queue is drained (use before reading back a just-finished run) |
-| `GET /api/explorer/*` | structured analysis endpoints — use via `TraceExplorerClient` (see `nemo-oo-trace-explorer`) |
+| `GET /api/explorer/*` | structured analysis endpoints — use via `TraceExplorerClient` (see `nooa-trace-explorer`) |
 
 Ingestion is queued and written by a single background writer, so a `GET` immediately after a run may miss the tail — `POST /v1/sync` first when scripting.
 
 ## Pitfalls
 
-- `nooa start-dev` resolves the DB and sets `NEMO_OO_TRACE_DB` in its own environment before starting uvicorn (same process); a *separately launched* `python -m nooa.viewer` without that var uses `./traces.db` in the CWD — easy way to "lose" traces into a second DB.
+- `nooa start-dev` resolves the DB and sets `NOOA_TRACE_DB` in its own environment before starting uvicorn (same process); a *separately launched* `python -m nooa.viewer` without that var uses `./traces.db` in the CWD — easy way to "lose" traces into a second DB.
 - The viewer refuses to start (exit 1) if the SQLite DB is locked by another viewer instance — check for an already-running `start-dev`.
-- Old docs mention `packages/nemo-oo-agents-viewer/` and a `nooa viewer` subcommand; the viewer now lives in `src/nooa/viewer/` and `nooa start-dev` is the canonical command.
+- Old docs mention a separate viewer package and a `nooa viewer` subcommand; the viewer now lives in `src/nooa/viewer/` and `nooa start-dev` is the canonical command.
 
 ## Related skills
 
-- `nemo-oo-capturing-traces` — how spans get produced and exported.
-- `nemo-oo-trace-explorer` — programmatic trace analysis (CLI + Python) on top of files or this viewer.
+- `nooa-capturing-traces` — how spans get produced and exported.
+- `nooa-trace-explorer` — programmatic trace analysis (CLI + Python) on top of files or this viewer.

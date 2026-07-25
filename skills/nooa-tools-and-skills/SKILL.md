@@ -1,7 +1,7 @@
 ---
-name: nemo-oo-tools-and-skills
+name: nooa-tools-and-skills
 description: Give a NVIDIA OO agent capabilities — methods as tools, built-in tools (ShellTools, TodoManager), MCP servers, agent skills (Skill/TextSkill/SkillRegistry), and multimodal media. Use when adding tools or external integrations to an agent, wiring MCP, or packaging reusable guidance as an agent skill.
-compatibility: nemo-oo-agents core package; [mcp] extra for MCP
+compatibility: nooa package; [mcp] extra for MCP
 ---
 
 # Tools, Skills, and Integrations
@@ -73,11 +73,11 @@ class MyAgent(Agent, llm=llm):
 - SKILL.md frontmatter: required `name`, `description`; optional `compatibility`, `metadata`, `user-invocable`, `allowed-tools` — Claude-Code-compatible format.
 - Bulk discovery/activation is `SkillRegistry(agent)` + `discover_skills_dirs([...])` / `activate([...])`. **`SkillManager` does not exist** — `README`/`examples/quickstart/10_skills.py` referencing `SkillManager.install(...)` are stale.
 - `@slash_command` on a `Skill` method marks it user-invocable via a host that reads the agent's `slash_commands` queue (see `InteractiveAgent`).
-- Docstring conventions and the full guide: `docs/skills-guide.md`.
+- Docstring conventions: see `skills/nooa-agent-authoring/SKILL.md` and `AGENTS.md`.
 
 ## MCP servers
 
-Core library keeps MCP optional: `uv sync --extra mcp` (or `uv add 'nemo-oo-agents[mcp]'`).
+Core library keeps MCP optional: `uv sync --extra mcp` (or `uv add 'nooa[mcp]'`).
 
 ```python
 from nooa.mcp import MCPManager
@@ -120,5 +120,5 @@ Only works with multimodal-capable models — text-only models error when handed
 
 ## Related skills
 
-- `nemo-oo-agent-authoring` — visibility rules and method design that make tools discoverable.
-- `nemo-oo-capturing-traces` — every tool invocation becomes a `tool_execution.*` span you can inspect.
+- `nooa-agent-authoring` — visibility rules and method design that make tools discoverable.
+- `nooa-capturing-traces` — every tool invocation becomes a `tool_execution.*` span you can inspect.

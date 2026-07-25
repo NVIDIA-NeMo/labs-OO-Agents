@@ -11,7 +11,6 @@ Flow:
 3. If satisfactory → return result
 4. If not → add reflection feedback to events, repeat
 
-Design: docs/methodic006/overview.md
 Inspired by: Methodic's Reflexion strategy
 """
 

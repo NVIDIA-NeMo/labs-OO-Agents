@@ -11,9 +11,6 @@ When max_length fires, pformat emits a `type(len=N, ...)` marker:
 
 Untruncated values render as plain Python literals (`[1, 2, 3]`, `{1: 2}`,
 etc.) — the marker's *presence* is the truncation signal.
-
-See ``docs/design/truncation-3.0-experiment-summary.md`` for the format-choice
-rationale and the matrix data behind it.
 """
 
 import re

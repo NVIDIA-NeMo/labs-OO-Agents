@@ -14,7 +14,6 @@ Includes:
 Debug Features:
 - Set DEBUG_JUDGE_INPUT=./tmp/judge_debug to dump judge inputs to files
 - Set DEBUG_JUDGE_VERBOSE=1 for additional debug prints
-- See docs/debug-llm-judge.md for details
 """
 
 from __future__ import annotations

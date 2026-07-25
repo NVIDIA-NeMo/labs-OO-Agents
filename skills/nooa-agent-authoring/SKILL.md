@@ -1,7 +1,7 @@
 ---
-name: nemo-oo-agent-authoring
+name: nooa-agent-authoring
 description: Author agents with the NVIDIA OO Agents (nooa) framework. Use when writing or modifying an Agent subclass, agentic methods (ellipsis bodies), docstring prompts, structured output contracts, strategy selection (CodeAct/Predict), visibility control, orchestrators, or subagent composition.
-compatibility: Python >= 3.12, uv, nemo-oo-agents core package (CLI: nooa)
+compatibility: Python >= 3.12, uv, nooa package (CLI: nooa)
 ---
 
 # Authoring NVIDIA OO Agents (nooa)
@@ -104,7 +104,7 @@ async def summarize(self, text: str) -> str:
     ...
 ```
 
-There are cases where `{param}` is appropriate — e.g. when prefill is disabled and you need custom rendering, or when you want to embed a short value directly in the instruction. For advanced prefill and truncation control, see `nemo-oo-codeact-advanced`.
+There are cases where `{param}` is appropriate — e.g. when prefill is disabled and you need custom rendering, or when you want to embed a short value directly in the instruction. For advanced prefill and truncation control, see `nooa-codeact-advanced`.
 
 Template expansion is primarily for values the signature *can't* show: `{self.attr}` instance state and computed expressions like `{len(items)}`. Escape literal braces as `{{ }}`.
 
@@ -134,7 +134,7 @@ async def analyze(self, text: str) -> Analysis:
 
 - Prefer a typed `BaseModel` over raw `dict`/`list` — it gives the LLM a schema to target.
 - For an annotated free-form string: `-> Annotated[str, "Your answer"]`.
-- When the LLM generates code, validate it in the model: a `@field_validator` that calls `ast.parse()` turns syntax errors into automatic retries (see `docs/guides/structured-output.md`).
+- When the LLM generates code, validate it in the model: a `@field_validator` that calls `ast.parse()` turns syntax errors into automatic retries.
 - Types used in signatures must be defined or imported at **module level** so they exist in the CodeAct execution namespace.
 
 ## Strategies
@@ -158,7 +158,7 @@ async def implement(self, task: str) -> str: ...
 
 **Constructors take `config=` only.** `PredictStrategy(max_retries=3)` and `CodeActStrategy(max_iterations=10)` are errors — wrap options in `PredictConfig(...)`/`CodeActConfig(...)`. Useful `CodeActConfig` fields: `max_iterations`, `max_retries`, `cell_timeout`, `max_tokens`, `temperature`, `max_consecutive_text_only`, `restrictions`.
 
-`max_iterations` is a safety net, not the main tuning dial — decompose the task instead of raising the cap. For prefill control, truncation tuning, code restrictions, and the full config surface, see `nemo-oo-codeact-advanced`.
+`max_iterations` is a safety net, not the main tuning dial — decompose the task instead of raising the cap. For prefill control, truncation tuning, code restrictions, and the full config surface, see `nooa-codeact-advanced`.
 
 **Reserved parameter:** naming an agentic method parameter `reasoning` raises `ValueError` at class creation (chain-of-thought is provided via the injected `reasoning()` builtin instead).
 
@@ -196,8 +196,8 @@ class SearchAgent(Agent, llm=llm):
 - **Hide the entry-point agentic method** (`@hidden` on `run`/`respond`) when the LLM might recursively call itself through `doc(self)`.
 - Never hide a method the LLM must call as a tool.
 - Module-level imports are the LLM's execution namespace: if generated code needs `json.loads`, `import json  # noqa: F401` at the top of the agent file.
-- `self.context` / `self.events` are always present but hidden; expose with `spec(self, "context", hidden=False)` in `__init__` (see `nemo-oo-context-and-state`).
-- Making the visible surface render *well* — field descriptions, referenced-type expansion, `pformat` caps — is its own craft: see `nemo-oo-agentdoc`.
+- `self.context` / `self.events` are always present but hidden; expose with `spec(self, "context", hidden=False)` in `__init__` (see `nooa-context-and-state`).
+- Making the visible surface render *well* — field descriptions, referenced-type expansion, `pformat` caps — is its own craft: see `nooa-agentdoc`.
 
 ## Orchestration and decomposition
 
@@ -223,10 +223,10 @@ enable_logging(level="DEBUG")                    # nooa.* logger hierarchy
 # kill -USR2 <pid>                               # dump traceback + all registered cells to debug_dump_<pid>.txt
 ```
 
-Most bugs are visible in the rendered prompt. For runtime behavior, capture traces and inspect them — see `nemo-oo-capturing-traces` and `nemo-oo-trace-explorer`.
+Most bugs are visible in the rendered prompt. For runtime behavior, capture traces and inspect them — see `nooa-capturing-traces` and `nooa-trace-explorer`.
 
 ## Where to look
 
-- Guides: `docs/guides/prompt-mechanics.md`, `strategies.md`, `structured-output.md`, `writing-generation-methods.md`, `single-vs-multi-agent.md`.
+- Examples: `examples/README.md` and `examples/quickstart/`.
 - Runnable examples: `examples/quickstart/01`–`15`.
-- Related skills: `nemo-oo-codeact-advanced`, `nemo-oo-context-and-state`, `nemo-oo-tools-and-skills`, `nemo-oo-agentdoc`, `nemo-oo-channels`, `nemo-oo-capturing-traces`, `nemo-oo-trace-viewer`, `nemo-oo-trace-explorer`.
+- Related skills: `nooa-codeact-advanced`, `nooa-context-and-state`, `nooa-tools-and-skills`, `nooa-agentdoc`, `nooa-channels`, `nooa-capturing-traces`, `nooa-trace-viewer`, `nooa-trace-explorer`.

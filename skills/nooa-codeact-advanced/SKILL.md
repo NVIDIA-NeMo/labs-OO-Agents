@@ -1,12 +1,12 @@
 ---
-name: nemo-oo-codeact-advanced
+name: nooa-codeact-advanced
 description: Advanced tuning of NVIDIA OO Agents strategies — CodeAct prefill (understanding, disabling, custom, pre-ellipsis code), loop guards (max_iterations, retries, text-only stop), truncation tuning (TruncationConfig/CaptureConfig/FormatConfig), code restrictions (RestrictionsConfig), execution environment internals, and PredictStrategy tuning (retries, param guards, output_serialization). Use when configuring CodeActConfig or PredictConfig beyond defaults, writing a custom prefill, restricting generated code, or debugging truncation/eviction behavior.
-compatibility: nemo-oo-agents core package
+compatibility: nooa package
 ---
 
 # Advanced CodeAct (and Predict) Tuning
 
-The authoring basics are in `nemo-oo-agent-authoring`. This skill covers the deep configuration surface, verified against `strategies/codeact.py`, `strategies/prefill.py`, `strategies/predict.py`, and `config/`.
+The authoring basics are in `nooa-agent-authoring`. This skill covers the deep configuration surface, verified against `strategies/codeact.py`, `strategies/prefill.py`, `strategies/predict.py`, and `config/`.
 
 ## Config plumbing rules (read first)
 
@@ -74,7 +74,7 @@ Two independent mechanisms — set them separately:
 
 Context budget: `max_context_tokens` — or, when unset and the model exposes a context window, half the *usable* window (`(context_window - reserved_output) // 2`, where `reserved_output` is the call's `max_tokens`, else `TruncationConfig.response_reserve_tokens`, default 4096; setting `response_reserve_tokens=0` disables the auto-derived budget). Over-budget triggers **whole-block eviction** of SYSTEM context blocks — newest non-`static` user blocks first, marked `EVICTED: over context budget` in place. Static framework blocks (`system_prompt`, `self`) are never evicted. No token counter is required: eviction sizes blocks as `chars × ratio`, where the ratio is calibrated from each provider response's reported prompt tokens (cold-start ~4 chars/token before the first response). Inspect usage via `agent.context_stats` — token figures are provider-reported (`prompt_tokens`); the context-vs-events breakdown is attributed by character share and `ctx N%` is measured against the usable window.
 
-**Dead/stale knobs**: `max_event_tokens` and `min_preserved_events` are read by nothing — events are never evicted by the renderer. `docs/guides/truncation.md` documents a removed field schema (`max_block_chars`, `max_stdout_chars`, ...) — trust `config/truncation_config.py`, not that guide.
+**Dead/stale knobs**: `max_event_tokens` and `min_preserved_events` are read by nothing — events are never evicted by the renderer. Older notes may mention removed flat fields such as `max_block_chars` or `max_stdout_chars`; trust `config/truncation_config.py`.
 
 ## Restricting generated code (`RestrictionsConfig`)
 
@@ -124,6 +124,6 @@ Single LLM turn, no tools, no code. The prompt is the docstring plus each parame
 
 ## Related skills
 
-- `nemo-oo-agent-authoring` — the basics this builds on (strategy selection, contracts, visibility).
-- `nemo-oo-context-and-state` — the context blocks that truncation/eviction act on.
-- `nemo-oo-capturing-traces` / `nemo-oo-trace-explorer` — see every prefill cell, tool call, and validation retry in the trace.
+- `nooa-agent-authoring` — the basics this builds on (strategy selection, contracts, visibility).
+- `nooa-context-and-state` — the context blocks that truncation/eviction act on.
+- `nooa-capturing-traces` / `nooa-trace-explorer` — see every prefill cell, tool call, and validation retry in the trace.

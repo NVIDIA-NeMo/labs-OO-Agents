@@ -7,8 +7,6 @@ These tests verify that:
 2. Nested event loop patterns (asyncio.run, run_until_complete) are blocked
 3. The validation integrates correctly with the execution path
 
-See docs/bugs/async-deadlock-patterns.md for background on the issue.
-
 NOTE: These tests are designed to FAIL before the fix is applied,
 demonstrating that the dangerous patterns are not yet blocked.
 After applying the fix, all tests should PASS.

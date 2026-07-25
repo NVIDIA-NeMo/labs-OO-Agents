@@ -1,7 +1,7 @@
 ---
-name: nemo-oo-agentdoc
+name: nooa-agentdoc
 description: Make NVIDIA OO agent types render beautiful documentation for the LLM — doc(), spec(), hidden, Annotated field descriptions, and pformat/pprint tuning. Use when designing Pydantic models/dataclasses the LLM will see, controlling what appears in doc(self), hiding internals, adding field descriptions, fixing noisy or missing type docs, or tuning value truncation.
-compatibility: nemo-oo-agents core package (agentdoc ships inside it — import from nooa.agentdoc)
+compatibility: nooa package (agentdoc ships inside it — import from nooa.agentdoc)
 ---
 
 # agentdoc: Beautiful Docs for the LLM
@@ -139,7 +139,7 @@ dict(len=100, items={0: 0, 1: 1, ..., 99: 99})
 
 - Classes with their own `__repr__` (pandas, numpy) are trusted and rendered via their repr (truncated head/tail if huge).
 - Implement `__instance_values__(self) -> dict[str, Any]` (the `SupportsInstanceValues` protocol) to control exactly which fields an instance renders — omitted keys are hidden.
-- These same knobs are what `TruncationConfig`'s `event_format`/`prefill_format` splat into `pformat` framework-wide — see `nemo-oo-codeact-advanced`.
+- These same knobs are what `TruncationConfig`'s `event_format`/`prefill_format` splat into `pformat` framework-wide — see `nooa-codeact-advanced`.
 
 ## Gotchas
 
@@ -151,6 +151,6 @@ dict(len=100, items={0: 0, 1: 1, ..., 99: 99})
 
 ## Related skills
 
-- `nemo-oo-agent-authoring` — visibility rules in the agent context (`doc(self)`, exec_globals).
-- `nemo-oo-codeact-advanced` — how prefill and truncation configs drive `pprint` of your parameters.
-- `nemo-oo-tools-and-skills` — skill docstring conventions (`doc(self.skill)` is the usage guide).
+- `nooa-agent-authoring` — visibility rules in the agent context (`doc(self)`, exec_globals).
+- `nooa-codeact-advanced` — how prefill and truncation configs drive `pprint` of your parameters.
+- `nooa-tools-and-skills` — skill docstring conventions (`doc(self.skill)` is the usage guide).

@@ -70,7 +70,7 @@ def _find_pid_on_port(port: int) -> str | None:
     type=click.Path(dir_okay=False),
     default=None,
     help="SQLite trace store path. Defaults to ~/.config/nooa/traces.db "
-    "(or $NEMO_OO_TRACE_DB if set). Pass an explicit path to run a second viewer "
+    "(or $NOOA_TRACE_DB if set). Pass an explicit path to run a second viewer "
     "side-by-side with the default one.",
 )
 def command(port: int, host: str, db_path_opt: str | None):
@@ -80,16 +80,19 @@ def command(port: int, host: str, db_path_opt: str | None):
 
     from nooa.paths import get_user_dir
 
-    # Resolve the DB path with --db winning, then $NEMO_OO_TRACE_DB, then the
-    # user-dir default. Set NEMO_OO_TRACE_DB unconditionally so the viewer
-    # module picks it up at import time (it reads the env var at the top).
+    # Resolve the DB path with --db winning, then $NOOA_TRACE_DB, then the
+    # legacy $NEMO_OO_TRACE_DB, then the user-dir default. Set both env vars
+    # unconditionally so the viewer module picks it up at import time.
     if db_path_opt:
         db_path = Path(db_path_opt).expanduser().resolve()
+    elif "NOOA_TRACE_DB" in os.environ:
+        db_path = Path(os.environ["NOOA_TRACE_DB"]).expanduser().resolve()
     elif "NEMO_OO_TRACE_DB" in os.environ:
         db_path = Path(os.environ["NEMO_OO_TRACE_DB"]).expanduser().resolve()
     else:
         db_path = get_user_dir("traces.db")
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    os.environ["NOOA_TRACE_DB"] = str(db_path)
     os.environ["NEMO_OO_TRACE_DB"] = str(db_path)
 
     try:
@@ -97,7 +100,7 @@ def command(port: int, host: str, db_path_opt: str | None):
     except ImportError:
         click.secho(
             "Error: viewer dependencies are not installed.\n"
-            'Install them with:  uv add "nemo-oo-agents[viewer]"',
+            'Install them with:  uv add "nooa[viewer]"',
             fg="red",
             err=True,
         )

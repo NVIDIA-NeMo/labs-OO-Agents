@@ -11,7 +11,6 @@ first, then weighted) plus an associative-spread term over the graph:
     S_base   = a_rel*rel^ + a_rec*rec^ + a_imp*imp^
     Act(n)   = S_base(n) + spread over k hops (decayed per hop)
 
-See ``docs/design/memory-system/design.md`` §4.3.
 """
 
 from __future__ import annotations
