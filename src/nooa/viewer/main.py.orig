@@ -8,20 +8,16 @@ for client-side routing.
 """
 
 import asyncio
-import hmac
-import ipaddress
-import json
 import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from urllib.parse import urlencode
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.requests import ClientDisconnect
 from starlette.staticfiles import StaticFiles
 
@@ -48,15 +44,8 @@ log = logging.getLogger(__name__)
 # at a time, the event loop is never blocked, and HTTP latency is near-zero.
 # ---------------------------------------------------------------------------
 
-_INGEST_QUEUE_MAXSIZE = int(os.environ.get("NOOA_VIEWER_INGEST_QUEUE_MAXSIZE", "16"))
-_MAX_OTLP_BODY_BYTES = int(os.environ.get("NOOA_VIEWER_MAX_OTLP_BODY_BYTES", str(8 * 1024 * 1024)))
-_MAX_JOURNAL_BODY_BYTES = int(
-    os.environ.get("NOOA_VIEWER_MAX_JOURNAL_BODY_BYTES", str(2 * 1024 * 1024))
-)
-_MAX_JOURNAL_ITEMS = int(os.environ.get("NOOA_VIEWER_MAX_JOURNAL_ITEMS", "1000"))
-
-_ingest_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=_INGEST_QUEUE_MAXSIZE)
-_QUEUE_WARN_THRESHOLD = max(1, _INGEST_QUEUE_MAXSIZE * 3 // 4)
+_ingest_queue: asyncio.Queue[bytes] = asyncio.Queue()
+_QUEUE_WARN_THRESHOLD = 500  # log a warning if the backlog grows this large
 
 # Single-writer thread pool: exactly one thread owns the write connection.
 # Using max_workers=1 ensures serial SQLite writes with no concurrent access.
@@ -67,77 +56,6 @@ _write_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sqlite-w
 
 _INGEST_MAX_BATCH = 32  # max payloads to commit in one SQLite transaction
 
-_AUTH_TOKEN_ENV = "NOOA_VIEWER_AUTH_TOKEN"
-_AUTH_COOKIE_NAME = "nooa_viewer_auth"
-_PUBLIC_PATHS = frozenset({"/api/eval/health"})
-
-
-def is_loopback_host(host: str) -> bool:
-    """Return whether a bind host is limited to the local machine."""
-    if host.lower() == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
-def ensure_viewer_bind_is_safe(host: str) -> None:
-    """Reject remote binds unless the operator configured bearer-token auth."""
-    if not is_loopback_host(host) and not os.environ.get(_AUTH_TOKEN_ENV):
-        raise ValueError(
-            f"Refusing to bind viewer to {host!r} without {_AUTH_TOKEN_ENV}. "
-            "Set a strong token or bind to 127.0.0.1."
-        )
-
-
-def _configured_auth_token() -> str | None:
-    token = os.environ.get(_AUTH_TOKEN_ENV, "").strip()
-    return token or None
-
-
-def _request_auth_token(request: Request) -> str | None:
-    auth = request.headers.get("authorization", "")
-    scheme, _, value = auth.partition(" ")
-    if scheme.lower() == "bearer" and value:
-        return value
-    return request.cookies.get(_AUTH_COOKIE_NAME)
-
-
-async def _read_limited_body(request: Request, max_bytes: int) -> bytes:
-    """Read a request body without allowing an unbounded allocation."""
-    content_length = request.headers.get("content-length")
-    if content_length:
-        try:
-            if int(content_length) > max_bytes:
-                raise HTTPException(status_code=413, detail="Request body too large")
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid Content-Length header") from None
-
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > max_bytes:
-            raise HTTPException(status_code=413, detail="Request body too large")
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
-async def _read_limited_json(request: Request, max_bytes: int) -> object:
-    body = await _read_limited_body(request, max_bytes)
-    try:
-        return json.loads(body)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
-
-
-def _validate_journal_items(body: object) -> list[dict]:
-    if not isinstance(body, list):
-        raise HTTPException(status_code=400, detail="Body must be a list of objects")
-    if len(body) > _MAX_JOURNAL_ITEMS:
-        raise HTTPException(status_code=413, detail="Too many journal items")
-    return body
 
 async def _ingest_worker() -> None:
     """Drain _ingest_queue, writing batches to SQLite in a dedicated writer thread.
@@ -228,44 +146,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="NVIDIA OO Agents Viewer", version="2.0.0", lifespan=lifespan)
 
-
-@app.middleware("http")
-async def viewer_auth_middleware(request: Request, call_next):
-    """Require a configured bearer token for API, ingest, and SPA requests.
-
-    Local loopback usage remains frictionless when no token is configured. A
-    remote bind is rejected at startup unless a token exists, so enabling this
-    middleware is mandatory for the only remotely reachable mode.
-    """
-    expected = _configured_auth_token()
-    if expected is None or request.url.path in _PUBLIC_PATHS:
-        return await call_next(request)
-
-    supplied = _request_auth_token(request)
-    if supplied is not None and hmac.compare_digest(supplied, expected):
-        return await call_next(request)
-
-    query_token = request.query_params.get("token")
-    is_spa_get = request.method == "GET" and not request.url.path.startswith(("/api/", "/v1/"))
-    if is_spa_get and query_token is not None and hmac.compare_digest(query_token, expected):
-        query = [(k, v) for k, v in request.query_params.multi_items() if k != "token"]
-        target = str(request.url.replace(query=urlencode(query)))
-        response = RedirectResponse(target, status_code=303)
-        response.set_cookie(
-            _AUTH_COOKIE_NAME,
-            expected,
-            httponly=True,
-            samesite="strict",
-            secure=request.url.scheme == "https",
-        )
-        return response
-
-    return JSONResponse(
-        status_code=401,
-        content={"error": "viewer authentication required"},
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -298,7 +178,7 @@ async def otlp_ingest(request: Request):
     (3-5 MB payloads) don't block the event loop while parsing.
     """
     try:
-        body_bytes = await _read_limited_body(request, _MAX_OTLP_BODY_BYTES)
+        body_bytes = await request.body()
     except ClientDisconnect:
         # BSP exporter timed out and closed the connection before we read the
         # body — log at WARNING (not ERROR) since this is a transient backpressure
@@ -312,14 +192,7 @@ async def otlp_ingest(request: Request):
             "SQLite may not be keeping up with ingest rate.",
             qsize,
         )
-    try:
-        _ingest_queue.put_nowait(body_bytes)
-    except asyncio.QueueFull:
-        log.warning("[otlp_ingest] Write queue full: %d pending", _ingest_queue.qsize())
-        return JSONResponse(
-            status_code=503,
-            content={"error": "ingest queue full", "retryable": True},
-        )
+    await _ingest_queue.put(body_bytes)
     return JSONResponse(content={"queued": True})
 
 
@@ -367,7 +240,12 @@ async def journal_messages_ingest(request: Request):
     """
     import sqlite3
 
-    body = _validate_journal_items(await _read_limited_json(request, _MAX_JOURNAL_BODY_BYTES))
+    body = await request.json()
+    if not isinstance(body, list):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Body must be a list of message objects"},
+        )
     n_items = len(body)
     loop = asyncio.get_running_loop()
     t0 = time.monotonic()
@@ -399,7 +277,7 @@ async def journal_call_ingest(request: Request):
     """
     import sqlite3
 
-    body = await _read_limited_json(request, _MAX_JOURNAL_BODY_BYTES)
+    body = await request.json()
     if not isinstance(body, dict) or not body.get("call_id") or not body.get("session_id"):
         return JSONResponse(
             status_code=400,
@@ -445,7 +323,12 @@ async def journal_blocks_ingest(request: Request):
     """
     import sqlite3
 
-    body = _validate_journal_items(await _read_limited_json(request, _MAX_JOURNAL_BODY_BYTES))
+    body = await request.json()
+    if not isinstance(body, list):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Body must be a list of block objects"},
+        )
     session_id = request.headers.get("X-Session-Id") or ""
     if not session_id:
         # Fallback: allow the session_id on each item (rarely used but
@@ -524,11 +407,9 @@ def spa_catchall(request: Request, path: str):
 if __name__ == "__main__":
     import uvicorn
 
-    host = os.environ.get("NOOA_TRACE_VIEWER_HOST", "127.0.0.1")
     port = int(
         os.environ.get("NOOA_TRACE_VIEWER_PORT")
         or os.environ.get("NEMO_OO_TRACE_VIEWER_PORT", "5001")
     )
-    ensure_viewer_bind_is_safe(host)
-    log.info("Starting viewer on %s:%d", host, port)
-    uvicorn.run(app, host=host, port=port)
+    log.info("Starting viewer on port %d", port)
+    uvicorn.run(app, host="0.0.0.0", port=port)

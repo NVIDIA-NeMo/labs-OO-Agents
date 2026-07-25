@@ -63,13 +63,7 @@ def _find_pid_on_port(port: int) -> str | None:
 
 @click.command()
 @click.option("--port", "-p", type=int, default=5001, help="Port number (default: 5001).")
-@click.option("--host", "-h", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1).")
-@click.option(
-    "--auth-token",
-    envvar="NOOA_VIEWER_AUTH_TOKEN",
-    default=None,
-    help="Bearer token required for remote viewer access. Required for non-loopback binds.",
-)
+@click.option("--host", "-h", default="0.0.0.0", help="Host to bind to (default: 0.0.0.0).")
 @click.option(
     "--db",
     "db_path_opt",
@@ -79,7 +73,7 @@ def _find_pid_on_port(port: int) -> str | None:
     "(or $NOOA_TRACE_DB if set). Pass an explicit path to run a second viewer "
     "side-by-side with the default one.",
 )
-def command(port: int, host: str, auth_token: str | None, db_path_opt: str | None):
+def command(port: int, host: str, db_path_opt: str | None):
     """Start the unified trace + evaluation viewer."""
     import os
     from pathlib import Path
@@ -101,11 +95,8 @@ def command(port: int, host: str, auth_token: str | None, db_path_opt: str | Non
     os.environ["NOOA_TRACE_DB"] = str(db_path)
     os.environ["NEMO_OO_TRACE_DB"] = str(db_path)
 
-    if auth_token:
-        os.environ["NOOA_VIEWER_AUTH_TOKEN"] = auth_token
-
     try:
-        from nooa.viewer.main import app, ensure_viewer_bind_is_safe
+        from nooa.viewer.main import app
     except ImportError:
         click.secho(
             "Error: viewer dependencies are not installed.\n"
@@ -114,11 +105,6 @@ def command(port: int, host: str, auth_token: str | None, db_path_opt: str | Non
             err=True,
         )
         raise SystemExit(1) from None
-
-    try:
-        ensure_viewer_bind_is_safe(host)
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from None
 
     import copy
 
@@ -137,8 +123,6 @@ def command(port: int, host: str, auth_token: str | None, db_path_opt: str | Non
     click.secho("  NVIDIA OO Agents Viewer", fg="cyan", bold=True)
     click.echo(f"  URL:  http://localhost:{port}")
     click.echo(f"  DB:   {db_path}")
-    if auth_token:
-        click.echo("  Auth: bearer token required")
     click.echo()
 
     try:
