@@ -43,8 +43,6 @@ _BROKER_PROTOCOL_DUNDERS = frozenset(
 )
 
 
-
-
 def _capabilities() -> Capabilities:
     global _CAPS_CACHE
     if _CAPS_CACHE is None:
@@ -280,7 +278,9 @@ class SandboxedExecutor:
             return dto_to_result(dto, signal_factory=self._signal_factory)
 
     @staticmethod
-    def _namespace_updates(builtins: dict[str, Any]) -> tuple[dict[str, Any], list[tuple[int, Any]] | None]:
+    def _namespace_updates(
+        builtins: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[tuple[int, Any]] | None]:
         """Return picklable per-cell namespace refreshes and an ``Out`` snapshot."""
         updates: dict[str, Any] = {}
         out_events: list[tuple[int, Any]] | None = None
@@ -404,13 +404,19 @@ class SandboxedExecutor:
 
     def _validate_broker_path(self, path: list[str]) -> None:
         """Reject worker-supplied paths that cross hidden/private boundaries."""
-        if not isinstance(path, list) or not path or not all(isinstance(p, str) and p for p in path):
+        if (
+            not isinstance(path, list)
+            or not path
+            or not all(isinstance(p, str) and p for p in path)
+        ):
             raise AttributeError("invalid sandbox broker path")
         if not self._is_visible_root_attr(path[0]):
             raise AttributeError(f"sandbox broker cannot access hidden attribute self.{path[0]}")
         for part in path[1:]:
             if part.startswith("_") and part not in _BROKER_PROTOCOL_DUNDERS:
-                raise AttributeError(f"sandbox broker cannot access private nested attribute {part}")
+                raise AttributeError(
+                    f"sandbox broker cannot access private nested attribute {part}"
+                )
 
     async def _dispatch_tool_call(self, msg: dict[str, Any]) -> dict[str, Any]:
         """Run a brokered ``self.<path>`` access against the parent's live agent."""

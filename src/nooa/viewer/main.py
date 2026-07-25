@@ -139,6 +139,7 @@ def _validate_journal_items(body: object) -> list[dict]:
         raise HTTPException(status_code=413, detail="Too many journal items")
     return body
 
+
 async def _ingest_worker() -> None:
     """Drain _ingest_queue, writing batches to SQLite in a dedicated writer thread.
 
@@ -265,6 +266,7 @@ async def viewer_auth_middleware(request: Request, call_next):
         content={"error": "viewer authentication required"},
         headers={"WWW-Authenticate": "Bearer"},
     )
+
 
 app.add_middleware(
     CORSMiddleware,
