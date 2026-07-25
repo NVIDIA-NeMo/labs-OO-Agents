@@ -46,8 +46,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -74,11 +75,14 @@ _NVIDIA_KEY_SYNONYMS = {
     "NVIDIA_INFERENCE_API_KEY": "NVIDIA_INTERNAL_API_KEY",
     "NVIDIA_INTERNAL_API_KEY": "NVIDIA_INFERENCE_API_KEY",
 }
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def resolve_api_key_from_config(
     model_name: str,
     config: Mapping[str, Any],
+    *,
+    allowed_env_vars: Collection[str] | None = None,
 ) -> str | None:
     """Read the api_key_env-named env var declared by a registry config.
 
@@ -91,6 +95,10 @@ def resolve_api_key_from_config(
 
     Shared helper for callers outside the registry (NAT plugin, viewer
     routes) that need the same resolution + diagnostic semantics.
+
+    ``allowed_env_vars`` is a defense-in-depth boundary for callers handling
+    partially untrusted config. When supplied, only those exact env-var names
+    may be resolved.
     """
     api_key_env = config.get("api_key_env")
     if not api_key_env:
@@ -103,6 +111,20 @@ def resolve_api_key_from_config(
             model_name,
             api_key_env,
             type(api_key_env).__name__,
+        )
+        return None
+    if not _ENV_VAR_NAME_RE.fullmatch(api_key_env):
+        logger.warning(
+            "Model %r has invalid api_key_env %r: expected a shell-style env var name.",
+            model_name,
+            api_key_env,
+        )
+        return None
+    if allowed_env_vars is not None and api_key_env not in allowed_env_vars:
+        logger.warning(
+            "Model %r requested api_key_env %r, which is not in the caller's allowed env-var set.",
+            model_name,
+            api_key_env,
         )
         return None
     api_key = os.getenv(api_key_env)

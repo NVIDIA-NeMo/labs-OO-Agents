@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -141,7 +142,9 @@ def load_custom_models() -> list[dict]:
     """Load custom models from file."""
     if CUSTOM_MODELS_FILE.exists():
         with open(CUSTOM_MODELS_FILE) as f:
-            return json.load(f)
+            data = json.load(f)
+            if isinstance(data, list):
+                return [model for model in data if isinstance(model, dict)]
     return []
 
 
@@ -149,6 +152,59 @@ def save_custom_models(models: list[dict]):
     """Save custom models to file."""
     with open(CUSTOM_MODELS_FILE, "w") as f:
         json.dump(models, f, indent=2)
+
+
+def _normalize_model_pair(model: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    """Return a normalized ``(endpoint, api_key_env)`` pair from model config."""
+    endpoint = model.get("endpoint")
+    api_key_env = model.get("api_key_env")
+    return (
+        endpoint.strip() if isinstance(endpoint, str) and endpoint.strip() else None,
+        api_key_env.strip() if isinstance(api_key_env, str) and api_key_env.strip() else None,
+    )
+
+
+def _trusted_playground_pairs() -> set[tuple[str | None, str | None]]:
+    """Pairs declared by the server-side models file are trusted for playground use.
+
+    Custom models are browser-controlled state. They may alias a pair already
+    approved by the local operator in ``models.yaml`` or use provider defaults,
+    but they must not invent a destination or env-var name.
+    """
+    pairs = {(None, None)}
+    config = load_models_config()
+    for model_info in config.get("models", {}).values():
+        if isinstance(model_info, Mapping):
+            pairs.add(_normalize_model_pair(model_info))
+    return pairs
+
+
+def _sanitize_custom_model(model: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop untrusted endpoint/key pairs from persisted browser-controlled models."""
+    sanitized = dict(model)
+    pair = _normalize_model_pair(model)
+    if pair not in _trusted_playground_pairs():
+        log.warning(
+            "Ignoring untrusted playground model endpoint/api_key_env pair for model %r.",
+            model.get("model_id"),
+        )
+        sanitized["endpoint"] = None
+        sanitized["api_key_env"] = None
+    else:
+        sanitized["endpoint"], sanitized["api_key_env"] = pair
+    return sanitized
+
+
+def _validate_custom_model_pair(model: Mapping[str, Any]) -> None:
+    pair = _normalize_model_pair(model)
+    if pair not in _trusted_playground_pairs():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Custom models may only use endpoint/api_key_env pairs already declared "
+                "in the server-side models config."
+            ),
+        )
 
 
 # ============================================================================
@@ -439,7 +495,7 @@ def get_playground_models():
     known_keys = get_known_api_key_patterns()
     available_keys = [key for key in known_keys if os.environ.get(key)]
 
-    custom_models = load_custom_models()
+    custom_models = [_sanitize_custom_model(model) for model in load_custom_models()]
     builtin_models = get_builtin_models()
 
     return {
@@ -454,10 +510,12 @@ def add_custom_model(model: CustomModel):
     """Add a custom model configuration."""
     models = load_custom_models()
 
+    _validate_custom_model_pair(model.model_dump())
+
     if any(m["model_id"] == model.model_id for m in models):
         raise HTTPException(status_code=400, detail="Model with this ID already exists")
 
-    models.append(model.model_dump())
+    models.append(_sanitize_custom_model(model.model_dump()))
     save_custom_models(models)
 
     return {"status": "success", "message": f"Model '{model.name}' added"}
@@ -492,6 +550,7 @@ def get_model_config(model_id: str) -> dict | None:
     custom_models = load_custom_models()
     for model in custom_models:
         if model.get("model_id") == model_id:
+            model = _sanitize_custom_model(model)
             return {
                 "endpoint": model.get("endpoint"),
                 "api_key_env": model.get("api_key_env"),
@@ -626,7 +685,11 @@ async def run_inference(request: InferenceRequest):
             kwargs["custom_llm_provider"] = "openai"
 
         if model_config:
-            api_key = resolve_api_key_from_config(request.model, model_config)
+            api_key = resolve_api_key_from_config(
+                request.model,
+                model_config,
+                allowed_env_vars=get_known_api_key_patterns(),
+            )
             if api_key:
                 kwargs["api_key"] = api_key
 
