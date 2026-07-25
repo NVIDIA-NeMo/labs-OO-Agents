@@ -32,16 +32,52 @@ from nooa.runtime.sandbox.serialization import ResultDTO, result_to_dto
 # through ``__getattr__`` against the agent (which has no such attribute) and
 # fails, rather than handing the cell the live pipe — closing the direct
 # ``self._broker._conn.send(<pickle bomb>)`` escape. Legitimately-exposed private
-# agent attributes (``self._foo``) still broker normally, matching in-process.
+# agent attributes (``self._foo``) still broker normally, matching in-process. The
+# parent also enforces agentdoc visibility on every broker path, so hidden/private
+# agent state does not become reachable merely because the worker can name it.
 # NB: the parent<->worker channel still uses pickle, so a *fully adversarial*
 # in-process cell that reaches framework internals is out of scope here — that is
 # the OS-layer (separate uid/namespace) sandbox's job; this layer's contract is
 # OS-enforced action containment.
 _PROXY_STATE: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_SAFE_ENV_KEYS = frozenset({"LANG", "LC_ALL", "LC_CTYPE", "TZ", "PYTHONHASHSEED"})
+
+
+def _scrub_worker_environment() -> None:
+    """Remove parent process secrets before any model-authored cell can run."""
+    safe = {key: value for key, value in os.environ.items() if key in _SAFE_ENV_KEYS}
+    os.environ.clear()
+    os.environ.update(safe)
 
 
 class ParentToolError(RuntimeError):
     """Raised in the worker when a parent-brokered ``self.*`` call fails."""
+
+
+class _OutSnapshot:
+    """Worker-local Jupyter-style output accessor refreshed before each cell."""
+
+    def __init__(self, events: list[tuple[int, Any]]):
+        self._events = events
+
+    def __getitem__(self, index: int) -> Any:
+        if index < 0:
+            try:
+                return self._events[index][1]
+            except IndexError:
+                raise IndexError(
+                    f"Out index {index} out of range (have {len(self._events)} outputs)"
+                ) from None
+        for execution_count, value in self._events:
+            if execution_count == index:
+                return value
+        raise KeyError(f"No output for execution {index}")
+
+    def __len__(self) -> int:
+        return len(self._events)
+
+    def __contains__(self, index: int) -> bool:
+        return any(execution_count == index for execution_count, _ in self._events)
 
 
 class ChildBroker:
@@ -395,7 +431,7 @@ def build_namespace(
     from nooa.runtime.actor import _strip_blocked_modules
 
     effective = restrictions or RestrictionsConfig()
-    ns = _strip_blocked_modules(ns, effective.blocked_modules)
+    ns = _strip_blocked_modules(ns, effective.blocked_modules | effective.restricted_imports)
     return ns
 
 
@@ -410,6 +446,7 @@ def worker_main(conn: Connection, init: dict[str, Any]) -> None:  # pragma: no c
         namespace = build_namespace(
             init["agent"], init.get("framework_builtins") or {}, proxy, init.get("restrictions")
         )
+        _scrub_worker_environment()
         # Guards go on AFTER the (trusted) namespace build and BEFORE the op loop,
         # so every cell — and nothing else — runs under the full lock-down.
         install_guards(init["spec"])
@@ -449,6 +486,9 @@ def worker_main(conn: Connection, init: dict[str, Any]) -> None:  # pragma: no c
 def _run_one(
     loop: asyncio.AbstractEventLoop, namespace: dict[str, Any], request: dict[str, Any]
 ) -> ResultDTO:
+    namespace.update(request.get("namespace_updates") or {})
+    if request.get("out_events") is not None:
+        namespace["Out"] = _OutSnapshot(request["out_events"])
     result = loop.run_until_complete(
         run_cell_source(
             request["code"],

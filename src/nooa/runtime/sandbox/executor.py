@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures as futures
+import inspect
 import logging
 import multiprocessing as mp
 import os
@@ -37,6 +38,11 @@ from nooa.runtime.sandbox.worker import worker_main
 logger = logging.getLogger(__name__)
 
 _CAPS_CACHE: Capabilities | None = None
+_BROKER_PROTOCOL_DUNDERS = frozenset(
+    {"__getitem__", "__setitem__", "__delitem__", "__contains__", "__len__"}
+)
+
+
 
 
 def _capabilities() -> Capabilities:
@@ -217,7 +223,13 @@ class SandboxedExecutor:
         return self._req_id
 
     # --- running a cell ----------------------------------------------------
-    async def run_cell(self, code: str, *, execution_count: int = 1) -> ExecutionResult:
+    async def run_cell(
+        self,
+        code: str,
+        *,
+        execution_count: int = 1,
+        builtins: dict[str, Any] | None = None,
+    ) -> ExecutionResult:
         """Execute one cell in the worker and return an ``ExecutionResult``."""
         if self._closed:
             raise WorkerDiedError("sandbox executor is closed")
@@ -234,9 +246,17 @@ class SandboxedExecutor:
             await self._ensure_worker()
             assert self._conn is not None
             req_id = self._next_id()
+            namespace_updates, out_events = self._namespace_updates(builtins or {})
             try:
                 self._conn.send(
-                    {"op": "run", "id": req_id, "code": code, "execution_count": execution_count}
+                    {
+                        "op": "run",
+                        "id": req_id,
+                        "code": code,
+                        "execution_count": execution_count,
+                        "namespace_updates": namespace_updates,
+                        "out_events": out_events,
+                    }
                 )
             except (BrokenPipeError, OSError) as exc:
                 # The worker died between _ensure_worker and this send (e.g. an
@@ -258,6 +278,24 @@ class SandboxedExecutor:
                 return self._synth_error(err)
             dto: ResultDTO = response["result"]
             return dto_to_result(dto, signal_factory=self._signal_factory)
+
+    @staticmethod
+    def _namespace_updates(builtins: dict[str, Any]) -> tuple[dict[str, Any], list[tuple[int, Any]] | None]:
+        """Return picklable per-cell namespace refreshes and an ``Out`` snapshot."""
+        updates: dict[str, Any] = {}
+        out_events: list[tuple[int, Any]] | None = None
+        for name, value in builtins.items():
+            if name == "Out" and hasattr(value, "_get_output_events"):
+                events = value._get_output_events()
+                out_events = [
+                    (event.execution_count, event.value)
+                    for event in events
+                    if is_picklable(event.value)
+                ]
+                continue
+            if is_picklable(value):
+                updates[name] = value
+        return updates, out_events
 
     def _recv_until_result(
         self, req_id: int, deadline: float | None, loop: asyncio.AbstractEventLoop
@@ -333,10 +371,46 @@ class SandboxedExecutor:
 
     def _walk_path(self, path: list[str]) -> Any:
         """Resolve a dotted attribute path (``["memory", "remember"]``) on the agent."""
+        self._validate_broker_path(path)
         obj: Any = self._agent
         for part in path:
             obj = getattr(obj, part)
         return obj
+
+    def _is_visible_root_attr(self, name: str) -> bool:
+        """Mirror agentdoc visibility before brokering any root ``self.*`` access."""
+        from nooa.agentdoc._metadata import get_field_metadata
+        from nooa.agentdoc.visibility import is_hidden_field, is_hidden_method
+
+        if not name or (name.startswith("__") and name.endswith("__")):
+            return False
+
+        try:
+            raw = inspect.getattr_static(self._agent, name)
+        except AttributeError:
+            raw = None
+
+        if is_hidden_field(self._agent, name) or (raw is not None and is_hidden_method(raw)):
+            return False
+
+        if name.startswith("_"):
+            explicitly_shown = get_field_metadata(self._agent, name).get("hidden") is False
+            explicitly_shown = explicitly_shown or (
+                raw is not None and getattr(raw, "_agentdoc_hidden", None) is False
+            )
+            if not explicitly_shown:
+                return False
+        return True
+
+    def _validate_broker_path(self, path: list[str]) -> None:
+        """Reject worker-supplied paths that cross hidden/private boundaries."""
+        if not isinstance(path, list) or not path or not all(isinstance(p, str) and p for p in path):
+            raise AttributeError("invalid sandbox broker path")
+        if not self._is_visible_root_attr(path[0]):
+            raise AttributeError(f"sandbox broker cannot access hidden attribute self.{path[0]}")
+        for part in path[1:]:
+            if part.startswith("_") and part not in _BROKER_PROTOCOL_DUNDERS:
+                raise AttributeError(f"sandbox broker cannot access private nested attribute {part}")
 
     async def _dispatch_tool_call(self, msg: dict[str, Any]) -> dict[str, Any]:
         """Run a brokered ``self.<path>`` access against the parent's live agent."""
@@ -346,9 +420,10 @@ class SandboxedExecutor:
         display = ".".join(path)
         kind = msg.get("kind")
         try:
+            self._validate_broker_path(path)
             if kind == "setattr":
                 # self.<path> = value on the parent's live agent.
-                obj = self._walk_path(path[:-1])
+                obj = self._agent if len(path) == 1 else self._walk_path(path[:-1])
                 setattr(obj, path[-1], msg.get("value"))
                 return {"ok": True, "result": None}
             if kind == "iter":
@@ -367,7 +442,7 @@ class SandboxedExecutor:
             target = self._walk_path(path)
             if kind == "attr":
                 # Picklable state crosses; a live object becomes a nested proxy.
-                if is_picklable(target):
+                if is_picklable(target) and not isinstance(target, (bytearray, dict, list, set)):
                     return {"ok": True, "result": target}
                 return {"ok": True, "result": None, "proxy": True}
             value = target(*msg.get("args", ()), **msg.get("kwargs", {}))

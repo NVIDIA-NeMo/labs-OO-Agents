@@ -1440,7 +1440,8 @@ class ActorRuntime:
             # 2. Strip blocked modules and their members from exec_globals
             effective_restrictions = restrictions or RestrictionsConfig()
             exec_globals = _strip_blocked_modules(
-                exec_globals, effective_restrictions.blocked_modules
+                exec_globals,
+                effective_restrictions.blocked_modules | effective_restrictions.restricted_imports,
             )
 
             # 3. Strip redundant imports (from typing import Literal, etc.)
@@ -1505,7 +1506,11 @@ class ActorRuntime:
             # still wrap the cell on the parent. The worker owns the namespace,
             # stdout capture and wrapper, so we skip the in-process exec below.
             if sandbox_executor is not None:
-                result = await sandbox_executor.run_cell(code, execution_count=execution_count)
+                result = await sandbox_executor.run_cell(
+                    code,
+                    execution_count=execution_count,
+                    builtins=builtins,
+                )
                 return result
 
             # Set up stdout/stderr capture BEFORE ast.parse/compile so that

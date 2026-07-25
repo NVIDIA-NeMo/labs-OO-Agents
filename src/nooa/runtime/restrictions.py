@@ -83,11 +83,27 @@ DEFAULT_BLOCKED_CALLS: dict[str, frozenset[str]] = {
 }
 
 
-# Tier 2: restricted — denied at AST import validation but not stripped from namespace.
-# Empty by default (all imports allowed in sandboxed environments).
-# Developers can set DEFAULT_RESTRICTED_IMPORTS for a small deny list,
-# or RESTRICTED_MODULES for strict lockdown.
-DEFAULT_RESTRICTED_IMPORTS: frozenset[str] = frozenset()
+# Tier 2: restricted — denied at AST import validation and stripped from the
+# generated-code namespace by default. These modules provide direct host
+# capability access (filesystem, process state, dynamic import, network clients)
+# and should only be re-enabled deliberately with an explicit config override.
+DEFAULT_RESTRICTED_IMPORTS: frozenset[str] = frozenset(
+    {
+        "builtins",
+        "ctypes",
+        "glob",
+        "httpx",
+        "importlib",
+        "inspect",
+        "io",
+        "os",
+        "pathlib",
+        "requests",
+        "shutil",
+        "sys",
+        "tempfile",
+    }
+)
 
 
 class RestrictionsConfig(BaseModel):
@@ -100,8 +116,8 @@ class RestrictionsConfig(BaseModel):
         Event-loop hazards: subprocess, socket, etc.
 
     Tier 2 — **restricted** (soft block):
-        Blocked at AST import validation only.
-        Modules with side effects that shouldn't be casually imported.
+        Blocked at AST import validation and removed from generated-code globals.
+        Modules with direct host capabilities that require explicit opt-in.
 
     Tier 3 — **allowed** (everything else):
         Any installed module can be imported freely.

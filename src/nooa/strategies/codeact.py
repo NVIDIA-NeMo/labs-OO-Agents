@@ -2525,6 +2525,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             with code_exec_context(code):
                 return await runtime.execute_code(
                     code,
+                    builtins={**builtins, **session.session_locals},
                     validate=True,  # run restrictions/cell-guard validation on the parent
                     wrap_in_function=True,
                     timeout=self.config.cell_timeout,

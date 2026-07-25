@@ -62,7 +62,7 @@ class CodeActConfig(BaseModel):
             return "synthetic_comment"
         return v
 
-    cell_timeout: float | None = None
+    cell_timeout: float | None = 30.0
     max_tokens: int | None = None
     temperature: float | None = None
     top_p: float | None = None
@@ -71,13 +71,12 @@ class CodeActConfig(BaseModel):
     restrictions: RestrictionsConfig = RestrictionsConfig()
 
     # Execution backend for execute_python cells:
-    #   * "inprocess" (default) — run cells in the agent's own process/event loop.
-    #     Zero behavior change; the historical path.
-    #   * "sandbox" — run each cell in a locked-down worker process with
+    #   * "sandbox" (default) — run each cell in a locked-down worker process with
     #     OS-enforced guardrails (hard timeout, memory/CPU caps, filesystem
     #     confinement, network off). Turns ``cell_timeout`` into a *hard* bound.
+    #   * "inprocess" — explicit compatibility escape hatch for trusted code only.
     # The ``sandbox`` sub-config below is ignored unless this is "sandbox".
-    execution_backend: Literal["inprocess", "sandbox"] = "inprocess"
+    execution_backend: Literal["inprocess", "sandbox"] = "sandbox"
     sandbox: SandboxConfig = SandboxConfig()
 
     # Method-local deterministic validators (see nooa.strategy_validation).
