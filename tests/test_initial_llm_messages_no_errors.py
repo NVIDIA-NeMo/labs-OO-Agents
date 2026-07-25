@@ -102,7 +102,7 @@ class TestInitialLlmMessagesNoErrors:
         )
 
         class SimpleAgent(Agent, llm=fake_llm):
-            @strategy(CodeActStrategy(config=CodeActConfig()))
+            @strategy(CodeActStrategy(config=CodeActConfig(execution_backend="inprocess")))
             async def answer(self) -> int:
                 """Return the answer."""
                 ...

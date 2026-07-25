@@ -68,7 +68,9 @@ _TEST_LLM_DEFAULT = FakeLLMClient()
 class NestedGenAgent(Agent, llm=_TEST_LLM_DEFAULT):
     """Outer CodeAct method calls an inner generation method on the same agent."""
 
-    @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=5)))
+    @strategy(
+        CodeActStrategy(config=CodeActConfig(max_iterations=5, execution_backend="inprocess"))
+    )
     async def outer(self, x: str) -> str:
         """Process {x} via inner method."""
         ...
@@ -140,7 +142,9 @@ async def _classify_one(text: str) -> Literal["pos", "neg"]:
 class StandaloneCallerAgent(Agent, llm=_TEST_LLM_DEFAULT):
     """CodeAct method that calls a standalone generation function."""
 
-    @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=5)))
+    @strategy(
+        CodeActStrategy(config=CodeActConfig(max_iterations=5, execution_backend="inprocess"))
+    )
     async def run(self, prompt: str) -> str:
         """{prompt}"""
         ...
@@ -216,7 +220,9 @@ async def _classify_gather(text: str) -> Literal["pos", "neg", "neu"]:
 
 
 class GatherCallerAgent(Agent, llm=_TEST_LLM_DEFAULT):
-    @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=5)))
+    @strategy(
+        CodeActStrategy(config=CodeActConfig(max_iterations=5, execution_backend="inprocess"))
+    )
     async def run(self, prompts: list[str]) -> list[str]:
         """Run {prompts} via gather."""
         ...

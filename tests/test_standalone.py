@@ -24,6 +24,7 @@ import pytest
 from pydantic import BaseModel
 
 from nooa import EventQuery, strategy
+from nooa.config import CodeActConfig
 from nooa.context_blocks import ScopedContext
 from nooa.strategies import CodeActStrategy, PredictStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
@@ -420,7 +421,9 @@ class TestStandaloneCodeActStrategy:
             ]
         )
 
-        @strategy(CodeActStrategy(), llm=fake_llm)
+        @strategy(
+            CodeActStrategy(config=CodeActConfig(execution_backend="inprocess")), llm=fake_llm
+        )
         async def classify_outer(text: str) -> str:
             """Classify {text} by delegating to _inner_classify."""
             ...

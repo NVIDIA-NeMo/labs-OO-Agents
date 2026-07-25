@@ -51,7 +51,7 @@ class TestCodeActSessionLocalsInjection:
         """Without _session_locals, behavior is unchanged (fresh dict per call)."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(CodeActStrategy(config=CodeActConfig()))
+            @strategy(CodeActStrategy(config=CodeActConfig(execution_backend="inprocess")))
             async def compute(self) -> int:
                 """Return 42."""
                 ...
@@ -70,7 +70,7 @@ class TestCodeActSessionLocalsInjection:
         """Injected session_locals should be accessible in LLM-generated code."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(CodeActStrategy(config=CodeActConfig()))
+            @strategy(CodeActStrategy(config=CodeActConfig(execution_backend="inprocess")))
             async def compute(self) -> int:
                 """Use injected_value to compute result."""
                 ...
@@ -93,7 +93,7 @@ class TestCodeActSessionLocalsInjection:
         """After execute(), caller's dict should contain captured locals."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(CodeActStrategy(config=CodeActConfig()))
+            @strategy(CodeActStrategy(config=CodeActConfig(execution_backend="inprocess")))
             async def compute(self) -> int:
                 """Compute and store intermediate values."""
                 ...
@@ -117,7 +117,7 @@ class TestCodeActSessionLocalsInjection:
         """Session locals should persist across two successive calls via the same dict."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(CodeActStrategy(config=CodeActConfig()))
+            @strategy(CodeActStrategy(config=CodeActConfig(execution_backend="inprocess")))
             async def step(self) -> str:
                 """Do one step of work."""
                 ...
@@ -150,7 +150,7 @@ class TestCodeActSessionLocalsInjection:
         """The internal Out accessor should not leak into caller's dict."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(CodeActStrategy(config=CodeActConfig()))
+            @strategy(CodeActStrategy(config=CodeActConfig(execution_backend="inprocess")))
             async def compute(self) -> int:
                 """Return 1."""
                 ...

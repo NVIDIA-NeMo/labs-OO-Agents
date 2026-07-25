@@ -137,7 +137,9 @@ async def _classify_iso(text: str) -> Literal["pos", "neg"]:
 
 
 class _ScopedCaller(Agent, llm=_DEFAULT):
-    @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=3)))
+    @strategy(
+        CodeActStrategy(config=CodeActConfig(max_iterations=3, execution_backend="inprocess"))
+    )
     async def run(self, prompt: str) -> str:
         """{prompt}"""
         ...
@@ -251,13 +253,17 @@ async def test_enable_atif_two_agents_one_combined_file_per_run(
     )
 
     class _AgentA(Agent, llm=_DEFAULT):
-        @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=3)))
+        @strategy(
+            CodeActStrategy(config=CodeActConfig(max_iterations=3, execution_backend="inprocess"))
+        )
         async def run(self, prompt: str) -> str:
             """{prompt}"""
             ...
 
     class _AgentB(Agent, llm=_DEFAULT):
-        @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=3)))
+        @strategy(
+            CodeActStrategy(config=CodeActConfig(max_iterations=3, execution_backend="inprocess"))
+        )
         async def run(self, prompt: str) -> int:
             """{prompt}"""
             ...
@@ -334,7 +340,9 @@ async def test_enable_atif_contextvar_stays_unset_between_runs(
     enable_atif(output_dir=tmp_path)
 
     class _Probe(Agent, llm=_DEFAULT):
-        @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=2)))
+        @strategy(
+            CodeActStrategy(config=CodeActConfig(max_iterations=2, execution_backend="inprocess"))
+        )
         async def run(self, x: int) -> int:
             """double {x}."""
             ...

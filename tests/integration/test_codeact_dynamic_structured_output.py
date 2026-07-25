@@ -62,7 +62,9 @@ return_result(results)
 class SentimentAgent(Agent, llm=_TEST_LLM):
     """Test agent for batch sentiment classification."""
 
-    @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=5)))
+    @strategy(
+        CodeActStrategy(config=CodeActConfig(max_iterations=5, execution_backend="inprocess"))
+    )
     async def classify(self, texts: list[str]) -> list[Literal["positive", "negative", "neutral"]]:
         """Classify the sentiment of multiple texts."""
         ...

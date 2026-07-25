@@ -91,7 +91,7 @@ class TestCurrentCallProperty:
         """current_call returns the CurrentCall object during generation."""
 
         class _Agent(Agent, llm=_TEST_LLM):
-            @strategy(CodeActStrategy(config=CodeActConfig()))
+            @strategy(CodeActStrategy(config=CodeActConfig(execution_backend="inprocess")))
             async def task(self) -> int:
                 """Do it."""
                 ...

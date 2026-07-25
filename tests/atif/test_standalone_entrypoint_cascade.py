@@ -114,7 +114,9 @@ async def categorize_ticket(ticket: str) -> Category:
 
 
 class _CaseAAgent(Agent, llm=_DEFAULT):
-    @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=3)))
+    @strategy(
+        CodeActStrategy(config=CodeActConfig(max_iterations=3, execution_backend="inprocess"))
+    )
     async def triage(self, ticket: str) -> str:
         """Triage {ticket}. Call ``categorize_ticket`` then summarize."""
         ...

@@ -673,7 +673,7 @@ class TestReturnResultVariableResolution:
         """If LLM calls return_result with variable name, resolve from session (lines 1338-1343)."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(CodeActStrategy(config=CodeActConfig()))
+            @strategy(CodeActStrategy(config=CodeActConfig(execution_backend="inprocess")))
             async def compute(self) -> int:
                 """Compute and return."""
                 ...

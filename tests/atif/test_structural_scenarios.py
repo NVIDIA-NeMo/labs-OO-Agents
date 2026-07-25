@@ -116,7 +116,9 @@ def _subagent_refs(step: StepObject) -> list[str]:
 
 
 class _CodeActAgent(Agent, llm=_TEST_LLM_DEFAULT):
-    @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=5)))
+    @strategy(
+        CodeActStrategy(config=CodeActConfig(max_iterations=5, execution_backend="inprocess"))
+    )
     async def run(self, prompt: str) -> int:
         """Solve {prompt}."""
         ...
@@ -130,7 +132,9 @@ class _ClassifierAgent(Agent, llm=_TEST_LLM_DEFAULT):
 
 
 class _NestedAgent(Agent, llm=_TEST_LLM_DEFAULT):
-    @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=5)))
+    @strategy(
+        CodeActStrategy(config=CodeActConfig(max_iterations=5, execution_backend="inprocess"))
+    )
     async def outer(self, x: str) -> str:
         """{x}"""
         ...
@@ -154,7 +158,9 @@ async def _standalone_gather_one(text: str) -> Literal["pos", "neg", "neu"]:
 
 
 class _StandaloneCaller(Agent, llm=_TEST_LLM_DEFAULT):
-    @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=5)))
+    @strategy(
+        CodeActStrategy(config=CodeActConfig(max_iterations=5, execution_backend="inprocess"))
+    )
     async def run(self, prompt: str) -> str:
         """{prompt}"""
         ...
@@ -335,7 +341,9 @@ async def test_async_gather_standalones(tmp_path: Path) -> None:
     )
 
     class _GatherCaller(Agent, llm=fake):
-        @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=5)))
+        @strategy(
+            CodeActStrategy(config=CodeActConfig(max_iterations=5, execution_backend="inprocess"))
+        )
         async def run(self, prompts: list[str]) -> list[str]:
             """gather over {prompts}"""
             ...
@@ -374,7 +382,9 @@ async def test_codeact_inline_return_result(tmp_path: Path) -> None:
     )
 
     class _InlineAgent(Agent, llm=_TEST_LLM_DEFAULT):
-        @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=5)))
+        @strategy(
+            CodeActStrategy(config=CodeActConfig(max_iterations=5, execution_backend="inprocess"))
+        )
         async def run(self, prompt: str) -> float:
             """{prompt}"""
             ...
