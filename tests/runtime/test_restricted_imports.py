@@ -32,11 +32,28 @@ class TestRestrictedImportsConfig:
         assert rc.restricted_imports == frozenset()
         assert isinstance(rc.restricted_imports, frozenset)
 
-    def test_default_restricted_imports_constant_is_empty(self):
-        """DEFAULT_RESTRICTED_IMPORTS constant should be empty — no restrictions by default."""
+    def test_default_restricted_imports_constant_lists_host_capabilities(self):
+        """DEFAULT_RESTRICTED_IMPORTS enumerates the host-capability modules that
+        callers can opt into denying via ``set_restricted_imports``."""
         from nooa.runtime.restrictions import DEFAULT_RESTRICTED_IMPORTS
 
-        assert DEFAULT_RESTRICTED_IMPORTS == frozenset()
+        assert DEFAULT_RESTRICTED_IMPORTS == frozenset(
+            {
+                "builtins",
+                "ctypes",
+                "glob",
+                "httpx",
+                "importlib",
+                "inspect",
+                "io",
+                "os",
+                "pathlib",
+                "requests",
+                "shutil",
+                "sys",
+                "tempfile",
+            }
+        )
 
     def test_custom_restricted_imports(self):
         """Developers can set a custom restricted_imports set."""

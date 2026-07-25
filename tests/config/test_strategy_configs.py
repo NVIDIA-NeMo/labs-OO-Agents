@@ -16,11 +16,12 @@ class TestCodeActConfig:
         c = CodeActConfig()
         assert c.max_iterations is None
         assert c.max_retries == 3
-        assert c.cell_timeout is None
+        assert c.cell_timeout == 30.0
         assert c.max_tokens is None
         assert c.temperature is None
         assert c.top_p is None
         assert c.max_tool_calls is None
+        assert c.execution_backend == "sandbox"
 
     def test_frozen(self):
         c = CodeActConfig()

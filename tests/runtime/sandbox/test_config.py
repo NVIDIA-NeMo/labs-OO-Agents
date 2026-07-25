@@ -16,9 +16,9 @@ from nooa.runtime.sandbox.config import (
 from nooa.runtime.sandbox.context_block import render_sandbox_block
 
 
-def test_codeact_defaults_keep_inprocess_backend():
+def test_codeact_defaults_use_sandbox_backend():
     cfg = CodeActConfig()
-    assert cfg.execution_backend == "inprocess"
+    assert cfg.execution_backend == "sandbox"
     assert isinstance(cfg.sandbox, SandboxConfig)
 
 

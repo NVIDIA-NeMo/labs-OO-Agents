@@ -117,10 +117,10 @@ class TestCodeActStrategyConfig:
         assert strat.config.max_iterations == 5
 
     def test_default_config(self):
-        """``CodeActStrategy()`` defaults: unlimited iterations, no cell timeout."""
+        """``CodeActStrategy()`` defaults: unlimited iterations, 30s cell timeout."""
         strat = CodeActStrategy(config=CodeActConfig())
         assert strat.config.max_iterations is None
-        assert strat.config.cell_timeout is None
+        assert strat.config.cell_timeout == 30.0
 
     def test_rejects_old_flat_kwargs(self):
         """CodeActStrategy rejects old-style flat kwargs."""
