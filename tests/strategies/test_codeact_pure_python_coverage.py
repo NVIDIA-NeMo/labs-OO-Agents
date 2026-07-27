@@ -4177,7 +4177,7 @@ class TestCodeActGenerationIdNone:
 
 
 class TestMaybeEvalConstructorString:
-    """Tests for _maybe_eval_constructor_string constructor-call coercion."""
+    """Tests for safe _maybe_eval_constructor_string constructor-call coercion."""
 
     def _make_session(self, **locals_):
         """Create a mock session with given session_locals."""
@@ -4186,7 +4186,7 @@ class TestMaybeEvalConstructorString:
         return session
 
     def test_basic_constructor_with_type_in_locals(self):
-        """Should eval 'Answer(answer=1, reason="test")' when Answer is in locals."""
+        """Should coerce 'Answer(answer=1, reason="test")' when Answer is return type."""
         from pydantic import BaseModel
 
         class Answer(BaseModel):
@@ -4203,7 +4203,7 @@ class TestMaybeEvalConstructorString:
         assert result.reason == "the minimum"
 
     def test_constructor_with_type_injected_from_return_type(self):
-        """Should inject return_type into eval ns when not in session_locals."""
+        """Should use return_type when not in session_locals."""
         from pydantic import BaseModel
 
         class MyResult(BaseModel):
@@ -4220,7 +4220,7 @@ class TestMaybeEvalConstructorString:
         assert result.note == "computed"
 
     def test_constructor_with_variable_reference_in_args(self):
-        """Should resolve variables from session_locals inside constructor args."""
+        """Should resolve plain JSON values from session_locals inside constructor args."""
         from pydantic import BaseModel
 
         class Answer(BaseModel):
@@ -4235,6 +4235,21 @@ class TestMaybeEvalConstructorString:
         assert isinstance(result, Answer)
         assert result.answer == 7
         assert result.reason == "found it"
+
+    def test_constructor_with_session_value_is_json_detached(self):
+        """Should copy plain session values through JSON before constructor use."""
+        from pydantic import BaseModel
+
+        class Answer(BaseModel):
+            payload: dict[str, list[int]]
+
+        payload = {"numbers": [1, 2, 3]}
+        strat = CodeActStrategy()
+        session = self._make_session(Answer=Answer, payload=payload)
+        result = strat._maybe_eval_constructor_string("Answer(payload=payload)", Answer, session)
+        assert isinstance(result, Answer)
+        assert result.payload == {"numbers": [1, 2, 3]}
+        assert result.payload is not payload
 
     def test_non_constructor_string_returns_as_is(self):
         """Plain string should be returned unchanged."""
@@ -4253,12 +4268,12 @@ class TestMaybeEvalConstructorString:
     def test_unknown_type_returns_as_is(self):
         """Constructor with unknown type name should return as-is."""
         strat = CodeActStrategy()
-        session = self._make_session()
+        session = self._make_session(Unknown=lambda **kwargs: "should not run")
         result = strat._maybe_eval_constructor_string("Unknown(x=1)", object, session)
         assert result == "Unknown(x=1)"
 
-    def test_eval_failure_returns_as_is(self):
-        """If eval raises, return original string."""
+    def test_constructor_coercion_failure_returns_as_is(self):
+        """If safe argument parsing fails, return original string."""
         from pydantic import BaseModel
 
         class Answer(BaseModel):
@@ -4267,15 +4282,15 @@ class TestMaybeEvalConstructorString:
 
         strat = CodeActStrategy()
         session = self._make_session(Answer=Answer)
-        # Missing required field should raise ValidationError in eval
+        # Missing variable should fail safe argument parsing.
         result = strat._maybe_eval_constructor_string(
             'Answer(answer="not_an_int_but_coerced", reason=missing_var)', Answer, session
         )
-        # missing_var is not in session_locals → NameError → returns as-is
+        # missing_var is not in session_locals, so the original value is preserved.
         assert result == 'Answer(answer="not_an_int_but_coerced", reason=missing_var)'
 
-    def test_nested_parens_work(self):
-        """Nested parens in args should be handled by eval."""
+    def test_nested_calls_return_as_is(self):
+        """Nested calls in args should be rejected instead of executed."""
         from pydantic import BaseModel
 
         class Answer(BaseModel):
@@ -4287,8 +4302,53 @@ class TestMaybeEvalConstructorString:
         result = strat._maybe_eval_constructor_string(
             'Answer(answer=min(3, 1, 2), reason="picked smallest")', Answer, session
         )
-        assert isinstance(result, Answer)
-        assert result.answer == 1
+        assert result == 'Answer(answer=min(3, 1, 2), reason="picked smallest")'
+
+    def test_constructor_does_not_call_session_object(self):
+        """Pre-planted callable session objects must not be invoked."""
+        from pydantic import BaseModel
+
+        class Answer(BaseModel):
+            answer: str
+            reason: str
+
+        class Trap:
+            called = False
+
+            def __call__(self):
+                self.called = True
+                return "owned"
+
+        trap = Trap()
+        strat = CodeActStrategy()
+        session = self._make_session(Answer=Answer, payload=trap)
+        result = strat._maybe_eval_constructor_string(
+            'Answer(answer=payload(), reason="should not execute")', Answer, session
+        )
+        assert result == 'Answer(answer=payload(), reason="should not execute")'
+        assert trap.called is False
+
+    def test_constructor_rejects_non_plain_session_object(self):
+        """Session references to arbitrary objects should not be serialized or used."""
+        from pydantic import BaseModel
+
+        class Answer(BaseModel):
+            answer: object
+            reason: str
+
+        class Trap:
+            def __iter__(self):
+                raise AssertionError("object serialization should not be attempted")
+
+            def __repr__(self):
+                raise AssertionError("object repr should not be needed")
+
+        strat = CodeActStrategy()
+        session = self._make_session(Answer=Answer, payload=Trap())
+        result = strat._maybe_eval_constructor_string(
+            'Answer(answer=payload, reason="should not serialize")', Answer, session
+        )
+        assert result == 'Answer(answer=payload, reason="should not serialize")'
 
     def test_non_identifier_prefix_returns_as_is(self):
         """String starting with non-identifier before parens should return as-is."""

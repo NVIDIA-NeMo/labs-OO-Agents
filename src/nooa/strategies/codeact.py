@@ -1803,8 +1803,8 @@ Standard Python builtins and agent instance (`self`) are available."""
                         normalized_args["result"] = parsed
                     else:
                         # Constructor-call coercion: if the string looks like a Python
-                        # constructor call (e.g. "Answer(answer=1, reason='...')"), eval it
-                        # in the session namespace where the type is available.
+                        # constructor call (e.g. "Answer(answer=1, reason='...')"),
+                        # parse its arguments without evaluating against session state.
                         coerced = self._maybe_eval_constructor_string(
                             result_str, return_type, session
                         )
@@ -2009,13 +2009,87 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         return {"result": corrected_result}
 
+    def _json_detached_session_value(self, name: str, session: Any) -> Any:
+        """Return a JSON-round-tripped session value if it is a plain value."""
+        session_locals = getattr(session, "session_locals", {})
+        if name not in session_locals:
+            raise ValueError(f"Unknown constructor argument reference: {name}")
+
+        value = session_locals[name]
+        if not self._is_plain_json_value(value):
+            raise TypeError(f"Session value {name!r} is not a plain JSON value")
+
+        return json.loads(json.dumps(value, allow_nan=False))
+
+    def _is_plain_json_value(self, value: Any, seen: set[int] | None = None) -> bool:
+        """True for exact JSON-compatible builtin values, excluding subclasses."""
+        if value is None or type(value) in {bool, int, float, str}:
+            return True
+
+        if seen is None:
+            seen = set()
+
+        if type(value) in {list, tuple}:
+            value_id = id(value)
+            if value_id in seen:
+                return False
+            seen.add(value_id)
+            try:
+                return all(self._is_plain_json_value(item, seen) for item in value)
+            finally:
+                seen.remove(value_id)
+
+        if type(value) is dict:
+            value_id = id(value)
+            if value_id in seen:
+                return False
+            seen.add(value_id)
+            try:
+                return all(
+                    type(key) is str and self._is_plain_json_value(item, seen)
+                    for key, item in value.items()
+                )
+            finally:
+                seen.remove(value_id)
+
+        return False
+
+    def _safe_constructor_arg_value(self, node: ast.AST, session: Any) -> Any:
+        """Parse one constructor argument without executing Python code."""
+        if isinstance(node, ast.Call):
+            raise ValueError("Constructor argument calls are not allowed")
+
+        if isinstance(node, ast.Name):
+            return self._json_detached_session_value(node.id, session)
+
+        if isinstance(node, ast.List):
+            return [self._safe_constructor_arg_value(item, session) for item in node.elts]
+
+        if isinstance(node, ast.Tuple):
+            return tuple(self._safe_constructor_arg_value(item, session) for item in node.elts)
+
+        if isinstance(node, ast.Set):
+            return {self._safe_constructor_arg_value(item, session) for item in node.elts}
+
+        if isinstance(node, ast.Dict):
+            result: dict[Any, Any] = {}
+            for key_node, value_node in zip(node.keys, node.values, strict=True):
+                if key_node is None:
+                    raise ValueError("Dictionary unpacking is not allowed")
+                key = self._safe_constructor_arg_value(key_node, session)
+                result[key] = self._safe_constructor_arg_value(value_node, session)
+            return result
+
+        return ast.literal_eval(node)
+
     def _maybe_eval_constructor_string(self, value: str, return_type: Any, session: Any) -> Any:
-        """Eval a string that looks like a Python constructor call.
+        """Safely coerce a string that looks like a constructor call.
 
         Detects patterns like 'ClassName(field=value, ...)' where ClassName
-        matches the expected return type. Evaluates in the session namespace
-        so the type is available. Returns the constructed object on success,
-        or the original string on failure.
+        matches the expected return type. Constructor arguments may contain
+        Python literals or references to plain JSON-compatible session values.
+        Session values are copied through JSON before use, and executable
+        expressions such as function calls or attribute access are rejected.
 
         This handles a common LLM failure mode where the model calls
         return_result as a tool with the constructor as a string argument
@@ -2024,41 +2098,45 @@ Standard Python builtins and agent instance (`self`) are available."""
         """
         stripped = value.strip()
 
-        # Must look like a constructor call: Identifier(...)
-        # Quick check before parsing
-        paren_idx = stripped.find("(")
-        if paren_idx <= 0 or not stripped.endswith(")"):
-            return value
-
-        candidate_name = stripped[:paren_idx].strip()
-        if not candidate_name.isidentifier():
-            return value
-
-        # Check that the candidate name matches the expected return type
-        # or is available in session locals
-        type_name = getattr(return_type, "__name__", None)
-        if candidate_name != type_name and candidate_name not in session.session_locals:
-            return value
-
-        # Build eval namespace: session locals + the return type itself (which may
-        # live in module globals rather than session_locals).
-        eval_ns = dict(session.session_locals)
-        if type_name and type_name not in eval_ns and isinstance(return_type, type):
-            eval_ns[type_name] = return_type
-
-        # Try to eval in the combined namespace
         try:
-            result = eval(stripped, {"__builtins__": {}}, eval_ns)  # noqa: S307
+            expression = ast.parse(stripped, mode="eval")
+        except SyntaxError:
+            return value
+
+        if not isinstance(expression.body, ast.Call):
+            return value
+
+        call = expression.body
+        if not isinstance(call.func, ast.Name):
+            return value
+
+        base_return_type, _ = self._extract_annotated_description(return_type)
+        type_name = getattr(base_return_type, "__name__", None)
+        candidate_name = call.func.id
+        if candidate_name != type_name or not isinstance(base_return_type, type):
+            return value
+
+        if any(keyword.arg is None for keyword in call.keywords):
+            return value
+
+        try:
+            args = [self._safe_constructor_arg_value(arg, session) for arg in call.args]
+            kwargs = {
+                keyword.arg: self._safe_constructor_arg_value(keyword.value, session)
+                for keyword in call.keywords
+                if keyword.arg is not None
+            }
+            result = base_return_type(*args, **kwargs)
             get_harness_metrics().constructor_string_coerced(candidate_name)
             logger.debug(
-                "[CODEACT] Coerced constructor-call string %r into %s instance",
+                "[CODEACT] Safely coerced constructor-call string %r into %s instance",
                 stripped[:80],
                 type(result).__name__,
             )
             return result
         except Exception:
             logger.debug(
-                "[CODEACT] Failed to eval constructor string %r, returning as-is",
+                "[CODEACT] Failed to safely coerce constructor string %r, returning as-is",
                 stripped[:80],
             )
             return value
