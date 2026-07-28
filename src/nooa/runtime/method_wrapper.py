@@ -11,6 +11,7 @@ for context variable management, tracing hooks, and execution routing.
 """
 
 import asyncio
+import inspect
 import logging
 from collections.abc import Callable
 from functools import wraps
@@ -33,6 +34,8 @@ if TYPE_CHECKING:
     from nooa.strategies.base import GenerationStrategy
 
 logger = logging.getLogger(__name__)
+
+_MISSING = object()
 
 
 async def _flush_litellm_journal() -> None:
@@ -117,12 +120,21 @@ def create_agent_method_wrapper(
             # Strip framework kwargs before validation — they're consumed by
             # _execute_with_generation, not the user's method signature.
             _fw_session_locals = kwargs.pop("_session_locals", None)
+            _fw_llm = _MISSING
+            try:
+                _has_user_llm_param = "llm" in inspect.signature(original_func).parameters
+            except (TypeError, ValueError):
+                _has_user_llm_param = False
+            if not _has_user_llm_param:
+                _fw_llm = kwargs.pop("llm", _MISSING)
             try:
                 ArgumentValidator().validate(original_func, args, kwargs, _tc)
             finally:
                 # Restore so _execute_with_generation can pop them
                 if _fw_session_locals is not None:
                     kwargs["_session_locals"] = _fw_session_locals
+                if _fw_llm is not _MISSING:
+                    kwargs["llm"] = _fw_llm
 
             # Strategy resolution if not provided
             if resolved_strategy is None:
