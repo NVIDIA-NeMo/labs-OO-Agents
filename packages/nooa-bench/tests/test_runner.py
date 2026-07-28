@@ -84,6 +84,37 @@ async def test_runner_writes_failure_result_when_agent_raises(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_runner_writes_failure_result_when_agent_returns_none(monkeypatch):
+    class EmptyAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        async def _run_evaluation(self, task_input: dict[str, Any]) -> None:
+            return None
+
+    written: dict[str, Any] = {}
+
+    monkeypatch.setattr(runner, "_import_agent_class", lambda agent_type: EmptyAgent)
+    monkeypatch.setattr(runner, "_write_result", lambda result, model, agent_type: written.update(result))
+    monkeypatch.setattr(runner, "_write_answer", lambda result: None)
+
+    exit_code = await runner._run(
+        "fix it",
+        "gpt-5.6-sol",
+        "copilot",
+        api_base=None,
+        working_dir=str(Path.cwd()),
+    )
+
+    assert exit_code == 1
+    assert written == {
+        "response": "",
+        "success": False,
+        "error": "Agent returned no result",
+    }
+
+
+@pytest.mark.asyncio
 async def test_runner_copilot_rejects_api_base_before_agent_construction(monkeypatch):
     def fail_import(agent_type: str) -> Any:
         raise AssertionError("agent should not be imported when --api-base is rejected")

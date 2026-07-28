@@ -212,6 +212,9 @@ async def _run(
         except Exception as e:
             logger.exception("Agent evaluation failed with unhandled exception: %s", e)
             result = {"response": "", "success": False, "error": str(e)}
+    if result is None:
+        logger.error("Agent returned no result")
+        result = {"response": "", "success": False, "error": "Agent returned no result"}
     if get_token_counts is not None:
         result.update(get_token_counts())
     _write_result(result, model, agent_type)
