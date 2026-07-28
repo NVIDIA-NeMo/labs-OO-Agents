@@ -83,7 +83,7 @@ async def test_copilot_install_downloads_runtime(monkeypatch):
     command = agent.root_commands[-1]
     assert "python3 -m copilot download-runtime" in command
     assert "COPILOT_CLI_EXTRACT_DIR=/opt/nooa-copilot-runtime" in command
-    assert "chmod -R a+rX /opt/nooa-copilot-runtime" in command
+    assert "chmod -R u=rwX,go=rX /opt/nooa-copilot-runtime" in command
     assert "a+rwx" not in command
 
 

@@ -97,10 +97,11 @@ class NooaBenchAgent(BaseInstalledAgent):
         """Clone the repo and install core + cli + bench into a fresh venv."""
         branch = f"--branch {shlex.quote(self._git_ref)} " if self._git_ref else ""
         copilot_runtime_install = (
-            f"mkdir -p {COPILOT_RUNTIME_DIR} && chmod -R a+rX {COPILOT_RUNTIME_DIR} && "
+            f"mkdir -p {COPILOT_RUNTIME_DIR} && "
+            f"chmod -R u=rwX,go=rX {COPILOT_RUNTIME_DIR} && "
             f"COPILOT_CLI_EXTRACT_DIR={COPILOT_RUNTIME_DIR} "
             f"{VENV}/bin/python3 -m copilot download-runtime && "
-            f"chmod -R a+rX {COPILOT_RUNTIME_DIR} && "
+            f"chmod -R u=rwX,go=rX {COPILOT_RUNTIME_DIR} && "
             if self._agent_type == "copilot"
             else ""
         )
