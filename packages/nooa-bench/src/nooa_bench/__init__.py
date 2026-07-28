@@ -14,6 +14,8 @@ from __future__ import annotations
 AGENT_CLASSES: dict[str, str] = {
     # Unified SWE-bench + Terminal-Bench agent (the tech report's BenchAgent)
     "bench": "nooa_bench.bench_agent:BenchAgent",
+    # Official GitHub Copilot SDK-backed runtime.
+    "copilot": "nooa_bench.copilot_agent:CopilotBenchAgent",
 }
 
 __all__ = ["AGENT_CLASSES"]

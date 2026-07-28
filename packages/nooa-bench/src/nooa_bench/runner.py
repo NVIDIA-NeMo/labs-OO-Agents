@@ -40,6 +40,7 @@ LOGS_DIR = Path("/logs/agent")
 ARTIFACTS_DIR = Path("/logs/artifacts")
 TRACES_DIR = ARTIFACTS_DIR / "traces"
 ANSWER_FILE = Path("/app/answer.txt")
+COPILOT_AGENT_TYPES = {"copilot"}
 
 
 def _setup_logging() -> None:
@@ -148,37 +149,62 @@ async def _run(
     agent_type: str,
     api_base: str | None,
     working_dir: str | None = None,
+    reasoning_effort: str | None = None,
+    context_tier: str | None = None,
+    timeout_seconds: float | None = None,
 ) -> int:
     """Async main: instantiate, wire, run.  Returns exit code (0 = success)."""
-    from nooa.unifiedllm import get_llm_client
-
-    # Build LLM client — honour env-var overrides for local vLLM deployments.
-    llm_overrides: dict[str, str] = {}
-    if api_base:
-        llm_overrides["api_base"] = api_base
-    elif base_url := os.environ.get("OPENAI_BASE_URL"):
-        llm_overrides["api_base"] = base_url
-    if api_key := os.environ.get("OPENAI_API_KEY"):
-        llm_overrides["api_key"] = api_key
-
-    llm_client = get_llm_client(model, **llm_overrides)
-
-    # Instantiate agent.
-    AgentClass = _import_agent_class(agent_type)
-    agent: Any = AgentClass(llm=llm_client)
-
     # All agents share the same interface: {"user_message": instruction}.
     # Benchmark-specific parsing (system prompts, data paths, etc.) happens
     # inside the agent's _run_evaluation method.
-    from nooa.runtime.token_usage import get_task_tokens, start_task_tokens
-
     logger.info("Running agent %s (model=%s)...", agent_type, model)
-    start_task_tokens()
+    get_token_counts: Any | None = None
     task_input: dict[str, Any] = {"user_message": instruction}
     if working_dir:
         task_input["working_dir"] = working_dir
-    result = await agent._run_evaluation(task_input)
-    result.update(get_task_tokens())
+
+    if agent_type in COPILOT_AGENT_TYPES:
+        if api_base:
+            raise ValueError(
+                "--api-base is not supported for --agent-type copilot; "
+                "BYOK provider wiring is not implemented"
+            )
+        AgentClass = _import_agent_class(agent_type)
+        agent: Any = AgentClass(
+            model=model,
+            reasoning_effort=reasoning_effort,
+            context_tier=context_tier,
+            timeout_seconds=timeout_seconds,
+        )
+    else:
+        from nooa.runtime.token_usage import get_task_tokens, start_task_tokens
+        from nooa.unifiedllm import get_llm_client
+
+        AgentClass = _import_agent_class(agent_type)
+
+        # Build LLM client — honour env-var overrides for local vLLM deployments.
+        llm_overrides: dict[str, str] = {}
+        if api_base:
+            llm_overrides["api_base"] = api_base
+        elif base_url := os.environ.get("OPENAI_BASE_URL"):
+            llm_overrides["api_base"] = base_url
+        if api_key := os.environ.get("OPENAI_API_KEY"):
+            llm_overrides["api_key"] = api_key
+
+        llm_client = get_llm_client(model, **llm_overrides)
+        agent = AgentClass(llm=llm_client)
+        start_task_tokens()
+        get_token_counts = get_task_tokens
+
+    try:
+        result = await agent._run_evaluation(task_input)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.exception("Agent evaluation failed with unhandled exception: %s", e)
+        result = {"response": "", "success": False, "error": str(e)}
+    if get_token_counts is not None:
+        result.update(get_token_counts())
     _write_result(result, model, agent_type)
     _write_answer(result)
 
@@ -196,12 +222,33 @@ async def _run(
 @click.option("--agent-type", default="bench", show_default=True, help="Agent variant to run")
 @click.option("--working-dir", default=None, help="Working directory for the agent shell session")
 @click.option("--api-base", default=None, help="Override API base URL")
+@click.option(
+    "--reasoning-effort",
+    type=click.Choice(["low", "medium", "high", "xhigh"]),
+    default=None,
+    help="Copilot SDK reasoning effort for --agent-type copilot (highest supported: xhigh)",
+)
+@click.option(
+    "--context-tier",
+    type=click.Choice(["default", "long_context"]),
+    default=None,
+    help="Copilot SDK context tier for --agent-type copilot",
+)
+@click.option(
+    "--timeout-seconds",
+    type=float,
+    default=None,
+    help="Copilot SDK session timeout for --agent-type copilot",
+)
 def main(
     instruction: str,
     model: str,
     agent_type: str,
     working_dir: str | None,
     api_base: str | None,
+    reasoning_effort: str | None,
+    context_tier: str | None,
+    timeout_seconds: float | None,
 ) -> None:
     """Run a NOOA agent on a task inside a Harbor container."""
     _setup_logging()
@@ -223,7 +270,18 @@ def main(
     _setup_tracing(model=model, agent_type=agent_type)
 
     try:
-        exit_code = asyncio.run(_run(instruction, model, agent_type, api_base, working_dir))
+        exit_code = asyncio.run(
+            _run(
+                instruction,
+                model,
+                agent_type,
+                api_base,
+                working_dir,
+                reasoning_effort,
+                context_tier,
+                timeout_seconds,
+            )
+        )
     except Exception as e:
         logger.exception("Runner failed with unhandled exception: %s", e)
         exit_code = 1
@@ -232,4 +290,4 @@ def main(
 
 
 if __name__ == "__main__":
-    main()
+    main()  # type: ignore[call-arg]
