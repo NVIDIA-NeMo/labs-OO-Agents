@@ -97,10 +97,10 @@ class NooaBenchAgent(BaseInstalledAgent):
         """Clone the repo and install core + cli + bench into a fresh venv."""
         branch = f"--branch {shlex.quote(self._git_ref)} " if self._git_ref else ""
         copilot_runtime_install = (
-            f"mkdir -p {COPILOT_RUNTIME_DIR} && chmod -R a+rwx {COPILOT_RUNTIME_DIR} && "
+            f"mkdir -p {COPILOT_RUNTIME_DIR} && chmod -R a+rX {COPILOT_RUNTIME_DIR} && "
             f"COPILOT_CLI_EXTRACT_DIR={COPILOT_RUNTIME_DIR} "
             f"{VENV}/bin/python3 -m copilot download-runtime && "
-            f"chmod -R a+rwx {COPILOT_RUNTIME_DIR} && "
+            f"chmod -R a+rX {COPILOT_RUNTIME_DIR} && "
             if self._agent_type == "copilot"
             else ""
         )
@@ -145,14 +145,8 @@ class NooaBenchAgent(BaseInstalledAgent):
         )
         # Exit code 1 means the agent reported task failure: map it to exit 0 so
         # the verifier scores reward=0 instead of raising a harness error.
-        prefix = (
-            f"umask 077; mkdir -p {shlex.quote(COPILOT_HOME)} && "
-            f"chmod 700 {shlex.quote(COPILOT_HOME)} && "
-            if self._agent_type == "copilot"
-            else ""
-        )
         command = (
-            f"({prefix}{VENV}/bin/nemo-harbor "
+            f"({VENV}/bin/nemo-harbor "
             f"--instruction {shlex.quote(instruction)} "
             f"--model {shlex.quote(self.model_name or '')} "
             f"--agent-type {shlex.quote(self._agent_type)} "

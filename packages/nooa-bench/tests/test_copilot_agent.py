@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -500,6 +502,71 @@ async def test_copilot_agent_cleans_up_when_unsubscribe_fails(monkeypatch):
     assert result["success"] is True
     assert factory.session.disconnected is True
     assert factory.clients[-1].stopped is True
+
+
+@pytest.mark.asyncio
+async def test_copilot_agent_stops_client_when_disconnect_is_cancelled(monkeypatch):
+    monkeypatch.delenv("COPILOT_GITHUB_TOKEN", raising=False)
+    factory = _ClientFactory(
+        [
+            _CallReturnTool(
+                {
+                    "solution_description": "fixed it",
+                    "evidence": "pytest passed",
+                    "command_to_verify": "pytest -q",
+                }
+            ),
+            SessionIdleData(),
+        ]
+    )
+    disconnect_started = asyncio.Event()
+
+    async def disconnect() -> None:
+        disconnect_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(factory.session, "disconnect", disconnect)
+    agent = CopilotBenchAgent(timeout_seconds=1, client_factory=factory)
+    task = asyncio.create_task(
+        agent._run_evaluation(
+            {"user_message": "fix the bug", "working_dir": str(Path.cwd())}
+        )
+    )
+
+    await asyncio.wait_for(disconnect_started.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert factory.clients[-1].stopped is True
+
+
+@pytest.mark.asyncio
+async def test_copilot_agent_prepares_private_home(monkeypatch, tmp_path):
+    home = tmp_path / "copilot-home"
+    monkeypatch.setenv("COPILOT_HOME", str(home))
+    factory = _ClientFactory(
+        [
+            _CallReturnTool(
+                {
+                    "solution_description": "fixed it",
+                    "evidence": "pytest passed",
+                    "command_to_verify": "pytest -q",
+                }
+            ),
+            SessionIdleData(),
+        ]
+    )
+    agent = CopilotBenchAgent(timeout_seconds=1, client_factory=factory)
+
+    result = await agent._run_evaluation(
+        {"user_message": "fix the bug", "working_dir": str(Path.cwd())}
+    )
+
+    assert result["success"] is True
+    assert home.is_dir()
+    if os.name != "nt":
+        assert stat.S_IMODE(home.stat().st_mode) == 0o700
 
 
 @pytest.mark.asyncio

@@ -273,6 +273,7 @@ class CopilotBenchAgent:
     async def _run_copilot_session(
         self, *, prompt: str, working_dir: str, usage: _UsageAccumulator
     ) -> _CopilotRunOutcome:
+        _prepare_copilot_home()
         done = asyncio.Event()
         loop = asyncio.get_running_loop()
         final_messages: list[str] = []
@@ -345,14 +346,16 @@ class CopilotBenchAgent:
             await session.send(prompt, agent_mode="autopilot")
             await done.wait()
         finally:
-            if callable(unsubscribe):
-                try:
-                    unsubscribe()
-                except Exception as exc:
-                    _logger.exception("Copilot session unsubscribe failed: %s", exc)
-            if session is not None:
-                await _bounded_cleanup("Copilot session", session.disconnect())
-            await _cleanup_client(client)
+            try:
+                if callable(unsubscribe):
+                    try:
+                        unsubscribe()
+                    except Exception as exc:
+                        _logger.exception("Copilot session unsubscribe failed: %s", exc)
+                if session is not None:
+                    await _bounded_cleanup("Copilot session", session.disconnect())
+            finally:
+                await _cleanup_client(client)
 
         return _CopilotRunOutcome(
             final_response=final_messages[-1] if final_messages else "",
@@ -398,6 +401,15 @@ class CopilotBenchAgent:
             options["context_tier"] = self.context_tier
 
         return options
+
+
+def _prepare_copilot_home() -> None:
+    configured = os.environ.get("COPILOT_HOME")
+    if not configured:
+        return
+    path = Path(configured).expanduser()
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.chmod(0o700)
 
 
 async def _bounded_cleanup(label: str, awaitable: Any) -> None:

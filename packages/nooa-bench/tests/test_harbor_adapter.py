@@ -83,6 +83,8 @@ async def test_copilot_install_downloads_runtime(monkeypatch):
     command = agent.root_commands[-1]
     assert "python3 -m copilot download-runtime" in command
     assert "COPILOT_CLI_EXTRACT_DIR=/opt/nooa-copilot-runtime" in command
+    assert "chmod -R a+rX /opt/nooa-copilot-runtime" in command
+    assert "a+rwx" not in command
 
 
 @pytest.mark.asyncio
@@ -111,6 +113,5 @@ async def test_copilot_run_uses_private_ephemeral_home(monkeypatch):
     command, env = agent.agent_commands[-1]
     assert env["COPILOT_GITHUB_TOKEN"] == "secret-token"
     assert env["COPILOT_HOME"] == "/tmp/nooa-copilot-home"
-    assert "umask 077" in command
-    assert "chmod 700 /tmp/nooa-copilot-home" in command
+    assert "nooa-copilot-home" not in command
     assert "/logs/artifacts/copilot-home" not in command

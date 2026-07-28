@@ -158,9 +158,6 @@ async def _run(
     # Benchmark-specific parsing (system prompts, data paths, etc.) happens
     # inside the agent's _run_evaluation method.
     logger.info("Running agent %s (model=%s)...", agent_type, model)
-    get_token_counts: Any | None = None
-    result: dict[str, Any] | None = None
-    agent: Any = None
     task_input: dict[str, Any] = {"user_message": instruction}
     if working_dir:
         task_input["working_dir"] = working_dir
@@ -173,17 +170,21 @@ async def _run(
                     "BYOK provider wiring is not implemented"
                 )
             AgentClass = _import_agent_class(agent_type)
-            agent = AgentClass(
+            agent: Any = AgentClass(
                 model=model,
                 reasoning_effort=reasoning_effort,
                 context_tier=context_tier,
                 timeout_seconds=timeout_seconds,
             )
+            result = await agent._run_evaluation(task_input)
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.exception("Copilot agent setup failed: %s", e)
+            logger.exception("Copilot agent failed: %s", e)
             result = {"response": "", "success": False, "error": str(e)}
+        if result is None:
+            logger.error("Copilot agent returned no result")
+            result = {"response": "", "success": False, "error": "Agent returned no result"}
     else:
         from nooa.runtime.token_usage import get_task_tokens, start_task_tokens
         from nooa.unifiedllm import get_llm_client
@@ -202,21 +203,9 @@ async def _run(
         llm_client = get_llm_client(model, **llm_overrides)
         agent = AgentClass(llm=llm_client)
         start_task_tokens()
-        get_token_counts = get_task_tokens
+        result = await agent._run_evaluation(task_input)
+        result.update(get_task_tokens())
 
-    if result is None:
-        try:
-            result = await agent._run_evaluation(task_input)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.exception("Agent evaluation failed with unhandled exception: %s", e)
-            result = {"response": "", "success": False, "error": str(e)}
-    if result is None:
-        logger.error("Agent returned no result")
-        result = {"response": "", "success": False, "error": "Agent returned no result"}
-    if get_token_counts is not None:
-        result.update(get_token_counts())
     _write_result(result, model, agent_type)
     _write_answer(result)
 
