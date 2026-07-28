@@ -83,3 +83,34 @@ async def test_copilot_install_downloads_runtime(monkeypatch):
     command = agent.root_commands[-1]
     assert "python3 -m copilot download-runtime" in command
     assert "COPILOT_CLI_EXTRACT_DIR=/opt/nooa-copilot-runtime" in command
+
+
+@pytest.mark.asyncio
+async def test_bench_run_does_not_forward_copilot_credentials(monkeypatch):
+    monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "secret-token")
+    adapter = _load_adapter(monkeypatch)
+    agent = adapter.NooaBenchAgent(Path.cwd(), git_url="https://example.test/repo.git")
+
+    await agent.run("fix it", object(), object())
+
+    command, env = agent.agent_commands[-1]
+    assert "COPILOT_GITHUB_TOKEN" not in env
+    assert "nooa-copilot-home" not in command
+
+
+@pytest.mark.asyncio
+async def test_copilot_run_uses_private_ephemeral_home(monkeypatch):
+    monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "secret-token")
+    adapter = _load_adapter(monkeypatch)
+    agent = adapter.NooaBenchAgent(
+        Path.cwd(), git_url="https://example.test/repo.git", agent_type="copilot"
+    )
+
+    await agent.run("fix it", object(), object())
+
+    command, env = agent.agent_commands[-1]
+    assert env["COPILOT_GITHUB_TOKEN"] == "secret-token"
+    assert env["COPILOT_HOME"] == "/tmp/nooa-copilot-home"
+    assert "umask 077" in command
+    assert "chmod 700 /tmp/nooa-copilot-home" in command
+    assert "/logs/artifacts/copilot-home" not in command

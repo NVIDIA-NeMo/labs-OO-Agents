@@ -159,23 +159,31 @@ async def _run(
     # inside the agent's _run_evaluation method.
     logger.info("Running agent %s (model=%s)...", agent_type, model)
     get_token_counts: Any | None = None
+    result: dict[str, Any] | None = None
+    agent: Any = None
     task_input: dict[str, Any] = {"user_message": instruction}
     if working_dir:
         task_input["working_dir"] = working_dir
 
     if agent_type in COPILOT_AGENT_TYPES:
-        if api_base:
-            raise ValueError(
-                "--api-base is not supported for --agent-type copilot; "
-                "BYOK provider wiring is not implemented"
+        try:
+            if api_base:
+                raise ValueError(
+                    "--api-base is not supported for --agent-type copilot; "
+                    "BYOK provider wiring is not implemented"
+                )
+            AgentClass = _import_agent_class(agent_type)
+            agent = AgentClass(
+                model=model,
+                reasoning_effort=reasoning_effort,
+                context_tier=context_tier,
+                timeout_seconds=timeout_seconds,
             )
-        AgentClass = _import_agent_class(agent_type)
-        agent: Any = AgentClass(
-            model=model,
-            reasoning_effort=reasoning_effort,
-            context_tier=context_tier,
-            timeout_seconds=timeout_seconds,
-        )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.exception("Copilot agent setup failed: %s", e)
+            result = {"response": "", "success": False, "error": str(e)}
     else:
         from nooa.runtime.token_usage import get_task_tokens, start_task_tokens
         from nooa.unifiedllm import get_llm_client
@@ -196,13 +204,14 @@ async def _run(
         start_task_tokens()
         get_token_counts = get_task_tokens
 
-    try:
-        result = await agent._run_evaluation(task_input)
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        logger.exception("Agent evaluation failed with unhandled exception: %s", e)
-        result = {"response": "", "success": False, "error": str(e)}
+    if result is None:
+        try:
+            result = await agent._run_evaluation(task_input)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.exception("Agent evaluation failed with unhandled exception: %s", e)
+            result = {"response": "", "success": False, "error": str(e)}
     if get_token_counts is not None:
         result.update(get_token_counts())
     _write_result(result, model, agent_type)

@@ -39,14 +39,13 @@ from harbor.models.agent.context import AgentContext
 REPO_DIR = "/installed-agent/nooa"
 VENV = "/opt/nooa-venv"
 COPILOT_RUNTIME_DIR = "/opt/nooa-copilot-runtime"
-COPILOT_HOME = "/logs/artifacts/copilot-home"
+COPILOT_HOME = "/tmp/nooa-copilot-home"
 
 # Credentials forwarded from the host into the agent process. The NVIDIA
 # inference endpoints are public; add other provider keys here if needed.
 FORWARDED_ENV_VARS = (
     "NVIDIA_INFERENCE_API_KEY",  # inference.nvidia.com gateway
     "NVIDIA_API_KEY",  # public NIM endpoint
-    "COPILOT_GITHUB_TOKEN",  # optional Copilot SDK token auth
 )
 
 
@@ -146,7 +145,12 @@ class NooaBenchAgent(BaseInstalledAgent):
         )
         # Exit code 1 means the agent reported task failure: map it to exit 0 so
         # the verifier scores reward=0 instead of raising a harness error.
-        prefix = f"mkdir -p {shlex.quote(COPILOT_HOME)} && " if self._agent_type == "copilot" else ""
+        prefix = (
+            f"umask 077; mkdir -p {shlex.quote(COPILOT_HOME)} && "
+            f"chmod 700 {shlex.quote(COPILOT_HOME)} && "
+            if self._agent_type == "copilot"
+            else ""
+        )
         command = (
             f"({prefix}{VENV}/bin/nemo-harbor "
             f"--instruction {shlex.quote(instruction)} "
@@ -166,6 +170,8 @@ class NooaBenchAgent(BaseInstalledAgent):
         if nvidia_key:
             env.setdefault("OPENAI_API_KEY", nvidia_key)
         if self._agent_type == "copilot":
+            if copilot_token := os.environ.get("COPILOT_GITHUB_TOKEN"):
+                env["COPILOT_GITHUB_TOKEN"] = copilot_token
             env.setdefault("COPILOT_CLI_EXTRACT_DIR", COPILOT_RUNTIME_DIR)
             env.setdefault("COPILOT_HOME", COPILOT_HOME)
         await self.exec_as_agent(environment, command=command, env=env, cwd=REPO_DIR)

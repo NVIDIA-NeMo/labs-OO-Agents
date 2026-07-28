@@ -467,6 +467,42 @@ async def test_copilot_agent_force_stops_client_when_stop_hangs(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_copilot_agent_cleans_up_when_unsubscribe_fails(monkeypatch):
+    monkeypatch.delenv("COPILOT_GITHUB_TOKEN", raising=False)
+    factory = _ClientFactory(
+        [
+            _CallReturnTool(
+                {
+                    "solution_description": "fixed it",
+                    "evidence": "pytest passed",
+                    "command_to_verify": "pytest -q",
+                }
+            ),
+            SessionIdleData(),
+        ]
+    )
+
+    def on(handler: Any) -> Any:
+        factory.session.handlers.append(handler)
+
+        def unsubscribe() -> None:
+            raise RuntimeError("unsubscribe failed")
+
+        return unsubscribe
+
+    monkeypatch.setattr(factory.session, "on", on)
+    agent = CopilotBenchAgent(timeout_seconds=1, client_factory=factory)
+
+    result = await agent._run_evaluation(
+        {"user_message": "fix the bug", "working_dir": str(Path.cwd())}
+    )
+
+    assert result["success"] is True
+    assert factory.session.disconnected is True
+    assert factory.clients[-1].stopped is True
+
+
+@pytest.mark.asyncio
 async def test_copilot_agent_returns_failure_for_send_exception(monkeypatch):
     monkeypatch.delenv("COPILOT_GITHUB_TOKEN", raising=False)
     factory = _ClientFactory([], send_error=RuntimeError("send failed"))

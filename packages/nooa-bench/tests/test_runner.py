@@ -88,16 +88,56 @@ async def test_runner_copilot_rejects_api_base_before_agent_construction(monkeyp
     def fail_import(agent_type: str) -> Any:
         raise AssertionError("agent should not be imported when --api-base is rejected")
 
-    monkeypatch.setattr(runner, "_import_agent_class", fail_import)
+    written: dict[str, Any] = {}
 
-    with pytest.raises(ValueError, match="BYOK provider wiring is not implemented"):
-        await runner._run(
-            "fix it",
-            "gpt-5.6-sol",
-            "copilot",
-            api_base="https://example.test/v1",
-            working_dir=str(Path.cwd()),
-            reasoning_effort="xhigh",
-            context_tier="long_context",
-            timeout_seconds=10,
-        )
+    monkeypatch.setattr(runner, "_import_agent_class", fail_import)
+    monkeypatch.setattr(runner, "_write_result", lambda result, model, agent_type: written.update(result))
+    monkeypatch.setattr(runner, "_write_answer", lambda result: None)
+
+    exit_code = await runner._run(
+        "fix it",
+        "gpt-5.6-sol",
+        "copilot",
+        api_base="https://example.test/v1",
+        working_dir=str(Path.cwd()),
+        reasoning_effort="xhigh",
+        context_tier="long_context",
+        timeout_seconds=10,
+    )
+
+    assert exit_code == 1
+    assert written == {
+        "response": "",
+        "success": False,
+        "error": (
+            "--api-base is not supported for --agent-type copilot; "
+            "BYOK provider wiring is not implemented"
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_runner_writes_failure_result_when_copilot_setup_fails(monkeypatch):
+    def fail_import(agent_type: str) -> Any:
+        raise RuntimeError("copilot import failed")
+
+    written: dict[str, Any] = {}
+
+    monkeypatch.setattr(runner, "_import_agent_class", fail_import)
+    monkeypatch.setattr(runner, "_write_result", lambda result, model, agent_type: written.update(result))
+    monkeypatch.setattr(runner, "_write_answer", lambda result: None)
+
+    exit_code = await runner._run(
+        "fix it",
+        "gpt-5.6-sol",
+        "copilot",
+        api_base=None,
+        working_dir=str(Path.cwd()),
+    )
+
+    assert exit_code == 1
+    assert written == {
+        "response": "",
+        "success": False,
+        "error": "copilot import failed",
+    }

@@ -346,7 +346,10 @@ class CopilotBenchAgent:
             await done.wait()
         finally:
             if callable(unsubscribe):
-                unsubscribe()
+                try:
+                    unsubscribe()
+                except Exception as exc:
+                    _logger.exception("Copilot session unsubscribe failed: %s", exc)
             if session is not None:
                 await _bounded_cleanup("Copilot session", session.disconnect())
             await _cleanup_client(client)

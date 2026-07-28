@@ -61,9 +61,10 @@ isolated benchmark container. Containerized runs do not automatically inherit
 your host login: forward `COPILOT_GITHUB_TOKEN`, or mount supported Copilot
 state into the container. Do not copy secrets into this repo or commit them.
 The adapter pre-downloads the Copilot runtime during install with
-`COPILOT_CLI_EXTRACT_DIR=/opt/nooa-copilot-runtime`, and sets
-`COPILOT_HOME=/logs/artifacts/copilot-home` so runtime/session state is written
-to a container-writable artifact path.
+`COPILOT_CLI_EXTRACT_DIR=/opt/nooa-copilot-runtime`. It keeps Copilot
+runtime/session state in the private, container-local
+`COPILOT_HOME=/tmp/nooa-copilot-home`; that state is not persisted with Harbor
+artifacts.
 
 Future Pareto-loop orchestration and GPU allocation should stay outside this
 agent boundary; this agent only adapts Harbor tasks to the Copilot SDK runtime.
