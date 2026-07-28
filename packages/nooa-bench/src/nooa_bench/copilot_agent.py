@@ -182,7 +182,9 @@ class CopilotBenchAgent:
             DEFAULT_REASONING_EFFORT if reasoning_effort is None else reasoning_effort
         )
         self.context_tier = DEFAULT_CONTEXT_TIER if context_tier is None else context_tier
-        self.timeout_seconds = DEFAULT_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+        self.timeout_seconds = (
+            DEFAULT_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+        )
         self.github_token = github_token or os.environ.get("COPILOT_GITHUB_TOKEN")
         self._client_factory = client_factory
 

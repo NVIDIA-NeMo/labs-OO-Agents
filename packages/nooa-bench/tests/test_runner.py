@@ -34,7 +34,9 @@ async def test_runner_copilot_dispatch_does_not_construct_litellm(monkeypatch):
     written: dict[str, Any] = {}
 
     monkeypatch.setattr(runner, "_import_agent_class", lambda agent_type: FakeCopilotAgent)
-    monkeypatch.setattr(runner, "_write_result", lambda result, model, agent_type: written.update(result))
+    monkeypatch.setattr(
+        runner, "_write_result", lambda result, model, agent_type: written.update(result)
+    )
     monkeypatch.setattr(runner, "_write_answer", lambda result: None)
 
     exit_code = await runner._run(
@@ -85,7 +87,9 @@ async def test_runner_legacy_dispatch_preserves_token_accounting(monkeypatch):
         "get_task_tokens",
         lambda: {"n_input_tokens": 11, "n_output_tokens": 7},
     )
-    monkeypatch.setattr(runner, "_write_result", lambda result, model, agent_type: written.update(result))
+    monkeypatch.setattr(
+        runner, "_write_result", lambda result, model, agent_type: written.update(result)
+    )
     monkeypatch.setattr(runner, "_write_answer", lambda result: None)
 
     exit_code = await runner._run(
@@ -114,7 +118,9 @@ async def test_runner_writes_failure_result_when_agent_raises(monkeypatch):
     written: dict[str, Any] = {}
 
     monkeypatch.setattr(runner, "_import_agent_class", lambda agent_type: BrokenAgent)
-    monkeypatch.setattr(runner, "_write_result", lambda result, model, agent_type: written.update(result))
+    monkeypatch.setattr(
+        runner, "_write_result", lambda result, model, agent_type: written.update(result)
+    )
     monkeypatch.setattr(runner, "_write_answer", lambda result: None)
 
     exit_code = await runner._run(
@@ -141,7 +147,9 @@ async def test_runner_writes_failure_result_when_agent_returns_none(monkeypatch)
     written: dict[str, Any] = {}
 
     monkeypatch.setattr(runner, "_import_agent_class", lambda agent_type: EmptyAgent)
-    monkeypatch.setattr(runner, "_write_result", lambda result, model, agent_type: written.update(result))
+    monkeypatch.setattr(
+        runner, "_write_result", lambda result, model, agent_type: written.update(result)
+    )
     monkeypatch.setattr(runner, "_write_answer", lambda result: None)
 
     exit_code = await runner._run(
@@ -168,7 +176,9 @@ async def test_runner_copilot_rejects_api_base_before_agent_construction(monkeyp
     written: dict[str, Any] = {}
 
     monkeypatch.setattr(runner, "_import_agent_class", fail_import)
-    monkeypatch.setattr(runner, "_write_result", lambda result, model, agent_type: written.update(result))
+    monkeypatch.setattr(
+        runner, "_write_result", lambda result, model, agent_type: written.update(result)
+    )
     monkeypatch.setattr(runner, "_write_answer", lambda result: None)
 
     exit_code = await runner._run(
@@ -201,7 +211,9 @@ async def test_runner_writes_failure_result_when_copilot_setup_fails(monkeypatch
     written: dict[str, Any] = {}
 
     monkeypatch.setattr(runner, "_import_agent_class", fail_import)
-    monkeypatch.setattr(runner, "_write_result", lambda result, model, agent_type: written.update(result))
+    monkeypatch.setattr(
+        runner, "_write_result", lambda result, model, agent_type: written.update(result)
+    )
     monkeypatch.setattr(runner, "_write_answer", lambda result: None)
 
     exit_code = await runner._run(

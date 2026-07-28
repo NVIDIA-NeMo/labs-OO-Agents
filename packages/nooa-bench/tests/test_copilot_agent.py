@@ -37,9 +37,7 @@ def _model(
 ) -> SimpleNamespace:
     return SimpleNamespace(
         id=model_id,
-        capabilities=SimpleNamespace(
-            supports=SimpleNamespace(reasoning_effort=supports_reasoning)
-        ),
+        capabilities=SimpleNamespace(supports=SimpleNamespace(reasoning_effort=supports_reasoning)),
         supported_reasoning_efforts=supported_reasoning_efforts
         or ["low", "medium", "high", "xhigh"],
     )
@@ -296,7 +294,10 @@ async def test_copilot_agent_reports_idle_without_return_tool(monkeypatch):
     monkeypatch.delenv("GITHUB_COPILOT_TOKEN", raising=False)
     monkeypatch.delenv("COPILOT_GITHUB_TOKEN", raising=False)
     factory = _ClientFactory(
-        [AssistantMessageData(content='{"solution_description":"text only"}', message_id="m1"), SessionIdleData()]
+        [
+            AssistantMessageData(content='{"solution_description":"text only"}', message_id="m1"),
+            SessionIdleData(),
+        ]
     )
     agent = CopilotBenchAgent(timeout_seconds=1, client_factory=factory)
 
@@ -528,9 +529,7 @@ async def test_copilot_agent_stops_client_when_disconnect_is_cancelled(monkeypat
     monkeypatch.setattr(factory.session, "disconnect", disconnect)
     agent = CopilotBenchAgent(timeout_seconds=1, client_factory=factory)
     task = asyncio.create_task(
-        agent._run_evaluation(
-            {"user_message": "fix the bug", "working_dir": str(Path.cwd())}
-        )
+        agent._run_evaluation({"user_message": "fix the bug", "working_dir": str(Path.cwd())})
     )
 
     await asyncio.wait_for(disconnect_started.wait(), timeout=1)
