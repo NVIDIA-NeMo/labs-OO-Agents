@@ -668,6 +668,19 @@ wheels = [
 ]
 
 [[package]]
+name = "github-copilot-sdk"
+version = "1.0.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "python-dateutil" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/13/c7/152a5e87528a3960886bf8d6af8cd1c32437367d2c40725b51da428fdaca/github_copilot_sdk-1.0.5-py3-none-any.whl", hash = "sha256:4f4715553dfab863ffdbff250fc245fb484577e2a16c9cbaab3cf43bb69c4ca7", size = 375876, upload-time = "2026-07-01T15:11:57.92Z" },
+]
+
+[[package]]
 name = "googleapis-common-protos"
 version = "1.75.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1488,6 +1501,7 @@ name = "nooa-bench"
 source = { editable = "packages/nooa-bench" }
 dependencies = [
     { name = "click" },
+    { name = "github-copilot-sdk" },
     { name = "nooa" },
     { name = "nooa-cli" },
 ]
@@ -1495,6 +1509,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1" },
+    { name = "github-copilot-sdk", specifier = ">=1.0.5" },
     { name = "nooa", editable = "." },
     { name = "nooa-cli", editable = "packages/nooa-cli" },
 ]

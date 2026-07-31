@@ -17,8 +17,9 @@ Credentials: set ``NVIDIA_INFERENCE_API_KEY`` (inference.nvidia.com gateway)
 or ``NVIDIA_API_KEY`` (public NIM endpoint) on the host — it is forwarded
 into the agent process. The NVIDIA endpoints are OpenAI-compatible, so the
 key is also exposed as ``OPENAI_API_KEY`` for litellm when you point
-``api_base`` at them. To use another provider directly, add its key to
-``FORWARDED_ENV_VARS`` below.
+``api_base`` at them. The Copilot SDK path can use a forwarded
+``COPILOT_GITHUB_TOKEN``; direct local runs normally reuse the signed-in
+Copilot CLI account.
 
 Note: the container needs network access during :meth:`install` (git clone +
 dependency download). For air-gapped task containers, pre-stage the repo and
@@ -37,6 +38,8 @@ from harbor.models.agent.context import AgentContext
 
 REPO_DIR = "/installed-agent/nooa"
 VENV = "/opt/nooa-venv"
+COPILOT_RUNTIME_DIR = "/opt/nooa-copilot-runtime"
+COPILOT_HOME = "/tmp/nooa-copilot-home"
 
 # Credentials forwarded from the host into the agent process. The NVIDIA
 # inference endpoints are public; add other provider keys here if needed.
@@ -54,6 +57,9 @@ class NooaBenchAgent(BaseInstalledAgent):
         git_ref:    optional branch/tag/SHA (or env ``NOOA_GIT_REF``)
         agent_type: registry key passed to ``nemo-harbor`` (default ``bench``)
         api_base:   optional OpenAI-compatible endpoint override
+        reasoning_effort: optional Copilot SDK reasoning effort
+        context_tier: optional Copilot SDK context tier
+        timeout_seconds: optional Copilot SDK session timeout
     """
 
     def __init__(
@@ -63,6 +69,9 @@ class NooaBenchAgent(BaseInstalledAgent):
         git_ref: str | None = None,
         agent_type: str = "bench",
         api_base: str | None = None,
+        reasoning_effort: str | None = None,
+        context_tier: str | None = None,
+        timeout_seconds: float | None = None,
         *args,
         **kwargs,
     ) -> None:
@@ -76,6 +85,9 @@ class NooaBenchAgent(BaseInstalledAgent):
         self._git_ref = git_ref or os.environ.get("NOOA_GIT_REF")
         self._agent_type = agent_type
         self._api_base = api_base
+        self._reasoning_effort = reasoning_effort
+        self._context_tier = context_tier
+        self._timeout_seconds = timeout_seconds
 
     @staticmethod
     def name() -> str:
@@ -84,6 +96,15 @@ class NooaBenchAgent(BaseInstalledAgent):
     async def install(self, environment: BaseEnvironment) -> None:
         """Clone the repo and install core + cli + bench into a fresh venv."""
         branch = f"--branch {shlex.quote(self._git_ref)} " if self._git_ref else ""
+        copilot_runtime_install = (
+            f"mkdir -p {COPILOT_RUNTIME_DIR} && "
+            f"chmod -R u=rwX,go=rX {COPILOT_RUNTIME_DIR} && "
+            f"COPILOT_CLI_EXTRACT_DIR={COPILOT_RUNTIME_DIR} "
+            f"{VENV}/bin/python3 -m copilot download-runtime && "
+            f"chmod -R u=rwX,go=rX {COPILOT_RUNTIME_DIR} && "
+            if self._agent_type == "copilot"
+            else ""
+        )
         await self.exec_as_root(
             environment,
             command=(
@@ -98,6 +119,7 @@ class NooaBenchAgent(BaseInstalledAgent):
                 f"uv venv {VENV} && "
                 f"uv pip install --python {VENV}/bin/python3 "
                 f"{REPO_DIR} {REPO_DIR}/packages/nooa-cli {REPO_DIR}/packages/nooa-bench && "
+                f"{copilot_runtime_install}"
                 f"{VENV}/bin/python3 -c \"from nooa_bench.runner import main; print('nooa-bench installed OK')\""
             ),
         )
@@ -109,6 +131,19 @@ class NooaBenchAgent(BaseInstalledAgent):
         context: AgentContext,
     ) -> None:
         api_base = f"--api-base {shlex.quote(self._api_base)} " if self._api_base else ""
+        reasoning_effort = (
+            f"--reasoning-effort {shlex.quote(self._reasoning_effort)} "
+            if self._reasoning_effort
+            else ""
+        )
+        context_tier = (
+            f"--context-tier {shlex.quote(self._context_tier)} " if self._context_tier else ""
+        )
+        timeout_seconds = (
+            f"--timeout-seconds {self._timeout_seconds:g} "
+            if self._timeout_seconds is not None
+            else ""
+        )
         # Exit code 1 means the agent reported task failure: map it to exit 0 so
         # the verifier scores reward=0 instead of raising a harness error.
         command = (
@@ -117,6 +152,9 @@ class NooaBenchAgent(BaseInstalledAgent):
             f"--model {shlex.quote(self.model_name or '')} "
             f"--agent-type {shlex.quote(self._agent_type)} "
             f"{api_base}"
+            f"{reasoning_effort}"
+            f"{context_tier}"
+            f"{timeout_seconds}"
             f"; EC=$?; [ $EC -eq 1 ] && exit 0 || exit $EC) "
             f"2>&1 | tee /logs/agent/nooa_bench.log"
         )
@@ -126,6 +164,11 @@ class NooaBenchAgent(BaseInstalledAgent):
         nvidia_key = env.get("NVIDIA_INFERENCE_API_KEY") or env.get("NVIDIA_API_KEY")
         if nvidia_key:
             env.setdefault("OPENAI_API_KEY", nvidia_key)
+        if self._agent_type == "copilot":
+            if copilot_token := os.environ.get("COPILOT_GITHUB_TOKEN"):
+                env["COPILOT_GITHUB_TOKEN"] = copilot_token
+            env.setdefault("COPILOT_CLI_EXTRACT_DIR", COPILOT_RUNTIME_DIR)
+            env.setdefault("COPILOT_HOME", COPILOT_HOME)
         await self.exec_as_agent(environment, command=command, env=env, cwd=REPO_DIR)
 
     def populate_context_post_run(self, context: AgentContext) -> None:
