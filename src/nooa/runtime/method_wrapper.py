@@ -434,8 +434,10 @@ def create_sync_agent_method_wrapper(
         # nearest traced ancestor — same semantics as the async wrapper.
         _push_agent_call_id(call_id if _tracing_enabled[0] else parent_call_id)
 
-        # Same agent-call event as the async wrapper. The sync wrapper doesn't
-        # set _parent_agent_var, so read it directly for is_top_level.
+        # Set parent agent for LLM inheritance — subagents instantiated inside
+        # this sync method can inherit the parent's LLM (mirrors async wrapper).
+        parent_token = _parent_agent_var.set(self)
+
         is_top_level = _parent_agent_var.get() is None
         try:
             self.event_manager.add(
@@ -490,6 +492,7 @@ def create_sync_agent_method_wrapper(
             except Exception:  # noqa: BLE001
                 logger.debug("agent-call: AfterAgentCall emission failed (sync)", exc_info=True)
             _pop_agent_call_id()
+            _parent_agent_var.reset(parent_token)
             if hook_context is not None:
                 call_after_hook(
                     "after_agent_call",
