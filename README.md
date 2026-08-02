@@ -203,7 +203,7 @@ its working directory:
 
 ```bash
 uv add nooa-acp
-export NOOA_MODEL=gpt-5-mini
+export NOOA_MODEL=gpt-5.6-luna
 
 # Agent command for the ACP client
 uv run nooa-acp
