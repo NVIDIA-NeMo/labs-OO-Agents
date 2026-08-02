@@ -65,7 +65,7 @@ jobs:
       - name: Build all packages
         run: |
           rm -rf dist
-          for pkg in nooa nooa-cli nooa-memory nooa-bench; do
+          for pkg in nooa nooa-cli nooa-acp nooa-memory nooa-bench; do
             uv build --no-sources --package "$pkg" --out-dir dist
           done
       - name: Upload wheels

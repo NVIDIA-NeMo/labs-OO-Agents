@@ -1,6 +1,6 @@
 # Releasing
 
-`nooa`, `nooa-cli`, `nooa-memory`, and `nooa-bench` release together from one
+`nooa`, `nooa-cli`, `nooa-acp`, `nooa-memory`, and `nooa-bench` release together from one
 commit. The version comes from the Git tag: on `v0.0.10` the distributions are
 `0.0.10`; between tags they are development versions.
 
@@ -23,7 +23,7 @@ The strict gate performs:
 
 1. Ruff lint and formatting, SPDX checks, unit tests, and explicit OS sandbox
    containment tests.
-2. Builds all four wheels and source distributions under a temporary local tag,
+2. Builds all five wheels and source distributions under a temporary local tag,
    verifies their versions, and smoke-tests imports and `nooa --version` in a
    clean environment.
 3. Runs the full capability suite for the candidate and previous release, fresh
@@ -121,7 +121,8 @@ GitHub draft UI.
 
 Each project needs a publisher configured for owner `NVIDIA-NeMo`, repository
 `labs-OO-Agents`, workflow `publish.yml`, and its distinct environment:
-`pypi-nooa`, `pypi-nooa-cli`, `pypi-nooa-memory`, or `pypi-nooa-bench`. Repeat
+`pypi-nooa`, `pypi-nooa-cli`, `pypi-nooa-acp`, `pypi-nooa-memory`, or
+`pypi-nooa-bench`. Repeat
 with `testpypi-*` environments on TestPyPI.
 
 Every `uses:` entry in `publish.yml` must remain compatible with the NVIDIA
