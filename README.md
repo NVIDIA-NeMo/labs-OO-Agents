@@ -205,7 +205,7 @@ its working directory:
 
 ```bash
 uv add nooa-acp
-export NOOA_MODEL=gpt-5.6-luna
+export NVIDIA_API_KEY=nvapi-...
 
 # Agent command for the ACP client
 uv run nooa-acp
