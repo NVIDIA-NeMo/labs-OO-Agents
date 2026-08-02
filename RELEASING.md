@@ -1,6 +1,6 @@
 # Releasing
 
-`nooa`, `nooa-cli`, `nooa-memory` and `nooa-bench` release together from the
+`nooa`, `nooa-cli`, `nooa-acp`, `nooa-memory` and `nooa-bench` release together from the
 same commit. **The version comes from the git tag** — there is no `version =`
 in any `pyproject.toml` and no bump step. On tag `v0.0.9` the wheels are
 `0.0.9`; between tags they are `0.0.9.devN`.
@@ -19,7 +19,7 @@ capability report, and after the draft notes:
 |---|---|
 | Preflight — on `main`, clean, in sync with origin, tag unused | yes |
 | Lint, SPDX headers, unit tests | yes |
-| Build 4 wheels, version == tag, smoke import | yes |
+| Build 5 wheels, version == tag, smoke import | yes |
 | Capability diff vs the previous release, 4 models × 3 runs | only below the floor |
 | `gh release create --draft`, capability report appended | — |
 | `gh release edit --draft=false` → triggers `publish.yml` | — |
@@ -63,7 +63,7 @@ Report logic is covered by `tests/test_make_release.py`.
 Each project needs a pending publisher at
 <https://pypi.org/manage/account/publishing/> — owner `NVIDIA-NeMo`, repo
 `labs-OO-Agents`, workflow `publish.yml`, and a **distinct environment per
-package**: `pypi-nooa`, `pypi-nooa-cli`, `pypi-nooa-memory`, `pypi-nooa-bench`.
+package**: `pypi-nooa`, `pypi-nooa-cli`, `pypi-nooa-acp`, `pypi-nooa-memory`, `pypi-nooa-bench`.
 PyPI keys a pending publisher on (owner, repo, workflow, environment), so a
 shared environment makes the second registration fail. The matching GitHub
 Environments must exist too.

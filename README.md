@@ -89,6 +89,7 @@ them by name, or pull them in as extras of the core package:
 
 ```bash
 uv add nooa-cli                 # or: uv add "nooa[cli]"
+uv add nooa-acp                 # or: uv add "nooa[acp]"
 uv add nooa-memory              # or: uv add "nooa[memory]"
 uv add nooa-bench               # or: uv add "nooa[bench]"
 
@@ -98,6 +99,7 @@ uv add "nooa[cli,memory]"       # several at once
 | Package | Extra | What it adds |
 |---|---|---|
 | `nooa-cli` | `nooa[cli]` | the `nooa` command, trace viewer, eval runner |
+| `nooa-acp` | `nooa[acp]` | coding agent for Agent Client Protocol hosts |
 | `nooa-memory` | `nooa[memory]` | long-term memory subsystem (`MemoryManager`) |
 | `nooa-bench` | `nooa[bench]` | `BenchAgent` and the Harbor benchmark runner |
 
@@ -192,6 +194,31 @@ uv run nooa start-dev        # trace viewer on http://localhost:5001
 ```
 
 If the viewer isn't running, tracing is silently disabled — no configuration needed either way.
+
+### 4. Work in a repository interactively
+
+Install `nooa-acp`, select any LiteLLM model or configured NOOA alias, then
+configure an ACP-compatible client to launch the agent with the repository as
+its working directory:
+
+```bash
+uv add nooa-acp
+export NOOA_MODEL=gpt-5-mini
+
+# Agent command for the ACP client
+uv run nooa-acp
+```
+
+`nooa-acp` runs NOOA's `InteractiveAgent`, CodeAct strategy, repository tools,
+and persistent shell over the standard Agent Client Protocol on stdin/stdout.
+The adapter also registers `nooa acp` when both `nooa-cli` and `nooa-acp` are
+installed.
+
+Because the agent executes generated code and shell commands, use an OS-level
+sandbox for untrusted tasks. `cwd` scopes the working session but is not a
+security boundary. Generated code shares the agent's process environment,
+including model credentials, so launch it with only the credentials and network
+access that the session may use.
 
 ## Learn more
 
