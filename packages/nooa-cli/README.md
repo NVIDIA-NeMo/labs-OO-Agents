@@ -27,7 +27,7 @@ run the NOOA coding agent from an ACP-compatible client:
 
 ```bash
 uv add nooa-acp
-export NOOA_MODEL=gpt-5-mini
+export NOOA_MODEL=gpt-5.6-luna
 uv run nooa-acp
 ```
 

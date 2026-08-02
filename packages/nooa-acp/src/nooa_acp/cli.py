@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 @click.option(
     "--model",
     envvar="NOOA_MODEL",
-    default="gpt-5-mini",
+    default="gpt-5.6-luna",
     show_default=True,
     help="LiteLLM model name or configured NOOA model alias.",
 )
