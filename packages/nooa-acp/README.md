@@ -8,7 +8,7 @@ Set the model and its provider credentials, then configure the client to launch
 this command with the repository as its working directory:
 
 ```bash
-export NOOA_MODEL=gpt-5-mini
+export NOOA_MODEL=gpt-5.6-luna
 uvx nooa-acp
 ```
 
@@ -29,7 +29,7 @@ finish in the background when its client does not support transport-level aborts
 ## Standalone server
 
 ```bash
-nooa-acp --model gpt-5-mini
+nooa-acp --model gpt-5.6-luna
 ```
 
 The process waits for an ACP client on standard input. `--model` accepts any
