@@ -1,9 +1,10 @@
 # Releasing
 
-Four workspace packages release together from the same git commit:
+Five workspace packages release together from the same git commit:
 
 - **`nooa`** — the core framework
 - **`nooa-cli`** — the `nooa` command and REPL
+- **`nooa-acp`** — the ACP coding agent
 - **`nooa-memory`** — the long-term memory subsystem
 - **`nooa-bench`** — the benchmark agent and Harbor runner
 
@@ -47,7 +48,7 @@ gh release edit v0.0.7 --draft=false
 
 Publishing the release triggers the workflow, which:
 
-1. Builds all four packages from the tagged commit.
+1. Builds all five packages from the tagged commit.
 2. Fails the run if the built version does not match the tag, or is a `.devN`
    version (which means the tag was not reachable from the checked-out commit).
 3. Smoke-tests the wheels in a clean venv (imports + `nooa --version`).
@@ -88,14 +89,16 @@ builds.
 
 ```bash
 rm -rf dist
-for p in nooa nooa-cli nooa-memory nooa-bench; do
+for p in nooa nooa-cli nooa-acp nooa-memory nooa-bench; do
   uv build --no-sources --package "$p" --out-dir dist
 done
 uvx twine check dist/*
 uv venv /tmp/nooa-smoke --python 3.12
 VIRTUAL_ENV=/tmp/nooa-smoke uv pip install dist/nooa-*.whl dist/nooa_cli-*.whl \
-  dist/nooa_memory-*.whl dist/nooa_bench-*.whl
-/tmp/nooa-smoke/bin/python -c "import nooa, nooa_cli, nooa_memory, nooa_bench; print(nooa.__version__)"
+  dist/nooa_acp-*.whl dist/nooa_memory-*.whl dist/nooa_bench-*.whl
+/tmp/nooa-smoke/bin/python -c "import nooa, nooa_cli, nooa_acp, nooa_memory, nooa_bench; print(nooa.__version__)"
+/tmp/nooa-smoke/bin/nooa --help
+/tmp/nooa-smoke/bin/nooa-acp --help
 ```
 
 ### Pre-release tags
@@ -106,20 +109,21 @@ the GitHub Release as a pre-release; PyPI will not serve it to plain
 
 ## One-time PyPI setup
 
-Each of the four project names needs a **pending publisher** registered at
+Each of the five project names needs a **pending publisher** registered at
 <https://pypi.org/manage/account/publishing/> before its first upload. Owner
-`NVIDIA-NeMo`, repository `labs-OO-Agents`, workflow `publish.yml` for all four
+`NVIDIA-NeMo`, repository `labs-OO-Agents`, workflow `publish.yml` for all five
 — but the **environment name differs per package**:
 
 | PyPI Project Name | Environment name |
 |---|---|
 | `nooa` | `pypi-nooa` |
 | `nooa-cli` | `pypi-nooa-cli` |
+| `nooa-acp` | `pypi-nooa-acp` |
 | `nooa-memory` | `pypi-nooa-memory` |
 | `nooa-bench` | `pypi-nooa-bench` |
 
 > **Why one environment per package.** PyPI keys a *pending* publisher on
-> (owner, repo, workflow filename, environment). If all four shared one
+> (owner, repo, workflow filename, environment). If all five shared one
 > environment, the second registration fails with *"a pending trusted publisher
 > matching this configuration has already been registered for a different
 > project name"* — PyPI cannot tell which project to create on first upload.
@@ -131,13 +135,13 @@ for dry runs. After the first successful upload each pending publisher becomes
 a normal one.
 
 The matching **GitHub Environments** must exist too (Settings → Environments):
-`pypi-nooa`, `pypi-nooa-cli`, `pypi-nooa-memory`, `pypi-nooa-bench`, and the
-four `testpypi-*` equivalents.
+`pypi-nooa`, `pypi-nooa-cli`, `pypi-nooa-acp`, `pypi-nooa-memory`,
+`pypi-nooa-bench`, and the five `testpypi-*` equivalents.
 
 ## Distribution
 
 ```bash
-uv add nooa nooa-cli
+uv add nooa nooa-cli nooa-acp
 ```
 
 Installing straight from a tag also works, and does not require a release:
@@ -148,6 +152,7 @@ uv add "nooa @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@v0.0.7"
 
 ## Cross-package dependencies
 
-`nooa-cli`, `nooa-memory`, and `nooa-bench` depend on the core `nooa` package.
-They are always released together at the same derived version, so their
-dependency on `nooa` carries **no version floor** — CI never rewrites it.
+`nooa-cli`, `nooa-acp`, `nooa-memory`, and `nooa-bench` depend on the core
+`nooa` package. They are always released together at the same derived version,
+so their dependency on `nooa` carries **no version floor** — CI never rewrites
+it.
