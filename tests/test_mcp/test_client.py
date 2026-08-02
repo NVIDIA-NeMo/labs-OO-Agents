@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for mcp_nooa module."""
 
+import asyncio
 import json
 
 import httpx
@@ -21,7 +22,7 @@ from nooa.mcp.client import (  # noqa: E402
     MCPStreamableHTTPClient,
     create_mcp_client,
 )
-from nooa.mcp.tool import MCPTool, MCPToolSpec, _make_dynamic_class  # noqa: E402
+from nooa.mcp.tool import MCPManager, MCPTool, MCPToolSpec, _make_dynamic_class  # noqa: E402
 
 
 # Fixtures
@@ -789,3 +790,76 @@ def test_create_from_server_keeps_and_copies_nested_inline_config(monkeypatch):
     assert transport_args["args"] == ["server.py", "${MCP_HOST_SECRET}"]
     assert transport_args["env"] == {"TOKEN": "${MCP_HOST_SECRET}"}
     assert canary not in repr(transport_args)
+
+
+@pytest.mark.asyncio
+async def test_create_stdio_server_builds_tool_without_blocking_wrapper():
+    session = AsyncMock()
+    schema = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+    }
+    remote_tool = MagicMock()
+    remote_tool.name = "lookup"
+    remote_tool.description = "Look up a value"
+    remote_tool.inputSchema = schema
+    session.list_tools.return_value.tools = [remote_tool]
+    client = MagicMock()
+
+    class Context:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    client.connect_to_server.return_value = Context()
+
+    with patch("nooa.mcp.tool.create_mcp_client", return_value=client) as create:
+        tool = await MCPManager.create_stdio_server(
+            "lookup", "lookup-server", args=["--stdio"], env={"TOKEN": "test"}
+        )
+
+    assert isinstance(tool, MCPTool)
+    assert callable(tool.lookup)  # type: ignore[attr-defined]
+    create.assert_called_once_with(
+        transport="stdio",
+        command="lookup-server",
+        args=["--stdio"],
+        env={"TOKEN": "test"},
+        tool_call_timeout=timedelta(seconds=60),
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_stdio_server_closes_connection_on_cancellation():
+    started = asyncio.Event()
+    closed = asyncio.Event()
+    session = AsyncMock()
+
+    async def list_tools():
+        started.set()
+        await asyncio.Event().wait()
+
+    session.list_tools.side_effect = list_tools
+    client = MagicMock()
+
+    class Context:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, exc_type, exc, tb):
+            closed.set()
+            return False
+
+    client.connect_to_server.return_value = Context()
+
+    with patch("nooa.mcp.tool.create_mcp_client", return_value=client):
+        task = asyncio.create_task(MCPManager.create_stdio_server("lookup", "lookup-server"))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert closed.is_set()
