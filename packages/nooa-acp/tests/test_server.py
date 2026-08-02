@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from acp import PROTOCOL_VERSION, RequestError, resource_link_block, text_block
 from acp.schema import AgentMessageChunk, EnvVariable, McpServerStdio
+from click.testing import CliRunner
 from nooa_acp.cli import command
 from nooa_acp.server import CodingACPAdapter
 from nooa_cli.commands import discover_commands
@@ -40,6 +41,26 @@ class _RecordingClient:
 
 def test_acp_command_is_discovered_as_cli_plugin():
     assert dict(discover_commands())["acp"] is command
+
+
+def test_acp_command_defaults_to_public_nvidia_model():
+    runner = CliRunner()
+    with (
+        patch("nooa.secrets.load_secrets_into_env"),
+        patch("nooa.unifiedllm.get_llm_client") as get_llm_client,
+        patch("nooa_acp.server.serve") as serve,
+        patch("nooa_acp.cli.asyncio.run"),
+    ):
+        result = runner.invoke(command, env={"NVIDIA_API_KEY": "nvapi-test"})
+
+    assert result.exit_code == 0
+    llm_factory = serve.call_args.args[0]
+    llm_factory()
+    get_llm_client.assert_called_once_with(
+        "nvidia_nim/nvidia/nemotron-3-super-120b-a12b",
+        client_type=None,
+        api_key="nvapi-test",
+    )
 
 
 class _MCPTools:
