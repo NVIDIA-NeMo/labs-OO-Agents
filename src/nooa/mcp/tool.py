@@ -692,6 +692,30 @@ class MCPTool:
             return False
 
 
+def _create_tool_instance(
+    server_name: str,
+    client: Any,
+    tools_result: Any,
+    refresh_ctx: dict[str, Any] | None = None,
+) -> MCPTool:
+    tool_specs = []
+    for tool in tools_result.tools:
+        input_schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
+        tool_specs.append(
+            MCPToolSpec(
+                name=tool.name,
+                description=tool.description or "",
+                input_schema=input_schema,
+                required=set(input_schema.get("required", [])),
+            )
+        )
+
+    dynamic_class = _make_dynamic_class(server_name, tool_specs, MCPTool)
+    instance = object.__new__(dynamic_class)
+    instance.__init__(client, server_name, refresh_ctx=refresh_ctx)
+    return instance
+
+
 class MCPManager:
     """Manager for creating and connecting to MCP server tool instances.
 
@@ -730,6 +754,33 @@ class MCPManager:
         config = _load_mcp_config(mcp_file)
         config.update(servers or {})
         return list(config.keys())
+
+    @staticmethod
+    async def create_stdio_server(
+        server_name: str,
+        command: str,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        tool_call_timeout: timedelta = timedelta(seconds=60),
+    ) -> MCPTool:
+        """Create an MCP tool from explicit stdio configuration without blocking the event loop."""
+        client = create_mcp_client(
+            transport="stdio",
+            command=command,
+            args=args,
+            env=env,
+            tool_call_timeout=tool_call_timeout,
+        )
+        async with client.connect_to_server() as session:
+            tools_result = await session.list_tools()
+        refresh_ctx = {
+            "server_url": "",
+            "transport": "stdio",
+            "command": command,
+            "args": args,
+            "env": env,
+        }
+        return _create_tool_instance(server_name, client, tools_result, refresh_ctx)
 
     @staticmethod
     def create_from_server(
@@ -902,22 +953,6 @@ class MCPManager:
 
         # Parse tools
         assert tools_result is not None, "tools_result must be set by connect or OAuth retry"
-        tool_specs = []
-        for tool in tools_result.tools:
-            input_schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
-            required = set(input_schema.get("required", []))
-            tool_specs.append(
-                MCPToolSpec(
-                    name=tool.name,
-                    description=tool.description or "",
-                    input_schema=input_schema,
-                    required=required,
-                )
-            )
-
-        # Generate dynamic class and create instance. Stash a refresh context so
-        # _call_tool can transparently refresh the OAuth token + retry once on a
-        # 401 mid-session (cached access tokens expire between connect and call).
         refresh_ctx = {
             "server_url": url or config_server.get("url") or "",
             "redirect_uri": oauth_redirect_uri,
@@ -929,7 +964,4 @@ class MCPManager:
             "args": args,
             "env": env,
         }
-        dynamic_class = _make_dynamic_class(server_name, tool_specs, MCPTool)
-        instance = object.__new__(dynamic_class)
-        instance.__init__(client, server_name, refresh_ctx=refresh_ctx)
-        return instance
+        return _create_tool_instance(server_name, client, tools_result, refresh_ctx)
