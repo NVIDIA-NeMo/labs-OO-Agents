@@ -24,7 +24,7 @@ _agentdoc_hidden_names = {"_hidden"}
 with _hidden:
     import logging
     import os
-    from typing import TYPE_CHECKING, Any
+    from typing import TYPE_CHECKING, Any, ClassVar
 
     from nooa_cli.tools.repo_tools import RepoTools
     from pydantic import BaseModel, Field
@@ -128,17 +128,68 @@ class BenchAgent(
 
     shell: ShellTools
     repo: RepoTools
+    _expose_context_management: ClassVar[bool] = True
+    _context_usage_includes_management_hint: ClassVar[bool] = True
 
     def _context_usage_block(self) -> str:
         """Return context-window usage plus a benchmark-agent compaction hint."""
         if not self.context_stats:
             return ""
+        if not self._context_usage_includes_management_hint:
+            return self._context_usage_block_without_management_hint()
         return (
             f"{self.context_stats.format()}\n"
             "If event history is taking too much space, summarize older work "
             "and call self.events.collapse(start_tag, end_tag, summary_text) "
             "to replace it with a compact summary while keeping details accessible."
         )
+
+    def _context_usage_block_without_management_hint(self) -> str:
+        """Return context-window usage without exposing context-management actions."""
+        stats = self.context_stats
+        if not stats:
+            return ""
+        if stats.prompt_tokens is None:
+            return "Context usage: awaiting first model response (no provider token count yet)"
+
+        lines: list[str] = []
+        window = stats.model_context_window
+        usable = stats.effective_window
+        if window and usable:
+            pct = stats.prompt_tokens / usable * 100
+            reserve = stats.reserved_output_tokens or 0
+            if reserve:
+                lines.append(
+                    f"Context usage: {stats.prompt_tokens:,} / {usable:,} usable tokens "
+                    f"({pct:.1f}%) [provider-reported; {reserve:,} of the "
+                    f"{window:,}-token window reserved for output]"
+                )
+            else:
+                lines.append(
+                    f"Context usage: {stats.prompt_tokens:,} / {window:,} tokens "
+                    f"({pct:.1f}%) [provider-reported]"
+                )
+        else:
+            lines.append(f"Context usage: {stats.prompt_tokens:,} tokens [provider-reported]")
+
+        cb = stats.context_blocks_tokens or 0
+        cb_parts = [f"~{cb:,} tokens", f"{stats.context_blocks_count} blocks"]
+        if stats.context_blocks_dropped:
+            cb_parts.append(f"{stats.context_blocks_dropped} EVICTED")
+        lines.append(f"  Context blocks: {' - '.join(cb_parts)}")
+
+        ev = stats.events_tokens or 0
+        ev_parts = [f"~{ev:,} tokens", f"{stats.events_count} events"]
+        if stats.events_dropped:
+            ev_parts.append(f"{stats.events_dropped} dropped")
+        lines.append(f"  Events:         {' - '.join(ev_parts)}")
+
+        util = stats.overall_utilization
+        hot = util is not None and util > 0.8
+        if stats.context_blocks_dropped or stats.events_dropped or hot:
+            lines.append("Context is nearly full.")
+
+        return "\n".join(lines)
 
     def __init__(self, llm: UnifiedLLM | None = None, **kwargs: Any) -> None:
         super().__init__(llm=llm, **kwargs)
@@ -149,8 +200,9 @@ class BenchAgent(
         self.problem_statement = ""
         # Base Agent hides context/events by default; BenchAgent's context_usage
         # hint references them, so expose both APIs to the LLM here.
-        spec(self, "context", hidden=False)
-        spec(self, "events", hidden=False)
+        if self._expose_context_management:
+            spec(self, "context", hidden=False)
+            spec(self, "events", hidden=False)
         from nooa import Context
 
         self.context_manager["python_tools"] = Context(doc(RepoTools, ShellTools), prefix=True)
@@ -254,3 +306,22 @@ class BenchAgent(
         4. Return ``TaskResult(...)`` with concrete evidence
         """
         ...
+
+
+class BenchCodeActAcmAgent(BenchAgent):
+    """CodeAct benchmark agent with context-management APIs exposed.
+
+    This is the minimal SWE-bench-style "with context management" arm: it keeps
+    BenchAgent's CodeAct tools and additionally shows the LLM ``self.context``,
+    ``self.events``, and the event-history collapse hint.
+    """
+
+    _expose_context_management: ClassVar[bool] = True
+    _context_usage_includes_management_hint: ClassVar[bool] = True
+
+
+class BenchCodeActBaselineAgent(BenchAgent):
+    """CodeAct benchmark agent without context-management APIs exposed."""
+
+    _expose_context_management: ClassVar[bool] = False
+    _context_usage_includes_management_hint: ClassVar[bool] = False

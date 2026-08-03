@@ -5,8 +5,14 @@
 from __future__ import annotations
 
 import pytest
+from nooa_bench import AGENT_CLASSES
 from nooa_bench import bench_agent as bench_agent_module
-from nooa_bench.bench_agent import BenchAgent, TaskResult
+from nooa_bench.bench_agent import (
+    BenchAgent,
+    BenchCodeActAcmAgent,
+    BenchCodeActBaselineAgent,
+    TaskResult,
+)
 
 from nooa.agentdoc import doc
 from nooa.unifiedllm import FakeLLMClient
@@ -80,6 +86,26 @@ def test_bench_agent_exposes_context_and_events_apis():
     assert "events:" in agent_doc
 
 
+def test_codeact_acm_agent_exposes_context_and_events_apis():
+    """The context-management arm exposes the APIs needed for self-compression."""
+    agent = BenchCodeActAcmAgent(llm=FakeLLMClient())
+
+    agent_doc = doc(agent)
+
+    assert "context:" in agent_doc
+    assert "events:" in agent_doc
+
+
+def test_codeact_baseline_hides_context_and_events_apis():
+    """The baseline arm is CodeAct-only, with no context-management APIs in doc(self)."""
+    agent = BenchCodeActBaselineAgent(llm=FakeLLMClient())
+
+    agent_doc = doc(agent)
+
+    assert "context:" not in agent_doc
+    assert "events:" not in agent_doc
+
+
 def test_context_usage_block_includes_collapse_hint():
     """Context usage tells agents how to compact old event history."""
     from nooa.context_blocks.models import ContextWindowStats
@@ -99,6 +125,41 @@ def test_context_usage_block_includes_collapse_hint():
 
     assert "Context usage:" in block
     assert "self.events.collapse(start_tag, end_tag, summary_text)" in block
+
+
+@pytest.mark.parametrize("prompt_tokens", [None, 1000])
+def test_codeact_baseline_context_usage_omits_management_hint(prompt_tokens):
+    """The baseline context-usage block reports size without self-compression instructions."""
+    from nooa.context_blocks.models import ContextWindowStats
+
+    agent = BenchCodeActBaselineAgent(llm=FakeLLMClient())
+    agent.runtime._last_context_stats = ContextWindowStats(
+        context_blocks_count=2,
+        events_count=12,
+        prompt_tokens=prompt_tokens,
+        context_blocks_chars=100,
+        events_chars=900,
+        max_context_tokens=1000,
+        model_context_window=1000,
+    )
+
+    block = agent._context_usage_block()
+
+    assert "Context usage:" in block
+    assert "collapse" not in block
+    assert "self.events" not in block
+    assert "self.context" not in block
+
+
+def test_bench_agent_registry_includes_codeact_ab_variants():
+    """Harbor can select the baseline and context-management arms by agent_type."""
+
+    assert AGENT_CLASSES["bench-codeact"] == (
+        "nooa_bench.bench_agent:BenchCodeActBaselineAgent"
+    )
+    assert AGENT_CLASSES["bench-codeact-acm"] == (
+        "nooa_bench.bench_agent:BenchCodeActAcmAgent"
+    )
 
 
 @pytest.mark.asyncio

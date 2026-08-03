@@ -14,6 +14,9 @@ from __future__ import annotations
 AGENT_CLASSES: dict[str, str] = {
     # Unified SWE-bench + Terminal-Bench agent (the tech report's BenchAgent)
     "bench": "nooa_bench.bench_agent:BenchAgent",
+    # Minimal A/B variants for CodeAct-only long-context evaluation.
+    "bench-codeact": "nooa_bench.bench_agent:BenchCodeActBaselineAgent",
+    "bench-codeact-acm": "nooa_bench.bench_agent:BenchCodeActAcmAgent",
 }
 
 __all__ = ["AGENT_CLASSES"]
