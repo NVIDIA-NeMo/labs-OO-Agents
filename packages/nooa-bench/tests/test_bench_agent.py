@@ -16,6 +16,7 @@ from nooa_bench.bench_agent import (
 )
 
 from nooa.agentdoc import doc
+from nooa.prompts import build_prompt_data
 from nooa.unifiedllm import FakeLLMClient
 
 
@@ -39,6 +40,20 @@ class _FakeRepo:
     def __init__(self, root: str, session: object | None = None) -> None:
         self.root = root
         self.session = session
+
+
+def _seed_context_stats(agent: BenchAgent) -> None:
+    from nooa.context_blocks.models import ContextWindowStats
+
+    agent.runtime._last_context_stats = ContextWindowStats(
+        context_blocks_count=2,
+        events_count=12,
+        prompt_tokens=1000,
+        context_blocks_chars=100,
+        events_chars=900,
+        max_context_tokens=1000,
+        model_context_window=1000,
+    )
 
 
 def test_task_result_model():
@@ -126,6 +141,7 @@ def test_context_usage_block_includes_collapse_hint():
 
     assert "Context usage:" in block
     assert "self.events.collapse(start_tag, end_tag, summary_text)" in block
+    assert "ContextApi" in block
 
 
 @pytest.mark.parametrize("prompt_tokens", [None, 1000])
@@ -150,6 +166,49 @@ def test_codeact_baseline_context_usage_omits_management_hint(prompt_tokens):
     assert "collapse" not in block
     assert "self.events" not in block
     assert "self.context" not in block
+
+
+def test_codeact_variant_classes_hidden_from_generated_code_globals():
+    """Generated code should not inspect alternate A/B arm classes for hidden guidance."""
+    from nooa.agentdoc.visibility import filter_mro_module_globals
+
+    names = filter_mro_module_globals(BenchCodeActBaselineAgent)
+
+    assert "TaskResult" in names
+    assert "BenchAgent" not in names
+    assert "BenchCodeActBaselineAgent" not in names
+    assert "BenchCodeActAcmAgent" not in names
+
+
+@pytest.mark.asyncio
+async def test_codeact_baseline_static_prompt_omits_context_management_surface():
+    """The baseline static prompt does not expose alternate-arm classes or API hints."""
+    agent = BenchCodeActBaselineAgent(llm=FakeLLMClient())
+
+    data = await build_prompt_data(agent._solve_task, "fix the bug")
+    prompt = data.system_prompt
+
+    assert "self.events.collapse" not in prompt
+    assert "doc(self.events)" not in prompt
+    assert "self.context" not in prompt
+    assert "ContextApi" not in prompt
+    assert "context-management" not in prompt
+    assert "BenchAgent" not in prompt
+    assert "BenchCodeActAcmAgent" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_codeact_acm_static_prompt_exposes_context_management_surface():
+    """The ACM static prompt includes context API access and hides the baseline class."""
+    agent = BenchCodeActAcmAgent(llm=FakeLLMClient())
+
+    data = await build_prompt_data(agent._solve_task, "fix the bug")
+    prompt = data.system_prompt
+
+    assert "self.context" in prompt
+    assert "self.events" in prompt
+    assert "BenchCodeActBaselineAgent" not in prompt
+    assert "BenchAgent" not in prompt
 
 
 def test_bench_agent_registry_includes_codeact_ab_variants():

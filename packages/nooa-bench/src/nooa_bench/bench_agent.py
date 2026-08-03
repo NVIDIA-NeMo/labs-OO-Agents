@@ -19,7 +19,12 @@ from __future__ import annotations
 
 from nooa import hidden as _hidden
 
-_agentdoc_hidden_names = {"_hidden"}
+_agentdoc_hidden_names = {
+    "_hidden",
+    "BenchAgent",
+    "BenchCodeActAcmAgent",
+    "BenchCodeActBaselineAgent",
+}
 
 with _hidden:
     import logging
@@ -312,8 +317,8 @@ class BenchCodeActAcmAgent(BenchAgent):
     """CodeAct benchmark agent with context-management APIs exposed.
 
     This is the minimal SWE-bench-style "with context management" arm: it keeps
-    BenchAgent's CodeAct tools and additionally shows the LLM ``self.context``,
-    ``self.events``, and the event-history collapse hint.
+    the shared CodeAct shell/repo/todo tools and additionally shows the LLM
+    ``self.context``, ``self.events``, and the event-history collapse hint.
     """
 
     _expose_context_management: ClassVar[bool] = True
@@ -321,7 +326,7 @@ class BenchCodeActAcmAgent(BenchAgent):
 
 
 class BenchCodeActBaselineAgent(BenchAgent):
-    """CodeAct benchmark agent without context-management APIs exposed."""
+    """Minimal CodeAct benchmark agent for containerized tasks."""
 
     _expose_context_management: ClassVar[bool] = False
     _context_usage_includes_management_hint: ClassVar[bool] = False
