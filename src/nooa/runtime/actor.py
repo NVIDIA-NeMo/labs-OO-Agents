@@ -62,6 +62,8 @@ from nooa.runtime.hooks import call_after_hook, call_before_hook
 
 logger = logging.getLogger(__name__)
 
+_MISSING = object()
+
 
 @contextmanager
 def _harness_metrics_lifecycle(should_trace: bool):
@@ -2530,13 +2532,18 @@ class ActorRuntime:
         method_name: str,
     ) -> Any:
         """Execute a method that needs LLM generation."""
+        base_method = getattr(method, "__func__", method)
+        try:
+            has_user_llm_param = "llm" in inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            has_user_llm_param = False
+
         # Extract framework parameters (don't pass to generated method)
         call_strategy = kwargs.pop("_strategy", None)
-        call_llm = kwargs.pop("llm", None)
+        call_llm = kwargs.pop("llm", _MISSING) if not has_user_llm_param else _MISSING
         call_session_locals = kwargs.pop("_session_locals", None)
 
         # Get strategy with priority: call-level > decorator > default
-        base_method = getattr(method, "__func__", method)
         decorator_strategy = getattr(base_method, "_plan_strategy", None)
 
         # DEBUG: Log strategy retrieval for nested method debugging
@@ -2559,9 +2566,18 @@ class ActorRuntime:
 
         # Resolve LLM client with priority: call-level > @strategy decorator > agent's default
         plan_llm = getattr(base_method, "_plan_llm", None)
-        llm_client = call_llm or plan_llm or getattr(self.agent, "_llm", None)
+        if call_llm is not _MISSING and call_llm is not None:
+            llm_client = call_llm
+            llm_selection_source = "call_site"
+        elif plan_llm is not None:
+            llm_client = plan_llm
+            llm_selection_source = "decorator"
+        else:
+            llm_client = getattr(self.agent, "_llm", None)
+            llm_selection_source = "agent_default"
         if llm_client is None:
             raise RuntimeError(f"No LLM client available for {method_name}")
+        llm_model_name = getattr(llm_client, "model", "") or ""
 
         # Resolve truncation config: method-level @strategy(truncation=...) > agent-level
         method_truncation = getattr(base_method, "_strategy_truncation", None)
@@ -2605,6 +2621,10 @@ class ActorRuntime:
                 generation_id=generation_id,
                 parent_generation_id=parent_generation_id,
                 agent_call_id=self._agent_call_id,
+                **{
+                    "llm.model_name": llm_model_name,
+                    "llm.selection_source": llm_selection_source,
+                },
                 **strategy_kwargs,  # Add strategy config parameters
             )
 
