@@ -95,6 +95,11 @@ class ConfluenceAgent(Agent, llm=llm):
 
 MCP tools appear alongside regular methods — the LLM calls them like any other attribute. Servers are configured in `.mcp.json` (VS Code/Claude Code format). Transports: stdio, SSE, streamable-http; OAuth supported (`nooa.mcp.OAuthConfig`).
 
+`${VAR}` placeholders in `.mcp.json` and inline `servers` configuration remain
+literal. If a server needs a secret, resolve it in trusted caller code and pass
+the resulting URL, header, argument, or environment value directly to
+`MCPManager.create_from_server()`.
+
 ## Multimodal media
 
 ```python

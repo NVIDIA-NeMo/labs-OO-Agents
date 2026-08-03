@@ -11,9 +11,8 @@ from __future__ import annotations
 import ast
 import asyncio
 import concurrent.futures
+import copy
 import json
-import os
-import re
 import types
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -553,31 +552,14 @@ def _load_mcp_config(mcp_file: Path | None = None) -> dict[str, dict]:
     return {}
 
 
-_ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+def _prepare_server_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Copy an untrusted server config without interpreting its values.
 
-
-def _expand_env(value: Any) -> Any:
-    """Expand ${VAR} references in MCP config strings."""
-    if isinstance(value, str):
-        missing: list[str] = []
-
-        def replace_var(match: re.Match[str]) -> str:
-            name = match.group(1)
-            if name not in os.environ:
-                missing.append(name)
-                return match.group(0)
-            return os.environ[name]
-
-        expanded = _ENV_VAR_PATTERN.sub(replace_var, value)
-        if missing:
-            names = ", ".join(sorted(set(missing)))
-            raise ValueError(f"Unset environment variable(s) in MCP config: {names}")
-        return expanded
-    if isinstance(value, list):
-        return [_expand_env(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _expand_env(item) for key, item in value.items()}
-    return value
+    MCP configuration can come from a repository-local ``.mcp.json`` or
+    ``config.toml``. In particular, ``${VAR}`` placeholders must remain literal
+    so repository data cannot read values from the host environment.
+    """
+    return copy.deepcopy(config)
 
 
 class MCPTool:
@@ -811,7 +793,7 @@ class MCPManager:
         # Load config from .mcp.json
         configured_servers = _load_mcp_config(mcp_file)
         configured_servers.update(servers or {})
-        config_server = _expand_env(configured_servers.get(server_name, {}).copy())
+        config_server = _prepare_server_config(configured_servers.get(server_name, {}))
 
         # Merge provided args with config (provided args take precedence): start
         # from the config headers, then let caller-supplied headers override them

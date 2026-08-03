@@ -503,6 +503,22 @@ confluence_tool = MCPManager.create_from_server(
 )
 ```
 
+Environment placeholders in `.mcp.json` and inline/TUI `servers` configurations
+are always treated literally so repository data cannot copy host secrets
+into MCP URLs, headers, arguments, or child-process environments. Resolve secrets
+only in trusted caller code and pass the resulting values explicitly:
+
+```python
+import os
+
+trusted_tool = MCPManager.create_from_server(
+    "trusted",
+    url="https://trusted.example/mcp",
+    transport="streamable-http",
+    headers={"Authorization": f"Bearer {os.environ['MCP_TOKEN']}"},
+)
+```
+
 > **Key insight.** MCP servers surface as regular `self.<name>` attributes. The model calls them the same way it calls a local method — external services stop being second-class relative to your own code.
 
 ```bash
