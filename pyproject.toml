@@ -55,6 +55,7 @@ trace-explorer = "nooa.trace_explorer:main"
 [tool.uv.sources]
 eval_pipeline = { workspace = true }
 nooa-cli = { workspace = true }
+nooa-acp = { workspace = true }
 nooa-memory = { workspace = true }
 nooa-bench = { workspace = true }
 
@@ -62,15 +63,12 @@ nooa-bench = { workspace = true }
 # Extra index URLs to search for packages (in addition to PyPI)
 # Ignore packages uploaded less than 7 days ago to mitigate supply-chain attacks
 exclude-newer = "2026-07-23T00:00:00Z"
-# Match the package's supported Python range and LiteLLM's stable releases.
-environments = [
-    "python_full_version >= '3.12' and python_full_version < '3.14'",
-]
 
 [tool.uv.workspace]
 members = [
     "util/eval_pipeline",
     "packages/nooa-cli",
+    "packages/nooa-acp",
     "packages/nooa-memory",
     "packages/nooa-bench",
 ]
@@ -89,6 +87,7 @@ members = [
 cli = ["nooa-cli"]
 memory = ["nooa-memory"]
 bench = ["nooa-bench"]
+acp = ["nooa-acp"]
 # ARC-AGI-3 example agent (examples/arc_agi_3): the public ARC-AGI-3 SDK + deps.
 # Install with `pip install "nemo-oo-agents[arc]"` (or `uv sync --extra arc`).
 arc = [
@@ -189,8 +188,9 @@ dev = [
     "httpx[socks]>=0.28.1",
     "opentelemetry-exporter-otlp-proto-http>=1.39.1",
     "eval_pipeline",
-    # Workspace packages — keep bench + cli + memory installed/editable in dev sync
+    # Workspace packages — keep acp + bench + cli + memory installed/editable in dev sync
     "nooa-cli",
+    "nooa-acp",
     "nooa-memory",
     "nooa-bench",
     "pre-commit>=4.5.0",
@@ -214,6 +214,7 @@ testpaths = [
     "tests/tracing",
     "tests/test_mcp",
     "packages/nooa-cli/tests",
+    "packages/nooa-acp/tests",
     "packages/nooa-bench/tests",
     "tests/trace_explorer",
 ]

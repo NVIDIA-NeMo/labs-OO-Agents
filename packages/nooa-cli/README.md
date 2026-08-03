@@ -17,9 +17,18 @@ uv add "nooa-cli[datascience]"
 
 ```bash
 nooa --help
-nooa start-dev            # launch the trace viewer
-nooa eval ...             # eval pipeline runner
-nooa traces ...           # inspect/manage trace files
+nooa start-dev        # launch the trace viewer
+nooa eval ...         # eval pipeline runner
+nooa traces ...       # inspect/manage trace files
+```
+
+Install the separate `nooa-acp` package to add the `nooa acp` plugin command and
+run the NOOA coding agent from an ACP-compatible client:
+
+```bash
+uv add nooa-acp
+export NVIDIA_API_KEY=nvapi-...
+uv run nooa-acp
 ```
 
 See the main repo [README](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/README.md) for the framework documentation.
