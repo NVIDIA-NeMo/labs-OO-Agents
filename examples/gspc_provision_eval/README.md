@@ -55,6 +55,28 @@ LLM-narrated split that audit-grade evaluation requires.
 Verdict rules: any `prohibited` match → `PROHIBITED_RISK`; otherwise any
 match → `PERMITTED_WITH_CONDITIONS`; nothing matched → `UNMEASURED`.
 
+## Strict narration (audit-pipeline mode)
+
+By default, `explain_verdict` calls the LLM regardless of the verdict — if
+the deterministic core returned `UNMEASURED`, the narration simply says
+"no provision matched." For pipelines that want a hard refusal instead,
+pass `strict_narration=True` to the constructor:
+
+```python
+agent = ProvisionEvaluator(
+    llm=...,
+    signing_key_path="gspc_signing_key.hex",
+    strict_narration=True,
+)
+# ...
+asyncio.run(agent.explain_verdict(record))  # raises ValueError on UNMEASURED
+```
+
+In strict mode, `explain_verdict` raises `ValueError` for an `UNMEASURED`
+verdict rather than letting the LLM fill the gap the deterministic core
+explicitly left empty. Permissive (default) and strict modes are covered by
+`test_strict_narration_refuses_unmeasured`.
+
 ## Run it
 
 Deterministic core — no API key needed:
