@@ -248,11 +248,13 @@ class EventManager:
         """
         event_type = event.event_type
 
-        for handler in list(self._handlers[event_type]):
-            try:
-                handler(event)
-            except Exception:
-                logger.warning("Event handler %r raised", handler, exc_info=True)
+        handler_types = (event_type, *event.handler_aliases)
+        for handler_type in handler_types:
+            for handler in list(self._handlers[handler_type]):
+                try:
+                    handler(event)
+                except Exception:
+                    logger.warning("Event handler %r raised", handler, exc_info=True)
 
         for handler in list(self._handlers["*"]):
             try:
