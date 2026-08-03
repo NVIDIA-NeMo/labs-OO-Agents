@@ -668,6 +668,40 @@ def _acquire_session_lock(lock_path: str) -> int:
     return fd
 
 
+def delete_sqlite_database(db_path: str | Path) -> bool:
+    """Delete an inactive SQLite database and its WAL/SHM sidecars.
+
+    The same file lock used by :class:`SQLiteStorageManager` is held for the
+    whole deletion. Attempting to delete a live session therefore raises
+    :class:`SessionAlreadyActiveError` instead of unlinking an open database.
+    The lock file itself is intentionally retained: unlinking a flock target
+    creates a race where another process can lock a different inode at the
+    same path.
+
+    Returns:
+        True when the main database existed, otherwise false.
+    """
+    path = Path(db_path)
+    if str(db_path) == ":memory:":
+        raise ValueError("An in-memory SQLite database cannot be deleted")
+    if not path.parent.exists():
+        return False
+
+    lock_path = str(path.with_suffix(".lock"))
+    lock_fd = _acquire_session_lock(lock_path)
+    try:
+        existed = path.exists()
+        for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
+            try:
+                candidate.unlink()
+            except FileNotFoundError:
+                pass
+        return existed
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
 class SQLiteStorageManager:
     """StorageManager backed by a SQLite database.
 
@@ -765,6 +799,11 @@ class SQLiteStorageManager:
     @property
     def event_backend(self) -> SQLiteEventBackend:
         return self._backend
+
+    @property
+    def path(self) -> Path | None:
+        """Filesystem path for this storage, or ``None`` for in-memory storage."""
+        return None if self._db_path == ":memory:" else Path(self._db_path)
 
     def save_snapshot(self, agent: Agent) -> str:
         snapshot = AgentSnapshot.from_agent(agent)
