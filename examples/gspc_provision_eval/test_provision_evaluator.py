@@ -88,3 +88,44 @@ def test_tampering_changes_scenario_hash(agent):
     # And a forged record (verdict flipped, original signature kept) is rejected.
     forged = record.model_copy(update={"verdict": "UNMEASURED"})
     assert not agent.verify_verdict(forged)
+
+
+def test_strict_narration_refuses_unmeasured(key_path):
+    """strict_narration=True must refuse to narrate UNMEASURED verdicts.
+
+    The deterministic core returns nothing to anchor on when no provision
+    fires; in strict mode we surface that as a hard refusal rather than
+    letting the LLM fill the gap. We assert the deterministic contract
+    here (strict-mode guard fires before any LLM is invoked); end-to-end
+    narration requires a real LLM client and is covered by manual runs.
+    """
+    import asyncio
+
+    from provision_evaluator import VERDICT_UNMEASURED
+
+    strict_agent = ProvisionEvaluator(
+        llm=FakeLLMClient(), signing_key_path=key_path, strict_narration=True
+    )
+    permissive_agent = ProvisionEvaluator(
+        llm=FakeLLMClient(), signing_key_path=key_path, strict_narration=False
+    )
+
+    # UNMEASURED -> strict mode raises BEFORE the LLM is invoked.
+    unmeasured = strict_agent.build_verdict(UNRELATED_SCENARIO)
+    assert unmeasured.verdict == VERDICT_UNMEASURED
+    with pytest.raises(ValueError, match="strict_narration=True"):
+        asyncio.run(strict_agent.explain_verdict(unmeasured))
+
+    # Strict mode still works fine on measured verdicts at the deterministic
+    # layer — the strict-mode guard only affects UNMEASURED verdicts.
+    measured = strict_agent.build_verdict(HOSPITAL_SCENARIO)
+    assert measured.verdict != VERDICT_UNMEASURED
+
+    # Permissive mode (strict_narration=False) is the default and does not
+    # raise on UNMEASURED — the deterministic layer is unchanged.
+    permissive_unmeasured = permissive_agent.build_verdict(UNRELATED_SCENARIO)
+    assert permissive_unmeasured.verdict == VERDICT_UNMEASURED
+
+    # The strict-mode flag itself is observable on the agent instance.
+    assert strict_agent.strict_narration is True
+    assert permissive_agent.strict_narration is False

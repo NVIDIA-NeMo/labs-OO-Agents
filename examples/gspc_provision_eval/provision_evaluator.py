@@ -187,11 +187,23 @@ class ProvisionEvaluator(Agent):
     """
 
     signing_key_path: Annotated[str, hidden] = "gspc_signing_key.hex"
+    strict_narration: Annotated[bool, hidden] = False
 
-    def __init__(self, *args, signing_key_path: str | Path | None = None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        signing_key_path: str | Path | None = None,
+        strict_narration: bool = False,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         if signing_key_path is not None:
             self.signing_key_path = str(signing_key_path)
+        # `strict_narration` rejects LLM narration when the verdict is
+        # UNMEASURED — i.e. when the deterministic core has nothing to anchor
+        # on, the model is forbidden from filling the gap. Off by default to
+        # preserve the existing call signature.
+        self.strict_narration = strict_narration
 
     # ------------------------------------------------------------------
     # Deterministic core — ordinary Python, no LLM in the loop.
@@ -296,6 +308,35 @@ class ProvisionEvaluator(Agent):
         Do NOT change the verdict, add provisions, or speculate about
         provisions that are not in the record — if a provision is absent,
         it was not measured.
+
+        Strict mode: when `strict_narration=True` was passed to the
+        constructor, this method refuses to generate any narration for an
+        UNMEASURED verdict (raises `ValueError` rather than letting the LLM
+        fill the gap the deterministic core explicitly left empty). Off by
+        default; opt-in for audit pipelines that prefer a hard "no
+        narration without anchor" rule over a permissive "summarise what we
+        don't know" rule.
+        """
+        if self.strict_narration and verdict.verdict == VERDICT_UNMEASURED:
+            raise ValueError(
+                "strict_narration=True: refusing to narrate an UNMEASURED "
+                "verdict (no provision matched; deterministic core returned "
+                "nothing to anchor on)."
+            )
+        # Permissive mode (or a measured verdict in strict mode) delegates to
+        # the LLM generation body below. NOOA runs `...` as LLM generation;
+        # by splitting strict-mode enforcement out of the body, we ensure
+        # the model is never invoked on UNMEASURED in strict mode.
+        return await self._narrate_verdict(verdict)
+
+    async def _narrate_verdict(self, verdict: VerdictRecord) -> str:
+        """LLM generation: narrate the signed verdict (deterministic record unchanged).
+
+        Receives only verified fields — scenario_hash, provisions_matched,
+        verdict, evidence, signature — so the model cannot introduce new
+        provisions or change the verdict. Used by `explain_verdict`; do not
+        call directly (callers wanting strict-mode behaviour should go
+        through `explain_verdict`).
         """
         ...
 
