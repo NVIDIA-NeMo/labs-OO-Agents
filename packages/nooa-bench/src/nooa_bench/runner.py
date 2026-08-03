@@ -111,6 +111,20 @@ def _import_agent_class(agent_type: str) -> type:
     return getattr(mod, class_name)
 
 
+def _llm_overrides_from_env() -> dict[str, Any]:
+    """Read optional LLM client overrides from the benchmark adapter environment."""
+    raw = os.environ.get("NOOA_BENCH_LLM_KWARGS_JSON")
+    if not raw:
+        return {}
+    try:
+        overrides = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError("NOOA_BENCH_LLM_KWARGS_JSON must be valid JSON") from e
+    if not isinstance(overrides, dict):
+        raise ValueError("NOOA_BENCH_LLM_KWARGS_JSON must decode to an object")
+    return overrides
+
+
 def _write_result(result: dict[str, Any], model: str, agent_type: str) -> None:
     """Write result metadata to LOGS_DIR/result.json."""
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -153,7 +167,7 @@ async def _run(
     from nooa.unifiedllm import get_llm_client
 
     # Build LLM client — honour env-var overrides for local vLLM deployments.
-    llm_overrides: dict[str, str] = {}
+    llm_overrides: dict[str, Any] = _llm_overrides_from_env()
     if api_base:
         llm_overrides["api_base"] = api_base
     elif base_url := os.environ.get("OPENAI_BASE_URL"):

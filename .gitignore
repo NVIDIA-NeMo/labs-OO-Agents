@@ -186,6 +186,7 @@ trash/
 /trace/
 /traces/
 /results/
+/jobs/
 trace*.json
 !trace_viewer_config.json
 /tmp/

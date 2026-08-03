@@ -7,6 +7,7 @@ from __future__ import annotations
 import pytest
 from nooa_bench import AGENT_CLASSES
 from nooa_bench import bench_agent as bench_agent_module
+from nooa_bench import runner as runner_module
 from nooa_bench.bench_agent import (
     BenchAgent,
     BenchCodeActAcmAgent,
@@ -160,6 +161,24 @@ def test_bench_agent_registry_includes_codeact_ab_variants():
     assert AGENT_CLASSES["bench-codeact-acm"] == (
         "nooa_bench.bench_agent:BenchCodeActAcmAgent"
     )
+
+
+def test_runner_reads_llm_overrides_from_env(monkeypatch):
+    """The Harbor adapter can pass non-secret LLM kwargs through the runner env."""
+
+    monkeypatch.setenv("NOOA_BENCH_LLM_KWARGS_JSON", '{"max_tokens": 16384}')
+
+    assert runner_module._llm_overrides_from_env() == {"max_tokens": 16384}
+
+
+@pytest.mark.parametrize("value", ["not-json", "[]"])
+def test_runner_rejects_invalid_llm_overrides_env(monkeypatch, value):
+    """LLM override env var must be a JSON object."""
+
+    monkeypatch.setenv("NOOA_BENCH_LLM_KWARGS_JSON", value)
+
+    with pytest.raises(ValueError, match="NOOA_BENCH_LLM_KWARGS_JSON"):
+        runner_module._llm_overrides_from_env()
 
 
 @pytest.mark.asyncio

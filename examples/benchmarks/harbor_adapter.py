@@ -54,6 +54,7 @@ class NooaBenchAgent(BaseInstalledAgent):
         git_ref:    optional branch/tag/SHA (or env ``NOOA_GIT_REF``)
         agent_type: registry key passed to ``nemo-harbor`` (default ``bench``)
         api_base:   optional OpenAI-compatible endpoint override
+        llm_kwargs: optional extra kwargs passed to the NOOA LLM client
     """
 
     def __init__(
@@ -63,6 +64,7 @@ class NooaBenchAgent(BaseInstalledAgent):
         git_ref: str | None = None,
         agent_type: str = "bench",
         api_base: str | None = None,
+        llm_kwargs: dict[str, object] | None = None,
         *args,
         **kwargs,
     ) -> None:
@@ -76,6 +78,7 @@ class NooaBenchAgent(BaseInstalledAgent):
         self._git_ref = git_ref or os.environ.get("NOOA_GIT_REF")
         self._agent_type = agent_type
         self._api_base = api_base
+        self._llm_kwargs = llm_kwargs or {}
 
     @staticmethod
     def name() -> str:
@@ -95,10 +98,11 @@ class NooaBenchAgent(BaseInstalledAgent):
                 "(which uv > /dev/null 2>&1 || "
                 "(curl -LsSf https://astral.sh/uv/install.sh | sh)) && "
                 'export PATH="$HOME/.local/bin:$PATH" && '
-                f"uv venv {VENV} && "
-                f"uv pip install --python {VENV}/bin/python3 "
+                "uv python install 3.12 && "
+                f"uv venv --python 3.12 {VENV} && "
+                f"uv pip install --python {VENV}/bin/python "
                 f"{REPO_DIR} {REPO_DIR}/packages/nooa-cli {REPO_DIR}/packages/nooa-bench && "
-                f"{VENV}/bin/python3 -c \"from nooa_bench.runner import main; print('nooa-bench installed OK')\""
+                f"{VENV}/bin/python -c \"from nooa_bench.runner import main; print('nooa-bench installed OK')\""
             ),
         )
 
@@ -126,6 +130,8 @@ class NooaBenchAgent(BaseInstalledAgent):
         nvidia_key = env.get("NVIDIA_INFERENCE_API_KEY") or env.get("NVIDIA_API_KEY")
         if nvidia_key:
             env.setdefault("OPENAI_API_KEY", nvidia_key)
+        if self._llm_kwargs:
+            env["NOOA_BENCH_LLM_KWARGS_JSON"] = json.dumps(self._llm_kwargs)
         await self.exec_as_agent(environment, command=command, env=env, cwd=REPO_DIR)
 
     def populate_context_post_run(self, context: AgentContext) -> None:
