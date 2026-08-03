@@ -45,12 +45,35 @@ By making a contribution to this project, I certify that:
     this project or the open source license(s) involved.
 ```
 
-To indicate acceptance of the DCO, sign off your commits with `git commit -s`, which
-appends a `Signed-off-by` line to your commit message:
+All commits in a pull request must include a DCO sign-off. To indicate acceptance of
+the DCO, sign off each commit with `git commit -s`, which appends a `Signed-off-by`
+line to your commit message:
+
+```
+git commit -s -m "your commit message"
+```
 
 ```
 Signed-off-by: Jane Smith <jane.smith@example.com>
 ```
+
+If you forgot to sign off the most recent commit, amend it locally:
+
+```
+git commit --amend -s --no-edit
+```
+
+For older commits, use an interactive rebase, amend each unsigned commit, then
+continue:
+
+```
+git rebase -i origin/main
+git commit --amend -s --no-edit
+git rebase --continue
+```
+
+If you already pushed the branch to your fork, update it with
+`git push --force-with-lease` after the rebase completes.
 
 ## How to contribute
 
