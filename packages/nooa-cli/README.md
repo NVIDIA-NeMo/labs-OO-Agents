@@ -65,17 +65,36 @@ nooa tui --agent internal_agents:InternalCodingAgent
 ```
 
 Private or organization-specific model registries stay outside this package.
-After obtaining a trusted registry YAML locally, add it to the discovered
-registry chain for one invocation with a repeatable flag:
+A trusted Git repository can supply one without a separate checkout:
+
+```bash
+nooa tui --registry https://git.example.com/team/model-registry.git
+```
+
+Git sources are shallow-cloned into NOOA's user cache and refreshed at startup
+using the operator's existing Git credentials. The repository must contain
+`llm_config.yaml` at its root, or a `nooa-registry.yaml` manifest that points to
+the repository-relative registry YAML:
+
+```yaml
+version: 1
+llm_config: config/llm_config.yaml
+```
+
+Only the declared YAML is read; packages and code from the registry repository
+are not installed or executed. To select a non-default Git branch or tag,
+append `#ref=<name>` to the source URL.
+
+A registry YAML already present locally can use either `--registry` or the
+more explicit `--llm-config` flag:
 
 ```bash
 nooa tui --llm-config /path/to/llm_config.yaml
 ```
 
 Explicit paths have highest precedence. The TUI does not download registry
-files or handle source-control credentials; use your organization's normal
-authenticated checkout or package-install workflow first. Run
-`nooa config show` to inspect the registry layers that were discovered.
+credentials itself; authenticate Git normally before launch. Run `nooa config
+show` to inspect the registry layers that were discovered.
 
 The TUI passes `llm`, durable `storage`, `cwd`, and `skills_dirs` when those
 parameters are declared by the custom class. Installed Python skills should be

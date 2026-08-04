@@ -139,6 +139,7 @@ class StartupInfo:
     tracing_enabled: bool = False
     trace_dir: str | None = None
     custom_agent: str | None = None
+    llm_ready: bool = True
 
     def to_json(self) -> dict:
         return {
@@ -152,6 +153,7 @@ class StartupInfo:
             "tracing_enabled": self.tracing_enabled,
             "trace_dir": self.trace_dir,
             "custom_agent": self.custom_agent,
+            "llm_ready": self.llm_ready,
         }
 
 
