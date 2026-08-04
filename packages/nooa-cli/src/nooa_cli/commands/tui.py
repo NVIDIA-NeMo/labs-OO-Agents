@@ -60,16 +60,6 @@ _RESUME_LAST = "__last__"
     ),
 )
 @click.option(
-    "--registry",
-    "registry_sources",
-    multiple=True,
-    metavar="SOURCE",
-    help=(
-        "Local registry YAML/directory or raw HTTP(S) YAML URL "
-        "(repeatable; URLs fetch only that file)."
-    ),
-)
-@click.option(
     "--no-splash",
     is_flag=True,
     help="Skip the splash screen",
@@ -115,7 +105,6 @@ def command(
     working_dir: str,
     mcp_file: str | None,
     llm_config_paths: tuple[Path, ...],
-    registry_sources: tuple[str, ...],
     no_splash: bool,
     skills_dir: tuple[str, ...],
     context_limit: int | None,
@@ -136,7 +125,7 @@ def command(
         nooa tui --model gpt-4o
         nooa tui --working-dir /path/to/project
         nooa tui --mcp-file .mcp.json
-        nooa tui --registry https://git.example.com/team/llm_config.yaml
+        nooa tui --llm-config .nooa/llm_config.yaml
         nooa tui --agent internal_agents:CodingAgent
         nooa tui --vi
     """
@@ -144,22 +133,12 @@ def command(
     from nooa_cli.tui.config import Config
     from nooa_cli.tui.main import main as tui_main
 
-    registry_paths: list[Path] = []
-    if registry_sources:
-        from nooa_cli.registry_sources import RegistrySourceError, resolve_registry_sources
-
-        try:
-            registry_paths = resolve_registry_sources(list(registry_sources))
-        except RegistrySourceError as exc:
-            raise click.ClickException(str(exc)) from exc
-
-    explicit_registry_paths = [*llm_config_paths, *registry_paths]
     config = Config.load(
         model=model,
         agent=agent_spec,
         working_dir=working_dir,
         mcp_file=Path(mcp_file) if mcp_file else None,
-        llm_config=explicit_registry_paths or None,
+        llm_config=list(llm_config_paths) or None,
         no_splash=no_splash,
         skills_dir=list(skills_dir) if skills_dir else None,
         context_limit=context_limit,

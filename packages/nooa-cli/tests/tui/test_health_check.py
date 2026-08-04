@@ -86,7 +86,7 @@ class TestClassifyError:
         assert "No LLM registry entry is loaded" in result.error_message
         assert "nooa config show" in result.fix_hint
         assert "registry extension" in result.fix_hint
-        assert "--registry <path-or-url>" in result.fix_hint
+        assert "--llm-config FILE" in result.fix_hint
         assert result.blocking is True
         expected_env.assert_not_called()
 
