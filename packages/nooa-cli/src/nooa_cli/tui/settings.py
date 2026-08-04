@@ -252,6 +252,9 @@ tui:
   # Show the agent's Python execution panels.
   # show_python: false
 
+  # Show bounded unified diffs when coding tools edit files.
+  # show_diffs: true
+
   # Audit DONE turns and continue when autonomous work remains.
   # Configure the judge model before enabling this.
   # keep_going: false
