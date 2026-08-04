@@ -18,7 +18,7 @@ import pytest
 from nooa_cli import commands as commands_pkg
 from nooa_cli.commands import PLUGIN_ENTRY_POINT_GROUP, discover_commands
 
-BUILTIN_NAMES = {"eval", "config", "start-dev"}
+BUILTIN_NAMES = {"eval", "config", "start-dev", "tui"}
 
 
 class FakeEntryPoint:
@@ -85,11 +85,11 @@ def test_group_name_is_stable():
 
 def test_plugin_command_is_registered_alongside_builtins(monkeypatch):
     plugin = make_command()
-    patch_entry_points(monkeypatch, [FakeEntryPoint("tui", plugin)])
+    patch_entry_points(monkeypatch, [FakeEntryPoint("chat", plugin)])
 
     found = dict(discover_commands())
 
-    assert found["tui"] is plugin
+    assert found["chat"] is plugin
     assert BUILTIN_NAMES <= set(found)
 
 
@@ -148,17 +148,17 @@ def test_two_plugins_with_the_same_name_yield_one_command(monkeypatch, caplog):
     first, second = make_command(), make_command()
     patch_entry_points(
         monkeypatch,
-        [FakeEntryPoint("tui", first), FakeEntryPoint("tui", second)],
+        [FakeEntryPoint("chat", first), FakeEntryPoint("chat", second)],
     )
 
     with caplog.at_level(logging.WARNING, logger="nooa_cli.commands"):
         pairs = list(discover_commands())
 
     names = [name for name, _ in pairs]
-    assert names.count("tui") == 1
-    assert dict(pairs)["tui"] is first
+    assert names.count("chat") == 1
+    assert dict(pairs)["chat"] is first
     assert any(
-        "shadows" in record.getMessage() and "tui" in record.getMessage()
+        "shadows" in record.getMessage() and "chat" in record.getMessage()
         for record in caplog.records
     )
 
