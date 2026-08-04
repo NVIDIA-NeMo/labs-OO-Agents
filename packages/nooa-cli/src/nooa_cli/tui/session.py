@@ -437,6 +437,7 @@ class Session:
             session_label=self._session_label,
             config=self.config,
             full_screen=self.config.tui.full_screen,
+            submission_guard=self._llm_submission_error,
         )
         bind_app = getattr(self.frontend, "bind_app", None)
         if callable(bind_app):
@@ -953,6 +954,27 @@ class Session:
                 agent=self.agent,
             ),
         )
+
+    def _llm_submission_error(self) -> str | None:
+        """Explain why agent-bound input is disabled while LLM config is broken."""
+        health = getattr(self.registry, "blocking_llm_health", None)
+        if health is None or getattr(health, "blocking", False) is not True:
+            return None
+        lines = [
+            "Cannot send this message because the configured LLM is unavailable.",
+        ]
+        if health.error_message:
+            lines.append(health.error_message)
+        if health.fix_hint:
+            lines.extend(("", health.fix_hint))
+        lines.extend(
+            (
+                "",
+                "Slash commands and !shell commands still work.",
+                "After fixing the registry, use /model <name> to validate and enable the model.",
+            )
+        )
+        return "\n".join(lines)
 
     def _on_user_message_ui(
         self,
