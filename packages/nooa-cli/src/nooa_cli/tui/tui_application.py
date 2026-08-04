@@ -533,6 +533,22 @@ class TUIApplication:
         await self.open_subview(view)
         return view.value or ""
 
+    async def prompt_text(self, title: str, message: str, default: str = "") -> str:
+        """Collect ordinary text in a reusable in-app modal view."""
+        from .subapp import TextPromptView
+
+        view = TextPromptView(title, message, default=default)
+        await self.open_subview(view)
+        return view.value or ""
+
+    async def prompt_choice(self, title: str, message: str, options: list[str]) -> str:
+        """Collect one searchable choice in a reusable in-app modal view."""
+        from .subapp import ChoicePromptView
+
+        view = ChoicePromptView(title, message, options)
+        await self.open_subview(view)
+        return view.value or ""
+
     async def open_job_explorer(self) -> None:
         """Open the job explorer as an in-app subview."""
         from .job_explorer import JobExplorerView
