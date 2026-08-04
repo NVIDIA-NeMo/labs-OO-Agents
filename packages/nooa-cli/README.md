@@ -55,20 +55,8 @@ nooa tui --agent internal_agents:InternalCodingAgent
 ```
 
 Private or organization-specific model registries stay outside this package.
-Pass either a local YAML file or a raw URL that returns the YAML file directly:
-
-```bash
-nooa tui --registry https://git.example.com/team/llm_config.yaml
-```
-
-URL sources download only that response, enforce a 5 MiB limit, validate its
-registry shape, and store it in NOOA's private user cache. Use a GitLab raw-file
-or raw-snippet URL when the registry is hosted there. Authenticate to the URL
-outside NOOA when the server requires it; credentials must not be embedded in
-the URL.
-
-A registry YAML already present locally can use either `--registry` or the
-more explicit `--llm-config` flag:
+Place the registry at `.nooa/llm_config.yaml` for automatic project-local
+discovery, or pass a downloaded file explicitly:
 
 ```bash
 nooa tui --llm-config /path/to/llm_config.yaml
