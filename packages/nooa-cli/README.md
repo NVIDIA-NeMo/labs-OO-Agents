@@ -65,25 +65,17 @@ nooa tui --agent internal_agents:InternalCodingAgent
 ```
 
 Private or organization-specific model registries stay outside this package.
-A trusted Git repository can supply one without a separate checkout:
+Pass either a local YAML file or a raw URL that returns the YAML file directly:
 
 ```bash
-nooa tui --registry https://git.example.com/team/model-registry.git
+nooa tui --registry https://git.example.com/team/llm_config.yaml
 ```
 
-Git sources are shallow-cloned into NOOA's user cache and refreshed at startup
-using the operator's existing Git credentials. The repository must contain
-`llm_config.yaml` at its root, or a `nooa-registry.yaml` manifest that points to
-the repository-relative registry YAML:
-
-```yaml
-version: 1
-llm_config: config/llm_config.yaml
-```
-
-Only the declared YAML is read; packages and code from the registry repository
-are not installed or executed. To select a non-default Git branch or tag,
-append `#ref=<name>` to the source URL.
+URL sources download only that response, enforce a 5 MiB limit, validate its
+registry shape, and store it in NOOA's private user cache. Use a GitLab raw-file
+or raw-snippet URL when the registry is hosted there. Authenticate to the URL
+outside NOOA when the server requires it; credentials must not be embedded in
+the URL.
 
 A registry YAML already present locally can use either `--registry` or the
 more explicit `--llm-config` flag:
@@ -92,9 +84,8 @@ more explicit `--llm-config` flag:
 nooa tui --llm-config /path/to/llm_config.yaml
 ```
 
-Explicit paths have highest precedence. The TUI does not download registry
-credentials itself; authenticate Git normally before launch. Run `nooa config
-show` to inspect the registry layers that were discovered.
+Explicit paths have highest precedence. Run `nooa config show` to inspect the
+registry layers that were discovered.
 
 The TUI passes `llm`, durable `storage`, `cwd`, and `skills_dirs` when those
 parameters are declared by the custom class. Installed Python skills should be
