@@ -113,6 +113,7 @@ def format_session_rule(cols: int, label: str = "") -> list[tuple[str, str]]:
 
 
 PROMPT_MARKER = "❯ "
+_CTRL_C_EXIT_WINDOW_SECONDS = 2.0
 
 
 @dataclass
@@ -211,6 +212,9 @@ class TUIApplication:
         self._session_label_fn: Callable[[], str] | None = session_label
         self._config = config
         self._submission_guard = submission_guard
+        self._ctrl_c_exit_armed = False
+        self._ctrl_c_exit_timer: asyncio.TimerHandle | None = None
+        self._exit_hint_text = ""
 
         # Register a QueueManager notify callback to also start the
         # dispatcher when items arrive on non-user channels while idle.
@@ -255,6 +259,7 @@ class TUIApplication:
             complete_while_typing=False,
             accept_handler=self._accept_handler,
         )
+        self.input_buffer.on_text_changed += self._on_input_text_changed
 
         # History — a plain list of submitted strings and a cursor that
         # tracks Up/Down navigation. Simpler than prompt_toolkit's async
@@ -755,11 +760,20 @@ class TUIApplication:
 
         @kb.add("c-c", filter=subview_inactive)
         def _(event):
-            # If an agent is running, C-c cancels the task and keeps the
-            # buffer. Otherwise it exits the app.
-            if self.request_agent_cancel(source="ctrl-c"):
+            # The second C-c in the confirmation window exits through the
+            # normal Application path; Session.run() then performs its full
+            # snapshot/close/terminal-restoration cleanup in ``finally``.
+            if self._ctrl_c_exit_armed:
+                self._clear_ctrl_c_exit()
+                event.app.exit()
                 return
-            event.app.exit()
+
+            # While an agent is running, the first C-c requests cancellation
+            # and keeps the input buffer. At an idle prompt it only arms exit.
+            if self.request_agent_cancel(source="ctrl-c"):
+                self._arm_ctrl_c_exit()
+                return
+            self._arm_ctrl_c_exit()
 
         @kb.add("c-d", filter=subview_inactive)
         def _(event):
@@ -1550,6 +1564,35 @@ class TUIApplication:
             task.cancel()
         return True
 
+    def _on_input_text_changed(self, _buffer: Buffer) -> None:
+        """Typing after an exit warning cancels the double-Ctrl-C gesture."""
+        self._clear_ctrl_c_exit()
+
+    def _arm_ctrl_c_exit(self) -> None:
+        """Require a second Ctrl-C shortly after the first before exiting."""
+        self._clear_ctrl_c_exit()
+        self._ctrl_c_exit_armed = True
+        self._exit_hint_text = "Press Ctrl+C again to exit"
+        self._ctrl_c_exit_timer = asyncio.get_running_loop().call_later(
+            _CTRL_C_EXIT_WINDOW_SECONDS,
+            self._clear_ctrl_c_exit,
+        )
+        if self._app.is_running:
+            self._app.invalidate()
+
+    def _clear_ctrl_c_exit(self) -> None:
+        """Disarm exit confirmation and remove its transient status hint."""
+        timer = self._ctrl_c_exit_timer
+        self._ctrl_c_exit_timer = None
+        if timer is not None:
+            timer.cancel()
+        changed = self._ctrl_c_exit_armed or bool(self._exit_hint_text)
+        self._ctrl_c_exit_armed = False
+        self._exit_hint_text = ""
+        app = getattr(self, "_app", None)
+        if changed and app is not None and app.is_running:
+            app.invalidate()
+
     async def cancel_agent_turn(self, *, source: str = "escape") -> bool:
         """Request turn cancellation and await the dispatcher acknowledgement."""
         task = self._agent_task
@@ -1894,6 +1937,7 @@ class TUIApplication:
             # swallows every other diagnostic field.
             await self._app.run_async(set_exception_handler=False)
         finally:
+            self._clear_ctrl_c_exit()
             # Restore sys.stdout / sys.stderr FIRST so any post-exit
             # prints from teardown code (spinner cleanup, snapshot save,
             # goodbye message) go straight to the real terminal rather
@@ -2198,6 +2242,8 @@ class TUIApplication:
             lines.append(reflection_frame)
         if self._command_status_text:
             lines.append(self._command_status_text)
+        if self._exit_hint_text:
+            lines.append(self._exit_hint_text)
         if self._session_label:
             if lines:
                 lines[-1] = f"{lines[-1]}   [{self._session_label}]"
