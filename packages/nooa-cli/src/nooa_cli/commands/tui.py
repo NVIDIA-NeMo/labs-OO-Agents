@@ -50,6 +50,16 @@ _RESUME_LAST = "__last__"
     help="MCP config file (default: .mcp.json in cwd)",
 )
 @click.option(
+    "--llm-config",
+    "llm_config_paths",
+    multiple=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help=(
+        "Additional LLM registry YAML (repeatable, highest precedence). "
+        "Clone private configs locally before passing them."
+    ),
+)
+@click.option(
     "--no-splash",
     is_flag=True,
     help="Skip the splash screen",
@@ -94,6 +104,7 @@ def command(
     agent_spec: str | None,
     working_dir: str,
     mcp_file: str | None,
+    llm_config_paths: tuple[Path, ...],
     no_splash: bool,
     skills_dir: tuple[str, ...],
     context_limit: int | None,
@@ -126,6 +137,7 @@ def command(
         agent=agent_spec,
         working_dir=working_dir,
         mcp_file=Path(mcp_file) if mcp_file else None,
+        llm_config=list(llm_config_paths) if llm_config_paths else None,
         no_splash=no_splash,
         skills_dir=list(skills_dir) if skills_dir else None,
         context_limit=context_limit,

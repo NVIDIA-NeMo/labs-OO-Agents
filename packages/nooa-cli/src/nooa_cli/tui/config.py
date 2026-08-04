@@ -136,6 +136,9 @@ class Config(BaseModel):
     # Runtime flags (not persisted)
     no_splash: bool = False
     no_trace: bool = False
+    # Explicit registry YAMLs supplied by the host. These are appended after
+    # the discovered chain, so a command-line path has highest precedence.
+    llm_config_paths: list[Path] = Field(default_factory=list)
 
     # ── Declarative mapping: kwarg name → dotted config path ──────────
     # Tuple form: (path, transform_fn) for type coercion.
@@ -147,6 +150,10 @@ class Config(BaseModel):
         "mcp_auto_connect": (
             "tui.mcp_auto_connect",
             lambda v: [str(item) for item in v] if isinstance(v, (list, tuple, set)) else [str(v)],
+        ),
+        "llm_config": (
+            "llm_config_paths",
+            lambda v: [Path(item) for item in v],
         ),
         "trace": ("tui.trace_dir", Path),
         "context_limit": "agent.summarization.max_tokens",
