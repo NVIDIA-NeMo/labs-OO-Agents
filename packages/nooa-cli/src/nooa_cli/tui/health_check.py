@@ -9,6 +9,8 @@ early — before the user types their first message and gets a cryptic traceback
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import logging
 import os
 from dataclasses import dataclass
@@ -52,6 +54,10 @@ class HealthCheckResult:
     ok: bool
     error_message: str | None = None
     fix_hint: str | None = None
+    # Permanent configuration failures should prevent agent turns until the
+    # user successfully changes models. Transient network/rate-limit failures
+    # remain warnings so a real prompt may still succeed moments later.
+    blocking: bool = False
 
 
 def _detect_provider(model: str) -> str | None:
@@ -59,10 +65,32 @@ def _detect_provider(model: str) -> str | None:
     try:
         import litellm
 
-        _, provider, _, _ = litellm.get_llm_provider(model)
+        # LiteLLM prints its provider documentation URL to stdout/stderr on a
+        # registry miss. Detection is an internal branch decision, so keep that
+        # library noise out of the TUI and render our actionable diagnosis.
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            _, provider, _, _ = litellm.get_llm_provider(model)
         return provider
     except Exception:
         return None
+
+
+def unresolved_model_health(model: str) -> HealthCheckResult:
+    """Return the permanent, actionable result for an unresolved model alias."""
+    return HealthCheckResult(
+        ok=False,
+        error_message=(
+            f"No LLM registry entry is loaded for model '{model}', "
+            "and its provider cannot be inferred."
+        ),
+        fix_hint=(
+            "  • Start with --registry <git-url>, install your organization's "
+            "registry extension, or add .nooa/llm_config.yaml\n"
+            "  • Run `nooa config show` to inspect locally discovered registry layers\n"
+            "  • Or choose a provider-qualified model with --model <provider/model>"
+        ),
+        blocking=True,
+    )
 
 
 def _get_expected_env_var(llm: UnifiedLLM) -> str | None:
@@ -140,19 +168,7 @@ def _classify_error(exc: Exception, llm: UnifiedLLM) -> HealthCheckResult:
     if "llm provider not provided" in msg or (
         "provider not provided" in msg and "pass in the llm provider" in msg
     ):
-        return HealthCheckResult(
-            ok=False,
-            error_message=(
-                f"No LLM registry entry is loaded for model '{model}', "
-                "and its provider cannot be inferred."
-            ),
-            fix_hint=(
-                "  • Run `nooa config show` to inspect the registry layers that were loaded\n"
-                "  • Install your organization's model-registry extension, add "
-                ".nooa/llm_config.yaml, or set NEMO_OO_LLM_CONFIG\n"
-                "  • Or choose a provider-qualified model with --model <provider/model>"
-            ),
-        )
+        return unresolved_model_health(model)
 
     expected_env = _get_expected_env_var(llm)
 
@@ -199,6 +215,7 @@ def _classify_error(exc: Exception, llm: UnifiedLLM) -> HealthCheckResult:
             ok=False,
             error_message=hint_lines[0],
             fix_hint="\n".join(fix_lines),
+            blocking=True,
         )
 
     # --- Model not found / doesn\'t exist ---
@@ -234,6 +251,7 @@ def _classify_error(exc: Exception, llm: UnifiedLLM) -> HealthCheckResult:
             ok=False,
             error_message=f"Model '{model}' was not found by the API provider.",
             fix_hint="\n".join(fix_lines),
+            blocking=True,
         )
 
     # --- Permission / access denied ---
@@ -257,6 +275,7 @@ def _classify_error(exc: Exception, llm: UnifiedLLM) -> HealthCheckResult:
                 "  • Billing is active and quota is not exhausted\n"
                 "  • Organization/project permissions are correct"
             ),
+            blocking=True,
         )
 
     # --- Connection refused / DNS / network ---

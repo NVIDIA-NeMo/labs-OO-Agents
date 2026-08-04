@@ -510,12 +510,11 @@ class TerminalFrontend:
         sapphire = COLORS["sapphire"]
         peach = COLORS["peach"]
 
-        self._console.console.print(
-            Rule(
-                title=f"[bold {COLORS['mauve']}]NeMo OO Agents ready[/]",
-                style=COLORS["surface2"],
-            )
-        )
+        if info.llm_ready:
+            title = f"[bold {COLORS['mauve']}]NeMo OO Agents ready[/]"
+        else:
+            title = f"[bold {COLORS['red']}]NeMo OO Agents — LLM unavailable[/]"
+        self._console.console.print(Rule(title=title, style=COLORS["surface2"]))
 
         table = Table.grid(padding=(0, 2))
         table.add_column(style=f"bold {sapphire}", no_wrap=True)

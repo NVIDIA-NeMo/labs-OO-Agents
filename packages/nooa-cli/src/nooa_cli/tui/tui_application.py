@@ -172,6 +172,7 @@ class TUIApplication:
         session_label: Callable[[], str] | None = None,
         config: Any = None,
         full_screen: bool = True,
+        submission_guard: Callable[[], str | None] | None = None,
     ) -> None:
         """
         Args:
@@ -194,6 +195,8 @@ class TUIApplication:
             full_screen: Native-scrollback mode. Transcript output is written to
                 the terminal scrollback; resize only redraws prompt_toolkit's
                 live input/status region.
+            submission_guard: Returns an actionable error when plain agent-bound
+                input must be rejected. Slash and bang commands remain available.
 
         The per-message echo ("queued → accepted" transition, user-bar
         render, SessionUserMessage log) is wired on the agent's
@@ -207,6 +210,7 @@ class TUIApplication:
         self._on_output = on_output
         self._session_label_fn: Callable[[], str] | None = session_label
         self._config = config
+        self._submission_guard = submission_guard
 
         # Register a QueueManager notify callback to also start the
         # dispatcher when items arrive on non-user channels while idle.
@@ -1006,6 +1010,15 @@ class TUIApplication:
         """
         if self.agent is None:
             return
+        if self._submission_guard is not None:
+            try:
+                problem = self._submission_guard()
+            except Exception:
+                logger.debug("TUI submission guard failed", exc_info=True)
+                problem = None
+            if problem:
+                self.emit_block(f"\x1b[31m{problem}\x1b[0m\n")
+                return
         inq = getattr(self.agent, "_user_messages_in", None)
         if inq is None:
             self.emit_block("[submit_message dropped] agent has no user_messages queue\n")

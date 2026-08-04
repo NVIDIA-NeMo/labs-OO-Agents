@@ -425,20 +425,44 @@ class ModelCommand(Command):
                 TextOutput(f"Current model: {self.config.default_model}", "info")
             )
 
-        from nooa.unifiedllm import get_llm_client
-
         selected = args[0]
-        self.config.default_model = selected
         try:
             from nooa.interactive import apply_model_limits
+            from nooa_cli.tui.config import UnresolvedModelError, get_llm_for_model
+            from nooa_cli.tui.health_check import probe_llm
+
+            try:
+                candidate = get_llm_for_model(selected)
+            except UnresolvedModelError:
+                from nooa_cli.tui.health_check import unresolved_model_health
+
+                health = unresolved_model_health(selected)
+                return CommandResult(
+                    success=False,
+                    outputs=[
+                        TextOutput(f"Could not switch to model '{selected}': {health.error_message}", "error"),
+                        TextOutput(health.fix_hint or "", "info"),
+                    ],
+                )
+            health = await probe_llm(candidate)
+            if not health.ok:
+                outputs = [
+                    TextOutput(f"Could not switch to model '{selected}': {health.error_message}", "error")
+                ]
+                if health.fix_hint:
+                    outputs.append(TextOutput(health.fix_hint, "info"))
+                return CommandResult(success=False, outputs=outputs)
 
             def _switch():
-                self.agent.set_llm(get_llm_client(selected))
+                self.agent.set_llm(candidate)
                 apply_model_limits(self.agent)
 
             await self.agent_run_async(_switch)
         except Exception as e:
             return CommandResult.err(f"Failed to switch model: {e}")
+        self.config.default_model = selected
+        if self._registry is not None:
+            self._registry.blocking_llm_health = None
         try:
             self._persist_tui_setting("default_model", selected)
         except Exception as e:
@@ -2080,6 +2104,7 @@ class CommandRegistry:
         self.session_manager = session_manager
         self._root_config = root_config
         self.startup_info: Output | None = None  # set by main after bootstrap
+        self.blocking_llm_health: Any | None = None
         self._bind_mcp_oauth_prompt()
         self._commands: dict[str, Command] = self._register()
         self._discover_directory_skills()
