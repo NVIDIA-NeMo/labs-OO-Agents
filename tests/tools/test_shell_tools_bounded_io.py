@@ -353,6 +353,33 @@ async def test_failed_write_file_leaves_previous_contents(sh, tmp_path, monkeypa
     assert path.read_text() == "original\n"
 
 
+@pytest.mark.asyncio
+async def test_replace_diverges_hardlinks_by_design(sh, tmp_path):
+    """Atomic replacement swaps the directory entry, so hardlinks diverge.
+
+    ``write_text()`` truncated in place, so every hardlink to the inode saw the
+    edit. ``os.replace()`` gives the edited path a new inode and other links
+    keep the old contents. That is a deliberate trade — the atomicity guarantee
+    is worth more here than hardlink write-through, and it matches what git and
+    dpkg do — so it is asserted rather than left implicit. A future change to
+    ``atomic_replace_text`` then has to decide about it on purpose.
+    """
+    original = tmp_path / "a.txt"
+    original.write_text("needle\n")
+    link = tmp_path / "b.txt"
+    try:
+        os.link(original, link)
+    except (OSError, NotImplementedError, AttributeError):
+        pytest.skip("hardlinks unavailable on this platform/filesystem")
+    assert original.stat().st_ino == link.stat().st_ino, "fixture is not a hardlink"
+
+    await sh.replace("a.txt", "needle", "thread")
+
+    assert original.read_text() == "thread\n"
+    assert link.read_text() == "needle\n", "hardlink unexpectedly followed the edit"
+    assert original.stat().st_ino != link.stat().st_ino
+
+
 def test_atomic_replace_writes_through_a_symlink(tmp_path):
     target = tmp_path / "real.txt"
     target.write_text("before\n")
