@@ -18,3 +18,4 @@ def test_commands_discoverable():
     assert "start-dev" in names
     assert "eval" in names
     assert "config" in names
+    assert "tui" in names

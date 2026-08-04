@@ -5,6 +5,7 @@
 from types import SimpleNamespace
 
 from nooa_cli.coding import CodingAgent, discover_agent_instruction_files
+from nooa_cli.tui.bootstrap import _instantiate_custom_agent
 
 from nooa.skill import Skill, get_slash_commands, slash_command
 from nooa.unifiedllm import FakeLLMClient
@@ -114,3 +115,35 @@ async def test_library_directory_can_be_scoped_by_the_host(tmp_path):
         assert agent.libs._path == libs_dir
     finally:
         await agent.close()
+
+
+def test_custom_coding_agent_receives_workspace_extension_arguments(tmp_path):
+    captured = {}
+
+    class CustomAgent:
+        def __init__(self, *, llm, storage, cwd, skills_dirs):
+            captured.update(
+                llm=llm,
+                storage=storage,
+                cwd=cwd,
+                skills_dirs=skills_dirs,
+            )
+
+    llm = object()
+    storage = object()
+    skills_dirs = [tmp_path / "skills"]
+    agent = _instantiate_custom_agent(
+        CustomAgent,
+        llm=llm,
+        storage=storage,
+        working_directory=tmp_path,
+        skills_dirs=skills_dirs,
+    )
+
+    assert isinstance(agent, CustomAgent)
+    assert captured == {
+        "llm": llm,
+        "storage": storage,
+        "cwd": tmp_path,
+        "skills_dirs": skills_dirs,
+    }
