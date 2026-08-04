@@ -266,20 +266,35 @@ def _set_nested(obj, path: str, value):
 # ── LLM helpers ───────────────────────────────────────────────────────────
 
 
+class UnresolvedModelError(ValueError):
+    """The model is neither a loaded alias nor provider-routable by LiteLLM."""
+
+    def __init__(self, model: str):
+        super().__init__(model)
+        self.model = model
+
+
+def get_llm_for_model(model_name: str) -> "CompletionClient":
+    """Build a client after validating aliases/provider routing without noisy output."""
+    from nooa.unifiedllm import MODELS, CompletionClient, get_llm_client
+
+    if model_name in MODELS:
+        return get_llm_client(model_name)
+
+    from .health_check import _detect_provider
+
+    if _detect_provider(model_name) is None:
+        raise UnresolvedModelError(model_name)
+    return CompletionClient(model=model_name)
+
+
 def get_llm(config: TUIConfig | Config) -> "CompletionClient":
     """Get the LLM client based on configuration.
 
     Accepts either a TUIConfig or the top-level Config.
     """
-    from nooa.unifiedllm import MODELS, CompletionClient, get_llm_client
-
     tui = config.tui if isinstance(config, Config) else config
-    model_name = tui.default_model
-
-    if model_name in MODELS:
-        return get_llm_client(model_name)
-
-    return CompletionClient(model=model_name)
+    return get_llm_for_model(tui.default_model)
 
 
 def list_models() -> list[str]:
