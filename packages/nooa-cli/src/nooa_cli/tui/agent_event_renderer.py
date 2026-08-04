@@ -3,7 +3,7 @@
 """Per-turn rendering for agent events into the TUI's block queue.
 
 ``AgentEventRenderer`` subscribes to the agent's ``Reasoning``,
-``ToolCallEvent`` and ``PythonOutput`` events and forwards them to
+``ToolCallEvent``, ``PythonOutput``, and semantic ``FileEdit`` events and forwards them to
 ``emit_text`` as Rich renderables. It also owns the monkey-patched
 ``agent._render_message`` hook so ``self.message()`` output lands in
 the transcript.
@@ -27,7 +27,7 @@ is called mid-cell, the ``∴`` preview fires on the enclosing
 and output.
 
 The class has no reference to ``Session``. Callers pass ``emit_text``
-(the ANSI-enqueue function), a ``show_python`` getter, and a shared
+(the ANSI-enqueue function), display-preference getters, and a shared
 ``pending_code`` dict (keyed by ``tool_call_id``) that pairs a code
 preview with its eventual output.
 """
@@ -76,6 +76,15 @@ class _SummaryEvent(Protocol):
     summary_text: str | None
 
 
+class _FileEditEvent(Protocol):
+    """Fields the renderer reads from a semantic coding-host file edit."""
+
+    path: str
+    operation: str
+    diff: str
+    content_complete: bool
+
+
 class AgentEventRenderer:
     """Render agent events into the TUI block queue, in turn order."""
 
@@ -85,12 +94,14 @@ class AgentEventRenderer:
         agent: Any,
         emit_text: Callable[..., None],
         show_python: Callable[[], bool],
+        show_diffs: Callable[[], bool],
         pending_code: dict[str, str],
         colors: dict[str, str],
     ) -> None:
         self._agent = agent
         self._emit_text = emit_text
         self._show_python = show_python
+        self._show_diffs = show_diffs
         self._pending_code = pending_code
         self._colors = colors
         self._unsubscribes: list[Callable[[], None]] = []
@@ -119,6 +130,7 @@ class AgentEventRenderer:
                 em.on("Reasoning", self._on_reasoning),
                 em.on("ToolCallEvent", self._on_tool_call),
                 em.on("PythonOutput", self._on_python_output),
+                em.on("FileEdit", self._on_file_edit),
                 em.on("Summary", self._on_summary),
                 em.on("TextOnlyReply", self._on_text_only_reply),
             ]
@@ -284,6 +296,32 @@ class AgentEventRenderer:
             self._emit_text(
                 Text(f"  ⚠ {first_err}", style="dim red"), **self._event_emit_kwargs(event)
             )
+
+    def _on_file_edit(self, event: _FileEditEvent) -> None:
+        """Render the bounded diff supplied by ``ActivityShellTools``."""
+        if not self._show_diffs():
+            return
+        diff = str(getattr(event, "diff", "") or "")
+        if not diff.strip():
+            return
+
+        path = str(getattr(event, "path", "") or "")
+        operation = str(getattr(event, "operation", "edit") or "edit")
+        kwargs = self._event_emit_kwargs(event)
+        self._emit_text(
+            Rule(
+                Text(f"oo {operation} · {path}", style=self._colors["mauve"]),
+                style="dim",
+                align="left",
+            ),
+            **kwargs,
+        )
+        self._emit_text(
+            Syntax(diff, "diff", theme="monokai", background_color="default", word_wrap=True),
+            **kwargs,
+        )
+        if not bool(getattr(event, "content_complete", True)):
+            self._emit_text(Text("diff is truncated", style="dim italic"), **kwargs)
 
     def _on_summary(self, event: _SummaryEvent) -> None:
         """Render a dim one-line notice when a summary/truncation is applied.

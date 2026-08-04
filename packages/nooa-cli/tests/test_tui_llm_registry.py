@@ -44,3 +44,28 @@ def test_explicit_registry_paths_load_after_discovered_chain(tmp_path: Path) -> 
     load_secrets.assert_called_once_with()
     reload_registry.assert_called_once_with(bundled, private)
     assert messages == []
+
+
+def test_working_dir_scopes_project_settings(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    project_config = workspace / ".nooa"
+    project_config.mkdir(parents=True)
+    (project_config / "settings.yaml").write_text(
+        "tui:\n  default_model: workspace-model\n"
+    )
+    monkeypatch.delenv("NEMO_OO_PROJECT_DIR", raising=False)
+    seen = {}
+
+    async def fake_main(*, config, **_kwargs):
+        seen["model"] = config.tui.default_model
+        seen["project_dir"] = __import__("os").environ.get("NEMO_OO_PROJECT_DIR")
+
+    with patch("nooa_cli.tui.main.main", fake_main):
+        result = CliRunner().invoke(command, ["--working-dir", str(workspace)])
+
+    assert result.exit_code == 0, result.output
+    assert seen == {
+        "model": "workspace-model",
+        "project_dir": str(project_config),
+    }
+    assert "NEMO_OO_PROJECT_DIR" not in __import__("os").environ

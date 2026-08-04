@@ -22,8 +22,7 @@ def mock_registry():
         "/session resume": "Resume a session",
         "/session delete": "Delete a session",
         "/session list": "List sessions",
-        "/python on": "Enable Python display",
-        "/python off": "Disable Python display",
+        "/show-python [status|on|off]": "Configure Python display",
         "/exit": "Exit",
     }
     # The completer uses get_active_help() (keys may include argument hints).
@@ -189,6 +188,12 @@ def test_user_skill_appears_in_completer_via_real_registry(user_skill_registry):
     items = completer.complete("/")
     texts = [i.text for i in items]
     assert any("myskill" in t for t in texts), f"Expected '/myskill' in completions, got: {texts}"
+
+
+def test_user_skill_is_not_flattened_into_builtin_help(user_skill_registry):
+    """Generic /help stays portable; /skills commands owns extension discovery."""
+    assert any(key.startswith("/myskill") for key in user_skill_registry.get_active_help())
+    assert not any(key.startswith("/myskill") for key in user_skill_registry.get_builtin_help())
 
 
 def test_user_skill_partial_completion(user_skill_registry):

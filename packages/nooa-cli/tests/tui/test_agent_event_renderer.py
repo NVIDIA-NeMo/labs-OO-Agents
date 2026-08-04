@@ -66,7 +66,9 @@ class _FakeAgent:
         self._render_message: Any = None
 
 
-def _mk(show_python: bool = False) -> tuple[_FakeAgent, list[Any], AgentEventRenderer]:
+def _mk(
+    show_python: bool = False, show_diffs: bool = True
+) -> tuple[_FakeAgent, list[Any], AgentEventRenderer]:
     agent = _FakeAgent()
     emitted: list[Any] = []
     pending_code: dict[str, str] = {}
@@ -74,6 +76,7 @@ def _mk(show_python: bool = False) -> tuple[_FakeAgent, list[Any], AgentEventRen
         agent=agent,  # type: ignore[arg-type]
         emit_text=emitted.append,
         show_python=lambda: show_python,
+        show_diffs=lambda: show_diffs,
         pending_code=pending_code,
         colors=COLORS,
     )
@@ -101,6 +104,18 @@ def _fire_python_output(
     em.fire(
         "PythonOutput",
         SimpleNamespace(tool_call_id=tool_call_id, stdout=stdout, stderr=stderr),
+    )
+
+
+def _fire_file_edit(em: _FakeEventManager, *, complete: bool = True) -> None:
+    em.fire(
+        "FileEdit",
+        SimpleNamespace(
+            path="/workspace/example.py",
+            operation="update",
+            diff="--- a/example.py\n+++ b/example.py\n@@ -1 +1 @@\n-old\n+new\n",
+            content_complete=complete,
+        ),
     )
 
 
@@ -399,3 +414,33 @@ def test_code_preview_first_line_shape(code: str, expected_fragment: str) -> Non
     preview_texts = [e for e in emitted if isinstance(e, Text) and "∴" in str(e)]
     assert preview_texts, "expected a ∴ preview line"
     assert expected_fragment in str(preview_texts[0])
+
+
+def test_file_edit_renders_inline_diff_when_enabled() -> None:
+    agent, emitted, renderer = _mk(show_diffs=True)
+    renderer.attach()
+
+    _fire_file_edit(agent.event_manager)
+
+    assert any(isinstance(item, Rule) and "example.py" in str(item.title) for item in emitted)
+    diffs = [item for item in emitted if isinstance(item, Syntax)]
+    assert len(diffs) == 1
+    assert "+new" in diffs[0].code
+
+
+def test_file_edit_is_hidden_when_inline_diffs_are_disabled() -> None:
+    agent, emitted, renderer = _mk(show_diffs=False)
+    renderer.attach()
+
+    _fire_file_edit(agent.event_manager)
+
+    assert emitted == []
+
+
+def test_file_edit_marks_bounded_diff_as_truncated() -> None:
+    agent, emitted, renderer = _mk(show_diffs=True)
+    renderer.attach()
+
+    _fire_file_edit(agent.event_manager, complete=False)
+
+    assert any(isinstance(item, Text) and "truncated" in str(item) for item in emitted)

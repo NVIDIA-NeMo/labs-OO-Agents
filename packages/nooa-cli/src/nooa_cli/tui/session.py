@@ -315,6 +315,15 @@ class Session:
         self.config.tui.show_python = value
 
     @property
+    def show_diffs(self) -> bool:
+        """Whether to display semantic file-edit diffs inline."""
+        return self.config.tui.show_diffs
+
+    @show_diffs.setter
+    def show_diffs(self, value: bool) -> None:
+        self.config.tui.show_diffs = value
+
+    @property
     def session_id(self) -> str | None:
         return self._session_manager.session_id if self._session_manager else None
 
@@ -523,6 +532,7 @@ class Session:
             agent=self.agent,
             emit_text=self._emit_text,
             show_python=lambda: self.show_python,
+            show_diffs=lambda: self.show_diffs,
             pending_code=self._pending_code,
             colors=self._colors,
         )

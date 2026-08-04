@@ -10,12 +10,33 @@ module's imports light and defer the TUI machinery into the handler.
 """
 
 import asyncio
+import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import click
 
 _RESUME_LAST = "__last__"
+
+
+@contextmanager
+def _working_directory_project_scope(working_dir: str):
+    """Use ``--working-dir`` as the TUI's project configuration scope.
+
+    An explicit ``NEMO_OO_PROJECT_DIR`` remains authoritative. Otherwise the
+    TUI reads and writes project settings, registries, and secrets beneath the
+    workspace it is actually operating on, not beneath the framework checkout.
+    """
+    env_name = "NEMO_OO_PROJECT_DIR"
+    if env_name in os.environ:
+        yield
+        return
+    os.environ[env_name] = str(Path(working_dir).expanduser().resolve() / ".nooa")
+    try:
+        yield
+    finally:
+        os.environ.pop(env_name, None)
 
 
 @click.command()
@@ -133,33 +154,36 @@ def command(
     from nooa_cli.tui.config import Config
     from nooa_cli.tui.main import main as tui_main
 
-    config = Config.load(
-        model=model,
-        agent=agent_spec,
-        working_dir=working_dir,
-        mcp_file=Path(mcp_file) if mcp_file else None,
-        llm_config=list(llm_config_paths) or None,
-        no_splash=no_splash,
-        skills_dir=list(skills_dir) if skills_dir else None,
-        context_limit=context_limit,
-        no_trace=no_trace,
-        vi=vi,
-        python=python,
-    )
-
-    continue_last = continue_session == _RESUME_LAST
-    resume_session_id = (
-        continue_session if continue_session and continue_session != _RESUME_LAST else None
-    )
-
-    try:
-        asyncio.run(
-            tui_main(
-                config=config, continue_last=continue_last, resume_session_id=resume_session_id
-            )
+    with _working_directory_project_scope(working_dir):
+        config = Config.load(
+            model=model,
+            agent=agent_spec,
+            working_dir=working_dir,
+            mcp_file=Path(mcp_file) if mcp_file else None,
+            llm_config=list(llm_config_paths) or None,
+            no_splash=no_splash,
+            skills_dir=list(skills_dir) if skills_dir else None,
+            context_limit=context_limit,
+            no_trace=no_trace,
+            vi=vi,
+            python=python,
         )
-    except KeyboardInterrupt:
-        sys.exit(0)
+
+        continue_last = continue_session == _RESUME_LAST
+        resume_session_id = (
+            continue_session if continue_session and continue_session != _RESUME_LAST else None
+        )
+
+        try:
+            asyncio.run(
+                tui_main(
+                    config=config,
+                    continue_last=continue_last,
+                    resume_session_id=resume_session_id,
+                )
+            )
+        except KeyboardInterrupt:
+            sys.exit(0)
 
 
 # ``python -m nooa_cli.commands.tui`` remains a script-free fallback.
