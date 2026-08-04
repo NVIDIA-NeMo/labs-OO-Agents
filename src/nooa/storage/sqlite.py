@@ -118,6 +118,8 @@ CREATE TABLE IF NOT EXISTS events (
     insertion_order INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id);
+CREATE INDEX IF NOT EXISTS idx_events_insertion_order ON events(insertion_order);
+CREATE INDEX IF NOT EXISTS idx_events_type_order ON events(event_type, insertion_order);
 
 CREATE TABLE IF NOT EXISTS active_tags (
     position INTEGER NOT NULL,
