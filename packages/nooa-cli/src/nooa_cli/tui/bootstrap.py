@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from .commands import CommandRegistry
     from .config import Config
     from .frontend import Frontend
+    from .health_check import HealthCheckResult
     from .session import Session
     from .session_manager import SessionManager
 
@@ -56,6 +57,7 @@ class BootstrapResult:
     restored: bool
     session_id: str | None
     messages: list[Output] = field(default_factory=list)
+    blocking_llm_health: HealthCheckResult | None = None
 
 
 def _scaffold_settings(config: Config) -> None:
@@ -297,19 +299,37 @@ async def bootstrap(
     _load_llm_registry(messages, config.llm_config_paths)
     tracing_enabled, set_trace_session = _enable_tracing(config, messages)
 
-    from .config import get_llm
+    from .config import UnresolvedModelError, get_llm
 
+    blocking_llm_health = None
     try:
         llm = get_llm(config)
+    except UnresolvedModelError as exc:
+        from nooa.unifiedllm import FakeLLMClient
+
+        from .health_check import unresolved_model_health
+
+        blocking_llm_health = unresolved_model_health(exc.model)
+        messages.append(TextOutput(f"⚠️  {blocking_llm_health.error_message}", "error"))
+        if blocking_llm_health.fix_hint:
+            messages.append(TextOutput(blocking_llm_health.fix_hint, "info"))
+        llm = FakeLLMClient()
     except Exception as exc:
         from nooa.unifiedllm import FakeLLMClient
 
-        messages.extend(
-            (
-                TextOutput(f"Failed to initialize LLM: {exc}", "error"),
-                TextOutput("Using fake LLM client for testing", "info"),
-            )
+        from .health_check import HealthCheckResult
+
+        blocking_llm_health = HealthCheckResult(
+            ok=False,
+            error_message=f"Failed to initialize model '{config.tui.default_model}': {exc}",
+            fix_hint=(
+                "  • Run `nooa config show` to inspect model configuration\n"
+                "  • Use /model <provider/model> to select a different model"
+            ),
+            blocking=True,
         )
+        messages.append(TextOutput(f"⚠️  {blocking_llm_health.error_message}", "error"))
+        messages.append(TextOutput(blocking_llm_health.fix_hint, "info"))
         llm = FakeLLMClient()
 
     from nooa.unifiedllm import FakeLLMClient
@@ -322,6 +342,8 @@ async def bootstrap(
             messages.append(TextOutput(f"⚠️  {health.error_message}", "error"))
             if health.fix_hint:
                 messages.append(TextOutput(health.fix_hint, "info"))
+            if health.blocking:
+                blocking_llm_health = health
 
     from nooa.storage.sqlite import SessionAlreadyActiveError
 
@@ -452,6 +474,7 @@ async def bootstrap(
         restored=restored,
         session_id=session_id,
         messages=messages,
+        blocking_llm_health=blocking_llm_health,
     )
 
 
@@ -484,6 +507,7 @@ def build_startup_info(result: BootstrapResult) -> Output:
             if config.tui.agent_spec and not isinstance(agent, TUIAgent)
             else None
         ),
+        llm_ready=result.blocking_llm_health is None,
     )
 
 
@@ -518,6 +542,7 @@ def build_registry(result: BootstrapResult, frontend: Frontend) -> CommandRegist
         session_manager=result.session_manager,
         root_config=result.config,
     )
+    registry.blocking_llm_health = result.blocking_llm_health
     result.agent._command_registry = registry  # type: ignore[attr-defined]
     return registry
 

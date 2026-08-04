@@ -277,6 +277,26 @@ async def test_commands_bang_fires_on_bang_callback_with_stripped_body():
             run_task.cancel()
 
 
+async def test_plain_input_is_blocked_by_actionable_submission_guard():
+    """Broken LLM configuration never enters the agent/retry loop."""
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    agent = FakeAgent()
+    app = TUIApplication(
+        agent=agent,
+        submission_guard=lambda: (
+            "Cannot send this message because the configured LLM is unavailable.\n"
+            "Use /model <name> to recover."
+        ),
+    )
+
+    app.submit_message("hi")
+
+    assert agent._user_messages_in.qsize() == 0
+    assert "LLM is unavailable" in app.output_buffer.text
+    assert "/model <name>" in app.output_buffer.text
+
+
 async def test_commands_tab_completion_for_slash():
     async with TUIHarness() as h:
         await h.type_keys("/he")

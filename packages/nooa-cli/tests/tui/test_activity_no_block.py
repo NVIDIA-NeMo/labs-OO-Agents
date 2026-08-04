@@ -163,7 +163,15 @@ async def test_agent_mutating_commands_use_async_dispatch():
     agent.event_manager.keys.return_value = ["1", "2"]
     agent.context_stats = None
 
-    with patch("nooa.unifiedllm.get_llm_client", return_value=MagicMock()):
+    from nooa_cli.tui.health_check import HealthCheckResult
+
+    with (
+        patch("nooa_cli.tui.config.get_llm_for_model", return_value=MagicMock()),
+        patch(
+            "nooa_cli.tui.health_check.probe_llm",
+            new=AsyncMock(return_value=HealthCheckResult(ok=True)),
+        ),
+    ):
         await assert_uses_async_dispatch(ModelCommand(AsyncMock(), config, agent), ["new/model"])
 
     compact = CompactCommand(AsyncMock(), config, agent)

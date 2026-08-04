@@ -41,6 +41,12 @@ class TestDetectProvider:
         # Either None or a string is fine
         assert result is None or isinstance(result, str)
 
+    def test_unknown_provider_does_not_print_litellm_docs(self, capsys):
+        assert _detect_provider("private/unknown-alias") is None
+        captured = capsys.readouterr()
+        assert "Provider List" not in captured.out
+        assert "Provider List" not in captured.err
+
 
 class TestGetExpectedEnvVar:
     """Test env var detection for LLM providers."""
@@ -79,8 +85,9 @@ class TestClassifyError:
         assert not result.ok
         assert "No LLM registry entry is loaded" in result.error_message
         assert "nooa config show" in result.fix_hint
-        assert "model-registry extension" in result.fix_hint
-        assert "NEMO_OO_LLM_CONFIG" in result.fix_hint
+        assert "registry extension" in result.fix_hint
+        assert "--registry <git-url>" in result.fix_hint
+        assert result.blocking is True
         expected_env.assert_not_called()
 
     def test_auth_401_env_not_set(self):
@@ -100,6 +107,7 @@ class TestClassifyError:
         assert "Authentication failed" in result.error_message
         assert "ANTHROPIC_API_KEY" in result.fix_hint
         assert "NOT set" in result.fix_hint
+        assert result.blocking is True
 
     def test_auth_401_env_set_but_invalid(self):
         llm = _make_llm(model="claude-sonnet-4-5")
@@ -118,6 +126,7 @@ class TestClassifyError:
         assert not result.ok
         assert "not found" in result.error_message
         assert "gpt-99" in result.error_message
+        assert result.blocking is True
 
     def test_model_not_found_suggests_config_creation(self):
         llm = _make_llm(model="fake-model")
@@ -139,6 +148,7 @@ class TestClassifyError:
         result = _classify_error(exc, llm)
         assert not result.ok
         assert "Access denied" in result.error_message
+        assert result.blocking is True
 
     def test_connection_refused(self):
         llm = _make_llm(model="my-model")
@@ -146,6 +156,7 @@ class TestClassifyError:
         result = _classify_error(exc, llm)
         assert not result.ok
         assert "Cannot connect" in result.error_message
+        assert result.blocking is False
 
     def test_connection_with_yaml_mentions_api_base(self):
         llm = _make_llm(model="my-model")
