@@ -65,6 +65,24 @@ class TestGetExpectedEnvVar:
 class TestClassifyError:
     """Test error classification into user-friendly messages."""
 
+    def test_missing_registry_alias_has_specific_extension_guidance(self):
+        llm = _make_llm(model="private/model-alias")
+        llm._registry_config = None
+        exc = Exception(
+            "LLM Provider NOT provided. Pass in the LLM provider you are trying to call. "
+            "You passed model=private/model-alias"
+        )
+
+        with patch("nooa_cli.tui.health_check._get_expected_env_var") as expected_env:
+            result = _classify_error(exc, llm)
+
+        assert not result.ok
+        assert "No LLM registry entry is loaded" in result.error_message
+        assert "nooa config show" in result.fix_hint
+        assert "model-registry extension" in result.fix_hint
+        assert "NEMO_OO_LLM_CONFIG" in result.fix_hint
+        expected_env.assert_not_called()
+
     def test_auth_401_env_not_set(self):
         llm = _make_llm(model="claude-sonnet-4-5")
         llm._registry_config = None

@@ -128,9 +128,33 @@ def _classify_error(exc: Exception, llm: UnifiedLLM) -> HealthCheckResult:
     msg = str(exc).lower()
     exc_type = type(exc).__name__
 
-    expected_env = _get_expected_env_var(llm)
     has_yaml = _has_llm_config_yaml()
     has_config = _has_project_config()
+
+    # --- Registry alias / provider cannot be resolved ---
+    # LiteLLM's raw error is both noisy (it repeats the provider-doc URL) and
+    # misleading for registry users: an organization-local alias is not fixed
+    # by guessing a public API-key variable. Keep this message generic so the
+    # public TUI can point at the extension boundary without knowing anything
+    # about a private registry package or its contents.
+    if "llm provider not provided" in msg or (
+        "provider not provided" in msg and "pass in the llm provider" in msg
+    ):
+        return HealthCheckResult(
+            ok=False,
+            error_message=(
+                f"No LLM registry entry is loaded for model '{model}', "
+                "and its provider cannot be inferred."
+            ),
+            fix_hint=(
+                "  • Run `nooa config show` to inspect the registry layers that were loaded\n"
+                "  • Install your organization's model-registry extension, add "
+                ".nooa/llm_config.yaml, or set NEMO_OO_LLM_CONFIG\n"
+                "  • Or choose a provider-qualified model with --model <provider/model>"
+            ),
+        )
+
+    expected_env = _get_expected_env_var(llm)
 
     # --- Authentication / API key issues ---
     if any(

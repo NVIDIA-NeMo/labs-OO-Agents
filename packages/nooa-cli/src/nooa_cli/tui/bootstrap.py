@@ -227,14 +227,18 @@ def configure_tui_memory(
     )
 
 
-def _load_llm_registry(messages: list[Output]) -> None:
+def _load_llm_registry(messages: list[Output], explicit_paths: list[Path] | None = None) -> None:
     try:
         from nooa.llm_config import llm_config_chain
         from nooa.secrets import load_secrets_into_env
         from nooa.unifiedllm import reload_registry
 
         load_secrets_into_env()
-        reload_registry(*llm_config_chain())
+        # Explicit host paths come last and therefore override bundled, user,
+        # project, and environment layers. The TUI accepts only existing local
+        # files; fetching or authenticating to a private registry remains the
+        # operator's responsibility outside this public process.
+        reload_registry(*llm_config_chain(), *(explicit_paths or []))
     except Exception as exc:
         messages.append(TextOutput(f"Failed to load LLM registry config: {exc}", "warning"))
 
@@ -290,7 +294,7 @@ async def bootstrap(
 
     messages: list[Output] = []
     _scaffold_settings(config)
-    _load_llm_registry(messages)
+    _load_llm_registry(messages, config.llm_config_paths)
     tracing_enabled, set_trace_session = _enable_tracing(config, messages)
 
     from .config import get_llm
