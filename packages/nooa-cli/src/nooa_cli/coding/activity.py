@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
+from difflib import unified_diff
 from functools import wraps
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal
@@ -13,7 +14,7 @@ from uuid import uuid4
 
 from pydantic import Field
 
-from nooa.agentdoc import hidden, spec
+from nooa.agentdoc import TruncatingStringIO, hidden, pformat, spec
 from nooa.context_blocks import EventBase
 from nooa.context_blocks.roles import Role
 from nooa.runtime.event_manager import EventManager
@@ -23,6 +24,34 @@ from nooa.tools._results import StreamDone, StreamEvent
 from nooa.tools.shell_tools import FileWrite, Match, ShellResult, ShellTools
 
 logger = logging.getLogger(__name__)
+
+_MAX_EVENT_TEXT_CHARS = 10_000
+_MAX_COMMAND_OUTPUT_CHARS = 30_000
+
+
+def _line_count(value: str) -> int:
+    if not value:
+        return 0
+    return value.count("\n") + (0 if value.endswith("\n") else 1)
+
+
+def _edit_diff(path: str, old_text: str, new_text: str, start_line: int | None) -> str:
+    lines = list(
+        unified_diff(
+            old_text.splitlines(keepends=True),
+            new_text.splitlines(keepends=True),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+        )
+    )
+    if start_line is not None:
+        for index, line in enumerate(lines):
+            if line.startswith("@@ "):
+                old_count = max(1, _line_count(old_text))
+                new_count = max(1, _line_count(new_text))
+                lines[index] = f"@@ -{start_line},{old_count} +{start_line},{new_count} @@\n"
+                break
+    return pformat("".join(lines), max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
 
 
 class FileEdit(EventBase):  # type: ignore[misc]
@@ -37,9 +66,22 @@ class FileEdit(EventBase):  # type: ignore[misc]
     ]
     old_text: Annotated[
         str | None,
-        Field(description="Complete content before the edit, when available"),
+        Field(description="Bounded affected text before the edit, when available"),
     ] = None
-    new_text: Annotated[str, Field(description="Complete content after the edit")] = ""
+    new_text: Annotated[str, Field(description="Bounded affected text after the edit")] = ""
+    start_line: Annotated[
+        int | None,
+        Field(description="First affected line in the original file, 1-indexed"),
+    ] = None
+    end_line: Annotated[
+        int | None,
+        Field(description="Last affected line in the original file, 1-indexed and inclusive"),
+    ] = None
+    diff: Annotated[str, Field(description="Bounded unified diff of the affected text")] = ""
+    content_complete: Annotated[
+        bool,
+        Field(description="Whether old_text and new_text contain the complete affected text"),
+    ] = True
 
 
 class TerminalCommandStarted(EventBase):  # type: ignore[misc]
@@ -48,9 +90,20 @@ class TerminalCommandStarted(EventBase):  # type: ignore[misc]
     _role: ClassVar[Role] = Role.RUNTIME_EVENT
 
     command_id: Annotated[str, Field(description="Correlation ID for this command")]
-    command: Annotated[str, Field(description="Shell command text")]
+    command: Annotated[str, Field(description="Bounded shell command text")]
     working_directory: Annotated[str, Field(description="Working directory at command start")]
-    has_stdin: Annotated[bool, Field(description="Whether stdin was supplied separately")] = False
+    stdin: Annotated[
+        str | None,
+        Field(description="Bounded separate stdin text; never stored in session history"),
+    ] = None
+    command_truncated: Annotated[
+        bool,
+        Field(description="Whether command was truncated by pformat for this event"),
+    ] = False
+    stdin_truncated: Annotated[
+        bool,
+        Field(description="Whether stdin was truncated by pformat for this event"),
+    ] = False
 
 
 class TerminalCommandOutput(EventBase):  # type: ignore[misc]
@@ -59,8 +112,12 @@ class TerminalCommandOutput(EventBase):  # type: ignore[misc]
     _role: ClassVar[Role] = Role.RUNTIME_EVENT
 
     command_id: Annotated[str, Field(description="Correlation ID for this command")]
-    stream: Annotated[Literal["stdout", "stderr"], Field(description="Output stream")]
-    content: Annotated[str, Field(description="Output chunk")]
+    stdout: Annotated[str, Field(description="Output chunk received on stdout")] = ""
+    stderr: Annotated[str, Field(description="Output chunk received on stderr")] = ""
+    truncated: Annotated[
+        bool,
+        Field(description="Whether further command output was omitted from activity events"),
+    ] = False
 
 
 class TerminalCommandFinished(EventBase):  # type: ignore[misc]
@@ -70,10 +127,12 @@ class TerminalCommandFinished(EventBase):  # type: ignore[misc]
 
     command_id: Annotated[str, Field(description="Correlation ID for this command")]
     exit_code: Annotated[int | None, Field(description="Process exit code when available")] = None
-    stdout: Annotated[str, Field(description="Captured non-streaming stdout")] = ""
-    stderr: Annotated[str, Field(description="Captured non-streaming stderr")] = ""
     timed_out: Annotated[bool, Field(description="Whether the command timed out")] = False
     error: Annotated[str, Field(description="Failure before an exit code was available")] = ""
+    output_truncated: Annotated[
+        bool,
+        Field(description="Whether output was omitted from command activity events"),
+    ] = False
 
 
 class ActivityShellTools(Skill):
@@ -136,12 +195,21 @@ class ActivityShellTools(Skill):
         timeout: Annotated[float, spec(description="Max seconds")] = 30.0,
     ) -> ShellResult:
         command_id = str(uuid4())
+        bounded_command = pformat(command, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
+        command_truncated = len(command) > _MAX_EVENT_TEXT_CHARS
+        bounded_stdin: str | None = None
+        stdin_truncated = False
+        if stdin is not None:
+            bounded_stdin = pformat(stdin, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
+            stdin_truncated = len(stdin) > _MAX_EVENT_TEXT_CHARS
         self._emit(
             TerminalCommandStarted(
                 command_id=command_id,
-                command=command,
+                command=bounded_command,
                 working_directory=str(self.cwd),
-                has_stdin=stdin is not None,
+                stdin=bounded_stdin,
+                command_truncated=command_truncated,
+                stdin_truncated=stdin_truncated,
             )
         )
         try:
@@ -155,13 +223,26 @@ class ActivityShellTools(Skill):
             )
             raise
 
+        stdout_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS // 2)
+        stderr_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS // 2)
+        stdout_buffer.write(result.stdout)
+        stderr_buffer.write(result.stderr)
+        output_truncated = stdout_buffer.was_truncated or stderr_buffer.was_truncated
+        if result.stdout or result.stderr:
+            self._emit(
+                TerminalCommandOutput(
+                    command_id=command_id,
+                    stdout=stdout_buffer.getvalue(),
+                    stderr=stderr_buffer.getvalue(),
+                    truncated=output_truncated,
+                )
+            )
         self._emit(
             TerminalCommandFinished(
                 command_id=command_id,
                 exit_code=result.returncode,
-                stdout=result.stdout,
-                stderr=result.stderr,
                 timed_out=result.timed_out,
+                output_truncated=output_truncated,
             )
         )
         return result
@@ -173,40 +254,62 @@ class ActivityShellTools(Skill):
         timeout: Annotated[float, spec(description="Max seconds to wait before timeout")] = 30.0,
     ) -> AsyncIterator[StreamEvent | StreamDone]:
         command_id = str(uuid4())
+        bounded_command = pformat(command, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
+        command_truncated = len(command) > _MAX_EVENT_TEXT_CHARS
         self._emit(
             TerminalCommandStarted(
                 command_id=command_id,
-                command=command,
+                command=bounded_command,
                 working_directory=str(self.cwd),
+                command_truncated=command_truncated,
             )
         )
         finished = False
+        stdout_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS // 2)
+        stderr_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS // 2)
         try:
             async for item in self._shell.run_stream(command, timeout=timeout):
                 if isinstance(item, StreamDone):
+                    output_truncated = stdout_buffer.was_truncated or stderr_buffer.was_truncated
+                    if stdout_buffer.chars_written or stderr_buffer.chars_written:
+                        self._emit(
+                            TerminalCommandOutput(
+                                command_id=command_id,
+                                stdout=stdout_buffer.getvalue(),
+                                stderr=stderr_buffer.getvalue(),
+                                truncated=output_truncated,
+                            )
+                        )
                     self._emit(
                         TerminalCommandFinished(
                             command_id=command_id,
                             exit_code=item.returncode,
                             timed_out=item.timed_out,
+                            output_truncated=output_truncated,
                         )
                     )
                     finished = True
                 else:
-                    self._emit(
-                        TerminalCommandOutput(
-                            command_id=command_id,
-                            stream=item.kind,
-                            content=item.text,
-                        )
-                    )
+                    buffer = stdout_buffer if item.kind == "stdout" else stderr_buffer
+                    buffer.write(item.text)
                 yield item
         except BaseException as error:
             if not finished:
+                output_truncated = stdout_buffer.was_truncated or stderr_buffer.was_truncated
+                if stdout_buffer.chars_written or stderr_buffer.chars_written:
+                    self._emit(
+                        TerminalCommandOutput(
+                            command_id=command_id,
+                            stdout=stdout_buffer.getvalue(),
+                            stderr=stderr_buffer.getvalue(),
+                            truncated=output_truncated,
+                        )
+                    )
                 self._emit(
                     TerminalCommandFinished(
                         command_id=command_id,
                         error=str(error) or type(error).__name__,
+                        output_truncated=output_truncated,
                     )
                 )
             raise
@@ -243,19 +346,41 @@ class ActivityShellTools(Skill):
             return await self._shell.replace(target, old_or_new, new)
 
         resolved = self._resolve_path(path)
-        old_text = resolved.read_text()
+        if isinstance(target, Match):
+            old_text = target.text
+            new_text = old_or_new
+            start_line = target.start
+            end_line = target.end
+        else:
+            old_text = old_or_new
+            new_text = new or ""
+            start_line = None
+            end_line = None
+            try:
+                with resolved.open("r") as stream:
+                    content = stream.read(_MAX_EVENT_TEXT_CHARS + 1)
+                if len(content) <= _MAX_EVENT_TEXT_CHARS:
+                    offset = content.index(old_text)
+                    start_line = content.count("\n", 0, offset) + 1
+                    end_line = start_line + max(1, _line_count(old_text)) - 1
+            except (OSError, UnicodeError, ValueError):
+                pass
+
+        bounded_old = pformat(old_text, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
+        bounded_new = pformat(new_text, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
+        old_truncated = len(old_text) > _MAX_EVENT_TEXT_CHARS
+        new_truncated = len(new_text) > _MAX_EVENT_TEXT_CHARS
         result = await self._shell.replace(target, old_or_new, new)
-        try:
-            new_text = resolved.read_text()
-        except (OSError, UnicodeError):
-            logger.debug("Failed to observe completed file edit", exc_info=True)
-            return result
         self._emit(
             FileEdit(
                 path=str(resolved),
                 operation="update",
-                old_text=old_text,
-                new_text=new_text,
+                old_text=bounded_old,
+                new_text=bounded_new,
+                start_line=start_line,
+                end_line=end_line,
+                diff=_edit_diff(path, bounded_old, bounded_new, start_line),
+                content_complete=not old_truncated and not new_truncated,
             )
         )
         return result
@@ -269,20 +394,34 @@ class ActivityShellTools(Skill):
         resolved = self._resolve_path(path)
         existed = resolved.exists()
         old_text: str | None = None
+        old_complete = True
         if existed:
             try:
-                old_text = resolved.read_text()
+                with resolved.open("r") as stream:
+                    old_text = stream.read(_MAX_EVENT_TEXT_CHARS + 1)
+                old_complete = len(old_text) <= _MAX_EVENT_TEXT_CHARS
+                old_text = pformat(old_text, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
             except (OSError, UnicodeError):
                 # Observation must not make an otherwise valid overwrite fail.
-                pass
+                old_complete = False
 
         result = await self._shell.write_file(path, content)
+        bounded_content = pformat(content, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
+        content_truncated = len(content) > _MAX_EVENT_TEXT_CHARS
         self._emit(
             FileEdit(
                 path=str(resolved),
                 operation="update" if existed else "create",
                 old_text=old_text,
-                new_text=content,
+                new_text=bounded_content,
+                start_line=1 if existed and old_complete and old_text is not None else None,
+                end_line=(
+                    max(1, _line_count(old_text))
+                    if existed and old_complete and old_text is not None
+                    else None
+                ),
+                diff=_edit_diff(path, old_text or "", bounded_content, 1),
+                content_complete=old_complete and not content_truncated,
             )
         )
         return result
