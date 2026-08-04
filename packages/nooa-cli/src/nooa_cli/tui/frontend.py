@@ -138,6 +138,14 @@ class Frontend(Protocol):
         """Collect a masked one-line value without adding it to input history."""
         ...
 
+    async def prompt_text(self, title: str, message: str, default: str = "") -> str:
+        """Collect unmasked one-line text in the active host UI."""
+        ...
+
+    async def prompt_choice(self, title: str, message: str, options: list[str]) -> str:
+        """Collect one value from a searchable list in the active host UI."""
+        ...
+
     async def start_thinking(self, message: str = "thinking...") -> None:
         """Show a loading/thinking indicator."""
         ...
@@ -353,6 +361,20 @@ class TerminalFrontend:
         self._console.console.print(message)
         session = PromptSession(is_password=True)
         return (await session.prompt_async(f"{title}: ")).strip()
+
+    async def prompt_text(self, title: str, message: str, default: str = "") -> str:
+        """Collect ordinary text without launching a nested live application."""
+        if self._app is not None:
+            return await self._app.prompt_text(title, message, default)
+        self._console.console.print(message)
+        return await self.get_input(f"{title}: ", default=default)
+
+    async def prompt_choice(self, title: str, message: str, options: list[str]) -> str:
+        """Collect a searchable choice without launching a nested live application."""
+        if self._app is not None:
+            return await self._app.prompt_choice(title, message, options)
+        self._console.console.print(message)
+        return await self.get_input(f"{title}: ", completions=options)
 
     async def start_thinking(self, message: str = "thinking...") -> None:
         self._console.start_spinner(message)

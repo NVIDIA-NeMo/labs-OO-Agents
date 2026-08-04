@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the in-app masked prompt used by manual MCP OAuth."""
 
-from nooa_cli.tui.subapp import SensitiveTextPromptView
+from nooa_cli.tui.subapp import ChoicePromptView, SensitiveTextPromptView, TextPromptView
 
 
 def test_sensitive_prompt_masks_value_and_submits():
@@ -50,3 +50,36 @@ def test_sensitive_prompt_scrolls_long_authorization_url():
     last = view.render(40, 8)
 
     assert "TAIL_VISIBLE" in last
+
+
+def test_text_prompt_shows_default_and_returns_edited_value():
+    view = TextPromptView("Alias", "Choose an alias", default="nemotron")
+    assert "nemotron" in view.render(80, 8)
+    view.handle_key("text", "-fast")
+    assert view.handle_key("enter") == "close"
+    assert view.value == "nemotron-fast"
+
+
+def test_choice_prompt_filters_and_selects():
+    view = ChoicePromptView(
+        "Model", "Choose a model", ["nvidia/nemotron", "openai/gpt", "meta/llama"]
+    )
+    for character in "gpt":
+        view.handle_key("text", character)
+
+    rendered = view.render(80, 10)
+    assert "openai/gpt" in rendered
+    assert "nemotron" not in rendered
+    assert view.handle_key("enter") == "close"
+    assert view.value == "openai/gpt"
+
+
+def test_choice_prompt_supports_arrow_selection_and_escape():
+    view = ChoicePromptView("Model", "Choose", ["one", "two"])
+    view.handle_key("down")
+    assert view.handle_key("enter") == "close"
+    assert view.value == "two"
+
+    cancelled = ChoicePromptView("Model", "Choose", ["one"])
+    assert cancelled.handle_key("escape") == "close"
+    assert cancelled.value is None

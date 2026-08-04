@@ -202,6 +202,7 @@ class Command(abc.ABC):
         self.agent: Any = agent
         self.session_manager = session_manager
         self._registry: Any = kwargs.get("registry")
+        self._root_config: Any = kwargs.get("root_config")
         # Dispatch operations to the agent thread. Set by CommandRegistry
         # after construction. Falls back to inline execution if not wired.
         self._agent_run = kwargs.get("agent_run")
@@ -248,10 +249,11 @@ class Command(abc.ABC):
             return False, f"Usage: /{self.name}"
         return True, None
 
-    def _persist_tui_setting(self, key: str, value: object) -> None:
+    def _persist_tui_setting(self, key: str, value: object) -> Path:
         from .settings import write_settings_updates
 
-        write_settings_updates({("tui", key): value})
+        path, _data = write_settings_updates({("tui", key): value})
+        return path
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +276,7 @@ class HelpCommand(Command):
 
     async def execute(self, args: list[str]) -> "CommandResult":
         commands_dict = (
-            self._registry.get_active_help() if self._registry else CommandRegistry.get_help()
+            self._registry.get_builtin_help() if self._registry else CommandRegistry.get_help()
         )
         return CommandResult.ok(HelpOutput(commands_dict))
 
@@ -411,10 +413,16 @@ class ModelCommand(Command):
     def help_text(self) -> dict[str, str]:  # type: ignore[override]
         short = self.config.default_model.split("/")[-1] if hasattr(self, "config") else "?"
         return {
-            "/model [name]": f"Switch model (currently {short})",
+            "/model [NAME|add-to-registry URL]": (
+                f"Switch and save a model, or add one from a server (currently {short})"
+            ),
         }
 
     def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
+        if args and args[0].lower() == "add-to-registry":
+            if len(args) != 2:
+                return False, "Usage: /model add-to-registry <server-url>"
+            return True, None
         if len(args) > 1:
             return False, "Usage: /model [name]"
         return True, None
@@ -424,6 +432,8 @@ class ModelCommand(Command):
             return CommandResult.ok(
                 TextOutput(f"Current model: {self.config.default_model}", "info")
             )
+        if args[0].lower() == "add-to-registry":
+            return await self._add_to_registry(args[1])
 
         selected = args[0]
         try:
@@ -464,10 +474,135 @@ class ModelCommand(Command):
         if self._registry is not None:
             self._registry.blocking_llm_health = None
         try:
-            self._persist_tui_setting("default_model", selected)
+            settings_path = self._persist_tui_setting("default_model", selected)
         except Exception as e:
             logger.warning("Failed to persist selected TUI model %r: %s", selected, e)
-        return CommandResult.ok(TextOutput(f"Switched to model: {selected}", "success"))
+            return CommandResult.ok(
+                TextOutput(f"Switched to model: {selected}", "success"),
+                TextOutput(f"Could not save the project default: {e}", "warning"),
+            )
+        return CommandResult.ok(
+            TextOutput(f"Switched to model: {selected}", "success"),
+            TextOutput(f"Saved as the project default in {settings_path}", "status"),
+        )
+
+    async def _add_to_registry(self, server_url: str) -> "CommandResult":
+        """Run the host-rendered workflow for an OpenAI-compatible server."""
+        from nooa.paths import get_project_dir
+
+        from .model_catalog import (
+            ModelCatalogError,
+            default_alias,
+            fetch_model_catalog,
+            normalize_catalog_endpoint,
+            registry_entry,
+            suggested_api_key_env,
+            validate_alias,
+            validate_api_key_env,
+            write_model_alias,
+        )
+
+        prompt_text = getattr(self.frontend, "prompt_text", None)
+        prompt_choice = getattr(self.frontend, "prompt_choice", None)
+        if not callable(prompt_text) or not callable(prompt_choice):
+            return CommandResult.err("This frontend does not support interactive model setup.")
+
+        try:
+            api_base, _models_url = normalize_catalog_endpoint(server_url)
+        except ModelCatalogError as exc:
+            return CommandResult.err(str(exc))
+
+        suggested_env = suggested_api_key_env(api_base)
+        api_key_env = await prompt_text(
+            "Model server authentication",
+            "API key environment variable (the secret itself is never stored). "
+            "Leave blank for a server that needs no authentication.",
+            suggested_env,
+        )
+        try:
+            api_key_env = validate_api_key_env(api_key_env)
+        except ModelCatalogError as exc:
+            return CommandResult.err(str(exc))
+        api_key = None
+        if api_key_env:
+            from nooa.unifiedllm import resolve_api_key_from_config
+
+            api_key = resolve_api_key_from_config(
+                "model-catalog", {"api_key_env": api_key_env}
+            )
+        if api_key_env and not api_key:
+            return CommandResult.err(
+                f"{api_key_env} is not set. Export it and run the command again; "
+                "the TUI will use it without writing the secret to disk."
+            )
+
+        try:
+            api_base, models = await asyncio.to_thread(
+                fetch_model_catalog, server_url, api_key=api_key
+            )
+        except ModelCatalogError as exc:
+            return CommandResult.err(str(exc))
+
+        selected = await prompt_choice(
+            "Add model",
+            f"Found {len(models):,} models at {api_base}. Type to filter, then choose one.",
+            models,
+        )
+        if not selected:
+            return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
+
+        alias = await prompt_text(
+            "Model alias",
+            "Choose the name you will use with /model and --model.",
+            default_alias(selected),
+        )
+        if not alias:
+            return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
+        try:
+            alias = validate_alias(alias)
+            entry = registry_entry(selected, api_base, api_key_env)
+        except ModelCatalogError as exc:
+            return CommandResult.err(str(exc))
+
+        summary = (
+            f"Alias: {alias}\nModel: {entry['model_name']}\nServer: {api_base}\n"
+            f"API key: {api_key_env or '(none)'}"
+        )
+        action = await prompt_choice(
+            "Confirm model",
+            summary,
+            ["Add and use now", "Add only", "Cancel"],
+        )
+        if not action or action == "Cancel":
+            return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
+
+        registry_path = get_project_dir("llm_config.yaml")
+        try:
+            await asyncio.to_thread(write_model_alias, registry_path, alias, entry)
+            await asyncio.to_thread(self._reload_model_registry)
+        except (ModelCatalogError, OSError, ValueError) as exc:
+            return CommandResult.err(f"Could not update {registry_path}: {exc}")
+
+        added = TextOutput(f"Added model '{alias}' to {registry_path}", "success")
+        if action == "Add only":
+            return CommandResult.ok(
+                added,
+                TextOutput(f"Use /model {alias} when you are ready to switch.", "info"),
+            )
+
+        switched = await self.execute([alias])
+        switched.outputs.insert(0, added)
+        return switched
+
+    def _reload_model_registry(self) -> None:
+        """Reload discovered and explicitly supplied registry layers in place."""
+        from nooa.llm_config import llm_config_chain
+        from nooa.unifiedllm import reload_registry
+
+        paths = llm_config_chain()
+        explicit = getattr(self._root_config, "llm_config_paths", None) or []
+        paths.extend(Path(path) for path in explicit if Path(path) not in paths)
+        reload_registry(*paths)
 
 
 class ModelsCommand(Command):
@@ -647,84 +782,6 @@ class ThemeCommand(Command):
 
 
 # ---------------------------------------------------------------------------
-# History commands
-# ---------------------------------------------------------------------------
-
-
-class HistoryCommand(Command):
-    required_capabilities: ClassVar[frozenset[str]] = frozenset({"get_summarization_status"})
-
-    @property
-    def name(self) -> str:
-        return "history"
-
-    @classmethod
-    def help_text(cls) -> dict[str, str]:
-        return {
-            "/history status": "Show history and summarization status",
-            "/history tags": "Show active history tags",
-        }
-
-    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
-        if not args:
-            return False, "Usage: /history <status|tags>"
-        if args[0].lower() not in ("status", "tags"):
-            return False, f"Unknown subcommand `{args[0]}`. Usage: /history <status|tags>"
-        return True, None
-
-    async def execute(self, args: list[str]) -> "CommandResult":
-        subcmd = args[0].lower()
-        if subcmd == "status":
-            return self._history_status()
-        return self._history_tags()
-
-    def _history_status(self) -> "CommandResult":
-        s = self.agent.get_summarization_status()
-
-        rows: list[list[str]] = [
-            ["Active events", str(s["active_events"])],
-            ["Policy", s["policy"]],
-        ]
-
-        if s.get("has_summarizer") and s.get("max_tokens", 0) > 0:
-            cur = s["current_tokens"]
-            mx = s["max_tokens"]
-            pct = cur / mx * 100 if mx else 0
-            rows.append([f"Token usage ({pct:.1f}%)", f"{cur:,} / {mx:,}"])
-            rows.append(["Preserve recent", str(s.get("preserve_recent", 0))])
-
-        rows.append(["Summary count", str(s.get("summary_count", 0))])
-
-        outputs: list[Output] = [
-            TableOutput(title="History Status", columns=["Field", "Value"], rows=rows)
-        ]
-        if s.get("summary_tags"):
-            outputs.append(TextOutput("Tags: " + ", ".join(s["summary_tags"]), "status"))
-
-        return CommandResult.ok(*outputs)
-
-    def _history_tags(self) -> "CommandResult":
-        if not hasattr(self.agent, "event_manager"):
-            return CommandResult.err("Agent does not support event history.")
-        tags = self.agent.event_manager.keys()
-        rows: list[list[str]] = []
-        for tag in tags[:50]:
-            event = self.agent.event_manager[tag]
-            etype = getattr(event, "event_type", type(event).__name__)
-            rows.append([tag, etype])
-
-        footer = f"\u2026 and {len(tags) - 50} more" if len(tags) > 50 else ""
-        return CommandResult.ok(
-            TableOutput(
-                title=f"Active History Tags ({len(tags)} total)",
-                columns=["Tag", "Type"],
-                rows=rows,
-                footer=footer,
-            )
-        )
-
-
-# ---------------------------------------------------------------------------
 # Skills commands
 # ---------------------------------------------------------------------------
 
@@ -744,10 +801,9 @@ class SkillsCommand(Command):
     @classmethod
     def help_text(cls) -> dict[str, str]:
         return {
-            "/skills list": "List available skills",
-            "/skills activate <id>": "Activate a skill",
-            "/skills deactivate <id>": "Deactivate a skill",
-            "/skills commands": "Show auto-registered slash commands from skills",
+            "/skills <list|commands|activate ID|deactivate ID>": (
+                "List and manage skills or show their slash commands"
+            ),
         }
 
     def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
@@ -760,14 +816,6 @@ class SkillsCommand(Command):
         return True, None
 
     async def execute(self, args: list[str]) -> "CommandResult":
-        from nooa.skill_registry import SkillRegistry
-
-        registry = getattr(self.agent, "skills", None)
-        if not isinstance(registry, SkillRegistry):
-            return CommandResult.err(
-                "Agent has no SkillRegistry. Skills require self.skills = SkillRegistry(self)."
-            )
-
         subcmd = args[0].lower()
         subargs = args[1:]
 
@@ -789,6 +837,14 @@ class SkillsCommand(Command):
             return CommandResult.ok(
                 TextOutput("No user-invocable skill commands found.", "info"),
                 TextOutput(f"Searched: {self.skills_dirs}", "status"),
+            )
+
+        from nooa.skill_registry import SkillRegistry
+
+        registry = getattr(self.agent, "skills", None)
+        if not isinstance(registry, SkillRegistry):
+            return CommandResult.err(
+                "Agent has no SkillRegistry. Skills require self.skills = SkillRegistry(self)."
             )
 
         if subcmd == "list":
@@ -929,46 +985,85 @@ class CompactCommand(Command):
 
 
 # ---------------------------------------------------------------------------
-# Python display toggle
+# Display toggles
 # ---------------------------------------------------------------------------
 
 
-class PythonCommand(Command):
+class ShowPythonCommand(Command):
     """Toggle display of the Python execution panel."""
 
     @property
     def name(self) -> str:
-        return "python"
+        return "show-python"
 
     @classmethod
     def help_text(cls) -> dict[str, str]:
-        return {
-            "/python status": "Show whether Python execution display is on or off",
-            "/python on": "Enable Python execution display",
-            "/python off": "Suppress Python execution display",
-        }
+        return {"/show-python [status|on|off]": "Configure Python execution display"}
 
     def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
-        if not args:
-            return False, "Usage: /python <status|on|off>"
-        if args[0].lower() not in ("status", "on", "off"):
+        if len(args) > 1 or (args and args[0].lower() not in ("status", "on", "off")):
             return False, f"Unknown subcommand `{args[0]}`"
         return True, None
 
     async def execute(self, args: list[str]) -> "CommandResult":
-        subcmd = args[0].lower()
+        subcmd = args[0].lower() if args else "status"
 
         if subcmd == "status":
             state = "on" if self.config.show_python else "off"
             return CommandResult.ok(TextOutput(f"Python execution display: {state}", "info"))
 
-        if subcmd == "on":
-            self.config.show_python = True
-            return CommandResult.ok(TextOutput("Python execution display enabled.", "success"))
+        enabled = subcmd == "on"
+        self.config.show_python = enabled
+        label = "enabled" if enabled else "suppressed"
+        try:
+            path = self._persist_tui_setting("show_python", enabled)
+        except Exception as e:
+            return CommandResult.ok(
+                TextOutput(f"Python execution display {label}.", "success"),
+                TextOutput(f"Could not save the display preference: {e}", "warning"),
+            )
+        return CommandResult.ok(
+            TextOutput(f"Python execution display {label}.", "success"),
+            TextOutput(f"Saved in {path}", "status"),
+        )
 
-        # off
-        self.config.show_python = False
-        return CommandResult.ok(TextOutput("Python execution display suppressed.", "success"))
+
+class ShowDiffsCommand(Command):
+    """Toggle inline rendering of semantic file-edit diffs."""
+
+    @property
+    def name(self) -> str:
+        return "show-diffs"
+
+    @classmethod
+    def help_text(cls) -> dict[str, str]:
+        return {"/show-diffs [status|on|off]": "Configure inline file-edit diffs"}
+
+    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
+        if len(args) > 1 or (args and args[0].lower() not in ("status", "on", "off")):
+            return False, f"Unknown subcommand `{args[0]}`"
+        return True, None
+
+    async def execute(self, args: list[str]) -> "CommandResult":
+        subcmd = args[0].lower() if args else "status"
+        if subcmd == "status":
+            state = "on" if self.config.show_diffs else "off"
+            return CommandResult.ok(TextOutput(f"Inline file-edit diffs: {state}", "info"))
+
+        enabled = subcmd == "on"
+        self.config.show_diffs = enabled
+        label = "enabled" if enabled else "suppressed"
+        try:
+            path = self._persist_tui_setting("show_diffs", enabled)
+        except Exception as e:
+            return CommandResult.ok(
+                TextOutput(f"Inline file-edit diffs {label}.", "success"),
+                TextOutput(f"Could not save the display preference: {e}", "warning"),
+            )
+        return CommandResult.ok(
+            TextOutput(f"Inline file-edit diffs {label}.", "success"),
+            TextOutput(f"Saved in {path}", "status"),
+        )
 
 
 def _set_agent_settings_preference(agent: "Agent | None", field: str, value: object) -> Path:
@@ -2068,9 +2163,9 @@ class CommandRegistry:
         "model": ModelCommand,
         "models": ModelsCommand,
         "theme": ThemeCommand,
-        "history": HistoryCommand,
         "skills": SkillsCommand,
-        "python": PythonCommand,
+        "show-python": ShowPythonCommand,
+        "show-diffs": ShowDiffsCommand,
         "keep-going": KeepGoingCommand,
         "memory": MemoryCommand,
         "memories": MemoriesCommand,
@@ -2116,6 +2211,7 @@ class CommandRegistry:
             "skills_dirs": self.skills_dirs,
             "registry": self,
             "session_manager": self.session_manager,
+            "root_config": self._root_config,
         }
         for name, cls in self.get_all_command_classes().items():
             if not all(hasattr(self.agent, cap) for cap in cls.required_capabilities):
@@ -2370,6 +2466,14 @@ class CommandRegistry:
         return commands
 
     def get_active_help(self) -> dict[str, str]:
+        commands = self.get_builtin_help()
+        for skill in self._user_skills.values():
+            key, desc = skill.help_entry()
+            commands[key] = desc
+        return commands
+
+    def get_builtin_help(self) -> dict[str, str]:
+        """Return active built-ins without environment-supplied skill commands."""
         commands: dict[str, str] = {}
         seen: set[type[Command]] = set()
         for cmd in self._commands.values():
@@ -2377,9 +2481,6 @@ class CommandRegistry:
             if cls not in seen:
                 seen.add(cls)
                 commands.update(cmd.help_text())
-        for skill in self._user_skills.values():
-            key, desc = skill.help_entry()
-            commands[key] = desc
         return commands
 
     def get_completions(self) -> dict[str, str]:

@@ -51,8 +51,22 @@ def normalize_key_result(result: SubviewKeyResult | bool | None) -> SubviewKeyRe
     return "handled"
 
 
-class SensitiveTextPromptView:
-    """Single-line masked input hosted by the existing TUI application."""
+def _safe_terminal_text(value: str) -> str:
+    """Strip terminal controls and bidi formatting from user/server text."""
+    return "".join(
+        character
+        for character in value
+        if character in "\n\t"
+        or (
+            ord(character) >= 32
+            and not 127 <= ord(character) <= 159
+            and unicodedata.category(character) != "Cf"
+        )
+    )
+
+
+class TextPromptView:
+    """Single-line text input hosted by the existing TUI application."""
 
     _TEXT_ACTIONS = {
         "quit": "q",
@@ -62,10 +76,13 @@ class SensitiveTextPromptView:
         "k": "k",
     }
 
-    def __init__(self, title: str, message: str) -> None:
+    def __init__(
+        self, title: str, message: str, *, default: str = "", masked: bool = False
+    ) -> None:
         self.title = title
         self.message = message
-        self._buffer = ""
+        self.masked = masked
+        self._buffer = default
         self._scroll = 0
         self._max_scroll = 0
         self._page_size = 1
@@ -77,16 +94,7 @@ class SensitiveTextPromptView:
         header = f" {self.title} ".ljust(width, "─")[:width]
         footer = " ↑/↓ scroll  Enter submit  Esc cancel ".ljust(width, "─")[:width]
         message_lines: list[str] = []
-        safe_message = "".join(
-            character
-            for character in self.message
-            if character in "\n\t"
-            or (
-                ord(character) >= 32
-                and not 127 <= ord(character) <= 159
-                and unicodedata.category(character) != "Cf"
-            )
-        )
+        safe_message = _safe_terminal_text(self.message)
         for paragraph in safe_message.splitlines():
             message_lines.extend(textwrap.wrap(paragraph, width=width) or [""])
         body_height = max(height - 2, 0)
@@ -96,7 +104,8 @@ class SensitiveTextPromptView:
         self._scroll = min(max(self._scroll, 0), self._max_scroll)
         visible = message_lines[self._scroll : self._scroll + message_height]
         visible.extend("" for _ in range(max(message_height - len(visible), 0)))
-        visible.extend(("", "> " + ("•" * len(self._buffer))))
+        displayed = "•" * len(self._buffer) if self.masked else _safe_terminal_text(self._buffer)
+        visible.extend(("", "> " + displayed))
         return "\n".join([header, *visible, footer])
 
     def handle_key(self, action: str, value: str = "") -> SubviewKeyResult:
@@ -134,6 +143,113 @@ class SensitiveTextPromptView:
         if mapped is not None:
             self._buffer += mapped
             return "handled"
+        return "handled"
+
+    def on_open(self) -> None:
+        pass
+
+    def on_close(self) -> None:
+        pass
+
+
+class SensitiveTextPromptView(TextPromptView):
+    """Backward-compatible masked prompt used for OAuth material."""
+
+    def __init__(self, title: str, message: str) -> None:
+        super().__init__(title, message, masked=True)
+
+
+class ChoicePromptView:
+    """Searchable single-choice prompt hosted by the existing TUI."""
+
+    _TEXT_ACTIONS = TextPromptView._TEXT_ACTIONS
+
+    def __init__(self, title: str, message: str, options: list[str]) -> None:
+        if not options:
+            raise ValueError("ChoicePromptView requires at least one option")
+        self.title = title
+        self.message = message
+        self.options = list(dict.fromkeys(options))
+        self.query = ""
+        self.cursor = 0
+        self.scroll = 0
+        self._page_size = 1
+        self.value: str | None = None
+
+    def _matches(self) -> list[str]:
+        needle = self.query.casefold()
+        if not needle:
+            return self.options
+        return [option for option in self.options if needle in option.casefold()]
+
+    def render(self, width: int, height: int) -> str:
+        width = max(int(width), 40)
+        height = max(int(height), 6)
+        header = f" {self.title} ".ljust(width, "─")[:width]
+        footer = " Type to filter  ↑/↓ select  Enter choose  Esc cancel ".ljust(width, "─")[:width]
+        message = _safe_terminal_text(self.message)
+        message_lines = textwrap.wrap(message, width=width) or [""]
+        available = max(height - len(message_lines) - 3, 1)
+        self._page_size = available
+        matches = self._matches()
+        if matches:
+            self.cursor = min(max(self.cursor, 0), len(matches) - 1)
+            if self.cursor < self.scroll:
+                self.scroll = self.cursor
+            elif self.cursor >= self.scroll + available:
+                self.scroll = self.cursor - available + 1
+        else:
+            self.cursor = 0
+            self.scroll = 0
+        rows = []
+        for index, option in enumerate(matches[self.scroll : self.scroll + available], self.scroll):
+            marker = "❯" if index == self.cursor else " "
+            rows.append(f"{marker} {_safe_terminal_text(option)}"[:width])
+        if not rows:
+            rows = ["  (no matching models)"]
+        rows.extend("" for _ in range(max(available - len(rows), 0)))
+        return "\n".join(
+            [header, *message_lines, f"> {_safe_terminal_text(self.query)}", *rows, footer]
+        )
+
+    def handle_key(self, action: str, value: str = "") -> SubviewKeyResult:
+        matches = self._matches()
+        if action == "enter":
+            self.value = matches[self.cursor] if matches else None
+            return "close" if self.value is not None else "handled"
+        if action == "escape":
+            self.value = None
+            return "close"
+        if action == "backspace":
+            self.query = self.query[:-1]
+            self.cursor = self.scroll = 0
+            return "handled"
+        if action == "text":
+            self.query += value
+            self.cursor = self.scroll = 0
+            return "handled"
+        if action in ("down", "scroll_down", "tab") and matches:
+            self.cursor = min(self.cursor + 1, len(matches) - 1)
+            return "handled"
+        if action in ("up", "scroll_up") and matches:
+            self.cursor = max(self.cursor - 1, 0)
+            return "handled"
+        if action == "page_down" and matches:
+            self.cursor = min(self.cursor + self._page_size, len(matches) - 1)
+            return "handled"
+        if action == "page_up" and matches:
+            self.cursor = max(self.cursor - self._page_size, 0)
+            return "handled"
+        if action == "home":
+            self.cursor = 0
+            return "handled"
+        if action == "end" and matches:
+            self.cursor = len(matches) - 1
+            return "handled"
+        mapped = self._TEXT_ACTIONS.get(action)
+        if mapped is not None:
+            self.query += mapped
+            self.cursor = self.scroll = 0
         return "handled"
 
     def on_open(self) -> None:

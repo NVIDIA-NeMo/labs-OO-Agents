@@ -90,6 +90,9 @@ class TUIConfig(BaseModel):
     # Show agent Python code execution panels (off by default)
     show_python: bool = False
 
+    # Show bounded unified diffs for semantic file-edit events.
+    show_diffs: bool = True
+
     # Audit DONE turns and continue autonomously when the configured judge
     # finds unfinished work. Disabled until explicitly enabled by the user.
     keep_going: bool = False
