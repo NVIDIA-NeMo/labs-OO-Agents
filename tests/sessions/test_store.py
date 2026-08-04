@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+import nooa.sessions.store as store_module
 from nooa.interactive import AgentMessage
 from nooa.sessions import InvalidSessionIdError, SessionNotFoundError, SessionStore
 from nooa.storage import SessionAlreadyActiveError
@@ -49,6 +50,37 @@ def test_create_record_title_list_and_resume(tmp_path):
         ]
     finally:
         resumed.close()
+
+
+def test_session_summary_uses_targeted_queries(tmp_path, monkeypatch):
+    store = SessionStore(tmp_path)
+    session = store.create(session_id="query-shape")
+    session.record_user_message("hello")
+    session.set_title("Targeted")
+    session.close()
+
+    queries: list[str] = []
+    real_connect = sqlite3.connect
+
+    class RecordingConnection:
+        def __init__(self, *args, **kwargs):
+            self._connection = real_connect(*args, **kwargs)
+
+        def execute(self, query, parameters=()):
+            queries.append(" ".join(query.split()))
+            return self._connection.execute(query, parameters)
+
+        def close(self):
+            self._connection.close()
+
+    monkeypatch.setattr(store_module.sqlite3, "connect", RecordingConnection)
+
+    assert store.get("query-shape").title == "Targeted"
+    assert not any(
+        query == "SELECT event_type, data FROM events ORDER BY insertion_order" for query in queries
+    )
+    assert any("SELECT COUNT(*)" in query for query in queries)
+    assert sum("LIMIT 1" in query for query in queries) == 2
 
 
 def test_different_session_databases_can_be_open_together(tmp_path):

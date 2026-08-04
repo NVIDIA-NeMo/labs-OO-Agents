@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""SQLite-backed durable session catalog shared by interactive hosts."""
+"""SQLite-backed durable session repository shared by interactive hosts."""
 
 from __future__ import annotations
 
@@ -153,7 +153,7 @@ class SessionHandle:
 
 
 class SessionStore:
-    """Catalog and factory for project-local durable sessions."""
+    """Repository and factory for project-local durable sessions."""
 
     def __init__(self, root: str | Path | None = None) -> None:
         self.root = Path(root) if root is not None else get_project_dir("sessions")
@@ -278,37 +278,63 @@ class SessionStore:
         return delete_sqlite_database(self.path_for(session_id))
 
     def _read_info(self, path: Path) -> SessionInfo | None:
-        rows = self._read_rows(path)
-        if not rows:
-            return None
-
         try:
             fallback = path.stat().st_mtime
         except OSError:
             return None
-        started_at = fallback
-        last_active = fallback
-        start: dict[str, object] | None = None
-        title: str | None = None
-        title_is_user_set = False
-        turn_count = 0
 
-        for event_type, raw in rows:
-            timestamp = self._timestamp(raw, fallback=last_active)
-            last_active = max(last_active, timestamp)
-            if event_type in _START_EVENT_TYPES and start is None:
-                start = raw
-                started_at = timestamp
-            elif event_type in _TITLE_EVENT_TYPES:
-                title = str(raw.get("title", raw.get("name", ""))) or None
-                title_is_user_set = title_is_user_set or bool(
-                    raw.get("user_set", raw.get("user_named", False))
+        try:
+            connection = sqlite3.connect(str(path))
+            try:
+                start_row = connection.execute(
+                    "SELECT event_type, data FROM events "
+                    "WHERE event_type IN (?, ?) ORDER BY insertion_order LIMIT 1",
+                    tuple(_START_EVENT_TYPES),
+                ).fetchone()
+                if start_row is None:
+                    return None
+
+                title_rows = connection.execute(
+                    "SELECT data FROM events WHERE event_type IN (?, ?) ORDER BY insertion_order",
+                    tuple(_TITLE_EVENT_TYPES),
+                ).fetchall()
+                turn_count = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM events WHERE event_type IN (?, ?, ?, ?)",
+                        tuple(_TURN_EVENT_TYPES),
+                    ).fetchone()[0]
                 )
-            elif event_type in _TURN_EVENT_TYPES:
-                turn_count += 1
+                last_row = connection.execute(
+                    "SELECT data FROM events ORDER BY insertion_order DESC LIMIT 1"
+                ).fetchone()
+            finally:
+                connection.close()
+        except (OSError, sqlite3.Error):
+            logger.debug("Could not summarize session database %s", path, exc_info=True)
+            return None
 
+        start = self._decode_data(start_row[1], path)
         if start is None:
             return None
+        start_event_type = str(start_row[0])
+        started_at = self._timestamp(start, fallback=fallback)
+        last_active = fallback
+        if last_row is not None:
+            last = self._decode_data(last_row[0], path)
+            if last is not None:
+                last_active = max(last_active, self._timestamp(last, fallback=fallback))
+
+        title: str | None = None
+        title_is_user_set = False
+        for (data,) in title_rows:
+            raw = self._decode_data(data, path)
+            if raw is None:
+                continue
+            title = str(raw.get("title", raw.get("name", ""))) or None
+            title_is_user_set = title_is_user_set or bool(
+                raw.get("user_set", raw.get("user_named", False))
+            )
+
         return SessionInfo(
             id=path.stem,
             model=str(start.get("model", "")),
@@ -322,10 +348,22 @@ class SessionStore:
             host=str(
                 start.get(
                     "host",
-                    "tui" if start.get("event_type") == "TUISessionStart" else "",
+                    "tui" if start_event_type == "TUISessionStart" else "",
                 )
             ),
         )
+
+    @staticmethod
+    def _decode_data(data: object, path: Path) -> dict[str, object] | None:
+        if not isinstance(data, (str, bytes, bytearray)):
+            logger.debug("Skipping invalid session event payload in %s", path)
+            return None
+        try:
+            raw = json.loads(data)
+        except (TypeError, json.JSONDecodeError):
+            logger.debug("Skipping corrupt session event in %s", path, exc_info=True)
+            return None
+        return raw if isinstance(raw, dict) else None
 
     @staticmethod
     def _read_rows(
@@ -357,12 +395,9 @@ class SessionStore:
 
         rows: list[tuple[str, dict[str, object]]] = []
         for event_type, data in db_rows:
-            try:
-                raw = json.loads(data)
-                if isinstance(raw, dict):
-                    rows.append((str(event_type), raw))
-            except (TypeError, json.JSONDecodeError):
-                logger.debug("Skipping corrupt session event in %s", path, exc_info=True)
+            raw = SessionStore._decode_data(data, path)
+            if raw is not None:
+                rows.append((str(event_type), raw))
         return rows
 
     @staticmethod
