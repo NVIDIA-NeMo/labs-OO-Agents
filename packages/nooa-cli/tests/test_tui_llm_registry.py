@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """TUI model-registry command-line and bootstrap coverage."""
 
-import subprocess
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -47,11 +48,11 @@ def test_tui_registry_option_passes_resolved_yaml_to_config(tmp_path: Path) -> N
     ):
         result = CliRunner().invoke(
             command,
-            ["--registry", "https://git.example.com/team/registry.git", "--no-splash"],
+            ["--registry", "https://git.example.com/team/models.yaml", "--no-splash"],
         )
 
     assert result.exit_code == 0
-    resolve_sources.assert_called_once_with(["https://git.example.com/team/registry.git"])
+    resolve_sources.assert_called_once_with(["https://git.example.com/team/models.yaml"])
     assert load_config.call_args.kwargs["llm_config"] == [resolved]
     tui_main.assert_awaited_once()
 
@@ -95,54 +96,65 @@ def test_registry_manifest_cannot_escape_source_directory(tmp_path: Path) -> Non
         resolve_registry_source(registry)
 
 
-def _git(repo: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-C", str(repo), *args],
-        check=True,
-        capture_output=True,
-    )
+class _RegistryHandler(BaseHTTPRequestHandler):
+    content = b"models:\n  first: {model_name: openai/first}\n"
+    request_paths: list[str] = []
+
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        type(self).request_paths.append(self.path)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(type(self).content)))
+        self.end_headers()
+        self.wfile.write(type(self).content)
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
 
 
-def test_git_registry_is_cached_and_refreshed(tmp_path: Path, monkeypatch) -> None:
-    source = tmp_path / "source"
-    source.mkdir()
-    _git(source, "init", "-b", "main")
-    config = source / "private" / "models.yaml"
-    config.parent.mkdir()
-    config.write_text("models:\n  first: {model_name: openai/first}\n")
-    (source / "nooa-registry.yaml").write_text(
-        "version: 1\nllm_config: private/models.yaml\n"
-    )
-    _git(source, "add", ".")
-    _git(
-        source,
-        "-c",
-        "user.name=Test",
-        "-c",
-        "user.email=test@example.com",
-        "commit",
-        "-m",
-        "initial",
-    )
+@pytest.fixture
+def registry_url():
+    _RegistryHandler.content = b"models:\n  first: {model_name: openai/first}\n"
+    _RegistryHandler.request_paths = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _RegistryHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/models.yaml?ref=main"
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+def test_url_registry_fetches_one_file_and_refreshes(
+    tmp_path: Path, monkeypatch, registry_url: str
+) -> None:
     monkeypatch.setenv("NEMO_OO_REGISTRY_CACHE", str(tmp_path / "cache"))
 
-    materialized = resolve_registry_source(source.as_uri())
+    materialized = resolve_registry_source(registry_url)
     assert "first" in materialized.read_text()
+    assert _RegistryHandler.request_paths == ["/models.yaml?ref=main"]
+    assert materialized.stat().st_mode & 0o077 == 0
 
-    config.write_text("models:\n  second: {model_name: openai/second}\n")
-    _git(source, "add", ".")
-    _git(
-        source,
-        "-c",
-        "user.name=Test",
-        "-c",
-        "user.email=test@example.com",
-        "commit",
-        "-m",
-        "update",
-    )
+    _RegistryHandler.content = b"models:\n  second: {model_name: openai/second}\n"
 
-    refreshed = resolve_registry_source(source.as_uri())
+    refreshed = resolve_registry_source(registry_url)
     assert refreshed == materialized
     assert "second" in refreshed.read_text()
     assert "first" not in refreshed.read_text()
+
+
+def test_url_registry_rejects_credentials() -> None:
+    with pytest.raises(RegistrySourceError, match="must not contain credentials"):
+        resolve_registry_source("https://user:secret@git.example.com/models.yaml")
+
+
+def test_url_registry_rejects_non_registry_yaml(
+    tmp_path: Path, monkeypatch, registry_url: str
+) -> None:
+    monkeypatch.setenv("NEMO_OO_REGISTRY_CACHE", str(tmp_path / "cache"))
+    _RegistryHandler.content = b"<html>sign in</html>\n"
+
+    with pytest.raises(RegistrySourceError, match="'models' mapping"):
+        resolve_registry_source(registry_url)

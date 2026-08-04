@@ -65,8 +65,8 @@ _RESUME_LAST = "__last__"
     multiple=True,
     metavar="SOURCE",
     help=(
-        "Trusted local registry YAML/directory or Git repository URL "
-        "(repeatable; Git credentials are handled by Git)."
+        "Local registry YAML/directory or raw HTTP(S) YAML URL "
+        "(repeatable; URLs fetch only that file)."
     ),
 )
 @click.option(
@@ -136,7 +136,7 @@ def command(
         nooa tui --model gpt-4o
         nooa tui --working-dir /path/to/project
         nooa tui --mcp-file .mcp.json
-        nooa tui --registry https://git.example.com/team/model-registry.git
+        nooa tui --registry https://git.example.com/team/llm_config.yaml
         nooa tui --agent internal_agents:CodingAgent
         nooa tui --vi
     """

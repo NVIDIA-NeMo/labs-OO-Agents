@@ -84,7 +84,7 @@ def unresolved_model_health(model: str) -> HealthCheckResult:
             "and its provider cannot be inferred."
         ),
         fix_hint=(
-            "  • Start with --registry <git-url>, install your organization's "
+            "  • Start with --registry <path-or-url>, install your organization's "
             "registry extension, or add .nooa/llm_config.yaml\n"
             "  • Run `nooa config show` to inspect locally discovered registry layers\n"
             "  • Or choose a provider-qualified model with --model <provider/model>"
