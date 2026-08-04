@@ -80,6 +80,28 @@ async def test_baseline_ctrl_d_exits():
         await h.wait_for(lambda: not h.app.is_running)
 
 
+async def test_baseline_ctrl_c_requires_confirmation_then_exits_cleanly():
+    async with TUIHarness() as h:
+        await h.press("c-c")
+        await h.wait_for(lambda: "Press Ctrl+C again to exit" in h.capture_status())
+        assert h.app.is_running
+
+        await h.press("c-c")
+        await h.wait_for(lambda: h._run_task.done())
+        assert not h._run_task.cancelled()
+        assert h._run_task.exception() is None
+
+
+async def test_baseline_typing_disarms_ctrl_c_exit_confirmation():
+    async with TUIHarness() as h:
+        await h.press("c-c")
+        await h.wait_for(lambda: "Press Ctrl+C again to exit" in h.capture_status())
+
+        await h.type_keys("keep working")
+        await h.wait_for(lambda: "Press Ctrl+C again to exit" not in h.capture_status())
+        assert h.app.is_running
+
+
 async def test_baseline_command_status_is_dynamic_not_scrollback():
     """Queued/running command state lives in the status area, not transcript."""
     async with TUIHarness() as h:
@@ -962,6 +984,7 @@ async def test_repeated_ctrl_c_exits_while_cancel_is_pending() -> None:
         await h.press("c-c")
         await asyncio.wait_for(cleanup_started.wait(), timeout=1.0)
         assert "cancelling" in h.capture_status()
+        assert "Press Ctrl+C again to exit" in h.capture_status()
         await h.press("c-c")
         await h.wait_for(lambda: not h.app.is_running)
 
