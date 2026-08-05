@@ -28,6 +28,15 @@ from nooa_cli.tui.model_catalog import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _stub_ollama_probe(monkeypatch):
+    """Prevent the connect flow from hitting the network to probe /api/tags."""
+    monkeypatch.setattr(
+        "nooa_cli.tui.model_catalog.probe_ollama_backend",
+        lambda *_args, **_kwargs: False,
+    )
+
+
 def test_normalize_catalog_endpoint_accepts_api_base_or_models_url() -> None:
     expected = (
         "https://inference-api.nvidia.com/v1",
@@ -449,7 +458,7 @@ async def test_connect_anthropic_writes_native_provider_alias(tmp_path, monkeypa
     )
     command._reload_model_registry = MagicMock()
 
-    result = await command.execute(["anthropic"])
+    result = await command.execute(["https://api.anthropic.com"])
 
     assert result.success is True
     command._reload_model_registry.assert_called_once_with()
@@ -476,7 +485,9 @@ async def test_connect_anthropic_writes_native_provider_alias(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_connect_registers_local_openai_compatible_backend(tmp_path, monkeypatch) -> None:
+async def test_connect_registers_openai_compatible_backend_when_probe_fails(
+    tmp_path, monkeypatch
+) -> None:
     project_dir = tmp_path / ".nooa"
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
     project_dir.mkdir(parents=True)
@@ -484,8 +495,48 @@ async def test_connect_registers_local_openai_compatible_backend(tmp_path, monke
         "models:\n"
         "  qwen3-1.7b:\n"
         "    model_name: openai/qwen3:1.7b\n"
-        "    api_base: http://localhost:11434/v1\n"
+        "    api_base: http://localhost:8000/v1\n"
     )
+    monkeypatch.setattr(
+        "nooa_cli.tui.model_catalog.fetch_model_catalog",
+        lambda *_args, **_kwargs: (
+            "http://localhost:8000/v1",
+            [CatalogModel(id="qwen3:1.7b")],
+        ),
+    )
+    monkeypatch.setattr(
+        "nooa_cli.tui.model_catalog.lookup_model_token_limits",
+        lambda *_args: (None, None),
+    )
+    monkeypatch.setattr(
+        "nooa_cli.tui.model_catalog.probe_ollama_backend",
+        lambda *_args, **_kwargs: False,
+    )
+    frontend = _WorkflowFrontend()
+    frontend.choice_answers = ["qwen3:1.7b", "Replace only"]
+    command = ConnectCommand(
+        frontend,
+        TUIConfig(),
+        MagicMock(),
+        root_config=SimpleNamespace(llm_config_paths=[]),
+    )
+    command._reload_model_registry = MagicMock()
+
+    result = await command.execute(["http://localhost:8000"])
+
+    assert result.success is True
+    saved = yaml.safe_load((project_dir / "llm_config.yaml").read_text())
+    assert saved["models"]["qwen3-1.7b"] == {
+        "model_name": "openai/qwen3:1.7b",
+        "api_base": "http://localhost:8000/v1",
+    }
+    assert frontend.choice_prompts[-1][2] == ["Replace and use now", "Replace only", "Cancel"]
+
+
+@pytest.mark.asyncio
+async def test_connect_routes_ollama_backend_via_probe(tmp_path, monkeypatch) -> None:
+    project_dir = tmp_path / ".nooa"
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
     monkeypatch.setattr(
         "nooa_cli.tui.model_catalog.fetch_model_catalog",
         lambda *_args, **_kwargs: (
@@ -497,8 +548,13 @@ async def test_connect_registers_local_openai_compatible_backend(tmp_path, monke
         "nooa_cli.tui.model_catalog.lookup_model_token_limits",
         lambda *_args: (None, None),
     )
+    monkeypatch.setattr(
+        "nooa_cli.tui.model_catalog.probe_ollama_backend",
+        lambda *_args, **_kwargs: True,
+    )
     frontend = _WorkflowFrontend()
-    frontend.choice_answers = ["qwen3:1.7b", "Replace only"]
+    frontend.choice_answers = ["qwen3:1.7b"]
+    _stub_successful_model_switch(monkeypatch)
     command = ConnectCommand(
         frontend,
         TUIConfig(),
@@ -512,10 +568,9 @@ async def test_connect_registers_local_openai_compatible_backend(tmp_path, monke
     assert result.success is True
     saved = yaml.safe_load((project_dir / "llm_config.yaml").read_text())
     assert saved["models"]["qwen3-1.7b"] == {
-        "model_name": "openai/qwen3:1.7b",
-        "api_base": "http://localhost:11434/v1",
+        "model_name": "ollama_chat/qwen3:1.7b",
+        "api_base": "http://localhost:11434",
     }
-    assert frontend.choice_prompts[-1][2] == ["Replace and use now", "Replace only", "Cancel"]
 
 
 @pytest.mark.asyncio
