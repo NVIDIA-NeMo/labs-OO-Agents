@@ -123,6 +123,49 @@ def test_model_completion_includes_add_to_registry(completer):
     assert [item.text for item in items] == ["/model add-to-registry"]
 
 
+def test_model_add_to_registry_completes_deduplicated_api_bases(completer, monkeypatch):
+    import nooa.unifiedllm as unifiedllm
+
+    monkeypatch.setattr(
+        unifiedllm,
+        "MODELS",
+        {
+            "alpha": {"api_base": "https://inference.example.test/v1/"},
+            "beta": {"api_base": "https://inference.example.test/v1/models"},
+            "gamma": {"api_base": "https://other.example.test/api"},
+            "provider-default": {"model_name": "anthropic/model"},
+            "unsafe": {"api_base": "https://user:password@example.test/v1"},
+        },
+    )
+
+    items = completer.complete("/model add-to-registry ")
+
+    assert [item.text for item in items] == [
+        "/model add-to-registry https://inference.example.test/v1",
+        "/model add-to-registry https://other.example.test/api",
+    ]
+    assert items[0].display == "https://inference.example.test/v1"
+    assert items[0].description == "Used by alpha, beta"
+
+
+def test_model_add_to_registry_endpoint_completion_filters_partial(completer, monkeypatch):
+    import nooa.unifiedllm as unifiedllm
+
+    monkeypatch.setattr(
+        unifiedllm,
+        "MODELS",
+        {
+            "alpha": {"api_base": "https://inference.example.test/v1"},
+            "beta": {"api_base": "https://other.example.test/v1"},
+        },
+    )
+
+    assert [
+        item.text
+        for item in completer.complete("/model add-to-registry https://oth")
+    ] == ["/model add-to-registry https://other.example.test/v1"]
+
+
 def test_skills_add_completes_directories_only(tmp_path, mock_registry):
     (tmp_path / "skill-pack").mkdir()
     (tmp_path / "skill-pack" / "nested").mkdir()
