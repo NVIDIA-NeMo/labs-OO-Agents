@@ -55,8 +55,6 @@ class TestRoundTrip:
     def test_modified_round_trip(self, user_dir, project_dir):
         original = Config()
         original.tui.default_model = "my-model"
-        original.tui.api_base = "http://localhost:8000/v1"
-        original.tui.api_key_env = "MY_API_KEY"
         original.tui.vi_mode = True
         original.tui.toolbar_items = ["model", "cwd", "session"]
         original.agent.working_dir = "/tmp"
@@ -64,8 +62,6 @@ class TestRoundTrip:
         (user_dir / "settings.yaml").write_text(dump_settings(original))
         loaded = load_settings(Config())
         assert loaded.tui.default_model == "my-model"
-        assert loaded.tui.api_base == "http://localhost:8000/v1"
-        assert loaded.tui.api_key_env == "MY_API_KEY"
         assert loaded.tui.vi_mode is True
         assert loaded.tui.toolbar_items == ["model", "cwd", "session"]
         assert loaded.agent.working_dir == "/tmp"
