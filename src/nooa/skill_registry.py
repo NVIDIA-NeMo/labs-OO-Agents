@@ -276,13 +276,16 @@ class SkillRegistry(Skill):
         return skill_from_module(module, lib_name, source=f"Library {lib_name!r}")
 
     def discover_skills_dirs(self, dirs: "list[Path]") -> None:
-        """Scan skills directories for TextSkills and Python skills.
+        """Scan skill roots for packaged libraries, TextSkills, and Python skills.
 
-        TextSkills (SKILL.md directories) register as cmd.<skill_id>.
-        Python skills (.py files with Skill subclass) register as ext.<name>.
+        Immediate child directories with a ``pyproject.toml`` are discovered
+        through :meth:`discover_libs`, using their ``nooa.skills`` entry-point
+        metadata. TextSkills (SKILL.md directories) register as
+        cmd.<skill_id>. Python skills (.py files with Skill subclass) register
+        as ext.<name>.
 
         Args:
-            dirs: List of directories to scan.
+            dirs: List of skill roots to scan.
         """
         from pathlib import Path
 
@@ -290,6 +293,7 @@ class SkillRegistry(Skill):
             skills_dir = Path(skills_dir)
             if not skills_dir.is_dir():
                 continue
+            self.discover_libs(skills_dir)
             for entry in skills_dir.iterdir():
                 if entry.is_dir():
                     skill_md = entry / "SKILL.md"

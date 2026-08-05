@@ -45,6 +45,34 @@ def registry(agent):
 
 
 class TestDiscoverSkillsDirs:
+    def test_mixed_root_discovers_packaged_and_text_skills(self, registry, tmp_path):
+        """One skill root may contain libraries and SKILL.md directories."""
+        for package_name in ("first_package", "second_package"):
+            package_dir = tmp_path / package_name
+            package_dir.mkdir()
+            (package_dir / "pyproject.toml").write_text(
+                '[project]\nname = "test-package"\n\n'
+                '[project.entry-points."nooa.skills"]\n'
+                f'"test.{package_name}" = "{package_name}:{package_name.title()}"\n'
+            )
+            (package_dir / "__init__.py").write_text(
+                "from nooa.skill import Skill\n\n"
+                f"class {package_name.title()}(Skill):\n"
+                '    """A packaged test skill."""\n'
+            )
+
+        text_skill = tmp_path / "review-code"
+        text_skill.mkdir()
+        (text_skill / "SKILL.md").write_text(
+            "---\nname: review-code\ndescription: Review code\n---\nReview the code.\n"
+        )
+
+        registry.discover_skills_dirs([tmp_path])
+
+        assert {"test.first_package", "test.second_package", "cmd.review-code"} <= set(
+            registry.loaded()
+        )
+
     def test_python_skill_file_discovered(self, registry, agent, tmp_path):
         """A .py file with a Skill subclass is discovered as ext.<name>."""
         skill_file = tmp_path / "my_tool.py"
