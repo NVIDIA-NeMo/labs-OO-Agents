@@ -42,6 +42,7 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.layout.menus import CompletionsMenuControl
 from prompt_toolkit.layout.processors import BeforeInput
+from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
 
 from .completer import expand_mentions
 from .subapp import InAppSubview, normalize_key_result
@@ -55,6 +56,30 @@ class DispatcherExit(Exception):
     Used by test harnesses. In the real TUI, exit is triggered by
     /exit → external task cancellation, not by the LLM.
     """
+
+
+class _SubviewControl(FormattedTextControl):
+    """Formatted subview content with position-aware wheel dispatch."""
+
+    def __init__(
+        self,
+        *args: Any,
+        mouse_callback: Callable[[str, int, int], bool],
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._mouse_callback = mouse_callback
+
+    def mouse_handler(self, mouse_event: MouseEvent):
+        action = {
+            MouseEventType.SCROLL_UP: "scroll_up",
+            MouseEventType.SCROLL_DOWN: "scroll_down",
+        }.get(mouse_event.event_type)
+        if action is not None and self._mouse_callback(
+            action, mouse_event.position.x, mouse_event.position.y
+        ):
+            return None
+        return super().mouse_handler(mouse_event)
 
 
 # CSI + OSC stripper for the plain-text view of output_buffer. We keep
@@ -479,8 +504,9 @@ class TUIApplication:
                 width, height = terminal_cols(minimum=80), 24
             return ANSI(view.render(width, height))
 
-        self._subview_control = FormattedTextControl(
+        self._subview_control = _SubviewControl(
             _subview_formatted,
+            mouse_callback=self._subview_mouse,
             focusable=True,
             show_cursor=False,
         )
@@ -741,6 +767,23 @@ class TUIApplication:
             self._app.invalidate()
         return True
 
+    def _subview_mouse(self, action: str, x: int, y: int) -> bool:
+        """Dispatch a mouse action, preserving its position for pane routing."""
+        view = self._active_subview
+        if view is None:
+            return False
+        handler = getattr(view, "handle_mouse", None)
+        if handler is None:
+            return self._subview_key(None, action)
+        result = normalize_key_result(handler(action, x, y))
+        if result == "ignored":
+            return False
+        if result == "close":
+            self._close_subview()
+        if self._app.is_running:
+            self._app.invalidate()
+        return True
+
     # ── key bindings --------------------------------------------------
 
     def _build_key_bindings(self):  # returns KeyBindingsBase (union of KB + merged)
@@ -804,6 +847,10 @@ class TUIApplication:
         @kb.add("c-y", filter=subview_active, eager=True)
         def _(event):
             self._subview_key(event, "copy")
+
+        @kb.add("f2", filter=subview_active, eager=True)
+        def _(event):
+            self._subview_key(event, "native_selection")
 
         @kb.add("tab", filter=subview_active, eager=True)
         def _(event):

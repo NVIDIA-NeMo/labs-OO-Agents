@@ -11,6 +11,7 @@ from typing import Any
 
 from .explorer_base import (
     BAR_STYLE,
+    ExplorerInteraction,
     highlight_terms,
     search_terms,
     style_bar,
@@ -187,19 +188,29 @@ class EventExplorerModel:
         self.detail_offset = min(max(self.detail_offset, 0), max_offset)
 
 
-class EventExplorerView:
+class EventExplorerView(ExplorerInteraction):
     """In-app subview wrapper for browsing recorded events."""
 
     title = "events"
+    detail_focus = "detail"
 
     def __init__(self, event_manager: Any) -> None:
         self.model = EventExplorerModel(build_event_rows(event_manager))
 
     def render(self, width: int, height: int) -> str:
-        return render_event_explorer(self.model, width, height, ansi=True)
+        return render_event_explorer(
+            self.model,
+            width,
+            height,
+            ansi=True,
+            selection_hint=self.selection_hint(),
+        )
 
     def handle_key(self, action: str, value: str = "") -> SubviewKeyResult:
         model = self.model
+        interaction = self.handle_interaction_action(action)
+        if interaction != "ignored":
+            return interaction
         if action == "quit":
             if model.search_active:
                 model.edit_query(model.query + "q")
@@ -887,7 +898,12 @@ def highlighted_detail_lines(
 
 
 def render_event_explorer(
-    model: EventExplorerModel, width: int, height: int, *, ansi: bool = False
+    model: EventExplorerModel,
+    width: int,
+    height: int,
+    *,
+    ansi: bool = False,
+    selection_hint: str = "F2 select/copy",
 ) -> str:
     """Render the current explorer state as text/ANSI."""
     width = max(int(width), 40)
@@ -916,8 +932,9 @@ def render_event_explorer(
     focus_label = f"{mode_text} · pane={pane_label}"
     footer_parts = [
         focus_label,
-        "tab switch pane",
         nav_hint,
+        selection_hint,
+        "tab switch pane",
         search_prompt,
         enter_hint,
         "esc clear",
@@ -933,6 +950,7 @@ def render_event_explorer(
     else:
         footer = footer_plain
     body_height = max(height - 2, 0)
+    model._last_divider_y = 0
     if not total:
         body = ["No events recorded."]
     elif row is None:
@@ -967,6 +985,7 @@ def render_event_explorer(
             body.append(divider)
         else:
             body.append(divider_plain)
+        model._last_divider_y = len(body)
         available = max(body_height - len(body), 0)
         model._last_detail_match_lines = detail_match_lines(row, width, model.query)
         model._last_detail_match_occurrences = detail_match_occurrences(row, width, model.query)

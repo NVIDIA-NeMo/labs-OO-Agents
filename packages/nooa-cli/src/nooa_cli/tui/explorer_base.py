@@ -30,6 +30,7 @@ from .subapp import SubviewKeyResult
 # ─── ANSI styling primitives ─────────────────────────────────────────────────
 
 BAR_STYLE = "\x1b[48;5;236;38;5;252m"
+FTS_ACTIVE_STYLE = "\x1b[1;38;2;255;255;255;48;2;95;28;75m"
 
 
 def style_bar(text: str, *, ansi: bool) -> str:
@@ -43,15 +44,16 @@ def style_mode_label(text: str, *, active: bool, ansi: bool) -> str:
     """Style the mode indicator (FTS/BROWSE)."""
     if not ansi:
         return text
-    color = "30;45" if active else "30;46"
-    return f"\x1b[1;{color}m{text}\x1b[0m"
+    if active:
+        return f"{FTS_ACTIVE_STYLE}{text}\x1b[0m"
+    return f"\x1b[1;30;46m{text}\x1b[0m"
 
 
 def style_fts_prompt(text: str, *, active: bool, ansi: bool) -> str:
     """Style the search prompt in the divider."""
     if not ansi or not active:
         return text
-    return f"\x1b[1;30;45m{text}\x1b[0m"
+    return f"{FTS_ACTIVE_STYLE}{text}\x1b[0m"
 
 
 # ─── Text utilities ──────────────────────────────────────────────────────────
@@ -156,6 +158,7 @@ class ExplorerModel:
         self._last_detail_line_count = 0
         self._last_detail_visible_lines = 0
         self._last_detail_match_lines: list[int] = []
+        self._last_divider_y = 0
 
     @property
     def current_index(self) -> int | None:
@@ -268,7 +271,41 @@ class ExplorerConfig:
     actions: dict[str, str] = field(default_factory=dict)
 
 
-class ExplorerView:
+class ExplorerInteraction:
+    """Shared mouse and native-selection behavior for explorer subviews."""
+
+    detail_focus = "detail"
+    native_selection = False
+
+    @property
+    def mouse_support(self) -> bool:
+        """Disable terminal mouse reporting while native selection is active."""
+        return not self.native_selection
+
+    def handle_interaction_action(self, action: str) -> SubviewKeyResult:
+        if action != "native_selection":
+            return "ignored"
+        self.native_selection = not self.native_selection
+        return "handled"
+
+    def handle_mouse(self, action: str, _x: int, y: int) -> SubviewKeyResult:
+        """Route wheel input to the pane under the pointer."""
+        if action not in {"scroll_up", "scroll_down"}:
+            return "ignored"
+        delta = -3 if action == "scroll_up" else 3
+        if y <= getattr(self.model, "_last_divider_y", 0):
+            self.model.focus = "list"
+            self.model.move_or_scroll(delta)
+        else:
+            self.model.focus = self.detail_focus
+            self.model.scroll_detail(delta)
+        return "handled"
+
+    def selection_hint(self) -> str:
+        return "F2 mouse/wheel" if self.native_selection else "F2 select/copy"
+
+
+class ExplorerView(ExplorerInteraction):
     """Generic in-app explorer subview.
 
     Concrete explorers subclass this and provide:
@@ -303,6 +340,9 @@ class ExplorerView:
 
     def handle_key(self, action: str, value: str = "") -> SubviewKeyResult:
         model = self.model
+        interaction = self.handle_interaction_action(action)
+        if interaction != "ignored":
+            return interaction
         if action == "quit":
             if model.search_active:
                 model.edit_query(model.query + "q")
@@ -423,8 +463,9 @@ def render_explorer(view: ExplorerView, width: int, height: int, *, ansi: bool =
     focus_label = f"{mode_text} \u00b7 pane={pane_label}"
     footer_parts = [
         focus_label,
-        "tab switch pane",
         "\u2191/\u2193 nav/scroll",
+        view.selection_hint(),
+        "tab switch pane",
         search_prompt,
         enter_hint,
         "esc clear",
@@ -446,6 +487,7 @@ def render_explorer(view: ExplorerView, width: int, height: int, *, ansi: bool =
 
     # ── Body ──
     body_height = max(height - 2, 0)
+    model._last_divider_y = 0
 
     if not total:
         body = [config.empty_message]
@@ -486,6 +528,10 @@ def render_explorer(view: ExplorerView, width: int, height: int, *, ansi: bool =
             body.append(divider)
         else:
             body.append(divider_plain)
+        # Screen row of the divider: one header row plus the zero-based body
+        # row. Because ``body`` already includes the divider, ``len(body)`` is
+        # exactly that absolute row number.
+        model._last_divider_y = len(body)
 
         # Detail pane
         available = max(body_height - len(body), 0)
