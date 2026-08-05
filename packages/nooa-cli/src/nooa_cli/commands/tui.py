@@ -46,15 +46,6 @@ def _working_directory_project_scope(working_dir: str):
     help="LLM model to use (overrides config default)",
 )
 @click.option(
-    "--api-base",
-    help="Advanced: custom LLM API base URL. Requires --model.",
-)
-@click.option(
-    "--api-key-env",
-    metavar="ENVVAR",
-    help="Advanced: environment variable containing the LLM API key for --api-base.",
-)
-@click.option(
     "--agent",
     "agent_spec",
     default=None,
@@ -131,8 +122,6 @@ def _working_directory_project_scope(working_dir: str):
 )
 def command(
     model: str | None,
-    api_base: str | None,
-    api_key_env: str | None,
     agent_spec: str | None,
     working_dir: str,
     mcp_file: str | None,
@@ -161,11 +150,6 @@ def command(
         nooa tui --agent internal_agents:CodingAgent
         nooa tui --vi
     """
-    if api_base and not model:
-        raise click.UsageError("--api-base requires --model. Use /connect for interactive setup.")
-    if api_key_env and not api_base:
-        raise click.UsageError("--api-key-env requires --api-base.")
-
     # Lazy imports preserve the fast path for every other ``nooa`` command.
     from nooa_cli.tui.config import Config
     from nooa_cli.tui.main import main as tui_main
@@ -173,8 +157,6 @@ def command(
     with _working_directory_project_scope(working_dir):
         config = Config.load(
             model=model,
-            api_base=api_base,
-            api_key_env=api_key_env,
             agent=agent_spec,
             working_dir=working_dir,
             mcp_file=Path(mcp_file) if mcp_file else None,
