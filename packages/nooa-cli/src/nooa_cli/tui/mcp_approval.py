@@ -168,6 +168,12 @@ class MCPApprovalRequest:
     def variables(self) -> tuple[str, ...]:
         return tuple(sorted({variable for variable, _path in self.bindings}))
 
+    @property
+    def approval_command(self) -> str:
+        """Exact user-owned command that approves this configuration."""
+        quoted_name = _safe_display(shlex.quote(self.server_name))
+        return f"/mcp approve {quoted_name} {self.confirmation}"
+
     def accepts_confirmation(self, value: str) -> bool:
         return hmac.compare_digest(value, self.confirmation) or hmac.compare_digest(
             value, self.fingerprint
@@ -175,7 +181,6 @@ class MCPApprovalRequest:
 
     def review_text(self) -> str:
         """Render a secret-safe review and a second-step confirmation command."""
-        quoted_name = _safe_display(shlex.quote(self.server_name))
         lines = [
             f"Approval required for MCP server {_safe_display(self.server_name)!r}.",
             "",
@@ -214,7 +219,7 @@ class MCPApprovalRequest:
                 "to its URL, command, arguments, headers, environment, or OAuth settings requires approval again.",
                 "",
                 "Review the source config, then approve and connect with:",
-                f"  /mcp approve {quoted_name} {self.confirmation}",
+                f"  {self.approval_command}",
             )
         )
         return "\n".join(lines)

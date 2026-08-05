@@ -72,6 +72,21 @@ async def test_baseline_input_buffer_cleared_after_submit():
         await h.wait_input_equals("")
 
 
+async def test_ctrl_u_clears_the_input_buffer():
+    async with TUIHarness() as h:
+        await h.type_keys("discard this command")
+        await h.press("c-u")
+        await h.wait_input_equals("")
+
+
+async def test_prefill_does_not_overwrite_user_typing():
+    async with TUIHarness() as h:
+        await h.type_keys("already typing")
+        await h.wait_input_equals("already typing")
+        assert h.app.prefill_input("/mcp approve docs abc123") is False
+        assert h.capture_input() == "already typing"
+
+
 async def test_baseline_ctrl_d_exits():
     # Already pinned by the stub's Ctrl+D binding; keep un-xfailed so a
     # regression flips the test red instead of silently green-to-green.
@@ -475,6 +490,43 @@ async def test_queue_esc_soft_cancels_and_delivers_queue():
         await h.press("enter")
         await h.press("escape")
         await h.wait_for(lambda: agent.messages_received == ["first", "queued"])
+
+
+async def test_esc_prefers_active_slash_command_over_agent_interrupt():
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("first")
+        await h.wait_for(lambda: h.app.is_thinking())
+        cancelled = []
+        h.app._on_cancel_command = lambda: cancelled.append(True) or True
+
+        await h.press("escape")
+
+        await h.wait_for(lambda: cancelled == [True])
+        assert h.app.is_thinking()
+        agent.block.set()
+
+
+async def test_cancelled_agent_run_async_propagates_to_agent_loop():
+    """Slash cancellation reaches async skill work on the separate agent loop."""
+    started = ThreadGate()
+    cancelled = ThreadGate()
+
+    async def remote_work():
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    async with TUIHarness() as h:
+        task = asyncio.create_task(h.app.agent_run_async(remote_work))
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(cancelled.wait(), timeout=1.0)
 
 
 # ╔══════════════════════════════════════════════════════════════════════╗

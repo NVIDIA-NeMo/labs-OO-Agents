@@ -566,7 +566,8 @@ class TerminalFrontend:
             table.add_row("agent", f"[{green}]{info.custom_agent}[/]")
 
         keybinds = ("vi mode  " if info.vi_mode else "") + (
-            "Tab: complete  |  ↑↓: history  |  Shift+Enter: newline  |  Esc: interrupt  |  Ctrl+C ×2: exit"
+            "Tab: complete  |  ↑↓: history  |  Ctrl+U: clear  |  Shift+Enter: newline  |  "
+            "Esc: interrupt  |  Ctrl+C ×2: exit"
         )
         table.add_row("keys", f"[{overlay}]{keybinds}[/]")
         table.add_row(
