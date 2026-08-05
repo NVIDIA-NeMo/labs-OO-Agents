@@ -2,7 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the in-app masked prompt used by manual MCP OAuth."""
 
+import base64
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
 from nooa_cli.tui.subapp import ChoicePromptView, SensitiveTextPromptView, TextPromptView
+from nooa_cli.tui.tui_application import TUIApplication
+from prompt_toolkit.formatted_text import ANSI
 
 
 def test_sensitive_prompt_masks_value_and_submits():
@@ -50,6 +56,61 @@ def test_sensitive_prompt_scrolls_long_authorization_url():
     last = view.render(40, 8)
 
     assert "TAIL_VISIBLE" in last
+
+
+def test_sensitive_prompt_renders_short_clickable_authorization_link():
+    url = "https://login.example.test/authorize?" + "state=" + "a" * 500
+    view = SensitiveTextPromptView("OAuth", "Authorize in your browser.", link_url=url)
+
+    rendered = view.render(60, 10)
+    fragments = ANSI(rendered).__pt_formatted_text__()
+    visible = "".join(text for style, text in fragments if style != "[ZeroWidthEscape]")
+    escapes = "".join(text for style, text in fragments if style == "[ZeroWidthEscape]")
+
+    assert "Open authorization URL" in visible
+    assert url not in visible
+    assert f"\x1b]8;;{url}\x07" in escapes
+    assert "Ctrl+Y copy URL" in visible
+
+
+def test_sensitive_prompt_copies_complete_authorization_url():
+    copied = []
+    url = "https://login.example.test/authorize?state=" + "a" * 500
+    view = SensitiveTextPromptView(
+        "OAuth",
+        "Authorize in your browser.",
+        link_url=url,
+        copy_handler=lambda value: copied.append(value) or True,
+    )
+
+    assert view.handle_key("copy") == "handled"
+    assert copied == [url]
+    assert "URL copied" in view.render(80, 10)
+
+
+def test_sensitive_prompt_rejects_non_http_link_targets():
+    view = SensitiveTextPromptView(
+        "OAuth",
+        "Authorize in your browser.",
+        link_url="javascript:alert(1)",
+    )
+
+    assert "Open authorization URL" not in view.render(80, 10)
+    assert view.handle_key("copy") == "handled"
+
+
+def test_clipboard_falls_back_to_complete_osc52_payload(monkeypatch):
+    url = "https://login.example.test/authorize?state=" + "a" * 500
+    output = MagicMock()
+    app = TUIApplication.__new__(TUIApplication)
+    app._app = SimpleNamespace(output=output)
+    monkeypatch.setattr("nooa_cli.tui.tui_application.shutil.which", lambda _name: None)
+
+    assert app._copy_to_clipboard(url) is True
+    sequence = output.write_raw.call_args.args[0]
+    encoded = sequence.removeprefix("\x1b]52;c;").removesuffix("\x07")
+    assert base64.b64decode(encoded).decode("utf-8") == url
+    output.flush.assert_called_once_with()
 
 
 def test_text_prompt_shows_default_and_returns_edited_value():
