@@ -88,6 +88,16 @@ async def test_skills_add_discovers_immediately_and_persists(tmp_path, monkeypat
     (skill_dir / "SKILL.md").write_text(
         "---\nname: review-code\ndescription: Review code\n---\nReview the code.\n"
     )
+    library_dir = skills_root / "local_tool"
+    library_dir.mkdir()
+    (library_dir / "pyproject.toml").write_text(
+        '[project]\nname = "local-tool"\n\n'
+        '[project.entry-points."nooa.skills"]\n'
+        '"local.tool" = "local_tool:LocalTool"\n'
+    )
+    (library_dir / "__init__.py").write_text(
+        'from nooa.skill import Skill\n\nclass LocalTool(Skill):\n    """A local tool."""\n'
+    )
 
     agent = SimpleNamespace(context_manager=MagicMock(), cwd=tmp_path)
     agent.skills = SkillRegistry(agent)
@@ -107,6 +117,7 @@ async def test_skills_add_discovers_immediately_and_persists(tmp_path, monkeypat
     assert result.success is True
     assert skills_root.resolve() in registry.skills_dirs
     assert "cmd.review-code" in agent.skills.discovered()
+    assert "local.tool" in agent.skills.discovered()
     assert "review-code" in registry._user_skills
     saved = yaml.safe_load((project_dir / "settings.yaml").read_text())
     assert saved["tui"]["additional_skills_dirs"] == [str(skills_root.resolve())]
