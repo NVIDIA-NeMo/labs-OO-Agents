@@ -26,13 +26,13 @@ def _render(width: int) -> str:
 
 @pytest.mark.parametrize(
     ("width", "expected"),
-    [(120, "wide"), (83, "wide"), (82, "standard"), (56, "standard"), (55, "compact")],
+    [(120, "wide"), (80, "wide"), (79, "standard"), (48, "standard"), (47, "compact")],
 )
 def test_splash_selects_responsive_variant(width: int, expected: str) -> None:
     assert splash_variant(width) == expected
 
 
-@pytest.mark.parametrize("width", [32, 48, 56, 64, 72, 100, 160])
+@pytest.mark.parametrize("width", [32, 47, 48, 64, 72, 100, 160])
 def test_splash_never_exceeds_terminal_width(width: int) -> None:
     rendered = _render(width)
     assert rendered
@@ -40,7 +40,7 @@ def test_splash_never_exceeds_terminal_width(width: int) -> None:
 
 
 def test_compact_splash_keeps_full_identity_readable() -> None:
-    rendered = _render(48)
+    rendered = _render(40)
     assert "NVIDIA LABS · NOOA" in rendered
     assert "Object Oriented Agents" in rendered
 
@@ -52,6 +52,12 @@ def test_graphical_splash_uses_new_brand_not_legacy_copy() -> None:
     assert "NEMOTRON" not in rendered
     assert "licensed to vibe" not in rendered
     assert NOOA_ASCII == "NVIDIA LABS OBJECT ORIENTED AGENTS (NOOA)"
+
+
+def test_graphical_splash_centers_nooa_without_the_nvidia_eye() -> None:
+    rendered = _render(100)
+    assert "████▀███▄ ▄███▀███▄" in rendered
+    assert "████████████████████████" not in rendered
 
 
 def test_splash_does_not_delay_startup_by_default() -> None:
