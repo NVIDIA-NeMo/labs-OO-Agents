@@ -255,7 +255,7 @@ class Session:
 
     Args:
         frontend: Any object implementing the ``Frontend`` protocol.
-        agent: An NeMo OO Agents agent with a ``handle(notification)`` async method.
+        agent: A NOOA agent with a ``handle(notification)`` async method.
         config: Loaded ``Config`` (holds tui / agent sub-configs).
         registry: Pre-built ``CommandRegistry``.
         session_manager: Optional ``SessionManager`` for persisting turns.

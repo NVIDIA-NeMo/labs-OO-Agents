@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Structured output types for NeMo OO Agents frontends.
+"""Structured output types for NOOA frontends.
 
 Commands and agent events produce ``Output`` instances; the
 ``TerminalFrontend`` renders them as Rich panels in the terminal.

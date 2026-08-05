@@ -134,7 +134,7 @@ def command(
     python: bool,
     continue_session: str | None,
 ):
-    """Launch the NVIDIA OO Agents TUI (Text User Interface).
+    """Launch the NVIDIA Labs Object Oriented Agents (NOOA) TUI.
 
     Interactive REPL for chatting with agents, running commands, and managing
     skills and MCP servers.

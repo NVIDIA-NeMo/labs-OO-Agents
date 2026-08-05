@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Layered YAML settings for the NeMo OO Agents TUI.
+"""Layered YAML settings for the NOOA TUI.
 
 This is the TUI half of the project's "one config story": TUI settings
 live in ``settings.yaml`` next to ``llm_config.yaml`` and ``secrets.yaml``,
@@ -234,7 +234,7 @@ def _set_mapping_path(data: dict[str, Any], path: list[str], value: Any) -> None
 # Commented scaffold written on first run. Everything is commented out so
 # the file documents the schema without overriding any defaults.
 SETTINGS_TEMPLATE = """\
-# NeMo OO Agents — TUI settings
+# NVIDIA Labs Object Oriented Agents (NOOA) — TUI settings
 #
 # Layered, last wins:
 #   1. built-in defaults

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Theme system for NeMo OO Agents TUI.
+"""Theme system for the NOOA TUI.
 
 Four built-in palettes — all use the same Catppuccin key names so every
 consumer (frontend.py, console.py, splash.py) works without changes:
@@ -184,7 +184,7 @@ def create_theme() -> Theme:
     c = COLORS
     return Theme(
         {
-            # NeMo OO Agents branding
+            # NOOA branding
             "nooa": f"bold {c['mauve']}",
             "tagline": f"italic {c['pink']}",
             # User interface

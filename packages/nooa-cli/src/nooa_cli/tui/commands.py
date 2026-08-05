@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Slash command parser and handlers for NeMo OO Agents TUI/Web.
+"""Slash command parser and handlers for the NOOA TUI/Web hosts.
 
 Commands return structured ``CommandResult`` objects whose ``outputs`` list
 is rendered by the active ``Frontend``.  No command calls the console or

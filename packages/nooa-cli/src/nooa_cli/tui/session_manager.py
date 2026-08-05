@@ -139,7 +139,7 @@ class SessionManager:
     def as_markdown(self) -> str:
         lines = [f"# Session {self.session_id[:8]}\n"]
         for turn in self.turns:
-            prefix = "**You:**" if turn.role == "user" else "**NeMo OO Agents:**"
+            prefix = "**You:**" if turn.role == "user" else "**NOOA:**"
             lines.append(f"{prefix}\n\n{turn.content}\n")
         return "\n---\n\n".join(lines)
 

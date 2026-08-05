@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Native terminal interface for NVIDIA NeMo OO Agents."""
+"""Native terminal interface for NVIDIA Labs Object Oriented Agents (NOOA)."""
 
 from .agent import BaseTUIAgent, TUIAgent
 from .config import AgentConfig, Config, SummarizationConfig, TUIConfig

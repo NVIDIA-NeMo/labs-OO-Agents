@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Shared completion engine for NeMo OO Agents frontends.
+"""Shared completion engine for NOOA frontends.
 
 ``Completer`` is frontend-agnostic: it takes a text buffer and returns a list
 of ``CompletionItem`` objects.  The terminal (prompt_toolkit adapter) uses
