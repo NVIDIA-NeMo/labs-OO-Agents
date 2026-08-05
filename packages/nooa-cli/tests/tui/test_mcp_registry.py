@@ -304,6 +304,7 @@ async def test_cancelled_connect_stays_pending_until_worker_finishes(monkeypatch
             break
         await asyncio.sleep(0.01)
     assert "maas" not in reg._pending
+    assert reg.connected() == []
 
 
 @pytest.mark.asyncio
