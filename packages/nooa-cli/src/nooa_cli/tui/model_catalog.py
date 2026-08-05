@@ -17,6 +17,7 @@ from typing import Any
 
 _MAX_CATALOG_BYTES = 5 * 1024 * 1024
 _MAX_MODELS = 5_000
+_MAX_NATIVE_PROVIDER_PAGES = 200
 _MAX_TOKEN_LIMIT = 100_000_000
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
@@ -184,10 +185,11 @@ def fetch_native_provider_models(
         "x-api-key": api_key,
     }
     models: dict[str, CatalogModel] = {}
+    seen_after_ids: set[str] = set()
     after_id: str | None = None
     try:
         with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-            while True:
+            for _page in range(_MAX_NATIVE_PROVIDER_PAGES):
                 params = {"limit": "100"}
                 if after_id:
                     params["after_id"] = after_id
@@ -218,7 +220,14 @@ def fetch_native_provider_models(
                 last_id = payload.get("last_id")
                 if not isinstance(last_id, str) or not last_id:
                     raise ModelCatalogError("Provider model catalog pagination is incomplete.")
+                if last_id in seen_after_ids:
+                    raise ModelCatalogError("Provider model catalog pagination is looping.")
+                seen_after_ids.add(last_id)
                 after_id = last_id
+            else:
+                raise ModelCatalogError(
+                    f"Provider model catalog exceeded {_MAX_NATIVE_PROVIDER_PAGES} pages."
+                )
     except ModelCatalogError:
         raise
     except httpx.HTTPStatusError as exc:
@@ -272,17 +281,6 @@ def native_provider_registry_entry(
             raise ModelCatalogError("Maximum output tokens cannot exceed the context window.")
         entry["max_tokens"] = max_tokens
     return entry
-
-
-def _ollama_api_base(api_base: str) -> str | None:
-    """Return the root Ollama base URL for conventional Ollama endpoints."""
-    parsed = urllib.parse.urlsplit(api_base)
-    if parsed.port != 11434:
-        return None
-    path = parsed.path.rstrip("/")
-    if path not in {"", "/v1"}:
-        return None
-    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
 
 
 def fetch_model_catalog(
@@ -429,15 +427,8 @@ def registry_entry(
     max_tokens: int | None = None,
 ) -> dict[str, Any]:
     """Build the minimal registry entry for an OpenAI-compatible server."""
-    ollama_base = _ollama_api_base(api_base)
-    if not api_key_env and ollama_base:
-        model_name = (
-            model_id if model_id.startswith("ollama_chat/") else f"ollama_chat/{model_id}"
-        )
-        entry: dict[str, Any] = {"model_name": model_name, "api_base": ollama_base}
-    else:
-        model_name = model_id if model_id.startswith("openai/") else f"openai/{model_id}"
-        entry = {"model_name": model_name, "api_base": api_base}
+    model_name = model_id if model_id.startswith("openai/") else f"openai/{model_id}"
+    entry: dict[str, Any] = {"model_name": model_name, "api_base": api_base}
     if api_key_env:
         entry["api_key_env"] = validate_api_key_env(api_key_env)
     if context_window is not None:

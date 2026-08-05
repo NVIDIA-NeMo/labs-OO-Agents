@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 import yaml
-from nooa_cli.tui.commands import ConnectCommand, ModelCommand
+from nooa_cli.tui.commands import ConnectCommand
 from nooa_cli.tui.config import TUIConfig
 from nooa_cli.tui.model_catalog import (
     CatalogModel,
@@ -189,16 +189,16 @@ def test_write_model_alias_replaces_existing_when_requested(tmp_path) -> None:
     loaded = yaml.safe_load(text)
     assert "# team registry" in text
     assert loaded["models"]["qwen3-1.7b"] == {
-        "model_name": "ollama_chat/qwen3:1.7b",
-        "api_base": "http://localhost:11434",
+        "model_name": "openai/qwen3:1.7b",
+        "api_base": "http://localhost:11434/v1",
     }
     assert loaded["models"]["sibling"]["model_name"] == "openai/sibling"
 
 
-def test_registry_entry_routes_local_ollama_without_openai_key() -> None:
+def test_registry_entry_uses_openai_prefix_for_openai_compatible_server() -> None:
     assert registry_entry("qwen3:1.7b", "http://localhost:11434/v1") == {
-        "model_name": "ollama_chat/qwen3:1.7b",
-        "api_base": "http://localhost:11434",
+        "model_name": "openai/qwen3:1.7b",
+        "api_base": "http://localhost:11434/v1",
     }
 
 
@@ -320,7 +320,7 @@ def _stub_successful_model_switch(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_model_add_to_registry_workflow_writes_local_file(tmp_path, monkeypatch) -> None:
+async def test_connect_workflow_writes_local_registry(tmp_path, monkeypatch) -> None:
     project_dir = tmp_path / ".nooa"
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
     monkeypatch.setattr(
@@ -336,7 +336,7 @@ async def test_model_add_to_registry_workflow_writes_local_file(tmp_path, monkey
     )
     frontend = _WorkflowFrontend()
     _stub_successful_model_switch(monkeypatch)
-    command = ModelCommand(
+    command = ConnectCommand(
         frontend,
         TUIConfig(),
         MagicMock(),
@@ -344,7 +344,7 @@ async def test_model_add_to_registry_workflow_writes_local_file(tmp_path, monkey
     )
     command._reload_model_registry = MagicMock()
 
-    result = await command.execute(["add-to-registry", "http://localhost:8000/v1"])
+    result = await command.execute(["http://localhost:8000/v1"])
 
     assert result.success is True
     command._reload_model_registry.assert_called_once_with()
@@ -357,7 +357,7 @@ async def test_model_add_to_registry_workflow_writes_local_file(tmp_path, monkey
 
 
 @pytest.mark.asyncio
-async def test_model_add_to_registry_defaults_to_project_config(tmp_path, monkeypatch) -> None:
+async def test_connect_workflow_defaults_to_project_config(tmp_path, monkeypatch) -> None:
     user_dir = tmp_path / "user-config"
     project_dir = tmp_path / "project" / ".nooa"
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_dir))
@@ -371,7 +371,7 @@ async def test_model_add_to_registry_defaults_to_project_config(tmp_path, monkey
     )
     frontend = _WorkflowFrontend("All projects (~/.config/nooa/llm_config.yaml)")
     _stub_successful_model_switch(monkeypatch)
-    command = ModelCommand(
+    command = ConnectCommand(
         frontend,
         TUIConfig(),
         MagicMock(),
@@ -379,7 +379,7 @@ async def test_model_add_to_registry_defaults_to_project_config(tmp_path, monkey
     )
     command._reload_model_registry = MagicMock()
 
-    result = await command.execute(["add-to-registry", "http://localhost:8000/v1"])
+    result = await command.execute(["http://localhost:8000/v1"])
 
     assert result.success is True
     assert not (user_dir / "llm_config.yaml").exists()
@@ -476,7 +476,7 @@ async def test_connect_anthropic_writes_native_provider_alias(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_connect_routes_ollama_catalog_to_ollama_provider(tmp_path, monkeypatch) -> None:
+async def test_connect_registers_local_openai_compatible_backend(tmp_path, monkeypatch) -> None:
     project_dir = tmp_path / ".nooa"
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
     project_dir.mkdir(parents=True)
@@ -512,8 +512,8 @@ async def test_connect_routes_ollama_catalog_to_ollama_provider(tmp_path, monkey
     assert result.success is True
     saved = yaml.safe_load((project_dir / "llm_config.yaml").read_text())
     assert saved["models"]["qwen3-1.7b"] == {
-        "model_name": "ollama_chat/qwen3:1.7b",
-        "api_base": "http://localhost:11434",
+        "model_name": "openai/qwen3:1.7b",
+        "api_base": "http://localhost:11434/v1",
     }
     assert frontend.choice_prompts[-1][2] == ["Replace and use now", "Replace only", "Cancel"]
 

@@ -28,7 +28,10 @@ if TYPE_CHECKING:
 
 # Default model — direct litellm-supported name. Override via config or --model.
 DEFAULT_MODEL = "claude-opus-4-8"
-_DIRECT_ENDPOINT_PROVIDERS = {"openai", "hosted_vllm", "ollama_chat"}
+# LiteLLM providers whose endpoint is fixed by the SDK (cloud APIs). For every
+# other provider we forward --api-base / api_key_env overrides so users can point
+# them at proxies, gateways, and self-hosted deployments without a code change.
+_LOCKED_ENDPOINT_PROVIDERS = {"anthropic", "bedrock", "vertex_ai", "gemini"}
 
 
 # SummarizationConfig moved to core with the interactive-agent base;
@@ -334,18 +337,21 @@ def _llm_endpoint_overrides(
     from .health_check import _detect_provider
 
     provider = _detect_provider(model_name)
-    if provider not in _DIRECT_ENDPOINT_PROVIDERS:
+    if provider in _LOCKED_ENDPOINT_PROVIDERS:
         return {}, {}
 
-    overrides: dict[str, Any] = {}
     direct_config: dict[str, Any] = {"api_base": endpoint_config.api_base}
-    overrides["api_base"] = endpoint_config.api_base
-    if endpoint_config.api_key_env:
-        direct_config["api_key_env"] = endpoint_config.api_key_env
-        api_key = resolve_api_key_from_config(model_name, direct_config)
-        if api_key is not None:
-            overrides["api_key"] = api_key
-    return overrides, direct_config
+    if not endpoint_config.api_key_env:
+        return {"api_base": endpoint_config.api_base}, direct_config
+
+    direct_config["api_key_env"] = endpoint_config.api_key_env
+    api_key = resolve_api_key_from_config(model_name, direct_config)
+    if api_key is None:
+        # Skip the api_base override: hitting a private endpoint with the wrong
+        # credential produces an opaque 401. Let LiteLLM route the model with
+        # its default endpoint so the caller sees the missing-key error.
+        return {}, direct_config
+    return {"api_base": endpoint_config.api_base, "api_key": api_key}, direct_config
 
 
 def get_llm(config: TUIConfig | Config) -> "CompletionClient":
