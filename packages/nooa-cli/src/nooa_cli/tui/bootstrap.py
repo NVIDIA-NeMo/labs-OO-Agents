@@ -521,6 +521,7 @@ def build_registry(result: BootstrapResult, frontend: Frontend) -> CommandRegist
             MCPRegistry(
                 mcp_file=result.config.tui.mcp_file,
                 servers=result.config.tui.mcp_servers,
+                watch_settings=True,
             ),
         )
         result.agent.skills.activate(["nemo.mcp"])  # type: ignore[union-attr]
