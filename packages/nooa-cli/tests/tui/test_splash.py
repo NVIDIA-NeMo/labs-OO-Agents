@@ -26,7 +26,7 @@ def _render(width: int) -> str:
 
 @pytest.mark.parametrize(
     ("width", "expected"),
-    [(120, "wide"), (80, "wide"), (79, "standard"), (56, "standard"), (55, "compact")],
+    [(120, "wide"), (83, "wide"), (82, "standard"), (56, "standard"), (55, "compact")],
 )
 def test_splash_selects_responsive_variant(width: int, expected: str) -> None:
     assert splash_variant(width) == expected
