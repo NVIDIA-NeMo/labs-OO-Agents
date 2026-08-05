@@ -103,6 +103,8 @@ class Completer:
             return self._theme_completions(text)
 
         # Model completion
+        if lower.startswith("/model add-to-registry "):
+            return self._model_registry_endpoint_completions(text)
         if lower.startswith("/model ") or lower.startswith("/keep-going model "):
             return self._model_completions(text)
 
@@ -335,6 +337,48 @@ class Completer:
                         description=description.format(name=name),
                     )
                 )
+        return items
+
+    def _model_registry_endpoint_completions(self, text: str) -> list[CompletionItem]:
+        """Complete deduplicated, credential-free API bases from loaded aliases."""
+        try:
+            from nooa.unifiedllm import MODELS
+
+            from .model_catalog import ModelCatalogError, normalize_catalog_endpoint
+        except Exception:
+            return []
+
+        prefix = "/model add-to-registry "
+        partial = text[len(prefix) :].casefold()
+        aliases_by_endpoint: dict[str, list[str]] = {}
+        for alias, config in MODELS.items():
+            if not isinstance(config, dict):
+                continue
+            raw_endpoint = config.get("api_base")
+            if not isinstance(raw_endpoint, str):
+                continue
+            try:
+                endpoint, _models_url = normalize_catalog_endpoint(raw_endpoint)
+            except ModelCatalogError:
+                continue
+            aliases_by_endpoint.setdefault(endpoint, []).append(str(alias))
+
+        items: list[CompletionItem] = []
+        for endpoint, aliases in sorted(aliases_by_endpoint.items()):
+            if partial and not endpoint.casefold().startswith(partial):
+                continue
+            aliases.sort(key=str.casefold)
+            if len(aliases) <= 3:
+                description = "Used by " + ", ".join(aliases)
+            else:
+                description = f"Used by {len(aliases)} registry aliases"
+            items.append(
+                CompletionItem(
+                    text=prefix + endpoint,
+                    display=endpoint,
+                    description=description,
+                )
+            )
         return items
 
     def _toolbar_item_completions(self, text: str) -> list[CompletionItem]:
