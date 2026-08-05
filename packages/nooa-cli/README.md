@@ -41,24 +41,24 @@ the repository root down to the current working directory.
 
 ### Models and endpoints
 
-For reusable aliases, connect a provider or backend from inside the TUI:
+For reusable aliases, connect a backend from inside the TUI by URL:
 
 ```text
-/connect anthropic
+/connect https://api.anthropic.com
 /connect http://localhost:11434
 /connect http://localhost:8000/v1
 /connect https://inference-api.nvidia.com/v1
 ```
 
-For native providers such as Anthropic, the TUI uses the provider's model-list
-API and conventional secret name. For OpenAI-compatible servers, it fetches the
-`/models` catalog. In both cases it can save a pasted key to
-`.nooa/secrets.yaml`, write a project-local alias to `.nooa/llm_config.yaml`,
-reload the registry, and switch to the selected model. If a local server such as
-Ollama or vLLM exposes OpenAI-compatible routes under `/v1`, `/connect
-http://host:port` will retry `/v1/models` after a root `/models` 404.
-Conventional local Ollama endpoints are saved with the `ollama_chat/` LiteLLM
-provider and no API key.
+`/connect` normalizes the URL and detects the wire protocol before writing an
+alias. Anthropic hostnames use the provider's native model-list API with a
+conventional secret name; Ollama backends are detected by probing `/api/tags`
+and are saved with the `ollama_chat/` LiteLLM prefix and no API key; every other
+OpenAI-compatible server fetches its `/models` catalog (retrying `/v1/models`
+after a root 404). In all cases the flow can save a pasted key to
+`.nooa/secrets.yaml` (only after the fetch validates it), write a project-local
+alias to `.nooa/llm_config.yaml`, reload the registry, and switch to the
+selected model.
 
 For an advanced one-shot run, pass the same model string and API base you would
 pass to `get_llm_client`. `--api-base` requires `--model`:

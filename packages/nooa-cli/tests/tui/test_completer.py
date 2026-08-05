@@ -141,12 +141,11 @@ def test_connect_completes_deduplicated_api_bases(completer, monkeypatch):
     items = completer.complete("/connect ")
 
     assert [item.text for item in items] == [
-        "/connect anthropic",
         "/connect https://inference.example.test/v1",
         "/connect https://other.example.test/api",
     ]
-    assert items[1].display == "https://inference.example.test/v1"
-    assert items[1].description == "Used by alpha, beta"
+    assert items[0].display == "https://inference.example.test/v1"
+    assert items[0].description == "Used by alpha, beta"
 
 
 def test_connect_endpoint_completion_filters_partial(completer, monkeypatch):
@@ -167,8 +166,8 @@ def test_connect_endpoint_completion_filters_partial(completer, monkeypatch):
     ] == ["/connect https://other.example.test/v1"]
 
 
-def test_connect_provider_completion_filters_partial(completer):
-    assert [item.text for item in completer.complete("/connect ant")] == ["/connect anthropic"]
+def test_connect_provider_completion_no_hardcoded_shortcuts(completer):
+    assert list(completer.complete("/connect ant")) == []
 
 
 def test_skills_add_completes_directories_only(tmp_path, mock_registry):
