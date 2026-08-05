@@ -154,6 +154,35 @@ def normalize_native_provider(value: str) -> str | None:
     return provider if provider in _NATIVE_PROVIDERS else None
 
 
+def is_anthropic_endpoint(api_base: str) -> bool:
+    """Return True when ``api_base`` points at Anthropic's public API host."""
+    hostname = (urllib.parse.urlsplit(api_base).hostname or "").lower()
+    return hostname == "api.anthropic.com" or hostname.endswith(".anthropic.com")
+
+
+def probe_ollama_backend(api_base: str, *, timeout: float = 3.0) -> bool:
+    """Return True when ``<api_base>/api/tags`` responds like an Ollama server."""
+    import httpx
+
+    parsed = urllib.parse.urlsplit(api_base)
+    root = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            response = client.get(f"{root}/api/tags")
+        if response.status_code != 200:
+            return False
+        payload = response.json()
+    except (httpx.HTTPError, ValueError):
+        return False
+    return isinstance(payload, dict) and isinstance(payload.get("models"), list)
+
+
+def ollama_api_base(api_base: str) -> str:
+    """Return the root Ollama base URL for an OpenAI-compatible probe URL."""
+    parsed = urllib.parse.urlsplit(api_base)
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+
+
 def native_provider_api_key_env(provider: str) -> str:
     """Return the conventional API-key env var for a native provider."""
     normalized = normalize_native_provider(provider)
@@ -425,10 +454,17 @@ def registry_entry(
     *,
     context_window: int | None = None,
     max_tokens: int | None = None,
+    ollama: bool = False,
 ) -> dict[str, Any]:
     """Build the minimal registry entry for an OpenAI-compatible server."""
-    model_name = model_id if model_id.startswith("openai/") else f"openai/{model_id}"
-    entry: dict[str, Any] = {"model_name": model_name, "api_base": api_base}
+    if ollama:
+        model_name = (
+            model_id if model_id.startswith("ollama_chat/") else f"ollama_chat/{model_id}"
+        )
+        entry: dict[str, Any] = {"model_name": model_name, "api_base": ollama_api_base(api_base)}
+    else:
+        model_name = model_id if model_id.startswith("openai/") else f"openai/{model_id}"
+        entry = {"model_name": model_name, "api_base": api_base}
     if api_key_env:
         entry["api_key_env"] = validate_api_key_env(api_key_env)
     if context_window is not None:
@@ -617,13 +653,16 @@ __all__ = [
     "default_alias",
     "fetch_model_catalog",
     "fetch_native_provider_models",
+    "is_anthropic_endpoint",
     "lookup_model_token_limits",
     "model_alias_exists",
     "native_provider_api_key_env",
     "native_provider_registry_entry",
     "normalize_catalog_endpoint",
     "normalize_native_provider",
+    "ollama_api_base",
     "parse_optional_token_limit",
+    "probe_ollama_backend",
     "registry_entry",
     "suggested_api_key_env",
     "validate_alias",

@@ -496,8 +496,10 @@ class ModelCommand(Command):
             ModelCatalogError,
             default_alias,
             fetch_model_catalog,
+            is_anthropic_endpoint,
             lookup_model_token_limits,
             normalize_catalog_endpoint,
+            probe_ollama_backend,
             registry_entry,
             suggested_api_key_env,
             validate_alias,
@@ -514,6 +516,9 @@ class ModelCommand(Command):
             api_base, _models_url = normalize_catalog_endpoint(server_url)
         except ModelCatalogError as exc:
             return CommandResult.err(str(exc))
+
+        if is_anthropic_endpoint(api_base):
+            return await self._add_native_provider("anthropic")
 
         try:
             api_key_env = validate_api_key_env(suggested_api_key_env(api_base))
@@ -580,6 +585,8 @@ class ModelCommand(Command):
             if error is not None:
                 return error
 
+        ollama = not api_key_env and await asyncio.to_thread(probe_ollama_backend, api_base)
+
         selected_id = await prompt_choice(
             "Add model",
             f"Found {len(models):,} models at {api_base}. Type to filter, then choose one.",
@@ -606,6 +613,7 @@ class ModelCommand(Command):
                 api_key_env,
                 context_window=selected.context_window or inferred_context,
                 max_tokens=selected.max_tokens or inferred_output,
+                ollama=ollama,
             )
         except ModelCatalogError as exc:
             return CommandResult.err(str(exc))
@@ -790,7 +798,7 @@ class ConnectCommand(ModelCommand):
 
     @classmethod
     def help_text(cls) -> dict[str, str]:
-        return {"/connect [server-url|provider]": "Connect a model backend or provider"}
+        return {"/connect [server-url]": "Connect a model backend by URL"}
 
     def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
         if len(args) > 1:
@@ -802,18 +810,14 @@ class ConnectCommand(ModelCommand):
         if not server_url:
             prompt_text = getattr(self.frontend, "prompt_text", None)
             if not callable(prompt_text):
-                return CommandResult.err("Usage: /connect <server-url|provider>")
+                return CommandResult.err("Usage: /connect <server-url>")
             server_url = await prompt_text(
                 "Connect model backend",
-                "OpenAI-compatible API base URL or provider name such as anthropic.",
-                "anthropic",
+                "API base URL (Anthropic, Ollama, and OpenAI-compatible servers are auto-detected).",
+                "http://localhost:11434",
             )
             if not server_url:
                 return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
-        from .model_catalog import normalize_native_provider
-
-        if provider := normalize_native_provider(server_url):
-            return await self._add_native_provider(provider)
         return await self._add_to_registry(server_url)
 
 
