@@ -39,6 +39,13 @@ from typing import Annotated, Any
 from nooa.agentdoc import hidden, spec
 from nooa.skill import Skill
 from nooa.tools._bash_session import BashSession
+from nooa.tools._bounded_io import (
+    DEFAULT_MAX_FILE_BYTES,
+    atomic_replace_text,
+    read_line_range,
+    read_specific_lines,
+    read_whole_file_checked,
+)
 from nooa.tools._results import StreamDone, StreamEvent
 
 
@@ -281,6 +288,13 @@ class ShellTools(Skill):
         replace(match_or_path, ...)    — edit at a Match anchor, or by unique string
         write_file(path, content)      — create/overwrite a file
 
+    File operations are bounded. A ranged read consumes only that range, however
+    large the file is. Reading or replacing a whole file is capped by
+    ``max_file_bytes`` (8 MiB by default, raise it per instance:
+    ``ShellTools(cwd=..., max_file_bytes=...)``) and raises above the cap rather
+    than loading the file. Edits are swapped in atomically, so a failed write
+    leaves the original intact.
+
     Grep that you can edit from directly. When run() executes a plain search
     (grep/rg/egrep), the result still prints the EXACT bytes your command
     produced — and it also carries ``.matches``, a list of Match objects you can
@@ -310,9 +324,20 @@ class ShellTools(Skill):
 
     """
 
-    def __init__(self, cwd: str = ".", init_command: str | None = None, **kwargs: Any):
+    def __init__(
+        self,
+        cwd: str = ".",
+        init_command: str | None = None,
+        *,
+        max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
+        **kwargs: Any,
+    ):
         super().__init__(**kwargs)
         self.cwd = Path(cwd).resolve()
+        # Ceiling for reads and replacements that need a whole file at once.
+        # Ranged reads and anchor harvesting are bounded by construction and are
+        # not limited by this. Raise it to work on files above the default.
+        self.max_file_bytes: int = max_file_bytes
         # Construct the session eagerly (it starts lazily on first run) so a
         # consumer wired at construction time — e.g. RepoTools(session=shell.session)
         # in the TUI — shares this shell's bash session instead of capturing None.
@@ -487,7 +512,8 @@ class ShellTools(Skill):
             return None
 
         anchors: list[tuple[str, int]] = []
-        file_cache: dict[str, list[str]] = {}
+        # path -> {line number: line text}, holding only anchored lines.
+        file_cache: dict[str, dict[int, str]] = {}
         for raw in rg_out.splitlines():
             raw = raw.strip()
             if not raw:
@@ -545,18 +571,34 @@ class ShellTools(Skill):
         else:
             keep = anchors
 
+        # Fetch only the anchored lines. A search hit near the end of a very
+        # large file used to pull that whole file into memory to quote one line
+        # of it, and the agent never asked for a read — any grep could trigger
+        # it. Cost now scales with the number of anchors instead.
+        wanted: dict[str, set[int]] = {}
+        for mpath, line_no in keep:
+            wanted.setdefault(mpath, set()).add(line_no)
+
+        for mpath, line_nos in wanted.items():
+            try:
+                resolved = self._resolve_path(mpath)
+                file_cache[mpath] = read_specific_lines(
+                    resolved, line_nos, max_line_chars=self.max_file_bytes
+                )
+            except (OSError, ValueError):
+                # Includes FileTooLargeError. Harvesting is fail-closed by
+                # design: no anchors is a supported outcome, a wrong anchor is
+                # not.
+                return None
+
         out: list[Match] = []
         for mpath, line_no in keep:
-            if mpath not in file_cache:
-                try:
-                    resolved = self._resolve_path(mpath)
-                    file_cache[mpath] = resolved.read_text().splitlines(keepends=True)
-                except (OSError, ValueError):
-                    return None
-            lines = file_cache[mpath]
-            if not (1 <= line_no <= len(lines)):
+            line = file_cache[mpath].get(line_no)
+            if line is None:
+                # Anchor points past the end of the file — same distrust of the
+                # rg output as before.
                 return None
-            out.append(Match(mpath, line_no, line_no, lines[line_no - 1]))
+            out.append(Match(mpath, line_no, line_no, line))
         return out
 
     @staticmethod
@@ -659,25 +701,40 @@ class ShellTools(Skill):
         Print the Match to see numbered lines. Pass any Match to replace() for editing.
         Slice with match[start:end] to narrow the region.
 
+        A range reads only that range, whatever the file's size. Reading a whole
+        file is capped at ``max_file_bytes`` (8 MiB by default) and raises above
+        it rather than loading it — pass ``lines=`` to read a region instead.
+
         Args:
             path: File path (relative to cwd).
             lines: Optional (start, end) range, 1-indexed inclusive.
 
         Returns:
             Match with .text, .numbered, .path, .start, .end.
+
+        Raises:
+            FileTooLargeError: Whole-file read over ``max_file_bytes``.
         """
         resolved = self._resolve_path(path)
-        content = resolved.read_text()
-        all_lines = content.splitlines(keepends=True)
-        total = len(all_lines)
 
         if lines is not None:
             start, end = lines
             start = max(1, start)
-            end = min(total, end)
-            text = "".join(all_lines[start - 1 : end])
-            return Match(str(path), start, end, text)
+            text, clamped_end = read_line_range(
+                resolved, start, end, max_line_chars=self.max_file_bytes
+            )
+            return Match(str(path), start, clamped_end, text)
 
+        content = read_whole_file_checked(
+            resolved,
+            self.max_file_bytes,
+            hint=(
+                "Read a region instead: read(path, lines=(start, end)). To allow "
+                "whole-file reads this large, construct "
+                "ShellTools(max_file_bytes=...)."
+            ),
+        )
+        total = len(content.splitlines(keepends=True))
         return Match(str(path), 1, total, content)
 
     async def replace(
@@ -701,15 +758,27 @@ class ShellTools(Skill):
         1. replace(match, new_text) — replace the Match's line region.
         2. replace(path, old, new)  — old must match exactly once. new="" deletes.
 
+        Both forms rebuild the file, so both are capped at ``max_file_bytes``
+        (8 MiB by default) and raise above it instead of loading the file. The
+        new contents are swapped in atomically with the original's permissions
+        preserved, so a failed edit leaves the file exactly as it was.
+
         Args:
             target: A Match or file path string.
             old_or_new: For Match: the new text. For path: old text to find.
             new: Only for path form: the replacement text.
+
+        Raises:
+            FileTooLargeError: The file is over ``max_file_bytes``.
         """
+        oversize_hint = (
+            "Replacing text requires rebuilding the file. To edit a file this "
+            "large, construct ShellTools(max_file_bytes=...)."
+        )
         if isinstance(target, Match):
             new_text = old_or_new
             resolved = self._resolve_path(target.path)
-            content = resolved.read_text()
+            content = read_whole_file_checked(resolved, self.max_file_bytes, hint=oversize_hint)
             all_lines = content.splitlines(keepends=True)
 
             before = all_lines[: target.start - 1]
@@ -717,7 +786,7 @@ class ShellTools(Skill):
             if new_text and not new_text.endswith("\n") and after:
                 new_text += "\n"
             new_content = "".join(before) + new_text + "".join(after)
-            resolved.write_text(new_content)
+            atomic_replace_text(resolved, new_content)
 
             diff = f"--- a/{target.path}\n+++ b/{target.path}\n"
             diff += f"@@ -{target.start},{target.end - target.start + 1} @@\n"
@@ -735,7 +804,7 @@ class ShellTools(Skill):
                 )
             old_text = old_or_new
             resolved = self._resolve_path(target)
-            content = resolved.read_text()
+            content = read_whole_file_checked(resolved, self.max_file_bytes, hint=oversize_hint)
 
             count = content.count(old_text)
             if count == 0:
@@ -750,7 +819,7 @@ class ShellTools(Skill):
                 )
 
             new_content = content.replace(old_text, new, 1)
-            resolved.write_text(new_content)
+            atomic_replace_text(resolved, new_content)
 
             return FileWrite(
                 path=target,
@@ -768,13 +837,16 @@ class ShellTools(Skill):
         """
         Create or overwrite a file with content (no shell quoting needed).
 
+        The write is atomic: an overwrite that fails leaves the previous
+        contents intact rather than a truncated file.
+
         Args:
             path: File path (relative to cwd).
             content: Full file content.
         """
         resolved = self._resolve_path(path)
         resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_text(content)
+        atomic_replace_text(resolved, content)
         line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
         return FileWrite(
             path=path,
