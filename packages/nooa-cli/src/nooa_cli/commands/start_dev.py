@@ -120,7 +120,7 @@ def command(port: int, host: str, db_path_opt: str | None):
     }
 
     click.echo()
-    click.secho("  NVIDIA OO Agents Viewer", fg="cyan", bold=True)
+    click.secho("  NOOA Viewer", fg="cyan", bold=True)
     click.echo(f"  URL:  http://localhost:{port}")
     click.echo(f"  DB:   {db_path}")
     click.echo()

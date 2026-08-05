@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""NVIDIA OO Agents CLI — extensible command-line toolkit.
+"""NVIDIA Labs Object Oriented Agents (NOOA) CLI.
 
 Usage:
     nooa eval --config config.yaml  # Run an eval-pipeline job
@@ -36,7 +36,7 @@ _SKIP_SECRETS_PRELOAD = {"completion"}
 @click.version_option(package_name="nooa-cli")
 @click.pass_context
 def oo(ctx):
-    """OO Agents — agent toolkit.
+    """NOOA — NVIDIA Labs Object Oriented Agents.
 
     Extensible CLI for running agents, evaluations, and trace management.
     Add new commands by dropping a .py file in nooa_cli/commands/, or from
