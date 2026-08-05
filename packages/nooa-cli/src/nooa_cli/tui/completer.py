@@ -356,15 +356,6 @@ class Completer:
             aliases_by_endpoint.setdefault(endpoint, []).append(str(alias))
 
         items: list[CompletionItem] = []
-        for provider in ("anthropic",):
-            if not partial or provider.startswith(partial):
-                items.append(
-                    CompletionItem(
-                        text=prefix + provider,
-                        display=provider,
-                        description="Set up Anthropic / Claude",
-                    )
-                )
         for endpoint, aliases in sorted(aliases_by_endpoint.items()):
             if partial and not endpoint.casefold().startswith(partial):
                 continue
