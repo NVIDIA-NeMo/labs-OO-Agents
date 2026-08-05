@@ -13,9 +13,11 @@ import yaml
 from nooa_cli.tui.commands import ModelCommand
 from nooa_cli.tui.config import TUIConfig
 from nooa_cli.tui.model_catalog import (
+    CatalogModel,
     ModelCatalogError,
     fetch_model_catalog,
     normalize_catalog_endpoint,
+    parse_optional_token_limit,
     registry_entry,
     write_model_alias,
 )
@@ -47,7 +49,17 @@ def test_fetch_model_catalog_uses_bearer_and_openai_shape(monkeypatch) -> None:
         seen["authorization"] = request.headers.get("authorization")
         return httpx.Response(
             200,
-            json={"data": [{"id": "z/model"}, {"id": "a/model"}, {"id": "a/model"}]},
+            json={
+                "data": [
+                    {
+                        "id": "z/model",
+                        "context_window": "262144",
+                        "max_output_tokens": 16384,
+                    },
+                    {"id": "a/model", "max_model_len": 131072},
+                    {"id": "a/model", "max_completion_tokens": 8192},
+                ]
+            },
         )
 
     transport = httpx.MockTransport(handler)
@@ -61,10 +73,35 @@ def test_fetch_model_catalog_uses_bearer_and_openai_shape(monkeypatch) -> None:
     api_base, models = fetch_model_catalog("https://models.example.test/v1", api_key="secret")
 
     assert api_base == "https://models.example.test/v1"
-    assert models == ["a/model", "z/model"]
+    assert models == [
+        CatalogModel(id="a/model", context_window=131072, max_tokens=8192),
+        CatalogModel(id="z/model", context_window=262144, max_tokens=16384),
+    ]
     assert seen == {
         "url": "https://models.example.test/v1/models",
         "authorization": "Bearer secret",
+    }
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("", None), ("131,072", 131072), ("128k", 128000), ("1.5m", 1500000)],
+)
+def test_parse_optional_token_limit(value: str, expected: int | None) -> None:
+    assert parse_optional_token_limit(value, "Context window") == expected
+
+
+def test_registry_entry_includes_token_limits() -> None:
+    assert registry_entry(
+        "org/model",
+        "https://models.example.test/v1",
+        context_window=131072,
+        max_tokens=8192,
+    ) == {
+        "model_name": "openai/org/model",
+        "api_base": "https://models.example.test/v1",
+        "context_window": 131072,
+        "max_tokens": 8192,
     }
 
 
@@ -101,11 +138,13 @@ def test_write_model_alias_preserves_entries_in_flow_mapping(tmp_path) -> None:
 
 
 class _WorkflowFrontend:
-    def __init__(self) -> None:
-        self.text_answers = ["", "my-model"]
-        self.choice_answers = ["org/model", "Add only"]
+    def __init__(self, scope: str = "This project (.nooa/llm_config.yaml)") -> None:
+        self.text_answers = ["", "my-model", "131072", "8192"]
+        self.choice_answers = ["org/model", scope, "Add only"]
+        self.text_prompts = []
 
     async def prompt_text(self, *_args):
+        self.text_prompts.append(_args)
         return self.text_answers.pop(0)
 
     async def prompt_choice(self, *_args):
@@ -118,7 +157,14 @@ async def test_model_add_to_registry_workflow_writes_local_file(tmp_path, monkey
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
     monkeypatch.setattr(
         "nooa_cli.tui.model_catalog.fetch_model_catalog",
-        lambda *_args, **_kwargs: ("http://localhost:8000/v1", ["org/model"]),
+        lambda *_args, **_kwargs: (
+            "http://localhost:8000/v1",
+            [CatalogModel(id="org/model")],
+        ),
+    )
+    monkeypatch.setattr(
+        "nooa_cli.tui.model_catalog.lookup_model_token_limits",
+        lambda *_args: (None, None),
     )
     frontend = _WorkflowFrontend()
     command = ModelCommand(
@@ -137,5 +183,39 @@ async def test_model_add_to_registry_workflow_writes_local_file(tmp_path, monkey
     assert saved["models"]["my-model"] == {
         "model_name": "openai/org/model",
         "api_base": "http://localhost:8000/v1",
+        "context_window": 131072,
+        "max_tokens": 8192,
     }
     assert any("/model my-model" in output.content for output in result.outputs)
+
+
+@pytest.mark.asyncio
+async def test_model_add_to_registry_defaults_to_user_config(tmp_path, monkeypatch) -> None:
+    user_dir = tmp_path / "user-config"
+    project_dir = tmp_path / "project" / ".nooa"
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_dir))
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
+    monkeypatch.setattr(
+        "nooa_cli.tui.model_catalog.fetch_model_catalog",
+        lambda *_args, **_kwargs: (
+            "http://localhost:8000/v1",
+            [CatalogModel(id="org/model", context_window=262144, max_tokens=16384)],
+        ),
+    )
+    frontend = _WorkflowFrontend("All projects (~/.config/nooa/llm_config.yaml)")
+    frontend.text_answers = ["", "my-model", "262144", "16384"]
+    command = ModelCommand(
+        frontend,
+        TUIConfig(),
+        MagicMock(),
+        root_config=SimpleNamespace(llm_config_paths=[]),
+    )
+    command._reload_model_registry = MagicMock()
+
+    result = await command.execute(["add-to-registry", "http://localhost:8000/v1"])
+
+    assert result.success is True
+    assert (user_dir / "llm_config.yaml").exists()
+    assert not (project_dir / "llm_config.yaml").exists()
+    assert frontend.text_prompts[2][2] == "262144"
+    assert frontend.text_prompts[3][2] == "16384"

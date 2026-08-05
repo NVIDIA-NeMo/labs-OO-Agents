@@ -454,14 +454,19 @@ class ModelCommand(Command):
                 return CommandResult(
                     success=False,
                     outputs=[
-                        TextOutput(f"Could not switch to model '{selected}': {health.error_message}", "error"),
+                        TextOutput(
+                            f"Could not switch to model '{selected}': {health.error_message}",
+                            "error",
+                        ),
                         TextOutput(health.fix_hint or "", "info"),
                     ],
                 )
             health = await probe_llm(candidate)
             if not health.ok:
                 outputs = [
-                    TextOutput(f"Could not switch to model '{selected}': {health.error_message}", "error")
+                    TextOutput(
+                        f"Could not switch to model '{selected}': {health.error_message}", "error"
+                    )
                 ]
                 if health.fix_hint:
                     outputs.append(TextOutput(health.fix_hint, "info"))
@@ -492,13 +497,15 @@ class ModelCommand(Command):
 
     async def _add_to_registry(self, server_url: str) -> "CommandResult":
         """Run the host-rendered workflow for an OpenAI-compatible server."""
-        from nooa.paths import get_project_dir
+        from nooa.paths import get_project_dir, get_user_dir
 
         from .model_catalog import (
             ModelCatalogError,
             default_alias,
             fetch_model_catalog,
+            lookup_model_token_limits,
             normalize_catalog_endpoint,
+            parse_optional_token_limit,
             registry_entry,
             suggested_api_key_env,
             validate_alias,
@@ -531,9 +538,7 @@ class ModelCommand(Command):
         if api_key_env:
             from nooa.unifiedllm import resolve_api_key_from_config
 
-            api_key = resolve_api_key_from_config(
-                "model-catalog", {"api_key_env": api_key_env}
-            )
+            api_key = resolve_api_key_from_config("model-catalog", {"api_key_env": api_key_env})
         if api_key_env and not api_key:
             return CommandResult.err(
                 f"{api_key_env} is not set. Export it and run the command again; "
@@ -547,30 +552,80 @@ class ModelCommand(Command):
         except ModelCatalogError as exc:
             return CommandResult.err(str(exc))
 
-        selected = await prompt_choice(
+        selected_id = await prompt_choice(
             "Add model",
             f"Found {len(models):,} models at {api_base}. Type to filter, then choose one.",
-            models,
+            [model.id for model in models],
         )
-        if not selected:
+        if not selected_id:
             return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
+        selected = next(model for model in models if model.id == selected_id)
 
         alias = await prompt_text(
             "Model alias",
             "Choose the name you will use with /model and --model.",
-            default_alias(selected),
+            default_alias(selected.id),
         )
         if not alias:
             return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
+
+        inferred_context: int | None = None
+        inferred_output: int | None = None
+        if selected.context_window is None or selected.max_tokens is None:
+            inferred_context, inferred_output = await asyncio.to_thread(
+                lookup_model_token_limits, selected.id
+            )
+        suggested_context = selected.context_window or inferred_context
+        suggested_output = selected.max_tokens or inferred_output
+
+        context_value = await prompt_text(
+            "Context window",
+            "Maximum combined context capacity in tokens. Confirm the suggested value, "
+            "or leave blank if it is unknown.",
+            str(suggested_context or ""),
+        )
+        output_value = await prompt_text(
+            "Maximum output",
+            "Maximum completion/output tokens. Confirm the suggested value, or leave blank "
+            "to let the provider choose.",
+            str(suggested_output or ""),
+        )
+
+        user_scope = "All projects (~/.config/nooa/llm_config.yaml)"
+        project_scope = "This project (.nooa/llm_config.yaml)"
+        scope = await prompt_choice(
+            "Registry location",
+            "Choose where this model alias should be available.",
+            [user_scope, project_scope, "Cancel"],
+        )
+        if not scope or scope == "Cancel":
+            return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
+        registry_path = (
+            get_user_dir("llm_config.yaml")
+            if scope == user_scope
+            else get_project_dir("llm_config.yaml")
+        )
+
         try:
             alias = validate_alias(alias)
-            entry = registry_entry(selected, api_base, api_key_env)
+            context_window = parse_optional_token_limit(context_value, "Context window")
+            max_tokens = parse_optional_token_limit(output_value, "Maximum output tokens")
+            entry = registry_entry(
+                selected.id,
+                api_base,
+                api_key_env,
+                context_window=context_window,
+                max_tokens=max_tokens,
+            )
         except ModelCatalogError as exc:
             return CommandResult.err(str(exc))
 
         summary = (
             f"Alias: {alias}\nModel: {entry['model_name']}\nServer: {api_base}\n"
-            f"API key: {api_key_env or '(none)'}"
+            f"API key: {api_key_env or '(none)'}\n"
+            f"Context window: {context_window or '(unknown)'}\n"
+            f"Maximum output: {max_tokens or '(provider default)'}\n"
+            f"Registry: {registry_path}"
         )
         action = await prompt_choice(
             "Confirm model",
@@ -580,7 +635,6 @@ class ModelCommand(Command):
         if not action or action == "Cancel":
             return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
 
-        registry_path = get_project_dir("llm_config.yaml")
         try:
             await asyncio.to_thread(write_model_alias, registry_path, alias, entry)
             await asyncio.to_thread(self._reload_model_registry)
