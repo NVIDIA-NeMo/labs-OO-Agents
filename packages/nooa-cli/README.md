@@ -35,9 +35,11 @@ nooa tui
 ```
 
 ```text
-/connect https://api.anthropic.com
-/connect http://localhost:11434
-/connect https://inference-api.nvidia.com/v1
+/connect https://api.anthropic.com          # Anthropic (Claude)
+/connect https://api.openai.com/v1           # OpenAI
+/connect http://localhost:11434              # Local Ollama
+/connect http://localhost:8000/v1            # Local vLLM
+/connect https://inference-api.nvidia.com/v1 # NVIDIA inference API
 ```
 
 Give it a URL and `/connect` figures out the rest: it fetches the available
