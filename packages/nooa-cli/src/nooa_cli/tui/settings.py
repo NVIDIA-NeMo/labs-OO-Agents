@@ -249,6 +249,10 @@ SETTINGS_TEMPLATE = """\
 tui:
   # LLM model alias (from the unifiedllm registry) or a litellm model name.
   # default_model: {default_model}
+  # Optional endpoint overrides for the model above, matching
+  # get_llm_client(model, api_base=...). Most users should prefer /connect.
+  # api_base: http://localhost:11434
+  # api_key_env: NVIDIA_INFERENCE_API_KEY
 
   # Show the agent's Python execution panels.
   # show_python: false

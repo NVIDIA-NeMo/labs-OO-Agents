@@ -103,7 +103,7 @@ class Completer:
             return self._theme_completions(text)
 
         # Model completion
-        if lower.startswith("/model add-to-registry "):
+        if lower.startswith("/connect "):
             return self._model_registry_endpoint_completions(text)
         if lower.startswith("/model ") or lower.startswith("/keep-going model "):
             return self._model_completions(text)
@@ -320,14 +320,6 @@ class Completer:
             else "Switch to {name}"
         )
         items = []
-        if prefix == "/model " and "add-to-registry".startswith(partial.lower()):
-            items.append(
-                CompletionItem(
-                    text="/model add-to-registry",
-                    display="/model add-to-registry <server-url>",
-                    description="Add a model from an OpenAI-compatible server",
-                )
-            )
         for name in sorted(MODELS.keys()):
             if name.lower().startswith(partial.lower()):
                 items.append(
@@ -348,7 +340,7 @@ class Completer:
         except Exception:
             return []
 
-        prefix = "/model add-to-registry "
+        prefix = "/connect "
         partial = text[len(prefix) :].casefold()
         aliases_by_endpoint: dict[str, list[str]] = {}
         for alias, config in MODELS.items():
@@ -364,6 +356,15 @@ class Completer:
             aliases_by_endpoint.setdefault(endpoint, []).append(str(alias))
 
         items: list[CompletionItem] = []
+        for provider in ("anthropic",):
+            if not partial or provider.startswith(partial):
+                items.append(
+                    CompletionItem(
+                        text=prefix + provider,
+                        display=provider,
+                        description="Set up Anthropic / Claude",
+                    )
+                )
         for endpoint, aliases in sorted(aliases_by_endpoint.items()):
             if partial and not endpoint.casefold().startswith(partial):
                 continue
