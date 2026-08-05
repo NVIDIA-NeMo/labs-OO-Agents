@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from .explorer_base import (
     BAR_STYLE,
+    ExplorerInteraction,
     display_line,
     render_markdown_lines,
     search_terms,
@@ -166,20 +167,30 @@ class SessionExplorerModel:
         self.detail_offset = min(max(self.detail_offset, 0), max_offset)
 
 
-class SessionExplorerView:
+class SessionExplorerView(ExplorerInteraction):
     """In-app subview wrapper for browsing stored sessions."""
 
     title = "sessions"
+    detail_focus = "dialog"
 
     def __init__(self, *, limit: int = 100) -> None:
         self.model = SessionExplorerModel(build_session_rows(limit=limit))
         self.pending_input: str | None = None
 
     def render(self, width: int, height: int) -> str:
-        return render_session_explorer(self.model, width, height, ansi=True)
+        return render_session_explorer(
+            self.model,
+            width,
+            height,
+            ansi=True,
+            selection_hint=self.selection_hint(),
+        )
 
     def handle_key(self, action: str, value: str = "") -> SubviewKeyResult:
         model = self.model
+        interaction = self.handle_interaction_action(action)
+        if interaction != "ignored":
+            return interaction
         if action == "quit":
             if model.search_active:
                 model.edit_query(model.query + "q")
@@ -431,7 +442,12 @@ def _cached_detail_lines(
 
 
 def render_session_explorer(
-    model: SessionExplorerModel, width: int, height: int, *, ansi: bool = False
+    model: SessionExplorerModel,
+    width: int,
+    height: int,
+    *,
+    ansi: bool = False,
+    selection_hint: str = "F2 select/copy",
 ) -> str:
     """Render the current session explorer state as text/ANSI."""
     width = max(int(width), 40)
@@ -463,8 +479,9 @@ def render_session_explorer(
     focus_label = f"{mode_text} · pane={pane_label}"
     footer_parts = [
         focus_label,
-        "tab switch pane",
         "↑/↓ sessions/scroll",
+        selection_hint,
+        "tab switch pane",
         search_prompt,
         enter_hint,
         "esc clear",
@@ -481,6 +498,7 @@ def render_session_explorer(
         footer = footer_plain
 
     body_height = max(height - 2, 0)
+    model._last_divider_y = 0
     if not total:
         body = ["No sessions found."]
     elif row is None:
@@ -523,6 +541,7 @@ def render_session_explorer(
             body.append(divider)
         else:
             body.append(divider_plain)
+        model._last_divider_y = len(body)
         available = max(body_height - len(body), 0)
         detail_visible = max(available - 1, 0)
         model._last_detail_visible_lines = detail_visible

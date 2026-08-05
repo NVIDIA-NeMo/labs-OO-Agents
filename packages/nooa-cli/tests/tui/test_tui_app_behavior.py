@@ -141,6 +141,30 @@ async def test_mouse_support_only_enabled_for_subviews():
         assert bool(h.app._app.mouse_support()) is False
 
 
+async def test_explorer_f2_temporarily_restores_native_terminal_selection():
+    from unittest.mock import MagicMock
+
+    from nooa_cli.tui.explorer_base import ExplorerConfig, ExplorerModel, ExplorerView
+
+    view = ExplorerView(
+        ExplorerModel([MagicMock(search_text="copy me")]),
+        ExplorerConfig(title="Copy Explorer"),
+    )
+    async with TUIHarness() as h:
+        opened = asyncio.create_task(h.app.open_subview(view))
+        await h.wait_for(lambda: h.app.active_subview is view)
+        assert bool(h.app._app.mouse_support()) is True
+
+        await h.press("f2")
+        await h.wait_for(lambda: not bool(h.app._app.mouse_support()))
+        assert "F2 mouse/wheel" in view.render(80, 10)
+
+        await h.press("f2")
+        await h.wait_for(lambda: bool(h.app._app.mouse_support()))
+        await h.press("q")
+        await asyncio.wait_for(opened, timeout=1)
+
+
 async def test_oauth_modal_ctrl_y_copies_full_authorization_url(monkeypatch):
     url = "https://login.example.test/authorize?state=" + "a" * 500
     copied = []

@@ -10,6 +10,7 @@ from nooa_cli.tui.event_explorer import (
     highlight_terms_with_current,
 )
 from nooa_cli.tui.explorer_base import (
+    FTS_ACTIVE_STYLE,
     ExplorerConfig,
     ExplorerModel,
     ExplorerView,
@@ -27,6 +28,9 @@ from nooa_cli.tui.todo_explorer import (
     TodoExplorerView,
     build_todo_rows,
 )
+from nooa_cli.tui.tui_application import _SubviewControl
+from prompt_toolkit.data_structures import Point
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 
 # ─── explorer_base tests ─────────────────────────────────────────────────────
 
@@ -74,6 +78,9 @@ class TestExplorerBaseUtils:
     def test_style_bar_ansi(self):
         result = style_bar("test", ansi=True)
         assert "\x1b[" in result
+
+    def test_fts_style_uses_explicit_high_contrast_truecolor(self):
+        assert FTS_ACTIVE_STYLE == "\x1b[1;38;2;255;255;255;48;2;95;28;75m"
 
 
 class TestExplorerModel:
@@ -174,6 +181,35 @@ class TestExplorerView:
         view.handle_key("tab")
         assert view.model.focus == "detail"
 
+    def test_f2_toggles_native_terminal_selection(self):
+        view = self._make_view()
+
+        assert view.mouse_support is True
+        assert view.handle_key("native_selection") == "handled"
+        assert view.mouse_support is False
+        assert "F2 mouse/wheel" in view.render(80, 24)
+
+        view.handle_key("native_selection")
+        assert view.mouse_support is True
+
+    def test_mouse_wheel_routes_to_pane_under_pointer(self):
+        class LongDetailView(ExplorerView):
+            def detail_lines(self, row, width):
+                return [f"detail line {i}" for i in range(50)]
+
+        rows = [MagicMock(search_text=f"item {i}") for i in range(10)]
+        view = LongDetailView(ExplorerModel(rows), ExplorerConfig(title="Mouse Explorer"))
+        view.render(80, 16)
+
+        divider_y = view.model._last_divider_y
+        view.handle_mouse("scroll_down", 5, divider_y - 1)
+        assert view.model.focus == "list"
+        assert view.model.cursor == 3
+
+        view.handle_mouse("scroll_down", 5, divider_y + 1)
+        assert view.model.focus == "detail"
+        assert view.model.detail_offset == 3
+
     def test_render_empty(self):
         rows = []
         model = ExplorerModel(rows)
@@ -181,6 +217,23 @@ class TestExplorerView:
         view = ExplorerView(model, config)
         output = view.render(80, 24)
         assert "Nothing here." in output
+
+
+def test_subview_control_preserves_vt_mouse_position_for_wheel_dispatch():
+    calls = []
+    control = _SubviewControl(
+        "explorer",
+        mouse_callback=lambda action, x, y: calls.append((action, x, y)) or True,
+    )
+    event = MouseEvent(
+        position=Point(x=12, y=7),
+        event_type=MouseEventType.SCROLL_DOWN,
+        button=MouseButton.NONE,
+        modifiers=frozenset(),
+    )
+
+    assert control.mouse_handler(event) is None
+    assert calls == [("scroll_down", 12, 7)]
 
 
 # ─── Job explorer tests ──────────────────────────────────────────────────────
