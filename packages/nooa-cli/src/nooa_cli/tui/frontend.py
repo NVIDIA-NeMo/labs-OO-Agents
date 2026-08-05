@@ -134,7 +134,9 @@ class Frontend(Protocol):
         """
         ...
 
-    async def prompt_sensitive(self, title: str, message: str) -> str:
+    async def prompt_sensitive(
+        self, title: str, message: str, *, link_url: str | None = None
+    ) -> str:
         """Collect a masked one-line value without adding it to input history."""
         ...
 
@@ -351,14 +353,18 @@ class TerminalFrontend:
             None, lambda: self._console.console.input(f"[user]{prompt}[/user]").strip()
         )
 
-    async def prompt_sensitive(self, title: str, message: str) -> str:
+    async def prompt_sensitive(
+        self, title: str, message: str, *, link_url: str | None = None
+    ) -> str:
         """Collect OAuth material in the live application's masked modal view."""
         if self._app is not None:
-            return await self._app.prompt_sensitive(title, message)
+            return await self._app.prompt_sensitive(title, message, link_url=link_url)
 
         from prompt_toolkit import PromptSession
 
         self._console.console.print(message)
+        if link_url:
+            self._console.console.print(link_url, markup=False)
         session = PromptSession(is_password=True)
         return (await session.prompt_async(f"{title}: ")).strip()
 
