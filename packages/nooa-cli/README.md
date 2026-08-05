@@ -35,30 +35,37 @@ uv run nooa-acp
 
 ## TUI configuration
 
-The TUI reads layered `settings.yaml` files from the user config directory and
-the current project's `.nooa/` directory. It also honors `AGENTS.md` files from
-the repository root down to the current working directory.
+### Connect a model
 
-### Models and endpoints
+Start the TUI and run `/connect` — it guides you through picking a model and
+stores your credentials for you.
 
-For reusable aliases, connect a backend from inside the TUI by URL:
+```bash
+nooa tui
+```
 
 ```text
 /connect https://api.anthropic.com
 /connect http://localhost:11434
-/connect http://localhost:8000/v1
 /connect https://inference-api.nvidia.com/v1
 ```
 
-`/connect` normalizes the URL and detects the wire protocol before writing an
-alias. Anthropic hostnames use the provider's native model-list API with a
-conventional secret name; Ollama backends are detected by probing `/api/tags`
-and are saved with the `ollama_chat/` LiteLLM prefix and no API key; every other
-OpenAI-compatible server fetches its `/models` catalog (retrying `/v1/models`
-after a root 404). In all cases the flow can save a pasted key to
-`.nooa/secrets.yaml` (only after the fetch validates it), write a project-local
-alias to `.nooa/llm_config.yaml`, reload the registry, and switch to the
-selected model.
+Give it a URL and `/connect` figures out the rest: it fetches the available
+models, prompts for an API key if the backend needs one, saves an alias to your
+project, and switches to the model you pick. Rerun `/connect` on the same URL
+any time to update the saved alias.
+
+### Editing saved config
+
+Everything `/connect` writes lives under your project's `.nooa/` folder:
+
+- `.nooa/llm_config.yaml` — saved model aliases
+- `.nooa/secrets.yaml` — API keys keyed by env-var name
+- `.nooa/settings.yaml` — TUI preferences and default model
+
+Edit any of them from inside the TUI with `/edit .nooa/<file>`, or open them in
+your usual editor. Changes to `settings.yaml` and `llm_config.yaml` are picked
+up on the next launch.
 
 Agent Skills are discovered from installed `nooa.skills` entry points and from
 conventional `.agents/skills`, `.claude/skills`, and `.cursor/skills`
