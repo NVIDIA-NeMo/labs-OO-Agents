@@ -545,6 +545,30 @@ def _mcp_registry(servers, connected=()):
     return reg
 
 
+def test_mcp_lists_lifecycle_actions():
+    completer = Completer(registry=_mcp_registry([]))
+    items = completer.complete("/mcp ")
+
+    assert [item.text for item in items] == [
+        "/mcp list",
+        "/mcp add",
+        "/mcp remove",
+        "/mcp connect",
+        "/mcp approve",
+        "/mcp revoke",
+        "/mcp disconnect",
+    ]
+    assert all(item.description for item in items)
+
+
+def test_mcp_action_completion_filters_partial_input():
+    completer = Completer(registry=_mcp_registry([]))
+
+    assert [item.text for item in completer.complete("/mcp ap")] == [
+        "/mcp approve"
+    ]
+
+
 def test_mcp_connect_lists_configured_servers():
     reg = _mcp_registry(["maas-jira", "maas-confluence"])
     completer = Completer(registry=reg)
