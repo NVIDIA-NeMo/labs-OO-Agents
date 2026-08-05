@@ -533,9 +533,9 @@ class TerminalFrontend:
         peach = COLORS["peach"]
 
         if info.llm_ready:
-            title = f"[bold {COLORS['mauve']}]NeMo OO Agents ready[/]"
+            title = f"[bold {COLORS['mauve']}]NOOA ready[/]"
         else:
-            title = f"[bold {COLORS['red']}]NeMo OO Agents — LLM unavailable[/]"
+            title = f"[bold {COLORS['red']}]NOOA — LLM unavailable[/]"
         self._console.console.print(Rule(title=title, style=COLORS["surface2"]))
 
         table = Table.grid(padding=(0, 2))

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Main entry point for NeMo OO Agents TUI (terminal frontend).
+"""Main entry point for the NOOA TUI (terminal frontend).
 
 Thin wrapper around the shared bootstrap.  Creates a ``TerminalFrontend``,
 calls ``bootstrap()``, wires them together, and runs the session.
@@ -29,7 +29,7 @@ async def main(
 
     Args:
         config: Optional Config instance. If None, load layered defaults.
-        agent: Optional NeMo OO Agents agent.  If None, a TUIAgent (or custom class
+        agent: Optional NOOA agent. If None, a TUIAgent (or custom class
                from ``config.tui.agent_spec``) is created from ``config``.
                Custom hosts must implement the InteractiveAgent queue contract.
         resume_session_id: Explicit session ID (or prefix) to resume.
