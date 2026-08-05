@@ -18,40 +18,10 @@ def test_tui_help_documents_explicit_llm_config() -> None:
     result = CliRunner().invoke(command, ["--help"])
 
     assert result.exit_code == 0
-    assert "--api-base TEXT" in result.output
-    assert "--api-key-env ENVVAR" in result.output
-    assert "Advanced: custom LLM API base URL" in result.output
-    assert "--model." in result.output
+    assert "--model" in result.output
     assert "--llm-config FILE" in result.output
     assert "--registry" not in result.output
     assert "highest precedence" in result.output
-
-
-def test_tui_api_base_requires_model() -> None:
-    result = CliRunner().invoke(command, ["--api-base", "http://localhost:8000/v1"])
-
-    assert result.exit_code != 0
-    assert "--api-base requires --model" in result.output
-    assert "Use /connect for interactive setup" in result.output
-
-
-def test_tui_api_key_env_requires_api_base() -> None:
-    result = CliRunner().invoke(command, ["--model", "openai/custom", "--api-key-env", "KEY"])
-
-    assert result.exit_code != 0
-    assert "--api-key-env requires --api-base" in result.output
-
-
-def test_config_accepts_direct_endpoint_overrides() -> None:
-    config = Config.load(
-        model="hosted_vllm/Qwen/Qwen3-1.7B",
-        api_base="http://localhost:8000/v1",
-        api_key_env="MY_API_KEY",
-    )
-
-    assert config.tui.default_model == "hosted_vllm/Qwen/Qwen3-1.7B"
-    assert config.tui.api_base == "http://localhost:8000/v1"
-    assert config.tui.api_key_env == "MY_API_KEY"
 
 
 def test_config_accepts_repeated_explicit_registry_paths(tmp_path: Path) -> None:
@@ -105,42 +75,12 @@ def test_working_dir_scopes_project_settings(tmp_path: Path, monkeypatch) -> Non
     assert "NEMO_OO_PROJECT_DIR" not in __import__("os").environ
 
 
-def test_get_llm_uses_direct_endpoint_overrides(monkeypatch) -> None:
+def test_get_llm_uses_registry_alias(monkeypatch) -> None:
     calls = []
 
     def fake_get_llm_client(name: str, **kwargs):
         calls.append((name, kwargs))
         return SimpleNamespace(_registry_config=None)
-
-    monkeypatch.setattr(unifiedllm, "MODELS", {})
-    monkeypatch.setattr(unifiedllm, "get_llm_client", fake_get_llm_client)
-    monkeypatch.setenv("MY_API_KEY", "secret-value")
-
-    config = Config()
-    config.tui.default_model = "openai/custom/model"
-    config.tui.api_base = "https://gateway.example.com/v1"
-    config.tui.api_key_env = "MY_API_KEY"
-
-    llm = get_llm(config)
-
-    assert calls == [
-        (
-            "openai/custom/model",
-            {"api_base": "https://gateway.example.com/v1", "api_key": "secret-value"},
-        )
-    ]
-    assert llm._registry_config == {
-        "api_base": "https://gateway.example.com/v1",
-        "api_key_env": "MY_API_KEY",
-    }
-
-
-def test_get_llm_applies_endpoint_overrides_to_registry_aliases(monkeypatch) -> None:
-    calls = []
-
-    def fake_get_llm_client(name: str, **kwargs):
-        calls.append((name, kwargs))
-        return SimpleNamespace(_registry_config={"api_base": "https://registry.example/v1"})
 
     monkeypatch.setattr(
         unifiedllm,
@@ -148,70 +88,10 @@ def test_get_llm_applies_endpoint_overrides_to_registry_aliases(monkeypatch) -> 
         {"alias": {"model_name": "openai/provider/model", "api_base": "https://old.example/v1"}},
     )
     monkeypatch.setattr(unifiedllm, "get_llm_client", fake_get_llm_client)
-    monkeypatch.setenv("MY_API_KEY", "secret-value")
 
     config = Config()
     config.tui.default_model = "alias"
-    config.tui.api_base = "https://override.example/v1"
-    config.tui.api_key_env = "MY_API_KEY"
 
-    llm = get_llm(config)
+    get_llm(config)
 
-    assert calls == [
-        ("alias", {"api_base": "https://override.example/v1", "api_key": "secret-value"})
-    ]
-    assert llm._registry_config == {
-        "api_base": "https://override.example/v1",
-        "api_key_env": "MY_API_KEY",
-    }
-
-
-def test_get_llm_keeps_native_anthropic_model_off_direct_endpoint(monkeypatch) -> None:
-    calls = []
-
-    def fake_get_llm_client(name: str, **kwargs):
-        calls.append((name, kwargs))
-        raise AssertionError("native Anthropic should not use get_llm_client overrides")
-
-    def fake_completion_client(*, model: str):
-        return SimpleNamespace(model=model, _registry_config=None)
-
-    monkeypatch.setattr(unifiedllm, "MODELS", {})
-    monkeypatch.setattr(unifiedllm, "get_llm_client", fake_get_llm_client)
-    monkeypatch.setattr(unifiedllm, "CompletionClient", fake_completion_client)
-
-    config = Config()
-    config.tui.default_model = "claude-sonnet-4-5"
-    config.tui.api_base = "https://gateway.example.com/v1"
-    config.tui.api_key_env = "MY_API_KEY"
-
-    llm = get_llm(config)
-
-    assert calls == []
-    assert llm.model == "claude-sonnet-4-5"
-    assert llm._registry_config is None
-
-
-def test_get_llm_does_not_apply_endpoint_overrides_to_anthropic_alias(monkeypatch) -> None:
-    calls = []
-
-    def fake_get_llm_client(name: str, **kwargs):
-        calls.append((name, kwargs))
-        return SimpleNamespace(_registry_config={"model_name": "anthropic/claude-sonnet-4-5"})
-
-    monkeypatch.setattr(
-        unifiedllm,
-        "MODELS",
-        {"claude-alias": {"model_name": "anthropic/claude-sonnet-4-5"}},
-    )
-    monkeypatch.setattr(unifiedllm, "get_llm_client", fake_get_llm_client)
-
-    config = Config()
-    config.tui.default_model = "claude-alias"
-    config.tui.api_base = "https://gateway.example.com/v1"
-    config.tui.api_key_env = "MY_API_KEY"
-
-    llm = get_llm(config)
-
-    assert calls == [("claude-alias", {})]
-    assert llm._registry_config == {"model_name": "anthropic/claude-sonnet-4-5"}
+    assert calls == [("alias", {})]

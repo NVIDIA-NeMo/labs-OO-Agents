@@ -50,23 +50,6 @@ after a root 404). In all cases the flow can save a pasted key to
 alias to `.nooa/llm_config.yaml`, reload the registry, and switch to the
 selected model.
 
-For an advanced one-shot run, pass the same model string and API base you would
-pass to `get_llm_client`. `--api-base` requires `--model`:
-
-```bash
-nooa tui --model ollama_chat/qwen3:1.7b --api-base http://localhost:11434
-nooa tui --model hosted_vllm/Qwen/Qwen3-1.7B --api-base http://localhost:8000/v1
-nooa tui --model openai/nvidia/my-model --api-base https://inference-api.nvidia.com/v1 --api-key-env NVIDIA_INFERENCE_API_KEY
-```
-
-To persist a direct endpoint override manually, put it in `.nooa/settings.yaml`:
-
-```yaml
-tui:
-  default_model: hosted_vllm/Qwen/Qwen3-1.7B
-  api_base: http://localhost:8000/v1
-```
-
 Agent Skills are discovered from installed `nooa.skills` entry points and from
 conventional `.agents/skills`, `.claude/skills`, and `.cursor/skills`
 directories. Discovered workflow skills are loaded but remain model-inactive
