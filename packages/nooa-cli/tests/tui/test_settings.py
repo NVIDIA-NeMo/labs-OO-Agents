@@ -98,9 +98,12 @@ class TestLayering:
         assert loaded.tui.agent_spec is None
 
     def test_path_coercion(self, user_dir, project_dir):
-        (user_dir / "settings.yaml").write_text("tui:\n  mcp_file: custom.mcp.json\n")
+        (user_dir / "settings.yaml").write_text(
+            "tui:\n  mcp_file: custom.mcp.json\n  additional_skills_dirs:\n    - shared/skills\n"
+        )
         loaded = load_settings(Config())
         assert loaded.tui.mcp_file == Path("custom.mcp.json")
+        assert loaded.tui.additional_skills_dirs == [Path("shared/skills")]
 
 
 class TestPresence:

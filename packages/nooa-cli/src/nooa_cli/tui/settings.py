@@ -51,6 +51,7 @@ SETTINGS_ENV_VAR = "NEMO_OO_SETTINGS"
 _COERCE: dict[str, Any] = {
     "tui.mcp_file": lambda v: Path(v),
     "tui.trace_dir": lambda v: Path(v) if v is not None else None,
+    "tui.additional_skills_dirs": lambda v: [Path(item) for item in (v or [])],
 }
 
 # Fields that are computed / runtime-only and must NOT be persisted or
@@ -276,6 +277,10 @@ tui:
 
   # Vi keybindings in the input prompt.
   # vi_mode: false
+
+  # Additional skill roots. Prefer /skills add <directory> so these are
+  # discovered immediately and saved here for future TUI runs.
+  # additional_skills_dirs: []
 
   # Write trace files here (relative to project root, or ":project:").
   # trace_dir: .nooa/traces

@@ -74,6 +74,9 @@ class TUIConfig(BaseModel):
             Path.home() / ".claude" / "commands",
         ]
     )
+    # Extra roots explicitly added with ``/skills add``. Unlike
+    # ``skills_dirs`` (the computed runtime search path), these are persisted.
+    additional_skills_dirs: list[Path] = Field(default_factory=list)
 
     # Default LLM model (from unifiedllm registry)
     default_model: str = DEFAULT_MODEL
@@ -238,8 +241,9 @@ class Config(BaseModel):
                 if p not in explicit:
                     explicit.append(p)
 
-        defaults = [d for d in cfg.tui.skills_dirs if d not in explicit]
-        cfg.tui.skills_dirs = explicit + defaults
+        persisted = [Path(d) for d in cfg.tui.additional_skills_dirs]
+        ordered = explicit + persisted + cfg.tui.skills_dirs
+        cfg.tui.skills_dirs = list(dict.fromkeys(ordered))
 
         # Ignore absent conventional locations.
         cfg.tui.skills_dirs = [d for d in cfg.tui.skills_dirs if d.exists()]

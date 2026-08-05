@@ -805,16 +805,18 @@ class SkillsCommand(Command):
     @classmethod
     def help_text(cls) -> dict[str, str]:
         return {
-            "/skills <list|commands|activate ID|deactivate ID>": (
+            "/skills <list|add DIR|commands|activate ID|deactivate ID>": (
                 "List and manage skills or show their slash commands"
             ),
         }
 
     def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
         if not args:
-            return False, "Usage: /skills <list|activate|deactivate|commands>"
-        if args[0].lower() not in ("list", "activate", "deactivate", "commands"):
+            return False, "Usage: /skills <list|add|activate|deactivate|commands>"
+        if args[0].lower() not in ("list", "add", "activate", "deactivate", "commands"):
             return False, f"Unknown subcommand `{args[0]}`"
+        if args[0].lower() == "add" and len(args) != 2:
+            return False, "Usage: /skills add <directory>"
         if args[0].lower() in ("activate", "deactivate") and len(args) < 2:
             return False, f"Usage: /skills {args[0]} <skill_id>"
         return True, None
@@ -822,6 +824,58 @@ class SkillsCommand(Command):
     async def execute(self, args: list[str]) -> "CommandResult":
         subcmd = args[0].lower()
         subargs = args[1:]
+
+        if subcmd == "add":
+            if self._registry is None:
+                return CommandResult.err("The command registry is unavailable.")
+            raw_path = Path(subargs[0]).expanduser()
+            base = Path(getattr(self.agent, "cwd", Path.cwd()))
+            path = (base / raw_path).resolve() if not raw_path.is_absolute() else raw_path.resolve()
+            if not path.is_dir():
+                return CommandResult.err(f"Skills directory not found: {path}")
+
+            before_skills = set(
+                getattr(getattr(self.agent, "skills", None), "discovered", lambda: [])()
+            )
+            before_commands = set(self._registry._user_skills)
+            try:
+                added = self._registry.add_skills_dir(path)
+            except Exception as exc:
+                return CommandResult.err(f"Failed to add skills directory {path}: {exc}")
+
+            persisted = list(
+                dict.fromkeys(
+                    Path(item).expanduser().resolve()
+                    for item in getattr(self.config, "additional_skills_dirs", [])
+                )
+            )
+            if path not in persisted:
+                persisted.append(path)
+                self.config.additional_skills_dirs = persisted
+            try:
+                settings_path = self._persist_tui_setting(
+                    "additional_skills_dirs", [str(item) for item in persisted]
+                )
+            except Exception as exc:
+                return CommandResult.ok(
+                    TextOutput(f"Added skills directory: {path}", "success"),
+                    TextOutput(f"Could not save the skills directory: {exc}", "warning"),
+                )
+
+            after_skills = set(
+                getattr(getattr(self.agent, "skills", None), "discovered", lambda: [])()
+            )
+            after_commands = set(self._registry._user_skills)
+            detail = (
+                f"Discovered {len(after_skills - before_skills)} skill(s) and "
+                f"{len(after_commands - before_commands)} slash command(s)."
+            )
+            verb = "Added" if added else "Already using"
+            return CommandResult.ok(
+                TextOutput(f"{verb} skills directory: {path}", "success"),
+                TextOutput(detail, "info"),
+                TextOutput(f"Saved in {settings_path}", "status"),
+            )
 
         if subcmd == "commands":
             user_skills = self._registry._user_skills if self._registry else {}
@@ -2430,6 +2484,30 @@ class CommandRegistry:
             pass
         except Exception as e:
             logger.warning("Failed to auto-install skills: %s", e)
+
+    def add_skills_dir(self, path: Path) -> bool:
+        """Add one live skill root and refresh model and slash-command discovery."""
+        path = Path(path).expanduser().resolve()
+        existing = {Path(item).expanduser().resolve() for item in (self.skills_dirs or [])}
+        added = path not in existing
+        if added:
+            if self.skills_dirs is None:
+                self.skills_dirs = []
+            self.skills_dirs.append(path)
+            if path not in self.config.skills_dirs:
+                self.config.skills_dirs.append(path)
+
+        try:
+            from nooa.skill_registry import SkillRegistry
+
+            registry = getattr(self.agent, "skills", None)
+            if isinstance(registry, SkillRegistry):
+                registry.discover_skills_dirs([path])
+        except ImportError:
+            pass
+
+        self._user_skills = self._discover_user_skills()
+        return added
 
     def get_command(self, name: str) -> "Command | None":
         return self._commands.get(name.lower())

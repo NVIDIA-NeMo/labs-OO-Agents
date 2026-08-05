@@ -71,6 +71,81 @@ def test_slash_case_insensitive(completer):
     assert items[0].text == "/help"
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "/skills ",
+            [
+                "/skills list",
+                "/skills add",
+                "/skills commands",
+                "/skills activate",
+                "/skills deactivate",
+            ],
+        ),
+        (
+            "/show-python ",
+            ["/show-python status", "/show-python on", "/show-python off"],
+        ),
+        (
+            "/show-diffs ",
+            ["/show-diffs status", "/show-diffs on", "/show-diffs off"],
+        ),
+        (
+            "/reasoning ",
+            [
+                "/reasoning off",
+                "/reasoning low",
+                "/reasoning medium",
+                "/reasoning high",
+            ],
+        ),
+        ("/toolbar ", ["/toolbar reset", "/toolbar set"]),
+        ("/memory ", ["/memory on", "/memory local", "/memory off"]),
+        (
+            "/reflection ",
+            ["/reflection on", "/reflection off", "/reflection now"],
+        ),
+        (
+            "/keep-going ",
+            ["/keep-going on", "/keep-going off", "/keep-going model"],
+        ),
+    ],
+)
+def test_compact_help_command_families_complete_actions(completer, text, expected):
+    assert [item.text for item in completer.complete(text)] == expected
+
+
+def test_model_completion_includes_add_to_registry(completer):
+    items = completer.complete("/model add")
+
+    assert [item.text for item in items] == ["/model add-to-registry"]
+
+
+def test_skills_add_completes_directories_only(tmp_path, mock_registry):
+    (tmp_path / "skill-pack").mkdir()
+    (tmp_path / "skill-pack" / "nested").mkdir()
+    (tmp_path / "not-a-directory.md").touch()
+    mock_registry.agent.cwd = tmp_path
+    completer = Completer(mock_registry)
+
+    assert [item.text for item in completer.complete("/skills add ")] == ["/skills add skill-pack/"]
+    assert [item.text for item in completer.complete("/skills add skill-pack/")] == [
+        "/skills add skill-pack/nested/"
+    ]
+
+
+def test_toolbar_set_completes_unselected_items(completer):
+    first = completer.complete("/toolbar set ")
+    assert first
+
+    selected = first[0].text.removeprefix("/toolbar set ")
+    remaining = completer.complete(f"/toolbar set {selected} ")
+    assert all(item.text.startswith(f"/toolbar set {selected} ") for item in remaining)
+    assert all(item.text != f"/toolbar set {selected} {selected}" for item in remaining)
+
+
 # ---------------------------------------------------------------------------
 # Path completion (/edit)
 # ---------------------------------------------------------------------------

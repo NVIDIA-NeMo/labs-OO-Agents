@@ -17,7 +17,7 @@ def _command(command_type, config: TUIConfig):
 
 def test_command_families_have_one_help_row() -> None:
     assert list(SkillsCommand.help_text()) == [
-        "/skills <list|commands|activate ID|deactivate ID>"
+        "/skills <list|add DIR|commands|activate ID|deactivate ID>"
     ]
     assert list(ShowPythonCommand.help_text()) == ["/show-python [status|on|off]"]
     assert list(ShowDiffsCommand.help_text()) == ["/show-diffs [status|on|off]"]
@@ -72,3 +72,41 @@ async def test_skills_commands_lists_extensions_without_requiring_skill_registry
     assert result.outputs[0].rows == [
         ["/project-operation", "<target>", "Operate on this project"]
     ]
+
+
+@pytest.mark.asyncio
+async def test_skills_add_discovers_immediately_and_persists(tmp_path, monkeypatch) -> None:
+    from nooa_cli.tui.commands import CommandRegistry
+
+    from nooa.skill_registry import SkillRegistry
+
+    project_dir = tmp_path / ".nooa"
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
+    skills_root = tmp_path / "shared-skills"
+    skill_dir = skills_root / "review-code"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: review-code\ndescription: Review code\n---\nReview the code.\n"
+    )
+
+    agent = SimpleNamespace(context_manager=MagicMock(), cwd=tmp_path)
+    agent.skills = SkillRegistry(agent)
+    config = TUIConfig(skills_dirs=[], additional_skills_dirs=[])
+    registry = CommandRegistry(
+        config=config,
+        agent=agent,
+        frontend=MagicMock(),
+        skills_dirs=config.skills_dirs,
+    )
+    agent._command_registry = registry
+
+    command = registry.get_command("skills")
+    assert command is not None
+    result = await command.execute(["add", str(skills_root)])
+
+    assert result.success is True
+    assert skills_root.resolve() in registry.skills_dirs
+    assert "cmd.review-code" in agent.skills.discovered()
+    assert "review-code" in registry._user_skills
+    saved = yaml.safe_load((project_dir / "settings.yaml").read_text())
+    assert saved["tui"]["additional_skills_dirs"] == [str(skills_root.resolve())]
