@@ -106,6 +106,19 @@ class Completer:
         if lower.startswith("/model ") or lower.startswith("/keep-going model "):
             return self._model_completions(text)
 
+        # Directory-only completion for adding a live skill root.
+        if lower.startswith("/skills add "):
+            return self._path_completions(
+                text[len("/skills add ") :],
+                prefix="/skills add ",
+                directories_only=True,
+                base_dir=self._agent_working_dir(),
+            )
+
+        # Toolbar item completion after the `set` action.
+        if lower.startswith("/toolbar set "):
+            return self._toolbar_item_completions(text)
+
         if lower.startswith("/keep-going "):
             prefix = "/keep-going "
             partial = text[len(prefix) :].lower()
@@ -134,6 +147,33 @@ class Completer:
                 "on": "Enable idle memory reflection",
                 "off": "Disable idle memory reflection",
                 "now": "Run memory reflection immediately",
+            },
+            "/skills ": {
+                "list": "List available skills",
+                "add": "Add a skills directory",
+                "commands": "Show slash commands supplied by skills",
+                "activate": "Activate a skill",
+                "deactivate": "Deactivate a skill",
+            },
+            "/show-python ": {
+                "status": "Show whether Python execution display is on or off",
+                "on": "Enable Python execution display",
+                "off": "Suppress Python execution display",
+            },
+            "/show-diffs ": {
+                "status": "Show whether inline file-edit diffs are on or off",
+                "on": "Show inline file-edit diffs",
+                "off": "Suppress inline file-edit diffs",
+            },
+            "/reasoning ": {
+                "off": "Disable model reasoning",
+                "low": "Use low reasoning effort",
+                "medium": "Use medium reasoning effort",
+                "high": "Use high reasoning effort",
+            },
+            "/toolbar ": {
+                "reset": "Restore the default toolbar items",
+                "set": "Choose the toolbar items to display",
             },
             "/mcp ": {
                 "list": "Show configured, approved, and connected MCP servers",
@@ -278,6 +318,14 @@ class Completer:
             else "Switch to {name}"
         )
         items = []
+        if prefix == "/model " and "add-to-registry".startswith(partial.lower()):
+            items.append(
+                CompletionItem(
+                    text="/model add-to-registry",
+                    display="/model add-to-registry <server-url>",
+                    description="Add a model from an OpenAI-compatible server",
+                )
+            )
         for name in sorted(MODELS.keys()):
             if name.lower().startswith(partial.lower()):
                 items.append(
@@ -288,6 +336,23 @@ class Completer:
                     )
                 )
         return items
+
+    def _toolbar_item_completions(self, text: str) -> list[CompletionItem]:
+        from .toolbar import ToolbarRegistry
+
+        prefix = "/toolbar set "
+        selected, _, partial = text[len(prefix) :].rpartition(" ")
+        selected_items = selected.split() if selected else []
+        replacement_prefix = prefix + (selected + " " if selected else "")
+        return [
+            CompletionItem(
+                text=replacement_prefix + name,
+                display=name,
+                description="Toolbar item",
+            )
+            for name in ToolbarRegistry().names()
+            if name not in selected_items and name.lower().startswith(partial.lower())
+        ]
 
     # ------------------------------------------------------------------
     # Skill ID completion
@@ -557,13 +622,23 @@ class Completer:
     # File path completion
     # ------------------------------------------------------------------
 
-    def _path_completions(self, partial: str, prefix: str = "") -> list[CompletionItem]:
+    def _path_completions(
+        self,
+        partial: str,
+        prefix: str = "",
+        *,
+        directories_only: bool = False,
+        base_dir: Path | None = None,
+    ) -> list[CompletionItem]:
         """Complete filesystem paths from *partial*.
 
         Args:
             partial: The path fragment the user has typed so far.
             prefix: Command prefix to prepend to each item's ``text`` so that
                     the result is a full input replacement (e.g. ``"/edit "``).
+            directories_only: Exclude files from the candidates.
+            base_dir: Resolve relative lookup paths from this directory while
+                      preserving the user's relative path in inserted text.
         """
         if not partial:
             partial = "."
@@ -571,14 +646,15 @@ class Completer:
         # Expand ~ to home dir
         expanded = os.path.expanduser(partial)
         p = Path(expanded)
+        lookup = p if p.is_absolute() or base_dir is None else base_dir / p
 
         # Determine directory to list and filter prefix
-        if p.is_dir():
-            parent = p
+        if lookup.is_dir():
+            parent = lookup
             name_filter = ""
         else:
-            parent = p.parent
-            name_filter = p.name
+            parent = lookup.parent
+            name_filter = lookup.name
 
         if not parent.exists():
             return []
@@ -586,6 +662,8 @@ class Completer:
         items: list[CompletionItem] = []
         try:
             for entry in sorted(parent.iterdir()):
+                if directories_only and not entry.is_dir():
+                    continue
                 name = entry.name
                 if name_filter and not name.lower().startswith(name_filter.lower()):
                     continue
@@ -595,7 +673,7 @@ class Completer:
 
                 display = name + ("/" if entry.is_dir() else "")
                 # Build the path portion
-                if p.is_dir():
+                if lookup.is_dir():
                     path_text = str(Path(partial) / name)
                 else:
                     path_text = str(Path(partial).parent / name)
@@ -615,6 +693,10 @@ class Completer:
             pass
 
         return items
+
+    def _agent_working_dir(self) -> Path:
+        agent = getattr(self._registry, "agent", None)
+        return Path(getattr(agent, "cwd", Path.cwd())).expanduser().resolve()
 
 
 # ---------------------------------------------------------------------------
