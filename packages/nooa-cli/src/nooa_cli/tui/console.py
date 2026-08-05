@@ -17,7 +17,7 @@ from .theme import CATPPUCCIN_THEME, COLORS
 
 
 class TUIConsole:
-    """Rich console wrapper with Catppuccin styling for NeMo OO Agents TUI."""
+    """Rich console wrapper with Catppuccin styling for the NOOA TUI."""
 
     def __init__(self) -> None:
         self.console = Console(theme=CATPPUCCIN_THEME)

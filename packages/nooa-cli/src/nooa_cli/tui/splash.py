@@ -1,108 +1,159 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Splash screen for the Nemotron Agents TUI.
+"""Responsive splash for NVIDIA Labs Object Oriented Agents (NOOA).
 
-A side-by-side lockup: the NVIDIA "eye" mark (green on its black square) next to
-the ``NEMOTRON / OO / AGENTS`` wordmark, sized to fit an 80-column terminal.
+The NVIDIA eye artwork is checked in as terminal-native half blocks. It was
+generated from the ``Eye_Mark`` path in the official NVIDIA SVG served from
+``nvidia.com/content/dam/en-zz/Solutions/about-nvidia/nvidia-brochure/images/``
+``nvidia-logo-black.svg``, then hand-tuned at each terminal resolution.
 
-The eye is half-block art (``█``/``▀``/``▄`` pack two pixel rows per line),
-downsampled from the official logo. The wordmark uses a hand-built full-block
-pixel font (each pixel is one solid ``█``) so the letters stay clean and chunky.
-The logo and the text block are the same height and share top/bottom edges.
+Nothing is downloaded or rasterized at runtime. Wide and standard terminals
+get an eye + NOOA lockup; narrow terminals get a readable text identity.
 """
 
+from __future__ import annotations
+
 import time
+from typing import Literal
 
 from rich.align import Align
 from rich.console import Console, Group
-from rich.panel import Panel
 from rich.text import Text
 
-NVIDIA_GREEN = "#76b900"
-BLACK = "#0a0a0a"
-STEEL_LO = "#6e7d8c"
+from .theme import COLORS
 
-_EYE_W = 38  # columns
-_WORD_W = 40  # columns
+NVIDIA_GREEN = "#76b900"
+
+NOOA_ASCII = "NVIDIA LABS OBJECT ORIENTED AGENTS (NOOA)"
+
+_WIDE_MIN_WIDTH = 80
+_STANDARD_MIN_WIDTH = 56
+_LOCKUP_GAP = 3
 
 # fmt: off
-# NVIDIA eye mark (green on black square). Sized to the wordmark's full height
-# so the logo and the text block share the same top and bottom edges.
-_EYE_LINES: list[str] = [
+# Generated from the official NVIDIA eye at 38 columns × 28 half-cell pixels.
+_WIDE_EYE: tuple[str, ...] = (
     "              ████████████████████████",
     "              ████████████████████████",
-    "         ▄▄███      ▀▀████████████████",
-    "     ▄▄██▀▀   ████▄▄    ▀█████████████",
-    "  ▄▄██▀    ▄▄▄   ▀▀███▄   ▀███████████",
-    "▄███▀   ▄██▀▀ ▄▄     ▀██▄   ▀█████████",
-    "▀███   ███    ███▄  ▄███    ██████████",
-    " ▀███   ██▄   ████████▀   ▄███▀▀██████",
-    "  ▀███   ▀██▄ █████▀▀  ▄▄███▀    ▀▀███",
-    "    ▀██▄   ▀██      ▄▄███▀       ▄████",
-    "      ▀██▄▄   ███████▀▀      ▄▄███████",
-    "        ▀▀████          ▄▄▄███████████",
-    "              ▄▄▄▄▄███████████████████",
+    "        ▄▄████     ▀▀▀████████████████",
+    "     ▄███▀▀   █████▄▄   ▀█████████████",
+    "  ▄███▀   ▄▄▄█▀ ▀▀▀███▄   ▀███████████",
+    "▄███▀  ▄▄██▀▀▀█▄▄   ▀███▄   ▀█████████",
+    "▀███▄  ███    ███▄  ▄███▀  ▄██████████",
+    " ▀███  ▀███   ████████▀  ▄████▀▀██████",
+    "  ▀███▄  ███▄ ██████▀  ▄████▀    ▀▀███",
+    "    ███▄  ▀▀██▀▀▀  ▄▄████▀▀      ▄████",
+    "     ▀████▄   ████████▀▀     ▄▄███████",
+    "        ▀▀████▀▀▀▀     ▄▄▄████████████",
+    "            ▀▀▄▄▄▄████████████████████",
     "              ████████████████████████",
-]
+)
 
-# NEMOTRON / OO / AGENTS wordmark. The OO echoes the object-oriented heritage
-# and the eye mark.
-_WORD_LINES: list[str] = [
-    "█  █ ████ █   █ ████ ████ ███  ████ █  █",
-    "██ █ ██   ██ ██ █  █  ██  █  █ █  █ ██ █",
-    "█ ██ █    █ █ █ █  █  ██  ███  █  █ █ ██",
-    "█  █ ████ █   █ ████  ██  █ ██ ████ █  █",
-    "                                        ",
-    "               ████ ████                ",
-    "               █  █ █  █                ",
-    "               █  █ █  █                ",
-    "               ████ ████                ",
-    "                                        ",
-    "     ████ ████ ████ █  █ ████ ████      ",
-    "     █  █ █    ██   ██ █  ██  ██        ",
-    "     ████ █ ██ █    █ ██  ██    ██      ",
-    "     █  █ ████ ████ █  █  ██  ████      ",
-]
+# Generated independently at 30 columns × 20 half-cell pixels rather than
+# scaling terminal glyphs, which keeps the inner eye open at standard widths.
+_STANDARD_EYE: tuple[str, ...] = (
+    "           ███████████████████",
+    "       ▄▄▄▄▀▀▀▀▀██████████████",
+    "   ▄▄██▀▀▀ ████▄▄ ▀▀██████████",
+    " ▄██▀  ▄▄██▄  ▀▀██▄  ▀████████",
+    "███▄ ███▀  ██▄  ▄██▀  ▄███████",
+    " ▀██▄ ▀██  ██████▀ ▄▄██▀▀▀████",
+    "  ▀██▄ ▀▀█▄▀▀▀▀ ▄▄███▀    ▄███",
+    "    ▀██▄▄  ██████▀▀   ▄▄▄█████",
+    "       ▀▀▀█   ▄▄▄▄▄███████████",
+    "           ███████████████████",
+)
+
+_NOOA_WORDMARK: tuple[str, ...] = (
+    "▄▄▄    ▄▄▄   ▄▄▄▄▄     ▄▄▄▄▄     ▄▄▄▄",
+    "████▄  ███ ▄███████▄ ▄███████▄ ▄██▀▀██▄",
+    "███▀██▄███ ███   ███ ███   ███ ███  ███",
+    "███  ▀████ ███▄▄▄███ ███▄▄▄███ ███▀▀███",
+    "███    ███  ▀█████▀   ▀█████▀  ███  ███",
+)
 # fmt: on
 
-# Plain-text marker kept for tests / log scraping.
-NEMOTRON_ASCII = "NEMOTRON OO AGENTS"
-NEMO_OO_ASCII = NEMOTRON_ASCII  # backwards-compatible alias
+SplashVariant = Literal["wide", "standard", "compact"]
 
 
-def _render_lockup() -> Text:
-    """Render the eye + wordmark side by side as one styled block."""
-    text = Text(justify="left", no_wrap=True)
-    eye_style = f"{NVIDIA_GREEN} on {BLACK}"
-    word_style = NVIDIA_GREEN
-    for i, eye in enumerate(_EYE_LINES):
-        text.append(eye.ljust(_EYE_W), style=eye_style)
-        text.append("  ")
-        text.append(_WORD_LINES[i].ljust(_WORD_W), style=word_style)
-        if i < len(_EYE_LINES) - 1:
-            text.append("\n")
-    return text
+def splash_variant(width: int) -> SplashVariant:
+    """Choose the richest lockup that fits without wrapping."""
+    if width >= _WIDE_MIN_WIDTH:
+        return "wide"
+    if width >= _STANDARD_MIN_WIDTH:
+        return "standard"
+    return "compact"
 
 
-def show_splash(console: Console, delay: float = 0.8) -> None:
-    """Display the Nemotron Agents splash screen.
+def _right_lockup(wordmark: tuple[str, ...]) -> list[tuple[str, str]]:
+    return [
+        ("NVIDIA LABS", f"bold {COLORS['text']}"),
+        ("", ""),
+        *((line, NVIDIA_GREEN) for line in wordmark),
+        ("", ""),
+        ("OBJECT ORIENTED AGENTS", COLORS["subtext1"]),
+    ]
 
-    The splash stays on screen and scrolls off naturally as the user chats.
 
-    Args:
-        console: Rich console instance
-        delay: How long to pause after showing splash (seconds)
-    """
-    tagline = Align.center(
-        Text("object-oriented agents · licensed to vibe", style=f"italic {STEEL_LO}")
+def _render_lockup(eye: tuple[str, ...], wordmark: tuple[str, ...]) -> Text:
+    """Compose one vertically centered eye + wordmark Rich text block."""
+    right = _right_lockup(wordmark)
+    height = max(len(eye), len(right))
+    eye_pad = (height - len(eye)) // 2
+    right_pad = (height - len(right)) // 2
+    eye_lines = ["" for _ in range(eye_pad)] + list(eye)
+    right_lines = [("", "") for _ in range(right_pad)] + right
+    eye_lines.extend("" for _ in range(height - len(eye_lines)))
+    right_lines.extend(("", "") for _ in range(height - len(right_lines)))
+
+    eye_width = max(len(line) for line in eye)
+    result = Text(no_wrap=True, overflow="crop")
+    for index, (eye_line, (right_line, right_style)) in enumerate(
+        zip(eye_lines, right_lines, strict=True)
+    ):
+        result.append(eye_line.ljust(eye_width), style=NVIDIA_GREEN)
+        result.append(" " * _LOCKUP_GAP)
+        result.append(right_line, style=right_style)
+        if index < height - 1:
+            result.append("\n")
+    return result
+
+
+def build_splash(width: int) -> Group:
+    """Build the responsive splash renderable for a terminal width."""
+    variant = splash_variant(width)
+    blank = Text("")
+    if variant == "compact":
+        title = Text("NVIDIA LABS", style=f"bold {NVIDIA_GREEN}")
+        title.append(" · ", style=COLORS["overlay1"])
+        title.append("NOOA", style=f"bold {COLORS['text']}")
+        subtitle = Text("Object Oriented Agents", style=COLORS["subtext1"])
+        return Group(blank, Align.center(title), Align.center(subtitle), blank)
+
+    if variant == "wide":
+        lockup = _render_lockup(_WIDE_EYE, _NOOA_WORDMARK)
+        return Group(blank, Align.center(lockup), blank)
+
+    eye = Text("\n".join(_STANDARD_EYE), style=NVIDIA_GREEN, no_wrap=True)
+    lab = Text("NVIDIA LABS", style=f"bold {COLORS['text']}")
+    wordmark = Text("\n".join(_NOOA_WORDMARK), style=NVIDIA_GREEN, no_wrap=True)
+    subtitle = Text("OBJECT ORIENTED AGENTS", style=COLORS["subtext1"])
+    return Group(
+        blank,
+        Align.center(eye),
+        Align.center(lab),
+        Text(""),
+        Align.center(wordmark),
+        Align.center(subtitle),
+        blank,
     )
 
-    panel = Panel(
-        Group(Align.center(_render_lockup()), Text(""), tagline),
-        border_style=NVIDIA_GREEN,
-        padding=(1, 2),
-        expand=False,
-    )
 
-    console.print(Align.center(panel))
-    time.sleep(delay)
+def show_splash(console: Console, delay: float = 0.0) -> None:
+    """Print the responsive NOOA splash without delaying normal startup."""
+    console.print(build_splash(console.width))
+    if delay > 0:
+        time.sleep(delay)
+
+
+__all__ = ["NOOA_ASCII", "build_splash", "show_splash", "splash_variant"]
