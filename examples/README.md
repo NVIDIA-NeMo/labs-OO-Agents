@@ -611,3 +611,7 @@ Beyond the numbered quickstart, [`advanced/`](advanced/) contains focused demos 
 - [`tracing_langfuse.py`](advanced/tracing_langfuse.py), [`tracing_otlp.py`](advanced/tracing_otlp.py), [`tracing_phoenix.py`](advanced/tracing_phoenix.py) — export traces to third-party backends
 
 And [`quickstart/`](quickstart/) also contains a few beyond-numbered examples: `12_memory.py`, `13_multimodal.py`, `14_atif_trajectory.py`, `15_nemo_relay.py`.
+
+### Community examples
+
+- [`nist_rmf_eval/`](nist_rmf_eval/) — deterministic, NIST AI RMF-anchored evaluator with signed verdict records and an LLM-narrated explanation layer (Python decides, the LLM narrates). Contributed by [CSOAI](https://csoai.org) (Council for the Safety of Artificial Intelligence) for the Open Secure AI Alliance's evaluations-and-benchmarks lane.
