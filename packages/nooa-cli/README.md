@@ -39,6 +39,44 @@ The TUI reads layered `settings.yaml` files from the user config directory and
 the current project's `.nooa/` directory. It also honors `AGENTS.md` files from
 the repository root down to the current working directory.
 
+### Models and endpoints
+
+For reusable aliases, connect a provider or backend from inside the TUI:
+
+```text
+/connect anthropic
+/connect http://localhost:11434
+/connect http://localhost:8000/v1
+/connect https://inference-api.nvidia.com/v1
+```
+
+For native providers such as Anthropic, the TUI uses the provider's model-list
+API and conventional secret name. For OpenAI-compatible servers, it fetches the
+`/models` catalog. In both cases it can save a pasted key to
+`.nooa/secrets.yaml`, write a project-local alias to `.nooa/llm_config.yaml`,
+reload the registry, and switch to the selected model. If a local server such as
+Ollama or vLLM exposes OpenAI-compatible routes under `/v1`, `/connect
+http://host:port` will retry `/v1/models` after a root `/models` 404.
+Conventional local Ollama endpoints are saved with the `ollama_chat/` LiteLLM
+provider and no API key.
+
+For an advanced one-shot run, pass the same model string and API base you would
+pass to `get_llm_client`. `--api-base` requires `--model`:
+
+```bash
+nooa tui --model ollama_chat/qwen3:1.7b --api-base http://localhost:11434
+nooa tui --model hosted_vllm/Qwen/Qwen3-1.7B --api-base http://localhost:8000/v1
+nooa tui --model openai/nvidia/my-model --api-base https://inference-api.nvidia.com/v1 --api-key-env NVIDIA_INFERENCE_API_KEY
+```
+
+To persist a direct endpoint override manually, put it in `.nooa/settings.yaml`:
+
+```yaml
+tui:
+  default_model: hosted_vllm/Qwen/Qwen3-1.7B
+  api_base: http://localhost:8000/v1
+```
+
 Agent Skills are discovered from installed `nooa.skills` entry points and from
 conventional `.agents/skills`, `.claude/skills`, and `.cursor/skills`
 directories. Discovered workflow skills are loaded but remain model-inactive
