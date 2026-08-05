@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Configuration loading for NeMo OO Agents TUI.
+"""Configuration loading for the NOOA TUI.
 
 Hydra-like config: structured Pydantic models with Config.load(**overrides).
 
@@ -371,7 +371,7 @@ def load_agent_class(spec: str) -> type:
 
         if not (isinstance(cls, type) and issubclass(cls, Agent)):
             raise ValueError(
-                f"'{class_name}' is not a subclass of NeMo OO Agents Agent. "
+                f"'{class_name}' is not a subclass of a NOOA Agent. "
                 "Make sure your class inherits from Agent."
             )
     except ImportError:
