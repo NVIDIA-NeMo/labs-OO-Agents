@@ -102,7 +102,71 @@ async def test_mcp_approve_without_code_only_reviews_configuration(tmp_path):
     assert result.success
     assert "Config fingerprint: sha256:" in result.outputs[0].content
     assert "/mcp approve docs " in result.outputs[0].content
+    assert result.input_prefill is not None
+    assert result.input_prefill.startswith("/mcp approve docs ")
     assert registry._is_approved("docs") is False
+
+
+async def test_mcp_command_refreshes_agent_written_settings_before_approval(monkeypatch, tmp_path):
+    project_dir = tmp_path / ".nooa"
+    user_dir = tmp_path / "user-config"
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_dir))
+    project_dir.mkdir()
+    (project_dir / "settings.yaml").write_text(
+        """\
+tui:
+  mcp_servers:
+    docs:
+      url: https://docs.example/mcp
+      transport: streamable-http
+"""
+    )
+    registry = MCPRegistry(
+        approval_path=tmp_path / "approvals.json",
+        watch_settings=True,
+    )
+
+    result = await _command(registry).execute(["approve", "docs"])
+
+    assert result.success
+    assert registry.discovered() == ["docs"]
+    assert result.input_prefill is not None
+    assert result.input_prefill.startswith("/mcp approve docs ")
+
+
+def test_mcp_settings_change_detaches_the_stale_connection(monkeypatch, tmp_path):
+    project_dir = tmp_path / ".nooa"
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user-config"))
+    project_dir.mkdir()
+    (project_dir / "settings.yaml").write_text(
+        """\
+tui:
+  mcp_servers:
+    docs:
+      url: https://new.example/mcp
+"""
+    )
+    registry = MCPRegistry(
+        servers={"docs": {"url": "https://old.example/mcp"}},
+        watch_settings=True,
+        approval_path=tmp_path / "approvals.json",
+    )
+    registry._connected["docs"] = object()
+    registry._activated.add("docs")
+
+    registry.refresh_settings()
+
+    assert registry.connected() == []
+    assert registry.activated() == []
+    assert registry._servers["docs"] == {"url": "https://new.example/mcp"}
+
+
+def test_mcp_lifecycle_help_is_one_row():
+    assert list(MCPCommand.help_text()) == [
+        "/mcp <list|add|remove|connect|approve|revoke|disconnect>"
+    ]
 
 
 def test_mcp_registry_exposes_only_agent_assisted_add_command():

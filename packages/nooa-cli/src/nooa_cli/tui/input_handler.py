@@ -105,6 +105,7 @@ def create_key_bindings(vi_mode: bool = False) -> KeyBindings:
     - Enter: Submit
     - Alt+Enter or Option+Enter: Insert newline for multi-line input
     - Shift+Enter: Insert newline (requires iTerm2/kitty/WezTerm with CSI u mode)
+    - Ctrl+U: Clear the input buffer
     - Any character after /: Keep completion menu open (disabled in vi mode to
       avoid clashing with vi normal-mode movement keys)
 
@@ -131,6 +132,11 @@ def create_key_bindings(vi_mode: bool = False) -> KeyBindings:
     def _(event):
         """Alt+Enter (Option+Enter without CSI u mode) inserts a newline."""
         event.current_buffer.insert_text("\n")
+
+    @bindings.add("c-u")
+    def _(event):
+        """Clear the entire input buffer (readline-style Ctrl+U)."""
+        event.current_buffer.reset()
 
     # Trigger and maintain completion for slash commands
     def _handle_char_for_completion(event, char: str):

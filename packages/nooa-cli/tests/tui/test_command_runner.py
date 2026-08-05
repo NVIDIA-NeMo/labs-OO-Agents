@@ -68,6 +68,49 @@ async def test_command_runner_serializes_commands_and_renders_lifecycle():
 
 
 @pytest.mark.asyncio
+async def test_command_runner_cancels_active_slash_and_continues_queue():
+    """Esc-style cancellation is acknowledged before the next command starts."""
+    rendered = []
+
+    async def render(output):
+        rendered.append(output)
+
+    runner = CommandRunner(render)
+    first_started = asyncio.Event()
+    first_cancelled = asyncio.Event()
+    second_ran = asyncio.Event()
+
+    async def first():
+        first_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            first_cancelled.set()
+            raise
+
+    async def second():
+        second_ran.set()
+
+    first_run = asyncio.create_task(runner.run(kind="slash", text="/slow", work=first))
+    await first_started.wait()
+    second_run = asyncio.create_task(runner.run(kind="slash", text="/next", work=second))
+    await asyncio.sleep(0)
+
+    assert runner.cancel_active(kind="bang") is False
+    assert runner.cancel_active(kind="slash") is True
+    await asyncio.gather(first_run, second_run)
+
+    assert first_cancelled.is_set()
+    assert second_ran.is_set()
+    statuses = [output for output in rendered if isinstance(output, CommandStatus)]
+    assert [(status.text, status.state) for status in statuses] == [
+        ("/slow", "cancelled"),
+        ("/next", "done"),
+    ]
+    assert runner.cancel_active(kind="slash") is False
+
+
+@pytest.mark.asyncio
 async def test_command_runner_surfaces_post_done_render_failures_without_hanging():
     """Post-done render failures become failed statuses without blocking the queue."""
     rendered = []
@@ -251,6 +294,39 @@ async def test_session_slash_renders_done_before_user_visible_output():
     assert rendered[0].text == "/mcp list"
     assert rendered[0].state == "done"
     assert rendered[1].content == "command output"
+
+
+@pytest.mark.asyncio
+async def test_session_command_result_prefills_input_after_rendering():
+    """Approval-style command results populate, but do not submit, the buffer."""
+    from nooa_cli.tui.output import TextOutput
+
+    session = Session.__new__(Session)
+    session._first_message = None
+    session._session_manager = None
+    session.frontend = SimpleNamespace(render=AsyncMock())
+    session._command_runner = None
+    session._emit_text = MagicMock()
+    app = MagicMock()
+    app._agent_task = None
+    app.set_command_status = MagicMock()
+    app.set_command_queue = MagicMock()
+    app.prefill_input = MagicMock(return_value=True)
+    session._app = app
+    session.agent = SimpleNamespace()
+    session._handler = SimpleNamespace(
+        handle=AsyncMock(
+            return_value=CommandResult(
+                success=True,
+                outputs=[TextOutput("Review this", "warning")],
+                input_prefill="/mcp approve docs abc123",
+            )
+        )
+    )
+
+    await session._on_command("/mcp approve docs")
+
+    app.prefill_input.assert_called_once_with("/mcp approve docs abc123")
 
 
 @pytest.mark.asyncio

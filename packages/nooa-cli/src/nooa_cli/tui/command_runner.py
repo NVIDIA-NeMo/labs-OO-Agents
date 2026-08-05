@@ -60,6 +60,9 @@ class CommandRunner:
             tuple[CommandRecord, Callable[[], Awaitable[Any]], asyncio.Future[None]]
         ] = asyncio.Queue()
         self._worker: asyncio.Task[None] | None = None
+        self._active_record: CommandRecord | None = None
+        self._active_work: asyncio.Task[Any] | None = None
+        self._cancel_requested: set[int] = set()
 
     @property
     def records(self) -> list[CommandRecord]:
@@ -94,6 +97,25 @@ class CommandRunner:
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._run_loop(), name="tui-command-runner")
 
+    def cancel_active(self, *, kind: CommandKind | None = None) -> bool:
+        """Request cancellation of the active command without dropping its queue.
+
+        Returns ``True`` only when a matching running command owned an active
+        task. Cancellation is acknowledged by ``_run_loop`` before the next
+        queued command starts. Work delegated to an ordinary Python thread
+        cannot be force-killed; its owning coroutine is still cancelled and
+        must prevent any late result from being attached.
+        """
+        record = self._active_record
+        task = self._active_work
+        if record is None or task is None or task.done():
+            return False
+        if kind is not None and record.kind != kind:
+            return False
+        self._cancel_requested.add(record.id)
+        task.cancel()
+        return True
+
     async def _run_loop(self) -> None:
         while True:
             try:
@@ -104,15 +126,26 @@ class CommandRunner:
                 record.state = "running"
                 record.started_at = datetime.now()
                 self._update_dynamic_status()
-                post_done = await work()
+                self._active_record = record
+                self._active_work = asyncio.create_task(
+                    work(), name=f"tui-{record.kind}-command-{record.id}"
+                )
+                post_done = await self._active_work
+                if record.id in self._cancel_requested:
+                    raise asyncio.CancelledError
             except asyncio.CancelledError as exc:
                 record.state = "cancelled"
                 record.finished_at = datetime.now()
-                if not done.done():
-                    done.set_exception(exc)
+                requested = record.id in self._cancel_requested
                 self._update_dynamic_status()
                 await self._render_status(record)
-                raise
+                if not done.done():
+                    if requested:
+                        done.set_result(None)
+                    else:
+                        done.set_exception(exc)
+                if not requested:
+                    raise
             except Exception as exc:  # noqa: BLE001 - surface command failures to scrollback
                 record.state = "failed"
                 record.finished_at = datetime.now()
@@ -137,6 +170,10 @@ class CommandRunner:
                     if not done.done():
                         done.set_result(None)
             finally:
+                if self._active_record is record:
+                    self._active_record = None
+                    self._active_work = None
+                self._cancel_requested.discard(record.id)
                 self._queue.task_done()
 
     def _set_status(self, text: str) -> None:
@@ -155,12 +192,14 @@ class CommandRunner:
             return
 
         async def _animate() -> None:
-            i = 0
+            i = 1
             while any(r.state == "running" for r in self._records):
+                await asyncio.sleep(0.5)
+                if not any(r.state == "running" for r in self._records):
+                    break
                 self._spinner_frame = self._spinner_frames[i % len(self._spinner_frames)]
                 self._set_status(self._running_status_text())
                 i += 1
-                await asyncio.sleep(0.5)
 
         self._spinner_task = asyncio.create_task(_animate(), name="tui-command-spinner")
 

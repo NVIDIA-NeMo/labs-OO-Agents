@@ -228,6 +228,7 @@ class MCPRegistry(Skill):
         mcp_file: Path | None = None,
         servers: dict[str, dict[str, Any]] | None = None,
         approval_path: Path | None = None,
+        watch_settings: bool = False,
     ) -> None:
         """Initialize with optional config sources.
 
@@ -235,9 +236,15 @@ class MCPRegistry(Skill):
             mcp_file: Path to a VS Code / Claude-style ``.mcp.json``.
             servers: Inline server config (from TUI ``tui.mcp_servers`` in settings.yaml).
             approval_path: Override the user approval store path (primarily for tests).
+            watch_settings: Reload layered TUI settings before lifecycle commands.
+                The production TUI enables this so agent-assisted config edits
+                become available without restarting the process.
         """
         self._mcp_file = mcp_file
         self._servers: dict[str, dict[str, Any]] = copy.deepcopy(servers or {})
+        self._watch_settings = watch_settings
+        self._settings_server_names = set(self._servers)
+        self._registered_server_names: set[str] = set()
         self._approval_store = MCPApprovalStore(approval_path)
         self._connected: dict[str, Any] = {}
         self._activated: set[str] = set()
@@ -248,6 +255,58 @@ class MCPRegistry(Skill):
         # is still running after a wait_for timeout (the thread keeps going).
         self._pending: set[str] = set()
         super().__init__()
+
+    def refresh_settings(self) -> list[str]:
+        """Reload inline MCP definitions from the layered TUI settings.
+
+        The agent-assisted ``/mcp-add`` workflow edits ``settings.yaml`` while
+        the TUI is already running. Production registries opt into this refresh
+        so the next ``/mcp`` lifecycle command sees the exact current config.
+        Explicit in-memory registrations remain available until removed.
+
+        Returns the names loaded from settings. Test/programmatic registries do
+        nothing unless ``watch_settings=True`` was requested.
+        """
+        if not self._watch_settings:
+            return []
+
+        from nooa.layered_config import load_layered_yaml
+
+        from .settings import SETTINGS_ENV_VAR, SETTINGS_FILENAME
+
+        data = load_layered_yaml(SETTINGS_FILENAME, SETTINGS_ENV_VAR)
+        tui = data.get("tui", {})
+        raw_servers = tui.get("mcp_servers", {}) if isinstance(tui, dict) else {}
+        if raw_servers is None:
+            raw_servers = {}
+        if not isinstance(raw_servers, dict):
+            raise ValueError("tui.mcp_servers must be a mapping")
+
+        fresh: dict[str, dict[str, Any]] = {}
+        for name, definition in raw_servers.items():
+            if not isinstance(name, str) or not isinstance(definition, dict):
+                raise ValueError("each tui.mcp_servers entry must map a name to a mapping")
+            fresh[name] = copy.deepcopy(definition)
+
+        removed = self._settings_server_names - set(fresh)
+        changed = {
+            name
+            for name, definition in fresh.items()
+            if name in self._servers and self._servers[name] != definition
+        }
+        for name in sorted((removed | changed) & set(self._connected)):
+            self.deactivate([name])
+            self._detach(name)
+        for name in removed:
+            if name not in self._registered_server_names:
+                self._servers.pop(name, None)
+                self._activated.discard(name)
+        self._servers.update(fresh)
+        # A definition first registered in memory by `/mcp add` becomes
+        # settings-owned as soon as the persisted layer contains it.
+        self._registered_server_names.difference_update(fresh)
+        self._settings_server_names = set(fresh)
+        return sorted(fresh)
 
     def _bind_oauth_code_prompt(self, callback: Callable[[str], Awaitable[str]] | None) -> None:
         """Bind the host TUI's thread-safe manual OAuth input bridge."""
@@ -312,6 +371,7 @@ class MCPRegistry(Skill):
             if val is not None:
                 entry[key] = val
         self._servers[name] = copy.deepcopy(entry)
+        self._registered_server_names.add(name)
 
     # ------------------------------------------------------------------
     # User approval boundary

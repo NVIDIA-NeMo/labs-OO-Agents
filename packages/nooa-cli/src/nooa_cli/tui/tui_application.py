@@ -167,6 +167,7 @@ class TUIApplication:
         agent: Any = None,
         *,
         on_command: Callable[[str], Awaitable[None] | None] | None = None,
+        on_cancel_command: Callable[[], bool] | None = None,
         on_bang: Callable[[str], Awaitable[None] | None] | None = None,
         on_output: Callable[[Any], Awaitable[None] | None] | None = None,
         completer: Completer | None = None,
@@ -184,6 +185,9 @@ class TUIApplication:
                 CommandRegistry. If omitted, commands still land in
                 ``commands_dispatched()`` for introspection but nothing
                 runs.
+            on_cancel_command: Synchronously request cancellation of the
+                active slash command. Returns whether a command accepted the
+                request. Esc falls back to interrupting the agent when false.
             on_bang: Called with the bang body (e.g. ``"echo hi"`` for
                 ``!echo hi``). Session wires this to run_in_terminal +
                 bash. If omitted, bang commands are only recorded in
@@ -207,6 +211,7 @@ class TUIApplication:
         """
         self.agent = agent
         self._on_command = on_command
+        self._on_cancel_command = on_cancel_command
         self._on_bang = on_bang
         self._on_output = on_output
         self._session_label_fn: Callable[[], str] | None = session_label
@@ -639,6 +644,20 @@ class TUIApplication:
         except Exception:
             pass
 
+    def prefill_input(self, text: str, *, overwrite: bool = False) -> bool:
+        """Place text in the command buffer without submitting it.
+
+        Command results arrive asynchronously, so the default preserves text
+        the user has already started typing. Returns whether the prefill was
+        applied.
+        """
+        if self.input_buffer.text and not overwrite:
+            return False
+        self._prefill_input(text)
+        if self._app.is_running:
+            self._app.invalidate()
+        return True
+
     def _close_subview(self) -> None:
         done = self._active_subview_done
         if done is not None and not done.done():
@@ -846,6 +865,8 @@ class TUIApplication:
         # the next respond() via the done-callback.
         @kb.add("escape", filter=subview_inactive)
         def _(event):
+            if self.request_command_cancel():
+                return
             self.request_agent_cancel(source="escape")
 
         # Merge so our bindings (C-c with is_thinking awareness, Tab
@@ -1583,6 +1604,17 @@ class TUIApplication:
     def _on_input_text_changed(self, _buffer: Buffer) -> None:
         """Typing after an exit warning cancels the double-Ctrl-C gesture."""
         self._clear_ctrl_c_exit()
+
+    def request_command_cancel(self) -> bool:
+        """Ask the host to cancel its active slash command, if any."""
+        callback = self._on_cancel_command
+        if callback is None:
+            return False
+        try:
+            return bool(callback())
+        except Exception:
+            logger.debug("Slash-command cancellation callback failed", exc_info=True)
+            return False
 
     def _arm_ctrl_c_exit(self) -> None:
         """Require a second Ctrl-C shortly after the first before exiting."""

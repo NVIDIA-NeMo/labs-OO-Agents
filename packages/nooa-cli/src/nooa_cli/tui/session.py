@@ -440,6 +440,7 @@ class Session:
         self._app = TUIApplication(
             agent=self.agent,
             on_command=self._on_command,
+            on_cancel_command=self._cancel_active_slash_command,
             on_bang=self._on_bang,
             on_output=self._on_app_output,
             completer=SlashCommandCompleter(self.registry),
@@ -804,6 +805,13 @@ class Session:
 
         await self._get_command_runner().run(kind="slash", text=text, work=_work)
 
+    def _cancel_active_slash_command(self) -> bool:
+        """Route Esc to the command runner without creating one when idle."""
+        runner = getattr(self, "_command_runner", None)
+        if runner is None:
+            return False
+        return runner.cancel_active(kind="slash")
+
     async def _run_command(self, text: str) -> Callable[[], Awaitable[None]] | None:
         """Run one slash command body and return any post-done render callback."""
         assert self._app is not None
@@ -844,6 +852,10 @@ class Session:
             from .commands import render_command_outputs
 
             await render_command_outputs(frontend, result.outputs)
+            if result.input_prefill:
+                prefill = getattr(self._app, "prefill_input", None)
+                if callable(prefill):
+                    prefill(result.input_prefill)
 
         if result.exit:
 

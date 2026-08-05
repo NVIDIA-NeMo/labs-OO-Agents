@@ -101,6 +101,14 @@ class TestKeyBindings:
             "c-j (ControlJ) is not bound — Shift+Enter on iTerm2 will submit"
         )
 
+    def test_c_u_binding_exists(self):
+        """ControlU is the conventional clear-input shortcut."""
+        from prompt_toolkit.keys import Keys
+
+        bindings = create_key_bindings()
+        bound_keys = [binding.keys for binding in bindings.bindings]
+        assert any(keys == (Keys.ControlU,) for keys in bound_keys)
+
 
 # ---------------------------------------------------------------------------
 # End-to-end: Shift+Enter inserts newline

@@ -147,6 +147,10 @@ class CommandResult:
     new_session_manager: "SessionManager | None" = None
     # Set by CompactCommand to signal that auto-renaming should be retried.
     compact_done: bool = False
+    # Optional text the terminal host should place in an empty input buffer
+    # after rendering command output. Used for explicit user-confirmation
+    # steps such as MCP approval; prefill never submits the command.
+    input_prefill: str | None = None
     # When set, Session.run() passes this as the user message for an agent turn.
     agent_message: str | None = None
     # Structured slash command result — passed to the agent on a queue.
@@ -1995,13 +1999,9 @@ class MCPCommand(Command):
     @classmethod
     def help_text(cls) -> dict[str, str]:
         return {
-            "/mcp list": "Show configured, approved, and connected MCP servers",
-            "/mcp add <server> <url-or-command>": "Add an MCP server to project settings",
-            "/mcp remove <server>": "Remove an inline project MCP server",
-            "/mcp connect <server>": "Connect an approved MCP server",
-            "/mcp approve <server> [code]": "Review or approve one exact MCP configuration",
-            "/mcp revoke <server>": "Disconnect a server and revoke its approvals",
-            "/mcp disconnect <server>": "Disconnect an MCP server",
+            "/mcp <list|add|remove|connect|approve|revoke|disconnect>": (
+                "Configure, approve, and connect MCP servers"
+            ),
         }
 
     def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
@@ -2027,6 +2027,12 @@ class MCPCommand(Command):
         from .mcp_approval import MCPApprovalRequired
 
         mcp = self.agent.mcp
+        refresh = getattr(mcp, "refresh_settings", None)
+        if callable(refresh):
+            try:
+                refresh()
+            except Exception as exc:
+                return CommandResult.err(f"Failed to refresh MCP settings: {exc}")
         action = args[0].lower() if args else "list"
         if action == "list":
             return CommandResult.ok(TextOutput(mcp.status(), "info"))
@@ -2097,7 +2103,9 @@ class MCPCommand(Command):
             try:
                 connected = await mcp.connect([server])
             except MCPApprovalRequired as exc:
-                return CommandResult.ok(TextOutput(str(exc), "warning"))
+                result = CommandResult.ok(TextOutput(str(exc), "warning"))
+                result.input_prefill = exc.request.approval_command
+                return result
             except Exception as exc:
                 return CommandResult.err(f"Failed to connect {server!r}: {exc}")
             if not connected:
@@ -2111,10 +2119,13 @@ class MCPCommand(Command):
         if action == "approve":
             if len(args) == 2:
                 try:
-                    review = mcp._approval_request(server).review_text()
+                    request = mcp._approval_request(server)
+                    review = request.review_text()
                 except Exception as exc:
                     return CommandResult.err(f"Cannot review {server!r}: {exc}")
-                return CommandResult.ok(TextOutput(review, "warning"))
+                result = CommandResult.ok(TextOutput(review, "warning"))
+                result.input_prefill = request.approval_command
+                return result
             try:
                 mcp._approve(server, args[2])
             except Exception as exc:
