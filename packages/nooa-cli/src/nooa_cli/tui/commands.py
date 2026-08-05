@@ -438,7 +438,7 @@ class ModelCommand(Command):
             from nooa_cli.tui.health_check import probe_llm
 
             try:
-                candidate = get_llm_for_model(selected, self.config)
+                candidate = get_llm_for_model(selected)
             except UnresolvedModelError:
                 from nooa_cli.tui.health_check import unresolved_model_health
 

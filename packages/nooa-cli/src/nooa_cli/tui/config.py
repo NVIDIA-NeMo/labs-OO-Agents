@@ -28,10 +28,6 @@ if TYPE_CHECKING:
 
 # Default model — direct litellm-supported name. Override via config or --model.
 DEFAULT_MODEL = "claude-opus-4-8"
-# LiteLLM providers whose endpoint is fixed by the SDK (cloud APIs). For every
-# other provider we forward --api-base / api_key_env overrides so users can point
-# them at proxies, gateways, and self-hosted deployments without a code change.
-_LOCKED_ENDPOINT_PROVIDERS = {"anthropic", "bedrock", "vertex_ai", "gemini"}
 
 
 # SummarizationConfig moved to core with the interactive-agent base;
@@ -84,10 +80,6 @@ class TUIConfig(BaseModel):
 
     # Default LLM model (from unifiedllm registry)
     default_model: str = DEFAULT_MODEL
-    # Optional get_llm_client-style endpoint overrides for direct LiteLLM model
-    # strings, local runtimes, or OpenAI-compatible gateways.
-    api_base: str | None = None
-    api_key_env: str | None = None
 
     # Trace output directory (None = OTLP auto-probe only; --trace writes files)
     trace_dir: Path | None = None
@@ -159,8 +151,6 @@ class Config(BaseModel):
     # String form: path only, value passed through as-is.
     _OVERRIDES: ClassVar[dict] = {
         "model": "tui.default_model",
-        "api_base": "tui.api_base",
-        "api_key_env": "tui.api_key_env",
         "mcp_file": ("tui.mcp_file", Path),
         "mcp_servers": "tui.mcp_servers",
         "mcp_auto_connect": (
@@ -291,67 +281,18 @@ class UnresolvedModelError(ValueError):
         self.model = model
 
 
-def get_llm_for_model(
-    model_name: str, endpoint_config: TUIConfig | None = None
-) -> "CompletionClient":
+def get_llm_for_model(model_name: str) -> "CompletionClient":
     """Build a client after validating aliases/provider routing without noisy output."""
     from nooa.unifiedllm import MODELS, CompletionClient, get_llm_client
 
     if model_name in MODELS:
-        registry_entry = MODELS.get(model_name)
-        routed_model = (
-            registry_entry.get("model_name", model_name)
-            if isinstance(registry_entry, dict)
-            else model_name
-        )
-        overrides, direct_config = _llm_endpoint_overrides(routed_model, endpoint_config)
-        llm = get_llm_client(model_name, **overrides)
-        if direct_config:
-            registry_config = dict(getattr(llm, "_registry_config", None) or {})
-            registry_config.update(direct_config)
-            llm._registry_config = registry_config
-        return llm
+        return get_llm_client(model_name)
 
     from .health_check import _detect_provider
 
     if _detect_provider(model_name) is None:
         raise UnresolvedModelError(model_name)
-    overrides, direct_config = _llm_endpoint_overrides(model_name, endpoint_config)
-    if overrides:
-        llm = get_llm_client(model_name, **overrides)
-        if direct_config:
-            llm._registry_config = direct_config
-        return llm
     return CompletionClient(model=model_name)
-
-
-def _llm_endpoint_overrides(
-    model_name: str, endpoint_config: TUIConfig | None
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Return get_llm_client kwargs and non-secret metadata for direct endpoints."""
-    if endpoint_config is None or not endpoint_config.api_base:
-        return {}, {}
-
-    from nooa.unifiedllm import resolve_api_key_from_config
-
-    from .health_check import _detect_provider
-
-    provider = _detect_provider(model_name)
-    if provider in _LOCKED_ENDPOINT_PROVIDERS:
-        return {}, {}
-
-    direct_config: dict[str, Any] = {"api_base": endpoint_config.api_base}
-    if not endpoint_config.api_key_env:
-        return {"api_base": endpoint_config.api_base}, direct_config
-
-    direct_config["api_key_env"] = endpoint_config.api_key_env
-    api_key = resolve_api_key_from_config(model_name, direct_config)
-    if api_key is None:
-        # Skip the api_base override: hitting a private endpoint with the wrong
-        # credential produces an opaque 401. Let LiteLLM route the model with
-        # its default endpoint so the caller sees the missing-key error.
-        return {}, direct_config
-    return {"api_base": endpoint_config.api_base, "api_key": api_key}, direct_config
 
 
 def get_llm(config: TUIConfig | Config) -> "CompletionClient":
@@ -360,7 +301,7 @@ def get_llm(config: TUIConfig | Config) -> "CompletionClient":
     Accepts either a TUIConfig or the top-level Config.
     """
     tui = config.tui if isinstance(config, Config) else config
-    return get_llm_for_model(tui.default_model, tui)
+    return get_llm_for_model(tui.default_model)
 
 
 def list_models() -> list[str]:
