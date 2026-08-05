@@ -10,6 +10,7 @@ def test_builtin_command_surface_is_explicit_and_pruned():
         "activity",
         "clear",
         "compact",
+        "connect",
         "context",
         "edit",
         "events",
