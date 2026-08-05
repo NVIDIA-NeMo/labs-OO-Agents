@@ -9,7 +9,8 @@ So whichever directory appears first in ``cfg.tui.skills_dirs`` wins.
 Precedence:
 
     1. user-explicit ``--skills-dir`` values
-    2. default locations (``~/.claude/commands``, ``.claude/skills``, …)
+    2. paths persisted by ``/skills add``
+    3. default locations (``~/.claude/commands``, ``.claude/skills``, …)
 
 Installed packages contribute skills through ``nooa.skills`` rather than a
 TUI-specific directory entry-point group.
@@ -82,3 +83,21 @@ def test_same_explicit_dir_passed_twice_is_deduped(tmp_path, monkeypatch):
     cfg = Config.load(skills_dir=[shared, shared])
 
     assert cfg.tui.skills_dirs.count(shared) == 1
+
+
+def test_persisted_skills_dir_precedes_defaults(tmp_path, monkeypatch):
+    persisted = _skill_dir(tmp_path, "persisted")
+    default = _skill_dir(tmp_path, "fake-home/.claude/commands")
+    project_dir = tmp_path / "project-settings"
+    project_dir.mkdir()
+    (project_dir / "settings.yaml").write_text(
+        f"tui:\n  additional_skills_dirs:\n    - {persisted}\n"
+    )
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
+    monkeypatch.chdir(tmp_path / "fake-home")
+    monkeypatch.setenv("HOME", str(tmp_path / "fake-home"))
+
+    cfg = Config.load()
+
+    assert cfg.tui.additional_skills_dirs == [persisted]
+    assert cfg.tui.skills_dirs.index(persisted) < cfg.tui.skills_dirs.index(default)
