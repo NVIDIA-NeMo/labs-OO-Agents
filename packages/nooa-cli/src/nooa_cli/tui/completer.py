@@ -135,10 +135,21 @@ class Completer:
                 "off": "Disable idle memory reflection",
                 "now": "Run memory reflection immediately",
             },
+            "/mcp ": {
+                "list": "Show configured, approved, and connected MCP servers",
+                "add": "Add an MCP server to project settings",
+                "remove": "Remove an inline project MCP server",
+                "connect": "Connect an approved MCP server",
+                "approve": "Review or approve one exact MCP configuration",
+                "revoke": "Disconnect a server and revoke its approvals",
+                "disconnect": "Disconnect an MCP server",
+            },
         }
         for prefix, actions in action_sets.items():
             if lower.startswith(prefix):
                 partial = text[len(prefix) :].lower()
+                if any(char.isspace() for char in partial):
+                    continue
                 return [
                     CompletionItem(
                         text=prefix + action,
