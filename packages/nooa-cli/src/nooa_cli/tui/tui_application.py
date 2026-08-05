@@ -16,10 +16,12 @@ behaviour test needed it.
 from __future__ import annotations
 
 import asyncio
+import base64
 import datetime
 import logging
 import re
 import shutil
+import subprocess
 import threading
 from collections.abc import Awaitable, Callable
 from concurrent.futures import Future as ConcurrentFuture
@@ -491,6 +493,10 @@ class TUIApplication:
         def _root_container():
             return subview_window if self._active_subview is not None else main_container
 
+        def _subview_mouse_enabled() -> bool:
+            view = self._active_subview
+            return view is not None and bool(getattr(view, "mouse_support", True))
+
         self._app = Application(
             layout=Layout(
                 DynamicContainer(_root_container),
@@ -505,7 +511,7 @@ class TUIApplication:
             # gets a final redraw right before exit and appears as a
             # ghost prompt above '❯ /exit' in the transcript.
             erase_when_done=True,
-            mouse_support=Condition(lambda: self._active_subview is not None),
+            mouse_support=Condition(_subview_mouse_enabled),
             # SIGWINCH already invalidates the app; the fallback poll creates a
             # delayed second redraw (~0.5–0.75s later), which is visible in
             # fullscreen subviews after terminal resize.
@@ -530,11 +536,49 @@ class TUIApplication:
 
         await self.open_subview(ActivityOverlayView(outputs))
 
-    async def prompt_sensitive(self, title: str, message: str) -> str:
+    def _copy_to_clipboard(self, text: str) -> bool:
+        """Copy explicit user-requested text through the host or terminal."""
+        if not text or len(text.encode("utf-8")) > 100_000:
+            return False
+
+        # Native macOS copy is the most reliable path for a locally hosted TUI.
+        pbcopy = shutil.which("pbcopy")
+        if pbcopy:
+            try:
+                subprocess.run(
+                    [pbcopy],
+                    input=text.encode("utf-8"),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=True,
+                    timeout=2,
+                )
+                return True
+            except (OSError, subprocess.SubprocessError):
+                pass
+
+        # OSC 52 asks the user's terminal to set its clipboard, which also
+        # works across SSH when the terminal permits clipboard requests.
+        try:
+            payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
+            self._app.output.write_raw(f"\x1b]52;c;{payload}\x07")
+            self._app.output.flush()
+            return True
+        except Exception:
+            return False
+
+    async def prompt_sensitive(
+        self, title: str, message: str, *, link_url: str | None = None
+    ) -> str:
         """Collect masked text without launching a nested terminal application."""
         from .subapp import SensitiveTextPromptView
 
-        view = SensitiveTextPromptView(title, message)
+        view = SensitiveTextPromptView(
+            title,
+            message,
+            link_url=link_url,
+            copy_handler=self._copy_to_clipboard,
+        )
         await self.open_subview(view)
         return view.value or ""
 
@@ -744,6 +788,10 @@ class TUIApplication:
         @kb.add("c-h", filter=subview_active, eager=True)
         def _(event):
             self._subview_key(event, "backspace")
+
+        @kb.add("c-y", filter=subview_active, eager=True)
+        def _(event):
+            self._subview_key(event, "copy")
 
         @kb.add("tab", filter=subview_active, eager=True)
         def _(event):
