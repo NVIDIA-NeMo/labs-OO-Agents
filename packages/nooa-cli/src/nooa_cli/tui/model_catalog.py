@@ -9,17 +9,63 @@ import os
 import re
 import tempfile
 import urllib.parse
+from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
 _MAX_CATALOG_BYTES = 5 * 1024 * 1024
 _MAX_MODELS = 5_000
+_MAX_TOKEN_LIMIT = 100_000_000
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
+_TOKEN_LIMIT = re.compile(r"^(\d+(?:\.\d+)?)([km]?)$", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class CatalogModel:
+    """One model advertised by an OpenAI-compatible ``/models`` endpoint."""
+
+    id: str
+    context_window: int | None = None
+    max_tokens: int | None = None
 
 
 class ModelCatalogError(ValueError):
     """A catalog or registry operation could not be completed safely."""
+
+
+def _coerce_catalog_limit(value: Any) -> int | None:
+    """Return a plausible positive token count from endpoint metadata."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        result = value
+    elif isinstance(value, float) and value.is_integer():
+        result = int(value)
+    elif isinstance(value, str) and value.strip().isdigit():
+        result = int(value.strip())
+    else:
+        return None
+    return result if 0 < result <= _MAX_TOKEN_LIMIT else None
+
+
+def parse_optional_token_limit(value: str, label: str) -> int | None:
+    """Parse an optional human token count such as ``131072`` or ``128k``."""
+    raw = value.strip().replace(",", "").replace("_", "")
+    if not raw:
+        return None
+    match = _TOKEN_LIMIT.fullmatch(raw)
+    if not match:
+        raise ModelCatalogError(f"{label} must be a positive token count such as 131072 or 128k.")
+    number = float(match.group(1))
+    suffix = match.group(2).lower()
+    multiplier = {"": 1, "k": 1_000, "m": 1_000_000}[suffix]
+    result = int(number * multiplier)
+    if result <= 0 or result > _MAX_TOKEN_LIMIT:
+        raise ModelCatalogError(f"{label} must be between 1 and {_MAX_TOKEN_LIMIT:,} tokens.")
+    return result
 
 
 def normalize_catalog_endpoint(value: str) -> tuple[str, str]:
@@ -87,7 +133,7 @@ def fetch_model_catalog(
     *,
     api_key: str | None = None,
     timeout: float = 15.0,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[CatalogModel]]:
     """Fetch a bounded OpenAI-compatible ``GET /models`` catalog."""
     import httpx
 
@@ -126,8 +172,7 @@ def fetch_model_catalog(
     if not isinstance(data, list):
         raise ModelCatalogError("Model catalog must use the OpenAI shape: {'data': [{'id': ...}]}.")
 
-    model_ids: list[str] = []
-    seen: set[str] = set()
+    models: dict[str, CatalogModel] = {}
     for item in data[: _MAX_MODELS + 1]:
         model_id = item.get("id") if isinstance(item, dict) else None
         if not isinstance(model_id, str):
@@ -135,22 +180,98 @@ def fetch_model_catalog(
         model_id = model_id.strip()
         if not model_id or len(model_id) > 500 or any(ord(c) < 32 for c in model_id):
             continue
-        if model_id not in seen:
-            seen.add(model_id)
-            model_ids.append(model_id)
+        context_window = next(
+            (
+                limit
+                for field in (
+                    "context_window",
+                    "max_model_len",
+                    "context_length",
+                    "max_input_tokens",
+                )
+                if (limit := _coerce_catalog_limit(item.get(field))) is not None
+            ),
+            None,
+        )
+        max_tokens = next(
+            (
+                limit
+                for field in ("max_output_tokens", "max_completion_tokens")
+                if (limit := _coerce_catalog_limit(item.get(field))) is not None
+            ),
+            None,
+        )
+        previous = models.get(model_id)
+        models[model_id] = CatalogModel(
+            id=model_id,
+            context_window=(previous.context_window if previous else None) or context_window,
+            max_tokens=(previous.max_tokens if previous else None) or max_tokens,
+        )
     if len(data) > _MAX_MODELS:
         raise ModelCatalogError(f"Model catalog contains more than {_MAX_MODELS:,} entries.")
-    if not model_ids:
+    if not models:
         raise ModelCatalogError("Model catalog did not contain any usable model IDs.")
-    return api_base, sorted(model_ids, key=str.casefold)
+    return api_base, sorted(models.values(), key=lambda model: model.id.casefold())
 
 
-def registry_entry(model_id: str, api_base: str, api_key_env: str = "") -> dict[str, Any]:
+def lookup_model_token_limits(model_id: str) -> tuple[int | None, int | None]:
+    """Look up context and output limits in LiteLLM's local model database."""
+    try:
+        import litellm
+    except ImportError:
+        return None, None
+
+    parts = model_id.split("/")
+    candidates = [model_id]
+    if not model_id.startswith("openai/"):
+        candidates.append(f"openai/{model_id}")
+    if len(parts) > 1:
+        candidates.extend(("/".join(parts[1:]), parts[-1]))
+
+    context_window: int | None = None
+    max_tokens: int | None = None
+    for candidate in dict.fromkeys(candidates):
+        try:
+            # LiteLLM prints provider help for unknown names; model setup owns
+            # the UI and should remain quiet when a metadata lookup misses.
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                info = litellm.get_model_info(candidate)
+        except Exception:
+            continue
+        if not isinstance(info, dict):
+            continue
+        context_window = context_window or _coerce_catalog_limit(
+            info.get("max_input_tokens") or info.get("context_window")
+        )
+        max_tokens = max_tokens or _coerce_catalog_limit(info.get("max_output_tokens"))
+        if context_window is not None and max_tokens is not None:
+            break
+    return context_window, max_tokens
+
+
+def registry_entry(
+    model_id: str,
+    api_base: str,
+    api_key_env: str = "",
+    *,
+    context_window: int | None = None,
+    max_tokens: int | None = None,
+) -> dict[str, Any]:
     """Build the minimal registry entry for an OpenAI-compatible server."""
     model_name = model_id if model_id.startswith("openai/") else f"openai/{model_id}"
     entry: dict[str, Any] = {"model_name": model_name, "api_base": api_base}
     if api_key_env:
         entry["api_key_env"] = validate_api_key_env(api_key_env)
+    if context_window is not None:
+        if context_window <= 0 or context_window > _MAX_TOKEN_LIMIT:
+            raise ModelCatalogError("Context window is outside the supported range.")
+        entry["context_window"] = context_window
+    if max_tokens is not None:
+        if max_tokens <= 0 or max_tokens > _MAX_TOKEN_LIMIT:
+            raise ModelCatalogError("Maximum output tokens is outside the supported range.")
+        if context_window is not None and max_tokens > context_window:
+            raise ModelCatalogError("Maximum output tokens cannot exceed the context window.")
+        entry["max_tokens"] = max_tokens
     return entry
 
 
@@ -230,10 +351,13 @@ def write_model_alias(path: Path, alias: str, entry: dict[str, Any]) -> Path:
 
 
 __all__ = [
+    "CatalogModel",
     "ModelCatalogError",
     "default_alias",
     "fetch_model_catalog",
+    "lookup_model_token_limits",
     "normalize_catalog_endpoint",
+    "parse_optional_token_limit",
     "registry_entry",
     "suggested_api_key_env",
     "validate_alias",
