@@ -20,6 +20,7 @@ from nooa_cli.tui.event_explorer import (
     render_event_explorer,
     wrapped_detail_lines,
 )
+from nooa_cli.tui.explorer_base import FTS_ACTIVE_STYLE
 from nooa_cli.tui.output import TextOutput
 
 
@@ -490,8 +491,9 @@ def test_event_explorer_ansi_styles_header_footer_and_mode_label() -> None:
 
     assert lines[0].startswith("\x1b[48;5;236;38;5;252m")
     assert lines[-1].startswith("\x1b[48;5;236;38;5;252m")
-    assert "\x1b[1;30;45mFTS MODE\x1b[0m" in lines[-1]
-    assert "\x1b[48;5;236;38;5;252m" in lines[-1].split("\x1b[1;30;45mFTS MODE\x1b[0m", 1)[1]
+    active_mode = f"{FTS_ACTIVE_STYLE}FTS MODE\x1b[0m"
+    assert active_mode in lines[-1]
+    assert "\x1b[48;5;236;38;5;252m" in lines[-1].split(active_mode, 1)[1]
 
     model.search_active = False
     rendered = render_event_explorer(model, width=90, height=10, ansi=True)
@@ -509,7 +511,7 @@ def test_event_explorer_fts_divider_prompt_matches_session_explorer_style() -> N
 
     rendered = render_event_explorer(model, width=90, height=12, ansi=True)
 
-    assert "\x1b[1;30;45m[FTS: alpha] \x1b[0m" in rendered
+    assert f"{FTS_ACTIVE_STYLE}[FTS: alpha] \x1b[0m" in rendered
 
 
 def test_event_explorer_fts_mode_survives_tab_focus_changes() -> None:
@@ -1231,7 +1233,7 @@ def test_session_explorer_fts_divider_prompt_is_highlighted_when_active() -> Non
 
     rendered = render_session_explorer(model, width=90, height=12, ansi=True)
 
-    assert "\x1b[1;30;45m[FTS sessions: alpha] \x1b[0m" in rendered
+    assert f"{FTS_ACTIVE_STYLE}[FTS sessions: alpha] \x1b[0m" in rendered
 
 
 def test_session_explorer_selected_dialog_match_uses_distinct_highlight() -> None:
