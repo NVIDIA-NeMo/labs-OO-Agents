@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import textwrap
 import unicodedata
+from collections.abc import Callable
 from typing import Literal, Protocol
+from urllib.parse import urlsplit
 
 SubviewKeyResult = Literal["handled", "close", "ignored"]
 
@@ -65,8 +67,32 @@ def _safe_terminal_text(value: str) -> str:
     )
 
 
+def _safe_http_url(value: str | None) -> str | None:
+    """Return a terminal-safe HTTP(S) URL, or ``None`` for an unsafe target."""
+    if not value:
+        return None
+    safe = _safe_terminal_text(value).strip()
+    if any(character.isspace() for character in safe):
+        return None
+    parsed = urlsplit(safe)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return safe
+
+
+def _terminal_hyperlink(label: str, url: str) -> str:
+    """Build an OSC 8 link wrapped as prompt_toolkit zero-width escapes."""
+    start = f"\x01\x1b]8;;{url}\x07\x02"
+    end = "\x01\x1b]8;;\x07\x02"
+    return start + _safe_terminal_text(label) + end
+
+
 class TextPromptView:
     """Single-line text input hosted by the existing TUI application."""
+
+    # Prompt views do not consume mouse events. Leaving terminal mouse mode off
+    # lets users use native selection/copy while the modal is open.
+    mouse_support = False
 
     _TEXT_ACTIONS = {
         "quit": "q",
@@ -77,7 +103,14 @@ class TextPromptView:
     }
 
     def __init__(
-        self, title: str, message: str, *, default: str = "", masked: bool = False
+        self,
+        title: str,
+        message: str,
+        *,
+        default: str = "",
+        masked: bool = False,
+        link_url: str | None = None,
+        copy_handler: Callable[[str], bool] | None = None,
     ) -> None:
         self.title = title
         self.message = message
@@ -87,16 +120,29 @@ class TextPromptView:
         self._max_scroll = 0
         self._page_size = 1
         self.value: str | None = None
+        self.link_url = _safe_http_url(link_url)
+        self._copy_handler = copy_handler
+        self._copy_status = ""
 
     def render(self, width: int, height: int) -> str:
         width = max(int(width), 40)
         height = max(int(height), 4)
         header = f" {self.title} ".ljust(width, "─")[:width]
-        footer = " ↑/↓ scroll  Enter submit  Esc cancel ".ljust(width, "─")[:width]
         message_lines: list[str] = []
         safe_message = _safe_terminal_text(self.message)
         for paragraph in safe_message.splitlines():
             message_lines.extend(textwrap.wrap(paragraph, width=width) or [""])
+        if self.link_url:
+            message_lines.extend(
+                ("", _terminal_hyperlink("Open authorization URL", self.link_url))
+            )
+        if self._copy_status:
+            footer_text = f" {self._copy_status}  Enter submit  Esc cancel "
+        elif self.link_url:
+            footer_text = " ↑/↓ scroll  Ctrl+Y copy URL  Enter submit  Esc cancel "
+        else:
+            footer_text = " ↑/↓ scroll  Enter submit  Esc cancel "
+        footer = footer_text.ljust(width, "─")[:width]
         body_height = max(height - 2, 0)
         message_height = max(body_height - 2, 0)
         self._page_size = max(message_height, 1)
@@ -115,6 +161,15 @@ class TextPromptView:
         if action == "escape":
             self.value = None
             return "close"
+        if action == "copy" and self.link_url:
+            copied = False
+            if self._copy_handler is not None:
+                try:
+                    copied = bool(self._copy_handler(self.link_url))
+                except Exception:
+                    copied = False
+            self._copy_status = "URL copied" if copied else "URL copy unavailable"
+            return "handled"
         if action == "backspace":
             self._buffer = self._buffer[:-1]
             return "handled"
@@ -155,8 +210,21 @@ class TextPromptView:
 class SensitiveTextPromptView(TextPromptView):
     """Backward-compatible masked prompt used for OAuth material."""
 
-    def __init__(self, title: str, message: str) -> None:
-        super().__init__(title, message, masked=True)
+    def __init__(
+        self,
+        title: str,
+        message: str,
+        *,
+        link_url: str | None = None,
+        copy_handler: Callable[[str], bool] | None = None,
+    ) -> None:
+        super().__init__(
+            title,
+            message,
+            masked=True,
+            link_url=link_url,
+            copy_handler=copy_handler,
+        )
 
 
 class ChoicePromptView:

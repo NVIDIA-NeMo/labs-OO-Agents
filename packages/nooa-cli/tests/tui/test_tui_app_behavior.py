@@ -129,12 +129,39 @@ async def test_baseline_command_status_is_dynamic_not_scrollback():
 
 async def test_mouse_support_only_enabled_for_subviews():
     """Normal transcript mode must leave native terminal text selection/copy alone."""
+    from nooa_cli.tui.subapp import SensitiveTextPromptView
+
     async with TUIHarness() as h:
         assert bool(h.app._app.mouse_support()) is False
         h.app._active_subview = object()
         assert bool(h.app._app.mouse_support()) is True
+        h.app._active_subview = SensitiveTextPromptView("OAuth", "Authorize")
+        assert bool(h.app._app.mouse_support()) is False
         h.app._active_subview = None
         assert bool(h.app._app.mouse_support()) is False
+
+
+async def test_oauth_modal_ctrl_y_copies_full_authorization_url(monkeypatch):
+    url = "https://login.example.test/authorize?state=" + "a" * 500
+    copied = []
+
+    async with TUIHarness() as h:
+        monkeypatch.setattr(
+            h.app,
+            "_copy_to_clipboard",
+            lambda value: copied.append(value) or True,
+        )
+        prompt = asyncio.create_task(
+            h.app.prompt_sensitive("OAuth", "Authorize in your browser.", link_url=url)
+        )
+        await h.wait_for(lambda: h.app.active_subview is not None)
+
+        await h.press("c-y")
+        await h.wait_for(lambda: copied == [url])
+        assert "URL copied" in h.app.active_subview.render(80, 10)
+
+        await h.press("escape")
+        assert await prompt == ""
 
 
 async def test_status_text_separates_thinking_and_command_status():

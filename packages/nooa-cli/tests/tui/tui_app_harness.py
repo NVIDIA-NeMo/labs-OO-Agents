@@ -65,6 +65,7 @@ _KEY_SEQUENCES: dict[str, str] = {
     "c-d": "\x04",
     "c-j": "\n",  # bare LF — used by prompt_toolkit as "Shift+Enter"
     "c-u": "\x15",
+    "c-y": "\x19",
     "s-enter": "\x1b\r",  # Alt+Enter / Esc+Enter — prompt_toolkit treats as newline
 }
 

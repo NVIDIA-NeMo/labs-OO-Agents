@@ -2302,8 +2302,9 @@ class CommandRegistry:
                 raise RuntimeError("This frontend cannot collect MCP OAuth codes securely")
             return await prompt_sensitive(
                 "MCP OAuth authorization",
-                "Open this URL in a browser, authorize the server, then paste the "
-                f"authorization code or callback URL:\n\n{auth_url}",
+                "Open the authorization URL below in a browser, authorize the server, "
+                "then paste the authorization code or callback URL.",
+                link_url=auth_url,
             )
 
         async def _prompt(auth_url: str) -> str:
