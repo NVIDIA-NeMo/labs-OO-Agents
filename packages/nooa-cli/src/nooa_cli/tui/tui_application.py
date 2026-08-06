@@ -758,7 +758,19 @@ class TUIApplication:
 
         @kb.add(Keys.Any, filter=subview_active, eager=True)
         def _(event):
-            self._subview_key(event, "text", event.data)
+            # Drop parsed mouse events and any raw mouse CSI bytes that slip
+            # through — subviews disable mouse_support so these would otherwise
+            # be appended verbatim to text buffers (e.g. API-key prompt).
+            for kp in event.key_sequence:
+                if kp.key in (Keys.Vt100MouseEvent, Keys.WindowsMouseEvent):
+                    return
+            data = event.data or ""
+            if data.startswith("\x1b[M") or data.startswith("\x1b[<") or (
+                len(data) > 3 and data[:2] == "\x1b[" and data[-1] in "Mm"
+                and all(c.isdigit() or c == ";" for c in data[2:-1])
+            ):
+                return
+            self._subview_key(event, "text", data)
 
         @kb.add(Keys.BracketedPaste, filter=subview_active, eager=True)
         def _(event):
