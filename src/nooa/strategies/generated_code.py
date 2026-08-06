@@ -21,13 +21,19 @@ from pydantic import TypeAdapter
 from pydantic import ValidationError as PydanticValidationError
 from pydantic.errors import PydanticSchemaGenerationError
 
-from nooa.agentdoc import pformat
+from nooa.agentdoc import truncating_pformat
 from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG, TruncationConfig
 
 
 def _pformat(value: Any, tc: TruncationConfig) -> str:
-    """Format a value using truncation config's value-render settings."""
-    return pformat(value, **tc.event_format.model_dump())
+    """Format a value using truncation config's value-render settings.
+
+    Uses ``truncating_pformat`` rather than ``pformat`` so ``max_render_chars``
+    bounds the *total* output. ``event_format``'s per-value limits multiply, so
+    on their own they let one value render to tens of megabytes — and this
+    renders every turn for the rest of the run.
+    """
+    return truncating_pformat(value, max_chars=tc.max_render_chars, **tc.event_format.model_dump())
 
 
 @dataclass(frozen=True)
