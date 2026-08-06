@@ -485,6 +485,48 @@ async def test_connect_anthropic_writes_native_provider_alias(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_connect_anthropic_reprompts_for_rejected_saved_secret(
+    tmp_path, monkeypatch
+) -> None:
+    project_dir = tmp_path / ".nooa"
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "stale-value")
+    calls = []
+
+    def fake_fetch(_provider, api_key, **_kwargs):
+        calls.append(api_key)
+        if api_key == "stale-value":
+            raise ModelCatalogError("Provider model catalog rejected authentication (HTTP 401).")
+        return [CatalogModel(id="claude-sonnet-4-5")]
+
+    monkeypatch.setattr("nooa_cli.tui.model_catalog.fetch_native_provider_models", fake_fetch)
+    monkeypatch.setattr(
+        "nooa_cli.tui.model_catalog.lookup_model_token_limits",
+        lambda *_args: (200000, 64000),
+    )
+    frontend = _WorkflowFrontend()
+    frontend.choice_answers = ["claude-sonnet-4-5"]
+    frontend.sensitive_answers = ["fresh-value"]
+    _stub_successful_model_switch(monkeypatch)
+    command = ConnectCommand(
+        frontend,
+        TUIConfig(),
+        MagicMock(),
+        root_config=SimpleNamespace(llm_config_paths=[]),
+    )
+    command._reload_model_registry = MagicMock()
+
+    result = await command.execute(["https://api.anthropic.com"])
+
+    assert result.success is True
+    assert calls == ["stale-value", "fresh-value"]
+    assert yaml.safe_load((project_dir / "secrets.yaml").read_text()) == {
+        "env": {"ANTHROPIC_API_KEY": "fresh-value"}
+    }
+    assert __import__("os").environ["ANTHROPIC_API_KEY"] == "fresh-value"
+
+
+@pytest.mark.asyncio
 async def test_connect_registers_openai_compatible_backend_when_probe_fails(
     tmp_path, monkeypatch
 ) -> None:
@@ -610,6 +652,83 @@ async def test_connect_prompts_for_missing_secret_and_saves_it(tmp_path, monkeyp
     saved = yaml.safe_load((project_dir / "llm_config.yaml").read_text())
     assert saved["models"]["org/model"]["api_key_env"] == "NVIDIA_INFERENCE_API_KEY"
     assert frontend.text_prompts == []
+
+
+@pytest.mark.asyncio
+async def test_connect_cancel_after_secret_prompt_does_not_save_secret(
+    tmp_path, monkeypatch
+) -> None:
+    project_dir = tmp_path / ".nooa"
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
+    monkeypatch.delenv("NVIDIA_INFERENCE_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "nooa_cli.tui.model_catalog.fetch_model_catalog",
+        lambda *_args, **_kwargs: (
+            "https://inference-api.nvidia.com/v1",
+            [CatalogModel(id="org/model")],
+        ),
+    )
+    frontend = _WorkflowFrontend()
+    frontend.sensitive_answers = ["secret-value"]
+    frontend.choice_answers = [""]
+    command = ConnectCommand(
+        frontend,
+        TUIConfig(),
+        MagicMock(),
+        root_config=SimpleNamespace(llm_config_paths=[]),
+    )
+
+    result = await command.execute(["https://inference-api.nvidia.com/v1"])
+
+    assert result.success is True
+    assert any("Model setup cancelled." in output.content for output in result.outputs)
+    assert not (project_dir / "secrets.yaml").exists()
+    assert "NVIDIA_INFERENCE_API_KEY" not in __import__("os").environ
+
+
+@pytest.mark.asyncio
+async def test_connect_cancel_alias_replacement_does_not_save_secret(
+    tmp_path, monkeypatch
+) -> None:
+    project_dir = tmp_path / ".nooa"
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
+    monkeypatch.delenv("NVIDIA_INFERENCE_API_KEY", raising=False)
+    project_dir.mkdir(parents=True)
+    (project_dir / "llm_config.yaml").write_text(
+        "models:\n"
+        "  org/model:\n"
+        "    model_name: openai/org/model\n"
+        "    api_base: https://old.example/v1\n"
+    )
+    monkeypatch.setattr(
+        "nooa_cli.tui.model_catalog.fetch_model_catalog",
+        lambda *_args, **_kwargs: (
+            "https://inference-api.nvidia.com/v1",
+            [CatalogModel(id="org/model")],
+        ),
+    )
+    monkeypatch.setattr(
+        "nooa_cli.tui.model_catalog.lookup_model_token_limits",
+        lambda *_args: (None, None),
+    )
+    frontend = _WorkflowFrontend()
+    frontend.sensitive_answers = ["secret-value"]
+    frontend.choice_answers = ["org/model", "Cancel"]
+    command = ConnectCommand(
+        frontend,
+        TUIConfig(),
+        MagicMock(),
+        root_config=SimpleNamespace(llm_config_paths=[]),
+    )
+
+    result = await command.execute(["https://inference-api.nvidia.com/v1"])
+
+    assert result.success is True
+    assert any("Model setup cancelled." in output.content for output in result.outputs)
+    assert not (project_dir / "secrets.yaml").exists()
+    assert "NVIDIA_INFERENCE_API_KEY" not in __import__("os").environ
+    saved = yaml.safe_load((project_dir / "llm_config.yaml").read_text())
+    assert saved["models"]["org/model"]["api_base"] == "https://old.example/v1"
 
 
 @pytest.mark.asyncio
