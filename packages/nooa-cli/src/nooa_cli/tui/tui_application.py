@@ -1013,7 +1013,8 @@ class TUIApplication:
             self._run_callback(self._on_bang, body)
             return False
 
-        self.submit_message(expand_mentions(text))
+        mention_base = getattr(self.agent, "cwd", None) if self.agent is not None else None
+        self.submit_message(expand_mentions(text, base_dir=mention_base))
         return False
 
     def _run_callback(

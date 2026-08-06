@@ -2830,6 +2830,13 @@ class CommandHandler:
         self.frontend = frontend
         self._agent_run_async = agent_run_async
 
+    def _expand_agent_mentions(self, text: str) -> str:
+        """Expand @paths in skill output immediately before it becomes an agent turn."""
+        from .completer import expand_mentions
+
+        agent = getattr(self.registry, "agent", None)
+        return expand_mentions(text, base_dir=getattr(agent, "cwd", None))
+
     async def handle(self, input_text: str, *, render_outputs: bool = True) -> "CommandResult":
         if not input_text.startswith("/"):
             return CommandResult(False)
@@ -2884,15 +2891,19 @@ class CommandHandler:
                     if inspect.isawaitable(result_val):
                         result_val = await result_val
 
+                result_text = str(result_val) if result_val is not None else None
+                if result_text is not None and skill.output_to_agent:
+                    result_text = self._expand_agent_mentions(result_text)
                 slash_result = SlashCommandResult(
                     command=cmd_name,
                     args=raw_args,
                     value=result_val,
-                    text=str(result_val) if result_val is not None else None,
+                    text=result_text,
                     output_to_agent=skill.output_to_agent,
                 )
                 return CommandResult(success=True, slash_result=slash_result)
-            return CommandResult(success=True, agent_message=skill.make_agent_message(args))
+            agent_message = self._expand_agent_mentions(skill.make_agent_message(args))
+            return CommandResult(success=True, agent_message=agent_message)
 
         command = self.registry.get_command(cmd_name)
         if not command:
