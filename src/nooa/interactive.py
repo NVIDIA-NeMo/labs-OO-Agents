@@ -15,8 +15,8 @@ queues and re-enters ``handle()`` once per notification. It provides:
 * token-budget history summarization (``install_summarizer`` /
   ``apply_model_limits``).
 
-The TUI's ``BaseTUIAgent`` (packages/nooa-tui) is a thin subclass that
-adds TUI-specific tooling and event types on top of this class.
+``nooa_cli.coding.CodingAgent`` adds the shared coding tools used by
+interactive hosts such as the TUI and ACP.
 """
 
 from enum import StrEnum
@@ -159,9 +159,8 @@ class RespondResult(BaseModel):
 class AgentMessage(Metadata):
     """A Markdown message sent by the agent to the user via ``self.message()``.
 
-    The TUI emits its own ``TUIAgentMessage`` subtype (its explorers and
-    session store match on that exact type name); this is the host-neutral
-    event used by ``InteractiveAgent`` outside the TUI.
+    Interactive hosts share this event so durable sessions can be replayed
+    without knowing which frontend produced the response.
     """
 
     _role: ClassVar[Role] = Role.METADATA
@@ -340,7 +339,8 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     _user_messages_in: Annotated[Channel, hidden, nosnapshot]
     # Slash command results — posted by the host when a @slash_command returns.
     _slash_commands_in: Annotated[Channel, hidden, nosnapshot]
-    # Host-owned system/internal prompts, e.g. keep-going continuations.
+    # Host-owned system/internal prompts, e.g. keep-going continuations or
+    # harness instructions.
     _system_messages_in: Annotated[Channel, hidden, nosnapshot]
     # Read-only facade (just .get() / .status() / .name) is what the
     # LLM sees as ``self.user_messages``.
@@ -521,7 +521,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
           ``SlashCommandResult(command, args, value, text)``. Access the
           raw return value via ``item.value``; ``str(item)`` gives the text.
         - ``"system_messages"`` — host-owned system/internal prompts,
-          such as keep-going continuations.
+          such as keep-going continuations or harness instructions.
 
         Subclasses may add more (e.g. ``"job_outputs"``); the
         ``<queue_status>`` context block lists the pending count per
