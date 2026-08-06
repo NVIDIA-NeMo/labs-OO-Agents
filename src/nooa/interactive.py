@@ -118,31 +118,70 @@ class RespondResult(BaseModel):
       queue/event channel and re-enter ``handle()`` with the first arrival.
       ``kind`` records why the agent stopped; it does not choose a different
       queue primitive.
-    - ``explanation`` — required non-empty short reason why the agent is ending this
-      turn, or what external input/background event it is waiting for. The host
-      records and renders this line, so make it concrete: name the job/queue
-      being waited on, why it matters, or what user input is needed and why.
+    - ``explanation`` — short internal status note about why this turn ended.
+      This is NOT the reply to the user; it renders as a terse one-line status
+      (e.g. ``∴ done: <explanation>``), not as a chat reply.
+
+      User-facing content — answers, greetings, questions for the user — MUST
+      be sent via ``self.message(...)`` BEFORE ``return_result``. The rule per
+      ``kind``:
+
+        * ``DONE`` — if this turn was handling a user message, you almost
+          certainly owe the user a reply: call ``self.message(...)`` first.
+          Exceptions: the request was satisfied by a pure side effect the user
+          can already see (a slash-command mutation, a UI state change), or you
+          already sent a ``self.message(...)`` earlier in the turn.
+        * ``NEED_INPUT`` — you are asking the user something. ALWAYS call
+          ``self.message(...)`` with the question first; the ``explanation`` is
+          not the question.
+        * ``WAIT`` — no user reply expected. ``explanation`` IS the intended
+          surface: name the job/queue being waited on and why (e.g. "waiting
+          on build job #422 to finish before running tests").
+
+      Keep ``explanation`` terse and factual either way — it's a status line
+      for the host log, not prose.
 
 
     Use ``self.v.<name> = value`` for state that should survive across
     turns (snapshot-backed).
 
-    Build from within the LLM's ``execute_python`` code::
+    Correct pattern for a user-message reply — send the reply first, THEN
+    signal turn end::
 
+        self.message("Hi! I'm the coding agent. What would you like to work on?")
+        return_result(RespondReason.DONE, explanation="greeted the user")
+
+    WRONG — putting the reply in ``explanation`` (the user will not see it as
+    a chat reply; only a terse status line is shown)::
+
+        # BAD: no self.message() call, reply stuffed into explanation
         return_result(
             RespondReason.DONE,
-            explanation="answered the request; waiting for the next user message",
+            explanation="Hi! I'm the coding agent. What would you like to work on?",
         )
+
+    Correct pattern for WAIT — no ``self.message()`` needed; ``explanation``
+    is the status the UI shows::
+
+        return_result(RespondReason.WAIT, explanation="waiting on build job #422")
 
     The older explicit model form is still valid::
 
-        return_result(RespondResult(kind="DONE", explanation="answered the request"))
+        return_result(RespondResult(kind="DONE", explanation="greeted the user"))
     """
 
     kind: RespondReason = Field(description="What the outer dispatcher should do next")
     explanation: str = Field(
         min_length=1,
-        description=("Required: why handle() returned, or what the dispatcher is waiting for."),
+        description=(
+            "Short internal status note about why this turn ended (e.g. 'answered "
+            "the request', 'waiting on build job #422'). NOT shown to the user as "
+            "a chat reply — it renders as a terse status line. For DONE and "
+            "NEED_INPUT, send user-facing content via self.message(...) BEFORE "
+            "calling return_result; do not put the answer, greeting, or question "
+            "here. For WAIT, explanation IS the surfaced status — name the "
+            "job/queue being waited on."
+        ),
     )
 
     @field_validator("explanation")
