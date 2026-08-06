@@ -14,6 +14,7 @@ import pytest
 from pydantic import BaseModel
 
 from nooa.config.strategy_config import PredictConfig, ReflexionConfig
+from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
 from nooa.strategies.predict import PredictStrategy
 from nooa.strategies.reflexion import ReflectionOutput, ReflexionStrategy
 
@@ -70,7 +71,10 @@ async def test_reflexion_forwards_sampling_params_to_generate():
     strat = ReflexionStrategy(config=ReflexionConfig(max_tokens=64, temperature=0.3))
     runtime = MagicMock()
     runtime.event_manager = MagicMock()
-    runtime.truncation_config = MagicMock()
+    # A real config, not a MagicMock: value rendering reads numeric budgets off
+    # it (max_render_chars), and a mock satisfies the attribute access with an
+    # object that then fails the comparison.
+    runtime.truncation_config = DEFAULT_TRUNCATION_CONFIG
     runtime.generate = AsyncMock(
         return_value=(
             MagicMock(content=ReflectionOutput(is_satisfactory=True, reasoning="ok")),

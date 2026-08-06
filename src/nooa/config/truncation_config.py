@@ -207,6 +207,31 @@ class TruncationConfig(BaseModel):
             )
         ),
     ] = 4_096
+    # Total cap on ONE rendered value, applied on top of the per-value
+    # FormatConfig bounds. Those bounds multiply rather than compose: at the
+    # event_format defaults, ``max_length ** max_depth`` is 200**5 leaf slots at
+    # up to max_string chars each, and a list of depth 4 / width 30 — inside
+    # every FormatConfig limit — renders 25 MB. Eviction cannot help, because it
+    # runs at assembly, after the string has been materialised.
+    #
+    # This is the ceiling ``truncating_pformat`` enforces via TruncatingStringIO,
+    # which head/tail-truncates with a visible notice rather than dropping
+    # content silently.
+    #
+    # It lives here, not on FormatConfig, on purpose: that class documents its
+    # field names as matching ``pformat()``'s kwargs exactly so ``model_dump()``
+    # can be splatted straight in, and ``pformat()`` accepts no ``**kwargs`` — a
+    # field there raises TypeError at every splat site.
+    max_render_chars: Annotated[
+        int | None,
+        Field(
+            description=(
+                "Hard char cap on a single rendered value, on top of the "
+                "per-value FormatConfig bounds. None = unlimited. Mirrors "
+                "capture.max_stdout, which bounds the analogous raw-text path."
+            )
+        ),
+    ] = 50_000
     capture: CaptureConfig = CaptureConfig()
     media_capture: MediaCaptureConfig = MediaCaptureConfig()
     # Generous: rendered every turn, especially PythonOutput.value (the LLM
@@ -224,7 +249,7 @@ class TruncationConfig(BaseModel):
     @model_validator(mode="after")
     def _check(self) -> "TruncationConfig":
         errors = []
-        for name in ("max_context_tokens", "max_event_tokens"):
+        for name in ("max_context_tokens", "max_event_tokens", "max_render_chars"):
             v = getattr(self, name)
             if v is not None and v <= 0:
                 errors.append(f"{name} must be > 0 or None, got {v}")
