@@ -3,12 +3,11 @@
 """Tests for the ACP server surface."""
 
 import asyncio
-import threading
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from acp import PROTOCOL_VERSION, RequestError, resource_link_block, text_block
-from acp.schema import AgentMessageChunk, EnvVariable, McpServerStdio
+from acp.schema import AgentMessageChunk, EnvVariable, McpServerStdio, UserMessageChunk
 from click.testing import CliRunner
 from nooa_acp.cli import command
 from nooa_acp.server import CodingACPAdapter
@@ -37,6 +36,10 @@ class _RecordingClient:
 
     async def session_update(self, session_id: str, update: object, **kwargs) -> None:
         self.updates.append(update)
+
+
+async def _session(adapter: CodingACPAdapter, session_id: str):
+    return (await adapter._sessions.get(session_id)).value
 
 
 def test_acp_command_is_discovered_as_cli_plugin():
@@ -81,6 +84,10 @@ async def test_adapter_completes_one_session_prompt(tmp_path):
     assert initialized.protocol_version == PROTOCOL_VERSION
     assert initialized.agent_info is not None
     assert initialized.agent_info.name == "nooa-acp"
+    assert initialized.agent_capabilities.load_session is True
+    capabilities = initialized.agent_capabilities.session_capabilities
+    assert capabilities.list is not None
+    assert capabilities.close is not None
     assert response.stop_reason == "end_turn"
     assert any(
         isinstance(update, AgentMessageChunk) and update.content.text == "ACP response"
@@ -111,10 +118,10 @@ async def test_adapter_preserves_prompt_whitespace(tmp_path):
     adapter.on_connect(client)  # type: ignore[arg-type]
 
     session = await adapter.new_session(str(tmp_path))
-    assert adapter._dispatcher is not None
+    runtime = await _session(adapter, session.session_id)
     result = RespondResult(kind=RespondReason.DONE, explanation="done")
     submit = AsyncMock(return_value=result)
-    with patch.object(adapter._dispatcher, "submit", submit):
+    with patch.object(runtime.dispatcher, "submit", submit):
         await adapter.prompt(session.session_id, [text_block("  indented\n")])
 
     submit.assert_awaited_once_with("  indented\n")
@@ -136,7 +143,7 @@ async def test_adapter_connects_baseline_stdio_mcp_servers(tmp_path):
         "nooa_acp.server.MCPManager.create_stdio_server",
         new=AsyncMock(return_value=_MCPTools()),
     ) as create:
-        await adapter.new_session(str(tmp_path), mcp_servers=[server])
+        session = await adapter.new_session(str(tmp_path), mcp_servers=[server])
 
     create.assert_awaited_once_with(
         "lookup",
@@ -144,31 +151,105 @@ async def test_adapter_connects_baseline_stdio_mcp_servers(tmp_path):
         args=["--stdio"],
         env={"TOKEN": "test"},
     )
+    runtime = await _session(adapter, session.session_id)
+    assert "mcp.lookup" in runtime.agent.skills.loaded()
+    assert "mcp.lookup" in runtime.agent.skills.activated()
     await adapter.close()
 
 
-async def test_adapter_rejects_concurrent_session_creation(tmp_path):
+async def test_adapter_allows_independent_session_creation(tmp_path):
     client = _RecordingClient()
     adapter = CodingACPAdapter(_completed_llm)
     adapter.on_connect(client)  # type: ignore[arg-type]
     server = McpServerStdio(name="lookup", command="lookup-server", args=[], env=[])
-    started = threading.Event()
-    release = threading.Event()
+    started = asyncio.Event()
+    release = asyncio.Event()
 
     async def create_mcp(*args, **kwargs):
         started.set()
-        await asyncio.to_thread(release.wait, 2)
+        await release.wait()
         return _MCPTools()
 
     with patch("nooa_acp.server.MCPManager.create_stdio_server", side_effect=create_mcp):
         first_session = asyncio.create_task(
             adapter.new_session(str(tmp_path), mcp_servers=[server])
         )
-        await asyncio.to_thread(started.wait, 1)
-        with pytest.raises(RequestError):
-            await adapter.new_session(str(tmp_path))
+        await asyncio.wait_for(started.wait(), 1)
+        second = await asyncio.wait_for(adapter.new_session(str(tmp_path)), 1)
         release.set()
-        await first_session
+        first = await first_session
+
+    assert first.session_id != second.session_id
+    await adapter.close()
+
+
+async def test_adapter_rejects_two_prompts_for_same_session(tmp_path):
+    client = _RecordingClient()
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    session = await _session(adapter, created.session_id)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def submit(_text: str):
+        started.set()
+        await release.wait()
+        return RespondResult(kind=RespondReason.DONE, explanation="done")
+
+    with patch.object(session.dispatcher, "submit", side_effect=submit):
+        first = asyncio.create_task(adapter.prompt(created.session_id, [text_block("first")]))
+        await asyncio.wait_for(started.wait(), 1)
+        with pytest.raises(RequestError):
+            await adapter.prompt(created.session_id, [text_block("second")])
+        release.set()
+        assert (await first).stop_reason == "end_turn"
+
+    await adapter.close()
+
+
+async def test_adapter_lists_closes_loads_and_replays_durable_session(tmp_path):
+    first_client = _RecordingClient()
+    first_adapter = CodingACPAdapter(_completed_llm)
+    first_adapter.on_connect(first_client)  # type: ignore[arg-type]
+    created = await first_adapter.new_session(str(tmp_path))
+    await first_adapter.prompt(created.session_id, [text_block("remember this")])
+
+    listed = await first_adapter.list_sessions(str(tmp_path))
+    assert [session.session_id for session in listed.sessions] == [created.session_id]
+    assert listed.sessions[0].cwd == str(tmp_path)
+    await first_adapter.close_session(created.session_id)
+    with pytest.raises(RequestError):
+        await first_adapter.prompt(created.session_id, [text_block("closed")])
+    await first_adapter.close()
+
+    replay_client = _RecordingClient()
+    replay_adapter = CodingACPAdapter(_completed_llm)
+    replay_adapter.on_connect(replay_client)  # type: ignore[arg-type]
+    await replay_adapter.load_session(str(tmp_path), created.session_id)
+
+    replayed_text = [
+        update.content.text
+        for update in replay_client.updates
+        if isinstance(update, AgentMessageChunk)
+    ]
+    assert replayed_text == ["ACP response"]
+    replayed_user_text = [
+        update.content.text
+        for update in replay_client.updates
+        if isinstance(update, UserMessageChunk)
+    ]
+    assert replayed_user_text == ["remember this"]
+    await replay_adapter.close()
+
+
+async def test_adapter_reports_unknown_session_on_load(tmp_path):
+    client = _RecordingClient()
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+
+    with pytest.raises(RequestError):
+        await adapter.load_session(str(tmp_path), "missing")
 
     await adapter.close()
 
@@ -214,9 +295,9 @@ async def test_adapter_maps_generation_limits_to_stop_reasons(
     adapter = CodingACPAdapter(_completed_llm)
     adapter.on_connect(client)  # type: ignore[arg-type]
     session = await adapter.new_session(str(tmp_path))
-    assert adapter._dispatcher is not None
+    runtime = await _session(adapter, session.session_id)
 
-    with patch.object(adapter._dispatcher, "submit", side_effect=GenerationError(message)):
+    with patch.object(runtime.dispatcher, "submit", side_effect=GenerationError(message)):
         response = await adapter.prompt(session.session_id, [text_block("do the work")])
 
     assert response.stop_reason == stop_reason
@@ -228,11 +309,11 @@ async def test_adapter_propagates_unrelated_generation_errors(tmp_path):
     adapter = CodingACPAdapter(_completed_llm)
     adapter.on_connect(client)  # type: ignore[arg-type]
     session = await adapter.new_session(str(tmp_path))
-    assert adapter._dispatcher is not None
+    runtime = await _session(adapter, session.session_id)
 
     with (
         patch.object(
-            adapter._dispatcher,
+            runtime.dispatcher,
             "submit",
             side_effect=GenerationError("LLM API error after retries"),
         ),
