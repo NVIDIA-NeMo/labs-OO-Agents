@@ -580,11 +580,6 @@ class ModelCommand(Command):
                 return CommandResult.err(str(retry_exc))
             pending_secret = (api_key_env, api_key)
 
-        if pending_secret is not None:
-            error = await self._persist_pending_secret(pending_secret)
-            if error is not None:
-                return error
-
         ollama = not api_key_env and await asyncio.to_thread(probe_ollama_backend, api_base)
 
         selected_id = await prompt_choice(
@@ -619,7 +614,11 @@ class ModelCommand(Command):
             return CommandResult.err(str(exc))
 
         return await self._finalize_alias_and_switch(
-            alias, entry, get_project_dir("llm_config.yaml"), prompt_choice
+            alias,
+            entry,
+            get_project_dir("llm_config.yaml"),
+            prompt_choice,
+            pending_secret=pending_secret,
         )
 
     async def _add_native_provider(self, provider: str) -> "CommandResult":
@@ -674,12 +673,23 @@ class ModelCommand(Command):
                 fetch_native_provider_models, normalized, api_key
             )
         except ModelCatalogError as exc:
-            return CommandResult.err(str(exc))
-
-        if pending_secret is not None:
-            error = await self._persist_pending_secret(pending_secret)
-            if error is not None:
-                return error
+            auth_rejected = "rejected authentication" in str(exc).lower()
+            if not auth_rejected or not callable(prompt_sensitive):
+                return CommandResult.err(str(exc))
+            api_key = await prompt_sensitive(
+                f"{provider_label} API key",
+                f"Paste the API key for {provider_label}. "
+                f"It will replace {api_key_env} in project secrets.yaml.",
+            )
+            if not api_key:
+                return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
+            try:
+                discovered_models = await asyncio.to_thread(
+                    fetch_native_provider_models, normalized, api_key
+                )
+            except ModelCatalogError as retry_exc:
+                return CommandResult.err(str(retry_exc))
+            pending_secret = (api_key_env, api_key)
 
         model_choices = [model.id for model in discovered_models]
         model_choices.append("Custom model...")
@@ -716,7 +726,11 @@ class ModelCommand(Command):
             return CommandResult.err(str(exc))
 
         return await self._finalize_alias_and_switch(
-            alias, entry, get_project_dir("llm_config.yaml"), prompt_choice
+            alias,
+            entry,
+            get_project_dir("llm_config.yaml"),
+            prompt_choice,
+            pending_secret=pending_secret,
         )
 
     async def _persist_pending_secret(
@@ -742,8 +756,10 @@ class ModelCommand(Command):
         entry: dict[str, Any],
         registry_path: Path,
         prompt_choice: Callable[..., Awaitable[str | None]],
+        *,
+        pending_secret: tuple[str, str] | None = None,
     ) -> "CommandResult":
-        """Persist the alias, reload the registry, and switch unless replace-only."""
+        """Persist confirmed setup, reload the registry, and switch unless replace-only."""
         from .model_catalog import ModelCatalogError, model_alias_exists, write_model_alias
 
         try:
@@ -764,6 +780,10 @@ class ModelCommand(Command):
             await asyncio.to_thread(
                 write_model_alias, registry_path, alias, entry, replace=alias_exists
             )
+            if pending_secret is not None:
+                error = await self._persist_pending_secret(pending_secret)
+                if error is not None:
+                    return error
             await asyncio.to_thread(self._reload_model_registry)
         except (ModelCatalogError, OSError, ValueError) as exc:
             return CommandResult.err(f"Could not update {registry_path}: {exc}")
