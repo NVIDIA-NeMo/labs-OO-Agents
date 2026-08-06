@@ -16,6 +16,7 @@ from nooa_cli.tui.completer import Completer
 @pytest.fixture
 def mock_registry():
     reg = MagicMock()
+    reg.agent.cwd = Path.cwd()
     _completions = {
         "/help": "Show all commands",
         "/edit": "Edit a file",
@@ -501,6 +502,17 @@ def test_mention_completion_inline(completer):
         assert items[0].text == f"please read @{tmpdir}/alpha.py"
 
 
+def test_mention_completion_in_slash_command_uses_agent_cwd(tmp_path, mock_registry):
+    """An explicit @ argument overrides slash routing and resolves from the workspace."""
+    (tmp_path / "alpha.py").touch()
+    mock_registry.agent.cwd = tmp_path
+    completer = Completer(mock_registry)
+
+    items = completer.complete("/plan @al")
+
+    assert [item.text for item in items] == ["/plan @alpha.py"]
+
+
 def test_mention_only_last_token(completer):
     """An earlier @ in the buffer must not hijack completion."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -530,6 +542,18 @@ def test_expand_mentions_file():
         rel = str(f)
         out = expand_mentions(f"see @{rel} for details")
         assert out == f"see [{rel}](<{f.resolve()}>) for details"
+
+
+def test_expand_mentions_relative_to_agent_cwd(tmp_path):
+    """Relative mentions resolve from the configured workspace, not process cwd."""
+    from nooa_cli.tui.completer import expand_mentions
+
+    f = tmp_path / "notes.md"
+    f.touch()
+
+    assert expand_mentions("read @notes.md", base_dir=tmp_path) == (
+        f"read [notes.md](<{f.resolve()}>)"
+    )
 
 
 def test_expand_mentions_directory_strips_trailing_slash():

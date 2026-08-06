@@ -55,6 +55,13 @@ class Completer:
     def complete(self, text: str) -> list[CompletionItem]:
         """Return completion candidates for *text*."""
         if text.startswith("/"):
+            # An explicit @ token is unambiguous and composes with prompt-like
+            # slash commands (for example, ``/plan @src/foo.py``).  Keep slash
+            # command completion as the fallback so command-specific argument
+            # completers retain their existing behavior otherwise.
+            mention = self._active_mention(text)
+            if mention is not None:
+                return self._mention_completions(text, mention)
             return self._slash_completions(text)
         if text.startswith("!"):
             return self._bang_completions(text)
@@ -82,7 +89,11 @@ class Completer:
         """Path completions for an inline ``@path`` token (prefix = buffer up to the @)."""
         partial = match.group(1)
         prefix = text[: match.start()] + "@"
-        return self._path_completions(partial, prefix=prefix)
+        return self._path_completions(
+            partial,
+            prefix=prefix,
+            base_dir=self._agent_working_dir(),
+        )
 
     # ------------------------------------------------------------------
     # Slash commands
@@ -749,7 +760,7 @@ _MENTION_TOKEN = re.compile(r"(?:^|(?<=\s))@(\S+)")
 _TRAILING_PUNCT = ".,;:!?)]}\"'"
 
 
-def expand_mentions(text: str) -> str:
+def expand_mentions(text: str, *, base_dir: str | Path | None = None) -> str:
     """Expand inline ``@path`` mentions into Markdown links before sending.
 
     ``@docs/blah.md`` becomes ``[docs/blah.md](</abs/docs/blah.md>)`` so the
@@ -760,6 +771,10 @@ def expand_mentions(text: str) -> str:
     angle-bracketed so a path containing ``)`` can't break out of the link.
     """
 
+    resolved_base = (
+        Path(base_dir).expanduser().resolve() if isinstance(base_dir, (str, os.PathLike)) else None
+    )
+
     def _sub(m: "re.Match") -> str:
         raw = m.group(1)
         # Peel trailing punctuation, but try the full token first so a real
@@ -767,10 +782,11 @@ def expand_mentions(text: str) -> str:
         stripped = raw.rstrip(_TRAILING_PUNCT)
         for candidate in (raw, stripped):
             p = Path(os.path.expanduser(candidate))
-            if p.exists():
+            resolved = p if p.is_absolute() or resolved_base is None else resolved_base / p
+            if resolved.exists():
                 trailer = raw[len(candidate) :]
                 label = candidate.rstrip("/")
-                return f"[{label}](<{p.resolve()}>){trailer}"
+                return f"[{label}](<{resolved.resolve()}>){trailer}"
         return m.group(0)
 
     return _MENTION_TOKEN.sub(_sub, text)
