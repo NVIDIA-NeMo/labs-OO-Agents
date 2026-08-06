@@ -6,7 +6,7 @@ idea: **the agent authors and curates its own memories** through native tools â€
 rather than a harness extracting them behind the agent's back.
 
 - Runnable demos + measured results: [`examples/memory_bench/`](../../../examples/memory_bench/)
-  and the quickstart [`examples/quickstart/12_memory.py`](../../../examples/quickstart/12_memory.py).
+  and the quickstart [`examples/quickstart/12_memory.py`](../../../../examples/quickstart/12_memory.py).
 
 ---
 
