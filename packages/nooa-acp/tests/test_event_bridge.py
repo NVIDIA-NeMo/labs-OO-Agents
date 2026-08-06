@@ -6,9 +6,22 @@ import asyncio
 from typing import Any, cast
 
 import pytest
-from acp.schema import AgentMessageChunk, ToolCallProgress, ToolCallStart, UsageUpdate
+from acp.schema import (
+    AgentMessageChunk,
+    ContentToolCallContent,
+    FileEditToolCallContent,
+    ToolCallProgress,
+    ToolCallStart,
+    UsageUpdate,
+)
 from nooa_acp.coding_agent import CodingInteractiveAgent
 from nooa_acp.event_bridge import ACPEventBridge
+from nooa_cli.coding import (
+    FileEdit,
+    TerminalCommandFinished,
+    TerminalCommandOutput,
+    TerminalCommandStarted,
+)
 
 from nooa.context_blocks.events import ResultStatus, ToolCallEvent
 from nooa.events import LLMComplete, PythonOutput
@@ -125,6 +138,82 @@ async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
     await bridge.flush()
 
     assert not any(isinstance(update, UsageUpdate) for _, update in client.updates)
+    await bridge.close()
+    await agent.close()
+
+
+async def test_bridge_emits_structured_file_edit(tmp_path):
+    agent = CodingInteractiveAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+    path = str(tmp_path / "example.py")
+
+    agent.event_manager.add(
+        FileEdit(
+            path=path,
+            operation="update",
+            old_text="old\n",
+            new_text="new\n",
+            start_line=3,
+            end_line=3,
+            diff="unused when complete",
+        )
+    )
+    await bridge.flush()
+
+    update = next(
+        cast(ToolCallStart, update)
+        for _, update in client.updates
+        if isinstance(update, ToolCallStart)
+    )
+    assert update.kind == "edit"
+    assert update.status == "completed"
+    assert update.locations is not None
+    assert update.locations[0].path == path
+    assert update.locations[0].line == 2
+    content = cast(FileEditToolCallContent, update.content[0])
+    assert content.path == path
+    assert content.old_text == "old\n"
+    assert content.new_text == "new\n"
+    await bridge.close()
+    await agent.close()
+
+
+async def test_bridge_emits_terminal_lifecycle(tmp_path):
+    agent = CodingInteractiveAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+
+    agent.event_manager.add(
+        TerminalCommandStarted(
+            command_id="command-1",
+            command="pytest -q",
+            working_directory=str(tmp_path),
+        )
+    )
+    agent.event_manager.add(TerminalCommandOutput(command_id="command-1", stdout="2 passed\n"))
+    agent.event_manager.add(TerminalCommandFinished(command_id="command-1", exit_code=0))
+    await bridge.flush()
+
+    updates = [update for _, update in client.updates]
+    assert [type(update) for update in updates] == [
+        ToolCallStart,
+        ToolCallProgress,
+        ToolCallProgress,
+    ]
+    started = cast(ToolCallStart, updates[0])
+    assert started.kind == "execute"
+    assert started.title == "$ pytest -q"
+    progress = cast(ToolCallProgress, updates[1])
+    content = cast(ContentToolCallContent, progress.content[0])
+    assert content.content.text == "2 passed\n"
+    finished = cast(ToolCallProgress, updates[2])
+    assert finished.status == "completed"
+    assert finished.raw_output == {
+        "exit_code": 0,
+        "timed_out": False,
+        "output_truncated": False,
+    }
     await bridge.close()
     await agent.close()
 

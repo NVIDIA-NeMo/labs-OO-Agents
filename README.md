@@ -209,10 +209,11 @@ export NVIDIA_API_KEY=nvapi-...
 uv run nooa-acp
 ```
 
-`nooa-acp` runs NOOA's `InteractiveAgent`, CodeAct strategy, repository tools,
-and persistent shell over the standard Agent Client Protocol on stdin/stdout.
-The adapter also registers `nooa acp` when both `nooa-cli` and `nooa-acp` are
-installed.
+`nooa-acp` runs the shared NOOA coding agent, CodeAct strategy, repository
+tools, persistent shell, installed skills, and durable project sessions over
+the standard Agent Client Protocol on stdin/stdout. File edits and terminal
+commands are also sent as structured ACP activity. The adapter registers
+`nooa acp` when both `nooa-cli` and `nooa-acp` are installed.
 
 Because the agent executes generated code and shell commands, use an OS-level
 sandbox for untrusted tasks. `cwd` scopes the working session but is not a

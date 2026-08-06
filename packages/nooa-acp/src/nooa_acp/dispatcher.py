@@ -54,6 +54,7 @@ class InteractiveSessionDispatcher:
                 return result
 
     async def cancel(self) -> bool:
+        """Cancel the foreground turn and background jobs without closing the session."""
         task = self._active_task
         if task is None or task.done():
             return False
@@ -66,7 +67,6 @@ class InteractiveSessionDispatcher:
                 await task
             self.agent.queue_manager.get_channel("user_messages").flush()
             await self.agent.queue_manager.shutdown()
-            await self.agent.shell.close()
             return True
         finally:
             self._cancelling = False

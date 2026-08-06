@@ -5,11 +5,26 @@
 import asyncio
 from collections.abc import Callable
 from contextlib import suppress
+from pathlib import Path
 from typing import Any, Literal
+from uuid import uuid4
 
-from acp import start_tool_call, text_block, tool_content, update_agent_message, update_tool_call
+from acp import (
+    start_tool_call,
+    text_block,
+    tool_content,
+    tool_diff_content,
+    update_agent_message,
+    update_tool_call,
+)
 from acp.interfaces import Client
-from acp.schema import Cost, UsageUpdate
+from acp.schema import Cost, ToolCallLocation, UsageUpdate
+from nooa_cli.coding import (
+    FileEdit,
+    TerminalCommandFinished,
+    TerminalCommandOutput,
+    TerminalCommandStarted,
+)
 
 from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
 from nooa.events import LLMComplete, PythonOutput
@@ -28,12 +43,17 @@ class ACPEventBridge:
         self._error: Exception | None = None
         self._closed = False
         self._open_tools: set[str] = set()
+        self._terminal_output: dict[str, str] = {}
         self._cost_usd = 0.0
         self._unsubscribers: list[Callable[[], None]] = [
             agent.event_manager.on("AgentMessage", self._on_agent_message),
             agent.event_manager.on("ToolCallEvent", self._on_tool_call),
             agent.event_manager.on("PythonOutput", self._on_python_output),
             agent.event_manager.on("LLMComplete", self._on_llm_complete),
+            agent.event_manager.on("FileEdit", self._on_file_edit),
+            agent.event_manager.on("TerminalCommandStarted", self._on_terminal_started),
+            agent.event_manager.on("TerminalCommandOutput", self._on_terminal_output),
+            agent.event_manager.on("TerminalCommandFinished", self._on_terminal_finished),
         ]
         self._pump_task = asyncio.create_task(self._pump(), name="nooa-acp-events")
 
@@ -80,6 +100,88 @@ class ACPEventBridge:
                 event.tool_call_id,
                 status=status,
                 content=[tool_content(text_block(output))],
+            )
+        )
+
+    def _on_file_edit(self, event: EventBase) -> None:
+        if not isinstance(event, FileEdit):
+            return
+        tool_call_id = f"file-edit-{uuid4()}"
+        path = event.path
+        title = f"{'Created' if event.operation == 'create' else 'Edited'} {Path(path).name}"
+        if event.content_complete:
+            content = [tool_diff_content(path, event.new_text, event.old_text)]
+        else:
+            content = [tool_content(text_block(event.diff or "File content was truncated."))]
+        line = max(0, event.start_line - 1) if event.start_line is not None else None
+        self._enqueue(
+            start_tool_call(
+                tool_call_id,
+                title,
+                kind="edit",
+                status="completed",
+                content=content,
+                locations=[ToolCallLocation(path=path, line=line)],
+                raw_input={"path": path, "operation": event.operation},
+            )
+        )
+
+    def _on_terminal_started(self, event: EventBase) -> None:
+        if not isinstance(event, TerminalCommandStarted):
+            return
+        self._open_tools.add(event.command_id)
+        self._terminal_output[event.command_id] = ""
+        self._enqueue(
+            start_tool_call(
+                event.command_id,
+                f"$ {event.command}",
+                kind="execute",
+                status="in_progress",
+                raw_input={
+                    "command": event.command,
+                    "working_directory": event.working_directory,
+                },
+            )
+        )
+
+    def _on_terminal_output(self, event: EventBase) -> None:
+        if not isinstance(event, TerminalCommandOutput) or event.command_id not in self._open_tools:
+            return
+        chunk = event.stdout
+        if event.stderr:
+            chunk += ("\n" if chunk and not chunk.endswith("\n") else "") + event.stderr
+        output = self._terminal_output.get(event.command_id, "") + chunk
+        self._terminal_output[event.command_id] = output
+        self._enqueue(
+            update_tool_call(
+                event.command_id,
+                status="in_progress",
+                content=[tool_content(text_block(output))],
+            )
+        )
+
+    def _on_terminal_finished(self, event: EventBase) -> None:
+        if not isinstance(event, TerminalCommandFinished):
+            return
+        self._open_tools.discard(event.command_id)
+        output = self._terminal_output.pop(event.command_id, "")
+        if event.error:
+            output += ("\n" if output and not output.endswith("\n") else "") + event.error
+        failed = (
+            event.timed_out
+            or bool(event.error)
+            or (event.exit_code is not None and event.exit_code != 0)
+        )
+        self._enqueue(
+            update_tool_call(
+                event.command_id,
+                status="failed" if failed else "completed",
+                content=[tool_content(text_block(output or "Completed."))],
+                raw_output={
+                    "exit_code": event.exit_code,
+                    "timed_out": event.timed_out,
+                    "output_truncated": event.output_truncated,
+                },
             )
         )
 
@@ -137,6 +239,7 @@ class ACPEventBridge:
                 )
             )
         self._open_tools.clear()
+        self._terminal_output.clear()
 
     async def close(self) -> None:
         if self._closed:
