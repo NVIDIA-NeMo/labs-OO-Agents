@@ -25,9 +25,39 @@ nooa tui                  # interactive coding agent
 
 ## TUI configuration
 
-The TUI reads layered `settings.yaml` files from the user config directory and
-the current project's `.nooa/` directory. It also honors `AGENTS.md` files from
-the repository root down to the current working directory.
+### Connect a model
+
+Start the TUI and run `/connect` — it guides you through picking a model and
+stores your credentials for you.
+
+```bash
+nooa tui
+```
+
+```text
+/connect https://api.anthropic.com          # Anthropic (Claude)
+/connect https://api.openai.com/v1           # OpenAI
+/connect http://localhost:11434              # Local Ollama
+/connect http://localhost:8000/v1            # Local vLLM
+/connect https://inference-api.nvidia.com/v1 # NVIDIA inference API
+```
+
+Give it a URL and `/connect` figures out the rest: it fetches the available
+models, prompts for an API key if the backend needs one, saves an alias to your
+project, and switches to the model you pick. Rerun `/connect` on the same URL
+any time to update the saved alias.
+
+### Editing saved config
+
+Everything `/connect` writes lives under your project's `.nooa/` folder:
+
+- `.nooa/llm_config.yaml` — saved model aliases
+- `.nooa/secrets.yaml` — API keys keyed by env-var name
+- `.nooa/settings.yaml` — TUI preferences and default model
+
+Edit any of them from inside the TUI with `/edit .nooa/<file>`, or open them in
+your usual editor. Changes to `settings.yaml` and `llm_config.yaml` are picked
+up on the next launch.
 
 Agent Skills are discovered from installed `nooa.skills` entry points and from
 conventional `.agents/skills`, `.claude/skills`, and `.cursor/skills`

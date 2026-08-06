@@ -117,13 +117,13 @@ def test_compact_help_command_families_complete_actions(completer, text, expecte
     assert [item.text for item in completer.complete(text)] == expected
 
 
-def test_model_completion_includes_add_to_registry(completer):
-    items = completer.complete("/model add")
+def test_model_completion_does_not_include_backend_setup(completer):
+    items = completer.complete("/model dis")
 
-    assert [item.text for item in items] == ["/model add-to-registry"]
+    assert [item.text for item in items] == []
 
 
-def test_model_add_to_registry_completes_deduplicated_api_bases(completer, monkeypatch):
+def test_connect_completes_deduplicated_api_bases(completer, monkeypatch):
     import nooa.unifiedllm as unifiedllm
 
     monkeypatch.setattr(
@@ -138,17 +138,17 @@ def test_model_add_to_registry_completes_deduplicated_api_bases(completer, monke
         },
     )
 
-    items = completer.complete("/model add-to-registry ")
+    items = completer.complete("/connect ")
 
     assert [item.text for item in items] == [
-        "/model add-to-registry https://inference.example.test/v1",
-        "/model add-to-registry https://other.example.test/api",
+        "/connect https://inference.example.test/v1",
+        "/connect https://other.example.test/api",
     ]
     assert items[0].display == "https://inference.example.test/v1"
     assert items[0].description == "Used by alpha, beta"
 
 
-def test_model_add_to_registry_endpoint_completion_filters_partial(completer, monkeypatch):
+def test_connect_endpoint_completion_filters_partial(completer, monkeypatch):
     import nooa.unifiedllm as unifiedllm
 
     monkeypatch.setattr(
@@ -162,8 +162,12 @@ def test_model_add_to_registry_endpoint_completion_filters_partial(completer, mo
 
     assert [
         item.text
-        for item in completer.complete("/model add-to-registry https://oth")
-    ] == ["/model add-to-registry https://other.example.test/v1"]
+        for item in completer.complete("/connect https://oth")
+    ] == ["/connect https://other.example.test/v1"]
+
+
+def test_connect_provider_completion_no_hardcoded_shortcuts(completer):
+    assert list(completer.complete("/connect ant")) == []
 
 
 def test_skills_add_completes_directories_only(tmp_path, mock_registry):

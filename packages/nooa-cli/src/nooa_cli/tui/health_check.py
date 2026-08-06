@@ -86,6 +86,7 @@ def unresolved_model_health(model: str) -> HealthCheckResult:
         fix_hint=(
             "  • Add .nooa/llm_config.yaml, pass --llm-config FILE, or install "
             "your organization's registry extension\n"
+            "  • In the TUI, run `/connect <server-url>` to save an alias\n"
             "  • Run `nooa config show` to inspect locally discovered registry layers\n"
             "  • Or choose a provider-qualified model with --model <provider/model>"
         ),

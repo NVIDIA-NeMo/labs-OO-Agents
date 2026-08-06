@@ -16,6 +16,7 @@ import os
 import re
 import shlex
 import urllib.parse
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -417,16 +418,10 @@ class ModelCommand(Command):
     def help_text(self) -> dict[str, str]:  # type: ignore[override]
         short = self.config.default_model.split("/")[-1] if hasattr(self, "config") else "?"
         return {
-            "/model [NAME|add-to-registry URL]": (
-                f"Switch and save a model, or add one from a server (currently {short})"
-            ),
+            "/model [NAME]": f"Switch and save a model (currently {short})",
         }
 
     def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
-        if args and args[0].lower() == "add-to-registry":
-            if len(args) != 2:
-                return False, "Usage: /model add-to-registry <server-url>"
-            return True, None
         if len(args) > 1:
             return False, "Usage: /model [name]"
         return True, None
@@ -436,9 +431,6 @@ class ModelCommand(Command):
             return CommandResult.ok(
                 TextOutput(f"Current model: {self.config.default_model}", "info")
             )
-        if args[0].lower() == "add-to-registry":
-            return await self._add_to_registry(args[1])
-
         selected = args[0]
         try:
             from nooa.interactive import apply_model_limits
@@ -497,24 +489,26 @@ class ModelCommand(Command):
 
     async def _add_to_registry(self, server_url: str) -> "CommandResult":
         """Run the host-rendered workflow for an OpenAI-compatible server."""
-        from nooa.paths import get_project_dir, get_user_dir
+        from nooa.paths import get_project_dir
+        from nooa.unifiedllm import resolve_api_key_from_config
 
         from .model_catalog import (
             ModelCatalogError,
             default_alias,
             fetch_model_catalog,
+            is_anthropic_endpoint,
             lookup_model_token_limits,
             normalize_catalog_endpoint,
-            parse_optional_token_limit,
+            probe_ollama_backend,
             registry_entry,
             suggested_api_key_env,
             validate_alias,
             validate_api_key_env,
-            write_model_alias,
         )
 
         prompt_text = getattr(self.frontend, "prompt_text", None)
         prompt_choice = getattr(self.frontend, "prompt_choice", None)
+        prompt_sensitive = getattr(self.frontend, "prompt_sensitive", None)
         if not callable(prompt_text) or not callable(prompt_choice):
             return CommandResult.err("This frontend does not support interactive model setup.")
 
@@ -523,34 +517,70 @@ class ModelCommand(Command):
         except ModelCatalogError as exc:
             return CommandResult.err(str(exc))
 
-        suggested_env = suggested_api_key_env(api_base)
-        api_key_env = await prompt_text(
-            "Model server authentication",
-            "API key environment variable (the secret itself is never stored). "
-            "Leave blank for a server that needs no authentication.",
-            suggested_env,
-        )
+        if is_anthropic_endpoint(api_base):
+            return await self._add_native_provider("anthropic")
+
         try:
-            api_key_env = validate_api_key_env(api_key_env)
+            api_key_env = validate_api_key_env(suggested_api_key_env(api_base))
         except ModelCatalogError as exc:
             return CommandResult.err(str(exc))
-        api_key = None
-        if api_key_env:
-            from nooa.unifiedllm import resolve_api_key_from_config
-
-            api_key = resolve_api_key_from_config("model-catalog", {"api_key_env": api_key_env})
+        api_key = (
+            resolve_api_key_from_config("model-catalog", {"api_key_env": api_key_env})
+            if api_key_env
+            else None
+        )
+        pending_secret: tuple[str, str] | None = None
         if api_key_env and not api_key:
-            return CommandResult.err(
-                f"{api_key_env} is not set. Export it and run the command again; "
-                "the TUI will use it without writing the secret to disk."
+            if not callable(prompt_sensitive):
+                return CommandResult.err(
+                    f"{api_key_env} is not set and this frontend cannot collect masked secrets. "
+                    "Export it and run the command again."
+                )
+            api_key = await prompt_sensitive(
+                "Model server API key",
+                f"Paste the API key for {api_base}. "
+                f"It will be saved as {api_key_env} in project secrets.yaml.",
             )
+            if not api_key:
+                return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
+            pending_secret = (api_key_env, api_key)
 
         try:
             api_base, models = await asyncio.to_thread(
                 fetch_model_catalog, server_url, api_key=api_key
             )
         except ModelCatalogError as exc:
-            return CommandResult.err(str(exc))
+            auth_rejected = "rejected authentication" in str(exc).lower()
+            if not auth_rejected or not callable(prompt_sensitive):
+                return CommandResult.err(str(exc))
+            if not api_key_env:
+                api_key_env = await prompt_text(
+                    "Model server authentication",
+                    "API key environment variable to save this backend's key.",
+                    "MODEL_API_KEY",
+                )
+                try:
+                    api_key_env = validate_api_key_env(api_key_env)
+                except ModelCatalogError as env_exc:
+                    return CommandResult.err(str(env_exc))
+                if not api_key_env:
+                    return CommandResult.err(str(exc))
+            api_key = await prompt_sensitive(
+                "Model server API key",
+                f"Paste the API key for {api_base}. "
+                f"It will replace {api_key_env} in project secrets.yaml.",
+            )
+            if not api_key:
+                return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
+            try:
+                api_base, models = await asyncio.to_thread(
+                    fetch_model_catalog, server_url, api_key=api_key
+                )
+            except ModelCatalogError as retry_exc:
+                return CommandResult.err(str(retry_exc))
+            pending_secret = (api_key_env, api_key)
+
+        ollama = not api_key_env and await asyncio.to_thread(probe_ollama_backend, api_base)
 
         selected_id = await prompt_choice(
             "Add model",
@@ -559,14 +589,8 @@ class ModelCommand(Command):
         )
         if not selected_id:
             return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
-        selected = next(model for model in models if model.id == selected_id)
-
-        alias = await prompt_text(
-            "Model alias",
-            "Choose the name you will use with /model and --model.",
-            default_alias(selected.id),
-        )
-        if not alias:
+        selected = next((model for model in models if model.id == selected_id), None)
+        if selected is None:
             return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
 
         inferred_context: int | None = None
@@ -575,80 +599,202 @@ class ModelCommand(Command):
             inferred_context, inferred_output = await asyncio.to_thread(
                 lookup_model_token_limits, selected.id
             )
-        suggested_context = selected.context_window or inferred_context
-        suggested_output = selected.max_tokens or inferred_output
-
-        context_value = await prompt_text(
-            "Context window",
-            "Maximum combined context capacity in tokens. Confirm the suggested value, "
-            "or leave blank if it is unknown.",
-            str(suggested_context or ""),
-        )
-        output_value = await prompt_text(
-            "Maximum output",
-            "Maximum completion/output tokens. Confirm the suggested value, or leave blank "
-            "to let the provider choose.",
-            str(suggested_output or ""),
-        )
-
-        user_scope = "All projects (~/.config/nooa/llm_config.yaml)"
-        project_scope = "This project (.nooa/llm_config.yaml)"
-        scope = await prompt_choice(
-            "Registry location",
-            "Choose where this model alias should be available.",
-            [user_scope, project_scope, "Cancel"],
-        )
-        if not scope or scope == "Cancel":
-            return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
-        registry_path = (
-            get_user_dir("llm_config.yaml")
-            if scope == user_scope
-            else get_project_dir("llm_config.yaml")
-        )
 
         try:
-            alias = validate_alias(alias)
-            context_window = parse_optional_token_limit(context_value, "Context window")
-            max_tokens = parse_optional_token_limit(output_value, "Maximum output tokens")
+            alias = validate_alias(default_alias(selected.id))
             entry = registry_entry(
                 selected.id,
                 api_base,
                 api_key_env,
-                context_window=context_window,
-                max_tokens=max_tokens,
+                context_window=selected.context_window or inferred_context,
+                max_tokens=selected.max_tokens or inferred_output,
+                ollama=ollama,
             )
         except ModelCatalogError as exc:
             return CommandResult.err(str(exc))
 
-        summary = (
-            f"Alias: {alias}\nModel: {entry['model_name']}\nServer: {api_base}\n"
-            f"API key: {api_key_env or '(none)'}\n"
-            f"Context window: {context_window or '(unknown)'}\n"
-            f"Maximum output: {max_tokens or '(provider default)'}\n"
-            f"Registry: {registry_path}"
+        return await self._finalize_alias_and_switch(
+            alias,
+            entry,
+            get_project_dir("llm_config.yaml"),
+            prompt_choice,
+            pending_secret=pending_secret,
         )
-        action = await prompt_choice(
-            "Confirm model",
-            summary,
-            ["Add and use now", "Add only", "Cancel"],
+
+    async def _add_native_provider(self, provider: str) -> "CommandResult":
+        """Run the host-rendered workflow for a native LiteLLM provider."""
+        from nooa.paths import get_project_dir
+        from nooa.unifiedllm import resolve_api_key_from_config
+
+        from .model_catalog import (
+            ModelCatalogError,
+            default_alias,
+            fetch_native_provider_models,
+            lookup_model_token_limits,
+            native_provider_api_key_env,
+            native_provider_registry_entry,
+            normalize_native_provider,
+            validate_alias,
         )
-        if not action or action == "Cancel":
-            return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
+
+        normalized = normalize_native_provider(provider)
+        if normalized is None:
+            return CommandResult.err(f"Unsupported provider '{provider}'.")
+
+        prompt_text = getattr(self.frontend, "prompt_text", None)
+        prompt_choice = getattr(self.frontend, "prompt_choice", None)
+        prompt_sensitive = getattr(self.frontend, "prompt_sensitive", None)
+        if not callable(prompt_text) or not callable(prompt_choice):
+            return CommandResult.err("This frontend does not support interactive model setup.")
+
+        provider_label = normalized.title()
+        api_key_env = native_provider_api_key_env(normalized)
+        api_key = resolve_api_key_from_config(
+            f"{normalized}-model-setup", {"api_key_env": api_key_env}
+        )
+        pending_secret: tuple[str, str] | None = None
+        if not api_key:
+            if not callable(prompt_sensitive):
+                return CommandResult.err(
+                    f"{api_key_env} is not set and this frontend cannot collect masked secrets. "
+                    "Export it and run the command again."
+                )
+            api_key = await prompt_sensitive(
+                f"{provider_label} API key",
+                f"Paste the API key for {provider_label}. "
+                f"It will be saved as {api_key_env} in project secrets.yaml.",
+            )
+            if not api_key:
+                return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
+            pending_secret = (api_key_env, api_key)
 
         try:
-            await asyncio.to_thread(write_model_alias, registry_path, alias, entry)
+            discovered_models = await asyncio.to_thread(
+                fetch_native_provider_models, normalized, api_key
+            )
+        except ModelCatalogError as exc:
+            auth_rejected = "rejected authentication" in str(exc).lower()
+            if not auth_rejected or not callable(prompt_sensitive):
+                return CommandResult.err(str(exc))
+            api_key = await prompt_sensitive(
+                f"{provider_label} API key",
+                f"Paste the API key for {provider_label}. "
+                f"It will replace {api_key_env} in project secrets.yaml.",
+            )
+            if not api_key:
+                return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
+            try:
+                discovered_models = await asyncio.to_thread(
+                    fetch_native_provider_models, normalized, api_key
+                )
+            except ModelCatalogError as retry_exc:
+                return CommandResult.err(str(retry_exc))
+            pending_secret = (api_key_env, api_key)
+
+        model_choices = [model.id for model in discovered_models]
+        model_choices.append("Custom model...")
+        selected_id = await prompt_choice(
+            f"Add {provider_label} model",
+            f"Found {len(discovered_models):,} models. Type to filter, then choose one.",
+            model_choices,
+        )
+        if not selected_id:
+            return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
+        if selected_id == "Custom model...":
+            selected_id = await prompt_text(
+                f"{provider_label} model",
+                "Enter a LiteLLM-compatible model name.",
+                model_choices[0],
+            )
+            if not selected_id:
+                return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
+
+        inferred_context, inferred_output = await asyncio.to_thread(
+            lookup_model_token_limits, selected_id
+        )
+
+        try:
+            alias = validate_alias(default_alias(selected_id))
+            entry = native_provider_registry_entry(
+                normalized,
+                selected_id,
+                api_key_env,
+                context_window=inferred_context,
+                max_tokens=inferred_output,
+            )
+        except ModelCatalogError as exc:
+            return CommandResult.err(str(exc))
+
+        return await self._finalize_alias_and_switch(
+            alias,
+            entry,
+            get_project_dir("llm_config.yaml"),
+            prompt_choice,
+            pending_secret=pending_secret,
+        )
+
+    async def _persist_pending_secret(
+        self, pending: tuple[str, str]
+    ) -> "CommandResult | None":
+        """Write a validated secret to project secrets.yaml; return err on failure."""
+        from nooa.paths import get_project_dir
+
+        from .model_catalog import ModelCatalogError, write_secret_env
+
+        name, value = pending
+        try:
+            await asyncio.to_thread(
+                write_secret_env, get_project_dir("secrets.yaml"), name, value
+            )
+        except (ModelCatalogError, OSError, ValueError) as exc:
+            return CommandResult.err(f"Could not save {name} to secrets.yaml: {exc}")
+        return None
+
+    async def _finalize_alias_and_switch(
+        self,
+        alias: str,
+        entry: dict[str, Any],
+        registry_path: Path,
+        prompt_choice: Callable[..., Awaitable[str | None]],
+        *,
+        pending_secret: tuple[str, str] | None = None,
+    ) -> "CommandResult":
+        """Persist confirmed setup, reload the registry, and switch unless replace-only."""
+        from .model_catalog import ModelCatalogError, model_alias_exists, write_model_alias
+
+        try:
+            alias_exists = await asyncio.to_thread(model_alias_exists, registry_path, alias)
+        except (ModelCatalogError, OSError, ValueError) as exc:
+            return CommandResult.err(f"Could not inspect {registry_path}: {exc}")
+        action = "Use now"
+        if alias_exists:
+            action = await prompt_choice(
+                "Replace model alias",
+                f"Alias '{alias}' already exists in {registry_path}.",
+                ["Replace and use now", "Replace only", "Cancel"],
+            )
+            if not action or action == "Cancel":
+                return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
+
+        try:
+            await asyncio.to_thread(
+                write_model_alias, registry_path, alias, entry, replace=alias_exists
+            )
+            if pending_secret is not None:
+                error = await self._persist_pending_secret(pending_secret)
+                if error is not None:
+                    return error
             await asyncio.to_thread(self._reload_model_registry)
         except (ModelCatalogError, OSError, ValueError) as exc:
             return CommandResult.err(f"Could not update {registry_path}: {exc}")
 
-        added = TextOutput(f"Added model '{alias}' to {registry_path}", "success")
-        if action == "Add only":
+        added = TextOutput(f"Saved model '{alias}' to {registry_path}", "success")
+        if action == "Replace only":
             return CommandResult.ok(
                 added,
                 TextOutput(f"Use /model {alias} when you are ready to switch.", "info"),
             )
-
-        switched = await self.execute([alias])
+        switched = await ModelCommand.execute(self, [alias])
         switched.outputs.insert(0, added)
         return switched
 
@@ -661,6 +807,38 @@ class ModelCommand(Command):
         explicit = getattr(self._root_config, "llm_config_paths", None) or []
         paths.extend(Path(path) for path in explicit if Path(path) not in paths)
         reload_registry(*paths)
+
+
+class ConnectCommand(ModelCommand):
+    """Friendly model-backend setup entry point."""
+
+    @property
+    def name(self) -> str:
+        return "connect"
+
+    @classmethod
+    def help_text(cls) -> dict[str, str]:
+        return {"/connect [server-url]": "Connect a model backend by URL"}
+
+    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
+        if len(args) > 1:
+            return False, "Usage: /connect [server-url]"
+        return True, None
+
+    async def execute(self, args: list[str]) -> "CommandResult":
+        server_url = args[0] if args else ""
+        if not server_url:
+            prompt_text = getattr(self.frontend, "prompt_text", None)
+            if not callable(prompt_text):
+                return CommandResult.err("Usage: /connect <server-url>")
+            server_url = await prompt_text(
+                "Connect model backend",
+                "API base URL (Anthropic, Ollama, and OpenAI-compatible servers are auto-detected).",
+                "http://localhost:11434",
+            )
+            if not server_url:
+                return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
+        return await self._add_to_registry(server_url)
 
 
 class ModelsCommand(Command):
@@ -2279,6 +2457,7 @@ class CommandRegistry:
         "compact": CompactCommand,
         "context": ContextCommand,
         "edit": EditCommand,
+        "connect": ConnectCommand,
         "model": ModelCommand,
         "models": ModelsCommand,
         "theme": ThemeCommand,
