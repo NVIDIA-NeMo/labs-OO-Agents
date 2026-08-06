@@ -3,18 +3,22 @@
 """TUI model-registry command-line and bootstrap coverage."""
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from click.testing import CliRunner
 from nooa_cli.commands.tui import command
 from nooa_cli.tui.bootstrap import _load_llm_registry
-from nooa_cli.tui.config import Config
+from nooa_cli.tui.config import Config, get_llm
+
+import nooa.unifiedllm as unifiedllm
 
 
 def test_tui_help_documents_explicit_llm_config() -> None:
     result = CliRunner().invoke(command, ["--help"])
 
     assert result.exit_code == 0
+    assert "--model" in result.output
     assert "--llm-config FILE" in result.output
     assert "--registry" not in result.output
     assert "highest precedence" in result.output
@@ -69,3 +73,25 @@ def test_working_dir_scopes_project_settings(tmp_path: Path, monkeypatch) -> Non
         "project_dir": str(project_config),
     }
     assert "NEMO_OO_PROJECT_DIR" not in __import__("os").environ
+
+
+def test_get_llm_uses_registry_alias(monkeypatch) -> None:
+    calls = []
+
+    def fake_get_llm_client(name: str, **kwargs):
+        calls.append((name, kwargs))
+        return SimpleNamespace(_registry_config=None)
+
+    monkeypatch.setattr(
+        unifiedllm,
+        "MODELS",
+        {"alias": {"model_name": "openai/provider/model", "api_base": "https://old.example/v1"}},
+    )
+    monkeypatch.setattr(unifiedllm, "get_llm_client", fake_get_llm_client)
+
+    config = Config()
+    config.tui.default_model = "alias"
+
+    get_llm(config)
+
+    assert calls == [("alias", {})]
