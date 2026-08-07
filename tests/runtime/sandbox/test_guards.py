@@ -169,3 +169,55 @@ def test_probe_capabilities_reports_mechanisms():
     assert isinstance(caps.landlock_abi, int)
     assert isinstance(caps.seccomp, bool)
     assert isinstance(caps.rlimit, bool)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: Windows platform guards (issue #92)
+# These simulate a platform where POSIX-only modules are absent by patching
+# the import machinery with monkeypatch — no fork required, runs on Linux CI.
+# ---------------------------------------------------------------------------
+
+
+def test_probe_capabilities_returns_rlimit_false_when_resource_unavailable(monkeypatch):
+    """Regression test for #92.
+
+    probe_capabilities() must return Capabilities(rlimit=False) on platforms
+    where the ``resource`` module does not exist (e.g. Windows), instead of
+    raising ModuleNotFoundError.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _import_without_resource(name, *args, **kwargs):
+        if name == "resource":
+            raise ImportError("No module named 'resource'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _import_without_resource)
+
+    # Must not raise — should gracefully return rlimit=False
+    caps = guards.probe_capabilities()
+    assert caps.rlimit is False
+
+
+def test_apply_rlimits_returns_early_when_resource_unavailable(monkeypatch):
+    """Regression test for #92 (second site).
+
+    apply_rlimits() must return silently on platforms where the ``resource``
+    module does not exist (e.g. Windows), instead of raising ModuleNotFoundError.
+    The dormant import at guards.py line 215 must never propagate to the caller.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _import_without_resource(name, *args, **kwargs):
+        if name == "resource":
+            raise ImportError("No module named 'resource'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _import_without_resource)
+
+    # Must not raise even when args are non-zero
+    apply_rlimits(max_memory_mb=256, max_cpu_seconds=30)

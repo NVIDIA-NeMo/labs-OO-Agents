@@ -18,9 +18,11 @@ import logging
 import os
 import secrets
 import signal
+import sys
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +76,11 @@ class BashSession:
         proc = self._process
         if proc is not None and proc.returncode is None:
             try:
-                # During interpreter shutdown, module globals (os, signal) may
-                # be None, causing TypeError. Broad except handles all cases.
-                pgid = os.getpgid(proc.pid)
-                os.killpg(pgid, signal.SIGKILL)
+                if hasattr(os, "killpg"):
+                    pgid = os.getpgid(proc.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                else:
+                    proc.kill()
             except Exception:
                 try:
                     proc.kill()
@@ -159,6 +162,10 @@ class BashSession:
 
         # Create pipe for control channel (fd 3 inside bash).
         ctrl_r, ctrl_w = os.pipe()
+        kwargs: dict[str, Any] = {}
+        if sys.platform != "win32":
+            kwargs["start_new_session"] = True
+            kwargs["pass_fds"] = (ctrl_w,)
         try:
             self._process = await asyncio.create_subprocess_exec(
                 "/bin/bash",
@@ -169,8 +176,7 @@ class BashSession:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(self._cwd),
                 env=env,
-                start_new_session=True,
-                pass_fds=(ctrl_w,),
+                **kwargs,
             )
         except Exception:
             os.close(ctrl_r)
@@ -639,9 +645,12 @@ class BashSession:
             if same_loop:
                 # Graceful shutdown: SIGTERM → wait → SIGKILL on timeout
                 try:
-                    pgid = os.getpgid(self._process.pid)
-                    os.killpg(pgid, signal.SIGTERM)
-                except (ProcessLookupError, OSError):
+                    if hasattr(os, "killpg"):
+                        pgid = os.getpgid(self._process.pid)
+                        os.killpg(pgid, signal.SIGTERM)
+                    else:
+                        self._process.terminate()
+                except OSError:
                     try:
                         self._process.kill()
                     except Exception:
@@ -650,16 +659,22 @@ class BashSession:
                     await asyncio.wait_for(self._process.wait(), timeout=3.0)
                 except TimeoutError:
                     try:
-                        pgid = os.getpgid(self._process.pid)
-                        os.killpg(pgid, signal.SIGKILL)
-                    except (ProcessLookupError, OSError):
+                        if hasattr(os, "killpg"):
+                            pgid = os.getpgid(self._process.pid)
+                            os.killpg(pgid, signal.SIGKILL)
+                        else:
+                            self._process.kill()
+                    except OSError:
                         pass
             else:
                 # Cross-loop (gl-212): transport is dead, just kill immediately.
                 try:
-                    pgid = os.getpgid(self._process.pid)
-                    os.killpg(pgid, signal.SIGKILL)
-                except (ProcessLookupError, OSError):
+                    if hasattr(os, "killpg"):
+                        pgid = os.getpgid(self._process.pid)
+                        os.killpg(pgid, signal.SIGKILL)
+                    else:
+                        self._process.kill()
+                except OSError:
                     try:
                         self._process.kill()
                     except Exception:

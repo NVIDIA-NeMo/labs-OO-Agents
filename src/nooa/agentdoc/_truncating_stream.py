@@ -181,7 +181,7 @@ class FileBackedTruncatingStringIO(TruncatingStringIO):
         self._file: io.TextIOWrapper | None = None
         try:
             fd, path = tempfile.mkstemp(dir=dir, prefix=prefix, suffix=suffix)
-            self._file = os.fdopen(fd, "w")
+            self._file = os.fdopen(fd, "w", encoding="utf-8")
             self._file_path = path
         except OSError:
             _log.warning(
