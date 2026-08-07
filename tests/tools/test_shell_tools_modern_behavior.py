@@ -9,7 +9,7 @@ test_shell_tools_modern.py.
 
 import pytest
 
-from nooa.tools.shell_tools import Match, ShellTools
+from nooa.tools.shell_tools import Match, ShellResult, ShellTools
 
 
 @pytest.fixture
@@ -34,6 +34,15 @@ async def test_run_reports_failure(sh):
     r = await sh.run("false")
     assert not r.success
     assert r.returncode != 0
+    assert r.timed_out is False
+
+
+def test_shell_result_timeout_flag_preserves_positional_matches_argument():
+    match = Match("example.py", 1, 1, "value\n")
+    result = ShellResult("value", "", 0, [match], timed_out=True)
+
+    assert result.matches == [match]
+    assert result.timed_out is True
 
 
 @pytest.mark.asyncio

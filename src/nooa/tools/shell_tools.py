@@ -143,6 +143,7 @@ class ShellResult(str):
     stdout: str
     stderr: str
     returncode: int
+    timed_out: bool
     success: bool
     matches: list[Match] | None
 
@@ -152,11 +153,13 @@ class ShellResult(str):
         stderr: str = "",
         returncode: int = 0,
         matches: list[Match] | None = None,
+        timed_out: bool = False,
     ):
         obj = super().__new__(cls, stdout)
         obj.stdout = stdout
         obj.stderr = stderr
         obj.returncode = returncode
+        obj.timed_out = timed_out
         obj.success = returncode == 0
         obj.matches = matches
         return obj
@@ -376,7 +379,9 @@ class ShellTools(Skill):
         """
         session = await self._get_session()
         run_cmd = self._with_stdin(command, stdin)
-        stdout, stderr, code, _timed = await session.run_with_timeout_flag(run_cmd, timeout=timeout)
+        stdout, stderr, code, timed_out = await session.run_with_timeout_flag(
+            run_cmd, timeout=timeout
+        )
         # Track cwd changes for read/replace/write_file path resolution
         pwd_out, _, _, _ = await session.run_with_timeout_flag("pwd", timeout=5.0)
         if pwd_out.strip():
@@ -390,13 +395,15 @@ class ShellTools(Skill):
         if matches:
             print(
                 f"# self.shell.run({command!r:.60}) found {len(matches)} match(es).\n"
-                f"# Edit directly: m = <result>.matches[0]; await self.shell.replace(m, new_text)"
+                "# Edit directly: m = <result>.matches[0]; "
+                "await self.shell.replace(m, new_text)"
             )
 
         return ShellResult(
             stdout=stdout,
             stderr=stderr,
             returncode=code,
+            timed_out=timed_out,
             matches=matches,
         )
 
