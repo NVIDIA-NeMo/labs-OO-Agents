@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 
 _MAX_EVENT_TEXT_CHARS = 10_000
 _MAX_COMMAND_OUTPUT_CHARS = 30_000
+_MAX_DIFF_INPUT_CHARS = 1_000_000
+_MAX_DIFF_INPUT_LINES = 20_000
 
 
 def _line_count(value: str) -> int:
@@ -35,23 +37,42 @@ def _line_count(value: str) -> int:
     return value.count("\n") + (0 if value.endswith("\n") else 1)
 
 
-def _edit_diff(path: str, old_text: str, new_text: str, start_line: int | None) -> str:
-    lines = list(
-        unified_diff(
-            old_text.splitlines(keepends=True),
-            new_text.splitlines(keepends=True),
-            fromfile=f"a/{path}",
-            tofile=f"b/{path}",
-        )
+def _diff_input_is_too_large(value: str) -> bool:
+    return len(value) > _MAX_DIFF_INPUT_CHARS or _line_count(value) > _MAX_DIFF_INPUT_LINES
+
+
+def _omitted_diff(path: str, reason: str) -> tuple[str, bool]:
+    return (
+        f"--- a/{path}\n+++ b/{path}\n@@ -0,0 +0,0 @@\n Diff omitted: {reason}.\n",
+        False,
     )
-    if start_line is not None:
-        for index, line in enumerate(lines):
-            if line.startswith("@@ "):
-                old_count = max(1, _line_count(old_text))
-                new_count = max(1, _line_count(new_text))
-                lines[index] = f"@@ -{start_line},{old_count} +{start_line},{new_count} @@\n"
-                break
-    return pformat("".join(lines), max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
+
+
+def _edit_diff(
+    path: str,
+    old_text: str,
+    new_text: str,
+    start_line: int | None,
+) -> tuple[str, bool]:
+    """Return a bounded, line-oriented unified diff and its completeness."""
+    if _diff_input_is_too_large(old_text) or _diff_input_is_too_large(new_text):
+        return _omitted_diff(path, "file content exceeds the safe diff preview limit")
+
+    output = TruncatingStringIO(limit=_MAX_EVENT_TEXT_CHARS)
+    adjusted_hunk = False
+    for line in unified_diff(
+        old_text.splitlines(keepends=True),
+        new_text.splitlines(keepends=True),
+        fromfile=f"a/{path}",
+        tofile=f"b/{path}",
+    ):
+        if start_line is not None and not adjusted_hunk and line.startswith("@@ "):
+            old_count = _line_count(old_text)
+            new_count = _line_count(new_text)
+            line = f"@@ -{start_line},{old_count} +{start_line},{new_count} @@\n"
+            adjusted_hunk = True
+        output.write(line)
+    return output.getvalue(), not output.was_truncated
 
 
 class FileEdit(EventBase):  # type: ignore[misc]
@@ -81,6 +102,10 @@ class FileEdit(EventBase):  # type: ignore[misc]
     content_complete: Annotated[
         bool,
         Field(description="Whether old_text and new_text contain the complete affected text"),
+    ] = True
+    diff_complete: Annotated[
+        bool,
+        Field(description="Whether diff contains the complete unified diff"),
     ] = True
 
 
@@ -177,6 +202,12 @@ class ActivityShellTools(Skill):
 
     def _resolve_path(self, path: str) -> Path:
         return self._shell._resolve_path(path)
+
+    def _diff_path(self, resolved: Path) -> str:
+        try:
+            return resolved.relative_to(self.cwd).as_posix()
+        except ValueError:
+            return resolved.as_posix().lstrip("/")
 
     def _emit(self, event: EventBase) -> None:
         try:
@@ -375,6 +406,12 @@ class ActivityShellTools(Skill):
         written_text = result.new_text
         bounded_new = pformat(written_text, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
         new_truncated = len(written_text) > _MAX_EVENT_TEXT_CHARS
+        diff, diff_complete = _edit_diff(
+            self._diff_path(resolved),
+            old_text,
+            written_text,
+            start_line,
+        )
         self._emit(
             FileEdit(
                 path=str(resolved),
@@ -383,8 +420,9 @@ class ActivityShellTools(Skill):
                 new_text=bounded_new,
                 start_line=start_line,
                 end_line=end_line,
-                diff=_edit_diff(path, bounded_old, bounded_new, start_line),
+                diff=diff,
                 content_complete=not old_truncated and not new_truncated,
+                diff_complete=diff_complete,
             )
         )
         return result
@@ -397,35 +435,58 @@ class ActivityShellTools(Skill):
     ) -> FileWrite:
         resolved = self._resolve_path(path)
         existed = resolved.exists()
-        old_text: str | None = None
-        old_complete = True
+        old_diff_text: str | None = None
+        old_content_complete = not existed
         if existed:
             try:
                 with resolved.open("r") as stream:
-                    old_text = stream.read(_MAX_EVENT_TEXT_CHARS + 1)
-                old_complete = len(old_text) <= _MAX_EVENT_TEXT_CHARS
-                old_text = pformat(old_text, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
+                    old_diff_text = stream.read(_MAX_DIFF_INPUT_CHARS + 1)
+                old_content_complete = len(old_diff_text) <= _MAX_EVENT_TEXT_CHARS
             except (OSError, UnicodeError):
                 # Observation must not make an otherwise valid overwrite fail.
-                old_complete = False
+                old_content_complete = False
 
         result = await self._shell.write_file(path, content)
+        bounded_old = (
+            pformat(
+                old_diff_text,
+                max_string=_MAX_EVENT_TEXT_CHARS,
+                unquote_strings=True,
+            )
+            if old_diff_text is not None
+            else None
+        )
         bounded_content = pformat(content, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
         content_truncated = len(content) > _MAX_EVENT_TEXT_CHARS
+        if existed and old_diff_text is None:
+            diff, diff_complete = _omitted_diff(
+                self._diff_path(resolved),
+                "previous file content could not be read",
+            )
+        else:
+            diff, diff_complete = _edit_diff(
+                self._diff_path(resolved),
+                old_diff_text or "",
+                content,
+                None,
+            )
         self._emit(
             FileEdit(
                 path=str(resolved),
                 operation="update" if existed else "create",
-                old_text=old_text,
+                old_text=bounded_old,
                 new_text=bounded_content,
-                start_line=1 if existed and old_complete and old_text is not None else None,
+                start_line=(
+                    1 if existed and old_content_complete and old_diff_text is not None else None
+                ),
                 end_line=(
-                    max(1, _line_count(old_text))
-                    if existed and old_complete and old_text is not None
+                    max(1, _line_count(old_diff_text))
+                    if existed and old_content_complete and old_diff_text is not None
                     else None
                 ),
-                diff=_edit_diff(path, old_text or "", bounded_content, 1),
-                content_complete=old_complete and not content_truncated,
+                diff=diff,
+                content_complete=old_content_complete and not content_truncated,
+                diff_complete=diff_complete,
             )
         )
         return result
