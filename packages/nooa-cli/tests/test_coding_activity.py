@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Semantic activity emitted by the shared interactive coding tools."""
 
+import nooa_cli.coding.activity as activity
 from nooa_cli.coding.activity import (
     ActivityShellTools,
     FileEdit,
@@ -48,9 +49,11 @@ async def test_write_and_replace_emit_bounded_structured_file_edits(tmp_path):
     ]
     assert edits[0].path == str(tmp_path / "example.txt")
     assert edits[0].diff.startswith("--- a/example.txt\n+++ b/example.txt")
+    assert edits[0].diff_complete is True
     assert (edits[1].start_line, edits[1].end_line) == (1, 1)
     assert "-one" in edits[1].diff
     assert "+two" in edits[1].diff
+    assert edits[1].diff_complete is True
 
 
 async def test_match_replace_emits_actual_before_and_after_text(tmp_path):
@@ -82,7 +85,46 @@ async def test_observing_an_overwrite_does_not_break_binary_file_replacement(tmp
     assert edit.old_text is None
     assert edit.new_text == "now text"
     assert edit.content_complete is False
+    assert edit.diff_complete is False
+    assert "previous file content could not be read" in edit.diff
     assert (tmp_path / "binary.dat").read_text() == "now text"
+
+
+async def test_large_text_file_keeps_a_real_line_oriented_diff(tmp_path):
+    shell, events = _observed_shell(tmp_path)
+    old_lines = [f"section {index}: {'old content ' * 8}\n" for index in range(250)]
+    new_lines = list(old_lines)
+    new_lines[125] = "section 125: corrected agenda text\n"
+    path = tmp_path / "agenda.md"
+    path.write_text("".join(old_lines))
+    try:
+        await shell.write_file(str(path), "".join(new_lines))
+    finally:
+        await shell.close()
+
+    edit = next(event for event in events if isinstance(event, FileEdit))
+    assert edit.content_complete is False
+    assert edit.diff_complete is True
+    assert edit.diff.startswith("--- a/agenda.md\n+++ b/agenda.md\n")
+    assert "-section 125: old content" in edit.diff
+    assert "+section 125: corrected agenda text" in edit.diff
+    assert "str(len=" not in edit.diff
+    assert "a//" not in edit.diff
+
+
+async def test_diff_generation_has_a_separate_input_safety_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(activity, "_MAX_DIFF_INPUT_CHARS", 100)
+    shell, events = _observed_shell(tmp_path)
+    try:
+        await shell.write_file("large.txt", "x" * 101)
+    finally:
+        await shell.close()
+
+    edit = next(event for event in events if isinstance(event, FileEdit))
+    assert edit.content_complete is True
+    assert edit.diff_complete is False
+    assert edit.diff.startswith("--- a/large.txt\n+++ b/large.txt\n")
+    assert "exceeds the safe diff preview limit" in edit.diff
 
 
 async def test_run_emits_correlated_start_and_finish(tmp_path):
@@ -163,8 +205,11 @@ async def test_activity_payloads_are_bounded(tmp_path):
     )
 
     assert edit.new_text.startswith("str(len=50000,")
-    assert edit.diff.startswith("str(len=")
+    assert edit.diff.startswith("<truncated-output>")
+    assert "--- a/large.txt" in edit.diff
+    assert "str(len=" not in edit.diff
     assert edit.content_complete is False
+    assert edit.diff_complete is False
     assert (starts[0].stdin or "").startswith("str(len=50000,")
     assert starts[0].stdin_truncated is True
     assert sum(len(event.stdout) + len(event.stderr) for event in stream_outputs) <= 31_000
