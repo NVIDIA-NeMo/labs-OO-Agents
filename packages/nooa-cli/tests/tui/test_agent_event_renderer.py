@@ -107,14 +107,20 @@ def _fire_python_output(
     )
 
 
-def _fire_file_edit(em: _FakeEventManager, *, complete: bool = True) -> None:
+def _fire_file_edit(
+    em: _FakeEventManager,
+    *,
+    content_complete: bool = True,
+    diff_complete: bool = True,
+) -> None:
     em.fire(
         "FileEdit",
         SimpleNamespace(
             path="/workspace/example.py",
             operation="update",
             diff="--- a/example.py\n+++ b/example.py\n@@ -1 +1 @@\n-old\n+new\n",
-            content_complete=complete,
+            content_complete=content_complete,
+            diff_complete=diff_complete,
         ),
     )
 
@@ -441,6 +447,15 @@ def test_file_edit_marks_bounded_diff_as_truncated() -> None:
     agent, emitted, renderer = _mk(show_diffs=True)
     renderer.attach()
 
-    _fire_file_edit(agent.event_manager, complete=False)
+    _fire_file_edit(agent.event_manager, diff_complete=False)
 
     assert any(isinstance(item, Text) and "truncated" in str(item) for item in emitted)
+
+
+def test_file_edit_does_not_confuse_bounded_content_with_a_truncated_diff() -> None:
+    agent, emitted, renderer = _mk(show_diffs=True)
+    renderer.attach()
+
+    _fire_file_edit(agent.event_manager, content_complete=False, diff_complete=True)
+
+    assert not any(isinstance(item, Text) and "truncated" in str(item) for item in emitted)
