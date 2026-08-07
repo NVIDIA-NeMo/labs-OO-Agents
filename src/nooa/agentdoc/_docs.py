@@ -262,6 +262,31 @@ class Spec:
 
         return register_type_info_extractor(target)
 
+    def define_preview(self, target: type) -> Any:
+        """Define a custom value preview for *target* in ``pformat``/``pprint``.
+
+        Replaces the truncated-``repr`` fallback for instances of *target*
+        (and subclasses) with a structural, bounded preview. The extractor
+        receives the instance and the active ``PreviewBudget``; returning
+        ``None`` declines, falling back to the default repr rendering —
+        return ``None`` whenever the plain repr fits the budget, so complete
+        values keep rendering as plain literals::
+
+            from nooa.agentdoc.ext import PreviewBudget
+
+            @spec.define_preview(np.ndarray)
+            def _(arr, budget: PreviewBudget) -> str | None:
+                r = repr(arr)
+                if budget.max_string is None or len(r) <= budget.max_string:
+                    return None
+                return f"ndarray(shape={arr.shape}, dtype={arr.dtype}, ...)"
+
+        ``doc()`` rendering is unaffected — use :meth:`define_doc` for that.
+        """
+        from nooa.agentdoc.registry import register_preview_extractor
+
+        return register_preview_extractor(target)
+
 
 spec = Spec()
 
