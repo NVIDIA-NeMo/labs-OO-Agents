@@ -299,6 +299,13 @@ class OpenInferenceHooks:
     ) -> None:
         """Complete AGENT span."""
         if not context:
+            # before_agent_call ran but raised, so there's no span to complete -
+            # emit a minimal error span instead of leaving the call untraced.
+            call_id = kwargs.get("call_id")
+            if call_id:
+                self._record_hook_failure_span(
+                    agent, method_name, call_id, kwargs.get("parent_call_id")
+                )
             return
 
         span: Span = context.get("span")
@@ -330,6 +337,32 @@ class OpenInferenceHooks:
         # Remove from tracking
         if call_id and call_id in _get_active_spans():
             del _get_active_spans()[call_id]
+
+    def _record_hook_failure_span(
+        self,
+        agent: Any,
+        method_name: str,
+        call_id: str,
+        parent_call_id: str | None,
+    ) -> None:
+        """Emit a minimal ERROR span for a call whose before_agent_call hook raised."""
+        parent_span = _get_active_spans().get(parent_call_id) if parent_call_id else None
+        context = trace.set_span_in_context(parent_span) if parent_span else None
+        span = self.tracer.start_span(
+            name=f"method.{method_name}",
+            context=context,
+            start_time=time.time_ns(),
+        )
+        span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, SpanKind.AGENT)
+        span.set_attribute(VIEWER_PLUGIN_ATTR, ViewerPlugin.METHOD)
+        span.set_attribute("agent.name", type(agent).__name__)
+        span.set_attribute("agent.method", method_name)
+        span.set_attribute("agent.call_id", call_id)
+        if parent_call_id:
+            span.set_attribute("agent.parent_call_id", parent_call_id)
+        span.set_status(Status(StatusCode.ERROR, "before_agent_call hook raised"))
+        span.set_attribute("error.message", "before_agent_call hook raised an exception")
+        span.end(end_time=time.time_ns())
 
     def before_generation(
         self,

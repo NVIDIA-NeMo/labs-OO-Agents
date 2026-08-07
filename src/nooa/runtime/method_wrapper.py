@@ -157,8 +157,13 @@ def create_agent_method_wrapper(
                 cached_source_code,
             )
 
-            # hook_context is set inside the middleware/fast-path blocks below
+            # hook_context is set inside the middleware/fast-path blocks below.
+            # before_hook_attempted tracks whether before_agent_call actually ran,
+            # since call_before_hook swallows hook exceptions and returns None
+            # on failure - indistinguishable from hook_context legitimately
+            # being None if we only checked that.
             hook_context = None
+            before_hook_attempted = False
 
             # Enforce max nesting depth before pushing the new call ID
             execution_config = getattr(self, "_execution_config", None)
@@ -245,8 +250,9 @@ def create_agent_method_wrapper(
                     async def _core_agent(ctx: AgentCallContext) -> AgentCallContext:
                         # Tracing hooks fire INSIDE middleware so they
                         # see the post-middleware args/kwargs.
-                        nonlocal hook_context
+                        nonlocal hook_context, before_hook_attempted
                         if _tracing_enabled[0]:
+                            before_hook_attempted = True
                             hook_context = call_before_hook(
                                 "before_agent_call",
                                 agent=self,
@@ -271,6 +277,7 @@ def create_agent_method_wrapper(
                 else:
                     # Fast path — no agent_call middleware
                     if _tracing_enabled[0]:
+                        before_hook_attempted = True
                         hook_context = call_before_hook(
                             "before_agent_call",
                             agent=self,
@@ -316,9 +323,9 @@ def create_agent_method_wrapper(
                 # Reset parent agent context
                 _parent_agent_var.reset(parent_token)
                 _pop_agent_call_id()
-                # Only fire after_agent_call if before_agent_call ran
-                # (skipped when middleware short-circuits).
-                if hook_context is not None:
+                # Fire whenever before_agent_call was attempted, even if it
+                # failed (skipped only when middleware short-circuits first).
+                if before_hook_attempted:
                     call_after_hook(
                         "after_agent_call",
                         hook_context,
@@ -326,6 +333,8 @@ def create_agent_method_wrapper(
                         method_name=original_func.__name__,
                         result=result,
                         exception=exception_caught,
+                        call_id=call_id,
+                        parent_call_id=parent_call_id,
                     )
 
         elif needs_generation and args and isinstance(args[0], RuntimeServices):  # pyright: ignore[reportPossiblyUnboundVariable]
@@ -463,10 +472,12 @@ def create_sync_agent_method_wrapper(
             logger.debug("agent-call: BeforeAgentCall emission failed (sync)", exc_info=True)
 
         hook_context = None
+        before_hook_attempted = False
         result = None
         exception_caught: Exception | None = None
         try:
             if _tracing_enabled[0]:
+                before_hook_attempted = True
                 hook_context = call_before_hook(
                     "before_agent_call",
                     agent=self,
@@ -502,7 +513,7 @@ def create_sync_agent_method_wrapper(
             except Exception:  # noqa: BLE001
                 logger.debug("agent-call: AfterAgentCall emission failed (sync)", exc_info=True)
             _pop_agent_call_id()
-            if hook_context is not None:
+            if before_hook_attempted:
                 call_after_hook(
                     "after_agent_call",
                     hook_context,
@@ -510,6 +521,8 @@ def create_sync_agent_method_wrapper(
                     method_name=original_func.__name__,
                     result=result,
                     exception=exception_caught,
+                    call_id=call_id,
+                    parent_call_id=parent_call_id,
                 )
 
     setattr(wrapper, "_agent_decorator", "auto")  # noqa: B010

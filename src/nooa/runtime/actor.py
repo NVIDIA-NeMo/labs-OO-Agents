@@ -450,6 +450,7 @@ from nooa.runtime.stream_wrappers import (  # noqa: E402
     BlockedStdinWrapper,
     ContextVarStream,
     _block_stdin_var,
+    install_warnings_capture,
 )
 
 # Task-local stack for generation ID tracking.
@@ -1550,6 +1551,10 @@ class ActorRuntime:
                 sys.stderr = ContextVarStream(sys.stderr, _stderr_buffer_var, "stderr")
             if not isinstance(sys.stdin, BlockedStdinWrapper):
                 sys.stdin = BlockedStdinWrapper(sys.stdin)
+            # Re-installed on every call: pytest's warning-capture plugin replaces
+            # warnings.showwarning around each test, which would otherwise swallow
+            # warnings before they reach the (now-wrapped) sys.stderr.
+            install_warnings_capture()
 
             # Parse AST to find method definitions
             try:
