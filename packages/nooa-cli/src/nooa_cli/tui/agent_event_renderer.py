@@ -83,6 +83,7 @@ class _FileEditEvent(Protocol):
     operation: str
     diff: str
     content_complete: bool
+    diff_complete: bool
 
 
 class AgentEventRenderer:
@@ -320,7 +321,7 @@ class AgentEventRenderer:
             Syntax(diff, "diff", theme="monokai", background_color="default", word_wrap=True),
             **kwargs,
         )
-        if not bool(getattr(event, "content_complete", True)):
+        if not bool(getattr(event, "diff_complete", True)):
             self._emit_text(Text("diff is truncated", style="dim italic"), **kwargs)
 
     def _on_summary(self, event: _SummaryEvent) -> None:
