@@ -11,6 +11,7 @@ for context variable management, tracing hooks, and execution routing.
 """
 
 import asyncio
+import inspect
 import logging
 import warnings
 from collections.abc import Callable
@@ -220,6 +221,12 @@ def create_agent_method_wrapper(
                 em = self.event_manager
                 has_agent_mw = bool(em._middleware.get("agent_call"))
 
+                # Report methods the middleware chain cannot reach. Done here, at
+                # the entry point, so the gap is known before the model gets a
+                # chance to call one of them.
+                if has_agent_mw:
+                    _warn_uncovered_agent_methods(self, em)
+
                 # Shared dispatch logic used by both middleware and fast path.
                 async def _dispatch(a: tuple[Any, ...], kw: dict[str, Any]) -> Any:
                     if needs_generation:
@@ -393,40 +400,170 @@ def create_agent_method_wrapper(
     return wrapper
 
 
+_BYPASS_REMEDY = (
+    "Guards that block, authenticate, or rate-limit will not run for them — including "
+    "when generated CodeAct Python calls them. Declare such a capability as a traced "
+    "'async def' method to bring it under middleware, or enforce the policy inside the "
+    "method body."
+)
+
+# Cap the listing so a class with many helpers still produces a readable warning.
+_BYPASS_LIST_LIMIT = 10
+
+
+def _emit_bypass_warning(message: str, stacklevel: int) -> None:
+    """Emit the bypass ``RuntimeWarning`` so it actually reaches the developer.
+
+    Two delivery hazards are handled here:
+
+    - ``logging`` is not usable. ``nooa`` attaches a ``NullHandler`` to its root
+      logger (the correct thing for a library), which means a ``logger.warning``
+      is found by that handler and discarded rather than falling through to
+      ``logging.lastResort``. An application with no logging configuration would
+      never see it.
+    - Inside a CodeAct cell, ``sys.stderr`` is a ``ContextVarStream`` pointed at a
+      capture buffer whose contents are fed back to the model as cell output. A
+      warning written there is invisible to the developer *and* pollutes the
+      model's context. Clearing the buffer contextvar for the duration of the
+      call makes ``ContextVarStream`` fall through to the real stream.
+
+    Exceptions are deliberately not caught: under ``-W error`` the warning is
+    promoted to an exception and must be allowed to propagate.
+
+    Args:
+        message: The warning text.
+        stacklevel: Passed through to ``warnings.warn``.
+    """
+    # Imported lazily: actor imports this module, so a top-level import cycles.
+    from nooa.runtime.actor import _stderr_buffer_var
+
+    token = None
+    if _stderr_buffer_var.get() is not None:
+        token = _stderr_buffer_var.set(None)
+    try:
+        warnings.warn(message, RuntimeWarning, stacklevel=stacklevel)
+    finally:
+        if token is not None:
+            _stderr_buffer_var.reset(token)
+
+
+def _is_agent_call_covered(func: Callable[..., Any]) -> bool:
+    """Whether *func* is instrumented such that ``agent_call`` middleware wraps it.
+
+    Only the async wrapper built by :func:`create_agent_method_wrapper` runs the
+    middleware chain, so coverage requires both markers: the metaclass actually
+    wrapped this attribute, and the resulting wrapper is a coroutine function.
+
+    Checking the attribute itself rather than inferring from how it was declared
+    is what makes this correct for ``@no_trace``, ``staticmethod``,
+    ``classmethod``, and methods inherited from non-Agent bases — none of which
+    the metaclass instruments, and all of which therefore bypass middleware.
+    """
+    return getattr(func, "_agent_decorator", None) is not None and inspect.iscoroutinefunction(func)
+
+
+def _uncovered_agent_methods(cls: type) -> list[str]:
+    """User-defined callables on *cls* that ``agent_call`` middleware cannot wrap.
+
+    Walks the full MRO via ``dir()`` so inherited methods are included, and uses
+    ``inspect.getattr_static`` to see ``staticmethod`` / ``classmethod``
+    descriptors as themselves rather than as bound callables.
+
+    Methods defined inside ``nooa`` itself are excluded — the agent base class
+    contributes a large amount of infrastructure that is not the caller's to fix,
+    and listing it would bury the names that matter.
+
+    Args:
+        cls: The agent class to inspect.
+
+    Returns:
+        Sorted method names, each outside ``agent_call`` middleware coverage.
+    """
+    uncovered: list[str] = []
+    for name in dir(cls):
+        if name.startswith("__"):
+            continue
+
+        raw = inspect.getattr_static(cls, name, None)
+        if isinstance(raw, staticmethod | classmethod):
+            func = raw.__func__
+        elif inspect.isfunction(raw):
+            func = raw
+        else:
+            # Properties, plain attributes, and descriptors are not agent calls.
+            continue
+
+        module = getattr(func, "__module__", "") or ""
+        if module == "nooa" or module.startswith("nooa."):
+            continue
+
+        if not _is_agent_call_covered(func):
+            uncovered.append(name)
+
+    return sorted(uncovered)
+
+
+def _warn_uncovered_agent_methods(agent: Any, event_manager: Any) -> None:
+    """Report every method on *agent*'s class that ``agent_call`` middleware misses.
+
+    Runs from the async wrapper the first time an instrumented method executes
+    with ``agent_call`` middleware registered — i.e. at the entry point, before
+    the model has had a chance to call anything. Scanning the class rather than
+    warning per-call is what closes the gaps that the sync wrapper cannot see:
+    an unwrapped method has no wrapper in which to warn.
+
+    Reported once per (event manager, class). Diagnostic failures are swallowed;
+    a warning raised as an error by ``-W error`` is not.
+    """
+    cls = type(agent)
+    key = f"scan:{cls.__module__}.{cls.__qualname__}"
+    try:
+        reported = event_manager._agent_call_bypass_reported
+        if key in reported:
+            return
+        uncovered = _uncovered_agent_methods(cls)
+        if not uncovered:
+            reported.add(key)
+            return
+
+        shown = uncovered[:_BYPASS_LIST_LIMIT]
+        listing = ", ".join(shown)
+        if len(uncovered) > len(shown):
+            listing += f", and {len(uncovered) - len(shown)} more"
+        message = (
+            f"agent_call middleware is registered, but it does not apply to these "
+            f"methods on {cls.__name__}: {listing}. Middleware is async and only "
+            f"wraps async agent methods that the metaclass instruments, so synchronous "
+            f"methods, @no_trace methods, staticmethod/classmethod, and methods "
+            f"inherited from non-Agent bases all execute outside it. {_BYPASS_REMEDY}"
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("agent-call: middleware coverage scan failed", exc_info=True)
+        return
+
+    _emit_bypass_warning(message, stacklevel=4)
+    reported.add(key)
+
+
 def _warn_if_agent_call_middleware_bypassed(
     agent: Any,
     original_func: Callable[..., Any],
-    already_warned: list[bool],
 ) -> None:
     """Warn when a sync agent method runs while ``agent_call`` middleware is active.
 
-    ``agent_call`` middleware is async, so the sync wrapper cannot run it (see
-    :func:`create_sync_agent_method_wrapper`). Registering a guard and having it
-    silently not apply is the failure mode worth surfacing: the guard looks
-    installed, so the bypass is invisible until something unwanted has already
-    executed. This makes it audible at the moment a bypass actually happens,
-    rather than warning on every sync method whether or not a guard exists.
+    Complements :func:`_warn_uncovered_agent_methods`, which only runs once an
+    instrumented async method executes. Code that calls a sync capability
+    directly — never entering an async agent method at all — would otherwise get
+    no signal, so this covers that path and points at the offending call site.
 
-    Delivery depends on where the call came from:
-
-    - Directly from user code — ``warnings.warn`` (filterable, and points at the
-      caller's own line).
-    - From inside a CodeAct cell — ``logger.warning``. Cells redirect
-      ``sys.stderr`` into a capture buffer, so a ``warnings.warn`` here would be
-      swallowed instead of reaching the developer, and the captured text is fed
-      back to the model as cell output. Routing to the logger keeps the
-      diagnostic visible without polluting the model's context.
-
-    Failures here are swallowed — a diagnostic must never break a method call.
+    Suppressed when the class-wide scan has already reported this class, so a
+    method is never announced twice.
 
     Args:
         agent: The agent instance the method was called on.
         original_func: The unwrapped sync function, used for the method name.
-        already_warned: Single-element mutable flag; set once a warning is emitted.
     """
-    if already_warned[0]:
-        return
-
+    cls = type(agent)
     try:
         event_manager = getattr(agent, "event_manager", None)
         if event_manager is None:
@@ -434,26 +571,25 @@ def _warn_if_agent_call_middleware_bypassed(
         if not event_manager._middleware.get("agent_call"):
             return
 
-        already_warned[0] = True
-        qualname = f"{type(agent).__name__}.{original_func.__name__}"
+        reported = event_manager._agent_call_bypass_reported
+        if f"scan:{cls.__module__}.{cls.__qualname__}" in reported:
+            return
+
+        key = f"call:{cls.__qualname__}.{original_func.__name__}"
+        if key in reported:
+            return
+
         message = (
             f"agent_call middleware is registered but does not apply to the "
-            f"synchronous method '{qualname}'. Middleware is async and cannot wrap "
-            f"a sync calling convention, so guards that block, authenticate, or "
-            f"rate-limit will not run for this method — including when it is called "
-            f"from generated CodeAct Python. Declare it 'async def' to bring it "
-            f"under middleware, or enforce the policy inside the method body."
+            f"synchronous method '{cls.__name__}.{original_func.__name__}'. Middleware "
+            f"is async and cannot wrap a sync calling convention. {_BYPASS_REMEDY}"
         )
-
-        # Imported lazily: actor imports this module, so a top-level import cycles.
-        from nooa.runtime.actor import _stderr_buffer_var
-
-        if _stderr_buffer_var.get() is not None:
-            logger.warning(message)
-        else:
-            warnings.warn(message, RuntimeWarning, stacklevel=3)
     except Exception:  # noqa: BLE001
         logger.debug("agent-call: sync middleware bypass warning failed", exc_info=True)
+        return
+
+    _emit_bypass_warning(message, stacklevel=4)
+    reported.add(key)
 
 
 def create_sync_agent_method_wrapper(
@@ -496,9 +632,6 @@ def create_sync_agent_method_wrapper(
     # Mirrors the async wrapper: a mutable list lets `@no_trace` applied AFTER
     # this wrapper (outer decorator) flip the flag retroactively.
     _tracing_enabled = [needs_tracing]
-    # Warn at most once per wrapped method so a sync helper called in a loop
-    # does not emit one warning per iteration.
-    _bypass_warned = [False]
 
     @wraps(original_func)
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
@@ -507,7 +640,7 @@ def create_sync_agent_method_wrapper(
         if not hasattr(self, "runtime"):
             return original_func(self, *args, **kwargs)
 
-        _warn_if_agent_call_middleware_bypassed(self, original_func, _bypass_warned)
+        _warn_if_agent_call_middleware_bypassed(self, original_func)
 
         runtime = self.runtime
         call_id = str(uuid4())
