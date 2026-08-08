@@ -241,6 +241,7 @@ def create_prompt_style() -> Style:
             # Prompt
             "prompt": COLORS["green"],
             "prompt.continuation": COLORS["overlay1"],
+            "input-area": COLORS["text"],
             # Completion menu
             "completion-menu": f"bg:{COLORS['surface0']} {COLORS['text']}",
             "completion-menu.completion": f"bg:{COLORS['surface0']} {COLORS['text']}",
