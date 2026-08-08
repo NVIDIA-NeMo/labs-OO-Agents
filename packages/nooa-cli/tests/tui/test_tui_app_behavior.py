@@ -45,6 +45,23 @@ async def test_baseline_prompt_visible_at_startup():
         await h.wait_for(lambda: h.app.prompt_char_visible())  # new API
 
 
+async def test_input_composer_has_blank_row_above_and_below_input():
+    """The default composer is three rows and expands for multiline input."""
+    async with TUIHarness() as h:
+        assert h.app is not None
+        composer = h.app._input_container
+        assert len(composer.children) == 3
+
+        one_line = composer.preferred_height(80, 24)
+        assert one_line.min == 3
+        assert one_line.preferred == 3
+
+        h.app.input_buffer.text = "first\nsecond"
+        two_lines = composer.preferred_height(80, 24)
+        assert two_lines.min == 3
+        assert two_lines.preferred == 4
+
+
 async def test_baseline_enter_submits_to_agent():
     async with TUIHarness() as h:
         await h.type_keys("hello world")

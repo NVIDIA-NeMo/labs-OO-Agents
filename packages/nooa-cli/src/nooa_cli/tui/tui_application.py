@@ -45,6 +45,7 @@ from prompt_toolkit.layout.processors import BeforeInput
 from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
 
 from .completer import expand_mentions
+from .input_handler import create_prompt_style
 from .subapp import InAppSubview, normalize_key_result
 
 logger = logging.getLogger(__name__)
@@ -408,15 +409,26 @@ class TUIApplication:
             filter=Condition(lambda: bool(_queue_pending()) or bool(self._command_queue_texts)),
         )
 
+        input_style = "class:input-area"
         input_window = Window(
             BufferControl(
                 self.input_buffer,
                 input_processors=[self._prompt_processor],
             ),
             wrap_lines=True,
+            height=Dimension(min=1),
             dont_extend_height=True,
+            style=input_style,
         )
         self._input_window = input_window
+        self._input_container = HSplit(
+            [
+                Window(height=1, char=" ", style=input_style),
+                input_window,
+                Window(height=1, char=" ", style=input_style),
+            ],
+            style=input_style,
+        )
 
         # Status line at the bottom — shows spinner + session label.
         def _status_formatted():
@@ -481,14 +493,14 @@ class TUIApplication:
         #   status (spinner + optional badges)
         #   queued command/type-ahead lines
         #   session rule — always visible while at the transcript tail
-        #   input
+        #   input composer (one padding row above and below the input)
         #   completions (only while completing)
         main_container = HSplit(
             [
                 status_window,
                 queue_window,
                 session_rule,
-                input_window,
+                self._input_container,
                 completions_window,
             ],
         )
@@ -529,6 +541,7 @@ class TUIApplication:
                 focused_element=input_window,
             ),
             key_bindings=kb,
+            style=create_prompt_style(),
             full_screen=False,
             before_render=self._before_render,
             # When the Application exits (e.g. /exit), erase the live
@@ -543,6 +556,11 @@ class TUIApplication:
             # fullscreen subviews after terminal resize.
             terminal_size_polling_interval=None,
         )
+
+    def refresh_style(self) -> None:
+        """Apply the current TUI palette to the live prompt-toolkit app."""
+        self._app.style = create_prompt_style()
+        self._app.invalidate()
 
     async def open_event_explorer(self, event_manager: Any) -> None:
         """Open the event explorer as an in-app subview."""
