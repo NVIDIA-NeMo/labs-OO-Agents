@@ -1013,6 +1013,10 @@ class ThemeCommand(Command):
         # Rebuild prompt_toolkit style for the new theme
         if hasattr(self.frontend, "_input_handler") and self.frontend._input_handler is not None:  # type: ignore[attr-defined]
             self.frontend._input_handler.refresh_style()  # type: ignore[attr-defined]
+        app = getattr(self.frontend, "_app", None)
+        refresh_app_style = getattr(app, "refresh_style", None)
+        if callable(refresh_app_style):
+            refresh_app_style()
 
         return CommandResult.ok(TextOutput(f"Switched to {name} theme", "success"))
 
