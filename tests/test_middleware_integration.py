@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Integration tests: middleware wired through ActorRuntime.generate / execute_code."""
 
+import warnings
+
 import pytest
 
 from nooa.agent import Agent
@@ -930,3 +932,345 @@ class TestAgentCallMiddleware:
         # llm and exec fire inside
         assert "llm" in order
         assert "exec" in order
+
+
+# ---------------------------------------------------------------------------
+# agent_call middleware coverage gaps
+# ---------------------------------------------------------------------------
+
+
+class _PlainBase:
+    """A non-Agent base — its methods are never instrumented by the metaclass."""
+
+    def inherited_sync(self) -> str:
+        """Inherited from a non-Agent base."""
+        return "inherited_sync"
+
+
+async def _passthrough(ctx, nxt):
+    return await nxt(ctx)
+
+
+class TestAgentCallMiddlewareCoverage:
+    """agent_call middleware wraps only instrumented async methods.
+
+    Sync methods, @no_trace methods (sync or async), staticmethod/classmethod,
+    and methods inherited from non-Agent bases all execute outside the chain.
+    These tests pin that asymmetry and assert it is no longer silent.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sync_method_bypasses_agent_call_middleware(self):
+        """A blocking guard does not stop a sync method's side effect."""
+        seen = []
+
+        async def deny(ctx, nxt):
+            seen.append(ctx.method_name)
+            if ctx.method_name == "charge_card":
+                raise PermissionError("charge_card blocked")
+            return await nxt(ctx)
+
+        class A(Agent, llm=_TEST_LLM):
+            def __init__(self):
+                super().__init__()
+                self.charges = []
+
+            def charge_card(self, amount: int) -> str:
+                """Record a simulated card charge."""
+                self.charges.append(amount)
+                return f"receipt-{amount}"
+
+        agent = A()
+        agent.event_manager.intercept("agent_call", deny)
+
+        with pytest.warns(RuntimeWarning, match="does not apply to the synchronous method"):
+            result = agent.charge_card(100)
+
+        # The guard neither ran nor blocked: the side effect happened.
+        assert result == "receipt-100"
+        assert agent.charges == [100]
+        assert seen == []
+
+    @pytest.mark.asyncio
+    async def test_async_method_is_blocked_by_same_middleware(self):
+        """Control: the identical capability declared async IS intercepted."""
+        seen = []
+
+        async def deny(ctx, nxt):
+            seen.append(ctx.method_name)
+            if ctx.method_name == "charge_card":
+                raise PermissionError("charge_card blocked")
+            return await nxt(ctx)
+
+        class A(Agent, llm=_TEST_LLM):
+            def __init__(self):
+                super().__init__()
+                self.charges = []
+
+            async def charge_card(self, amount: int) -> str:
+                """Record a simulated card charge."""
+                self.charges.append(amount)
+                return f"receipt-{amount}"
+
+        agent = A()
+        agent.event_manager.intercept("agent_call", deny)
+
+        with pytest.raises(PermissionError):
+            await agent.charge_card(100)
+
+        assert agent.charges == []
+        assert seen == ["charge_card"]
+
+    @pytest.mark.asyncio
+    async def test_scan_names_every_uncovered_method_kind(self):
+        """The entry-point scan reports kinds the sync wrapper cannot see.
+
+        @no_trace, staticmethod, classmethod, and inherited methods are never
+        wrapped at all, so there is no per-call hook in which to warn. Only a
+        class-level scan finds them.
+        """
+        from nooa.metaclass import no_trace
+
+        class Probe(Agent, _PlainBase, llm=_TEST_LLM):
+            def plain_sync(self) -> str:
+                """Plain sync."""
+                return "plain_sync"
+
+            @no_trace
+            def notrace_sync(self) -> str:
+                """no_trace sync."""
+                return "notrace_sync"
+
+            @no_trace
+            async def notrace_async(self) -> str:
+                """no_trace async."""
+                return "notrace_async"
+
+            @staticmethod
+            def static_m() -> str:
+                """Static."""
+                return "static_m"
+
+            @classmethod
+            def class_m(cls) -> str:
+                """Classmethod."""
+                return "class_m"
+
+            async def entry(self) -> str:
+                """Traced async entry point."""
+                return "entry"
+
+        agent = Probe()
+        agent.event_manager.intercept("agent_call", _passthrough)
+
+        with pytest.warns(RuntimeWarning) as caught:
+            await agent.entry()
+
+        text = " ".join(str(w.message) for w in caught)
+        for name in (
+            "plain_sync",
+            "notrace_sync",
+            "notrace_async",
+            "static_m",
+            "class_m",
+            "inherited_sync",
+        ):
+            assert name in text, f"{name} missing from coverage warning"
+
+        # The one genuinely covered method must not be reported...
+        assert "entry" not in text
+        # ...nor should Agent's own infrastructure be listed as the user's problem.
+        assert "event_manager" not in text
+
+    @pytest.mark.asyncio
+    async def test_no_warning_when_class_is_fully_covered(self):
+        """An all-async agent produces no coverage warning."""
+
+        class A(Agent, llm=_TEST_LLM):
+            async def entry(self) -> str:
+                """Traced async entry point."""
+                return "entry"
+
+        agent = A()
+        agent.event_manager.intercept("agent_call", _passthrough)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            assert await agent.entry() == "entry"
+
+    @pytest.mark.asyncio
+    async def test_no_warning_when_no_agent_call_middleware(self):
+        """The warning is scoped to an actual bypass, not to sync methods."""
+
+        class A(Agent, llm=_TEST_LLM):
+            def helper(self) -> str:
+                """A plain sync helper."""
+                return "ok"
+
+        agent = A()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            assert agent.helper() == "ok"
+
+    @pytest.mark.asyncio
+    async def test_no_warning_for_unrelated_middleware_kinds(self):
+        """llm_call / execute_python middleware do not trigger the warning."""
+
+        class A(Agent, llm=_TEST_LLM):
+            def helper(self) -> str:
+                """A plain sync helper."""
+                return "ok"
+
+        agent = A()
+        agent.event_manager.intercept("llm_call", _passthrough)
+        agent.event_manager.intercept("execute_python", _passthrough)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            assert agent.helper() == "ok"
+
+    @pytest.mark.asyncio
+    async def test_warning_emitted_once_per_method(self):
+        """A sync helper in a loop warns once, not once per call."""
+
+        class A(Agent, llm=_TEST_LLM):
+            def helper(self) -> str:
+                """A plain sync helper."""
+                return "ok"
+
+        agent = A()
+        agent.event_manager.intercept("agent_call", _passthrough)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", RuntimeWarning)
+            for _ in range(5):
+                agent.helper()
+
+        assert len([w for w in caught if issubclass(w.category, RuntimeWarning)]) == 1
+
+    @pytest.mark.asyncio
+    async def test_warning_names_the_offending_method(self):
+        """The message identifies the class and method so it is actionable."""
+
+        class PaymentAgent(Agent, llm=_TEST_LLM):
+            def charge_card(self, amount: int) -> str:
+                """Record a simulated card charge."""
+                return f"receipt-{amount}"
+
+        agent = PaymentAgent()
+        agent.event_manager.intercept("agent_call", _passthrough)
+
+        with pytest.warns(RuntimeWarning, match=r"PaymentAgent\.charge_card"):
+            agent.charge_card(100)
+
+    @pytest.mark.asyncio
+    async def test_dedup_is_per_agent_not_per_class(self):
+        """A second agent instance still gets told about its own bypass."""
+
+        class A(Agent, llm=_TEST_LLM):
+            def helper(self) -> str:
+                """A plain sync helper."""
+                return "ok"
+
+        first = A()
+        first.event_manager.intercept("agent_call", _passthrough)
+        with pytest.warns(RuntimeWarning):
+            first.helper()
+
+        second = A()
+        second.event_manager.intercept("agent_call", _passthrough)
+        with pytest.warns(RuntimeWarning):
+            second.helper()
+
+
+class TestAgentCallBypassWarningDelivery:
+    """The warning has to survive nooa's NullHandler and CodeAct's stderr capture."""
+
+    @pytest.mark.asyncio
+    async def test_codeact_bypass_reaches_real_stderr(self):
+        """A bypass inside a cell must escape the capture buffer.
+
+        Cells point sys.stderr at a buffer that is fed back to the model, so a
+        warning written there would be invisible to the developer and would
+        pollute the model's context. It must land on the real stream instead.
+        """
+        import io
+        import sys
+
+        class PaymentAgent(Agent, llm=_TEST_LLM):
+            def __init__(self):
+                super().__init__()
+                self.charges = []
+
+            def charge_card(self, amount: int) -> str:
+                """Record a simulated card charge."""
+                self.charges.append(amount)
+                return f"receipt-{amount}"
+
+        agent = PaymentAgent()
+        agent.event_manager.intercept("agent_call", _passthrough)
+
+        # pytest replaces warnings.showwarning to record rather than print, so
+        # asserting on stderr needs the default write-through restored. This one
+        # writes through the *live* sys.stderr, which inside a cell is the
+        # ContextVarStream — exactly the object whose routing is under test.
+        def write_through(message, category, filename, lineno, file=None, line=None):
+            (file or sys.stderr).write(str(message))
+
+        real_stderr = sys.stderr
+        sink = io.StringIO()
+        original_showwarning = warnings.showwarning
+        sys.stderr = sink
+        warnings.showwarning = write_through
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("always", RuntimeWarning)
+                warnings.showwarning = write_through
+                result = await agent.runtime.execute_code("self.charge_card(100)")
+        finally:
+            warnings.showwarning = original_showwarning
+            sys.stderr = real_stderr
+
+        assert agent.charges == [100]
+        # Reached the developer's real stream...
+        assert "PaymentAgent.charge_card" in sink.getvalue()
+        # ...without leaking into what the model reads back.
+        assert "agent_call middleware" not in (result.stderr or "")
+
+    @pytest.mark.asyncio
+    async def test_warning_promoted_to_error_propagates(self):
+        """-W error must raise rather than be swallowed by the diagnostic guard."""
+
+        class A(Agent, llm=_TEST_LLM):
+            def helper(self) -> str:
+                """A plain sync helper."""
+                return "ok"
+
+        agent = A()
+        agent.event_manager.intercept("agent_call", _passthrough)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            with pytest.raises(RuntimeWarning):
+                agent.helper()
+
+    @pytest.mark.asyncio
+    async def test_swallowed_warning_is_not_marked_delivered(self):
+        """A warning that raised was never seen, so it must be re-emitted."""
+
+        class A(Agent, llm=_TEST_LLM):
+            def helper(self) -> str:
+                """A plain sync helper."""
+                return "ok"
+
+        agent = A()
+        agent.event_manager.intercept("agent_call", _passthrough)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            with pytest.raises(RuntimeWarning):
+                agent.helper()
+            # Second call must raise again — the first was never delivered.
+            with pytest.raises(RuntimeWarning):
+                agent.helper()
