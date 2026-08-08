@@ -12,6 +12,7 @@ for context variable management, tracing hooks, and execution routing.
 
 import asyncio
 import logging
+import warnings
 from collections.abc import Callable
 from functools import wraps
 from typing import TYPE_CHECKING, Any
@@ -392,6 +393,69 @@ def create_agent_method_wrapper(
     return wrapper
 
 
+def _warn_if_agent_call_middleware_bypassed(
+    agent: Any,
+    original_func: Callable[..., Any],
+    already_warned: list[bool],
+) -> None:
+    """Warn when a sync agent method runs while ``agent_call`` middleware is active.
+
+    ``agent_call`` middleware is async, so the sync wrapper cannot run it (see
+    :func:`create_sync_agent_method_wrapper`). Registering a guard and having it
+    silently not apply is the failure mode worth surfacing: the guard looks
+    installed, so the bypass is invisible until something unwanted has already
+    executed. This makes it audible at the moment a bypass actually happens,
+    rather than warning on every sync method whether or not a guard exists.
+
+    Delivery depends on where the call came from:
+
+    - Directly from user code — ``warnings.warn`` (filterable, and points at the
+      caller's own line).
+    - From inside a CodeAct cell — ``logger.warning``. Cells redirect
+      ``sys.stderr`` into a capture buffer, so a ``warnings.warn`` here would be
+      swallowed instead of reaching the developer, and the captured text is fed
+      back to the model as cell output. Routing to the logger keeps the
+      diagnostic visible without polluting the model's context.
+
+    Failures here are swallowed — a diagnostic must never break a method call.
+
+    Args:
+        agent: The agent instance the method was called on.
+        original_func: The unwrapped sync function, used for the method name.
+        already_warned: Single-element mutable flag; set once a warning is emitted.
+    """
+    if already_warned[0]:
+        return
+
+    try:
+        event_manager = getattr(agent, "event_manager", None)
+        if event_manager is None:
+            return
+        if not event_manager._middleware.get("agent_call"):
+            return
+
+        already_warned[0] = True
+        qualname = f"{type(agent).__name__}.{original_func.__name__}"
+        message = (
+            f"agent_call middleware is registered but does not apply to the "
+            f"synchronous method '{qualname}'. Middleware is async and cannot wrap "
+            f"a sync calling convention, so guards that block, authenticate, or "
+            f"rate-limit will not run for this method — including when it is called "
+            f"from generated CodeAct Python. Declare it 'async def' to bring it "
+            f"under middleware, or enforce the policy inside the method body."
+        )
+
+        # Imported lazily: actor imports this module, so a top-level import cycles.
+        from nooa.runtime.actor import _stderr_buffer_var
+
+        if _stderr_buffer_var.get() is not None:
+            logger.warning(message)
+        else:
+            warnings.warn(message, RuntimeWarning, stacklevel=3)
+    except Exception:  # noqa: BLE001
+        logger.debug("agent-call: sync middleware bypass warning failed", exc_info=True)
+
+
 def create_sync_agent_method_wrapper(
     original_func: Callable[..., Any],
     *,
@@ -407,6 +471,14 @@ def create_sync_agent_method_wrapper(
     - Pushes/pops the agent call stack so nested calls have correct parent linkage.
     - Skips agent_call middleware (middleware is async and would need an event loop).
     - Skips the generation path entirely (sync methods can't await an LLM).
+
+    Because ``agent_call`` middleware is documented as the authentication /
+    rate-limiting layer, silently skipping it would let a registered guard appear
+    active while a sync capability runs unchecked. To keep that gap visible, the
+    wrapper emits a ``RuntimeWarning`` (once per wrapped method) when it runs
+    while ``agent_call`` middleware is registered. Observability is unaffected:
+    tracing hooks and agent-call events still fire for sync methods — only the
+    middleware chain, the part that can *block*, does not apply.
 
     When `self.runtime` is not yet set (i.e. inside `Agent.__init__` while
     `_resolve_llm`/`_resolve_truncation`/etc. are running) the wrapper short-circuits
@@ -424,6 +496,9 @@ def create_sync_agent_method_wrapper(
     # Mirrors the async wrapper: a mutable list lets `@no_trace` applied AFTER
     # this wrapper (outer decorator) flip the flag retroactively.
     _tracing_enabled = [needs_tracing]
+    # Warn at most once per wrapped method so a sync helper called in a loop
+    # does not emit one warning per iteration.
+    _bypass_warned = [False]
 
     @wraps(original_func)
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
@@ -431,6 +506,8 @@ def create_sync_agent_method_wrapper(
         # before `self.runtime` is assigned). Skip all instrumentation.
         if not hasattr(self, "runtime"):
             return original_func(self, *args, **kwargs)
+
+        _warn_if_agent_call_middleware_bypassed(self, original_func, _bypass_warned)
 
         runtime = self.runtime
         call_id = str(uuid4())

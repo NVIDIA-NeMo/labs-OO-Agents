@@ -68,8 +68,22 @@ MIDDLEWARE_EXECUTE_PYTHON = "execute_python"
 class AgentCallContext(BaseModel):
     """Context for ``agent_call`` middleware.
 
-    Wraps the entire agent method execution — all LLM turns, all code
-    executions, the final return.
+    Wraps the entire execution of an ``async def`` agent method — all LLM turns,
+    all code executions, the final return.
+
+    .. warning::
+       ``agent_call`` middleware does **not** apply to synchronous (``def``)
+       agent methods. Middleware is async and cannot wrap a sync calling
+       convention, so a sync method executes without an ``AgentCallContext``
+       ever being created for it — including when it is called from generated
+       CodeAct Python. Sync methods are still traced and still emit agent-call
+       events; it is specifically the middleware chain, the part that can
+       *block*, that does not apply.
+
+       Declare a capability ``async def`` to place it under middleware, or
+       enforce the policy inside the method body. A ``RuntimeWarning`` is
+       emitted when a sync method runs while ``agent_call`` middleware is
+       registered.
 
     Attributes:
         agent: The agent instance.

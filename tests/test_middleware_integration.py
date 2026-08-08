@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Integration tests: middleware wired through ActorRuntime.generate / execute_code."""
 
+import warnings
+
 import pytest
 
 from nooa.agent import Agent
@@ -930,3 +932,191 @@ class TestAgentCallMiddleware:
         # llm and exec fire inside
         assert "llm" in order
         assert "exec" in order
+
+
+# ---------------------------------------------------------------------------
+# agent_call middleware vs. SYNC agent methods
+# ---------------------------------------------------------------------------
+
+
+class TestAgentCallMiddlewareSyncMethods:
+    """Sync (``def``) agent methods bypass agent_call middleware.
+
+    Middleware is async and cannot wrap a sync calling convention, so a guard
+    registered via ``intercept("agent_call", ...)`` never runs for a sync
+    capability. These tests pin that asymmetry and assert it is no longer
+    silent.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sync_method_bypasses_agent_call_middleware(self):
+        """A blocking guard does not stop a sync method's side effect."""
+        seen = []
+
+        async def deny(ctx, nxt):
+            seen.append(ctx.method_name)
+            if ctx.method_name == "charge_card":
+                raise PermissionError("charge_card blocked")
+            return await nxt(ctx)
+
+        class A(Agent, llm=_TEST_LLM):
+            def __init__(self):
+                super().__init__()
+                self.charges = []
+
+            def charge_card(self, amount: int) -> str:
+                """Record a simulated card charge."""
+                self.charges.append(amount)
+                return f"receipt-{amount}"
+
+        agent = A()
+        agent.event_manager.intercept("agent_call", deny)
+
+        with pytest.warns(RuntimeWarning, match="does not apply to the synchronous method"):
+            result = agent.charge_card(100)
+
+        # The guard neither ran nor blocked: the side effect happened.
+        assert result == "receipt-100"
+        assert agent.charges == [100]
+        assert seen == []
+
+    @pytest.mark.asyncio
+    async def test_async_method_is_blocked_by_same_middleware(self):
+        """Control: the identical capability declared async IS intercepted."""
+        seen = []
+
+        async def deny(ctx, nxt):
+            seen.append(ctx.method_name)
+            if ctx.method_name == "charge_card":
+                raise PermissionError("charge_card blocked")
+            return await nxt(ctx)
+
+        class A(Agent, llm=_TEST_LLM):
+            def __init__(self):
+                super().__init__()
+                self.charges = []
+
+            async def charge_card(self, amount: int) -> str:
+                """Record a simulated card charge."""
+                self.charges.append(amount)
+                return f"receipt-{amount}"
+
+        agent = A()
+        agent.event_manager.intercept("agent_call", deny)
+
+        with pytest.raises(PermissionError):
+            await agent.charge_card(100)
+
+        assert agent.charges == []
+        assert seen == ["charge_card"]
+
+    @pytest.mark.asyncio
+    async def test_no_warning_when_no_agent_call_middleware(self):
+        """The warning is scoped to an actual bypass, not to sync methods."""
+
+        class A(Agent, llm=_TEST_LLM):
+            def helper(self) -> str:
+                """A plain sync helper."""
+                return "ok"
+
+        agent = A()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            assert agent.helper() == "ok"
+
+    @pytest.mark.asyncio
+    async def test_no_warning_for_unrelated_middleware_kinds(self):
+        """llm_call / execute_python middleware do not trigger the warning."""
+
+        async def mw(ctx, nxt):
+            return await nxt(ctx)
+
+        class A(Agent, llm=_TEST_LLM):
+            def helper(self) -> str:
+                """A plain sync helper."""
+                return "ok"
+
+        agent = A()
+        agent.event_manager.intercept("llm_call", mw)
+        agent.event_manager.intercept("execute_python", mw)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            assert agent.helper() == "ok"
+
+    @pytest.mark.asyncio
+    async def test_warning_emitted_once_per_method(self):
+        """A sync helper in a loop warns once, not once per call."""
+
+        async def mw(ctx, nxt):
+            return await nxt(ctx)
+
+        class A(Agent, llm=_TEST_LLM):
+            def helper(self) -> str:
+                """A plain sync helper."""
+                return "ok"
+
+        agent = A()
+        agent.event_manager.intercept("agent_call", mw)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", RuntimeWarning)
+            for _ in range(5):
+                agent.helper()
+
+        bypass = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+        assert len(bypass) == 1
+
+    @pytest.mark.asyncio
+    async def test_warning_names_the_offending_method(self):
+        """The message identifies the class and method so it is actionable."""
+
+        async def mw(ctx, nxt):
+            return await nxt(ctx)
+
+        class PaymentAgent(Agent, llm=_TEST_LLM):
+            def charge_card(self, amount: int) -> str:
+                """Record a simulated card charge."""
+                return f"receipt-{amount}"
+
+        agent = PaymentAgent()
+        agent.event_manager.intercept("agent_call", mw)
+
+        with pytest.warns(RuntimeWarning, match=r"PaymentAgent\.charge_card"):
+            agent.charge_card(100)
+
+    @pytest.mark.asyncio
+    async def test_codeact_cell_bypass_warns_via_logger(self, caplog):
+        """A bypass from inside a CodeAct cell reaches the logger, not the cell.
+
+        Cells redirect ``sys.stderr`` into a capture buffer that is fed back to
+        the model, so a ``warnings.warn`` there would be invisible to the
+        developer and would pollute the model's context.
+        """
+        import logging
+
+        async def mw(ctx, nxt):
+            return await nxt(ctx)
+
+        class PaymentAgent(Agent, llm=_TEST_LLM):
+            def __init__(self):
+                super().__init__()
+                self.charges = []
+
+            def charge_card(self, amount: int) -> str:
+                """Record a simulated card charge."""
+                self.charges.append(amount)
+                return f"receipt-{amount}"
+
+        agent = PaymentAgent()
+        agent.event_manager.intercept("agent_call", mw)
+
+        with caplog.at_level(logging.WARNING, logger="nooa.runtime.method_wrapper"):
+            result = await agent.runtime.execute_code("self.charge_card(100)")
+
+        assert agent.charges == [100]
+        assert "PaymentAgent.charge_card" in caplog.text
+
+        # The captured cell output must stay clean so the model never sees it.
+        assert "agent_call middleware" not in (result.stderr or "")

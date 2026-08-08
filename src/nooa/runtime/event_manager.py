@@ -277,7 +277,7 @@ class EventManager:
 
         Execution order::
 
-            agent_call middleware        ← auth, rate limiting
+            agent_call middleware        ← auth, rate limiting (async methods only)
               → llm_call middleware      ← per-call guardrails
                 → acall()
               → execute_python middleware ← per-exec guardrails
@@ -286,6 +286,16 @@ class EventManager:
                 → on() handlers fire     ← observe only
 
         Registration order = execution order.  First registered = outermost.
+
+        .. warning::
+           ``agent_call`` middleware only wraps ``async def`` agent methods.
+           Synchronous (``def``) methods bypass it entirely — middleware is async
+           and cannot wrap a sync calling convention — so guards registered here
+           will not block a sync capability, including when generated CodeAct
+           Python calls it. Declare such a capability ``async def`` to bring it
+           under middleware, or enforce the policy inside the method body. A
+           ``RuntimeWarning`` is emitted when a sync method runs while
+           ``agent_call`` middleware is registered.
 
         Args:
             kind: ``"agent_call"``, ``"llm_call"``, or ``"execute_python"``.
