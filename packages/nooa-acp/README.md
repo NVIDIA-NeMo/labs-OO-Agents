@@ -48,6 +48,12 @@ and ACP adapter can share list and replay metadata. The adapter advertises ACP
 session list, load, and close capabilities; closing a live session preserves
 its durable history.
 
+The current stdio adapter hosts those live agents in its own process. That is
+an adapter-private implementation detail rather than part of the durable
+session API: the live-session registry is isolated inside `nooa-acp` so it can
+later be replaced by handles to an agent daemon without changing stored
+sessions, the shared coding agent, or the ACP protocol surface.
+
 Installed `nooa.skills` entry points are loaded into the shared skill registry
 but remain opt-in. The agent can activate a relevant skill with
 `self.skills.activate(["name"])`. Stdio MCP servers supplied by an ACP client
