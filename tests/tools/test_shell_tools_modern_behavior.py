@@ -7,6 +7,9 @@ its primary file/run surface. Search-anchor behavior is covered separately in
 test_shell_tools_modern.py.
 """
 
+import asyncio
+import shlex
+
 import pytest
 
 from nooa.tools.shell_tools import Match, ShellTools
@@ -105,3 +108,81 @@ async def test_close_terminates_underlying_bash_session(sh):
     assert r2.success
     assert "restarted" in r2.stdout
     await sh.close()
+
+
+@pytest.mark.asyncio
+async def test_abandoned_stream_interrupts_command_and_resynchronizes_shell(sh):
+    stream = sh.run_stream("printf started; sleep 30; printf stale")
+
+    first = await asyncio.wait_for(anext(stream), timeout=1.0)
+    assert first.kind == "stdout"
+    assert first.text == "started"
+
+    await asyncio.wait_for(stream.aclose(), timeout=3.0)
+
+    recovered = await asyncio.wait_for(sh.run("printf recovered"), timeout=2.0)
+    assert recovered.stdout == "recovered"
+    assert "stale" not in recovered.stdout
+
+
+@pytest.mark.asyncio
+async def test_stream_delivers_large_stdout_and_stderr_losslessly(sh):
+    command = (
+        'python3 -c "import os; '
+        "os.write(1, b'x' * 100000); os.write(2, b'y' * 70000); raise SystemExit(7)\""
+    )
+
+    events = [event async for event in sh.run_stream(command)]
+
+    assert "".join(event.text for event in events if event.kind == "stdout") == "x" * 100_000
+    assert "".join(event.text for event in events if event.kind == "stderr") == "y" * 70_000
+    assert events[-1].kind == "done"
+    assert events[-1].returncode == 7
+    assert events[-1].timed_out is False
+    assert sum(event.kind == "done" for event in events) == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_delivers_output_before_command_finishes(sh, tmp_path):
+    release = tmp_path / "release-shelltools-stream"
+    command = (
+        "printf first; "
+        f"while [ ! -f {shlex.quote(str(release))} ]; do sleep 0.01; done; "
+        "printf second"
+    )
+    stream = sh.run_stream(command)
+
+    first = await asyncio.wait_for(anext(stream), timeout=1.0)
+    assert first.kind == "stdout"
+    assert first.text == "first"
+
+    release.write_text("")
+    remaining = [event async for event in stream]
+    assert "".join(event.text for event in remaining if event.kind == "stdout") == "second"
+    assert remaining[-1].kind == "done"
+    assert remaining[-1].returncode == 0
+    assert remaining[-1].timed_out is False
+
+
+@pytest.mark.asyncio
+async def test_stream_reports_timeout_and_shell_remains_reusable(sh):
+    events = [
+        event async for event in sh.run_stream("printf before-timeout; sleep 10", timeout=0.1)
+    ]
+
+    assert "".join(event.text for event in events if event.kind == "stdout") == "before-timeout"
+    assert events[-1].kind == "done"
+    assert events[-1].returncode == 124
+    assert events[-1].timed_out is True
+
+    recovered = await asyncio.wait_for(sh.run("printf recovered"), timeout=2.0)
+    assert recovered.stdout == "recovered"
+
+
+@pytest.mark.asyncio
+async def test_stream_does_not_confuse_exit_124_with_timeout(sh):
+    events = [event async for event in sh.run_stream("bash -c 'exit 124'", timeout=2.0)]
+
+    assert events[-1].kind == "done"
+    assert events[-1].returncode == 124
+    assert events[-1].timed_out is False

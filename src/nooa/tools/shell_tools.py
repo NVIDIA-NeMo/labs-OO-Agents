@@ -419,13 +419,17 @@ class ShellTools(Skill):
         session = await self._get_session()
         timed_out = False
         exit_code = 0
-        async for stream_name, chunk in session.run_stream(command, timeout=timeout):
-            if stream_name == "__done__":
-                parts = chunk.split(",")
-                exit_code = int(parts[0])
-                timed_out = bool(int(parts[1])) if len(parts) > 1 else False
-                break
-            yield StreamEvent(kind=stream_name, text=chunk)
+        stream = session.run_stream(command, timeout=timeout)
+        try:
+            async for stream_name, chunk in stream:
+                if stream_name == "__done__":
+                    parts = chunk.split(",")
+                    exit_code = int(parts[0])
+                    timed_out = bool(int(parts[1])) if len(parts) > 1 else False
+                    break
+                yield StreamEvent(kind=stream_name, text=chunk)
+        finally:
+            await stream.aclose()
         yield StreamDone(kind="done", returncode=exit_code, timed_out=timed_out)
 
     @staticmethod

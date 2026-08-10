@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for persistent bash session."""
 
+import asyncio
+import shlex
+
 import pytest
 
 from nooa.tools._bash_session import BashSession
@@ -70,6 +73,50 @@ class TestBashSession:
         """Very long output should be truncated."""
         out, _, _ = await session.run("python3 -c \"print('x' * 50000)\"")
         assert len(out) <= 31000  # MAX_OUTPUT_CHARS + truncation message
+
+    async def test_streaming_output_is_not_truncated(self, session):
+        chunks = [
+            chunk
+            async for stream, chunk in session.run_stream("python3 -c \"print('x' * 100000)\"")
+            if stream == "stdout"
+        ]
+        output = "".join(chunks)
+        assert output == "x" * 100_000 + "\n"
+        assert "<truncated-output>" not in output
+
+    async def test_streaming_preserves_utf8_split_across_read_chunks(self, session):
+        command = "python3 -c \"import os; os.write(1, b'x' * 4095 + '€'.encode() + b'\\n')\""
+        chunks = [
+            chunk async for stream, chunk in session.run_stream(command) if stream == "stdout"
+        ]
+        assert "".join(chunks) == "x" * 4095 + "€\n"
+
+    async def test_streaming_output_arrives_before_command_finishes(self, session, tmp_path):
+        release = tmp_path / "release-stream"
+        command = (
+            "printf first; "
+            f"while [ ! -f {shlex.quote(str(release))} ]; do sleep 0.01; done; "
+            "printf second"
+        )
+        stream = session.run_stream(command)
+
+        first = await asyncio.wait_for(anext(stream), timeout=1)
+        assert first == ("stdout", "first")
+
+        release.write_text("")
+        remaining = [item async for item in stream]
+        assert ("stdout", "second") in remaining
+        assert remaining[-1] == ("__done__", "0,0")
+
+    async def test_abandoned_stream_interrupts_command_and_resynchronizes_shell(self, session):
+        stream = session.run_stream("printf started; sleep 30; printf stale")
+        first = await asyncio.wait_for(anext(stream), timeout=1)
+        assert first == ("stdout", "started")
+
+        await asyncio.wait_for(stream.aclose(), timeout=3)
+
+        out, err, code = await session.run("printf recovered")
+        assert (out, err, code) == ("recovered", "", 0)
 
     async def test_close_and_restart(self, tmp_path):
         """Session should be closeable and re-startable."""
