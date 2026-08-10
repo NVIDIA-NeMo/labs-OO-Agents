@@ -414,6 +414,8 @@ class ShellTools(Skill):
         created by that command while preserving the persistent shell, its
         state, and background jobs from earlier commands. The shell is reset
         only if scoped recovery cannot restore a clean command boundary.
+        Persistent background jobs must redirect stdout and stderr; deliberately
+        detached daemons require host-level containment rather than ShellTools.
 
         Consume the iterator directly when output should be handled as it arrives::
 

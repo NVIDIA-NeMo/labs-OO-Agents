@@ -5,17 +5,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import shutil
 import stat
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
 
 import nooa.tools._bash_session as bash_session_module
-from nooa.agentdoc import FileBackedTruncatingStringIO, TruncatingStringIO
+from nooa.agentdoc import FileBackedTruncatingStringIO
 from nooa.tools._bash_session import BashSession, _CommandOutputPipes
 
 _ARTIFACT_PATH = re.compile(r"full untruncated output .* is in: (.+)\n")
@@ -32,7 +34,7 @@ def _fifo_dirs(root: Path) -> list[Path]:
 
 
 def _shell_artifacts(root: Path) -> list[Path]:
-    return sorted(root.glob("nooa_shell_*.txt"))
+    return sorted(root.glob("nooa-shell-output-*/nooa_shell_*.txt"))
 
 
 def _fd_count() -> int | None:
@@ -51,7 +53,7 @@ async def _wait_for_fd_count_at_most(expected: int, timeout: float = 3.0) -> Non
             await asyncio.sleep(0.01)
 
 
-async def test_truncated_artifact_is_private_complete_and_removed_on_close(tmp_path, monkeypatch):
+async def test_truncated_artifact_is_private_complete_and_survives_close(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     session = BashSession(cwd=tmp_path)
     await session.start()
@@ -66,12 +68,10 @@ async def test_truncated_artifact_is_private_complete_and_removed_on_close(tmp_p
     assert path.read_text() == content
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     await session.close()
-    assert not path.exists()
+    assert path.read_text() == content
 
 
-async def test_multiple_artifacts_survive_reset_but_are_owned_by_session_close(
-    tmp_path, monkeypatch
-):
+async def test_multiple_published_artifacts_survive_reset_and_close(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     session = BashSession(cwd=tmp_path)
     await session.start()
@@ -84,8 +84,7 @@ async def test_multiple_artifacts_survive_reset_but_are_owned_by_session_close(
     assert all(path.exists() for path in paths)
 
     await session.close()
-    assert all(not path.exists() for path in paths)
-    assert _shell_artifacts(tmp_path) == []
+    assert all(path.exists() for path in paths)
 
 
 async def test_large_init_output_does_not_leave_unreachable_artifact(tmp_path, monkeypatch):
@@ -126,13 +125,12 @@ async def test_partial_backing_file_is_removed_after_write_failure(tmp_path, mon
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
 
     def fail_backing_write(self, value):
-        if self._file is not None and not self._file_failed:
-            self._file.write(value[:10])
-            self._file.flush()
-            self._file_failed = True
-        return TruncatingStringIO.write(self, value)
+        assert self._file is not None
+        self._file.write(value[:10])
+        self._file.flush()
+        raise OSError("simulated partial artifact write")
 
-    monkeypatch.setattr(FileBackedTruncatingStringIO, "write", fail_backing_write)
+    monkeypatch.setattr(FileBackedTruncatingStringIO, "_write_file", fail_backing_write)
     session = BashSession(cwd=tmp_path)
     try:
         await session.start()
@@ -164,7 +162,7 @@ async def test_cancelling_buffered_run_removes_unpublished_artifacts(tmp_path, m
         await session.close()
 
 
-async def test_timed_out_buffered_run_artifact_is_owned_until_close(tmp_path, monkeypatch):
+async def test_timed_out_buffered_run_artifact_survives_close(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     session = BashSession(cwd=tmp_path)
     await session.start()
@@ -178,7 +176,7 @@ async def test_timed_out_buffered_run_artifact_is_owned_until_close(tmp_path, mo
     assert (code, timed_out) == (124, True)
     assert path.exists()
     await session.close()
-    assert not path.exists()
+    assert path.exists()
 
 
 def test_shell_artifact_capture_has_finite_per_file_and_session_disk_limits():
@@ -236,37 +234,86 @@ async def test_session_total_artifact_quota_bounds_aggregate_disk(tmp_path, monk
     session = BashSession(cwd=tmp_path)
     try:
         await session.start()
-        for marker in ("A", "B", "C"):
+        published: list[Path] = []
+        last_stdout = ""
+        for marker in ("A", "B", "C", "D"):
             stdout, _, code = await session.run(f"python3 -c \"print({marker!r} * 40000, end='')\"")
+            last_stdout = stdout
             assert code == 0
             assert "<truncated-output>" in stdout
+            match = _ARTIFACT_PATH.search(stdout)
+            if match is not None:
+                published.append(Path(match.group(1)))
+            assert all(path.exists() for path in published)
 
         artifacts = _shell_artifacts(tmp_path)
         assert artifacts
         assert sum(path.stat().st_size for path in artifacts) <= total_limit
+        assert all(path.exists() for path in published)
+        assert "full untruncated output" not in last_stdout
+        assert "artifact was not retained" in last_stdout.lower()
     finally:
         await session.close()
 
 
-async def test_start_removes_stale_crash_artifacts_but_preserves_fresh_ones(tmp_path, monkeypatch):
+async def test_start_reaps_expired_dead_owner_but_preserves_live_and_recent_owners(
+    tmp_path, monkeypatch
+):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-    stale_seconds = getattr(bash_session_module, "OUTPUT_ARTIFACT_STALE_SECONDS", None)
-    assert isinstance(stale_seconds, int) and stale_seconds > 0
-    stale = tmp_path / "nooa_shell_stdout_stale.txt"
-    fresh = tmp_path / "nooa_shell_stdout_fresh.txt"
-    stale.write_text("stale")
-    fresh.write_text("fresh")
-    old = stale.stat().st_mtime - stale_seconds - 1
-    os.utime(stale, (old, old))
+    ttl = getattr(bash_session_module, "OUTPUT_ARTIFACT_TTL_SECONDS", None)
+    assert isinstance(ttl, int) and ttl > 0
+
+    def owner_dir(name: str, *, pid: int, start_token: str, orphaned_at: float) -> Path:
+        directory = tmp_path / f"nooa-shell-output-{name}"
+        directory.mkdir(mode=0o700)
+        (directory / "owner.json").write_text(
+            json.dumps(
+                {
+                    "pid": pid,
+                    "start_token": start_token,
+                    "orphaned_at": orphaned_at,
+                }
+            )
+        )
+        (directory / "nooa_shell_stdout_test.txt").write_text(name)
+        return directory
+
+    own_token = bash_session_module._process_start_token(os.getpid())
+    expired_dead = owner_dir(
+        "expired-dead",
+        pid=999_999_991,
+        start_token="dead",
+        orphaned_at=time.time() - ttl - 1,
+    )
+    recent_dead = owner_dir(
+        "recent-dead",
+        pid=999_999_992,
+        start_token="dead",
+        orphaned_at=time.time(),
+    )
+    old_live = owner_dir(
+        "old-live",
+        pid=os.getpid(),
+        start_token=own_token,
+        orphaned_at=time.time() - ttl - 1,
+    )
+    non_private = owner_dir(
+        "non-private",
+        pid=999_999_993,
+        start_token="dead",
+        orphaned_at=time.time() - ttl - 1,
+    )
+    non_private.chmod(0o755)
 
     session = BashSession(cwd=tmp_path)
     try:
         await session.start()
-        assert not stale.exists()
-        assert fresh.read_text() == "fresh"
+        assert not expired_dead.exists()
+        assert recent_dead.exists()
+        assert old_live.exists()
+        assert non_private.exists()
     finally:
         await session.close()
-        fresh.unlink(missing_ok=True)
 
 
 async def test_output_pipe_directory_and_fifos_are_private(tmp_path, monkeypatch):

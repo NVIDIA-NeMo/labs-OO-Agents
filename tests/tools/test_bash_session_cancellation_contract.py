@@ -150,7 +150,7 @@ async def test_cancelling_buffered_run_preserves_prior_background_job(session, t
     )
     task = asyncio.create_task(
         session.run(
-            f"touch {shlex.quote(str(active_started))}; sleep .15; "
+            f"touch {shlex.quote(str(active_started))}; sleep 30; "
             f"touch {shlex.quote(str(active_finished))}"
         )
     )

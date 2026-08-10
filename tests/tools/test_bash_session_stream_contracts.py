@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -108,8 +109,8 @@ async def test_run_stream_matches_buffered_run_observables(tmp_path, command):
         actual_stdout, actual_stderr, actual_code, timed_out = _stream_result(events)
 
         assert timed_out is False
-        assert actual_stdout.strip() == expected_stdout
-        assert actual_stderr.strip() == expected_stderr
+        assert actual_stdout == expected_stdout
+        assert actual_stderr.removesuffix("\n") == expected_stderr
         assert actual_code == expected_code
     finally:
         await buffered.close()
@@ -148,8 +149,9 @@ async def test_shell_terminating_commands_report_failure_and_recover(tmp_path, c
 
 
 async def test_successful_stream_keeps_background_job_alive(session, tmp_path):
-    """Persistent-shell jobs survive the end of the command that launched them."""
+    """Persistent jobs with redirected output survive their launching command."""
     marker = tmp_path / "background-finished"
+    output = tmp_path / "background-output"
     inner = (
         "import pathlib,time; time.sleep(.2); "
         "print('late output', flush=True); "
@@ -157,29 +159,37 @@ async def test_successful_stream_keeps_background_job_alive(session, tmp_path):
     )
 
     events = await _collect(
-        session.run_stream(f"python3 -c {shlex.quote(inner)} & printf foreground")
+        session.run_stream(
+            f"python3 -c {shlex.quote(inner)} > {shlex.quote(str(output))} 2>&1 & printf foreground"
+        )
     )
 
-    assert _stream_result(events) == ("foreground", "", 0, False)
+    stdout, stderr, code, timed_out = _stream_result(events)
+    assert (stdout, code, timed_out) == ("foreground", 0, False)
+    # Interactive Bash reports the launched job on stderr even with monitor
+    # mode disabled; the job's own output is redirected as required.
+    assert re.fullmatch(r"\[\d+\] \d+\n", stderr)
     await _wait_until_exists(marker, timeout=3)
     assert marker.read_text() == "alive"
+    assert output.read_text() == "late output\n"
     stdout, stderr, code = await session.run("printf next")
     assert (stdout, stderr, code) == ("next", "", 0)
 
 
-async def test_prior_background_output_is_not_attributed_to_active_or_next_command(
-    session, tmp_path
-):
+async def test_prior_background_job_with_redirected_output_survives_stream(session, tmp_path):
     emitted = tmp_path / "prior-output-emitted"
+    output = tmp_path / "prior-output"
     await session.run(
         f"(sleep .1; printf prior-out; printf prior-err >&2; "
-        f"touch {shlex.quote(str(emitted))}) </dev/null &"
+        f"touch {shlex.quote(str(emitted))}) </dev/null "
+        f"> {shlex.quote(str(output))} 2>&1 &"
     )
 
     events = await _collect(session.run_stream("printf foreground; sleep .3"))
     await _wait_until_exists(emitted)
     stdout, stderr, _, _ = _stream_result(events)
     assert (stdout, stderr) == ("foreground", "")
+    assert output.read_text() == "prior-outprior-err"
 
     next_stdout, next_stderr, code = await session.run("printf next-out; printf next-err >&2")
     assert (next_stdout, next_stderr, code) == ("next-out", "next-err", 0)
@@ -263,40 +273,19 @@ async def test_existing_background_job_can_signal_usr1_during_stream(session, tm
     assert stdout == "handled"
 
 
-async def test_cancel_kills_reparented_daemon_from_active_command(session, tmp_path):
-    pid_path = tmp_path / "daemon.pid"
-    daemon_code = (
-        "import os,pathlib,time; "
-        "pid=os.fork(); "
-        "(os._exit(0) if pid else None); "
-        "os.setsid(); "
-        "pid=os.fork(); "
-        "(os._exit(0) if pid else None); "
-        f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid())); "
-        "time.sleep(30)"
-    )
-    stream = session.run_stream(
-        f"python3 -c {shlex.quote(daemon_code)}; "
-        f"while [[ ! -f {shlex.quote(str(pid_path))} ]]; do sleep .01; done; "
-        "printf ready; sleep 30"
-    )
-    daemon_pid: int | None = None
-    try:
-        output = ""
-        while "ready" not in output:
-            name, value = await asyncio.wait_for(anext(stream), timeout=2)
-            if name == "stdout":
-                output += value
-        daemon_pid = int(pid_path.read_text())
+async def test_cancellation_honors_existing_sigint_handler(session):
+    await session.run("trap 'export USER_INT=handled' INT; export BEFORE_INT_CANCEL=preserved")
+    start_count = session._start_count
+    stream = session.run_stream("printf started; sleep 30; printf stale")
+    assert await asyncio.wait_for(anext(stream), timeout=3) == ("stdout", "started")
 
-        await asyncio.wait_for(stream.aclose(), timeout=3)
+    await asyncio.wait_for(stream.aclose(), timeout=3)
 
-        await _wait_until_pid_stops(daemon_pid)
-    finally:
-        if daemon_pid is None and pid_path.exists():
-            daemon_pid = int(pid_path.read_text())
-        if daemon_pid is not None and _pid_exists(daemon_pid):
-            os.kill(daemon_pid, signal.SIGKILL)
+    assert session._start_count == start_count
+    stdout, stderr, code = await session.run('printf "$BEFORE_INT_CANCEL:$USER_INT"; trap -p INT')
+    assert (stderr, code) == ("", 0)
+    assert stdout.startswith("preserved:handled")
+    assert "USER_INT=handled" in stdout
 
 
 async def test_cancel_sigkills_descendant_that_ignores_sigterm(session, tmp_path):
@@ -307,16 +296,23 @@ async def test_cancel_sigkills_descendant_that_ignores_sigterm(session, tmp_path
         "printf ready; while :; do sleep 1; done"
     )
     stream = session.run_stream(f"sh -c {shlex.quote(inner)}")
-    output = ""
-    while "ready" not in output:
-        name, value = await asyncio.wait_for(anext(stream), timeout=3)
-        if name == "stdout":
-            output += value
-    pid = int(pid_path.read_text())
+    pid: int | None = None
+    try:
+        output = ""
+        while "ready" not in output:
+            name, value = await asyncio.wait_for(anext(stream), timeout=3)
+            if name == "stdout":
+                output += value
+        pid = int(pid_path.read_text())
 
-    await asyncio.wait_for(stream.aclose(), timeout=3)
+        await asyncio.wait_for(stream.aclose(), timeout=3)
 
-    await _wait_until_pid_stops(pid)
+        await _wait_until_pid_stops(pid)
+    finally:
+        if pid is None and pid_path.exists():
+            pid = int(pid_path.read_text())
+        if pid is not None and _pid_exists(pid):
+            os.kill(pid, signal.SIGKILL)
 
 
 async def test_cancel_kills_child_spawned_by_sigterm_handler(session, tmp_path):

@@ -17,6 +17,7 @@ import io
 import logging
 import os
 import tempfile
+from collections.abc import Callable
 
 _log = logging.getLogger(__name__)
 
@@ -174,14 +175,32 @@ class FileBackedTruncatingStringIO(TruncatingStringIO):
         dir: str | None = None,
         prefix: str = "nemo_output_",
         suffix: str = ".txt",
+        file_limit_bytes: int | None = None,
+        byte_reserver: Callable[[int], int] | None = None,
+        byte_releaser: Callable[[int], None] | None = None,
     ):
         super().__init__(limit=limit, tail_chars=tail_chars)
         self._file_failed = False
         self._file_path: str | None = None
         self._file: io.TextIOWrapper | None = None
+        self._file_limit_bytes = file_limit_bytes
+        self._byte_reserver = byte_reserver
+        self._byte_releaser = byte_releaser
+        self._file_bytes = 0
+        self._artifact_incomplete = False
+        self._capture_unavailable_reason: str | None = None
+        self._released_budget = False
+
+        if file_limit_bytes is not None and file_limit_bytes <= 0:
+            self._artifact_incomplete = True
+            self._capture_unavailable_reason = (
+                "The full output artifact was not retained because the process disk quota "
+                "is exhausted."
+            )
+            return
         try:
             fd, path = tempfile.mkstemp(dir=dir, prefix=prefix, suffix=suffix)
-            self._file = os.fdopen(fd, "w")
+            self._file = os.fdopen(fd, "w", encoding="utf-8", newline="")
             self._file_path = path
         except OSError:
             _log.warning(
@@ -190,15 +209,66 @@ class FileBackedTruncatingStringIO(TruncatingStringIO):
             )
             self._file_failed = True
 
+    @staticmethod
+    def _utf8_prefix(value: str, byte_limit: int) -> tuple[str, int]:
+        encoded = value.encode("utf-8")
+        if len(encoded) <= byte_limit:
+            return value, len(encoded)
+        prefix = encoded[:byte_limit].decode("utf-8", errors="ignore")
+        return prefix, len(prefix.encode("utf-8"))
+
+    def _reserve_bytes(self, requested: int) -> int:
+        if requested <= 0:
+            return 0
+        if self._byte_reserver is None:
+            return requested
+        return max(0, min(requested, self._byte_reserver(requested)))
+
+    def _release_bytes(self, count: int) -> None:
+        if count > 0 and self._byte_releaser is not None:
+            self._byte_releaser(count)
+
+    def _write_file(self, value: str) -> None:
+        assert self._file is not None
+        self._file.write(value)
+        self._file.flush()
+
+    def _disable_file_capture(self) -> None:
+        self._file_failed = True
+        self.close()
+        if self._file_path is not None:
+            try:
+                os.unlink(self._file_path)
+            except OSError:
+                pass
+        if not self._released_budget:
+            self._release_bytes(self._file_bytes)
+            self._released_budget = True
+        self._file_bytes = 0
+
     def write(self, s: str) -> int:
         """Write to both the temp file and the in-memory truncating buffer."""
         if self._file is not None and not self._file_failed:
+            requested = len(s.encode("utf-8"))
+            if self._file_limit_bytes is not None:
+                requested = min(
+                    requested,
+                    max(0, self._file_limit_bytes - self._file_bytes),
+                )
+            reserved = self._reserve_bytes(requested)
+            file_value, file_bytes = self._utf8_prefix(s, reserved)
+            if file_bytes < len(s.encode("utf-8")):
+                self._artifact_incomplete = True
+            if file_bytes < reserved:
+                self._release_bytes(reserved - file_bytes)
             try:
-                self._file.write(s)
-                self._file.flush()
+                if file_value:
+                    self._write_file(file_value)
+                    self._file_bytes += file_bytes
             except OSError:
                 _log.warning("Failed to write to temp file; disabling file backing", exc_info=True)
-                self._file_failed = True
+                self._release_bytes(file_bytes)
+                self._disable_file_capture()
         return super().write(s)
 
     def _format_truncation_notice(
@@ -207,10 +277,19 @@ class FileBackedTruncatingStringIO(TruncatingStringIO):
         """Include the temp file path in the truncation notice."""
         if self._file_path and not self._file_failed:
             self._flush_file()
-            file_notice = (
-                f"The full untruncated output ({total:,} chars) is in: {self._file_path}\n"
-                f"Read that file to see the {dropped:,} chars not shown here.\n"
-            )
+            if self._artifact_incomplete:
+                file_notice = (
+                    f"The output artifact is incomplete: retained the first "
+                    f"{self._file_bytes:,} bytes in: {self._file_path}\n"
+                    "Capture stopped at the configured disk limit.\n"
+                )
+            else:
+                file_notice = (
+                    f"The full untruncated output ({total:,} chars) is in: {self._file_path}\n"
+                    f"Read that file to see the {dropped:,} chars not shown here.\n"
+                )
+        elif self._capture_unavailable_reason:
+            file_notice = f"{self._capture_unavailable_reason}\n"
         else:
             file_notice = f"The {dropped:,} chars in the middle are not recoverable.\n"
 
@@ -238,6 +317,16 @@ class FileBackedTruncatingStringIO(TruncatingStringIO):
         """Path to the temp file, or None if file creation failed."""
         return self._file_path
 
+    @property
+    def artifact_incomplete(self) -> bool:
+        """Whether disk capture stopped before all output was retained."""
+        return self._artifact_incomplete
+
+    @property
+    def file_bytes(self) -> int:
+        """Number of UTF-8 bytes retained in the backing artifact."""
+        return self._file_bytes
+
     def close(self) -> None:
         """Close the temp file handle (file remains on disk).
 
@@ -259,3 +348,6 @@ class FileBackedTruncatingStringIO(TruncatingStringIO):
                 os.unlink(self._file_path)
             except OSError:
                 pass
+        if not self._released_budget:
+            self._release_bytes(self._file_bytes)
+            self._released_budget = True

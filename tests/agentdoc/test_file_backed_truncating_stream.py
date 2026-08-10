@@ -148,6 +148,70 @@ class TestFileBackedFileOutput:
         finally:
             buf.cleanup()
 
+    def test_byte_limit_retains_valid_utf8_prefix(self, tmp_path):
+        """A byte cap never leaves a split UTF-8 code point in the artifact."""
+        buf = FileBackedTruncatingStringIO(
+            limit=4,
+            dir=str(tmp_path),
+            file_limit_bytes=10,
+        )
+        try:
+            buf.write("€" * 10)
+
+            assert buf.artifact_incomplete
+            assert buf.file_bytes == 9
+            assert open(buf.file_path, encoding="utf-8").read() == "€" * 3
+            assert "artifact is incomplete" in buf.getvalue()
+            assert "full untruncated output" not in buf.getvalue()
+        finally:
+            buf.cleanup()
+
+    def test_zero_byte_limit_does_not_publish_empty_artifact(self, tmp_path):
+        """Exhausted quota is explicit and does not return a misleading path."""
+        buf = FileBackedTruncatingStringIO(
+            limit=4,
+            dir=str(tmp_path),
+            file_limit_bytes=0,
+        )
+        try:
+            buf.write("too much output")
+
+            assert buf.file_path is None
+            assert list(tmp_path.iterdir()) == []
+            assert "artifact was not retained" in buf.getvalue()
+        finally:
+            buf.cleanup()
+
+    def test_quota_reservation_releases_unused_and_cleaned_bytes(self, tmp_path):
+        """Reservation accounting tracks bytes actually present on disk."""
+        reserved = 0
+
+        def reserve(requested):
+            nonlocal reserved
+            granted = min(requested, 10 - reserved)
+            reserved += granted
+            return granted
+
+        def release(count):
+            nonlocal reserved
+            reserved -= count
+
+        buf = FileBackedTruncatingStringIO(
+            limit=4,
+            dir=str(tmp_path),
+            file_limit_bytes=10,
+            byte_reserver=reserve,
+            byte_releaser=release,
+        )
+        buf.write("€" * 10)
+
+        # Ten bytes were available, but only three complete code points fit.
+        assert reserved == 9
+        buf.close()
+        assert reserved == 9  # Published artifacts continue consuming quota.
+        buf.cleanup()
+        assert reserved == 0
+
 
 class TestFileBackedTruncationNotice:
     """Verify truncation notice includes file path."""

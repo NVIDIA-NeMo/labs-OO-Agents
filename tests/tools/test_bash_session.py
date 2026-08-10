@@ -3,15 +3,33 @@
 """Tests for persistent bash session."""
 
 import asyncio
-import os
 import re
 import shlex
+import subprocess
 import tempfile
 from pathlib import Path
 
 import pytest
 
 from nooa.tools._bash_session import BashSession
+
+
+def _pid_is_running(pid: int) -> bool:
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().split()[2]
+        return state != "Z"
+    except (FileNotFoundError, IndexError, OSError):
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "stat=", "-p", str(pid)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            return False
+        state = result.stdout.strip()
+        return result.returncode == 0 and bool(state) and not state.startswith("Z")
 
 
 @pytest.fixture
@@ -240,8 +258,9 @@ printf '%s' "$value"
         await asyncio.wait_for(stream.aclose(), timeout=2)
 
         assert session._start_count == start_count
-        with pytest.raises(ProcessLookupError):
-            os.kill(nested_pid, 0)
+        async with asyncio.timeout(3):
+            while _pid_is_running(nested_pid):
+                await asyncio.sleep(0.01)
         out, err, code = await session.run("printf recovered")
         assert (out, err, code) == ("recovered", "", 0)
 

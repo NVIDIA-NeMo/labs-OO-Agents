@@ -10,3 +10,5 @@ to follow semantic versioning.
 - Security: MCP server configurations no longer expand host environment variables
   from `${VAR}` placeholders. Trusted caller code must resolve secrets and pass
   their values explicitly.
+- Breaking: removed the experimental `nooa_cli.tools.pyp` package. Use
+  `ShellTools.run()` or `ShellTools.run_stream()` for shell execution.
