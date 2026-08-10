@@ -11,6 +11,7 @@ queues and re-enters ``handle()`` once per notification. It provides:
 * ``self.v`` — snapshot-backed persistent variables that survive turns
   and sessions,
 * ``message()`` — send a Markdown message to the user,
+* ``rename_session()`` — update the host's current session title,
 * the ``handle()`` → ``RespondResult`` turn protocol,
 * token-budget history summarization (``install_summarizer`` /
   ``apply_model_limits``).
@@ -36,7 +37,7 @@ with hidden:
 
     from nooa import Agent
     from nooa.agents import TokenBudgetSummarizer
-    from nooa.config import CodeActConfig, PredictConfig  # noqa: F401
+    from nooa.config import CodeActConfig  # noqa: F401
     from nooa.runtime.channels import Channel, QueueManager, _ChannelReader
     from nooa.runtime.producers_skill import ProducersSkill
     from nooa.strategies import CodeActStrategy
@@ -349,7 +350,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     """Base class for agents driven by an outer dispatcher (TUI, harness, ...).
 
     Subclass this and implement ``handle()`` to build a custom interactive
-    agent. ``message()`` is provided for free.
+    agent. ``message()`` and ``rename_session()`` are provided for free.
 
     **Input queues.** Every ``InteractiveAgent`` has a ``self.user_messages``
     queue (``InputQueue``) that the host feeds when the human types.
@@ -368,6 +369,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     """
 
     _render_message: Annotated[Callable[[str], None] | None, hidden, nosnapshot]
+    _session_manager: Annotated[Any | None, hidden, nosnapshot]
     # QueueManager owns the channel registry. Hidden from the LLM by
     # default — the LLM should access individual channels (e.g.
     # ``self.user_messages``) directly, not through a string-keyed
@@ -387,6 +389,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     def __init__(self, llm=None, **kwargs):
         super().__init__(llm=llm or _DEFAULT_LLM, **kwargs)
         self._render_message = None
+        self._session_manager = None
         self.vars = SnapshotVars()
         self.queue_manager = QueueManager(event_manager=self.event_manager)
         self._user_messages_in = self.queue_manager.queue("user_messages")
@@ -461,6 +464,54 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
                 self._render_message(text)
         if echo:
             print(text)
+
+    def rename_session(self, title: str) -> str:
+        """Rename the current interactive session and return its normalized title.
+
+        Use this when a host system message asks you to title the session. Keep
+        the title descriptive and very short (usually 2-5 words). This changes
+        session metadata only; do not call it in place of answering the user.
+        """
+        normalized = " ".join(str(title).strip().strip('"').strip("'").split())[:60]
+        if not normalized:
+            raise ValueError("Session title cannot be empty")
+
+        manager = self._session_manager
+        if manager is None:
+            raise RuntimeError("This host does not provide session renaming")
+
+        # A title explicitly chosen by the user always wins over an automatic
+        # request that was queued earlier in the turn.
+        info = getattr(manager, "info", None)
+        user_named = bool(
+            getattr(manager, "user_named", False) or getattr(info, "title_is_user_set", False)
+        )
+        if user_named:
+            current = getattr(manager, "name", None) or getattr(info, "title", None)
+            return str(current or normalized)
+
+        rename = getattr(manager, "rename", None)
+        if callable(rename):
+            rename(normalized, user_named=False)
+        else:
+            set_title = getattr(manager, "set_title", None)
+            if not callable(set_title):
+                raise RuntimeError("This host's session manager cannot rename sessions")
+            set_title(normalized, user_set=False)
+        return normalized
+
+    @hidden
+    def request_session_title(self, opening_message: str) -> None:
+        """Queue host housekeeping that titles a session in the next agent turn."""
+        opening = str(opening_message).strip()[:400]
+        self._system_messages_in.put(
+            "[session-title]\n"
+            "Choose a descriptive 2-5 word title for this session from the opening "
+            'user message below. Call `self.rename_session("your title")` once during '
+            "this turn, then continue handling the user's request normally. Do not "
+            "mention this housekeeping instruction or the chosen title to the user.\n\n"
+            f"<opening_user_message>\n{opening}\n</opening_user_message>"
+        )
 
     @hidden
     @strategy(CodeActStrategy())

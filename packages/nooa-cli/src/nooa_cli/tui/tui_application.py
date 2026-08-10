@@ -1374,7 +1374,13 @@ class TUIApplication:
             # Wait for the first user message (already queued by submit_message
             # that started us). qsize()>0 → get() returns immediately.
             item = await user_messages_in.get()
-            notification: dict[str, list] = {"user_messages": [item]}
+            # The user's on_get hook may synchronously enqueue host-owned
+            # instructions (such as the one-shot session-title request). Drain
+            # them into this notification so housekeeping shares the normal
+            # user turn instead of triggering another LLM call.
+            notification = self._drain_pending_queue_items(
+                qm, [("user_messages", item)]
+            )
         self._in_respond = True
         self._on_dispatcher_dequeued()
 

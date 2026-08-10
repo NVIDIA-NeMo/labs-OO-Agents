@@ -1734,7 +1734,8 @@ class SessionCommand(Command):
             return False, f"Unknown subcommand `{args[0]}`"
         if args[0].lower() in ("resume", "delete") and len(args) < 2:
             return False, f"Usage: /session {args[0]} <session_id>"
-        # /session rename with no name regenerates the automatic Predict title.
+        if args[0].lower() == "rename" and len(args) < 2:
+            return False, "Usage: /session rename <name>"
         return True, None
 
     async def execute(self, args: list[str]) -> "CommandResult":
@@ -1859,28 +1860,8 @@ class SessionCommand(Command):
             if self.session_manager is None:
                 return CommandResult.err("No active session.")
 
-            if len(args) > 1:
-                name = " ".join(args[1:]).strip()
-                self.session_manager.rename(name, user_named=True)
-                return CommandResult.ok(TextOutput(f"Session renamed to: {name}", "success"))
-
-            turns = self.session_manager.turns
-            first_user = next((t.content for t in turns if t.role == "user" and t.content), "")
-            if not first_user:
-                return CommandResult.err("No user message available to generate a session name.")
-
-            async def _generate_name() -> str:
-                name = await self.agent.name_session(first_user[:400])
-                return str(name).strip().strip('"').strip("'")[:60]
-
-            try:
-                name = await self.agent_run_async(_generate_name)
-            except Exception as e:
-                return CommandResult.err(f"Could not generate session name: {e}")
-
-            if not name:
-                return CommandResult.err("Generated session name was empty.")
-            self.session_manager.rename(name, user_named=False)
+            name = " ".join(args[1:]).strip()
+            self.session_manager.rename(name, user_named=True)
             return CommandResult.ok(TextOutput(f"Session renamed to: {name}", "success"))
 
         if subcmd == "new":
