@@ -10,6 +10,7 @@ pin the core contract the ARC-AGI-3 example and other hosts rely on.
 import pytest
 from pydantic import ValidationError
 
+from nooa.agentdoc import doc
 from nooa.interactive import (
     AgentMessage,
     AgentVars,
@@ -67,6 +68,53 @@ def test_message_records_event_and_renders(agent):
     events = [e for e in agent.event_manager.values() if isinstance(e, AgentMessage)]
     assert len(events) == 1
     assert events[0].content == "**hi**"
+
+
+def test_rename_session_uses_host_session_manager(agent):
+    class SessionManager:
+        user_named = False
+        name = None
+
+        def __init__(self):
+            self.renames = []
+
+        def rename(self, title, *, user_named):
+            self.name = title
+            self.renames.append((title, user_named))
+
+    manager = SessionManager()
+    agent._session_manager = manager
+
+    assert agent.rename_session('  "Debug   TUI input"  ') == "Debug TUI input"
+    assert manager.renames == [("Debug TUI input", False)]
+
+
+def test_rename_session_preserves_user_selected_title(agent):
+    class SessionManager:
+        user_named = True
+        name = "My chosen title"
+
+        def rename(self, title, *, user_named):
+            raise AssertionError("automatic title overwrote a user-selected title")
+
+    agent._session_manager = SessionManager()
+    assert agent.rename_session("Automatic title") == "My chosen title"
+
+
+def test_request_session_title_queues_system_instruction(agent):
+    agent.request_session_title("Fix the TUI input box")
+
+    queued = agent._system_messages_in.snapshot()
+    assert len(queued) == 1
+    assert "self.rename_session" in queued[0]
+    assert "Fix the TUI input box" in queued[0]
+    assert not hasattr(agent, "name_session")
+
+
+def test_rename_session_is_model_visible_but_request_helper_is_hidden(agent):
+    rendered = str(doc(agent))
+    assert "rename_session" in rendered
+    assert "request_session_title" not in rendered
 
 
 def test_respond_result_requires_explanation():
