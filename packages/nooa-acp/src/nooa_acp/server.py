@@ -44,14 +44,12 @@ from nooa.errors import GenerationError
 from nooa.mcp import MCPManager, MCPTool
 from nooa.sessions import (
     InvalidSessionIdError,
-    SessionBusyError,
     SessionHandle,
     SessionNotFoundError,
-    SessionRuntime,
-    SessionRuntimePool,
     SessionStore,
 )
 from nooa.unifiedllm import UnifiedLLM
+from nooa_acp._runtime import SessionBusyError, SessionRuntime, SessionRuntimePool
 from nooa_acp.coding_agent import CodingInteractiveAgent
 from nooa_acp.dispatcher import InteractiveSessionDispatcher
 from nooa_acp.event_bridge import ACPEventBridge
@@ -136,7 +134,7 @@ class CodingACPAdapter:
                 model=llm.model,
                 agent="CodingAgent",
                 working_directory=str(root),
-                host="acp",
+                origin="acp",
                 check_same_thread=False,
             )
         except BaseException:
