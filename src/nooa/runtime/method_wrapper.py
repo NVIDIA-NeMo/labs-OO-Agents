@@ -13,6 +13,7 @@ for context variable management, tracing hooks, and execution routing.
 import asyncio
 import logging
 from collections.abc import Callable
+from contextlib import contextmanager
 from functools import wraps
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -570,6 +571,92 @@ def _emit_after_agent_call(
         logger.debug("agent-call: AfterAgentCall emission failed (generator)", exc_info=True)
 
 
+@contextmanager
+def _gen_agent_span(
+    self: Any,
+    original_func: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    cached_source_code: str | None,
+    tracing_enabled: bool,
+) -> Any:
+    """Open and close the AGENT span around a generator method's whole lifetime.
+
+    Yields the call id the generator's wrapper should push around each
+    resumption. Nothing in here awaits, so both the async and sync generator
+    wrappers use it — the only genuinely async-coloured part of those wrappers
+    is the drive loop.
+
+    `GeneratorExit` is deliberately not recorded as a failure: abandoning a
+    generator early (`break`, `aclosing()`, or the asyncio async-generator
+    finalizer) is ordinary control flow, not an error. Cancellation *is*
+    recorded, because a cancelled method genuinely did not complete. The same
+    value is reported to the event and to the hook so the event stream and the
+    span cannot disagree.
+
+    Args:
+        self: The agent instance owning the method.
+        original_func: The unwrapped generator function.
+        args: Positional args the method was called with.
+        kwargs: Keyword args the method was called with.
+        cached_source_code: Pre-extracted source code for the span.
+        tracing_enabled: Whether to fire the before/after tracing hooks.
+
+    Yields:
+        The call id to push while the generator body is running.
+    """
+    call_id = str(uuid4())
+    parent_call_id = self.runtime._agent_call_id
+    is_top_level = _parent_agent_var.get() is None
+
+    _emit_before_agent_call(self, original_func.__name__, call_id, parent_call_id, is_top_level)
+
+    hook_context = None
+    exception_caught: BaseException | None = None
+    try:
+        if tracing_enabled:
+            hook_context = call_before_hook(
+                "before_agent_call",
+                agent=self,
+                method_name=original_func.__name__,
+                args=args,
+                kwargs=kwargs,
+                call_id=call_id,
+                parent_call_id=parent_call_id,
+                **_build_trace_attributes(
+                    needs_generation=False,
+                    strategy=None,
+                    cached_source_code=cached_source_code,
+                ),
+            )
+        # @no_trace methods propagate the parent's id so children find the
+        # nearest traced ancestor — same semantics as the other wrappers.
+        yield call_id if tracing_enabled else parent_call_id
+    except GeneratorExit:
+        raise
+    except BaseException as e:
+        exception_caught = e
+        raise
+    finally:
+        _emit_after_agent_call(
+            self,
+            original_func.__name__,
+            call_id,
+            parent_call_id,
+            is_top_level,
+            exception_caught,
+        )
+        if hook_context is not None:
+            call_after_hook(
+                "after_agent_call",
+                hook_context,
+                agent=self,
+                method_name=original_func.__name__,
+                result=None,
+                exception=exception_caught,
+            )
+
+
 def create_async_gen_agent_method_wrapper(
     original_func: Callable[..., Any],
     *,
@@ -586,23 +673,26 @@ def create_async_gen_agent_method_wrapper(
     *consumer* is running, not the generator.
 
     So the call id is pushed around each resumption rather than around the whole
-    call. Parent linkage flows through `_agent_call_stack_var` (see
-    `runtime._agent_call_id`, which `before_agent_call` resolves against the
-    active-span registry), so scoping the push to the slices where the body is
-    actually executing gives both halves of the guarantee:
+    call, which gives both halves of the guarantee:
 
     - work the body does — including LLM calls — parents to the generator;
     - work the consumer does between yields does not.
 
-    The span opens before the first resumption and closes when the generator is
-    exhausted, raises, or is closed early, so it covers the generator's whole
-    lifetime even though the id is only current in slices. Wall-clock duration
-    therefore includes time the consumer spent between yields; parentage, which
-    is what issue #38 is about, is exact.
+    The span covers the generator's whole lifetime even though the id is only
+    current in slices, so wall-clock duration includes time the consumer spent
+    between yields. Parentage is exact.
 
     Like the sync wrapper, this is tracing only: generation is unreachable for
     generators (`AgentMeta` rejects a generator with an ellipsis body outright),
     and `agent_call` middleware is skipped.
+
+    Args:
+        original_func: The original async generator function to wrap.
+        needs_tracing: Whether the method should be traced.
+        cached_source_code: Pre-extracted source code for tracing (optional).
+
+    Returns:
+        Wrapped async generator function with tracing instrumentation.
     """
     # Mirrors the other wrappers: a mutable list lets `@no_trace` applied AFTER
     # this wrapper (outer decorator) flip the flag retroactively.
@@ -610,97 +700,54 @@ def create_async_gen_agent_method_wrapper(
 
     @wraps(original_func)
     async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
-        # Fast path: no runtime yet (mirrors the sync wrapper's fall-through).
+        # Fast path: no runtime yet (mirrors the non-generator wrappers).
         if not hasattr(self, "runtime"):
             async for item in original_func(self, *args, **kwargs):
                 yield item
             return
 
-        runtime = self.runtime
-        call_id = str(uuid4())
-        parent_call_id = runtime._agent_call_id
-
-        trace_attrs = _build_trace_attributes(
-            needs_generation=False,
-            strategy=None,
-            cached_source_code=cached_source_code,
-        )
-
-        # @no_trace methods propagate the parent's id so children find the
-        # nearest traced ancestor — same semantics as the other wrappers.
-        active_call_id = call_id if _tracing_enabled[0] else parent_call_id
-
-        is_top_level = _parent_agent_var.get() is None
-        _emit_before_agent_call(self, original_func.__name__, call_id, parent_call_id, is_top_level)
-
-        hook_context = None
-        exception_caught: BaseException | None = None
+        # Built before the span opens: binding the arguments can raise, and a
+        # TypeError here must not leave a BeforeAgentCall without its pair.
         agen = original_func(self, *args, **kwargs)
-        try:
-            if _tracing_enabled[0]:
-                hook_context = call_before_hook(
-                    "before_agent_call",
-                    agent=self,
-                    method_name=original_func.__name__,
-                    args=args,
-                    kwargs=kwargs,
-                    call_id=call_id,
-                    parent_call_id=parent_call_id,
-                    **trace_attrs,
-                )
-            # `asend`/`athrow` rather than `__anext__`/raise, so the wrapper stays
-            # transparent to consumers that drive the generator bidirectionally.
-            to_send: Any = None
-            to_throw: BaseException | None = None
-            while True:
-                # Push only for the slice where the body actually runs.
-                _push_agent_call_id(active_call_id)
-                parent_token = _parent_agent_var.set(self)
-                try:
-                    if to_throw is not None:
-                        pending, to_throw = to_throw, None
-                        item = await agen.athrow(pending)
-                    else:
-                        item = await agen.asend(to_send)
-                        to_send = None
-                except StopAsyncIteration:
-                    break
-                finally:
-                    _parent_agent_var.reset(parent_token)
-                    _pop_agent_call_id()
-                # Suspended: the consumer runs here with our id *not* on the stack.
-                try:
-                    to_send = yield item
-                except GeneratorExit:
-                    raise
-                except BaseException as e:  # noqa: BLE001
-                    # Consumer threw into us — forward it to the wrapped generator
-                    # so its own except/finally blocks still get to handle it.
-                    to_throw = e
-        except BaseException as e:
-            exception_caught = e
-            raise
-        finally:
-            # Close the underlying generator so its `finally` blocks run before
-            # the span closes. Harmless when it is already exhausted.
-            await agen.aclose()
-            _emit_after_agent_call(
-                self,
-                original_func.__name__,
-                call_id,
-                parent_call_id,
-                is_top_level,
-                exception_caught,
-            )
-            if hook_context is not None:
-                call_after_hook(
-                    "after_agent_call",
-                    hook_context,
-                    agent=self,
-                    method_name=original_func.__name__,
-                    result=None,
-                    exception=exception_caught if isinstance(exception_caught, Exception) else None,
-                )
+
+        with _gen_agent_span(
+            self, original_func, args, kwargs, cached_source_code, _tracing_enabled[0]
+        ) as active_call_id:
+            try:
+                # `asend`/`athrow` rather than `__anext__`/raise, so the wrapper
+                # stays transparent to consumers driving it bidirectionally.
+                to_send: Any = None
+                to_throw: BaseException | None = None
+                while True:
+                    # Push only for the slice where the body actually runs.
+                    _push_agent_call_id(active_call_id)
+                    parent_token = _parent_agent_var.set(self)
+                    try:
+                        if to_throw is not None:
+                            item = await agen.athrow(to_throw)
+                        else:
+                            item = await agen.asend(to_send)
+                        to_send = to_throw = None
+                    except StopAsyncIteration:
+                        break
+                    finally:
+                        _parent_agent_var.reset(parent_token)
+                        _pop_agent_call_id()
+                    # Suspended: the consumer runs here with our id *not* on the stack.
+                    try:
+                        to_send = yield item
+                    except GeneratorExit:
+                        raise
+                    except BaseException as e:
+                        # Consumer threw into us — forward it to the wrapped
+                        # generator so its own except/finally blocks still run.
+                        to_throw = e
+            finally:
+                # Close the wrapped generator so its `finally` blocks run inside
+                # this span. The close itself may raise (a body whose cleanup
+                # fails, or one that ignores GeneratorExit); the enclosing `with`
+                # still ends the span, so a failed close cannot leak it.
+                await agen.aclose()
 
     setattr(wrapper, "_agent_decorator", "auto")  # noqa: B010
     setattr(wrapper, "_needs_generation", False)  # noqa: B010
@@ -724,93 +771,60 @@ def create_sync_gen_agent_method_wrapper(
     around the call. A sync generator body cannot await an LLM, so the stakes
     are lower than the async case, but nested *sync* traced helpers called from
     the body were misattributed to the consumer in exactly the same way.
+
+    Args:
+        original_func: The original sync generator function to wrap.
+        needs_tracing: Whether the method should be traced.
+        cached_source_code: Pre-extracted source code for tracing (optional).
+
+    Returns:
+        Wrapped sync generator function with tracing instrumentation.
     """
     _tracing_enabled = [needs_tracing]
 
     @wraps(original_func)
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
-        # Fast path: no runtime yet (mirrors the sync wrapper's fall-through).
+        # Fast path: no runtime yet (mirrors the non-generator wrappers).
         if not hasattr(self, "runtime"):
-            yield from original_func(self, *args, **kwargs)
-            return
+            return (yield from original_func(self, *args, **kwargs))
 
-        runtime = self.runtime
-        call_id = str(uuid4())
-        parent_call_id = runtime._agent_call_id
-
-        trace_attrs = _build_trace_attributes(
-            needs_generation=False,
-            strategy=None,
-            cached_source_code=cached_source_code,
-        )
-
-        active_call_id = call_id if _tracing_enabled[0] else parent_call_id
-
-        is_top_level = _parent_agent_var.get() is None
-        _emit_before_agent_call(self, original_func.__name__, call_id, parent_call_id, is_top_level)
-
-        hook_context = None
-        exception_caught: BaseException | None = None
+        # Built before the span opens: binding the arguments can raise, and a
+        # TypeError here must not leave a BeforeAgentCall without its pair.
         gen = original_func(self, *args, **kwargs)
-        try:
-            if _tracing_enabled[0]:
-                hook_context = call_before_hook(
-                    "before_agent_call",
-                    agent=self,
-                    method_name=original_func.__name__,
-                    args=args,
-                    kwargs=kwargs,
-                    call_id=call_id,
-                    parent_call_id=parent_call_id,
-                    **trace_attrs,
-                )
-            # `send`/`throw` rather than `next`/raise, so the wrapper stays
-            # transparent to consumers that drive the generator bidirectionally.
-            to_send: Any = None
-            to_throw: BaseException | None = None
-            while True:
-                _push_agent_call_id(active_call_id)
-                try:
-                    if to_throw is not None:
-                        pending, to_throw = to_throw, None
-                        item = gen.throw(pending)
-                    else:
-                        item = gen.send(to_send)
-                        to_send = None
-                except StopIteration:
-                    break
-                finally:
-                    _pop_agent_call_id()
-                try:
-                    to_send = yield item
-                except GeneratorExit:
-                    raise
-                except BaseException as e:  # noqa: BLE001
-                    # Consumer threw into us — forward it to the wrapped generator
-                    # so its own except/finally blocks still get to handle it.
-                    to_throw = e
-        except BaseException as e:
-            exception_caught = e
-            raise
-        finally:
-            gen.close()
-            _emit_after_agent_call(
-                self,
-                original_func.__name__,
-                call_id,
-                parent_call_id,
-                is_top_level,
-                exception_caught,
-            )
-            if hook_context is not None:
-                call_after_hook(
-                    "after_agent_call",
-                    hook_context,
-                    agent=self,
-                    method_name=original_func.__name__,
-                    result=None,
-                    exception=exception_caught if isinstance(exception_caught, Exception) else None,
-                )
+
+        with _gen_agent_span(
+            self, original_func, args, kwargs, cached_source_code, _tracing_enabled[0]
+        ) as active_call_id:
+            try:
+                # `send`/`throw` rather than `next`/raise, so the wrapper stays
+                # transparent to consumers driving it bidirectionally.
+                to_send: Any = None
+                to_throw: BaseException | None = None
+                while True:
+                    _push_agent_call_id(active_call_id)
+                    try:
+                        if to_throw is not None:
+                            item = gen.throw(to_throw)
+                        else:
+                            item = gen.send(to_send)
+                        to_send = to_throw = None
+                    except StopIteration as stop:
+                        # Carry the wrapped generator's `return` value out, so
+                        # `yield from` and StopIteration.value stay transparent.
+                        return stop.value
+                    finally:
+                        _pop_agent_call_id()
+                    try:
+                        to_send = yield item
+                    except GeneratorExit:
+                        raise
+                    except BaseException as e:
+                        # Consumer threw into us — forward it to the wrapped
+                        # generator so its own except/finally blocks still run.
+                        to_throw = e
+            finally:
+                # See the async wrapper: a close that raises must not leak the span.
+                gen.close()
 
     setattr(wrapper, "_agent_decorator", "auto")  # noqa: B010
     setattr(wrapper, "_needs_generation", False)  # noqa: B010
