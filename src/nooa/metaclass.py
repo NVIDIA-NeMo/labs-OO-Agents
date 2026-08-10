@@ -34,11 +34,8 @@ class AgentMeta(ABCMeta):
     - Traceable (sync): all sync `def` methods except dunder names
       (if class sets _enable_tracing = True)
     - Traceable (generators): methods containing `yield` get a generator-specific
-      wrapper whose span covers the generator's lifetime, but whose call id is
-      only current while the body is actually running — so calls the body makes
-      parent to the generator and calls the consumer makes between yields do not.
-      A generator with an ellipsis body is rejected — see
-      _reject_ellipsis_generator.
+      wrapper (see `create_async_gen_agent_method_wrapper`). `yield` plus an
+      ellipsis body is rejected — see `_reject_ellipsis_generator`.
 
     Sync methods can't generate or run async middleware; they get tracing only.
     Properties, classmethods, and staticmethods are skipped (they aren't plain
@@ -238,7 +235,12 @@ class AgentMeta(ABCMeta):
             if isinstance(attr_value, (staticmethod, classmethod))
             else attr_value
         )
-        if not callable(method_obj):
+        # Gate on the object's own type, not merely `callable`. This runs on
+        # every namespace entry, and `has_ellipsis_body` -> `inspect.getsource`
+        # rejects anything that is not a real function: `functools.partial` in
+        # particular passes `isgeneratorfunction` (which unwraps partials) but
+        # blows up in `getsource` (which does not), crashing class creation.
+        if not (inspect.isfunction(method_obj) or inspect.ismethod(method_obj)):
             return
 
         unwrapped = inspect.unwrap(method_obj)

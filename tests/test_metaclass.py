@@ -1467,7 +1467,11 @@ def _record_hooks():
 
 
 def _one(hook_calls: list[dict], method_name: str) -> dict:
-    return next(c for c in hook_calls if c["method_name"] == method_name)
+    # Not a bare `next()`: a StopIteration escaping inside an `async def` test
+    # surfaces as "coroutine raised StopIteration" and hides the real problem.
+    matches = [c for c in hook_calls if c["method_name"] == method_name]
+    assert matches, f"no before_agent_call recorded for {method_name!r}"
+    return matches[0]
 
 
 def _all(hook_calls: list[dict], method_name: str) -> list[dict]:
@@ -1609,8 +1613,14 @@ async def test_sync_generator_body_calls_parent_to_the_generator():
     produce = _one(hook_calls, "produce")
 
     assert produce["parent_call_id"] == drain["call_id"]
-    assert all(c["parent_call_id"] == produce["call_id"] for c in _all(hook_calls, "in_body"))
-    assert all(c["parent_call_id"] == drain["call_id"] for c in _all(hook_calls, "between_yields"))
+
+    in_body = _all(hook_calls, "in_body")
+    assert len(in_body) == 2
+    assert all(c["parent_call_id"] == produce["call_id"] for c in in_body)
+
+    between = _all(hook_calls, "between_yields")
+    assert len(between) == 2
+    assert all(c["parent_call_id"] == drain["call_id"] for c in between)
 
 
 @pytest.mark.asyncio
@@ -1744,6 +1754,9 @@ async def test_async_generator_span_closes_when_break_uses_aclosing():
         agent = TestAgent()
         async with contextlib.aclosing(agent.produce(10)) as gen:
             async for _v in gen:
+                # Still inside the generator's lifetime: pre-fix, the span had
+                # already closed at creation and this assertion is what fails.
+                assert mock_hooks.after_agent_call.call_count == 0
                 break
         assert mock_hooks.after_agent_call.call_count == 1
     finally:
@@ -1827,7 +1840,9 @@ async def test_no_trace_generator_is_not_traced():
     assert _all(hook_calls, "produce") == []
     # Children skip the untraced generator and attach to the nearest traced ancestor.
     drain = _one(hook_calls, "drain")
-    assert all(c["parent_call_id"] == drain["call_id"] for c in _all(hook_calls, "in_body"))
+    in_body = _all(hook_calls, "in_body")
+    assert len(in_body) == 2
+    assert all(c["parent_call_id"] == drain["call_id"] for c in in_body)
 
 
 def test_generator_on_untraced_class_is_left_alone():
@@ -2009,6 +2024,7 @@ async def test_async_generator_span_closes_when_unreachable():
             # The generator is a temporary of this frame; when the frame exits
             # it becomes unreachable and the finalizer takes over.
             async for _v in agent.produce(1000):
+                assert mock_hooks.after_agent_call.call_count == 0
                 break
 
         await consumer()
@@ -2085,6 +2101,7 @@ def test_generator_span_closes_even_when_body_cleanup_raises():
         set_hooks(mock_hooks)
         gen = TestAgent().produce()
         assert next(gen) == 1
+        assert mock_hooks.after_agent_call.call_count == 0
         with pytest.raises(ValueError, match="cleanup failed"):
             gen.close()
         assert mock_hooks.after_agent_call.call_count == 1
@@ -2110,6 +2127,7 @@ async def test_async_generator_span_closes_even_when_body_cleanup_raises():
         set_hooks(mock_hooks)
         gen = TestAgent().produce()
         assert await gen.__anext__() == 1
+        assert mock_hooks.after_agent_call.call_count == 0
         with pytest.raises(ValueError, match="cleanup failed"):
             await gen.aclose()
         assert mock_hooks.after_agent_call.call_count == 1
@@ -2127,9 +2145,11 @@ def test_generator_signature_error_emits_no_unpaired_event():
     agent = TestAgent()
     events = _record_agent_call_events(agent)
 
-    gen = agent.produce()  # missing required arg
+    # Deliberately timing-agnostic: the wrapper currently defers argument
+    # binding to the first resumption, but the contract under test is only that
+    # a failed call leaves no unpaired BeforeAgentCall behind.
     with pytest.raises(TypeError, match="missing 1 required positional argument"):
-        next(gen)
+        list(agent.produce())
 
     assert [e for e in events if e[1] == "produce"] == []
 
@@ -2372,7 +2392,9 @@ async def test_nested_generators_link_two_levels_deep():
     inner = _one(hook_calls, "inner")
     assert outer["parent_call_id"] == drain["call_id"]
     assert inner["parent_call_id"] == outer["call_id"]
-    assert all(c["parent_call_id"] == inner["call_id"] for c in _all(hook_calls, "leaf"))
+    leaf = _all(hook_calls, "leaf")
+    assert len(leaf) == 2
+    assert all(c["parent_call_id"] == inner["call_id"] for c in leaf)
 
 
 @pytest.mark.asyncio
@@ -2407,7 +2429,14 @@ async def test_concurrent_generators_do_not_share_a_call_stack():
 
     produces = _all(hook_calls, "produce")
     assert len(produces) == 2
-    produce_ids = {c["call_id"] for c in produces}
-    body_parents = {c["parent_call_id"] for c in _all(hook_calls, "in_body")}
-    # Every body call belongs to one of the two generators, and both are represented.
-    assert body_parents == produce_ids
+
+    # Set equality would pass under ANY scrambling of body calls across the two
+    # generators. Check each body call against the generator that made it, via
+    # the tag threaded through the call args.
+    id_by_tag = {c["args"][0]: c["call_id"] for c in produces}
+    assert set(id_by_tag) == {"a", "b"}
+
+    body = _all(hook_calls, "in_body")
+    assert len(body) == 6
+    for call in body:
+        assert call["parent_call_id"] == id_by_tag[call["args"][0][0]]

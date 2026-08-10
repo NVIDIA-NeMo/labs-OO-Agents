@@ -8,12 +8,32 @@ This module provides the unified wrapper logic used by both:
 
 Having this in one place eliminates duplication and ensures consistent behavior
 for context variable management, tracing hooks, and execution routing.
+
+Generator methods (`def`/`async def` containing `yield`) get their own wrappers.
+Three behaviours differ from the non-generator wrappers, deliberately:
+
+- **Argument binding is deferred.** The wrapper is itself a generator function,
+  so a call-signature error surfaces at the first `next()`/`__anext__()` rather
+  than at the call. Native generator functions bind eagerly, so this is one
+  place the wrapper is less transparent than the function it wraps. The
+  alternative — a plain function returning an inner generator — would bind
+  eagerly but make `inspect.isgeneratorfunction` False for the method, which is
+  the more visible property to lose.
+- **A generator that is created but never iterated emits no agent-call events.**
+  There is no body execution to attribute, so emitting a Before/After pair for
+  it would record work that never happened.
+- **Cancellation counts as failure.** `_gen_agent_span` catches `BaseException`,
+  so a cancelled generator reports `success=False`, while the coroutine and sync
+  wrappers catch `Exception` and report a cancelled call as a success. The
+  generator behaviour is the intended one; aligning the older wrappers is out of
+  scope here, so `AfterAgentCall.success` currently means slightly different
+  things depending on whether the method contains `yield`.
 """
 
 import asyncio
 import logging
-from collections.abc import Callable
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from functools import wraps
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -579,7 +599,7 @@ def _gen_agent_span(
     kwargs: dict[str, Any],
     cached_source_code: str | None,
     tracing_enabled: bool,
-) -> Any:
+) -> Iterator[str | None]:
     """Open and close the AGENT span around a generator method's whole lifetime.
 
     Yields the call id the generator's wrapper should push around each
@@ -700,28 +720,38 @@ def create_async_gen_agent_method_wrapper(
 
     @wraps(original_func)
     async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
-        # Fast path: no runtime yet (mirrors the non-generator wrappers).
-        if not hasattr(self, "runtime"):
-            async for item in original_func(self, *args, **kwargs):
-                yield item
-            return
-
         # Built before the span opens: binding the arguments can raise, and a
         # TypeError here must not leave a BeforeAgentCall without its pair.
+        # (This does defer the error to the first resumption — see the note on
+        # argument binding in the module docstring.)
         agen = original_func(self, *args, **kwargs)
 
-        with _gen_agent_span(
-            self, original_func, args, kwargs, cached_source_code, _tracing_enabled[0]
-        ) as active_call_id:
+        # No runtime yet — e.g. an `Agent.__init__` helper running before
+        # `self.runtime` is assigned. Skip the span, but drive the generator
+        # through the SAME loop, so `asend`/`athrow` stay transparent here too.
+        # A separate flag rather than `active_call_id is not None`: a traced
+        # `@no_trace` generator legitimately propagates a None parent id.
+        instrumented = hasattr(self, "runtime")
+        span: Any = (
+            _gen_agent_span(
+                self, original_func, args, kwargs, cached_source_code, _tracing_enabled[0]
+            )
+            if instrumented
+            else nullcontext(None)
+        )
+
+        with span as active_call_id:
             try:
                 # `asend`/`athrow` rather than `__anext__`/raise, so the wrapper
                 # stays transparent to consumers driving it bidirectionally.
                 to_send: Any = None
                 to_throw: BaseException | None = None
+                parent_token = None
                 while True:
                     # Push only for the slice where the body actually runs.
-                    _push_agent_call_id(active_call_id)
-                    parent_token = _parent_agent_var.set(self)
+                    if instrumented:
+                        _push_agent_call_id(active_call_id)
+                        parent_token = _parent_agent_var.set(self)
                     try:
                         if to_throw is not None:
                             item = await agen.athrow(to_throw)
@@ -731,8 +761,10 @@ def create_async_gen_agent_method_wrapper(
                     except StopAsyncIteration:
                         break
                     finally:
-                        _parent_agent_var.reset(parent_token)
-                        _pop_agent_call_id()
+                        if instrumented:
+                            assert parent_token is not None
+                            _parent_agent_var.reset(parent_token)
+                            _pop_agent_call_id()
                     # Suspended: the consumer runs here with our id *not* on the stack.
                     try:
                         to_send = yield item
@@ -784,24 +816,36 @@ def create_sync_gen_agent_method_wrapper(
 
     @wraps(original_func)
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
-        # Fast path: no runtime yet (mirrors the non-generator wrappers).
-        if not hasattr(self, "runtime"):
-            return (yield from original_func(self, *args, **kwargs))
-
         # Built before the span opens: binding the arguments can raise, and a
         # TypeError here must not leave a BeforeAgentCall without its pair.
+        # (This does defer the error to the first resumption — see the note on
+        # argument binding in the module docstring.)
         gen = original_func(self, *args, **kwargs)
 
-        with _gen_agent_span(
-            self, original_func, args, kwargs, cached_source_code, _tracing_enabled[0]
-        ) as active_call_id:
+        # See the async wrapper: no runtime means no span, but the same drive
+        # loop, so the two paths cannot drift apart in transparency.
+        instrumented = hasattr(self, "runtime")
+        span: Any = (
+            _gen_agent_span(
+                self, original_func, args, kwargs, cached_source_code, _tracing_enabled[0]
+            )
+            if instrumented
+            else nullcontext(None)
+        )
+
+        with span as active_call_id:
             try:
                 # `send`/`throw` rather than `next`/raise, so the wrapper stays
                 # transparent to consumers driving it bidirectionally.
                 to_send: Any = None
                 to_throw: BaseException | None = None
                 while True:
-                    _push_agent_call_id(active_call_id)
+                    # No `_parent_agent_var` here, unlike the async wrapper: it
+                    # drives subagent LLM inheritance, which is async-only —
+                    # matching `create_sync_agent_method_wrapper`, which also
+                    # leaves it alone.
+                    if instrumented:
+                        _push_agent_call_id(active_call_id)
                     try:
                         if to_throw is not None:
                             item = gen.throw(to_throw)
@@ -813,7 +857,8 @@ def create_sync_gen_agent_method_wrapper(
                         # `yield from` and StopIteration.value stay transparent.
                         return stop.value
                     finally:
-                        _pop_agent_call_id()
+                        if instrumented:
+                            _pop_agent_call_id()
                     try:
                         to_send = yield item
                     except GeneratorExit:
