@@ -236,7 +236,30 @@ class MemoryStore:
                 self._index.add(row["id"], vector)
 
     def _row_to_memory(self, row: sqlite3.Row) -> Memory:
-        data = json.loads(row["data"])
+        try:
+            data = json.loads(row["data"])
+            if not isinstance(data, dict):
+                raise ValueError("memory payload is not a JSON object")
+        except (json.JSONDecodeError, TypeError, ValueError):
+            # SQLite recovery can retain the promoted/searchable columns while
+            # replacing an unreadable JSON payload with an empty string. Build
+            # the smallest lossless record available from those columns so one
+            # damaged payload cannot disable recall or reflection entirely.
+            logger.warning(
+                "memory %s has a malformed JSON payload; reconstructing it from columns",
+                row["id"],
+            )
+            data = {
+                "id": row["id"],
+                "type": row["type"],
+                "content": row["content"],
+                "importance": row["importance"],
+                "salience": row["salience"],
+                "strength": row["strength"],
+                "created_at": row["created_at"],
+                "last_accessed_at": row["last_accessed"],
+                "access_count": row["access_count"],
+            }
         edges = [
             Edge(target_id=e["dst"], type=EdgeType(e["type"]), weight=e["weight"])
             for e in self._edge_rows(row["id"])
