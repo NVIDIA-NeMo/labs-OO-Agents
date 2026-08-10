@@ -50,8 +50,8 @@ _FACTORY_CONFIG_FIELDS = (
 
 
 def _to_attr_name(name: str) -> str:
-    """Convert a hyphenated server name to a valid Python attribute name."""
-    return name.replace("-", "_")
+    """Convert common human-readable server-name separators for attribute access."""
+    return name.replace("-", "_").replace(" ", "_")
 
 
 class MCPRegistry(Skill):
@@ -451,7 +451,7 @@ class MCPRegistry(Skill):
         """Connect to configured servers matching *patterns*.
 
         Each connected server is attached to the agent as ``self.<name>``
-        (hyphens become underscores), hidden from ``doc(self)``. By default
+        (hyphens and spaces become underscores), hidden from ``doc(self)``. By default
         newly connected servers are also activated (listed in ``<mcp>``); pass
         ``activate=False`` to keep them connected but unlisted.
 
