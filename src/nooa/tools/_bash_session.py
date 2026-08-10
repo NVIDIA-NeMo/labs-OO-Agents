@@ -22,8 +22,6 @@ import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from nooa.agentdoc import TruncatingStringIO
-
 logger = logging.getLogger(__name__)
 
 MAX_OUTPUT_CHARS = 30_000
@@ -285,6 +283,11 @@ class BashSession:
                 if candidate.startswith("/"):
                     self._cwd = Path(candidate)
 
+        if len(stdout) > MAX_OUTPUT_CHARS:
+            stdout = stdout[:MAX_OUTPUT_CHARS] + "\n... (output truncated)"
+        if len(stderr) > MAX_OUTPUT_CHARS:
+            stderr = stderr[:MAX_OUTPUT_CHARS] + "\n... (stderr truncated)"
+
         if timed_out:
             exit_code = 124
         elif ctrl_lines:
@@ -352,23 +355,25 @@ class BashSession:
 
         # Read stdout/stderr concurrently, yielding chunks as they arrive,
         # while watching the control fd for the sentinel.
-        stdout_buffer = TruncatingStringIO(limit=MAX_OUTPUT_CHARS)
-        stderr_buffer = TruncatingStringIO(limit=MAX_OUTPUT_CHARS)
+        stdout_queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
+        stderr_queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
 
-        async def _read_stream(stream, buffer: TruncatingStringIO) -> None:
+        async def _read_stream(stream, name, queue):
             try:
                 while True:
                     chunk = await stream.read(4096)
                     if not chunk:
                         break
-                    buffer.write(chunk.decode("utf-8", errors="replace"))
+                    queue.put_nowait((name, chunk.decode("utf-8", errors="replace")))
             except asyncio.CancelledError:
                 pass
             except Exception:
                 pass
+            finally:
+                queue.put_nowait(None)
 
-        stdout_task = asyncio.create_task(_read_stream(proc.stdout, stdout_buffer))
-        stderr_task = asyncio.create_task(_read_stream(proc.stderr, stderr_buffer))
+        stdout_task = asyncio.create_task(_read_stream(proc.stdout, "stdout", stdout_queue))
+        stderr_task = asyncio.create_task(_read_stream(proc.stderr, "stderr", stderr_queue))
 
         ctrl_lines, timed_out = await self._read_control_until(sentinel, timeout)
 
@@ -381,21 +386,23 @@ class BashSession:
             except asyncio.CancelledError:
                 pass
 
+        # Drain queues
+        for q in (stdout_queue, stderr_queue):
+            while not q.empty():
+                item = q.get_nowait()
+                if item is not None:
+                    yield item
+
         # Greedy-drain remaining pipe data
-        for stream, buffer in [(proc.stdout, stdout_buffer), (proc.stderr, stderr_buffer)]:
+        for stream, name in [(proc.stdout, "stdout"), (proc.stderr, "stderr")]:
             while True:
                 try:
                     chunk = await asyncio.wait_for(stream.read(4096), timeout=_DRAIN_TIMEOUT)
                     if not chunk:
                         break
-                    buffer.write(chunk.decode("utf-8", errors="replace"))
+                    yield (name, chunk.decode("utf-8", errors="replace"))
                 except (TimeoutError, Exception):
                     break
-
-        if stdout_buffer.chars_written:
-            yield ("stdout", stdout_buffer.getvalue())
-        if stderr_buffer.chars_written:
-            yield ("stderr", stderr_buffer.getvalue())
 
         # Parse exit code
         exit_code = -1 if not ctrl_lines else 0
@@ -458,17 +465,17 @@ class BashSession:
 
         # Drain stdout/stderr concurrently with control fd to prevent deadlock.
         assert proc.stdout is not None and proc.stderr is not None
-        stdout_buf = TruncatingStringIO(limit=MAX_OUTPUT_CHARS)
-        stderr_buf = TruncatingStringIO(limit=MAX_OUTPUT_CHARS)
+        stdout_buf: list[bytes] = []
+        stderr_buf: list[bytes] = []
 
-        async def accumulate(stream: asyncio.StreamReader, buf: TruncatingStringIO) -> None:
+        async def accumulate(stream: asyncio.StreamReader, buf: list[bytes]) -> None:
             """Read from stream until EOF or external cancellation."""
             try:
                 while True:
                     chunk = await stream.read(65536)
                     if not chunk:
                         return
-                    buf.write(chunk.decode("utf-8", errors="replace"))
+                    buf.append(chunk)
             except asyncio.CancelledError:
                 return
             except Exception:
@@ -496,12 +503,12 @@ class BashSession:
                     chunk = await asyncio.wait_for(stream.read(65536), timeout=_DRAIN_TIMEOUT)
                     if not chunk:
                         break
-                    buf.write(chunk.decode("utf-8", errors="replace"))
+                    buf.append(chunk)
                 except (TimeoutError, Exception):
                     break
 
-        stdout = stdout_buf.getvalue()
-        stderr = stderr_buf.getvalue()
+        stdout = b"".join(stdout_buf).decode("utf-8", errors="replace")
+        stderr = b"".join(stderr_buf).decode("utf-8", errors="replace")
         return ctrl_lines, stdout, stderr, timed_out
 
     async def _read_control_until(self, sentinel: str, timeout: float) -> tuple[list[str], bool]:

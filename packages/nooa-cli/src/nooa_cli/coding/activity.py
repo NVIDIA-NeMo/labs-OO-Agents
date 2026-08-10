@@ -267,8 +267,9 @@ class ActivityShellTools(Skill):
         finished = False
         stdout_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS // 2)
         stderr_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS // 2)
+        stream = self._shell.run_stream(command, timeout=timeout)
         try:
-            async for item in self._shell.run_stream(command, timeout=timeout):
+            async for item in stream:
                 if isinstance(item, StreamDone):
                     output_truncated = stdout_buffer.was_truncated or stderr_buffer.was_truncated
                     if stdout_buffer.chars_written or stderr_buffer.chars_written:
@@ -313,6 +314,8 @@ class ActivityShellTools(Skill):
                     )
                 )
             raise
+        finally:
+            await stream.aclose()
 
     @wraps(ShellTools.read)
     async def read(

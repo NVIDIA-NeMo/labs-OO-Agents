@@ -4,7 +4,7 @@
 
 import pytest
 
-from nooa.tools._bash_session import MAX_OUTPUT_CHARS, BashSession
+from nooa.tools._bash_session import BashSession
 
 
 @pytest.fixture
@@ -70,17 +70,6 @@ class TestBashSession:
         """Very long output should be truncated."""
         out, _, _ = await session.run("python3 -c \"print('x' * 50000)\"")
         assert len(out) <= 31000  # MAX_OUTPUT_CHARS + truncation message
-
-    async def test_streaming_output_is_bounded(self, session):
-        chunks = [
-            chunk
-            async for stream, chunk in session.run_stream("python3 -c \"print('x' * 100000)\"")
-            if stream == "stdout"
-        ]
-        output = "".join(chunks)
-        assert len(output) <= MAX_OUTPUT_CHARS + 500
-        assert output.startswith("<truncated-output>")
-        assert "chars not shown" in output
 
     async def test_close_and_restart(self, tmp_path):
         """Session should be closeable and re-startable."""
