@@ -19,10 +19,13 @@ L2-normalised vectors.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator
+from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -36,6 +39,8 @@ from nooa_memory.vector_backends import (
 if TYPE_CHECKING:
     from nooa_memory.config import VectorConfig
 
+logger = logging.getLogger(__name__)
+
 
 def _vec_to_blob(vec: np.ndarray) -> bytes:
     return np.asarray(vec, dtype=np.float32).tobytes()
@@ -47,6 +52,17 @@ def _blob_to_vec(blob: bytes) -> np.ndarray:
 
 # Stamp of the DDL shape this code understands (PRAGMA user_version).
 SCHEMA_VERSION = 2
+
+
+def _synchronized(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Serialize one logical operation on a store connection and vector index."""
+
+    @wraps(method)
+    def wrapper(self: MemoryStore, *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 class MemorySchemaError(RuntimeError):
@@ -106,14 +122,23 @@ class MemoryStore:
         vector_config: VectorConfig | None = None,
         embedding_dim: int | None = None,
     ) -> None:
+        self._lock = threading.RLock()
+        self._embedding_dim = embedding_dim
         self.path = str(path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         if self.path != ":memory:":
-            self._conn.execute("PRAGMA journal_mode=WAL")
+            # WAL safely coordinates independent agent processes using the same
+            # workspace store.  FULL is deliberate: NORMAL may acknowledge a
+            # commit before the WAL itself is durable, so an interrupted agent
+            # can leave a damaged store after a crash or forced shutdown.
+            # Install the busy handler before changing journal mode because
+            # simultaneous process startup can otherwise fail immediately.
             self._conn.execute("PRAGMA busy_timeout=5000")
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=FULL")
         self._migrate()
         # An explicit index wins; otherwise dispatch on the config's backend
         # (numpy / sqlite_vec / chroma_*). Default is the zero-dependency numpy index.
@@ -160,6 +185,7 @@ class MemoryStore:
     def _current_data_version(self) -> int:
         return int(self._conn.execute("PRAGMA data_version").fetchone()[0])
 
+    @_synchronized
     def refresh_if_changed(self) -> bool:
         """Reload the derived vector index if another connection committed.
 
@@ -177,12 +203,37 @@ class MemoryStore:
             self._load_index()
         return True
 
+    def _decode_embedding(self, memory_id: str, blob: bytes) -> np.ndarray | None:
+        """Decode one stored vector, ignoring malformed or stale dimensions.
+
+        SQLite recovery can preserve an unreadable vector as a zero-length BLOB,
+        and changing embedding configuration can leave vectors from an older
+        dimension. Neither should prevent the remaining memories from loading.
+        """
+        vector = _blob_to_vec(blob)
+        if vector.size == 0:
+            logger.warning("memory %s has an empty embedding; ignoring it", memory_id)
+            return None
+        if self._embedding_dim is None:
+            self._embedding_dim = int(vector.size)
+        if vector.size != self._embedding_dim:
+            logger.warning(
+                "memory %s has embedding dimension %d, expected %d; ignoring it",
+                memory_id,
+                vector.size,
+                self._embedding_dim,
+            )
+            return None
+        return vector
+
     def _load_index(self) -> None:
         cur = self._conn.execute(
             "SELECT id, embedding FROM memories WHERE archived = 0 AND embedding IS NOT NULL"
         )
         for row in cur.fetchall():
-            self._index.add(row["id"], _blob_to_vec(row["embedding"]))
+            vector = self._decode_embedding(row["id"], row["embedding"])
+            if vector is not None:
+                self._index.add(row["id"], vector)
 
     def _row_to_memory(self, row: sqlite3.Row) -> Memory:
         data = json.loads(row["data"])
@@ -206,8 +257,19 @@ class MemoryStore:
     # ------------------------------------------------------------------
     # writes
     # ------------------------------------------------------------------
+    @_synchronized
     def add(self, memory: Memory, embedding: np.ndarray | None = None) -> Memory:
         """Insert (or replace) a memory and its edges. Persists the embedding."""
+        if embedding is not None:
+            if embedding.size == 0:
+                raise ValueError("memory embedding must not be empty")
+            if self._embedding_dim is None:
+                self._embedding_dim = int(embedding.size)
+            if embedding.size != self._embedding_dim:
+                raise ValueError(
+                    f"memory embedding dimension {embedding.size} does not match "
+                    f"store dimension {self._embedding_dim}"
+                )
         blob = _vec_to_blob(embedding) if embedding is not None else None
         payload = memory.model_dump(mode="json", exclude={"edges"})
         self._conn.execute(
@@ -247,6 +309,7 @@ class MemoryStore:
             self._index.remove(memory.id)
         return memory
 
+    @_synchronized
     def save(self, memory: Memory) -> None:
         """Persist mutations to an existing memory (keeps the stored embedding)."""
         payload = memory.model_dump(mode="json", exclude={"edges"})
@@ -280,6 +343,7 @@ class MemoryStore:
         if memory.archived:
             self._index.remove(memory.id)
 
+    @_synchronized
     def add_edge(
         self, src: str, dst: str, type: EdgeType = EdgeType.RELATED, weight: float = 1.0
     ) -> None:
@@ -292,11 +356,13 @@ class MemoryStore:
         )
         self._conn.commit()
 
+    @_synchronized
     def archive(self, id: str) -> None:
         self._conn.execute("UPDATE memories SET archived = 1 WHERE id = ?", (id,))
         self._conn.commit()
         self._index.remove(id)
 
+    @_synchronized
     def delete(self, id: str) -> None:
         self._conn.execute("DELETE FROM memories WHERE id = ?", (id,))
         self._conn.execute("DELETE FROM memory_edges WHERE src = ? OR dst = ?", (id, id))
@@ -306,10 +372,12 @@ class MemoryStore:
     # ------------------------------------------------------------------
     # reads
     # ------------------------------------------------------------------
+    @_synchronized
     def get(self, id: str) -> Memory | None:
         row = self._conn.execute("SELECT * FROM memories WHERE id = ?", (id,)).fetchone()
         return self._row_to_memory(row) if row else None
 
+    @_synchronized
     def resolve_id(self, id_or_prefix: str) -> str | None:
         """Exact id, or a unique id prefix (>=6 chars, as rendered in recalled
         lines). Raises on an ambiguous prefix; returns None when nothing matches."""
@@ -325,6 +393,7 @@ class MemoryStore:
             raise ValueError(f"memory id prefix {id_or_prefix!r} is ambiguous")
         return str(rows[0]["id"]) if rows else None
 
+    @_synchronized
     def rename_owner(self, old: str, new: str) -> int:
         """Re-stamp every row owned by ``old`` to ``new``; returns rows changed.
 
@@ -338,17 +407,20 @@ class MemoryStore:
         self._conn.commit()
         return cur.rowcount
 
+    @_synchronized
     def owner_of(self, id: str) -> str | None:
         """The owner column alone (cheap visibility checks during graph spread)."""
         row = self._conn.execute("SELECT owner FROM memories WHERE id = ?", (id,)).fetchone()
         return None if row is None else str(row["owner"])
 
+    @_synchronized
     def get_embedding(self, id: str) -> np.ndarray | None:
         row = self._conn.execute("SELECT embedding FROM memories WHERE id = ?", (id,)).fetchone()
         if row and row["embedding"] is not None:
-            return _blob_to_vec(row["embedding"])
+            return self._decode_embedding(id, row["embedding"])
         return None
 
+    @_synchronized
     def neighbors(self, id: str) -> list[Edge]:
         return [
             Edge(target_id=e["dst"], type=EdgeType(e["type"]), weight=e["weight"])
@@ -382,6 +454,7 @@ class MemoryStore:
             params.extend(owner_params)
         return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
 
+    @_synchronized
     def all_memories(
         self, *, include_archived: bool = False, owner: str | None = None
     ) -> list[Memory]:
@@ -389,11 +462,13 @@ class MemoryStore:
         q = "SELECT * FROM memories" + where
         return [self._row_to_memory(r) for r in self._conn.execute(q, params).fetchall()]
 
+    @_synchronized
     def iter_memories(
         self, *, include_archived: bool = False, owner: str | None = None
     ) -> Iterator[Memory]:
         yield from self.all_memories(include_archived=include_archived, owner=owner)
 
+    @_synchronized
     def count(self, *, include_archived: bool = False, owner: str | None = None) -> int:
         where, params = self._filters(include_archived=include_archived, owner=owner)
         q = "SELECT COUNT(*) AS n FROM memories" + where
@@ -410,6 +485,7 @@ class MemoryStore:
         ).fetchall()
         return {r["id"] for r in rows}
 
+    @_synchronized
     def knn(
         self, query_vec: np.ndarray, k: int, *, owner: str | None = None
     ) -> list[tuple[str, float]]:
@@ -432,6 +508,7 @@ class MemoryStore:
                 return out[:k]
             n = min(total, n * 4)
 
+    @_synchronized
     def keyword_search(
         self,
         text: str,
@@ -462,6 +539,7 @@ class MemoryStore:
         ranked = sorted(scored.items(), key=lambda kv: kv[1], reverse=True)
         return [mid for mid, _ in ranked[:k]]
 
+    @_synchronized
     def log_maintenance(self, kind: str, report: dict) -> None:
         """Append one reflect()/prune() run to the store-level maintenance history.
 
@@ -477,11 +555,13 @@ class MemoryStore:
         )
         self._conn.commit()
 
+    @_synchronized
     def maintenance_history(self, limit: int = 20) -> list[dict]:
         rows = self._conn.execute(
             "SELECT ts, kind, report FROM maintenance_log ORDER BY ts DESC LIMIT ?", (limit,)
         ).fetchall()
         return [{"ts": r["ts"], "kind": r["kind"], "report": json.loads(r["report"])} for r in rows]
 
+    @_synchronized
     def close(self) -> None:
         self._conn.close()

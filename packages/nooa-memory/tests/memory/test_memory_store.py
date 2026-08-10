@@ -2,11 +2,31 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the SQLite-centric memory store + numpy vector index."""
 
+import multiprocessing
+import queue
+import threading
+
 import numpy as np
 import pytest
 from nooa_memory.embeddings import HashingEmbedder
 from nooa_memory.schema import EdgeType, Memory, MemoryType
 from nooa_memory.store import MemoryStore, NumpyVectorIndex
+
+
+def _process_writer(path: str, start, result, worker: int, count: int) -> None:
+    """Write distinct rows from a spawned process and report any exception."""
+    store = None
+    try:
+        start.wait(timeout=10)
+        store = MemoryStore(path)
+        for i in range(count):
+            store.add(Memory(id=f"worker-{worker}-{i}", content=f"memory {worker} {i}"))
+        result.put(None)
+    except BaseException as exc:  # pragma: no cover - only returned to parent
+        result.put(repr(exc))
+    finally:
+        if store is not None:
+            store.close()
 
 
 @pytest.fixture
@@ -104,6 +124,114 @@ def test_get_embedding_roundtrip(store, emb):
     v = store.get_embedding(m.id)
     assert v is not None
     assert np.allclose(v, emb.embed(m.embedding_text()), atol=1e-6)
+
+
+def test_file_store_uses_durable_wal(tmp_path):
+    store = MemoryStore(tmp_path / "mem.sqlite")
+    assert store._conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert store._conn.execute("PRAGMA synchronous").fetchone()[0] == 2  # FULL
+    assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    store.close()
+
+
+def test_malformed_stored_embeddings_do_not_disable_memory(tmp_path, emb, caplog):
+    path = tmp_path / "recovered.sqlite"
+    store = MemoryStore(path, embedding_dim=128)
+    valid = _add(store, emb, "valid vector")
+    empty = _add(store, emb, "recovered empty vector")
+    wrong_dim = _add(store, emb, "stale vector dimension")
+    store._conn.execute("UPDATE memories SET embedding = X'' WHERE id = ?", (empty.id,))
+    store._conn.execute(
+        "UPDATE memories SET embedding = ? WHERE id = ?",
+        (np.ones(64, dtype=np.float32).tobytes(), wrong_dim.id),
+    )
+    store._conn.commit()
+    store.close()
+
+    reopened = MemoryStore(path, embedding_dim=128)
+    assert len(reopened._index) == 1
+    assert reopened.get_embedding(empty.id) is None
+    assert reopened.get_embedding(wrong_dim.id) is None
+    assert reopened.knn(emb.embed("valid vector"), 1)[0][0] == valid.id
+    assert "has an empty embedding; ignoring it" in caplog.text
+    assert "has embedding dimension 64, expected 128; ignoring it" in caplog.text
+    reopened.close()
+
+
+def test_rejects_new_embeddings_with_invalid_dimensions(store):
+    with pytest.raises(ValueError, match="must not be empty"):
+        store.add(Memory(content="empty"), np.array([], dtype=np.float32))
+
+    store.add(Memory(content="sets dimension"), np.ones(4, dtype=np.float32))
+    with pytest.raises(ValueError, match="dimension 3 does not match store dimension 4"):
+        store.add(Memory(content="wrong dimension"), np.ones(3, dtype=np.float32))
+
+
+def test_same_store_operations_are_atomic_across_threads(store):
+    entered = threading.Event()
+    release = threading.Event()
+    original_add = store._index.add
+
+    def blocking_add(memory_id, vector):
+        entered.set()
+        assert release.wait(timeout=5)
+        original_add(memory_id, vector)
+
+    store._index.add = blocking_add
+    vector = np.array([1.0, 0.0], dtype=np.float32)
+    writer = threading.Thread(target=store.add, args=(Memory(content="threaded"), vector))
+    writer.start()
+    assert entered.wait(timeout=5)
+
+    read_finished = threading.Event()
+    reader = threading.Thread(target=lambda: (store.count(), read_finished.set()))
+    reader.start()
+    assert not read_finished.wait(timeout=0.1)
+
+    release.set()
+    writer.join(timeout=5)
+    reader.join(timeout=5)
+    assert not writer.is_alive()
+    assert not reader.is_alive()
+    assert read_finished.is_set()
+    assert store.count() == len(store._index) == 1
+
+
+def test_concurrent_process_writers_share_store_safely(tmp_path):
+    path = tmp_path / "shared.sqlite"
+    ctx = multiprocessing.get_context("spawn")
+    start = ctx.Event()
+    result = ctx.Queue()
+    worker_count, rows_per_worker = 4, 25
+    workers = [
+        ctx.Process(target=_process_writer, args=(str(path), start, result, i, rows_per_worker))
+        for i in range(worker_count)
+    ]
+    for worker in workers:
+        worker.start()
+    start.set()
+    errors = []
+    for _ in workers:
+        try:
+            error = result.get(timeout=20)
+        except queue.Empty:
+            error = "writer timed out"
+        if error is not None:
+            errors.append(error)
+    for worker in workers:
+        worker.join(timeout=10)
+        if worker.is_alive():
+            worker.terminate()
+            worker.join()
+            errors.append("writer process did not exit")
+        elif worker.exitcode != 0:
+            errors.append(f"writer exited with {worker.exitcode}")
+
+    assert errors == []
+    store = MemoryStore(path)
+    assert store.count() == worker_count * rows_per_worker
+    assert store._conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    store.close()
 
 
 def test_persistence_reopen(tmp_path, emb):
