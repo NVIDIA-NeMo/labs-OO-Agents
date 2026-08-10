@@ -193,7 +193,7 @@ async def test_session_on_user_message_fires_when_dispatcher_dequeues() -> None:
     session._app.color_depth = 8
     session._session_manager = Mock()
     session._session_manager.user_named = True  # skip auto-name path
-    session._first_message = None
+    session._session_title_requested = False
     # _colors is a read-only property that reads the global theme; no setup needed.
 
     queue: Channel[str] = Channel("user_messages", "queue")
@@ -234,7 +234,7 @@ async def test_session_on_user_message_fires_for_mid_turn_dequeue() -> None:
     session._app.color_depth = 8
     session._session_manager = Mock()
     session._session_manager.user_named = True
-    session._first_message = None
+    session._session_title_requested = False
     # _colors is a read-only property that reads the global theme; no setup needed.
 
     inq: Channel[str] = Channel("user_messages", "queue")
@@ -290,7 +290,7 @@ async def test_on_command_clear_cancels_agent_task() -> None:
     from nooa_cli.tui.session import Session
 
     session = Session.__new__(Session)
-    session._first_message = "hello"
+    session._session_title_requested = True
     session._background_tasks = set()
     session._emit_console = None
 
@@ -353,7 +353,7 @@ async def test_on_command_clear_cancels_agent_task() -> None:
     assert fake_task.cancelled(), (
         f"_agent_task not cancelled; done={fake_task.done()}, cancelled={fake_task.cancelled()}"
     )
-    assert session._first_message is None, "_first_message not reset after /clear"
+    assert session._session_title_requested is False
     session._swap_session_manager.assert_awaited_once_with(new_sm)
 
 
@@ -366,7 +366,7 @@ async def test_on_command_clear_without_running_task() -> None:
     from nooa_cli.tui.session import Session
 
     session = Session.__new__(Session)
-    session._first_message = "hello"
+    session._session_title_requested = True
     session._background_tasks = set()
 
     agent = MagicMock()
@@ -408,7 +408,7 @@ async def test_on_command_clear_without_running_task() -> None:
     # Must not raise
     await session._on_command("/clear")
     app.cancel_agent_turn.assert_awaited_once_with(source="session")
-    assert session._first_message is None
+    assert session._session_title_requested is False
 
 
 async def test_run_command_runs_post_session_swap_on_agent_loop() -> None:
@@ -420,7 +420,7 @@ async def test_run_command_runs_post_session_swap_on_agent_loop() -> None:
     from nooa_cli.tui.session import Session
 
     session = Session.__new__(Session)
-    session._first_message = "hello"
+    session._session_title_requested = True
     session.agent = MagicMock()
     session.registry = MagicMock()
     session.registry.commands = MagicMock(return_value=[])
@@ -474,7 +474,7 @@ async def test_run_command_marks_session_transition_while_cancelling() -> None:
     from nooa_cli.tui.session import Session
 
     session = Session.__new__(Session)
-    session._first_message = "hello"
+    session._session_title_requested = True
     session.agent = MagicMock()
     session.registry = MagicMock()
     session.registry.commands = MagicMock(return_value=[])
@@ -526,7 +526,7 @@ async def test_on_command_slash_result_posts_to_queue_without_double_submit() ->
     from nooa.slash_dispatch import SlashCommandResult
 
     session = Session.__new__(Session)
-    session._first_message = None
+    session._session_title_requested = False
     session._session_manager = None
 
     slash_ch = MagicMock()
@@ -570,7 +570,7 @@ async def test_on_command_slash_result_renders_via_frontend_markdown() -> None:
     from nooa.slash_dispatch import SlashCommandResult
 
     session = Session.__new__(Session)
-    session._first_message = None
+    session._session_title_requested = False
     session._session_manager = None
 
     slash_ch = MagicMock()
@@ -627,7 +627,7 @@ async def test_on_command_slash_result_warns_and_drops_when_no_slash_channel() -
     from nooa.slash_dispatch import SlashCommandResult
 
     session = Session.__new__(Session)
-    session._first_message = None
+    session._session_title_requested = False
     session._session_manager = None
 
     agent = MagicMock(spec=[])  # no _slash_commands_in attribute

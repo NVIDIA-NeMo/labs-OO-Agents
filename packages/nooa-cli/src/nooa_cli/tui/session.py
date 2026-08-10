@@ -282,14 +282,13 @@ class Session:
 
         self._toolbar = ToolbarRegistry()
         self._initial_outputs = list(initial_outputs or [])
-        self._first_message: str | None = None  # first user turn (for auto-naming)
+        self._session_title_requested = False
 
         # Streaming state shared with the AgentEventRenderer: the
         # tool_call_id → code map that pairs a preview with its matching
         # ``PythonOutput`` event.
         self._pending_code: dict[str, str] = {}
         self._background_tasks: set[asyncio.Task] = set()  # fire-and-forget tasks
-        self._naming_futures: set = set()  # concurrent.futures.Future from agent-loop dispatch
         self._command_runner = None
 
         # Populated at the start of ``run()``; referenced by the handler
@@ -483,6 +482,7 @@ class Session:
                         event_id = getattr(event, "id", None)
                         if event_id is not None:
                             user_event_id = str(event_id)
+                self._request_session_title(text)
                 # UI rendering must happen on the UI loop.
                 app = self._app
                 loop = getattr(app, "_loop", None) if app is not None else None
@@ -832,17 +832,9 @@ class Session:
                     extra_outputs = await self._app.agent_run_async(post_swap)
                     if extra_outputs:
                         result.outputs.extend(extra_outputs)
-                self._first_message = None
+                self._session_title_requested = False
             finally:
                 self._app._session_transitioning = False
-        if (
-            result.compact_done
-            and self._first_message
-            and self._session_manager
-            and not self._session_manager.user_named
-        ):
-            self._name_session_on_agent_loop(self._first_message)
-
         async def _render_result_outputs() -> None:
             frontend = getattr(self, "frontend", None)
             render = getattr(frontend, "render", None)
@@ -1012,15 +1004,6 @@ class Session:
         the agent loop thread; this method only does UI work.
         """
         assert self._renderer is not None and self._app is not None
-
-        if self._first_message is None:
-            self._first_message = text
-            if (
-                self._session_manager is not None
-                and not self._session_manager.user_named
-                and not (self._session_manager.name or "").strip()
-            ):
-                self._name_session_on_agent_loop(text)
 
         bar = _build_user_bar(text, self._app, self._colors)
         full_screen = bool(
@@ -1195,8 +1178,7 @@ class Session:
     async def _cancel_background_tasks(self) -> None:
         """Cancel and await pending fire-and-forget tasks.
 
-        The set is populated by auto-naming and post-compact renaming;
-        tasks that finish remove themselves via ``discard``. At shutdown
+        Tasks that finish remove themselves via ``discard``. At shutdown
         anything still in the set is stale. We cancel then ``gather``
         so the cancellation actually propagates before the loop closes —
         without the await asyncio emits "Task was destroyed but it is
@@ -1208,12 +1190,6 @@ class Session:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         self._background_tasks.clear()
-        # Cancel any naming futures dispatched to the agent loop.
-        naming = getattr(self, "_naming_futures", None)
-        if naming:
-            for f in list(naming):
-                f.cancel()
-            naming.clear()
 
     # ------------------------------------------------------------------
     # Session manager swap (triggered by /session new)
@@ -1296,39 +1272,23 @@ class Session:
             pass
 
     # ------------------------------------------------------------------
-    # Session auto-naming
+    # Session auto-titling
     # ------------------------------------------------------------------
 
-    def _name_session_on_agent_loop(self, first_message: str) -> None:
-        """Dispatch auto-naming to the agent loop to avoid cross-thread sqlite access."""
-        agent_loop = getattr(self._app, "_agent_loop", None)
-        if isinstance(agent_loop, asyncio.AbstractEventLoop) and agent_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(
-                self._auto_name_session(first_message), agent_loop
-            )
-            # Track for cancellation on shutdown. concurrent.futures.Future isn't
-            # awaitable so we keep a separate set from _background_tasks.
-            self._naming_futures.add(future)
-            future.add_done_callback(self._naming_futures.discard)
-        else:
-            # No agent loop available — fall back to local scheduling.
-            self._fire_and_forget(self._auto_name_session(first_message))
+    def _request_session_title(self, opening_message: str) -> bool:
+        """Ask the normal agent turn to title a new, unnamed session once."""
+        if self._session_title_requested:
+            return False
+        self._session_title_requested = True
 
-    async def _auto_name_session(self, first_message: str) -> None:
-        """Generate and persist a session name from the first user message."""
-        if self._session_manager is None or self._session_manager.user_named:
-            return
-        try:
-            name = await self.agent.name_session(first_message[:400])  # type: ignore[union-attr]
-            name = str(name).strip().strip('"').strip("'")[:60]
-            if name and not self._session_manager.user_named:
-                self._session_manager.rename(name, user_named=False)
-        except Exception:
-            # Fallback: first few words of the message
-            words = first_message.split()
-            fallback = " ".join(words[:5])[:60]
-            if fallback:
-                self._session_manager.rename(fallback, user_named=False)
+        manager = self._session_manager
+        if manager is None or manager.user_named or (manager.name or "").strip():
+            return False
+        request_title = getattr(self.agent, "request_session_title", None)
+        if not callable(request_title):
+            return False
+        request_title(opening_message)
+        return True
 
     # ------------------------------------------------------------------
     # Bang (!) command routing

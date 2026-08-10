@@ -69,6 +69,33 @@ async def test_baseline_enter_submits_to_agent():
         await h.wait_for(lambda: h.agent.messages_received == ["hello world"])
 
 
+async def test_opening_system_housekeeping_shares_the_user_turn():
+    """An on-consume system request is batched without another agent call."""
+    agent = FakeAgent()
+    system_messages = agent.queue_manager.queue("system_messages")
+    agent._user_messages_in.set_on_get(
+        lambda _text: system_messages.put("call self.rename_session")
+    )
+    notifications: list[dict[str, list]] = []
+    original_handle = agent.handle
+
+    async def capture_notification(notification):
+        notifications.append(notification)
+        return await original_handle(notification)
+
+    agent.handle = capture_notification  # type: ignore[method-assign]
+
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("hello world")
+        await h.wait_for(lambda: len(notifications) == 1)
+        assert notifications == [
+            {
+                "user_messages": ["hello world"],
+                "system_messages": ["call self.rename_session"],
+            }
+        ]
+
+
 async def test_baseline_agent_message_renders_to_output():
     agent = FakeAgent()
 
