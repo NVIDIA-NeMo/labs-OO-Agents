@@ -8,8 +8,9 @@ stdout/stderr are 100% user-owned.
 
 Architecture:
   stdin  -> bash (commands only)
-  stdout <- pure command output (no sentinel parsing)
-  stderr <- pure command stderr (no sentinel parsing)
+  stdout <- buffered command output for run()
+  stderr <- buffered command stderr for run()
+  FIFOs  <- isolated per-command output for run_stream()
   fd 3   <- exit code + cwd + sentinel (control channel)
 """
 
@@ -18,7 +19,9 @@ import codecs
 import logging
 import os
 import secrets
+import shlex
 import signal
+import tempfile
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -31,6 +34,110 @@ MAX_OUTPUT_CHARS = 30_000
 _DRAIN_TIMEOUT = 0.05  # Seconds to wait for remaining output after sentinel
 _SIGTERM_GRACE = 5.0  # Seconds to wait for sentinel after SIGTERM
 _SIGKILL_GRACE = 2.0  # Seconds to wait for sentinel after SIGKILL
+
+
+class _CommandOutputPipes:
+    """Isolated stdout/stderr pipes for one persistent-shell command.
+
+    The persistent bash redirects a brace group into these FIFOs. Background
+    descendants may retain their write ends, but closing this object severs
+    those writers instead of allowing their output to bleed into a later
+    command on the shell's process-wide stdout/stderr pipes.
+    """
+
+    def __init__(
+        self,
+        *,
+        directory: Path,
+        paths: dict[str, Path],
+        readers: dict[str, asyncio.StreamReader],
+        transports: list[asyncio.BaseTransport],
+        keepalive_fds: list[int],
+    ) -> None:
+        self.directory = directory
+        self.paths = paths
+        self.readers = readers
+        self.transports = transports
+        self.keepalive_fds = keepalive_fds
+
+    @classmethod
+    async def open(cls) -> "_CommandOutputPipes":
+        directory = Path(tempfile.mkdtemp(prefix="nooa-bash-output-"))
+        paths = {name: directory / name for name in ("stdout", "stderr")}
+        readers: dict[str, asyncio.StreamReader] = {}
+        transports: list[asyncio.BaseTransport] = []
+        keepalive_fds: list[int] = []
+        flags = os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+        try:
+            loop = asyncio.get_running_loop()
+            for name, path in paths.items():
+                os.mkfifo(path, 0o600)
+                read_fd = os.open(path, os.O_RDONLY | flags)
+                read_file = None
+                try:
+                    # Keep a writer open until cleanup so the reader cannot see
+                    # premature EOF before bash opens its redirected stream.
+                    keepalive_fds.append(os.open(path, os.O_WRONLY | flags))
+                    read_file = os.fdopen(read_fd, "rb", 0)
+                    reader = asyncio.StreamReader()
+                    transport, _ = await loop.connect_read_pipe(
+                        lambda reader=reader: asyncio.StreamReaderProtocol(reader),
+                        read_file,
+                    )
+                except BaseException:
+                    if read_file is None:
+                        os.close(read_fd)
+                    else:
+                        read_file.close()
+                    raise
+                readers[name] = reader
+                transports.append(transport)
+            return cls(
+                directory=directory,
+                paths=paths,
+                readers=readers,
+                transports=transports,
+                keepalive_fds=keepalive_fds,
+            )
+        except BaseException:
+            for fd in keepalive_fds:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            for transport in transports:
+                transport.close()
+            for path in paths.values():
+                path.unlink(missing_ok=True)
+            directory.rmdir()
+            raise
+
+    def redirect(self, script: str) -> str:
+        stdout_path = shlex.quote(str(self.paths["stdout"]))
+        stderr_path = shlex.quote(str(self.paths["stderr"]))
+        return f"{{\n{script}\n}} > {stdout_path} 2> {stderr_path}\n"
+
+    def close_keepalives(self) -> None:
+        for fd in self.keepalive_fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self.keepalive_fds.clear()
+
+    async def close(self) -> None:
+        self.close_keepalives()
+        for transport in self.transports:
+            transport.close()
+        self.transports.clear()
+        # Let connect_read_pipe process transport closure before unlinking.
+        await asyncio.sleep(0)
+        for path in self.paths.values():
+            path.unlink(missing_ok=True)
+        try:
+            self.directory.rmdir()
+        except OSError:
+            pass
 
 
 class BashSession:
@@ -303,6 +410,13 @@ class BashSession:
         is '1' if the command timed out, '0' otherwise.
 
         Concurrent calls are serialized via an internal lock.
+
+        Each call uses isolated stdout/stderr pipes terminated by random
+        per-command markers. Output from a background process after its
+        foreground command completes is excluded and cannot bleed into the
+        next call. Closing an active stream resets the persistent shell to
+        terminate its complete process group; cwd is preserved, while shell
+        variables and aliases are lost.
         """
         self._ensure_lock_on_current_loop()
         async with self._lock:
@@ -324,7 +438,8 @@ class BashSession:
 
         self._last_command = command
         sentinel = f"__CTRL_{secrets.token_hex(8)}__"
-        script = f"{command}\n_nemo_ec=$?\necho $_nemo_ec >&3\npwd >&3\necho {sentinel} >&3\n"
+        output_marker_text = f"__NOOA_OUTPUT_{secrets.token_hex(16)}__"
+        output_marker = output_marker_text.encode()
 
         proc = self._process
         ctrl = self._control_reader
@@ -335,6 +450,19 @@ class BashSession:
             ctrl = self._control_reader
             if proc is None or proc.stdin is None or ctrl is None:
                 raise RuntimeError("Bash session failed to restart")
+
+        output_pipes = await _CommandOutputPipes.open()
+        quoted_command = shlex.quote(command)
+        quoted_marker = shlex.quote(output_marker_text)
+        script = output_pipes.redirect(
+            f"eval -- {quoted_command}\n"
+            "_nemo_ec=$?\n"
+            f"printf '%s' {quoted_marker}\n"
+            f"printf '%s' {quoted_marker} >&2\n"
+            "echo $_nemo_ec >&3\n"
+            "pwd >&3\n"
+            f"echo {sentinel} >&3"
+        )
 
         try:
             proc.stdin.write(script.encode())
@@ -351,9 +479,13 @@ class BashSession:
                 await proc.stdin.drain()
             except (BrokenPipeError, ConnectionResetError, OSError) as e2:
                 self._diagnose_death(f"run_stream_retry: {e2}")
+                await output_pipes.close()
                 raise RuntimeError("Bash session recovery failed") from e2
-
-        assert proc.stdout is not None and proc.stderr is not None
+        except BaseException:
+            await output_pipes.close()
+            if self._process is proc:
+                await self.reset()
+            raise
 
         # Keep one pending read per stream and watch the independent control
         # channel concurrently.  Yielding before scheduling the next read
@@ -361,20 +493,42 @@ class BashSession:
         # cannot make an unbounded Python queue grow and it never loses output.
         control_task = asyncio.create_task(self._read_control_until(sentinel, timeout))
         output_tasks: dict[asyncio.Task[bytes], tuple[str, asyncio.StreamReader]] = {
-            asyncio.create_task(proc.stdout.read(4096)): ("stdout", proc.stdout),
-            asyncio.create_task(proc.stderr.read(4096)): ("stderr", proc.stderr),
+            asyncio.create_task(reader.read(4096)): (name, reader)
+            for name, reader in output_pipes.readers.items()
         }
         decoders = {
             "stdout": codecs.getincrementaldecoder("utf-8")(errors="replace"),
             "stderr": codecs.getincrementaldecoder("utf-8")(errors="replace"),
         }
+        pending_bytes = {"stdout": b"", "stderr": b""}
+        output_complete: set[str] = set()
         command_complete = False
         stream_abandoned = False
         ctrl_lines: list[str] = []
         timed_out = False
 
+        def consume_output(name: str, chunk: bytes) -> tuple[str, bool]:
+            """Decode bytes up to this command's marker, preserving split UTF-8."""
+            data = pending_bytes[name] + chunk
+            marker_index = data.find(output_marker)
+            if marker_index >= 0:
+                payload = data[:marker_index]
+                pending_bytes[name] = b""
+                return decoders[name].decode(payload, final=True), True
+
+            # Retain only the longest suffix that could actually be the start
+            # of a marker split across reads. Ordinary short output should be
+            # yielded immediately rather than waiting for marker_length bytes.
+            possible_prefix = min(len(data), len(output_marker) - 1)
+            while possible_prefix and not data.endswith(output_marker[:possible_prefix]):
+                possible_prefix -= 1
+            safe_length = len(data) - possible_prefix
+            payload = data[:safe_length]
+            pending_bytes[name] = data[safe_length:]
+            return decoders[name].decode(payload), False
+
         try:
-            while True:
+            while not command_complete or len(output_complete) < 2:
                 done, _ = await asyncio.wait(
                     (control_task, *output_tasks),
                     return_when=asyncio.FIRST_COMPLETED,
@@ -382,68 +536,59 @@ class BashSession:
                 if control_task in done:
                     ctrl_lines, timed_out = control_task.result()
                     command_complete = True
-                for task in done:
-                    if task is control_task:
+                    output_pipes.close_keepalives()
+
+                for task in tuple(done):
+                    if task not in output_tasks:
                         continue
                     name, stream = output_tasks.pop(task)
-                    try:
-                        chunk = task.result()
-                    except Exception:
-                        chunk = b""
-                    if chunk:
-                        text = decoders[name].decode(chunk)
-                        if text:
-                            yield (name, text)
-                        if not command_complete:
-                            output_tasks[asyncio.create_task(stream.read(4096))] = (
-                                name,
-                                stream,
-                            )
-                if command_complete:
+                    chunk = task.result()
+                    if not chunk:
+                        raise RuntimeError(
+                            f"{name} closed before the command output marker was received"
+                        )
+                    text, reached_marker = consume_output(name, chunk)
+                    if reached_marker:
+                        output_complete.add(name)
+                    else:
+                        output_tasks[asyncio.create_task(stream.read(4096))] = (name, stream)
+                    if text:
+                        yield (name, text)
+
+                # Timeout recovery may replace the shell if it cannot reach
+                # the control sentinel. Its old output channels cannot then
+                # produce markers, so finish with the timeout result.
+                if command_complete and self._process is not proc:
                     break
         except BaseException:
             stream_abandoned = True
             raise
         finally:
-            pending = [task for task in output_tasks if not task.done()]
+            # The control reader runs independently while a consumer is paused
+            # at yield. Adopt a completed result before deciding the command is
+            # still active; otherwise an already-finished command would cause
+            # an unnecessary shell reset and loss of cd/export state.
+            if not command_complete and control_task.done() and not control_task.cancelled():
+                ctrl_lines, timed_out = control_task.result()
+                command_complete = True
+                output_pipes.close_keepalives()
+            if command_complete:
+                self._update_cwd_from_control(ctrl_lines)
+
             if not control_task.done():
                 control_task.cancel()
-                pending.append(control_task)
-            for task in pending:
-                task.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
+            for task in output_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(control_task, *output_tasks, return_exceptions=True)
+            await output_pipes.close()
 
-            # Closing a stream early must not leave the command running or its
-            # output/control sentinel queued for the next persistent-shell call.
-            if stream_abandoned and self._process is proc:
-                if not command_complete and proc.returncode is None:
-                    recovered = await self._interrupt_and_recover(proc, sentinel, timeout)
-                    if not recovered:
-                        self._diagnose_death("run_stream_consumer_closed")
-                        await self.reset()
-                if self._process is proc:
-                    await self._discard_process_output(proc)
-
-        # The command wrote its control sentinel only after it completed, so
-        # any remaining command output is already buffered in the data pipes.
-        # Drain it with a short quiescence timeout before emitting done.
-        for stream, name in ((proc.stdout, "stdout"), (proc.stderr, "stderr")):
-            while True:
-                try:
-                    chunk = await asyncio.wait_for(stream.read(4096), timeout=_DRAIN_TIMEOUT)
-                    if not chunk:
-                        break
-                    text = decoders[name].decode(chunk)
-                    if text:
-                        yield (name, text)
-                except (TimeoutError, Exception):
-                    break
-
-        for name, decoder in decoders.items():
-            tail = decoder.decode(b"", final=True)
-            if tail:
-                yield (name, tail)
+            # An active command may own an arbitrary descendant tree. Resetting
+            # the process group is the only reliable way to prevent descendants
+            # from surviving cancellation and writing stale output later.
+            if stream_abandoned and not command_complete and self._process is proc:
+                self._diagnose_death("run_stream_consumer_closed")
+                await self.reset()
 
         # Parse exit code
         exit_code = -1 if not ctrl_lines else 0
@@ -452,10 +597,7 @@ class BashSession:
                 exit_code = int(ctrl_lines[0].strip())
             except (ValueError, IndexError):
                 pass
-            if len(ctrl_lines) >= 2:
-                candidate = ctrl_lines[1].strip()
-                if candidate.startswith("/"):
-                    self._cwd = Path(candidate)
+            self._update_cwd_from_control(ctrl_lines)
 
         if timed_out:
             exit_code = 124
@@ -464,18 +606,11 @@ class BashSession:
 
         yield ("__done__", f"{exit_code},{1 if timed_out else 0}")
 
-    @staticmethod
-    async def _discard_process_output(proc: asyncio.subprocess.Process) -> None:
-        """Discard output buffered before an abandoned stream was resynchronized."""
-        assert proc.stdout is not None and proc.stderr is not None
-        for stream in (proc.stdout, proc.stderr):
-            while True:
-                try:
-                    chunk = await asyncio.wait_for(stream.read(4096), timeout=_DRAIN_TIMEOUT)
-                    if not chunk:
-                        break
-                except (TimeoutError, Exception):
-                    break
+    def _update_cwd_from_control(self, ctrl_lines: list[str]) -> None:
+        if len(ctrl_lines) >= 2:
+            candidate = ctrl_lines[1].strip()
+            if candidate.startswith("/"):
+                self._cwd = Path(candidate)
 
     async def _send_and_wait(
         self, script: str, sentinel: str, timeout: float
@@ -521,22 +656,25 @@ class BashSession:
         assert proc.stdout is not None and proc.stderr is not None
         stdout_buf = TruncatingStringIO(limit=MAX_OUTPUT_CHARS)
         stderr_buf = TruncatingStringIO(limit=MAX_OUTPUT_CHARS)
+        stdout_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        stderr_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
-        async def accumulate(stream: asyncio.StreamReader, buf: TruncatingStringIO) -> None:
+        async def accumulate(
+            stream: asyncio.StreamReader,
+            buf: TruncatingStringIO,
+            decoder,
+        ) -> None:
             """Read from stream until EOF or external cancellation."""
-            try:
-                while True:
-                    chunk = await stream.read(65536)
-                    if not chunk:
-                        return
-                    buf.write(chunk.decode("utf-8", errors="replace"))
-            except asyncio.CancelledError:
-                return
-            except Exception:
-                return
+            while True:
+                chunk = await stream.read(65536)
+                if not chunk:
+                    return
+                text = decoder.decode(chunk)
+                if text:
+                    buf.write(text)
 
-        stdout_task = asyncio.create_task(accumulate(proc.stdout, stdout_buf))
-        stderr_task = asyncio.create_task(accumulate(proc.stderr, stderr_buf))
+        stdout_task = asyncio.create_task(accumulate(proc.stdout, stdout_buf, stdout_decoder))
+        stderr_task = asyncio.create_task(accumulate(proc.stderr, stderr_buf, stderr_decoder))
 
         ctrl_lines, timed_out = await self._read_control_until(sentinel, timeout)
 
@@ -551,15 +689,23 @@ class BashSession:
                 pass
 
         # Now greedy-drain remaining output (sole reader per stream, safe).
-        for stream, buf in [(proc.stdout, stdout_buf), (proc.stderr, stderr_buf)]:
+        for stream, buf, decoder in [
+            (proc.stdout, stdout_buf, stdout_decoder),
+            (proc.stderr, stderr_buf, stderr_decoder),
+        ]:
             while True:
                 try:
                     chunk = await asyncio.wait_for(stream.read(65536), timeout=_DRAIN_TIMEOUT)
                     if not chunk:
                         break
-                    buf.write(chunk.decode("utf-8", errors="replace"))
-                except (TimeoutError, Exception):
+                    text = decoder.decode(chunk)
+                    if text:
+                        buf.write(text)
+                except TimeoutError:
                     break
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                buf.write(tail)
 
         stdout = stdout_buf.getvalue()
         stderr = stderr_buf.getvalue()

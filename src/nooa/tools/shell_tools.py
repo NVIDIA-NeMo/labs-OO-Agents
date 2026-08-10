@@ -405,16 +405,20 @@ class ShellTools(Skill):
         command: Annotated[str, spec(description="Shell command to execute")],
         timeout: Annotated[float, spec(description="Max seconds to wait before timeout")] = 30.0,
     ) -> AsyncIterator[StreamEvent | StreamDone]:
-        """Stream command output line-by-line as it arrives, ending with a done event.
+        """Stream command output in decoded chunks as it arrives, ending with a done event.
 
         Yields ``StreamEvent`` chunks (``.kind`` is "stdout"/"stderr", ``.text``
         the chunk) incrementally, then a final ``StreamDone`` (``.returncode``,
         ``.timed_out``) once the command completes. Runs in the persistent
-        session, like ``run``.
+        session, like ``run``. Closing an active stream terminates the command
+        process group and restarts the shell; cwd is retained, while exported
+        variables and aliases from that shell are lost.
 
-        This is what ``pyp.arun(self.shell, ...)`` consumes to stream output::
+        Consume the iterator directly when output should be handled as it arrives::
 
-            fails = await self.pyp.arun(self.shell, "make test").grep("FAIL").collect()
+            async for event in self.shell.run_stream("make test"):
+                if event.kind != "done":
+                    print(event.text, end="")
         """
         session = await self._get_session()
         timed_out = False
@@ -430,6 +434,7 @@ class ShellTools(Skill):
                 yield StreamEvent(kind=stream_name, text=chunk)
         finally:
             await stream.aclose()
+            self.cwd = session.cwd
         yield StreamDone(kind="done", returncode=exit_code, timed_out=timed_out)
 
     @staticmethod

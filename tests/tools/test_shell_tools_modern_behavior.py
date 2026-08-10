@@ -126,6 +126,26 @@ async def test_abandoned_stream_interrupts_command_and_resynchronizes_shell(sh):
 
 
 @pytest.mark.asyncio
+async def test_late_stream_close_preserves_shelltools_state(sh, tmp_path):
+    subdir = tmp_path / "stream-cwd"
+    subdir.mkdir()
+    await sh.run("export PRESERVE=yes")
+    start_count = sh.session._start_count
+    stream = sh.run_stream(f"cd {shlex.quote(str(subdir))}; printf finished")
+
+    first = await asyncio.wait_for(anext(stream), timeout=1)
+    assert first.kind == "stdout"
+    assert first.text == "finished"
+    await asyncio.sleep(0.1)
+    await asyncio.wait_for(stream.aclose(), timeout=1)
+
+    assert sh.session._start_count == start_count
+    assert sh.cwd == subdir
+    recovered = await sh.run('printf "$PRESERVE:$PWD"')
+    assert recovered.stdout == f"yes:{subdir}"
+
+
+@pytest.mark.asyncio
 async def test_stream_delivers_large_stdout_and_stderr_losslessly(sh):
     command = (
         'python3 -c "import os; '
