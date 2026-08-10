@@ -329,7 +329,10 @@ tombstone) vs hard delete is configurable.
 ## Storage & embedding backends
 
 **One SQLite file** holds records + the association graph + vector blobs (separate
-from the agent's session DB; WAL). The vector index is pluggable behind one
+from the agent's session DB). Multiple agents may share the same workspace store:
+SQLite WAL and a busy timeout coordinate processes, commits use `synchronous=FULL`
+for crash durability, and each `MemoryStore` serializes its connection and derived
+vector index across local threads. The vector index is pluggable behind one
 protocol (`vector_backends.py`):
 
 | `vector.backend` | what | extra dep |
