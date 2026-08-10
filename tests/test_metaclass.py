@@ -2211,34 +2211,56 @@ def _identity_decorator(fn):
     return inner
 
 
-def test_decorated_generator_still_gets_generator_parentage():
-    """`isgeneratorfunction` ignores __wrapped__; the dispatch must unwrap or #38 returns."""
-    from nooa.runtime.hooks import set_hooks
+def test_contextmanager_methods_keep_their_calling_convention():
+    """Dispatch must read the attribute's own shape, not the shape it wraps.
 
-    mock_hooks, hook_calls = _record_hooks()
+    `@contextmanager` wraps a generator function but returns a context manager.
+    Dispatching on the unwrapped shape installs the generator wrapper, and
+    `with agent.session()` then fails with "'generator' object does not support
+    the context manager protocol".
+    """
+    import contextlib
 
     class TestAgent(Agent, llm=_TEST_LLM):
-        @_identity_decorator
+        @contextlib.contextmanager
+        def session(self):
+            yield "RESOURCE"
+
+    with TestAgent().session() as resource:
+        assert resource == "RESOURCE"
+
+
+@pytest.mark.asyncio
+async def test_asynccontextmanager_methods_keep_their_calling_convention():
+    """Async counterpart — `@asynccontextmanager` wraps an async generator function."""
+    import contextlib
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        @contextlib.asynccontextmanager
+        async def session(self):
+            yield "ARESOURCE"
+
+    async with TestAgent().session() as resource:
+        assert resource == "ARESOURCE"
+
+
+def test_decorator_that_consumes_a_generator_returns_its_value():
+    """A decorator draining a generator must not be re-dispatched as a generator."""
+    import functools
+
+    def collect(fn):
+        @functools.wraps(fn)
+        def inner(*args, **kwargs):
+            return list(fn(*args, **kwargs))
+
+        return inner
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        @collect
         def produce(self, n: int):
-            for i in range(n):
-                self.in_body(i)
-                yield i
+            yield from range(n)
 
-        def in_body(self, i: int) -> int:
-            return i
-
-        def drain(self) -> list[int]:
-            return list(self.produce(2))
-
-    try:
-        set_hooks(mock_hooks)
-        assert TestAgent().drain() == [0, 1]
-    finally:
-        set_hooks(None)
-
-    produce = _one(hook_calls, "produce")
-    assert produce["parent_call_id"] == _one(hook_calls, "drain")["call_id"]
-    assert all(c["parent_call_id"] == produce["call_id"] for c in _all(hook_calls, "in_body"))
+    assert TestAgent().produce(2) == [0, 1]
 
 
 def test_decorated_generator_with_ellipsis_body_is_rejected():
