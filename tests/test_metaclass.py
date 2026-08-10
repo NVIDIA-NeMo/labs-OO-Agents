@@ -1692,10 +1692,13 @@ async def test_async_generator_span_closes_at_exhaustion_not_creation():
 async def test_async_generator_span_closes_on_explicit_aclose():
     """Abandoning a generator part-way closes its span exactly once, on aclose().
 
-    Closing an async generator is itself async, so the span cannot close at the
-    `break` — Python defers cleanup to `aclose()`, which `aclosing()` (below) or
-    the event loop's async-generator finalizer will call. Early close is not an
-    error, so `exception` stays None.
+    Closing an async generator is itself async, so the span closes at `aclose()`
+    rather than at the `break` that abandoned it. In ordinary code that is not a
+    leak: once the generator becomes unreachable, asyncio's async-generator
+    finalizer calls `aclose()` for you within a couple of event-loop ticks (see
+    test_async_generator_span_closes_when_unreachable). Only a live reference
+    that is never closed keeps the span open — which leaks the generator itself,
+    not just the span. Early close is not an error, so `exception` stays None.
     """
     from nooa.runtime.hooks import set_hooks
 
@@ -1976,3 +1979,46 @@ async def test_generator_body_finally_runs_before_span_closes():
         set_hooks(None)
 
     assert order == ["body_cleanup", "span_closed"]
+
+
+@pytest.mark.asyncio
+async def test_async_generator_span_closes_when_unreachable():
+    """An abandoned generator's span closes on its own once nothing references it.
+
+    `break` does not close an async generator, but dropping the last reference
+    hands it to asyncio's async-generator finalizer, which calls `aclose()` a
+    couple of loop ticks later. Documents that abandoning a generator in
+    ordinary code does not strand an open span.
+    """
+    import asyncio
+
+    from nooa.runtime.hooks import set_hooks
+
+    mock_hooks, _ = _record_hooks()
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        async def produce(self, n: int):
+            for i in range(n):
+                yield i
+
+    try:
+        set_hooks(mock_hooks)
+        agent = TestAgent()
+
+        async def consumer():
+            # The generator is a temporary of this frame; when the frame exits
+            # it becomes unreachable and the finalizer takes over.
+            async for _v in agent.produce(1000):
+                break
+
+        await consumer()
+
+        for _ in range(10):
+            if mock_hooks.after_agent_call.call_count:
+                break
+            await asyncio.sleep(0)
+
+        assert mock_hooks.after_agent_call.call_count == 1
+        assert mock_hooks.after_agent_call.call_args.kwargs["exception"] is None
+    finally:
+        set_hooks(None)
