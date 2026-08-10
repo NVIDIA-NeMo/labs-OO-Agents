@@ -134,6 +134,33 @@ def test_file_store_uses_durable_wal(tmp_path):
     store.close()
 
 
+def test_malformed_json_payload_is_reconstructed_from_columns(tmp_path, caplog):
+    path = tmp_path / "recovered.sqlite"
+    store = MemoryStore(path)
+    memory = Memory(
+        type=MemoryType.EPISODE,
+        content="survived recovery",
+        importance=7.0,
+        salience=0.8,
+        owner="agent@test",
+    )
+    store.add(memory)
+    store._conn.execute("UPDATE memories SET data = '' WHERE id = ?", (memory.id,))
+    store._conn.commit()
+
+    recovered = store.get(memory.id)
+
+    assert recovered is not None
+    assert recovered.id == memory.id
+    assert recovered.type == MemoryType.EPISODE
+    assert recovered.content == "survived recovery"
+    assert recovered.importance == 7.0
+    assert recovered.salience == 0.8
+    assert recovered.owner == "agent@test"
+    assert "has a malformed JSON payload; reconstructing it from columns" in caplog.text
+    store.close()
+
+
 def test_malformed_stored_embeddings_do_not_disable_memory(tmp_path, emb, caplog):
     path = tmp_path / "recovered.sqlite"
     store = MemoryStore(path, embedding_dim=128)
