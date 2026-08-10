@@ -3,7 +3,10 @@
 """Tests for persistent bash session."""
 
 import asyncio
+import re
 import shlex
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -99,6 +102,31 @@ class TestBashSession:
         assert "ERR_HEAD" in stderr and "ERR_TAIL" in stderr
         assert "<truncated-output>" in stdout
         assert "<truncated-output>" in stderr
+
+        for output, expected_head, expected_tail in (
+            (stdout, "OUT_HEAD", "OUT_TAIL"),
+            (stderr, "ERR_HEAD", "ERR_TAIL"),
+        ):
+            match = re.search(r"full untruncated output .* is in: (.+)\n", output)
+            assert match is not None
+            output_path = Path(match.group(1))
+            try:
+                full_output = output_path.read_text()
+                assert full_output.startswith(expected_head)
+                assert full_output.endswith(expected_tail)
+                assert len(full_output) == 50_016
+            finally:
+                output_path.unlink()
+
+    async def test_buffered_small_output_removes_backing_files(
+        self, session, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+
+        stdout, stderr, code = await session.run("printf small; printf warning >&2")
+
+        assert (stdout, stderr, code) == ("small", "warning", 0)
+        assert list(tmp_path.glob("nooa_shell_*")) == []
 
     async def test_streaming_output_is_not_truncated(self, session):
         chunks = [

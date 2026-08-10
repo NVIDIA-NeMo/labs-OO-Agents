@@ -26,7 +26,7 @@ import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from nooa.agentdoc import TruncatingStringIO
+from nooa.agentdoc import FileBackedTruncatingStringIO, TruncatingStringIO
 
 logger = logging.getLogger(__name__)
 
@@ -654,8 +654,14 @@ class BashSession:
 
         # Drain stdout/stderr concurrently with control fd to prevent deadlock.
         assert proc.stdout is not None and proc.stderr is not None
-        stdout_buf = TruncatingStringIO(limit=MAX_OUTPUT_CHARS)
-        stderr_buf = TruncatingStringIO(limit=MAX_OUTPUT_CHARS)
+        stdout_buf = FileBackedTruncatingStringIO(
+            limit=MAX_OUTPUT_CHARS,
+            prefix="nooa_shell_stdout_",
+        )
+        stderr_buf = FileBackedTruncatingStringIO(
+            limit=MAX_OUTPUT_CHARS,
+            prefix="nooa_shell_stderr_",
+        )
         stdout_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         stderr_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
@@ -676,39 +682,56 @@ class BashSession:
         stdout_task = asyncio.create_task(accumulate(proc.stdout, stdout_buf, stdout_decoder))
         stderr_task = asyncio.create_task(accumulate(proc.stderr, stderr_buf, stderr_decoder))
 
-        ctrl_lines, timed_out = await self._read_control_until(sentinel, timeout)
+        try:
+            ctrl_lines, timed_out = await self._read_control_until(sentinel, timeout)
 
-        # Cancel accumulators FIRST to avoid concurrent StreamReader access.
-        # StreamReader does not support multiple concurrent readers.
-        stdout_task.cancel()
-        stderr_task.cancel()
-        for task in (stdout_task, stderr_task):
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-        # Now greedy-drain remaining output (sole reader per stream, safe).
-        for stream, buf, decoder in [
-            (proc.stdout, stdout_buf, stdout_decoder),
-            (proc.stderr, stderr_buf, stderr_decoder),
-        ]:
-            while True:
+            # Cancel accumulators FIRST to avoid concurrent StreamReader access.
+            # StreamReader does not support multiple concurrent readers.
+            stdout_task.cancel()
+            stderr_task.cancel()
+            for task in (stdout_task, stderr_task):
                 try:
-                    chunk = await asyncio.wait_for(stream.read(65536), timeout=_DRAIN_TIMEOUT)
-                    if not chunk:
-                        break
-                    text = decoder.decode(chunk)
-                    if text:
-                        buf.write(text)
-                except TimeoutError:
-                    break
-            tail = decoder.decode(b"", final=True)
-            if tail:
-                buf.write(tail)
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
-        stdout = stdout_buf.getvalue()
-        stderr = stderr_buf.getvalue()
+            # Now greedy-drain remaining output (sole reader per stream, safe).
+            for stream, buf, decoder in [
+                (proc.stdout, stdout_buf, stdout_decoder),
+                (proc.stderr, stderr_buf, stderr_decoder),
+            ]:
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(stream.read(65536), timeout=_DRAIN_TIMEOUT)
+                        if not chunk:
+                            break
+                        text = decoder.decode(chunk)
+                        if text:
+                            buf.write(text)
+                    except TimeoutError:
+                        break
+                tail = decoder.decode(b"", final=True)
+                if tail:
+                    buf.write(tail)
+
+            stdout = stdout_buf.getvalue()
+            stderr = stderr_buf.getvalue()
+        except BaseException:
+            stdout_task.cancel()
+            stderr_task.cancel()
+            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+            stdout_buf.cleanup()
+            stderr_buf.cleanup()
+            raise
+
+        # Small outputs should not litter the temp directory. Truncated files
+        # remain available at the path embedded in their returned notice.
+        for buf in (stdout_buf, stderr_buf):
+            if buf.was_truncated:
+                buf.close()
+            else:
+                buf.cleanup()
+
         return ctrl_lines, stdout, stderr, timed_out
 
     async def _read_control_until(self, sentinel: str, timeout: float) -> tuple[list[str], bool]:
