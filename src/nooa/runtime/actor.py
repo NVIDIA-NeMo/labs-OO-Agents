@@ -5,6 +5,7 @@
 import ast
 import asyncio
 import contextvars
+import hashlib
 import inspect
 import io
 import linecache
@@ -61,6 +62,15 @@ from nooa.runtime.harness_metrics import (
 from nooa.runtime.hooks import call_after_hook, call_before_hook
 
 logger = logging.getLogger(__name__)
+
+
+def _derive_prompt_cache_key(agent_id: str, strategy_tag: str) -> str:
+    """Return a stable cache shard key within providers' 64-character limit."""
+    digest = hashlib.blake2s(
+        f"{agent_id}-{strategy_tag}".encode(),
+        digest_size=16,
+    ).hexdigest()
+    return f"nooa-{digest}"
 
 
 @contextmanager
@@ -969,7 +979,8 @@ class ActorRuntime:
                         type(_mw_strategy).__name__ if _mw_strategy is not None else "default"
                     )
                     call_params.setdefault(
-                        "prompt_cache_key", f"{self.agent._agent_id}-{_mw_strategy_tag}"
+                        "prompt_cache_key",
+                        _derive_prompt_cache_key(self.agent._agent_id, _mw_strategy_tag),
                     )
                     ctx.response = await llm_client.acall(
                         ctx.messages,
@@ -1054,7 +1065,10 @@ class ActorRuntime:
                 _strategy_tag = (
                     type(_current_strategy).__name__ if _current_strategy is not None else "default"
                 )
-                _kwargs.setdefault("prompt_cache_key", f"{self.agent._agent_id}-{_strategy_tag}")
+                _kwargs.setdefault(
+                    "prompt_cache_key",
+                    _derive_prompt_cache_key(self.agent._agent_id, _strategy_tag),
+                )
                 _emit_llm_start()
                 try:
                     try:
@@ -1506,7 +1520,7 @@ class ActorRuntime:
             # stdout capture and wrapper, so we skip the in-process exec below.
             if sandbox_executor is not None:
                 result = await sandbox_executor.run_cell(code, execution_count=execution_count)
-                return result
+                return cast(ExecutionResult, result)
 
             # Set up stdout/stderr capture BEFORE ast.parse/compile so that
             # SyntaxWarnings (e.g. invalid escape sequences in LLM-generated code)

@@ -23,7 +23,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from nooa import EventQuery, strategy
+from nooa import Agent, EventQuery, strategy
 from nooa.context_blocks import ScopedContext
 from nooa.strategies import CodeActStrategy, PredictStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
@@ -711,7 +711,7 @@ class TestStandaloneAgentIdSharding:
     """`prompt_cache_key` sharding contract for standalone functions.
 
     Each standalone call creates a fresh agent stub. The stub's ``_agent_id``
-    feeds the actor's default ``prompt_cache_key = f"{agent_id}-{strategy_tag}"``.
+    feeds the actor's default prompt-cache-key derivation.
     The id must satisfy three properties:
 
     1. Same function in the same process → same shard (fan-out cache hits).
@@ -746,9 +746,6 @@ class TestStandaloneAgentIdSharding:
         assert len(fake_llm.prompt_cache_keys) == 2
         assert fake_llm.prompt_cache_keys[0] == fake_llm.prompt_cache_keys[1]
         assert fake_llm.prompt_cache_keys[0] is not None
-        # The id must carry function identity so two different functions diverge
-        # (asserted in the next test) — sanity-check the format here.
-        assert "classify" in fake_llm.prompt_cache_keys[0]
 
     @pytest.mark.asyncio
     async def test_different_functions_get_different_cache_keys(self) -> None:
@@ -802,8 +799,10 @@ class TestStandaloneAgentIdSharding:
         )
 
     @pytest.mark.asyncio
-    async def test_agent_id_carries_per_process_token(self) -> None:
-        """The id format must include the module-level per-process token.
+    async def test_agent_id_carries_per_process_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Changing the module-level per-process token changes the shard.
 
         This is what spreads load when the same code is run as N separate
         Python processes — each gets a different ``_PROCESS_AGENT_ID`` at
@@ -812,16 +811,73 @@ class TestStandaloneAgentIdSharding:
         """
         from nooa import standalone as standalone_mod
 
-        fake_llm = _CaptureKwargsLLM(scripted_responses=[_resp('{"value": "x"}')])
+        fake_llm = _CaptureKwargsLLM(
+            scripted_responses=[_resp('{"value": "x"}'), _resp('{"value": "y"}')]
+        )
 
-        @strategy(PredictStrategy(), llm=fake_llm)
-        async def summarise(text: str) -> str:
-            """Summarise {text}."""
+        def make_summarise():
+            @strategy(PredictStrategy(), llm=fake_llm)
+            async def summarise(text: str) -> str:
+                """Summarise {text}."""
+                ...
+
+            return summarise
+
+        monkeypatch.setattr(standalone_mod, "_PROCESS_AGENT_ID", "process1")
+        first = make_summarise()
+        monkeypatch.setattr(standalone_mod, "_PROCESS_AGENT_ID", "process2")
+        second = make_summarise()
+
+        await first("input")
+        await second("input")
+
+        assert fake_llm.prompt_cache_keys[0] != fake_llm.prompt_cache_keys[1]
+
+    @pytest.mark.asyncio
+    async def test_long_standalone_identity_produces_bounded_cache_key(self) -> None:
+        """Long package and qualified names cannot exceed the provider limit."""
+        fake_llm = _CaptureKwargsLLM(scripted_responses=[_resp('{"value": "ok"}')])
+
+        async def summarise_document(text: str) -> str:
+            """Summarise the document."""
             ...
 
-        await summarise("input")
+        summarise_document.__module__ = "myproject.agents.summarization.pipeline"
+        summarise_document.__qualname__ = "DocumentSummarizer.summarise_document"
+        wrapped = strategy(PredictStrategy(), llm=fake_llm)(summarise_document)
 
-        assert fake_llm.prompt_cache_keys[0] is not None
-        # Locks in the contract: if anyone ever drops the per-process token
-        # the cybergym-style multi-trial collision returns.
-        assert standalone_mod._PROCESS_AGENT_ID in fake_llm.prompt_cache_keys[0]
+        await wrapped("input")
+
+        key = fake_llm.prompt_cache_keys[0]
+        assert key is not None
+        assert key.startswith("nooa-")
+        assert len(key) <= 64
+
+    @pytest.mark.asyncio
+    async def test_long_agent_strategy_name_produces_bounded_cache_key_with_middleware(
+        self,
+    ) -> None:
+        """Long custom strategy names are bounded on the middleware path too."""
+
+        class MultiStepResearchPlanningAndVerificationStrategy(PredictStrategy):
+            pass
+
+        fake_llm = _CaptureKwargsLLM(scripted_responses=[_resp('{"value": "ok"}')])
+
+        class SummarizerAgent(Agent, llm=fake_llm):
+            @strategy(MultiStepResearchPlanningAndVerificationStrategy())
+            async def summarise(self, text: str) -> str:
+                """Summarise the text."""
+                ...
+
+        async def passthrough(ctx, call_next):
+            return await call_next(ctx)
+
+        agent = SummarizerAgent()
+        agent.event_manager.intercept("llm_call", passthrough)
+        await agent.summarise("input")
+
+        key = fake_llm.prompt_cache_keys[0]
+        assert key is not None
+        assert key.startswith("nooa-")
+        assert len(key) <= 64
