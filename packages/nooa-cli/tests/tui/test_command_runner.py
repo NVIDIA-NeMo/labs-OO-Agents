@@ -223,7 +223,7 @@ async def test_session_bang_routes_through_command_runner_and_renders_status():
 async def test_session_slash_routes_through_command_runner_and_preserves_result_handling():
     """Slash commands use CommandRunner without changing result routing."""
     session = Session.__new__(Session)
-    session._first_message = None
+    session._session_title_requested = False
     session._session_manager = None
     session.frontend = SimpleNamespace(render=AsyncMock())
     session._command_runner = None
@@ -261,7 +261,7 @@ async def test_session_slash_routes_through_command_runner_and_preserves_result_
 async def test_session_slash_renders_done_before_user_visible_output():
     """User-visible slash output appears after the durable done marker."""
     session = Session.__new__(Session)
-    session._first_message = None
+    session._session_title_requested = False
     session._session_manager = None
     session.frontend = SimpleNamespace(render=AsyncMock())
     session._command_runner = None
@@ -302,7 +302,7 @@ async def test_session_command_result_prefills_input_after_rendering():
     from nooa_cli.tui.output import TextOutput
 
     session = Session.__new__(Session)
-    session._first_message = None
+    session._session_title_requested = False
     session._session_manager = None
     session.frontend = SimpleNamespace(render=AsyncMock())
     session._command_runner = None
@@ -335,7 +335,7 @@ async def test_session_exit_renders_done_before_goodbye_then_exits():
     from nooa_cli.tui.output import TextOutput
 
     session = Session.__new__(Session)
-    session._first_message = None
+    session._session_title_requested = False
     session._session_manager = None
     session.frontend = SimpleNamespace(render=AsyncMock())
     session._command_runner = None
