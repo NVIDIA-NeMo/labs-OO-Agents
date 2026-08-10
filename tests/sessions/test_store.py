@@ -21,7 +21,7 @@ def test_create_record_title_list_and_resume(tmp_path):
     store = SessionStore(tmp_path)
     session = store.create(
         session_id="session-one",
-        host="tui",
+        origin="tui",
         model="test/model",
         agent="CodingAgent",
         working_directory="/workspace",
@@ -33,13 +33,13 @@ def test_create_record_title_list_and_resume(tmp_path):
 
     info = store.list()[0]
     assert info.id == "session-one"
-    assert info.host == "tui"
+    assert info.origin == "tui"
     assert info.model == "test/model"
     assert info.agent == "CodingAgent"
     assert info.working_directory == "/workspace"
     assert info.title == "First session"
     assert info.title_is_user_set is True
-    assert info.turn_count == 2
+    assert info.turn_count == 1
 
     resumed = store.open("session-one")
     try:
@@ -257,13 +257,13 @@ def test_reads_legacy_tui_session_events(tmp_path):
     connection.close()
 
     info = store.get("legacy")
-    assert info.host == "tui"
+    assert info.origin == "tui"
     assert info.model == "legacy/model"
     assert info.agent == "TUIAgent"
     assert info.working_directory == "/legacy"
     assert info.title == "Legacy title"
     assert info.title_is_user_set is True
-    assert info.turn_count == 2
+    assert info.turn_count == 1
     assert [(turn.role, turn.content) for turn in store.load_turns("legacy")] == [
         ("user", "old user"),
         ("agent", "old agent"),

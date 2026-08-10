@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""SQLite-backed durable session repository shared by interactive hosts."""
+"""SQLite-backed sessions owned by agent runtimes and discoverable by hosts."""
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ class SessionInfo:
     working_directory: str = ""
     title: str | None = None
     title_is_user_set: bool = False
-    host: str = ""
+    origin: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +66,12 @@ class SessionTurn:
 
 
 class SessionHandle:
-    """One open session database and its metadata event writer."""
+    """An agent-runtime-owned session database and metadata writer.
+
+    Exactly one live agent runtime owns this handle. Interactive hosts attach
+    to that runtime through their transport; they do not open the database for
+    writing alongside it.
+    """
 
     def __init__(
         self,
@@ -94,12 +99,12 @@ class SessionHandle:
 
     @property
     def storage(self) -> SQLiteStorageManager:
-        """Storage to pass to the agent constructed for this session."""
+        """Storage to pass to the agent constructed by the owning runtime."""
         return self._storage
 
     @property
     def events(self) -> EventManager:
-        """Event manager for host-owned session metadata."""
+        """Event manager for runtime-owned session metadata."""
         return self._events
 
     @property
@@ -153,7 +158,12 @@ class SessionHandle:
 
 
 class SessionStore:
-    """Repository and factory for project-local durable sessions."""
+    """Repository and factory for project-local durable agent sessions.
+
+    A daemon may use read-only operations such as :meth:`list` and :meth:`get`
+    for discovery. Only the process running the agent opens a
+    :class:`SessionHandle` for writes.
+    """
 
     def __init__(self, root: str | Path | None = None) -> None:
         self.root = Path(root) if root is not None else get_project_dir("sessions")
@@ -168,7 +178,7 @@ class SessionStore:
         model: str = "",
         agent: str = "",
         working_directory: str = "",
-        host: str = "",
+        origin: str = "",
         session_id: str | None = None,
         check_same_thread: bool = True,
     ) -> SessionHandle:
@@ -183,7 +193,7 @@ class SessionStore:
         for event_type in SESSION_EVENT_TYPES:
             events.register_event_type(event_type)
         started = SessionStarted(
-            host=host,
+            origin=origin,
             model=model,
             agent=agent,
             working_directory=working_directory,
@@ -204,7 +214,7 @@ class SessionStore:
                 started_at=timestamp,
                 last_active=timestamp,
                 working_directory=working_directory,
-                host=host,
+                origin=origin,
             ),
         )
 
@@ -300,8 +310,8 @@ class SessionStore:
                 ).fetchall()
                 turn_count = int(
                     connection.execute(
-                        "SELECT COUNT(*) FROM events WHERE event_type IN (?, ?, ?, ?)",
-                        tuple(_TURN_EVENT_TYPES),
+                        "SELECT COUNT(*) FROM events WHERE event_type IN (?, ?)",
+                        tuple(_USER_EVENT_TYPES),
                     ).fetchone()[0]
                 )
                 last_row = connection.execute(
@@ -345,10 +355,13 @@ class SessionStore:
             working_directory=str(start.get("working_directory", start.get("working_dir", ""))),
             title=title,
             title_is_user_set=title_is_user_set,
-            host=str(
+            origin=str(
                 start.get(
-                    "host",
-                    "tui" if start_event_type == "TUISessionStart" else "",
+                    "origin",
+                    start.get(
+                        "host",
+                        "tui" if start_event_type == "TUISessionStart" else "",
+                    ),
                 )
             ),
         )

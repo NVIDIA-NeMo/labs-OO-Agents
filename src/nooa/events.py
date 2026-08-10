@@ -363,7 +363,6 @@ class TuiSessionResumed(EventBase):  # type: ignore[misc]
     """
 
     _role: ClassVar[Role] = Role.RUNTIME_EVENT
-    handler_aliases: ClassVar[tuple[str, ...]] = ("SessionResumed",)
 
     session_id: Annotated[str, Field(description="The resumed/started session id")]
     restored: Annotated[
@@ -387,7 +386,6 @@ class TuiSessionCleared(EventBase):  # type: ignore[misc]
     """
 
     _role: ClassVar[Role] = Role.RUNTIME_EVENT
-    handler_aliases: ClassVar[tuple[str, ...]] = ("SessionCleared",)
 
     session_id: Annotated[
         str | None,
