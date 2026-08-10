@@ -781,9 +781,12 @@ def test_mcp_completion_missing_command_is_safe():
     assert completer.complete("/mcp connect ") == []
 
 
-def test_mcp_completion_omits_unsafe_untrusted_server_names():
-    reg = _mcp_registry(["safe-server", "evil\x1b[2J", "has spaces"])
+def test_mcp_completion_quotes_server_names_with_spaces_and_omits_unsafe_names():
+    reg = _mcp_registry(["safe-server", "evil\x1b[2J", "MaaS Jira"])
     items = Completer(registry=reg).complete("/mcp connect ")
 
-    assert [item.text for item in items] == ["/mcp connect safe-server"]
+    assert [item.text for item in items] == [
+        "/mcp connect 'MaaS Jira'",
+        "/mcp connect safe-server",
+    ]
     assert all("\x1b" not in item.display for item in items)

@@ -12,6 +12,7 @@ import keyword
 import logging
 import os
 import re
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -486,7 +487,7 @@ class Completer:
 
         items: list[CompletionItem] = []
         for name in names:
-            attr_name = name.replace("-", "_")
+            attr_name = name.replace("-", "_").replace(" ", "_")
             if (
                 not attr_name.isidentifier()
                 or keyword.iskeyword(attr_name)
@@ -505,8 +506,8 @@ class Completer:
                     status = "configured"
             items.append(
                 CompletionItem(
-                    text=prefix + name,
-                    display=prefix + name,
+                    text=prefix + shlex.quote(name),
+                    display=prefix + shlex.quote(name),
                     description=status,
                 )
             )
