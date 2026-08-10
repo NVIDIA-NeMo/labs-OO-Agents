@@ -75,19 +75,34 @@ class AgentMeta(ABCMeta):
 
         # Process each method in this class's namespace (not inherited)
         for attr_name in list(namespace.keys()):
-            attr_value = namespace.get(attr_name)
+            # Annotated: the branch tests below narrow `unwrapped`, not
+            # `attr_value`, so the declared type has to carry through on its own.
+            attr_value: Any = namespace.get(attr_name)
 
             # Skip if already wrapped (e.g. by @strategy decorator)
             if hasattr(attr_value, "_agent_decorator"):
                 continue
 
+            # A generator hidden behind a descriptor or a decorator is still a
+            # generator, and an ellipsis body on one is still a contradiction —
+            # but neither reaches the branches below (`isfunction` is False for
+            # staticmethod/classmethod objects, and the isgeneratorfunction
+            # family does not follow `__wrapped__`). Reject those up front so a
+            # decorator cannot smuggle the defect back in.
+            mcs._reject_hidden_ellipsis_generator(name, attr_name, attr_value)
+
+            # `isgeneratorfunction`/`isasyncgenfunction` do not follow
+            # `__wrapped__`, so a decorated generator would look like a plain
+            # function here and land in the wrong branch. Unwrap once, up front.
+            unwrapped = inspect.unwrap(attr_value) if callable(attr_value) else attr_value
+
             # Async generators (`async def` + `yield`) are NOT coroutine functions,
             # so this must come before the iscoroutinefunction check — otherwise
             # they fall through to the sync branch (`inspect.isfunction` is True
             # for them) and get a wrapper whose span closes before the body runs.
-            if inspect.isasyncgenfunction(attr_value):
+            if inspect.isasyncgenfunction(unwrapped):
                 # === Async generator path (tracing only) ===
-                mcs._reject_ellipsis_generator(name, attr_name, attr_value, is_async=True)
+                mcs._reject_ellipsis_generator(name, attr_name, attr_value)
 
                 should_trace = mcs._should_trace(attr_name, attr_value, should_trace_class)
                 if should_trace:
@@ -116,26 +131,24 @@ class AgentMeta(ABCMeta):
                 # === Sync method path (tracing only) ===
                 # `inspect.isfunction` is False for property/classmethod/staticmethod
                 # descriptors, so those are naturally skipped.
+                is_generator = inspect.isgeneratorfunction(unwrapped)
+                if is_generator:
+                    # Validate before the dunder skip below: an ellipsis body on a
+                    # generator is a contradiction whether or not we go on to wrap
+                    # it, so `def __iter__(self): yield x; ...` must not slip past.
+                    mcs._reject_ellipsis_generator(name, attr_name, attr_value)
+
                 # Skip dunders to avoid wrapping __init__/__init_subclass__/__setattr__/
                 # __getattribute__ etc. — risk of infinite recursion or running before
                 # the runtime exists. Custom dunders have to be async to be traced.
                 if attr_name.startswith("__") and attr_name.endswith("__"):
                     continue
 
-                should_trace = mcs._should_trace(attr_name, attr_value, should_trace_class)
-
-                if inspect.isgeneratorfunction(attr_value):
-                    # === Sync generator path (tracing only) ===
-                    mcs._reject_ellipsis_generator(name, attr_name, attr_value, is_async=False)
-
-                    if should_trace:
-                        wrapped = mcs._create_sync_gen_wrapper(attr_value)
-                        type.__setattr__(cls, attr_name, wrapped)
-                    continue
-
-                if should_trace:
-                    wrapped = mcs._create_sync_wrapper(attr_value)
-                    type.__setattr__(cls, attr_name, wrapped)
+                if mcs._should_trace(attr_name, attr_value, should_trace_class):
+                    make = (
+                        mcs._create_sync_gen_wrapper if is_generator else mcs._create_sync_wrapper
+                    )
+                    type.__setattr__(cls, attr_name, make(attr_value))
 
         return cls
 
@@ -210,9 +223,7 @@ class AgentMeta(ABCMeta):
             return None
 
     @staticmethod
-    def _reject_ellipsis_generator(
-        class_name: str, method_name: str, method_obj: Callable[..., Any], *, is_async: bool
-    ) -> None:
+    def _reject_ellipsis_generator(class_name: str, method_name: str, method_obj: Any) -> None:
         """Reject a generator method whose body is an ellipsis stub.
 
         An ellipsis body means "the LLM writes this". Generation only happens on
@@ -221,22 +232,46 @@ class AgentMeta(ABCMeta):
         generation and run as an ordinary generator yielding whatever its body
         literally contains. The two markers contradict each other, so this is
         always an authoring mistake rather than a supported combination.
+
+        `has_ellipsis_body` follows `__wrapped__`, so the shape is read from the
+        same unwrapped function it inspects.
         """
         if not has_ellipsis_body(method_obj):
             return
 
+        is_async = inspect.isasyncgenfunction(inspect.unwrap(method_obj))
         shape = (
-            "async generator (async def with yield)" if is_async else "generator (def with yield)"
+            "an async generator (async def with yield)"
+            if is_async
+            else "a generator (def with yield)"
         )
         keyword = "async def" if is_async else "def"
         raise TypeError(
-            f"{class_name}.{method_name} is an {shape} with an ellipsis body, "
+            f"{class_name}.{method_name} is {shape} with an ellipsis body, "
             f"but generator methods cannot be LLM-generated — generation only "
             f"applies to coroutine methods, so the `...` would be silently "
             f"ignored and the method would run as an ordinary generator.\n"
             f"Either write the generator body out in full, or drop the `yield` "
             f"and make it a plain `{keyword}` method for the LLM to implement."
         )
+
+    @staticmethod
+    def _reject_hidden_ellipsis_generator(
+        class_name: str, method_name: str, attr_value: Any
+    ) -> None:
+        """Reject ellipsis generators wrapped in a staticmethod/classmethod descriptor.
+
+        `inspect.isfunction` is False for those descriptors, so they never reach
+        the dispatch branches and would otherwise keep the silent-skip defect
+        that `_reject_ellipsis_generator` exists to prevent. The descriptor never
+        gets a tracing wrapper either way — this only restores the error.
+        """
+        if not isinstance(attr_value, (staticmethod, classmethod)):
+            return
+
+        func = inspect.unwrap(attr_value.__func__)
+        if inspect.isgeneratorfunction(func) or inspect.isasyncgenfunction(func):
+            AgentMeta._reject_ellipsis_generator(class_name, method_name, attr_value.__func__)
 
     @staticmethod
     def _create_async_gen_wrapper(original_func: Callable[..., Any]) -> Callable[..., Any]:
