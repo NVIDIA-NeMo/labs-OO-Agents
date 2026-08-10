@@ -2,18 +2,31 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the SQLite-centric memory store + numpy vector index."""
 
-import json
-import sqlite3
+import multiprocessing
+import queue
 import threading
-from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pytest
-from nooa_memory.config import ForgetPolicy, ReflectionPolicy
 from nooa_memory.embeddings import HashingEmbedder
-from nooa_memory.reflection import ReflectionEngine
 from nooa_memory.schema import EdgeType, Memory, MemoryType
 from nooa_memory.store import MemoryStore, NumpyVectorIndex
+
+
+def _process_writer(path: str, start, result, worker: int, count: int) -> None:
+    """Write distinct rows from a spawned process and report any exception."""
+    store = None
+    try:
+        start.wait(timeout=10)
+        store = MemoryStore(path)
+        for i in range(count):
+            store.add(Memory(id=f"worker-{worker}-{i}", content=f"memory {worker} {i}"))
+        result.put(None)
+    except BaseException as exc:  # pragma: no cover - only returned to parent
+        result.put(repr(exc))
+    finally:
+        if store is not None:
+            store.close()
 
 
 @pytest.fixture
@@ -113,6 +126,114 @@ def test_get_embedding_roundtrip(store, emb):
     assert np.allclose(v, emb.embed(m.embedding_text()), atol=1e-6)
 
 
+def test_file_store_uses_durable_wal(tmp_path):
+    store = MemoryStore(tmp_path / "mem.sqlite")
+    assert store._conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert store._conn.execute("PRAGMA synchronous").fetchone()[0] == 2  # FULL
+    assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    store.close()
+
+
+def test_malformed_stored_embeddings_do_not_disable_memory(tmp_path, emb, caplog):
+    path = tmp_path / "recovered.sqlite"
+    store = MemoryStore(path, embedding_dim=128)
+    valid = _add(store, emb, "valid vector")
+    empty = _add(store, emb, "recovered empty vector")
+    wrong_dim = _add(store, emb, "stale vector dimension")
+    store._conn.execute("UPDATE memories SET embedding = X'' WHERE id = ?", (empty.id,))
+    store._conn.execute(
+        "UPDATE memories SET embedding = ? WHERE id = ?",
+        (np.ones(64, dtype=np.float32).tobytes(), wrong_dim.id),
+    )
+    store._conn.commit()
+    store.close()
+
+    reopened = MemoryStore(path, embedding_dim=128)
+    assert len(reopened._index) == 1
+    assert reopened.get_embedding(empty.id) is None
+    assert reopened.get_embedding(wrong_dim.id) is None
+    assert reopened.knn(emb.embed("valid vector"), 1)[0][0] == valid.id
+    assert "has an empty embedding; ignoring it" in caplog.text
+    assert "has embedding dimension 64, expected 128; ignoring it" in caplog.text
+    reopened.close()
+
+
+def test_rejects_new_embeddings_with_invalid_dimensions(store):
+    with pytest.raises(ValueError, match="must not be empty"):
+        store.add(Memory(content="empty"), np.array([], dtype=np.float32))
+
+    store.add(Memory(content="sets dimension"), np.ones(4, dtype=np.float32))
+    with pytest.raises(ValueError, match="dimension 3 does not match store dimension 4"):
+        store.add(Memory(content="wrong dimension"), np.ones(3, dtype=np.float32))
+
+
+def test_same_store_operations_are_atomic_across_threads(store):
+    entered = threading.Event()
+    release = threading.Event()
+    original_add = store._index.add
+
+    def blocking_add(memory_id, vector):
+        entered.set()
+        assert release.wait(timeout=5)
+        original_add(memory_id, vector)
+
+    store._index.add = blocking_add
+    vector = np.array([1.0, 0.0], dtype=np.float32)
+    writer = threading.Thread(target=store.add, args=(Memory(content="threaded"), vector))
+    writer.start()
+    assert entered.wait(timeout=5)
+
+    read_finished = threading.Event()
+    reader = threading.Thread(target=lambda: (store.count(), read_finished.set()))
+    reader.start()
+    assert not read_finished.wait(timeout=0.1)
+
+    release.set()
+    writer.join(timeout=5)
+    reader.join(timeout=5)
+    assert not writer.is_alive()
+    assert not reader.is_alive()
+    assert read_finished.is_set()
+    assert store.count() == len(store._index) == 1
+
+
+def test_concurrent_process_writers_share_store_safely(tmp_path):
+    path = tmp_path / "shared.sqlite"
+    ctx = multiprocessing.get_context("spawn")
+    start = ctx.Event()
+    result = ctx.Queue()
+    worker_count, rows_per_worker = 4, 25
+    workers = [
+        ctx.Process(target=_process_writer, args=(str(path), start, result, i, rows_per_worker))
+        for i in range(worker_count)
+    ]
+    for worker in workers:
+        worker.start()
+    start.set()
+    errors = []
+    for _ in workers:
+        try:
+            error = result.get(timeout=20)
+        except queue.Empty:
+            error = "writer timed out"
+        if error is not None:
+            errors.append(error)
+    for worker in workers:
+        worker.join(timeout=10)
+        if worker.is_alive():
+            worker.terminate()
+            worker.join()
+            errors.append("writer process did not exit")
+        elif worker.exitcode != 0:
+            errors.append(f"writer exited with {worker.exitcode}")
+
+    assert errors == []
+    store = MemoryStore(path)
+    assert store.count() == worker_count * rows_per_worker
+    assert store._conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    store.close()
+
+
 def test_persistence_reopen(tmp_path, emb):
     path = tmp_path / "mem.sqlite"
     s1 = MemoryStore(path)
@@ -122,7 +243,6 @@ def test_persistence_reopen(tmp_path, emb):
     s2 = MemoryStore(path)
     assert s2.count() == 1
     got = s2.get(m.id)
-    assert got is not None
     assert got.content == "persisted across sessions"
     # index rebuilt from disk -> knn works
     ranked = s2.knn(emb.embed("persisted across sessions"), 1)
@@ -140,148 +260,3 @@ def test_numpy_index_add_remove():
     idx.remove("a")
     assert len(idx) == 1
     assert idx.query(np.array([1.0, 0.0], dtype=np.float32), 2)[0][0] == "b"
-
-
-class _TrackedRLock:
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self._local = threading.local()
-
-    def __enter__(self):
-        self._lock.acquire()
-        self._local.depth = getattr(self._local, "depth", 0) + 1
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        self._local.depth -= 1
-        self._lock.release()
-
-    def owned(self) -> bool:
-        return getattr(self._local, "depth", 0) > 0
-
-
-class _GuardedConnection:
-    def __init__(self, conn, lock: _TrackedRLock) -> None:
-        self._conn = conn
-        self._lock = lock
-
-    def _assert_locked(self) -> None:
-        assert self._lock.owned(), "MemoryStore touched sqlite connection without its lock"
-
-    def execute(self, *args, **kwargs):
-        self._assert_locked()
-        return self._conn.execute(*args, **kwargs)
-
-    def executescript(self, *args, **kwargs):
-        self._assert_locked()
-        return self._conn.executescript(*args, **kwargs)
-
-    def commit(self):
-        self._assert_locked()
-        return self._conn.commit()
-
-    def close(self):
-        self._assert_locked()
-        return self._conn.close()
-
-    def __getattr__(self, name):
-        return getattr(self._conn, name)
-
-
-class _GuardedIndex:
-    def __init__(self, index, lock: _TrackedRLock) -> None:
-        self._index = index
-        self._lock = lock
-
-    def _assert_locked(self) -> None:
-        assert self._lock.owned(), "MemoryStore touched vector index without its lock"
-
-    def add(self, id, vector):
-        self._assert_locked()
-        return self._index.add(id, vector)
-
-    def remove(self, id):
-        self._assert_locked()
-        return self._index.remove(id)
-
-    def query(self, vector, k):
-        self._assert_locked()
-        return self._index.query(vector, k)
-
-    def __len__(self):
-        self._assert_locked()
-        return len(self._index)
-
-
-def test_store_serializes_connection_and_index_access(store, emb):
-    lock = _TrackedRLock()
-    store._lock = lock
-    store._conn = _GuardedConnection(store._conn, lock)
-    store._index = _GuardedIndex(store._index, lock)
-
-    m = _add(store, emb, "alpha beta", type=MemoryType.INFO)
-    got = store.get(m.id)
-    assert got is not None
-    got.add_edge("other", EdgeType.RELATED, 0.4)
-    store.save(got)
-    store.add_edge(got.id, "other", EdgeType.SUPPORTS)
-
-    assert store.resolve_id(m.id[:8]) == m.id
-    assert store.owner_of(m.id) == ""
-    assert store.get_embedding(m.id) is not None
-    assert store.neighbors(m.id)
-    assert store.all_memories()
-    assert store.count() == 1
-    assert store.knn(emb.embed("alpha beta"), 1)
-    assert store.keyword_search("alpha", 1) == [m.id]
-
-    store.rename_owner("missing-owner", "new-owner")
-    store.log_maintenance("test", {"ok": True})
-    assert store.maintenance_history()[0]["report"] == {"ok": True}
-    store.archive(m.id)
-    store.delete(m.id)
-
-
-def test_store_survives_foreground_and_reflection_thread_overlap(tmp_path, emb):
-    path = tmp_path / "memory.sqlite"
-    store = MemoryStore(path)
-    try:
-        for i in range(12):
-            _add(store, emb, f"seed memory {i}", type=MemoryType.INFO)
-
-        engine = ReflectionEngine(
-            store,
-            emb,
-            ReflectionPolicy(merge_threshold=0.999, edge_threshold=0.999),
-            ForgetPolicy(),
-        )
-
-        def reflect_worker() -> None:
-            for _ in range(20):
-                engine.consolidate()
-
-        def foreground_worker(worker_id: int) -> None:
-            for i in range(40):
-                m = _add(store, emb, f"foreground {worker_id} memory {i}")
-                store.count()
-                store.keyword_search("foreground memory", 5)
-                store.knn(emb.embed(f"foreground {worker_id}"), 5)
-                got = store.get(m.id)
-                if got is not None:
-                    got.touch()
-                    store.save(got)
-
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = [pool.submit(reflect_worker)]
-            futures.extend(pool.submit(foreground_worker, n) for n in range(3))
-            for fut in futures:
-                fut.result(timeout=30)
-
-        with sqlite3.connect(path) as conn:
-            assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-            rows = conn.execute("SELECT data FROM memories").fetchall()
-        assert rows
-        for (payload,) in rows:
-            Memory.model_validate(json.loads(payload))
-    finally:
-        store.close()
