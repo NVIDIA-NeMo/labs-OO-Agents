@@ -383,6 +383,22 @@ async def test_agent_attribute_collision_is_rejected_before_factory(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_server_name_with_spaces_connects_using_underscored_agent_attribute(monkeypatch):
+    calls = _fake_create(monkeypatch)
+    reg, agent = _make(
+        servers={"MaaS Jira": {"url": "https://jira.example/mcp", "transport": "streamable-http"}}
+    )
+
+    assert await reg.connect(["MaaS Jira"]) == ["MaaS Jira"]
+    assert agent.MaaS_Jira is reg["MaaS Jira"]
+    assert calls[0][0] == "MaaS Jira"
+    assert "self.MaaS_Jira" in reg.status()
+
+    assert await reg.disconnect(["MaaS Jira"]) == ["MaaS Jira"]
+    assert not hasattr(agent, "MaaS_Jira")
+
+
+@pytest.mark.asyncio
 async def test_normalized_server_name_collision_is_rejected(monkeypatch):
     calls = _fake_create(monkeypatch)
     reg, _ = _make(
