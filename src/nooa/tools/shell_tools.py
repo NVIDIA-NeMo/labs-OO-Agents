@@ -410,9 +410,10 @@ class ShellTools(Skill):
         Yields ``StreamEvent`` chunks (``.kind`` is "stdout"/"stderr", ``.text``
         the chunk) incrementally, then a final ``StreamDone`` (``.returncode``,
         ``.timed_out``) once the command completes. Runs in the persistent
-        session, like ``run``. Closing an active stream terminates the command
-        process group and restarts the shell; cwd is retained, while exported
-        variables and aliases from that shell are lost.
+        session, like ``run``. Closing an active stream interrupts processes
+        created by that command while preserving the persistent shell, its
+        state, and background jobs from earlier commands. The shell is reset
+        only if scoped recovery cannot restore a clean command boundary.
 
         Consume the iterator directly when output should be handled as it arrives::
 

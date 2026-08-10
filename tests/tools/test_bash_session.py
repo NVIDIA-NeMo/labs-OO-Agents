@@ -3,6 +3,7 @@
 """Tests for persistent bash session."""
 
 import asyncio
+import os
 import re
 import shlex
 import tempfile
@@ -162,15 +163,48 @@ class TestBashSession:
         assert ("stdout", "second") in remaining
         assert remaining[-1] == ("__done__", "0,0")
 
+    async def test_successful_stream_preserves_state_and_multiline_syntax(self, session, tmp_path):
+        subdir = tmp_path / "stream-state"
+        subdir.mkdir()
+        command = f"""\
+stream_fn() {{ printf function; }}
+export STREAM_STATE=preserved
+cd {shlex.quote(str(subdir))}
+value=$(cat <<'EOF'
+heredoc-value
+EOF
+)
+printf '%s' "$value"
+"""
+
+        events = [item async for item in session.run_stream(command)]
+
+        assert "".join(value for name, value in events if name == "stdout") == "heredoc-value"
+        assert events[-1] == ("__done__", "0,0")
+        assert session.cwd == subdir
+        out, err, code = await session.run('printf "$STREAM_STATE:"; stream_fn')
+        assert (out, err, code) == ("preserved:function", "", 0)
+
     async def test_abandoned_stream_interrupts_command_and_resynchronizes_shell(self, session):
-        stream = session.run_stream("printf started; sleep 30; printf stale")
+        await session.run(
+            "export BEFORE_CANCEL=preserved; "
+            "keep_fn() { printf function; }; "
+            "shopt -s expand_aliases; alias keep_alias='printf alias'"
+        )
+        start_count = session._start_count
+        stream = session.run_stream(
+            "export DURING_CANCEL=preserved; printf started; sleep 30; printf stale"
+        )
         first = await asyncio.wait_for(anext(stream), timeout=1)
         assert first == ("stdout", "started")
 
         await asyncio.wait_for(stream.aclose(), timeout=3)
 
-        out, err, code = await session.run("printf recovered")
-        assert (out, err, code) == ("recovered", "", 0)
+        assert session._start_count == start_count
+        out, err, code = await session.run(
+            'printf "$BEFORE_CANCEL:$DURING_CANCEL:"; keep_fn; printf :; keep_alias'
+        )
+        assert (out, err, code) == ("preserved:preserved:function:alias", "", 0)
 
     async def test_late_stream_close_preserves_completed_shell_state(self, session, tmp_path):
         subdir = tmp_path / "completed-cwd"
@@ -188,14 +222,90 @@ class TestBashSession:
         out, err, code = await session.run('printf "$PRESERVE:$PWD"')
         assert (out, err, code) == (f"yes:{subdir}", "", 0)
 
-    async def test_abandoned_stream_kills_nested_descendants(self, session):
-        stream = session.run_stream("printf started; sh -c '(sleep .3; printf stale) & wait'")
+    async def test_abandoned_stream_kills_nested_descendants(self, session, tmp_path):
+        child_pid_path = tmp_path / "nested-child.pid"
+        inner = (
+            f"sleep 30 & child=$!; printf '%s' $child > "
+            f"{shlex.quote(str(child_pid_path))}; printf ready; wait"
+        )
+        stream = session.run_stream(f"printf started; sh -c {shlex.quote(inner)}")
+        output = ""
+        while "ready" not in output:
+            name, chunk = await asyncio.wait_for(anext(stream), timeout=1)
+            if name == "stdout":
+                output += chunk
+        nested_pid = int(child_pid_path.read_text())
+        start_count = session._start_count
+
+        await asyncio.wait_for(stream.aclose(), timeout=2)
+
+        assert session._start_count == start_count
+        with pytest.raises(ProcessLookupError):
+            os.kill(nested_pid, 0)
+        out, err, code = await session.run("printf recovered")
+        assert (out, err, code) == ("recovered", "", 0)
+
+    async def test_abandoned_stream_preserves_existing_background_job(self, session, tmp_path):
+        marker = tmp_path / "background-survived"
+        await session.run(f"(sleep .4; printf alive > {shlex.quote(str(marker))}) </dev/null &")
+        start_count = session._start_count
+        stream = session.run_stream("printf started; sleep 30")
         assert await asyncio.wait_for(anext(stream), timeout=1) == ("stdout", "started")
 
         await asyncio.wait_for(stream.aclose(), timeout=2)
 
-        out, err, code = await session.run("sleep .5; printf recovered")
+        assert session._start_count == start_count
+        await asyncio.sleep(0.5)
+        assert marker.read_text() == "alive"
+
+    async def test_abandoned_builtin_loop_preserves_shell_state(self, session):
+        await session.run(
+            "export BUILTIN_CANCEL=preserved; trap 'printf old-handler >/dev/null' USR1"
+        )
+        start_count = session._start_count
+        stream = session.run_stream("printf started; while :; do :; done")
+        assert await asyncio.wait_for(anext(stream), timeout=1) == ("stdout", "started")
+
+        await asyncio.wait_for(stream.aclose(), timeout=3)
+
+        assert session._start_count == start_count
+        out, err, code = await session.run('printf "$BUILTIN_CANCEL"')
+        assert (out, err, code) == ("preserved", "", 0)
+        trap_out, _, _ = await session.run("trap -p USR1")
+        assert "old-handler" in trap_out
+        assert "return 125" not in trap_out
+
+    async def test_cancel_falls_back_to_reset_when_process_inspection_fails(
+        self, session, monkeypatch
+    ):
+        async def unavailable(_root_pid):
+            return None
+
+        monkeypatch.setattr(session, "_descendant_pids", unavailable)
+        start_count = session._start_count
+        stream = session.run_stream("printf started; sleep 30")
+        assert await asyncio.wait_for(anext(stream), timeout=1) == ("stdout", "started")
+
+        await asyncio.wait_for(stream.aclose(), timeout=2)
+
+        assert session._start_count == start_count + 1
+        out, err, code = await session.run("printf recovered")
         assert (out, err, code) == ("recovered", "", 0)
+
+    async def test_stream_preserves_usr1_trap_changed_by_command(self, session):
+        await session.run("trap 'printf old-handler >/dev/null' USR1")
+
+        events = [
+            item
+            async for item in session.run_stream(
+                "trap 'printf new-handler >/dev/null' USR1; printf done"
+            )
+        ]
+
+        assert ("stdout", "done") in events
+        trap_out, _, _ = await session.run("trap -p USR1")
+        assert "new-handler" in trap_out
+        assert "return 125" not in trap_out
 
     async def test_background_output_is_isolated_from_next_command(self, session):
         first = [

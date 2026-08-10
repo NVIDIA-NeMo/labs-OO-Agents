@@ -112,6 +112,8 @@ async def test_close_terminates_underlying_bash_session(sh):
 
 @pytest.mark.asyncio
 async def test_abandoned_stream_interrupts_command_and_resynchronizes_shell(sh):
+    await sh.run("export STREAM_CANCEL_STATE=preserved")
+    start_count = sh.session._start_count
     stream = sh.run_stream("printf started; sleep 30; printf stale")
 
     first = await asyncio.wait_for(anext(stream), timeout=1.0)
@@ -120,8 +122,11 @@ async def test_abandoned_stream_interrupts_command_and_resynchronizes_shell(sh):
 
     await asyncio.wait_for(stream.aclose(), timeout=3.0)
 
-    recovered = await asyncio.wait_for(sh.run("printf recovered"), timeout=2.0)
-    assert recovered.stdout == "recovered"
+    assert sh.session._start_count == start_count
+    recovered = await asyncio.wait_for(
+        sh.run('printf "recovered:$STREAM_CANCEL_STATE"'), timeout=2.0
+    )
+    assert recovered.stdout == "recovered:preserved"
     assert "stale" not in recovered.stdout
 
 

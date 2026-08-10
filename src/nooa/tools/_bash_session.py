@@ -34,6 +34,9 @@ MAX_OUTPUT_CHARS = 30_000
 _DRAIN_TIMEOUT = 0.05  # Seconds to wait for remaining output after sentinel
 _SIGTERM_GRACE = 5.0  # Seconds to wait for sentinel after SIGTERM
 _SIGKILL_GRACE = 2.0  # Seconds to wait for sentinel after SIGKILL
+_STREAM_CANCEL_TERM_GRACE = 0.5
+_STREAM_CANCEL_KILL_GRACE = 0.5
+_STREAM_CANCEL_SHELL_GRACE = 1.0
 
 
 class _CommandOutputPipes:
@@ -414,9 +417,9 @@ class BashSession:
         Each call uses isolated stdout/stderr pipes terminated by random
         per-command markers. Output from a background process after its
         foreground command completes is excluded and cannot bleed into the
-        next call. Closing an active stream resets the persistent shell to
-        terminate its complete process group; cwd is preserved, while shell
-        variables and aliases are lost.
+        next call. Closing an active stream interrupts only processes created
+        by that command and preserves the persistent shell and earlier
+        background jobs. The shell is reset only if scoped recovery fails.
         """
         self._ensure_lock_on_current_loop()
         async with self._lock:
@@ -451,12 +454,30 @@ class BashSession:
             if proc is None or proc.stdin is None or ctrl is None:
                 raise RuntimeError("Bash session failed to restart")
 
+        # Snapshot processes already owned by this shell so cancellation can
+        # spare background servers from earlier commands while terminating the
+        # complete descendant tree created by this command.
+        protected_descendants = await self._descendant_pids(proc.pid)
         output_pipes = await _CommandOutputPipes.open()
         quoted_command = shlex.quote(command)
         quoted_marker = shlex.quote(output_marker_text)
+        saved_cancel_trap = f"_nemo_saved_usr1_{secrets.token_hex(8)}"
+        installed_cancel_trap = f"_nemo_installed_usr1_{secrets.token_hex(8)}"
         script = output_pipes.redirect(
-            f"eval -- {quoted_command}\n"
+            f"{saved_cancel_trap}=$(trap -p USR1)\n"
+            "trap 'return 125' USR1\n"
+            f"{installed_cancel_trap}=$(trap -p USR1)\n"
+            # source preserves persistent-shell mutations while providing a
+            # return boundary for cancelling commands made entirely of bash
+            # builtins (which have no descendant PID to signal).
+            f"source <(printf '%s' {quoted_command})\n"
             "_nemo_ec=$?\n"
+            f'if [[ "$(trap -p USR1)" == "${{{installed_cancel_trap}}}" ]]; then\n'
+            "  trap - USR1\n"
+            f'  if [[ -n "${{{saved_cancel_trap}}}" ]]; then '
+            f'eval "${{{saved_cancel_trap}}}"; fi\n'
+            "fi\n"
+            f"unset {saved_cancel_trap} {installed_cancel_trap}\n"
             f"printf '%s' {quoted_marker}\n"
             f"printf '%s' {quoted_marker} >&2\n"
             "echo $_nemo_ec >&3\n"
@@ -527,6 +548,19 @@ class BashSession:
             pending_bytes[name] = data[safe_length:]
             return decoders[name].decode(payload), False
 
+        async def discard_to_marker(
+            first_read: asyncio.Task[bytes], stream: asyncio.StreamReader
+        ) -> None:
+            """Drain an abandoned stream so bash can write its boundary marker."""
+            carry = b""
+            chunk = await first_read
+            while chunk:
+                data = carry + chunk
+                if output_marker in data:
+                    return
+                carry = data[-(len(output_marker) - 1) :]
+                chunk = await stream.read(4096)
+
         try:
             while not command_complete or len(output_complete) < 2:
                 done, _ = await asyncio.wait(
@@ -572,22 +606,43 @@ class BashSession:
                 ctrl_lines, timed_out = control_task.result()
                 command_complete = True
                 output_pipes.close_keepalives()
+            discard_tasks: list[asyncio.Task[None]] = []
+            if stream_abandoned and not command_complete and self._process is proc:
+                # Keep consuming the command-private FIFOs during interruption.
+                # Otherwise a full pipe could prevent bash from reaching the
+                # output/control markers used to prove it is synchronized.
+                discard_tasks = [
+                    asyncio.create_task(discard_to_marker(task, stream))
+                    for task, (_name, stream) in output_tasks.items()
+                ]
+                recovered = await self._interrupt_stream_command(
+                    proc,
+                    control_task,
+                    protected_descendants,
+                )
+                if recovered is not None:
+                    ctrl_lines, timed_out = recovered
+                    command_complete = True
+                    output_pipes.close_keepalives()
+
             if command_complete:
                 self._update_cwd_from_control(ctrl_lines)
 
-            if not control_task.done():
-                control_task.cancel()
-            for task in output_tasks:
+            cleanup_tasks = [
+                control_task,
+                *output_tasks,
+                *discard_tasks,
+            ]
+            for task in cleanup_tasks:
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(control_task, *output_tasks, return_exceptions=True)
+            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
             await output_pipes.close()
 
-            # An active command may own an arbitrary descendant tree. Resetting
-            # the process group is the only reliable way to prevent descendants
-            # from surviving cancellation and writing stale output later.
+            # Scoped interruption should normally preserve the persistent
+            # shell. Reset only when its control boundary cannot be recovered.
             if stream_abandoned and not command_complete and self._process is proc:
-                self._diagnose_death("run_stream_consumer_closed")
+                self._diagnose_death("run_stream_cancel_recovery_failed")
                 await self.reset()
 
         # Parse exit code
@@ -611,6 +666,180 @@ class BashSession:
             candidate = ctrl_lines[1].strip()
             if candidate.startswith("/"):
                 self._cwd = Path(candidate)
+
+    @staticmethod
+    async def _process_parent_map() -> dict[int, int] | None:
+        """Return ``pid -> ppid`` from portable ``ps``, or None on failure."""
+        try:
+            ps = await asyncio.create_subprocess_exec(
+                "ps",
+                "-axo",
+                "pid=,ppid=",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except OSError:
+            return None
+        try:
+            stdout, _ = await asyncio.wait_for(ps.communicate(), timeout=1.0)
+        except TimeoutError:
+            ps.kill()
+            await ps.wait()
+            return None
+        except BaseException:
+            if ps.returncode is None:
+                ps.kill()
+                await ps.wait()
+            raise
+        if ps.returncode != 0:
+            return None
+
+        parents: dict[int, int] = {}
+        for raw_line in stdout.splitlines():
+            fields = raw_line.split()
+            if len(fields) != 2:
+                continue
+            try:
+                pid, ppid = (int(field) for field in fields)
+            except ValueError:
+                continue
+            parents[pid] = ppid
+        return parents
+
+    @staticmethod
+    def _descendants_from_parents(root_pid: int, parents: dict[int, int]) -> set[int]:
+        children: dict[int, list[int]] = {}
+        for pid, ppid in parents.items():
+            children.setdefault(ppid, []).append(pid)
+
+        descendants: set[int] = set()
+        stack = list(children.get(root_pid, ()))
+        while stack:
+            pid = stack.pop()
+            if pid in descendants:
+                continue
+            descendants.add(pid)
+            stack.extend(children.get(pid, ()))
+        return descendants
+
+    async def _descendant_pids(self, root_pid: int) -> set[int] | None:
+        """Snapshot all descendants, retaining failure as an explicit None."""
+        parents = await self._process_parent_map()
+        if parents is None:
+            return None
+        return self._descendants_from_parents(root_pid, parents)
+
+    async def _signal_command_descendants(
+        self,
+        shell_pid: int,
+        protected_descendants: set[int] | None,
+        sig: signal.Signals,
+    ) -> int | None:
+        """Signal only descendants created after the streamed command began.
+
+        Descendants of processes present in the pre-command snapshot are also
+        protected, so workers spawned later by an existing background server
+        are not mistaken for children of the active command.
+        """
+        if protected_descendants is None:
+            return None
+        parents = await self._process_parent_map()
+        if parents is None:
+            return None
+
+        all_descendants = self._descendants_from_parents(shell_pid, parents)
+        protected_now = set(protected_descendants) & all_descendants
+        for protected_pid in tuple(protected_now):
+            protected_now.update(self._descendants_from_parents(protected_pid, parents))
+        targets = all_descendants - protected_now
+
+        def depth(pid: int) -> int:
+            value = 0
+            seen: set[int] = set()
+            while pid in parents and pid != shell_pid and pid not in seen:
+                seen.add(pid)
+                pid = parents[pid]
+                value += 1
+            return value
+
+        signalled = 0
+        for pid in sorted(targets, key=depth, reverse=True):
+            try:
+                os.kill(pid, sig)
+                signalled += 1
+            except (ProcessLookupError, PermissionError):
+                pass
+        return signalled
+
+    @staticmethod
+    async def _completed_control_result(
+        control_task: asyncio.Task[tuple[list[str], bool]],
+        timeout: float,
+    ) -> tuple[list[str], bool] | None:
+        try:
+            result = await asyncio.wait_for(asyncio.shield(control_task), timeout=timeout)
+        except (TimeoutError, asyncio.CancelledError):
+            return None
+        except Exception:
+            logger.exception("Stream control reader failed during cancellation")
+            return None
+
+        lines, timed_out = result
+        # A normal boundary always carries exit code + cwd. A timeout result
+        # means _read_control_until already performed its recovery sequence.
+        if len(lines) >= 2 or timed_out:
+            return result
+        return None
+
+    async def _interrupt_stream_command(
+        self,
+        proc: asyncio.subprocess.Process,
+        control_task: asyncio.Task[tuple[list[str], bool]],
+        protected_descendants: set[int] | None,
+    ) -> tuple[list[str], bool] | None:
+        """Interrupt one streamed command without routinely replacing bash."""
+        if control_task.done():
+            return await self._completed_control_result(control_task, 0)
+
+        signalled = await self._signal_command_descendants(
+            proc.pid,
+            protected_descendants,
+            signal.SIGTERM,
+        )
+        if signalled is None:
+            return None
+        result = await self._completed_control_result(
+            control_task,
+            _STREAM_CANCEL_TERM_GRACE,
+        )
+        if result is not None:
+            return result
+
+        signalled = await self._signal_command_descendants(
+            proc.pid,
+            protected_descendants,
+            signal.SIGKILL,
+        )
+        if signalled is None:
+            return None
+        result = await self._completed_control_result(
+            control_task,
+            _STREAM_CANCEL_KILL_GRACE,
+        )
+        if result is not None:
+            return result
+
+        # Builtin-only loops have no child PID to target. SIGUSR1 the shell
+        # process itself (not its process group); the temporary USR1 trap
+        # returns from the sourced command without terminating persistent bash.
+        try:
+            os.kill(proc.pid, signal.SIGUSR1)
+        except (ProcessLookupError, PermissionError):
+            return None
+        return await self._completed_control_result(
+            control_task,
+            _STREAM_CANCEL_SHELL_GRACE,
+        )
 
     async def _send_and_wait(
         self, script: str, sentinel: str, timeout: float
