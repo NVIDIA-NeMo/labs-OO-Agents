@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for host-neutral durable session storage."""
+"""Tests for shared durable coding-agent session storage."""
 
 from __future__ import annotations
 
@@ -9,11 +9,11 @@ import sqlite3
 import threading
 from datetime import UTC, datetime
 
+import nooa_cli.sessions.store as store_module
 import pytest
+from nooa_cli.sessions import InvalidSessionIdError, SessionNotFoundError, SessionStore
 
-import nooa.sessions.store as store_module
 from nooa.interactive import AgentMessage
-from nooa.sessions import InvalidSessionIdError, SessionNotFoundError, SessionStore
 from nooa.storage import SessionAlreadyActiveError
 
 

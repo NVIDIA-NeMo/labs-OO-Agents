@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Host-neutral durable interactive agent sessions."""
+"""Durable interactive coding-agent sessions shared by CLI hosts."""
 
-from nooa.sessions.events import (
+from nooa_cli.sessions.events import (
     SESSION_EVENT_TYPES,
     SessionStarted,
     SessionTitleUpdated,
     SessionUserMessage,
 )
-from nooa.sessions.store import (
+from nooa_cli.sessions.store import (
     InvalidSessionIdError,
     SessionHandle,
     SessionInfo,
