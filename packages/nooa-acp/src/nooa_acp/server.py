@@ -79,6 +79,7 @@ class _ACPSession:
     dispatcher: InteractiveSessionDispatcher
     bridge: ACPEventBridge
     commands: CodingSlashCommandRegistry
+    startup_warnings: tuple[str, ...] = ()
     cancel_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     cancel_complete: asyncio.Event = field(default_factory=asyncio.Event)
     notification_tasks: set[asyncio.Task[None]] = field(default_factory=set)
@@ -335,7 +336,7 @@ class CodingACPAdapter:
         commands: CodingSlashCommandRegistry | None = None
         value: _ACPSession | None = None
         try:
-            mcp = await self._create_mcp_tools(mcp_servers)
+            mcp, mcp_warnings = await self._create_mcp_tools(mcp_servers)
             agent = CodingInteractiveAgent(
                 llm=llm,
                 cwd=root,
@@ -349,13 +350,20 @@ class CodingACPAdapter:
             dispatcher = InteractiveSessionDispatcher(agent)
             bridge = ACPEventBridge(agent, self._client, handle.id)
             commands = CodingSlashCommandRegistry(agent)
-            value = _ACPSession(handle, agent, dispatcher, bridge, commands)
+            value = _ACPSession(
+                handle,
+                agent,
+                dispatcher,
+                bridge,
+                commands,
+                startup_warnings=mcp_warnings,
+            )
             commands.set_on_change(
                 lambda available: bridge.publish(_available_commands_update(available)),
             )
             try:
                 runtime = await self._sessions.add(handle.id, value)
-                self._defer_available_commands(value)
+                self._defer_bootstrap_updates(value)
                 return runtime
             except ValueError:
                 raise RequestError.invalid_request(
@@ -372,42 +380,51 @@ class CodingACPAdapter:
                 await llm.aclose()
             raise
 
-    async def _create_mcp_tools(self, mcp_servers: list[Any] | None) -> dict[str, MCPTool]:
+    async def _create_mcp_tools(
+        self,
+        mcp_servers: list[Any] | None,
+    ) -> tuple[dict[str, MCPTool], tuple[str, ...]]:
         servers = list(mcp_servers or [])
         supported_types = (McpServerStdio, HttpMcpServer, SseMcpServer)
-        unsupported = [
-            type(server).__name__ for server in servers if not isinstance(server, supported_types)
-        ]
-        if unsupported:
-            raise RequestError.invalid_params(
-                {"reason": f"Unsupported MCP server type(s): {', '.join(unsupported)}"}
-            )
-        names = [server.name for server in servers if isinstance(server, supported_types)]
-        duplicates = sorted(name for name in set(names) if names.count(name) > 1)
-        if duplicates:
-            raise RequestError.invalid_params(
-                {"reason": f"Duplicate MCP server name(s): {', '.join(duplicates)}"}
-            )
-
         tools: dict[str, MCPTool] = {}
+        warnings: list[str] = []
+        seen_names: set[str] = set()
         for server in servers:
-            if isinstance(server, McpServerStdio):
-                env = {item.name: item.value for item in server.env}
-                tools[server.name] = await MCPManager.create_stdio_server(
-                    server.name,
-                    command=server.command,
-                    args=server.args,
-                    env=env,
+            name = getattr(server, "name", "<unnamed>")
+            if not isinstance(server, supported_types):
+                warnings.append(
+                    f"MCP server {name!r} was not loaded: unsupported ACP server type "
+                    f"{type(server).__name__}."
                 )
-            elif isinstance(server, (HttpMcpServer, SseMcpServer)):
-                headers = {item.name: item.value for item in server.headers}
-                tools[server.name] = await MCPManager.create_url_server(
-                    server.name,
-                    server.url,
-                    headers=headers,
-                    transport="streamable-http" if isinstance(server, HttpMcpServer) else "sse",
+                continue
+            if name in seen_names:
+                warnings.append(
+                    f"MCP server {name!r} was not loaded: another server has the same name."
                 )
-        return tools
+                continue
+            seen_names.add(name)
+            try:
+                if isinstance(server, McpServerStdio):
+                    env = {item.name: item.value for item in server.env}
+                    tools[name] = await MCPManager.create_stdio_server(
+                        name,
+                        command=server.command,
+                        args=server.args,
+                        env=env,
+                    )
+                elif isinstance(server, (HttpMcpServer, SseMcpServer)):
+                    headers = {item.name: item.value for item in server.headers}
+                    tools[name] = await MCPManager.create_url_server(
+                        name,
+                        server.url,
+                        headers=headers,
+                        transport=(
+                            "streamable-http" if isinstance(server, HttpMcpServer) else "sse"
+                        ),
+                    )
+            except Exception as exc:
+                warnings.append(f"MCP server {name!r} was not loaded: {exc}")
+        return tools, tuple(warnings)
 
     async def _get_runtime(self, session_id: str) -> SessionRuntime[_ACPSession]:
         try:
@@ -416,17 +433,27 @@ class CodingACPAdapter:
             raise RequestError.resource_not_found(session_id) from None
 
     @staticmethod
-    def _defer_available_commands(session: _ACPSession) -> None:
-        """Publish commands after the session response can reach clients such as Zed."""
+    def _defer_bootstrap_updates(session: _ACPSession) -> None:
+        """Publish bootstrap updates after the session response can reach clients such as Zed."""
 
         async def _publish() -> None:
             await asyncio.sleep(0)
             session.bridge.publish_best_effort(
                 _available_commands_update(session.commands.commands())
             )
+            if session.startup_warnings:
+                details = "\n".join(f"- {warning}" for warning in session.startup_warnings)
+                session.bridge.publish_best_effort(
+                    update_agent_message(
+                        text_block(
+                            "NOOA started without one or more MCP servers. The session is still "
+                            f"usable.\n\n{details}"
+                        )
+                    )
+                )
             await session.bridge.flush()
 
-        task = asyncio.create_task(_publish(), name="nooa-acp-commands")
+        task = asyncio.create_task(_publish(), name="nooa-acp-bootstrap")
         session.notification_tasks.add(task)
 
         def _finished(done: asyncio.Task[None]) -> None:
