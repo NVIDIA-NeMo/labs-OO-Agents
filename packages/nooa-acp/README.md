@@ -79,8 +79,13 @@ standard error. The agent can execute generated Python and shell commands, so
 use an OS-level sandbox for untrusted tasks. Generated code shares the agent's
 process environment, including model credentials; launch it with only the
 credentials and network access that the session may use.
-Cancellation stops local work immediately. An in-flight provider request may
-finish in the background when its client does not support transport-level aborts.
+Cancellation stops cooperative local work immediately. An in-flight provider
+request may finish in the background when its client does not support
+transport-level aborts. Slash commands run on the agent's event loop so they
+have the same semantics as the native TUI and can safely start agent jobs. An
+async command is cooperatively cancellable; a synchronous command that blocks
+that loop cannot be preempted by the current in-process adapter. The planned
+one-process-per-agent boundary is the safe kill mechanism for that case.
 
 ## Standalone server
 
@@ -105,10 +110,33 @@ session API: the live-session registry is isolated inside `nooa-acp` so it can
 later be replaced by handles to an agent daemon without changing stored
 sessions, the shared coding agent, or the ACP protocol surface.
 
+Python skill packages use the interpreter's normal import machinery. Multiple
+sessions may use distinct skill package names, but two workspaces must not load
+different checkouts under the same top-level Python package name in one ACP
+server process. Launch a separate stdio server for those workspaces. A future
+one-process-per-agent daemon will make that isolation an OS process boundary.
+
 Installed `nooa.skills` entry points are loaded into the shared skill registry
 but remain opt-in. The agent can activate a relevant skill with
 `self.skills.activate(["name"])`. Stdio MCP servers supplied by an ACP client
 are registered and activated as `mcp.<name>` skills for that session.
+
+Workspace and user skill roots are shared with the terminal host through
+layered `settings.yaml`. New configuration should use:
+
+```yaml
+coding:
+  additional_skills_dirs:
+    - ../nemo-oo-skills
+```
+
+The existing `tui.additional_skills_dirs` key remains supported during the
+migration, as does the older project-local `.nooa/config.toml` key
+`[tui].libs_dirs`. Packaged libraries declared through `nooa.skills`, `SKILL.md`
+skills, and standalone Python skills are discovered from each configured root.
+Loaded `@slash_command` methods are advertised through ACP and matching
+`/command arguments` prompts are dispatched through the shared typed command
+router. Command discovery is refreshed when loaded skills change.
 
 The current adapter accepts text and resource-link prompts and stdio MCP
 servers. Additional workspace directories, remote MCP transports, images, and
