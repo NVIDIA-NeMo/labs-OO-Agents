@@ -93,11 +93,20 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path):
     ]
     assert cast(AgentMessageChunk, updates[0]).content.text == "Final answer"
     started = cast(ToolCallStart, updates[1])
-    assert started.raw_input == {"code": "print('hello')"}
+    assert started.kind == "other"
+    assert started.status == "in_progress"
+    assert started.raw_input is None
     assert started.content is not None
     assert len(started.content) == 1
     source = _content_text(cast(ContentToolCallContent, started.content[0]))
     assert source == "```python\nprint('hello')\n```"
+    assert started.model_dump(mode="json", by_alias=True, exclude_none=True)["content"][0] == {
+        "type": "content",
+        "content": {
+            "type": "text",
+            "text": "```python\nprint('hello')\n```",
+        },
+    }
 
     completed = cast(ToolCallProgress, updates[2])
     assert completed.title == "Ran Python"

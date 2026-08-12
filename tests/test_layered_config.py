@@ -73,6 +73,21 @@ class TestLayeredPaths:
         _write(pr, "a: 2\n")
         assert layered_paths(_FILENAME, _ENV_VAR) == [u.resolve(), pr.resolve()]
 
+    def test_explicit_project_dir_is_independent_of_process_config(
+        self, user_dir, project_dir, tmp_path
+    ):
+        process_project = project_dir / _FILENAME
+        workspace_config = tmp_path / "workspace" / ".nooa"
+        workspace_project = workspace_config / _FILENAME
+        _write(process_project, "source: process\n")
+        _write(workspace_project, "source: workspace\n")
+
+        assert layered_paths(
+            _FILENAME,
+            _ENV_VAR,
+            project_dir=workspace_config,
+        ) == [workspace_project.resolve()]
+
     def test_env_highest(self, user_dir, project_dir, tmp_path, monkeypatch):
         u = user_dir / _FILENAME
         pr = project_dir / _FILENAME
@@ -126,6 +141,20 @@ class TestLoadLayeredYaml:
         _write(user_dir / _FILENAME, "model: foo\n")
         _write(project_dir / _FILENAME, "model: bar\n")
         assert load_layered_yaml(_FILENAME, _ENV_VAR)["model"] == "bar"
+
+    def test_explicit_project_dir_is_loaded(self, user_dir, project_dir, tmp_path):
+        _write(project_dir / _FILENAME, "model: process\n")
+        workspace_config = tmp_path / "workspace" / ".nooa"
+        _write(workspace_config / _FILENAME, "model: workspace\n")
+
+        assert (
+            load_layered_yaml(
+                _FILENAME,
+                _ENV_VAR,
+                project_dir=workspace_config,
+            )["model"]
+            == "workspace"
+        )
 
     def test_deep_merge_nested(self, user_dir, project_dir):
         _write(
