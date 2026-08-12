@@ -4,7 +4,7 @@
 
 This is an adapter implementation detail, not part of the durable session
 model. A future agent daemon can replace this registry with daemon handles
-without changing :mod:`nooa.sessions` or the ACP protocol surface.
+without changing :mod:`nooa_cli.sessions` or the ACP protocol surface.
 """
 
 from __future__ import annotations
