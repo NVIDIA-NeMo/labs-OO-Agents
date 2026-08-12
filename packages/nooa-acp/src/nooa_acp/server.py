@@ -39,15 +39,15 @@ from acp.schema import (
 from acp.schema import (
     SessionInfo as ACPSessionInfo,
 )
-
-from nooa.errors import GenerationError
-from nooa.mcp import MCPManager, MCPTool
-from nooa.sessions import (
+from nooa_cli.sessions import (
     InvalidSessionIdError,
     SessionHandle,
     SessionNotFoundError,
     SessionStore,
 )
+
+from nooa.errors import GenerationError
+from nooa.mcp import MCPManager, MCPTool
 from nooa.unifiedllm import UnifiedLLM
 from nooa_acp._runtime import SessionBusyError, SessionRuntime, SessionRuntimePool
 from nooa_acp.coding_agent import CodingInteractiveAgent
