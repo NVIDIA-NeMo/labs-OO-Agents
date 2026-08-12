@@ -129,10 +129,10 @@ def skill_from_module(module: Any, module_name: str, source: str = "") -> "Skill
 def _load_python_skill(
     path: Path,
     *,
-    namespace: str = "",
+    module_instance_key: str = "",
 ) -> "tuple[Skill | None, str | None]":
     """Import *path* and extract a ``Skill`` via :func:`skill_from_module`."""
-    suffix = f"_{namespace}" if namespace else ""
+    suffix = f"_{module_instance_key}" if module_instance_key else ""
     module_name = (
         f"_nooa_skill_{path.stem}_{abs(hash(str(path.resolve()))) & 0xFFFFFFFF:08x}{suffix}"
     )
@@ -403,7 +403,10 @@ class SkillRegistry(Skill):
 
         module_name: str | None = None
         try:
-            skill, module_name = _load_python_skill(entry, namespace=self._next_namespace())
+            skill, module_name = _load_python_skill(
+                entry,
+                module_instance_key=self._next_module_instance_key(),
+            )
             if skill is not None:
                 skill._source_dir = entry.parent
                 name = entry.stem.replace("-", "_").replace(" ", "_")
@@ -424,8 +427,8 @@ class SkillRegistry(Skill):
                 sys.modules.pop(module_name, None)
             logger.warning("Python skill %s skipped", entry, exc_info=True)
 
-    def _next_namespace(self) -> str:
-        """Return an agent-local generation name for a freshly loaded module."""
+    def _next_module_instance_key(self) -> str:
+        """Return a unique key for a freshly loaded standalone skill module."""
         self._load_generation += 1
         return f"{id(self):x}_{self._load_generation:x}"
 
@@ -794,7 +797,7 @@ class SkillRegistry(Skill):
             new_skill, module_name = await asyncio.to_thread(
                 _load_python_skill,
                 source.path,
-                namespace=self._next_namespace(),
+                module_instance_key=self._next_module_instance_key(),
             )
             if new_skill is None or module_name is None:
                 return f"Reload failed for {name}: could not load {source.path}"
