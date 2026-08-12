@@ -10,6 +10,8 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from acp import (
+    embedded_text_resource,
+    resource_block,
     start_tool_call,
     text_block,
     tool_content,
@@ -18,7 +20,7 @@ from acp import (
     update_tool_call,
 )
 from acp.interfaces import Client
-from acp.schema import Cost, ToolCallLocation, UsageUpdate
+from acp.schema import ContentToolCallContent, Cost, ToolCallLocation, UsageUpdate
 from nooa_cli.coding import (
     FileEdit,
     TerminalCommandFinished,
@@ -34,6 +36,39 @@ from nooa_acp.coding_agent import CodingInteractiveAgent
 _STOP = object()
 
 
+def _python_content(
+    tool_call_id: str,
+    code: str,
+    output: str | None = None,
+) -> list[ContentToolCallContent]:
+    """Render Python source and output as syntax-aware ACP resources."""
+    base_uri = f"tool://nooa/python/{tool_call_id}"
+    content = [
+        tool_content(
+            resource_block(
+                embedded_text_resource(
+                    f"{base_uri}/source.py",
+                    code,
+                    mime_type="text/x-python",
+                )
+            )
+        )
+    ]
+    if output is not None:
+        content.append(
+            tool_content(
+                resource_block(
+                    embedded_text_resource(
+                        f"{base_uri}/output.txt",
+                        output,
+                        mime_type="text/plain",
+                    )
+                )
+            )
+        )
+    return content
+
+
 class ACPEventBridge:
     def __init__(self, agent: CodingInteractiveAgent, client: Client, session_id: str) -> None:
         self.agent = agent
@@ -43,6 +78,7 @@ class ACPEventBridge:
         self._error: Exception | None = None
         self._closed = False
         self._open_tools: set[str] = set()
+        self._python_source: dict[str, str] = {}
         self._terminal_output: dict[str, str] = {}
         self._cost_usd = 0.0
         self._unsubscribers: list[Callable[[], None]] = [
@@ -73,13 +109,18 @@ class ACPEventBridge:
             or event.metadata.get("prefill") is True
         ):
             return
+        code = event.arguments.get("code", "")
+        if not isinstance(code, str):
+            code = repr(code)
         self._open_tools.add(event.tool_call_id)
+        self._python_source[event.tool_call_id] = code
         self._enqueue(
             start_tool_call(
                 event.tool_call_id,
                 "Running Python",
                 kind="execute",
                 status="in_progress",
+                content=_python_content(event.tool_call_id, code),
                 raw_input=event.arguments,
             )
         )
@@ -88,6 +129,7 @@ class ACPEventBridge:
         if not isinstance(event, PythonOutput) or event.tool_call_id not in self._open_tools:
             return
         self._open_tools.discard(event.tool_call_id)
+        code = self._python_source.pop(event.tool_call_id, "")
         parts = [
             part.rstrip() for part in (event.stdout, event.stderr, event.error) if part.strip()
         ]
@@ -98,8 +140,9 @@ class ACPEventBridge:
         self._enqueue(
             update_tool_call(
                 event.tool_call_id,
+                title="Python failed" if status == "failed" else "Ran Python",
                 status=status,
-                content=[tool_content(text_block(output))],
+                content=_python_content(event.tool_call_id, code, output),
             )
         )
 
@@ -231,14 +274,22 @@ class ACPEventBridge:
 
     async def fail_open_tools(self, reason: str) -> None:
         for tool_call_id in tuple(self._open_tools):
+            code = self._python_source.pop(tool_call_id, None)
+            content = (
+                _python_content(tool_call_id, code, reason)
+                if code is not None
+                else [tool_content(text_block(reason))]
+            )
             self._enqueue(
                 update_tool_call(
                     tool_call_id,
+                    title="Python interrupted" if code is not None else None,
                     status="failed",
-                    content=[tool_content(text_block(reason))],
+                    content=content,
                 )
             )
         self._open_tools.clear()
+        self._python_source.clear()
         self._terminal_output.clear()
 
     async def close(self) -> None:

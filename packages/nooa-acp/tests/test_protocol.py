@@ -7,7 +7,14 @@ import sys
 from pathlib import Path
 
 from acp import PROTOCOL_VERSION, spawn_agent_process, text_block
-from acp.schema import AgentMessageChunk, ToolCallProgress, ToolCallStart
+from acp.schema import (
+    AgentMessageChunk,
+    ContentToolCallContent,
+    EmbeddedResourceContentBlock,
+    TextResourceContents,
+    ToolCallProgress,
+    ToolCallStart,
+)
 
 
 class _RecordingClient:
@@ -39,8 +46,19 @@ async def test_acp_subprocess_transcript(tmp_path):
     assert initialized.agent_info.name == "nooa-acp"
     assert response.stop_reason == "end_turn"
     assert {update_session for update_session, _ in client.updates} == {session.session_id}
-    assert any(isinstance(update, ToolCallStart) for _, update in client.updates)
-    assert any(isinstance(update, ToolCallProgress) for _, update in client.updates)
+    started = next(update for _, update in client.updates if isinstance(update, ToolCallStart))
+    assert started.content is not None
+    source_content = started.content[0]
+    assert isinstance(source_content, ContentToolCallContent)
+    assert isinstance(source_content.content, EmbeddedResourceContentBlock)
+    assert isinstance(source_content.content.resource, TextResourceContents)
+    assert source_content.content.resource.mime_type == "text/x-python"
+    assert "return_result" in source_content.content.resource.text
+
+    completed = next(update for _, update in client.updates if isinstance(update, ToolCallProgress))
+    assert completed.content is not None
+    assert len(completed.content) == 2
+    assert completed.title == "Ran Python"
     assert any(
         isinstance(update, AgentMessageChunk)
         and update.content.text == "NOOA ACP smoke test passed."
