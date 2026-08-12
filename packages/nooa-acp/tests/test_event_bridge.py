@@ -9,7 +9,9 @@ import pytest
 from acp.schema import (
     AgentMessageChunk,
     ContentToolCallContent,
+    EmbeddedResourceContentBlock,
     FileEditToolCallContent,
+    TextResourceContents,
     ToolCallProgress,
     ToolCallStart,
     UsageUpdate,
@@ -35,6 +37,12 @@ class _RecordingClient:
 
     async def session_update(self, session_id: str, update: object, **kwargs) -> None:
         self.updates.append((session_id, update))
+
+
+def _resource_text(content: ContentToolCallContent) -> tuple[str, str, str | None]:
+    block = cast(EmbeddedResourceContentBlock, content.content)
+    resource = cast(TextResourceContents, block.resource)
+    return resource.uri, resource.text, resource.mime_type
 
 
 async def test_bridge_preserves_message_tool_and_usage_order(tmp_path):
@@ -86,7 +94,30 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path):
         UsageUpdate,
     ]
     assert cast(AgentMessageChunk, updates[0]).content.text == "Final answer"
-    assert cast(ToolCallProgress, updates[2]).status == "completed"
+    started = cast(ToolCallStart, updates[1])
+    assert started.raw_input == {"code": "print('hello')"}
+    assert started.content is not None
+    assert len(started.content) == 1
+    source_uri, source, source_mime = _resource_text(
+        cast(ContentToolCallContent, started.content[0])
+    )
+    assert source_uri.endswith("/source.py")
+    assert source == "print('hello')"
+    assert source_mime == "text/x-python"
+
+    completed = cast(ToolCallProgress, updates[2])
+    assert completed.title == "Ran Python"
+    assert completed.status == "completed"
+    assert completed.content is not None
+    assert len(completed.content) == 2
+    _, completed_source, _ = _resource_text(cast(ContentToolCallContent, completed.content[0]))
+    output_uri, output, output_mime = _resource_text(
+        cast(ContentToolCallContent, completed.content[1])
+    )
+    assert completed_source == "print('hello')"
+    assert output_uri.endswith("/output.txt")
+    assert output == "hello"
+    assert output_mime == "text/plain"
     usage = cast(UsageUpdate, updates[3])
     assert usage.cost is not None
     assert usage.cost.amount == 0.25
@@ -121,8 +152,48 @@ async def test_bridge_marks_failed_python_output(tmp_path):
         for _, update in client.updates
         if isinstance(update, ToolCallProgress)
     )
+    assert progress.title == "Python failed"
     assert progress.status == "failed"
-    assert "Execution error: RuntimeError: boom" in str(progress.content)
+    assert progress.content is not None
+    assert len(progress.content) == 2
+    _, source, source_mime = _resource_text(cast(ContentToolCallContent, progress.content[0]))
+    _, output, output_mime = _resource_text(cast(ContentToolCallContent, progress.content[1]))
+    assert source == "raise RuntimeError('boom')"
+    assert source_mime == "text/x-python"
+    assert output == "Execution error: RuntimeError: boom"
+    assert output_mime == "text/plain"
+    await bridge.close()
+    await agent.close()
+
+
+async def test_bridge_retains_python_source_when_interrupted(tmp_path):
+    agent = CodingInteractiveAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+
+    agent.event_manager.add(
+        ToolCallEvent(
+            tool_call_id="call-1",
+            name="execute_python",
+            arguments={"code": "await asyncio.sleep(30)"},
+        )
+    )
+    await bridge.fail_open_tools("User canceled")
+    await bridge.flush()
+
+    progress = next(
+        cast(ToolCallProgress, update)
+        for _, update in client.updates
+        if isinstance(update, ToolCallProgress)
+    )
+    assert progress.title == "Python interrupted"
+    assert progress.status == "failed"
+    assert progress.content is not None
+    assert len(progress.content) == 2
+    _, source, _ = _resource_text(cast(ContentToolCallContent, progress.content[0]))
+    _, output, _ = _resource_text(cast(ContentToolCallContent, progress.content[1]))
+    assert source == "await asyncio.sleep(30)"
+    assert output == "User canceled"
     await bridge.close()
     await agent.close()
 
