@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""SQLite-backed sessions owned by agent runtimes and discoverable by hosts."""
+"""SQLite-backed coding-agent sessions discoverable by interactive hosts."""
 
 from __future__ import annotations
 
@@ -17,13 +17,13 @@ from typing import Literal
 
 from nooa.paths import get_project_dir
 from nooa.runtime.event_manager import EventManager
-from nooa.sessions.events import (
+from nooa.storage.sqlite import SQLiteStorageManager, delete_sqlite_database
+from nooa_cli.sessions.events import (
     SESSION_EVENT_TYPES,
     SessionStarted,
     SessionTitleUpdated,
     SessionUserMessage,
 )
-from nooa.storage.sqlite import SQLiteStorageManager, delete_sqlite_database
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +158,7 @@ class SessionHandle:
 
 
 class SessionStore:
-    """Repository and factory for project-local durable agent sessions.
+    """Repository and factory for project-local durable coding-agent sessions.
 
     A daemon may use read-only operations such as :meth:`list` and :meth:`get`
     for discovery. Only the process running the agent opens a

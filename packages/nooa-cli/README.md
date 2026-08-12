@@ -32,3 +32,11 @@ uv run nooa-acp
 ```
 
 See the main repo [README](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/README.md) for the framework documentation.
+
+## Interactive coding sessions
+
+`nooa_cli.sessions` owns durable coding-agent session identity, metadata, and
+conversation replay shared by CLI hosts such as the native TUI and ACP. The
+process running an agent owns the writable session handle; other hosts attach
+through their transport or use read-only discovery. Generic event and SQLite
+storage primitives remain in the core `nooa` package.
