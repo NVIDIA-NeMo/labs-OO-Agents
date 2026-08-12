@@ -3,6 +3,7 @@
 """Translate observational NOOA events into ACP session updates."""
 
 import asyncio
+import re
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
@@ -10,8 +11,6 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from acp import (
-    embedded_text_resource,
-    resource_block,
     start_tool_call,
     text_block,
     tool_content,
@@ -36,36 +35,18 @@ from nooa_acp.coding_agent import CodingInteractiveAgent
 _STOP = object()
 
 
-def _python_content(
-    tool_call_id: str,
-    code: str,
-    output: str | None = None,
-) -> list[ContentToolCallContent]:
-    """Render Python source and output as syntax-aware ACP resources."""
-    base_uri = f"tool://nooa/python/{tool_call_id}"
-    content = [
-        tool_content(
-            resource_block(
-                embedded_text_resource(
-                    f"{base_uri}/source.py",
-                    code,
-                    mime_type="text/x-python",
-                )
-            )
-        )
-    ]
+def _fenced_code(text: str, language: str) -> str:
+    """Wrap text in a Markdown fence that cannot collide with its contents."""
+    longest_run = max((len(match.group()) for match in re.finditer(r"`+", text)), default=0)
+    fence = "`" * max(3, longest_run + 1)
+    return f"{fence}{language}\n{text}\n{fence}"
+
+
+def _python_content(code: str, output: str | None = None) -> list[ContentToolCallContent]:
+    """Render Python source and output as Markdown visible in ACP clients."""
+    content = [tool_content(text_block(_fenced_code(code, "python")))]
     if output is not None:
-        content.append(
-            tool_content(
-                resource_block(
-                    embedded_text_resource(
-                        f"{base_uri}/output.txt",
-                        output,
-                        mime_type="text/plain",
-                    )
-                )
-            )
-        )
+        content.append(tool_content(text_block(_fenced_code(output, "text"))))
     return content
 
 
@@ -120,7 +101,7 @@ class ACPEventBridge:
                 "Running Python",
                 kind="execute",
                 status="in_progress",
-                content=_python_content(event.tool_call_id, code),
+                content=_python_content(code),
                 raw_input=event.arguments,
             )
         )
@@ -142,7 +123,7 @@ class ACPEventBridge:
                 event.tool_call_id,
                 title="Python failed" if status == "failed" else "Ran Python",
                 status=status,
-                content=_python_content(event.tool_call_id, code, output),
+                content=_python_content(code, output),
             )
         )
 
@@ -276,7 +257,7 @@ class ACPEventBridge:
         for tool_call_id in tuple(self._open_tools):
             code = self._python_source.pop(tool_call_id, None)
             content = (
-                _python_content(tool_call_id, code, reason)
+                _python_content(code, reason)
                 if code is not None
                 else [tool_content(text_block(reason))]
             )

@@ -9,9 +9,8 @@ import pytest
 from acp.schema import (
     AgentMessageChunk,
     ContentToolCallContent,
-    EmbeddedResourceContentBlock,
     FileEditToolCallContent,
-    TextResourceContents,
+    TextContentBlock,
     ToolCallProgress,
     ToolCallStart,
     UsageUpdate,
@@ -39,10 +38,9 @@ class _RecordingClient:
         self.updates.append((session_id, update))
 
 
-def _resource_text(content: ContentToolCallContent) -> tuple[str, str, str | None]:
-    block = cast(EmbeddedResourceContentBlock, content.content)
-    resource = cast(TextResourceContents, block.resource)
-    return resource.uri, resource.text, resource.mime_type
+def _content_text(content: ContentToolCallContent) -> str:
+    block = cast(TextContentBlock, content.content)
+    return block.text
 
 
 async def test_bridge_preserves_message_tool_and_usage_order(tmp_path):
@@ -98,26 +96,18 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path):
     assert started.raw_input == {"code": "print('hello')"}
     assert started.content is not None
     assert len(started.content) == 1
-    source_uri, source, source_mime = _resource_text(
-        cast(ContentToolCallContent, started.content[0])
-    )
-    assert source_uri.endswith("/source.py")
-    assert source == "print('hello')"
-    assert source_mime == "text/x-python"
+    source = _content_text(cast(ContentToolCallContent, started.content[0]))
+    assert source == "```python\nprint('hello')\n```"
 
     completed = cast(ToolCallProgress, updates[2])
     assert completed.title == "Ran Python"
     assert completed.status == "completed"
     assert completed.content is not None
     assert len(completed.content) == 2
-    _, completed_source, _ = _resource_text(cast(ContentToolCallContent, completed.content[0]))
-    output_uri, output, output_mime = _resource_text(
-        cast(ContentToolCallContent, completed.content[1])
-    )
-    assert completed_source == "print('hello')"
-    assert output_uri.endswith("/output.txt")
-    assert output == "hello"
-    assert output_mime == "text/plain"
+    completed_source = _content_text(cast(ContentToolCallContent, completed.content[0]))
+    output = _content_text(cast(ContentToolCallContent, completed.content[1]))
+    assert completed_source == "```python\nprint('hello')\n```"
+    assert output == "```text\nhello\n```"
     usage = cast(UsageUpdate, updates[3])
     assert usage.cost is not None
     assert usage.cost.amount == 0.25
@@ -156,12 +146,10 @@ async def test_bridge_marks_failed_python_output(tmp_path):
     assert progress.status == "failed"
     assert progress.content is not None
     assert len(progress.content) == 2
-    _, source, source_mime = _resource_text(cast(ContentToolCallContent, progress.content[0]))
-    _, output, output_mime = _resource_text(cast(ContentToolCallContent, progress.content[1]))
-    assert source == "raise RuntimeError('boom')"
-    assert source_mime == "text/x-python"
-    assert output == "Execution error: RuntimeError: boom"
-    assert output_mime == "text/plain"
+    source = _content_text(cast(ContentToolCallContent, progress.content[0]))
+    output = _content_text(cast(ContentToolCallContent, progress.content[1]))
+    assert source == "```python\nraise RuntimeError('boom')\n```"
+    assert output == "```text\nExecution error: RuntimeError: boom\n```"
     await bridge.close()
     await agent.close()
 
@@ -190,10 +178,10 @@ async def test_bridge_retains_python_source_when_interrupted(tmp_path):
     assert progress.status == "failed"
     assert progress.content is not None
     assert len(progress.content) == 2
-    _, source, _ = _resource_text(cast(ContentToolCallContent, progress.content[0]))
-    _, output, _ = _resource_text(cast(ContentToolCallContent, progress.content[1]))
-    assert source == "await asyncio.sleep(30)"
-    assert output == "User canceled"
+    source = _content_text(cast(ContentToolCallContent, progress.content[0]))
+    output = _content_text(cast(ContentToolCallContent, progress.content[1]))
+    assert source == "```python\nawait asyncio.sleep(30)\n```"
+    assert output == "```text\nUser canceled\n```"
     await bridge.close()
     await agent.close()
 

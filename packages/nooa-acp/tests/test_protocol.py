@@ -10,8 +10,7 @@ from acp import PROTOCOL_VERSION, spawn_agent_process, text_block
 from acp.schema import (
     AgentMessageChunk,
     ContentToolCallContent,
-    EmbeddedResourceContentBlock,
-    TextResourceContents,
+    TextContentBlock,
     ToolCallProgress,
     ToolCallStart,
 )
@@ -50,10 +49,9 @@ async def test_acp_subprocess_transcript(tmp_path):
     assert started.content is not None
     source_content = started.content[0]
     assert isinstance(source_content, ContentToolCallContent)
-    assert isinstance(source_content.content, EmbeddedResourceContentBlock)
-    assert isinstance(source_content.content.resource, TextResourceContents)
-    assert source_content.content.resource.mime_type == "text/x-python"
-    assert "return_result" in source_content.content.resource.text
+    assert isinstance(source_content.content, TextContentBlock)
+    assert source_content.content.text.startswith("```python\n")
+    assert "return_result" in source_content.content.text
 
     completed = next(update for _, update in client.updates if isinstance(update, ToolCallProgress))
     assert completed.content is not None
