@@ -7,15 +7,19 @@ import os
 import sys
 import threading
 from typing import Literal
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
 from acp import PROTOCOL_VERSION, RequestError, resource_link_block, text_block
 from acp.schema import (
+    AcpMcpServer,
     AgentMessageChunk,
     AvailableCommandsUpdate,
     EnvVariable,
+    HttpHeader,
+    HttpMcpServer,
     McpServerStdio,
+    SseMcpServer,
     UserMessageChunk,
 )
 from click.testing import CliRunner
@@ -718,6 +722,76 @@ async def test_adapter_connects_baseline_stdio_mcp_servers(tmp_path):
     await adapter.close()
 
 
+async def test_adapter_connects_forwarded_http_and_sse_mcp_servers(tmp_path):
+    client = _RecordingClient()
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+    servers = [
+        HttpMcpServer(
+            name="remote-http",
+            url="https://mcp.example.test/mcp",
+            headers=[HttpHeader(name="Authorization", value="Bearer test")],
+            type="http",
+        ),
+        SseMcpServer(
+            name="remote-sse",
+            url="https://mcp.example.test/sse",
+            headers=[],
+            type="sse",
+        ),
+    ]
+
+    with patch(
+        "nooa_acp.server.MCPManager.create_url_server",
+        new=AsyncMock(side_effect=[_MCPTools(), _MCPTools()]),
+    ) as create:
+        session = await adapter.new_session(str(tmp_path), mcp_servers=servers)
+
+    assert create.await_args_list == [
+        call(
+            "remote-http",
+            "https://mcp.example.test/mcp",
+            headers={"Authorization": "Bearer test"},
+            transport="streamable-http",
+        ),
+        call(
+            "remote-sse",
+            "https://mcp.example.test/sse",
+            headers={},
+            transport="sse",
+        ),
+    ]
+    runtime = await _session(adapter, session.session_id)
+    assert {"mcp.remote-http", "mcp.remote-sse"}.issubset(runtime.agent.skills.loaded())
+    assert {"mcp.remote-http", "mcp.remote-sse"}.issubset(runtime.agent.skills.activated())
+    await adapter.close()
+
+
+async def test_adapter_rejects_forwarded_acp_transport_mcp_server(tmp_path):
+    client = _RecordingClient()
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+    server = AcpMcpServer(name="proxied", id="server-1", type="acp")
+
+    with (
+        patch(
+            "nooa_acp.server.MCPManager.create_stdio_server",
+            new=AsyncMock(),
+        ) as create_stdio,
+        patch(
+            "nooa_acp.server.MCPManager.create_url_server",
+            new=AsyncMock(),
+        ) as create_url,
+        pytest.raises(RequestError) as exc_info,
+    ):
+        await adapter.new_session(str(tmp_path), mcp_servers=[server])
+
+    assert "AcpMcpServer" in exc_info.value.data["reason"]
+    create_stdio.assert_not_awaited()
+    create_url.assert_not_awaited()
+    await adapter.close()
+
+
 async def test_adapter_allows_independent_session_creation(tmp_path):
     client = _RecordingClient()
     adapter = CodingACPAdapter(_completed_llm)
@@ -958,17 +1032,29 @@ async def test_adapter_rejects_duplicate_mcp_names_before_startup(tmp_path):
     adapter.on_connect(client)  # type: ignore[arg-type]
     servers = [
         McpServerStdio(name="lookup", command="first", args=[], env=[]),
-        McpServerStdio(name="lookup", command="second", args=[], env=[]),
+        HttpMcpServer(
+            name="lookup",
+            url="https://mcp.example.test/mcp",
+            headers=[],
+            type="http",
+        ),
     ]
 
-    with patch(
-        "nooa_acp.server.MCPManager.create_stdio_server",
-        new=AsyncMock(return_value=_MCPTools()),
-    ) as create:
+    with (
+        patch(
+            "nooa_acp.server.MCPManager.create_stdio_server",
+            new=AsyncMock(return_value=_MCPTools()),
+        ) as create_stdio,
+        patch(
+            "nooa_acp.server.MCPManager.create_url_server",
+            new=AsyncMock(return_value=_MCPTools()),
+        ) as create_url,
+    ):
         with pytest.raises(RequestError):
             await adapter.new_session(str(tmp_path), mcp_servers=servers)
 
-    create.assert_not_awaited()
+    create_stdio.assert_not_awaited()
+    create_url.assert_not_awaited()
     await adapter.close()
 
 

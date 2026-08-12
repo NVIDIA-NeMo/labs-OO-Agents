@@ -833,6 +833,49 @@ async def test_create_stdio_server_builds_tool_without_blocking_wrapper():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["streamable-http", "sse"])
+async def test_create_url_server_builds_tool_from_explicit_client_config(transport):
+    session = AsyncMock()
+    remote_tool = MagicMock()
+    remote_tool.name = "echo"
+    remote_tool.description = "Echo a value"
+    remote_tool.inputSchema = {
+        "type": "object",
+        "properties": {"message": {"type": "string"}},
+        "required": ["message"],
+    }
+    session.list_tools.return_value.tools = [remote_tool]
+    client = MagicMock()
+
+    class Context:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    client.connect_to_server.return_value = Context()
+    headers = {"Authorization": "Bearer test"}
+
+    with patch("nooa.mcp.tool.create_mcp_client", return_value=client) as create:
+        tool = await MCPManager.create_url_server(
+            "everything",
+            "https://mcp.example.test/mcp",
+            headers=headers,
+            transport=transport,
+        )
+
+    assert isinstance(tool, MCPTool)
+    assert callable(tool.echo)  # type: ignore[attr-defined]
+    create.assert_called_once_with(
+        transport=transport,
+        url="https://mcp.example.test/mcp",
+        headers=headers,
+        tool_call_timeout=timedelta(seconds=60),
+    )
+
+
+@pytest.mark.asyncio
 async def test_create_stdio_server_closes_connection_on_cancellation():
     started = asyncio.Event()
     closed = asyncio.Event()
