@@ -87,6 +87,7 @@ Loaded `@slash_command` methods are advertised through ACP and matching
 `/command arguments` prompts are dispatched through the shared typed command
 router. Command discovery is refreshed when loaded skills change.
 
-The current adapter accepts text and resource-link prompts and stdio MCP
-servers. Additional workspace directories, remote MCP transports, images, and
-embedded resources are not advertised yet.
+The current adapter accepts text and resource-link prompts plus stdio, HTTP,
+and SSE MCP servers forwarded by an ACP client. ACP-transport MCP proxies,
+additional workspace directories, images, and embedded resources are not
+advertised yet.

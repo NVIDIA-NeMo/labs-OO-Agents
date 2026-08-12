@@ -32,12 +32,14 @@ from acp.schema import (
     AvailableCommand,
     AvailableCommandInput,
     CloseSessionResponse,
+    HttpMcpServer,
     Implementation,
     ListSessionsResponse,
     McpServerStdio,
     SessionCapabilities,
     SessionCloseCapabilities,
     SessionListCapabilities,
+    SseMcpServer,
     UnstructuredCommandInput,
 )
 from acp.schema import (
@@ -371,19 +373,16 @@ class CodingACPAdapter:
             raise
 
     async def _create_mcp_tools(self, mcp_servers: list[Any] | None) -> dict[str, MCPTool]:
+        servers = list(mcp_servers or [])
+        supported_types = (McpServerStdio, HttpMcpServer, SseMcpServer)
         unsupported = [
-            type(server).__name__
-            for server in mcp_servers or []
-            if not isinstance(server, McpServerStdio)
+            type(server).__name__ for server in servers if not isinstance(server, supported_types)
         ]
         if unsupported:
             raise RequestError.invalid_params(
                 {"reason": f"Unsupported MCP server type(s): {', '.join(unsupported)}"}
             )
-        stdio_servers = [
-            server for server in mcp_servers or [] if isinstance(server, McpServerStdio)
-        ]
-        names = [server.name for server in stdio_servers]
+        names = [server.name for server in servers if isinstance(server, supported_types)]
         duplicates = sorted(name for name in set(names) if names.count(name) > 1)
         if duplicates:
             raise RequestError.invalid_params(
@@ -391,14 +390,23 @@ class CodingACPAdapter:
             )
 
         tools: dict[str, MCPTool] = {}
-        for server in stdio_servers:
-            env = {item.name: item.value for item in server.env}
-            tools[server.name] = await MCPManager.create_stdio_server(
-                server.name,
-                command=server.command,
-                args=server.args,
-                env=env,
-            )
+        for server in servers:
+            if isinstance(server, McpServerStdio):
+                env = {item.name: item.value for item in server.env}
+                tools[server.name] = await MCPManager.create_stdio_server(
+                    server.name,
+                    command=server.command,
+                    args=server.args,
+                    env=env,
+                )
+            elif isinstance(server, (HttpMcpServer, SseMcpServer)):
+                headers = {item.name: item.value for item in server.headers}
+                tools[server.name] = await MCPManager.create_url_server(
+                    server.name,
+                    server.url,
+                    headers=headers,
+                    transport="streamable-http" if isinstance(server, HttpMcpServer) else "sse",
+                )
         return tools
 
     async def _get_runtime(self, session_id: str) -> SessionRuntime[_ACPSession]:
