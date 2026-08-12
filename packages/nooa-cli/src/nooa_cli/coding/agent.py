@@ -147,6 +147,14 @@ class CodingAgent(InteractiveAgent):
 
     @hidden
     async def close(self) -> None:
-        await self.queue_manager.shutdown()
-        await self.shell.close()
-        await self.llm.aclose()
+        shell = self.shell
+        try:
+            await self.skills.aclose()
+        finally:
+            try:
+                await self.queue_manager.shutdown()
+            finally:
+                try:
+                    await shell.close()
+                finally:
+                    await self.llm.aclose()

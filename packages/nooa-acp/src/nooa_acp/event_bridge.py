@@ -3,9 +3,11 @@
 """Translate observational NOOA events into ACP session updates."""
 
 import asyncio
+import logging
 import re
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -33,6 +35,12 @@ from nooa.interactive import AgentMessage
 from nooa_acp.coding_agent import CodingInteractiveAgent
 
 _STOP = object()
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _BestEffortUpdate:
+    value: Any
 
 
 def _fenced_code(text: str, language: str) -> str:
@@ -78,6 +86,14 @@ class ACPEventBridge:
         if not self._closed:
             self._queue.put_nowait(update)
 
+    def publish(self, update: Any) -> None:
+        """Queue a host-originated session update on the ordered ACP stream."""
+        self._enqueue(update)
+
+    def publish_best_effort(self, update: Any) -> None:
+        """Queue bootstrap metadata without poisoning the live event stream."""
+        self._enqueue(_BestEffortUpdate(update))
+
     def _on_agent_message(self, event: EventBase) -> None:
         if not isinstance(event, AgentMessage):
             return
@@ -99,10 +115,13 @@ class ACPEventBridge:
             start_tool_call(
                 event.tool_call_id,
                 "Running Python",
-                kind="execute",
+                # Zed 1.14 treats every ``execute`` tool as a terminal card.
+                # A plain-content execute card has neither a terminal nor an
+                # output disclosure, so its source cannot be opened. Python is
+                # structured Markdown content, not a client-owned terminal.
+                kind="other",
                 status="in_progress",
                 content=_python_content(code),
-                raw_input=event.arguments,
             )
         )
 
@@ -238,7 +257,15 @@ class ACPEventBridge:
                         else:
                             item.set_exception(self._error)
                     continue
-                if self._error is None:
+                if isinstance(item, _BestEffortUpdate):
+                    try:
+                        await self.client.session_update(self.session_id, item.value)
+                    except Exception:
+                        logger.debug(
+                            "ACP client rejected best-effort session bootstrap update",
+                            exc_info=True,
+                        )
+                elif self._error is None:
                     try:
                         await self.client.session_update(self.session_id, item)
                     except Exception as exc:

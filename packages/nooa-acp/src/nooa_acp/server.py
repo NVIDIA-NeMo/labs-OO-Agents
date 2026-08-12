@@ -25,9 +25,12 @@ from acp import (
     update_agent_message,
     update_user_message,
 )
+from acp.helpers import update_available_commands
 from acp.interfaces import Agent, Client
 from acp.schema import (
     AgentCapabilities,
+    AvailableCommand,
+    AvailableCommandInput,
     CloseSessionResponse,
     Implementation,
     ListSessionsResponse,
@@ -35,9 +38,15 @@ from acp.schema import (
     SessionCapabilities,
     SessionCloseCapabilities,
     SessionListCapabilities,
+    UnstructuredCommandInput,
 )
 from acp.schema import (
     SessionInfo as ACPSessionInfo,
+)
+from nooa_cli.coding import (
+    CodingSlashCommand,
+    CodingSlashCommandRegistry,
+    load_coding_skills_dirs,
 )
 from nooa_cli.sessions import (
     InvalidSessionIdError,
@@ -48,6 +57,8 @@ from nooa_cli.sessions import (
 
 from nooa.errors import GenerationError
 from nooa.mcp import MCPManager, MCPTool
+from nooa.skill_registry import SkillPackageConflictError
+from nooa.slash_dispatch import CoercionError
 from nooa.unifiedllm import UnifiedLLM
 from nooa_acp._runtime import SessionBusyError, SessionRuntime, SessionRuntimePool
 from nooa_acp.coding_agent import CodingInteractiveAgent
@@ -65,20 +76,31 @@ class _ACPSession:
     agent: CodingInteractiveAgent
     dispatcher: InteractiveSessionDispatcher
     bridge: ACPEventBridge
+    commands: CodingSlashCommandRegistry
     cancel_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     cancel_complete: asyncio.Event = field(default_factory=asyncio.Event)
+    notification_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+    commands_sent_on_prompt: bool = False
 
     def __post_init__(self) -> None:
         self.cancel_complete.set()
 
     async def close(self) -> None:
+        for task in self.notification_tasks:
+            task.cancel()
+        if self.notification_tasks:
+            await asyncio.gather(*self.notification_tasks, return_exceptions=True)
+        self.notification_tasks.clear()
         try:
             await self.bridge.close()
         finally:
             try:
-                await self.dispatcher.close()
+                self.commands.close()
             finally:
-                self.handle.close()
+                try:
+                    await self.dispatcher.close()
+                finally:
+                    self.handle.close()
 
 
 class CodingACPAdapter:
@@ -142,9 +164,11 @@ class CodingACPAdapter:
             raise
         try:
             await self._create_runtime(handle, root, mcp_servers, llm=llm)
-        except BaseException:
+        except BaseException as exc:
             handle.close()
             self._store(root).delete(handle.id)
+            if isinstance(exc, SkillPackageConflictError):
+                raise RequestError.invalid_request({"reason": str(exc)}) from None
             raise
         return NewSessionResponse(session_id=handle.id)
 
@@ -166,12 +190,14 @@ class CodingACPAdapter:
         try:
             runtime = await self._create_runtime(handle, root, mcp_servers)
             await self._replay_session(handle)
-        except BaseException:
+        except BaseException as exc:
             if runtime is not None:
                 with suppress(KeyError):
                     await self._sessions.remove(session_id)
             else:
                 handle.close()
+            if isinstance(exc, SkillPackageConflictError):
+                raise RequestError.invalid_request({"reason": str(exc)}) from None
             raise
         return LoadSessionResponse()
 
@@ -224,7 +250,39 @@ class CodingACPAdapter:
                 session.handle.record_user_message(text)
                 session.cancel_complete.clear()
                 try:
-                    result = await session.dispatcher.submit(text)
+                    if not session.commands_sent_on_prompt:
+                        session.bridge.publish(
+                            _available_commands_update(session.commands.commands())
+                        )
+                        session.commands_sent_on_prompt = True
+                    slash = self._slash_invocation(session.commands, text)
+                    if slash is None:
+                        result = await session.dispatcher.submit(text)
+                    else:
+                        name, raw_args = slash
+                        try:
+                            submission = await session.dispatcher.invoke_slash(
+                                session.commands,
+                                name,
+                                raw_args,
+                            )
+                        except CoercionError as exc:
+                            message = f"/{name}: {exc.message}"
+                            if exc.hint:
+                                message += f"\n\nUsage: `/{name} {exc.hint}`"
+                            session.agent.message(message)
+                            await session.bridge.flush()
+                            return PromptResponse(stop_reason="end_turn")
+                        if submission is None:
+                            result = None
+                        else:
+                            slash_result, result = submission
+                            if not slash_result.output_to_agent:
+                                message = str(slash_result)
+                                if message:
+                                    session.agent.message(message)
+                                await session.bridge.flush()
+                                return PromptResponse(stop_reason="end_turn")
                 except GenerationError as exc:
                     await session.bridge.flush()
                     message = str(exc)
@@ -272,19 +330,31 @@ class CodingACPAdapter:
             await llm.aclose()
             raise RequestError.internal_error({"reason": "ACP client is not connected"})
         agent: CodingInteractiveAgent | None = None
+        commands: CodingSlashCommandRegistry | None = None
         value: _ACPSession | None = None
         try:
             mcp = await self._create_mcp_tools(mcp_servers)
-            agent = CodingInteractiveAgent(llm=llm, cwd=root, storage=handle.storage)
+            agent = CodingInteractiveAgent(
+                llm=llm,
+                cwd=root,
+                storage=handle.storage,
+                skills_dirs=load_coding_skills_dirs(root),
+            )
             for name, tool in mcp.items():
                 registry_name = f"mcp.{name}"
                 agent.skills.register(registry_name, tool)
                 agent.skills.activate([registry_name])
             dispatcher = InteractiveSessionDispatcher(agent)
             bridge = ACPEventBridge(agent, self._client, handle.id)
-            value = _ACPSession(handle, agent, dispatcher, bridge)
+            commands = CodingSlashCommandRegistry(agent)
+            value = _ACPSession(handle, agent, dispatcher, bridge, commands)
+            commands.set_on_change(
+                lambda available: bridge.publish(_available_commands_update(available)),
+            )
             try:
-                return await self._sessions.add(handle.id, value)
+                runtime = await self._sessions.add(handle.id, value)
+                self._defer_available_commands(value)
+                return runtime
             except ValueError:
                 raise RequestError.invalid_request(
                     {"sessionId": handle.id, "reason": "Session is already loaded"}
@@ -293,6 +363,8 @@ class CodingACPAdapter:
             if value is not None:
                 await value.close()
             elif agent is not None:
+                if commands is not None:
+                    commands.close()
                 await agent.close()
             else:
                 await llm.aclose()
@@ -334,6 +406,27 @@ class CodingACPAdapter:
             return await self._sessions.get(session_id)
         except KeyError:
             raise RequestError.resource_not_found(session_id) from None
+
+    @staticmethod
+    def _defer_available_commands(session: _ACPSession) -> None:
+        """Publish commands after the session response can reach clients such as Zed."""
+
+        async def _publish() -> None:
+            await asyncio.sleep(0)
+            session.bridge.publish_best_effort(
+                _available_commands_update(session.commands.commands())
+            )
+            await session.bridge.flush()
+
+        task = asyncio.create_task(_publish(), name="nooa-acp-commands")
+        session.notification_tasks.add(task)
+
+        def _finished(done: asyncio.Task[None]) -> None:
+            session.notification_tasks.discard(done)
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(_finished)
 
     async def _replay_session(self, handle: SessionHandle) -> None:
         if self._client is None:
@@ -380,6 +473,21 @@ class CodingACPAdapter:
             raise RequestError.invalid_params({"reason": "Prompt text must not be empty"})
         return text
 
+    @staticmethod
+    def _slash_invocation(
+        commands: CodingSlashCommandRegistry,
+        text: str,
+    ) -> tuple[str, str] | None:
+        stripped = text.strip()
+        if not stripped.startswith("/"):
+            return None
+        command_text = stripped[1:]
+        parts = command_text.split(maxsplit=1)
+        name = parts[0].lower() if parts else ""
+        if not name or commands.get(name) is None:
+            return None
+        return name, parts[1] if len(parts) == 2 else ""
+
     async def close(self) -> None:
         await self._sessions.close()
 
@@ -391,3 +499,23 @@ async def serve(llm_factory: Callable[[], UnifiedLLM]) -> None:
     finally:
         with suppress(Exception):
             await adapter.close()
+
+
+def _available_commands_update(commands: tuple[CodingSlashCommand, ...]):
+    available: list[AvailableCommand] = []
+    for command in commands:
+        input_spec = (
+            AvailableCommandInput(
+                UnstructuredCommandInput(hint=command.argument_hint),
+            )
+            if command.argument_hint
+            else None
+        )
+        available.append(
+            AvailableCommand(
+                name=command.name,
+                description=command.description,
+                input=input_spec,
+            )
+        )
+    return update_available_commands(available)
