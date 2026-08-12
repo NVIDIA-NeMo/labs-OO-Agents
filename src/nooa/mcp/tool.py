@@ -815,6 +815,39 @@ class MCPManager:
         return _create_tool_instance(server_name, client, tools_result, refresh_ctx)
 
     @staticmethod
+    async def create_url_server(
+        server_name: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        transport: Literal["sse", "streamable-http"] = "streamable-http",
+        tool_call_timeout: timedelta = timedelta(seconds=60),
+    ) -> MCPTool:
+        """Create an HTTP or SSE MCP tool from trusted, explicit client configuration.
+
+        Interactive hosts such as ACP already receive a resolved URL and headers
+        from their client. This async factory connects and lists tools without
+        routing through the synchronous config/OAuth wrapper.
+        """
+        if transport not in ("sse", "streamable-http"):
+            raise ValueError(f"Unsupported URL MCP transport {transport!r}")
+        resolved_headers = dict(headers or {})
+        client = create_mcp_client(
+            transport=transport,
+            url=url,
+            headers=resolved_headers,
+            tool_call_timeout=tool_call_timeout,
+        )
+        async with client.connect_to_server() as session:
+            tools_result = await session.list_tools()
+        refresh_ctx = {
+            "server_url": url,
+            "headers": resolved_headers,
+            "transport": transport,
+        }
+        return _create_tool_instance(server_name, client, tools_result, refresh_ctx)
+
+    @staticmethod
     def create_from_server(
         server_name: str,
         command: str | None = None,
