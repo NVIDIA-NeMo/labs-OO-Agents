@@ -725,6 +725,18 @@ def _create_tool_instance(
     return instance
 
 
+async def _list_server_tools(server_name: str, client: Any) -> Any:
+    """Connect once for discovery and preserve the useful cause of TaskGroup errors."""
+    try:
+        async with client.connect_to_server() as session:
+            return await session.list_tools()
+    except Exception as exc:
+        details = _describe_exceptions([exc])
+        raise RuntimeError(
+            f"Could not connect to MCP server {server_name!r}" + (f": {details}" if details else "")
+        ) from exc
+
+
 class MCPManager:
     """Manager for creating and connecting to MCP server tool instances.
 
@@ -803,8 +815,7 @@ class MCPManager:
             env=env,
             tool_call_timeout=tool_call_timeout,
         )
-        async with client.connect_to_server() as session:
-            tools_result = await session.list_tools()
+        tools_result = await _list_server_tools(server_name, client)
         refresh_ctx = {
             "server_url": "",
             "transport": "stdio",
@@ -838,8 +849,7 @@ class MCPManager:
             headers=resolved_headers,
             tool_call_timeout=tool_call_timeout,
         )
-        async with client.connect_to_server() as session:
-            tools_result = await session.list_tools()
+        tools_result = await _list_server_tools(server_name, client)
         refresh_ctx = {
             "server_url": url,
             "headers": resolved_headers,

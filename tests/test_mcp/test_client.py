@@ -876,6 +876,36 @@ async def test_create_url_server_builds_tool_from_explicit_client_config(transpo
 
 
 @pytest.mark.asyncio
+async def test_create_url_server_surfaces_nested_connection_error():
+    client = MagicMock()
+
+    class Context:
+        async def __aenter__(self):
+            raise ExceptionGroup(
+                "unhandled errors in a TaskGroup",
+                [ConnectionRefusedError("connection refused")],
+            )
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    client.connect_to_server.return_value = Context()
+
+    with (
+        patch("nooa.mcp.tool.create_mcp_client", return_value=client),
+        pytest.raises(RuntimeError) as exc_info,
+    ):
+        await MCPManager.create_url_server(
+            "offline",
+            "https://mcp.example.test/mcp",
+        )
+
+    assert str(exc_info.value) == (
+        "Could not connect to MCP server 'offline': ConnectionRefusedError: connection refused"
+    )
+
+
+@pytest.mark.asyncio
 async def test_create_stdio_server_closes_connection_on_cancellation():
     started = asyncio.Event()
     closed = asyncio.Event()

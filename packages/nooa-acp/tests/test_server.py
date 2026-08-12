@@ -767,8 +767,8 @@ async def test_adapter_connects_forwarded_http_and_sse_mcp_servers(tmp_path):
     await adapter.close()
 
 
-async def test_adapter_rejects_forwarded_acp_transport_mcp_server(tmp_path):
-    client = _RecordingClient()
+async def test_adapter_skips_forwarded_acp_transport_mcp_server(tmp_path):
+    client = _RegistrationAwareClient()
     adapter = CodingACPAdapter(_completed_llm)
     adapter.on_connect(client)  # type: ignore[arg-type]
     server = AcpMcpServer(name="proxied", id="server-1", type="acp")
@@ -782,13 +782,68 @@ async def test_adapter_rejects_forwarded_acp_transport_mcp_server(tmp_path):
             "nooa_acp.server.MCPManager.create_url_server",
             new=AsyncMock(),
         ) as create_url,
-        pytest.raises(RequestError) as exc_info,
     ):
-        await adapter.new_session(str(tmp_path), mcp_servers=[server])
+        created = await adapter.new_session(str(tmp_path), mcp_servers=[server])
 
-    assert "AcpMcpServer" in exc_info.value.data["reason"]
     create_stdio.assert_not_awaited()
     create_url.assert_not_awaited()
+    client.registered.add(created.session_id)
+    await asyncio.sleep(0)
+    runtime = await _session(adapter, created.session_id)
+    await runtime.bridge.flush()
+    warning = next(
+        update.content.text
+        for _, update in client.accepted
+        if isinstance(update, AgentMessageChunk)
+    )
+    assert "session is still usable" in warning
+    assert "unsupported ACP server type AcpMcpServer" in warning
+    await adapter.close()
+
+
+async def test_adapter_loads_healthy_mcp_when_another_server_fails(tmp_path):
+    client = _RegistrationAwareClient()
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+    servers = [
+        HttpMcpServer(
+            name="offline",
+            url="https://offline.example.test/mcp",
+            headers=[],
+            type="http",
+        ),
+        HttpMcpServer(
+            name="healthy",
+            url="https://healthy.example.test/mcp",
+            headers=[],
+            type="http",
+        ),
+    ]
+
+    with patch(
+        "nooa_acp.server.MCPManager.create_url_server",
+        new=AsyncMock(
+            side_effect=[
+                RuntimeError("Could not connect: ConnectionRefusedError: refused"),
+                _MCPTools(),
+            ]
+        ),
+    ):
+        created = await adapter.new_session(str(tmp_path), mcp_servers=servers)
+
+    client.registered.add(created.session_id)
+    await asyncio.sleep(0)
+    runtime = await _session(adapter, created.session_id)
+    await runtime.bridge.flush()
+    assert "mcp.offline" not in runtime.agent.skills.loaded()
+    assert "mcp.healthy" in runtime.agent.skills.loaded()
+    warning = next(
+        update.content.text
+        for _, update in client.accepted
+        if isinstance(update, AgentMessageChunk)
+    )
+    assert "MCP server 'offline' was not loaded" in warning
+    assert "ConnectionRefusedError: refused" in warning
     await adapter.close()
 
 
@@ -1015,6 +1070,45 @@ async def test_adapter_lists_closes_loads_and_replays_durable_session(tmp_path):
     await replay_adapter.close()
 
 
+async def test_adapter_loads_durable_session_when_forwarded_mcp_is_unavailable(tmp_path):
+    create_adapter = CodingACPAdapter(_completed_llm)
+    create_adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await create_adapter.new_session(str(tmp_path))
+    await create_adapter.close()
+
+    load_client = _RecordingClient()
+    load_adapter = CodingACPAdapter(_completed_llm)
+    load_adapter.on_connect(load_client)  # type: ignore[arg-type]
+    server = HttpMcpServer(
+        name="offline",
+        url="https://offline.example.test/mcp",
+        headers=[],
+        type="http",
+    )
+    with patch(
+        "nooa_acp.server.MCPManager.create_url_server",
+        new=AsyncMock(
+            side_effect=RuntimeError(
+                "Could not connect to MCP server 'offline': ConnectionRefusedError: refused"
+            )
+        ),
+    ):
+        await load_adapter.load_session(str(tmp_path), created.session_id, mcp_servers=[server])
+
+    await asyncio.sleep(0)
+    runtime = await _session(load_adapter, created.session_id)
+    await runtime.bridge.flush()
+    assert "mcp.offline" not in runtime.agent.skills.loaded()
+    warning = next(
+        update.content.text
+        for update in load_client.updates
+        if isinstance(update, AgentMessageChunk)
+    )
+    assert "session is still usable" in warning
+    assert "ConnectionRefusedError: refused" in warning
+    await load_adapter.close()
+
+
 async def test_adapter_reports_unknown_session_on_load(tmp_path):
     client = _RecordingClient()
     adapter = CodingACPAdapter(_completed_llm)
@@ -1026,7 +1120,7 @@ async def test_adapter_reports_unknown_session_on_load(tmp_path):
     await adapter.close()
 
 
-async def test_adapter_rejects_duplicate_mcp_names_before_startup(tmp_path):
+async def test_adapter_skips_duplicate_mcp_names_without_failing_startup(tmp_path):
     client = _RecordingClient()
     adapter = CodingACPAdapter(_completed_llm)
     adapter.on_connect(client)  # type: ignore[arg-type]
@@ -1050,11 +1144,18 @@ async def test_adapter_rejects_duplicate_mcp_names_before_startup(tmp_path):
             new=AsyncMock(return_value=_MCPTools()),
         ) as create_url,
     ):
-        with pytest.raises(RequestError):
-            await adapter.new_session(str(tmp_path), mcp_servers=servers)
+        created = await adapter.new_session(str(tmp_path), mcp_servers=servers)
 
-    create_stdio.assert_not_awaited()
+    create_stdio.assert_awaited_once()
     create_url.assert_not_awaited()
+    await asyncio.sleep(0)
+    runtime = await _session(adapter, created.session_id)
+    await runtime.bridge.flush()
+    assert "mcp.lookup" in runtime.agent.skills.loaded()
+    warning = next(
+        update.content.text for update in client.updates if isinstance(update, AgentMessageChunk)
+    )
+    assert "another server has the same name" in warning
     await adapter.close()
 
 
