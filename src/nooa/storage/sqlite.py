@@ -7,7 +7,13 @@ Provides persistent storage using stdlib sqlite3 — no new dependencies.
 
 from __future__ import annotations
 
-import fcntl
+import sys
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
+
 import json
 import logging
 import os
@@ -643,7 +649,10 @@ def _acquire_session_lock(lock_path: str) -> int:
     """
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if sys.platform == "win32":
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         os.close(fd)
         owner_pid = _read_lock_pid(lock_path)
@@ -832,7 +841,11 @@ class SQLiteStorageManager:
                     conn.close()
         finally:
             if self._lock_fd is not None:
-                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+                if sys.platform == "win32":
+                    os.lseek(self._lock_fd, 0, os.SEEK_SET)
+                    msvcrt.locking(self._lock_fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
                 os.close(self._lock_fd)
                 self._lock_fd = None
 
