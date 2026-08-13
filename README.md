@@ -28,7 +28,7 @@
 [![Blog](https://img.shields.io/badge/blog-NVIDIA-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/blog/six-agent-harness-capabilities-for-higher-model-performance/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/LICENSE)
 
-**[Quick Start](#quick-start)** &nbsp;·&nbsp; **[Notebook Tutorials](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/notebook_tutorials/README.md)** &nbsp;·&nbsp; **[Examples](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md)** &nbsp;·&nbsp; **[Paper](https://arxiv.org/abs/2607.20709)** &nbsp;·&nbsp; **[Blog](https://developer.nvidia.com/blog/six-agent-harness-capabilities-for-higher-model-performance/)**
+**[Quick Start](#quick-start)** &nbsp;·&nbsp; **[Notebook Tutorials](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/notebook_tutorials_colab_preview/notebook_tutorials/README.md)** &nbsp;·&nbsp; **[Examples](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md)** &nbsp;·&nbsp; **[Paper](https://arxiv.org/abs/2607.20709)** &nbsp;·&nbsp; **[Blog](https://developer.nvidia.com/blog/six-agent-harness-capabilities-for-higher-model-performance/)**
 
 <br />
 
@@ -181,7 +181,7 @@ uv run python examples/quickstart/01_first_generation_method.py
 
 Rename `analyze_feedback` to `analyze_feedback_briefly` and the output changes — your method name, parameters, and docstring *are* the prompt.
 
-Prefer a guided notebook path? Start with the [**notebook tutorials**](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/notebook_tutorials/README.md), which walk through the same ideas in Colab-friendly steps, with more notebooks planned.
+Prefer a guided notebook path? Start with the [**notebook tutorials**](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/notebook_tutorials_colab_preview/notebook_tutorials/README.md), which walk through the same ideas in Colab-friendly steps, with more notebooks planned.
 
 Ready for more? See [**examples/**](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md) for the full progressive tutorial — structured output, tools, strategies, tracing, context blocks, MCP, and more.
 
@@ -197,7 +197,7 @@ If the viewer isn't running, tracing is silently disabled — no configuration n
 
 ## Learn more
 
-- **[Notebook tutorials](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/notebook_tutorials/README.md)** — guided Colab-friendly walkthroughs for your first agent, strategy selection, and CodeAct's live-object workflow. More notebooks are planned.
+- **[Notebook tutorials](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/notebook_tutorials_colab_preview/notebook_tutorials/README.md)** — guided Colab-friendly walkthroughs for your first agent, strategy selection, and CodeAct's live-object workflow. More notebooks are planned.
 - **[examples/README.md](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md)** — the full progressive tutorial: structured output, tools via `self`, strategies, progressive disclosure with `doc()`, tracing, dynamic prompts, context blocks, summarization, skills, MCP, sandbox, and more.
 - **[Paper](https://arxiv.org/abs/2607.20709)** — design principles, harness details, capability tests, and SWE-bench Verified / Terminal-Bench 2.0 results.
 - **[Blog post](https://developer.nvidia.com/blog/six-agent-harness-capabilities-for-higher-model-performance/)** — Six Agent Harness Capabilities for Higher Model Performance.
