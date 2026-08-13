@@ -309,6 +309,7 @@ class SkillRegistry(Skill):
         lib_dir: "Path",
         lib_name: str,
         target: str | None = None,
+        previous_module_state: dict[str, Any] | None = None,
     ) -> "Skill | None":
         """Freshly import a library package and construct one local Skill object.
 
@@ -326,6 +327,8 @@ class SkillRegistry(Skill):
                 for key, module in sys.modules.items()
                 if key == top_package or key.startswith(prefix)
             }
+            if previous_module_state is not None:
+                previous_module_state.update(previous_modules)
             original_path = list(sys.path)
             for key in previous_modules:
                 sys.modules.pop(key, None)
@@ -821,19 +824,14 @@ class SkillRegistry(Skill):
 
         module_name = (source.target or source.path.name).partition(":")[0]
         top_package = module_name.split(".", 1)[0]
-        with _PACKAGE_IMPORT_LOCK:
-            prefix = top_package + "."
-            previous_modules = {
-                key: value
-                for key, value in sys.modules.items()
-                if key == top_package or key.startswith(prefix)
-            }
+        previous_modules: dict[str, Any] = {}
         try:
             new_skill = await asyncio.to_thread(
                 self._import_lib,
                 source.path,
                 source.path.name,
                 source.target,
+                previous_modules,
             )
         except Exception as exc:
             return f"Reload failed for {name}: {exc}"
@@ -888,6 +886,25 @@ class SkillRegistry(Skill):
             class_name,
         )
 
+    @staticmethod
+    def _import_reloaded_package(top_pkg: str, module_name: str) -> tuple[Any, dict[str, Any]]:
+        """Purge and import one package while holding the import-state lock."""
+        prefix = top_pkg + "."
+        old_modules: dict[str, Any] = {}
+        with _PACKAGE_IMPORT_LOCK:
+            try:
+                old_modules = {
+                    key: value
+                    for key, value in sys.modules.items()
+                    if key == top_pkg or key.startswith(prefix)
+                }
+                for key in old_modules:
+                    del sys.modules[key]
+                return importlib.import_module(module_name), old_modules
+            except Exception:
+                SkillRegistry._restore_package_modules(sys.modules, top_pkg, old_modules)
+                raise
+
     async def _reload_package_exclusive(
         self,
         name: str,
@@ -898,10 +915,8 @@ class SkillRegistry(Skill):
     ) -> str:
         """Purge and re-import an entire top-level package (user/lib skills)."""
         import asyncio
-        import importlib
-        import sys as _sys
 
-        if top_pkg not in _sys.modules:
+        if top_pkg not in sys.modules:
             return f"Package {top_pkg} not in sys.modules — cannot reload"
         old_skill = getattr(self._agent, attr, None)
         try:
@@ -911,28 +926,15 @@ class SkillRegistry(Skill):
             return f"Reload failed for {name}: {e}"
         old_modules: dict[str, Any] = {}
         try:
-            # Clear all submodules so reimport gets fresh code from disk
-            prefix = top_pkg + "."
-            old_modules = {
-                key: value
-                for key, value in _sys.modules.items()
-                if key == top_pkg or key.startswith(prefix)
-            }
-            for key in old_modules:
-                del _sys.modules[key]
-            mod = await asyncio.to_thread(importlib.import_module, module_name)
-            from nooa.skill import Skill as _Skill
+            mod, old_modules = await asyncio.to_thread(
+                self._import_reloaded_package, top_pkg, module_name
+            )
         except Exception as e:
-            self._restore_package_modules(_sys.modules, top_pkg, old_modules)
             await self._restore_old_after_reload_failure(name, old_skill, old_detached)
             return f"Reload failed for {name}: {e}"
 
         new_class = getattr(mod, class_name, None)
-        if (
-            isinstance(new_class, type)
-            and issubclass(new_class, _Skill)
-            and new_class is not _Skill
-        ):
+        if isinstance(new_class, type) and issubclass(new_class, Skill) and new_class is not Skill:
             try:
                 result = await self._install_reloaded(
                     name,
@@ -942,14 +944,14 @@ class SkillRegistry(Skill):
                     old_detached=old_detached,
                 )
                 if result.startswith("Reload failed") or result.startswith("Skill "):
-                    self._restore_package_modules(_sys.modules, top_pkg, old_modules)
+                    self._restore_package_modules(sys.modules, top_pkg, old_modules)
                     if result.startswith("Skill "):
                         return f"Reload failed for {name}: {result}"
                 return result
             except Exception as e:
-                self._restore_package_modules(_sys.modules, top_pkg, old_modules)
+                self._restore_package_modules(sys.modules, top_pkg, old_modules)
                 return f"Reload failed for {name}: {e}"
-        self._restore_package_modules(_sys.modules, top_pkg, old_modules)
+        self._restore_package_modules(sys.modules, top_pkg, old_modules)
         await self._restore_old_after_reload_failure(name, old_skill, old_detached)
         return (
             f"Reload failed for {name}: reloaded module {module_name!r} "
