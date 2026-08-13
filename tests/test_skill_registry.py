@@ -279,6 +279,14 @@ class TestContextBlockRegistration:
         assert "skills" in non_protected  # from SkillRegistry itself
         assert len(non_protected) == 1  # no block from the mock
 
+    @pytest.mark.asyncio
+    async def test_aclose_removes_registry_context_block(self, registry_ctx, agent_ctx):
+        assert "skills" in agent_ctx.context_manager
+
+        await registry_ctx.aclose()
+
+        assert "skills" not in agent_ctx.context_manager
+
     def test_skill_registry_registers_own_context_block(self, agent_ctx):
         """SkillRegistry itself has context_block and registers it on activate."""
         # SkillRegistry is registered on the agent as "skills" attr

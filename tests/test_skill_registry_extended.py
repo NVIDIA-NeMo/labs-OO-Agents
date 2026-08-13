@@ -422,6 +422,31 @@ class TestResolveDeps:
         assert "nemo.base" not in registry.loaded()
 
 
+class TestDeterministicLoadOrder:
+    def test_load_sorts_unrelated_matches(self):
+        loaded: list[str] = []
+
+        class RecordingEntryPoint:
+            def __init__(self, name: str):
+                self.name = name
+
+            def load(self):
+                loaded.append(self.name)
+                return FakeSkill
+
+        entries = [
+            RecordingEntryPoint("test.zulu"),
+            RecordingEntryPoint("test.alpha"),
+        ]
+        with patch("nooa.skill_registry.entry_points", return_value=entries):
+            value = SkillRegistry(_FakeAgent())
+        try:
+            value.load(["test.*"])
+            assert loaded == ["test.alpha", "test.zulu"]
+        finally:
+            value.close()
+
+
 # ---------------------------------------------------------------------------
 # Tests: reload
 # ---------------------------------------------------------------------------
@@ -663,6 +688,40 @@ class TestReload:
         os.utime(init, (stat.st_atime + 2, stat.st_mtime + 2))
         assert await registry.reload("test.swap") == "Reloaded test.swap (self.swap)"
         assert registry["test.swap"].value() == "recovered"
+
+    @pytest.mark.asyncio
+    async def test_failed_source_package_attach_restores_previous_package_tree(
+        self, registry, tmp_path
+    ):
+        lib_dir = tmp_path / "attach-checkout"
+        package = lib_dir / "src" / "attach_reload_workflow"
+        package.mkdir(parents=True)
+        (lib_dir / "pyproject.toml").write_text(
+            '[project]\nname = "attach-reload"\n\n'
+            '[project.entry-points."nooa.skills"]\n'
+            '"test.attach" = "attach_reload_workflow:AttachSkill"\n'
+        )
+        init = package / "__init__.py"
+        init.write_text(
+            "from nooa.skill import Skill\nclass AttachSkill(Skill):\n    value = 'old'\n"
+        )
+        registry.discover_libs(tmp_path)
+        old_skill = registry["test.attach"]
+        old_package = sys.modules["attach_reload_workflow"]
+        init.write_text(
+            "from nooa.skill import Skill\n"
+            "class AttachSkill(Skill):\n"
+            "    value = 'new'\n"
+            "    def attach(self, agent):\n"
+            "        raise RuntimeError('attach failed')\n"
+        )
+
+        result = await registry.reload("test.attach")
+
+        assert result == "Reload failed for test.attach: attach failed"
+        assert registry["test.attach"] is old_skill
+        assert sys.modules["attach_reload_workflow"] is old_package
+        assert old_skill.value == "old"
 
     @pytest.mark.asyncio
     async def test_reload_not_loaded_raises(self, registry):

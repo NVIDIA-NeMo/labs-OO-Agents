@@ -7,6 +7,7 @@ import importlib.util
 import inspect
 import logging
 import sys
+import threading
 from dataclasses import dataclass
 from importlib.metadata import entry_points
 from pathlib import Path
@@ -17,6 +18,11 @@ from nooa.skill import Skill, TextSkill
 logger = logging.getLogger(__name__)
 
 ENTRY_POINT_GROUP = "nooa.skills"
+
+# Package imports mutate process-global import state. Serialize mutations made
+# by registries, including rollback, so concurrent registry operations cannot
+# observe one another's temporary sys.path/sys.modules state.
+_PACKAGE_IMPORT_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -310,53 +316,47 @@ class SkillRegistry(Skill):
         Python references. ``sys.modules`` is only refreshed so this load sees
         current source; it is not treated as NOOA-owned lifecycle state.
         """
-        import importlib
-        import sys as _sys
-
         module_name, _, attr_path = (target or lib_name).partition(":")
         top_package = module_name.split(".", 1)[0]
         search_paths = _package_search_paths(lib_dir, top_package)
         prefix = top_package + "."
-        previous_modules = {
-            key: module
-            for key, module in _sys.modules.items()
-            if key == top_package or key.startswith(prefix)
-        }
-        original_path = list(_sys.path)
-        for key in previous_modules:
-            _sys.modules.pop(key, None)
-        _sys.path[:] = [*search_paths, *(p for p in original_path if p not in search_paths)]
-        importlib.invalidate_caches()
-        try:
-            module = importlib.import_module(module_name)
+        with _PACKAGE_IMPORT_LOCK:
+            previous_modules = {
+                key: module
+                for key, module in sys.modules.items()
+                if key == top_package or key.startswith(prefix)
+            }
+            original_path = list(sys.path)
+            for key in previous_modules:
+                sys.modules.pop(key, None)
+            sys.path[:] = [*search_paths, *(p for p in original_path if p not in search_paths)]
+            importlib.invalidate_caches()
+            try:
+                module = importlib.import_module(module_name)
 
-            if attr_path:
-                value: Any = module
-                for part in attr_path.split("."):
-                    value = getattr(value, part)
-                if isinstance(value, Skill):
-                    return value
-                if inspect.isclass(value) and issubclass(value, Skill):
-                    return value()
-                raise TypeError(f"Library {lib_name!r} target {target!r} is not a Skill")
+                if attr_path:
+                    value: Any = module
+                    for part in attr_path.split("."):
+                        value = getattr(value, part)
+                    if isinstance(value, Skill):
+                        return value
+                    if inspect.isclass(value) and issubclass(value, Skill):
+                        return value()
+                    raise TypeError(f"Library {lib_name!r} target {target!r} is not a Skill")
 
-            skill = skill_from_module(
-                module,
-                module_name,
-                source=f"Library {lib_name!r}",
-            )
-            if skill is None:
-                raise TypeError(f"Library {lib_name!r} does not export a Skill")
-            return skill
-        except Exception:
-            for key in [
-                key for key in _sys.modules if key == top_package or key.startswith(prefix)
-            ]:
-                _sys.modules.pop(key, None)
-            _sys.modules.update(previous_modules)
-            raise
-        finally:
-            _sys.path[:] = original_path
+                skill = skill_from_module(
+                    module,
+                    module_name,
+                    source=f"Library {lib_name!r}",
+                )
+                if skill is None:
+                    raise TypeError(f"Library {lib_name!r} does not export a Skill")
+                return skill
+            except Exception:
+                self._restore_package_modules(sys.modules, top_package, previous_modules)
+                raise
+            finally:
+                sys.path[:] = original_path
 
     def discover_skills_dirs(self, dirs: "list[Path]") -> None:
         """Scan skill roots for packaged libraries, TextSkills, and Python skills.
@@ -449,7 +449,7 @@ class SkillRegistry(Skill):
         """
         matched = self._match(patterns, set(self._discovered.keys()))
         changed = False
-        for name in matched:
+        for name in sorted(matched):
             if name in self._loaded:
                 continue
             entry = self._discovered[name]
@@ -819,6 +819,15 @@ class SkillRegistry(Skill):
             )
             return result
 
+        module_name = (source.target or source.path.name).partition(":")[0]
+        top_package = module_name.split(".", 1)[0]
+        with _PACKAGE_IMPORT_LOCK:
+            prefix = top_package + "."
+            previous_modules = {
+                key: value
+                for key, value in sys.modules.items()
+                if key == top_package or key.startswith(prefix)
+            }
         try:
             new_skill = await asyncio.to_thread(
                 self._import_lib,
@@ -831,7 +840,10 @@ class SkillRegistry(Skill):
         if new_skill is None:
             return f"Reload failed for {name}: {source.path} does not export a Skill"
         new_skill._source_dir = source.path
-        return await self._install_reloaded_instance(name, attr, new_skill)
+        result = await self._install_reloaded_instance(name, attr, new_skill)
+        if not result.startswith("Reloaded "):
+            self._restore_package_modules(sys.modules, top_package, previous_modules)
+        return result
 
     async def _detach_old_for_reload(self, attr: str) -> tuple[Any, bool]:
         """Detach the existing agent skill before reloading its module code."""
@@ -897,6 +909,7 @@ class SkillRegistry(Skill):
         except Exception as e:
             await self._restore_old_after_reload_failure(name, old_skill, old_skill is not None)
             return f"Reload failed for {name}: {e}"
+        old_modules: dict[str, Any] = {}
         try:
             # Clear all submodules so reimport gets fresh code from disk
             prefix = top_pkg + "."
@@ -951,9 +964,10 @@ class SkillRegistry(Skill):
     ) -> None:
         """Restore the exact pre-reload package tree after a failed swap."""
         prefix = top_pkg + "."
-        for key in [key for key in modules if key == top_pkg or key.startswith(prefix)]:
-            del modules[key]
-        modules.update(previous)
+        with _PACKAGE_IMPORT_LOCK:
+            for key in [key for key in modules if key == top_pkg or key.startswith(prefix)]:
+                del modules[key]
+            modules.update(previous)
 
     async def _reload_single_module(self, name: str, attr: str, skill: Any, mod_name: str) -> str:
         """Reload only the skill's own leaf module via ``importlib.reload``.
@@ -1144,6 +1158,12 @@ class SkillRegistry(Skill):
             if sys.modules.get(module_name) is module:
                 sys.modules.pop(module_name, None)
         self._python_modules.clear()
+
+        if self.context_block and hasattr(self._agent, "context_manager"):
+            key, _ = self.context_block
+            cm = self._agent.context_manager
+            if key in cm and key not in cm.protected_keys:
+                cm.pop(key, None)
 
     def close(self) -> None:
         """Synchronous shutdown helper for registries outside an event loop."""
