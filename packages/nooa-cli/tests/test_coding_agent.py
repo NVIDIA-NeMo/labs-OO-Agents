@@ -98,3 +98,19 @@ async def test_installed_memory_skill_is_left_for_host_configuration(tmp_path, m
         assert "nemo.memory" not in agent.skills.loaded()
     finally:
         await agent.close()
+
+
+async def test_library_directory_can_be_scoped_by_the_host(tmp_path):
+    """Hosts that run several workspaces in one process must be able to
+    separate the libs directory.
+
+    SkillWriting puts it on sys.path and imports from it, so a shared one
+    leaks agent-authored code between concurrent sessions. The default is
+    unchanged for single-workspace hosts like the TUI.
+    """
+    libs_dir = tmp_path / "scoped" / "libs"
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=libs_dir)
+    try:
+        assert agent.libs._path == libs_dir
+    finally:
+        await agent.close()

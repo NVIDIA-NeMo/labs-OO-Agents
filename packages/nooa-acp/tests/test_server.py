@@ -365,3 +365,28 @@ async def test_prompt_on_a_closing_session_is_a_clean_protocol_error(tmp_path):
 
     with pytest.raises(RequestError):
         await adapter.prompt(session.session_id, [text_block("do the work")])
+
+
+async def test_sessions_on_different_workspaces_get_separate_library_dirs(tmp_path):
+    """One ACP process serves many workspaces, so libs cannot be process-global.
+
+    SkillWriting puts the directory on sys.path and activates local.*, so a
+    shared one exposes code the agent wrote for one repo to a session working
+    on another.
+    """
+    client = _RecordingClient()
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+    first_root = tmp_path / "repo-a"
+    second_root = tmp_path / "repo-b"
+    first_root.mkdir()
+    second_root.mkdir()
+
+    first = await adapter.new_session(str(first_root))
+    second = await adapter.new_session(str(second_root))
+
+    first_agent = await _session(adapter, first.session_id)
+    second_agent = await _session(adapter, second.session_id)
+    assert first_agent.agent.libs._path == first_root / ".nooa" / "libs"
+    assert second_agent.agent.libs._path == second_root / ".nooa" / "libs"
+    await adapter.close()

@@ -170,10 +170,14 @@ class ACPEventBridge:
             return
         self._open_tools.discard(event.command_id)
         output = self._terminal_output.pop(event.command_id, "")
-        if event.error:
-            output += ("\n" if output and not output.endswith("\n") else "") + event.error
+        # ACP has no cancelled status, so a stopped command is still "failed" —
+        # but it must read as the user's own action, not as a crash.
+        reason = "Cancelled by user." if event.cancelled else event.error
+        if reason:
+            output += ("\n" if output and not output.endswith("\n") else "") + reason
         failed = (
             event.timed_out
+            or event.cancelled
             or bool(event.error)
             or (event.exit_code is not None and event.exit_code != 0)
         )
