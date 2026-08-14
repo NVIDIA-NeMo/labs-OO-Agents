@@ -359,11 +359,17 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         self._render_message = None
         self.vars = SnapshotVars()
         self.queue_manager = QueueManager(event_manager=self.event_manager)
-        self._user_messages_in = self.queue_manager.queue("user_messages")
+        # user/system messages are delivered to the agent through the
+        # dispatcher's notification, so the per-turn queue status must report
+        # only their pending count -- previewing the content there would make
+        # the agent answer the same message twice.
+        self._user_messages_in = self.queue_manager.queue("user_messages", preview_content=False)
         self.user_messages = self._user_messages_in.reader
         self._slash_commands_in = self.queue_manager.queue("slash_commands")
         self.slash_commands = self._slash_commands_in.reader
-        self._system_messages_in = self.queue_manager.queue("system_messages")
+        self._system_messages_in = self.queue_manager.queue(
+            "system_messages", preview_content=False
+        )
         self.system_messages = self._system_messages_in.reader
         self.producers = ProducersSkill()
         # Surface pending-queue counts (and a short preview of each item)

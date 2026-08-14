@@ -209,6 +209,7 @@ class Channel[T]:
         on_get: Callable[[T], None] | None = None,
         on_put: Callable[[], None] | None = None,
         preview: Callable[[T], str] | None = None,
+        preview_content: bool = True,
     ) -> None:
         if mode not in ("queue", "event"):
             raise ValueError(
@@ -230,6 +231,12 @@ class Channel[T]:
         # _notify event so race() can wake on event-mode puts.
         self._on_put: Callable[[], None] | None = on_put
         self._preview: Callable[[T], str] = preview or _default_event_preview
+        # When False, ``status()`` reports only the pending count, never the
+        # item content. Used for message-input channels (e.g. user_messages)
+        # whose content is delivered to the agent through the dispatcher's
+        # notification; previewing that content in the per-turn status block
+        # would show it a second time and make the agent answer it twice.
+        self._preview_content = preview_content
 
     # ---- producer side ---------------------------------------------------
 
@@ -467,6 +474,10 @@ class Channel[T]:
         """
         if self.mode != "queue" or not self._items:
             return ""
+        if not self._preview_content:
+            # Metadata only: the content is delivered through the dispatcher,
+            # so previewing it here would make the agent handle it twice.
+            return f"{self.name}: {len(self._items)} pending (awaiting delivery)"
         lines = [f"{self.name}: {len(self._items)} pending"]
         snapshot = list(self._items)
         for i, item in enumerate(snapshot[:max_items], start=1):
@@ -667,6 +678,7 @@ class QueueManager:
         *,
         on_get: Callable[[T], None] | None = None,
         replace: bool = False,
+        preview_content: bool = True,
     ) -> Channel[T]:
         """Register a queue-mode channel.
 
@@ -677,12 +689,23 @@ class QueueManager:
         exists, it is removed (via ``remove_channel``) before the new
         one is created. Otherwise a duplicate name raises
         ``ValueError``.
+
+        Pass ``preview_content=False`` for channels whose items are
+        delivered to the agent through the dispatcher (e.g. user
+        messages): ``status()`` then reports only the pending count so
+        the content is not shown a second time.
         """
         if name in self._channels:
             if not replace:
                 raise ValueError(f"channel {name!r} already registered")
             self.remove_channel(name)
-        ch: Channel[T] = Channel(name, "queue", on_get=on_get, on_put=self._set_notify)
+        ch: Channel[T] = Channel(
+            name,
+            "queue",
+            on_get=on_get,
+            on_put=self._set_notify,
+            preview_content=preview_content,
+        )
         self._channels[name] = ch
         return ch
 
