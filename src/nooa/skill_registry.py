@@ -52,8 +52,8 @@ _RESERVED_ATTRS = frozenset(
 def _package_search_paths(lib_dir: Path, top_package: str) -> tuple[str, ...]:
     """Find import roots for flat, package, and src package layouts."""
     candidates = [lib_dir.parent]
-    checkout_is_package = lib_dir.name == top_package and (lib_dir / "__init__.py").is_file()
-    if not checkout_is_package and (
+    lib_dir_is_package = lib_dir.name == top_package and (lib_dir / "__init__.py").is_file()
+    if not lib_dir_is_package and (
         (lib_dir / top_package).is_dir() or (lib_dir / f"{top_package}.py").is_file()
     ):
         candidates.append(lib_dir)
@@ -186,6 +186,23 @@ class SkillRegistry(Skill):
 
         self.skills.load(['nemo.*'])
         self.skills.activate(['nemo.shell', 'nemo.repo'])
+
+    Cleanup of superseded skills is deliberately split in two:
+
+    * **Skill objects and their classes are never torn down.** A reload
+      builds a new object; agents holding the old one keep working against
+      it, and it is collected once the last reference goes away. Lifetime
+      is by reference, not by registry bookkeeping.
+    * **Synthetic modules are tracked and reclaimed.** Every standalone
+      ``.py`` load gets a unique module name recorded in
+      ``_python_modules``. :meth:`reload` drops the module it replaces and
+      :meth:`shutdown` drops all of them, each only when ``sys.modules``
+      still holds the object this registry installed, so a third party that
+      replaced the entry is left alone. Failed loads unwind immediately.
+
+    Package skills follow the same rule for objects, but refresh
+    ``sys.modules`` under the top-level package on reload instead of using
+    a synthetic name, restoring the previous state if the reload fails.
     """
 
     __agentdoc_skip__ = True
@@ -296,8 +313,8 @@ class SkillRegistry(Skill):
             eps = data.get("project", {}).get("entry-points", {}).get(ENTRY_POINT_GROUP, {})
             if eps:
                 # One directory is one library skill. Its entry-point value is
-                # authoritative: the import package need not match the checkout
-                # directory or project distribution name.
+                # authoritative: the import package need not match the library
+                # directory name or the project distribution name.
                 name, target = next(iter(eps.items()))
                 return name, target if isinstance(target, str) else None
         except Exception:

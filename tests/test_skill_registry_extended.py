@@ -173,9 +173,9 @@ class TestDiscoverSkillsDirs:
 
 
 class TestDiscoverLibs:
-    def test_agents_load_local_objects_from_different_checkouts(self, tmp_path):
-        def write_checkout(root: Path, value: str) -> Path:
-            lib_dir = root / "workflow-checkout"
+    def test_agents_load_local_objects_from_different_library_dirs(self, tmp_path):
+        def write_library(root: Path, value: str) -> Path:
+            lib_dir = root / "workflow-lib"
             package = lib_dir / "src" / "shared_workflow"
             package.mkdir(parents=True)
             (lib_dir / "pyproject.toml").write_text(
@@ -190,8 +190,8 @@ class TestDiscoverLibs:
             )
             return root
 
-        first_root = write_checkout(tmp_path / "first", "first")
-        second_root = write_checkout(tmp_path / "second", "second")
+        first_root = write_library(tmp_path / "first", "first")
+        second_root = write_library(tmp_path / "second", "second")
         first = SkillRegistry(_FakeAgent())
         second = SkillRegistry(_FakeAgent())
         try:
@@ -205,8 +205,8 @@ class TestDiscoverLibs:
             first.close()
             second.close()
 
-    def test_same_checkout_creates_distinct_agent_local_objects(self, tmp_path):
-        lib_dir = tmp_path / "workflow-checkout"
+    def test_same_library_dir_creates_distinct_agent_local_objects(self, tmp_path):
+        lib_dir = tmp_path / "workflow-lib"
         package = lib_dir / "src" / "reference_workflow"
         package.mkdir(parents=True)
         (lib_dir / "pyproject.toml").write_text(
@@ -232,7 +232,7 @@ class TestDiscoverLibs:
 
     @pytest.mark.asyncio
     async def test_each_agent_reloads_its_own_package_object(self, tmp_path):
-        lib_dir = tmp_path / "shared-checkout"
+        lib_dir = tmp_path / "shared-lib"
         package = lib_dir / "src" / "shared_reload_workflow"
         package.mkdir(parents=True)
         (lib_dir / "pyproject.toml").write_text(
@@ -274,7 +274,7 @@ class TestDiscoverLibs:
             await second.aclose()
 
     def test_direct_module_entry_point_layout_is_importable(self, registry, tmp_path):
-        lib_dir = tmp_path / "workflow-checkout"
+        lib_dir = tmp_path / "workflow-lib"
         lib_dir.mkdir()
         (lib_dir / "pyproject.toml").write_text(
             '[project]\nname = "direct-workflow"\n\n'
@@ -309,7 +309,7 @@ class TestDiscoverLibs:
 
     def test_entry_point_target_controls_import_package_and_class(self, registry, agent, tmp_path):
         """Checkout, distribution, module, and Skill class names may all differ."""
-        lib_dir = tmp_path / "workflow-checkout"
+        lib_dir = tmp_path / "workflow-lib"
         package = lib_dir / "src" / "actual_workflow" / "commands"
         package.mkdir(parents=True)
         (lib_dir / "pyproject.toml").write_text(
@@ -514,7 +514,7 @@ class TestReload:
 
     @pytest.mark.asyncio
     async def test_nested_entry_point_module_reloads_its_declared_skill(self, registry, tmp_path):
-        lib_dir = tmp_path / "nested-checkout"
+        lib_dir = tmp_path / "nested-lib"
         package = lib_dir / "src" / "nested_reload_workflow"
         package.mkdir(parents=True)
         (lib_dir / "pyproject.toml").write_text(
@@ -600,7 +600,7 @@ class TestReload:
 
     @pytest.mark.asyncio
     async def test_failed_package_reload_restores_lazy_submodule_imports(self, registry, tmp_path):
-        lib_dir = tmp_path / "lazy-checkout"
+        lib_dir = tmp_path / "lazy-lib"
         package = lib_dir / "src" / "lazy_reload_workflow"
         package.mkdir(parents=True)
         (lib_dir / "pyproject.toml").write_text(
@@ -632,7 +632,7 @@ class TestReload:
     async def test_failed_skill_swap_restores_previous_package_tree(
         self, registry, tmp_path, constructor
     ):
-        lib_dir = tmp_path / "swap-checkout"
+        lib_dir = tmp_path / "swap-lib"
         package = lib_dir / "src" / "swap_reload_workflow"
         package.mkdir(parents=True)
         (lib_dir / "pyproject.toml").write_text(
@@ -693,7 +693,7 @@ class TestReload:
     async def test_failed_source_package_attach_restores_previous_package_tree(
         self, registry, tmp_path
     ):
-        lib_dir = tmp_path / "attach-checkout"
+        lib_dir = tmp_path / "attach-lib"
         package = lib_dir / "src" / "attach_reload_workflow"
         package.mkdir(parents=True)
         (lib_dir / "pyproject.toml").write_text(
