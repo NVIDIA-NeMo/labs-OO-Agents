@@ -68,8 +68,8 @@ class TUIConsole:
             self._live_spinner = None
             self._spinner = None
 
-    def print_agent(self, message: str, *, show_rule: bool = True) -> None:
-        """Print an agent response, optionally with the OO ── rule header."""
+    def print_agent(self, message: str, *, show_rule: bool = True, soft_wrap: bool = False) -> None:
+        """Print an agent response, optionally with terminal-managed wrapping."""
         import textwrap
 
         # Aggressive cleanup for markdown rendering:
@@ -91,7 +91,7 @@ class TUIConsole:
             self.console.print(
                 Rule(title="[agent]OO[/agent]", style=COLORS["surface2"], align="left")
             )
-        self.console.print(Markdown(cleaned))
+        self.console.print(Markdown(cleaned), soft_wrap=soft_wrap)
 
     def print_error(self, message: str) -> None:
         """Print an error message."""
