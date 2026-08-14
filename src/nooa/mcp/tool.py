@@ -698,6 +698,15 @@ def _create_tool_instance(
     tools_result: Any,
     refresh_ctx: dict[str, Any] | None = None,
 ) -> MCPTool:
+    """Build the dynamic per-server tool class from a completed ``list_tools``.
+
+    Shared by the sync and async factories: from here on the work is pure CPU
+    on an already-connected client, so it is identical either way.
+
+    ``refresh_ctx`` is stashed on the instance so ``_call_tool`` can
+    transparently refresh the OAuth token and retry once on a 401 mid-session —
+    cached access tokens can expire between connect and call.
+    """
     tool_specs = []
     for tool in tools_result.tools:
         input_schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
@@ -763,7 +772,30 @@ class MCPManager:
         env: dict[str, str] | None = None,
         tool_call_timeout: timedelta = timedelta(seconds=60),
     ) -> MCPTool:
-        """Create an MCP tool from explicit stdio configuration without blocking the event loop."""
+        """Create an MCP tool from explicit stdio config, from inside an event loop.
+
+        :meth:`create_from_server` is synchronous. Called with a loop already
+        running, it hands the coroutine to a worker thread and blocks on the
+        result, which stalls the caller's loop for the whole connect and
+        ``list_tools`` round trip. A host that is itself serving over that loop
+        — the ACP server on stdin/stdout, for instance — goes unresponsive for
+        as long as the MCP server takes to start.
+
+        This awaits the connection in the caller's loop instead, so the host
+        keeps serving while an MCP server comes up. It covers stdio only: no
+        config file lookup and no OAuth, because neither applies to a local
+        subprocess. Use :meth:`create_from_server` for everything else.
+
+        Args:
+            server_name: Name for the generated tool class and its methods.
+            command: Executable to launch.
+            args: Arguments passed to ``command``.
+            env: Extra environment for the subprocess.
+            tool_call_timeout: Per-call timeout for the generated methods.
+
+        Returns:
+            An MCPTool instance with one method per tool on the server.
+        """
         client = create_mcp_client(
             transport="stdio",
             command=command,

@@ -13,15 +13,66 @@ Set the model and its provider credentials, then configure the client to launch
 this command with the repository as its working directory:
 
 ```bash
+export NOOA_MODEL=nvidia_nim/nvidia/nemotron-3-super-120b-a12b
 export NVIDIA_API_KEY=nvapi-...
 uvx nooa-acp
 ```
+
+There is no default model. Pass `--model` or set `NOOA_MODEL`; the command
+exits with a usage error if neither is set.
 
 From this repository, use the workspace package as the client command:
 
 ```bash
 uv run --project "$PWD" --package nooa-acp -- nooa-acp
 ```
+
+## Configuring Zed
+
+Zed launches ACP agents as "external agents". Add NOOA to `settings.json`:
+
+```json
+{
+  "agent_servers": {
+    "NOOA": {
+      "type": "custom",
+      "command": "uvx",
+      "args": ["nooa-acp"],
+      "env": {
+        "NOOA_MODEL": "nvidia_nim/nvidia/nemotron-3-super-120b-a12b",
+        "NVIDIA_API_KEY": "nvapi-..."
+      }
+    }
+  }
+}
+```
+
+Pick NOOA from the `+` menu in the agent panel. Zed runs the command with the
+worktree as its working directory, so repository instructions and project
+sessions resolve against the open project.
+
+Credentials have to go in `env` here rather than Zed's own settings: the agent
+is a separate process and inherits only what Zed passes it. Use a secret
+manager wrapper as the `command` if you would rather not put a key in
+`settings.json`.
+
+### MCP servers do not carry over from Zed
+
+**Remote MCP servers you authenticated inside Zed are not usable from an ACP
+agent.** Zed holds those OAuth tokens itself and does not pass them down, so a
+server showing a green indicator in Zed's own UI arrives at the agent either
+with no tools at all or with nothing but its `authenticate` /
+`__complete_authentication` stubs. Local stdio MCP servers are unaffected.
+
+This is a known Zed limitation, tracked in
+[zed-industries/zed#54410](https://github.com/zed-industries/zed/issues/54410)
+(open, labelled `area:ai/mcp` + `area:ai/acp`). A maintainer has said the
+plumbing largely exists and the work is queued, but as of this writing it is
+unresolved.
+
+Configure the MCP server directly for NOOA instead — through NOOA's own
+`.mcp.json` — and it works normally, because the agent then owns the
+connection and its credentials rather than borrowing Zed's.
 
 ACP uses standard input and output for JSON-RPC. Diagnostics are written to
 standard error. The agent can execute generated Python and shell commands, so

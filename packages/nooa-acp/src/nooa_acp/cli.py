@@ -16,9 +16,8 @@ if TYPE_CHECKING:
 @click.option(
     "--model",
     envvar="NOOA_MODEL",
-    default="nvidia_nim/nvidia/nemotron-3-super-120b-a12b",
-    show_default=True,
-    help="LiteLLM model name or configured NOOA model alias.",
+    required=True,
+    help="LiteLLM model name or configured NOOA model alias. Or set NOOA_MODEL.",
 )
 @click.option(
     "--client-type",

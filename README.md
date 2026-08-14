@@ -203,6 +203,7 @@ its working directory:
 
 ```bash
 uv add nooa-acp
+export NOOA_MODEL=nvidia_nim/nvidia/nemotron-3-super-120b-a12b
 export NVIDIA_API_KEY=nvapi-...
 
 # Agent command for the ACP client
