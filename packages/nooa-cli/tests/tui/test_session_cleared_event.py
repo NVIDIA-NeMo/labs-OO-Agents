@@ -3,8 +3,7 @@
 """SessionCleared is emitted after /clear resets the agent's working state."""
 
 import pytest
-
-from nooa.sessions import SessionCleared
+from nooa_cli.sessions import SessionCleared
 
 
 def test_event_is_runtime_role_and_fields():

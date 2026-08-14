@@ -582,12 +582,8 @@ def test_mcp_remove_offers_configured_servers():
 def test_mcp_approve_and_revoke_complete_configured_servers():
     reg = _mcp_registry(["maas-jira"])
     completer = Completer(registry=reg)
-    assert [item.text for item in completer.complete("/mcp approve ")] == [
-        "/mcp approve maas-jira"
-    ]
-    assert [item.text for item in completer.complete("/mcp revoke ")] == [
-        "/mcp revoke maas-jira"
-    ]
+    assert [item.text for item in completer.complete("/mcp approve ")] == ["/mcp approve maas-jira"]
+    assert [item.text for item in completer.complete("/mcp revoke ")] == ["/mcp revoke maas-jira"]
 
 
 def test_mcp_completion_marks_approved_server():

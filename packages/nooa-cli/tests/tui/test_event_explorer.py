@@ -70,7 +70,7 @@ def test_event_explorer_renders_shared_session_events() -> None:
                     "2",
                     _FakeEvent(
                         "SessionStarted",
-                        host="tui",
+                        origin="tui",
                         model="test-model",
                         agent="CodingAgent",
                         working_directory="/work/repo",

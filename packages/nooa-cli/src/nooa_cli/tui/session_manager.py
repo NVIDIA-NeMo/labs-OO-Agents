@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Literal
 
 from nooa.paths import get_project_dir
-from nooa.sessions import SessionHandle, SessionInfo, SessionStore
 from nooa.storage.sqlite import delete_sqlite_database
+from nooa_cli.sessions import SessionHandle, SessionInfo, SessionStore
 
 SESSIONS_DIR = get_project_dir("sessions")
 
@@ -60,7 +60,7 @@ class Turn:
 
 
 class SessionManager:
-    """TUI-facing view of one :class:`nooa.sessions.SessionHandle`.
+    """TUI-facing view of one :class:`nooa_cli.sessions.SessionHandle`.
 
     The adapter deliberately contains no persistence implementation. Both the
     native TUI and protocol hosts read and write the same session event schema.
@@ -84,7 +84,7 @@ class SessionManager:
             model=model,
             agent=agent_cls,
             working_directory=working_dir,
-            host="tui",
+            origin="tui",
             session_id=session_id,
             check_same_thread=False,
         )

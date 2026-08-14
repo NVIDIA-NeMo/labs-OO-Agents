@@ -3,10 +3,9 @@
 """SessionResumed is emitted after agent reconstitution."""
 
 import pytest
+from nooa_cli.sessions import SessionResumed
 from nooa_cli.tui.bootstrap import bootstrap
 from nooa_cli.tui.config import Config
-
-from nooa.sessions import SessionResumed
 
 
 def test_event_is_runtime_role_and_fields():
