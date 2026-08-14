@@ -345,3 +345,23 @@ async def test_adapter_propagates_unrelated_generation_errors(tmp_path):
         await adapter.prompt(session.session_id, [text_block("do the work")])
 
     await adapter.close()
+
+
+async def test_prompt_on_a_closing_session_is_a_clean_protocol_error(tmp_path):
+    """A prompt racing a close must not surface as a raw internal error.
+
+    turn() raises SessionRuntimeClosedError as well as SessionBusyError; only
+    the latter was translated, so the client got -32603 with no actionable
+    reason instead of a typed protocol error.
+    """
+    client = _RecordingClient()
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+
+    await adapter.initialize(PROTOCOL_VERSION)
+    session = await adapter.new_session(str(tmp_path))
+    runtime = await adapter._sessions.get(session.session_id)
+    await runtime.close()
+
+    with pytest.raises(RequestError):
+        await adapter.prompt(session.session_id, [text_block("do the work")])

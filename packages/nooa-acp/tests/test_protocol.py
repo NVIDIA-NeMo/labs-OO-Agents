@@ -82,3 +82,27 @@ async def test_acp_subprocess_cancellation_finishes_open_tools(tmp_path):
         if isinstance(update, ToolCallProgress) and update.status == "failed"
     )
     assert failed.tool_call_id == started.tool_call_id
+
+
+async def test_acp_subprocess_closes_a_session_over_the_wire(tmp_path):
+    """session/close must work through the router, not just on the adapter.
+
+    initialize advertises the close capability, and the library registers that
+    method as unstable — so an adapter-level test passes while a real client
+    gets "method not found" and can never release a session.
+    """
+    client = _RecordingClient()
+    fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
+
+    async with spawn_agent_process(
+        client,  # type: ignore[arg-type]
+        sys.executable,
+        str(fixture),
+        cwd=tmp_path,
+    ) as (connection, _process):
+        initialized = await connection.initialize(PROTOCOL_VERSION)
+        session = await connection.new_session(str(tmp_path))
+        await connection.close_session(session.session_id)
+
+    capabilities = initialized.agent_capabilities.session_capabilities
+    assert capabilities is not None and capabilities.close is not None
