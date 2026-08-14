@@ -611,15 +611,15 @@ Orchestrators are pure Python — but a method's progress lives on the call stac
 snapshotted field and the run survives the process:
 
 ```python
-class PipelineAgent(Agent):
+class PipelineAgent(Agent, llm=llm):
     steps_done: dict[str, str]      # snapshotted — this is the resumable part
     inputs: dict[str, str]
 
     async def run(self, payload: str) -> str:
-        if "step_one" not in self.steps_done:
-            self.steps_done["step_one"] = await self.step_one(payload)
+        if "summary" not in self.steps_done:
+            self.steps_done["summary"] = await self.summarise(payload)
         if "threshold" not in self.inputs:
-            raise SuspendForInput("threshold", "What risk threshold applies?")
+            raise SuspendForInput("what risk threshold should apply?")
         ...
 ```
 
