@@ -251,3 +251,43 @@ async def test_cancelled_flush_does_not_stop_update_pump(tmp_path):
     assert messages == ["First", "Second"]
     await bridge.close()
     await agent.close()
+
+
+async def test_a_failed_update_does_not_silence_the_session_for_good(tmp_path):
+    """A transport failure must end its own turn, not every later one.
+
+    The error was latched and never cleared, so after one failed write the
+    bridge dropped every subsequent update and re-raised the stale exception
+    on every future flush — the agent kept running turns, at full cost, that
+    the client never saw.
+    """
+    agent = CodingInteractiveAgent(llm=FakeLLMClient(), cwd=tmp_path)
+
+    class _FlakyClient:
+        def __init__(self) -> None:
+            self.updates: list[object] = []
+            self.fail_next = True
+
+        async def session_update(self, session_id: str, update: object, **kwargs) -> None:
+            if self.fail_next:
+                self.fail_next = False
+                raise ConnectionResetError("transport went away")
+            self.updates.append(update)
+
+    client = _FlakyClient()
+    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+
+    # Turn 1: the write fails, and the turn is told about it.
+    agent.event_manager.add(AgentMessage(content="first turn"))
+    with pytest.raises(ConnectionResetError):
+        await bridge.flush()
+
+    # Turn 2: the transport is healthy again, so updates must flow.
+    agent.event_manager.add(AgentMessage(content="second turn"))
+    await bridge.flush()
+
+    assert any(
+        isinstance(update, AgentMessageChunk) and update.content.text == "second turn"
+        for update in client.updates
+    )
+    await bridge.close()

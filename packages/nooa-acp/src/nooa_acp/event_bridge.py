@@ -3,6 +3,7 @@
 """Translate observational NOOA events into ACP session updates."""
 
 import asyncio
+import logging
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
@@ -30,6 +31,10 @@ from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
 from nooa.events import LLMComplete, PythonOutput
 from nooa.interactive import AgentMessage
 from nooa_acp.coding_agent import CodingInteractiveAgent
+
+# ACP owns stdout for JSON-RPC; diagnostics belong on stderr, which is where
+# the logging default sends them.
+logger = logging.getLogger(__name__)
 
 _STOP = object()
 
@@ -208,17 +213,30 @@ class ACPEventBridge:
                 if item is _STOP:
                     return
                 if isinstance(item, asyncio.Future):
+                    # Hand the failure to the turn that is flushing, then clear
+                    # it. Latching it would mean every later turn ran the model
+                    # and edited files while the client saw nothing and got a
+                    # stale exception it could not act on.
+                    error, self._error = self._error, None
                     if not item.done():
-                        if self._error is None:
+                        if error is None:
                             item.set_result(None)
                         else:
-                            item.set_exception(self._error)
+                            item.set_exception(error)
                     continue
                 if self._error is None:
                     try:
                         await self.client.session_update(self.session_id, item)
                     except Exception as exc:
+                        # Skip the rest of this turn's updates rather than
+                        # hammering a transport that just failed; the next
+                        # flush reports the error and resets.
                         self._error = exc
+                        logger.warning(
+                            "ACP session %s dropped an update after a failed send",
+                            self.session_id,
+                            exc_info=True,
+                        )
             finally:
                 self._queue.task_done()
 
