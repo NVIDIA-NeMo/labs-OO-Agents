@@ -51,7 +51,7 @@ GATE_MODELS = [
 GATE_RUNS = 3
 GATE_PARALLEL = 40
 CAPABILITY_CONFIG = Path("tests/capability/config.yaml")
-PACKAGES = ["nooa", "nooa-cli", "nooa-memory", "nooa-bench"]
+PACKAGES = ["nooa", "nooa-cli", "nooa-acp", "nooa-memory", "nooa-bench"]
 REPORT_PATH = REPO / "tmp" / "release-check" / "capability-report.md"
 
 # An absolute floor on the stable tier, mirroring the MR pipeline's gate. A
