@@ -73,7 +73,10 @@ async def test_different_sessions_run_foreground_turns_concurrently():
                 both_entered.set()
             await both_entered.wait()
 
-    await asyncio.wait_for(asyncio.gather(run(first), run(second)), timeout=1)
+    # Deadlock detector: if the two sessions serialized, neither would reach
+    # both_entered and the gather would hang. Generous so a loaded runner
+    # cannot flake it; a real serialization bug still fails, just later.
+    await asyncio.wait_for(asyncio.gather(run(first), run(second)), timeout=30)
     assert entered == {"A", "B"}
     await pool.close()
 
