@@ -9,6 +9,12 @@ from pathlib import Path
 from acp import PROTOCOL_VERSION, spawn_agent_process, text_block
 from acp.schema import AgentMessageChunk, ToolCallProgress, ToolCallStart
 
+# Bounds a hang, not the expected duration. Spawning an interpreter and running
+# a turn takes well under a second here, but a loaded CI runner is a different
+# machine — and a flaky test gets deleted, which is worse than a slow one. A
+# real deadlock still fails, just later.
+_HANG_TIMEOUT = 30
+
 
 class _RecordingClient:
     def __init__(self) -> None:
@@ -64,9 +70,9 @@ async def test_acp_subprocess_cancellation_finishes_open_tools(tmp_path):
         prompt_task = asyncio.create_task(
             connection.prompt(session.session_id, [text_block("wait forever")])
         )
-        await asyncio.wait_for(client.tool_started.wait(), timeout=5)
+        await asyncio.wait_for(client.tool_started.wait(), timeout=_HANG_TIMEOUT)
         await connection.cancel(session.session_id)
-        response = await asyncio.wait_for(prompt_task, timeout=5)
+        response = await asyncio.wait_for(prompt_task, timeout=_HANG_TIMEOUT)
 
     assert response.stop_reason == "cancelled"
     started = next(update for _, update in client.updates if isinstance(update, ToolCallStart))
