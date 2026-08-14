@@ -46,7 +46,7 @@ def test_acp_command_is_discovered_as_cli_plugin():
     assert dict(discover_commands())["acp"] is command
 
 
-def test_acp_command_defaults_to_public_nvidia_model():
+def test_acp_command_passes_the_nvidia_key_for_nvidia_models():
     runner = CliRunner()
     with (
         patch("nooa.secrets.load_secrets_into_env"),
@@ -54,7 +54,11 @@ def test_acp_command_defaults_to_public_nvidia_model():
         patch("nooa_acp.server.serve") as serve,
         patch("nooa_acp.cli.asyncio.run"),
     ):
-        result = runner.invoke(command, env={"NVIDIA_API_KEY": "nvapi-test"})
+        result = runner.invoke(
+            command,
+            ["--model", "nvidia_nim/nvidia/nemotron-3-super-120b-a12b"],
+            env={"NVIDIA_API_KEY": "nvapi-test"},
+        )
 
     assert result.exit_code == 0
     llm_factory = serve.call_args.args[0]
@@ -64,6 +68,25 @@ def test_acp_command_defaults_to_public_nvidia_model():
         client_type=None,
         api_key="nvapi-test",
     )
+
+
+def test_acp_command_leaves_the_key_alone_for_other_providers():
+    runner = CliRunner()
+    with (
+        patch("nooa.secrets.load_secrets_into_env"),
+        patch("nooa.unifiedllm.get_llm_client") as get_llm_client,
+        patch("nooa_acp.server.serve") as serve,
+        patch("nooa_acp.cli.asyncio.run"),
+    ):
+        result = runner.invoke(
+            command,
+            ["--model", "openai/gpt-4o-mini"],
+            env={"NVIDIA_API_KEY": "nvapi-test"},
+        )
+
+    assert result.exit_code == 0
+    serve.call_args.args[0]()
+    get_llm_client.assert_called_once_with("openai/gpt-4o-mini", client_type=None)
 
 
 class _MCPTools:
