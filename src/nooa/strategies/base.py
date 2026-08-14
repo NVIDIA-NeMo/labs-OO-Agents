@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from nooa.context_blocks import DynamicContext
     from nooa.runtime.restrictions import RestrictionsConfig
     from nooa.strategies.current_call import CurrentCall
+    from nooa.unifiedllm import LLMRequirements
 
 
 @runtime_checkable
@@ -243,6 +244,11 @@ class GenerationStrategy(ABC, metaclass=AgentMeta):
         Returns:
             List of block keys in desired order, or None to keep default ordering.
         """
+        return None
+
+    @property
+    def llm_requirements(self) -> "LLMRequirements | None":
+        """Return LLM transport capabilities required by this strategy."""
         return None
 
     @property

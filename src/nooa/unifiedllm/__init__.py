@@ -9,7 +9,9 @@ from nooa.unifiedllm.registry import (
     get_registry_config,
     reload_registry,
     resolve_api_key_from_config,
+    resolve_llm_client_for_requirements,
 )
+from nooa.unifiedllm.requirements import LLMRequirements
 from nooa.unifiedllm.retry import (
     EmptyContentError,
     RetryingWrapper,
@@ -40,8 +42,10 @@ __all__ = [
     "get_registry_config",
     "reload_registry",
     "ensure_loaded",
+    "resolve_llm_client_for_requirements",
     "resolve_api_key_from_config",
     "MODELS",
+    "LLMRequirements",
     # Tools
     "Tool",
     "ToolCall",

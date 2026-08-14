@@ -1157,6 +1157,11 @@ class UnifiedLLM(ABC):
         self.model = model
         self.config = config
         self._registry_config = None
+        self._registry_name: str = ""
+        self._client_type: str = "direct"
+        self._client_type_source: str = "direct"
+        self._llm_requirements: Any = None
+        self._requirements_client_cache: dict[tuple[str, Any], UnifiedLLM] = {}
         # Cache control injection — shared by CompletionClient and ResponsesClient
         self.cache_control_injection_points: list[dict[str, Any]] = (
             DEFAULT_CACHE_CONTROL_INJECTION_POINTS
@@ -1167,11 +1172,15 @@ class UnifiedLLM(ABC):
 
     def close(self) -> None:
         """Release this client's sync HTTP resources (its own httpx clients)."""
+        for cached_client in self._requirements_client_cache.values():
+            cached_client.close()
         if self._http is not None:
             self._http.close()
 
     async def aclose(self) -> None:
         """Release this client's sync + async HTTP resources."""
+        for cached_client in self._requirements_client_cache.values():
+            await cached_client.aclose()
         if self._http is not None:
             await self._http.aclose()
 
