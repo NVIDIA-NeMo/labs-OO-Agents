@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from difflib import unified_diff
@@ -132,7 +133,11 @@ class TerminalCommandStarted(EventBase):  # type: ignore[misc]
 
 
 class TerminalCommandOutput(EventBase):  # type: ignore[misc]
-    """One streaming output chunk from a coding-agent terminal command."""
+    """The output of one coding-agent terminal command.
+
+    Emitted once, when the command finishes: output is buffered and bounded
+    rather than streamed, so hosts receive a single event per command.
+    """
 
     _role: ClassVar[Role] = Role.RUNTIME_EVENT
 
@@ -154,6 +159,10 @@ class TerminalCommandFinished(EventBase):  # type: ignore[misc]
     exit_code: Annotated[int | None, Field(description="Process exit code when available")] = None
     timed_out: Annotated[bool, Field(description="Whether the command timed out")] = False
     error: Annotated[str, Field(description="Failure before an exit code was available")] = ""
+    cancelled: Annotated[
+        bool,
+        Field(description="Whether the command was stopped by cancellation rather than failing"),
+    ] = False
     output_truncated: Annotated[
         bool,
         Field(description="Whether output was omitted from command activity events"),
@@ -246,10 +255,12 @@ class ActivityShellTools(Skill):
         try:
             result = await self._shell.run(command, stdin=stdin, timeout=timeout)
         except BaseException as error:
+            cancelled = isinstance(error, asyncio.CancelledError)
             self._emit(
                 TerminalCommandFinished(
                     command_id=command_id,
-                    error=str(error) or type(error).__name__,
+                    error="" if cancelled else (str(error) or type(error).__name__),
+                    cancelled=cancelled,
                 )
             )
             raise
@@ -337,10 +348,12 @@ class ActivityShellTools(Skill):
                             truncated=output_truncated,
                         )
                     )
+                cancelled = isinstance(error, asyncio.CancelledError)
                 self._emit(
                     TerminalCommandFinished(
                         command_id=command_id,
-                        error=str(error) or type(error).__name__,
+                        error="" if cancelled else (str(error) or type(error).__name__),
+                        cancelled=cancelled,
                         output_truncated=output_truncated,
                     )
                 )

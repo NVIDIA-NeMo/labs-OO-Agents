@@ -285,7 +285,15 @@ class CodingACPAdapter:
         value: _ACPSession | None = None
         try:
             mcp = await self._create_mcp_tools(mcp_servers)
-            agent = CodingInteractiveAgent(llm=llm, cwd=root, storage=handle.storage)
+            agent = CodingInteractiveAgent(
+                llm=llm,
+                cwd=root,
+                storage=handle.storage,
+                # Same anchoring as the session store above: one ACP process
+                # serves many workspaces, so project-local paths follow the
+                # session's workspace rather than the process.
+                libs_dir=root / ".nooa" / "libs",
+            )
             for name, tool in mcp.items():
                 registry_name = f"mcp.{name}"
                 agent.skills.register(registry_name, tool)

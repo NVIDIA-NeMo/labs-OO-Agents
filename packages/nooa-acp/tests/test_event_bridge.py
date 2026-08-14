@@ -291,3 +291,27 @@ async def test_a_failed_update_does_not_silence_the_session_for_good(tmp_path):
         for update in client.updates
     )
     await bridge.close()
+
+
+async def test_a_cancelled_command_reads_as_cancellation_not_a_crash(tmp_path):
+    """The client must see the user's action, not a Python exception name."""
+    agent = CodingInteractiveAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+
+    agent.event_manager.add(
+        TerminalCommandStarted(
+            command_id="cmd-1",
+            command="sleep 30",
+            working_directory=str(tmp_path),
+        )
+    )
+    agent.event_manager.add(TerminalCommandFinished(command_id="cmd-1", cancelled=True))
+    await bridge.flush()
+
+    progress = [update for _, update in client.updates if isinstance(update, ToolCallProgress)]
+    finished = progress[-1]
+    rendered = str(finished)
+    assert "Cancelled by user." in rendered
+    assert "CancelledError" not in rendered
+    await bridge.close()

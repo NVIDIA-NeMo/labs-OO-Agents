@@ -62,6 +62,7 @@ class CodingAgent(InteractiveAgent):
         cwd: str | Path = ".",
         summarization: SummarizationConfig | None = None,
         skills_dirs: list[Path] | None = None,
+        libs_dir: Path | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(llm=llm, **kwargs)
@@ -70,7 +71,13 @@ class CodingAgent(InteractiveAgent):
         self.shell = ActivityShellTools(self._base_shell, self.event_manager)
         self.repo = RepoTools(root=self.cwd, session=self.shell.session)
         self.todo = TodoManager()
-        self.libs = SkillWriting(self, path=get_project_dir("libs"))
+        # Libraries live at <project>/.nooa/libs. get_project_dir() resolves
+        # that per process, which is what a one-workspace host like the TUI
+        # wants. A host serving several workspaces at once must say which
+        # project it means, or every session shares one directory — and
+        # SkillWriting puts it on sys.path and activates local.*, so that
+        # would expose one workspace's agent-authored code to another.
+        self.libs = SkillWriting(self, path=libs_dir or get_project_dir("libs"))
 
         self.skills = SkillRegistry(self)
         self.skills.register("nemo.shell", self.shell)

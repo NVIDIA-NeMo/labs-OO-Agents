@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Semantic activity emitted by the shared interactive coding tools."""
 
+import asyncio
+
 import nooa_cli.coding.activity as activity
+import pytest
 from nooa_cli.coding.activity import (
     ActivityShellTools,
     FileEdit,
@@ -234,3 +237,31 @@ async def test_activity_payloads_are_bounded(tmp_path):
     assert stream_outputs[0].stdout.startswith("<truncated-output>")
     assert stream_finished.output_truncated is True
     assert streamed[-1].kind == "done"
+
+
+async def test_cancelling_a_command_is_not_reported_as_an_error(tmp_path):
+    """Cancellation is a user action, not a command failure.
+
+    The handler stringified the exception, and CancelledError has an empty
+    str(), so the event carried the literal text "CancelledError" and hosts
+    rendered a deliberate stop as a crash.
+    """
+    shell, events = _observed_shell(tmp_path)
+    try:
+        running = asyncio.create_task(shell.run("sleep 30"))
+        started = None
+        while started is None:
+            await asyncio.sleep(0.05)
+            started = next(
+                (event for event in events if isinstance(event, TerminalCommandStarted)),
+                None,
+            )
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+    finally:
+        await shell.close()
+
+    finished = next(event for event in events if isinstance(event, TerminalCommandFinished))
+    assert finished.cancelled is True
+    assert "CancelledError" not in finished.error
