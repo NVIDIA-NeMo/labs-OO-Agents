@@ -49,7 +49,12 @@ from nooa_cli.sessions import (
 from nooa.errors import GenerationError
 from nooa.mcp import MCPManager, MCPTool
 from nooa.unifiedllm import UnifiedLLM
-from nooa_acp._runtime import SessionBusyError, SessionRuntime, SessionRuntimePool
+from nooa_acp._runtime import (
+    SessionBusyError,
+    SessionRuntime,
+    SessionRuntimeClosedError,
+    SessionRuntimePool,
+)
 from nooa_acp.coding_agent import CodingInteractiveAgent
 from nooa_acp.dispatcher import InteractiveSessionDispatcher
 from nooa_acp.event_bridge import ACPEventBridge
@@ -246,6 +251,11 @@ class CodingACPAdapter:
             raise RequestError.invalid_request(
                 {"sessionId": session_id, "reason": "A prompt is already running"}
             ) from None
+        except SessionRuntimeClosedError:
+            # The session was closed between _get_runtime and the turn claim.
+            # It is gone as far as the client is concerned, so say so rather
+            # than letting this escape as an opaque internal error.
+            raise RequestError.resource_not_found(session_id) from None
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
         del kwargs
@@ -387,7 +397,11 @@ class CodingACPAdapter:
 async def serve(llm_factory: Callable[[], UnifiedLLM]) -> None:
     adapter = CodingACPAdapter(llm_factory)
     try:
-        await run_agent(cast(Agent, adapter))
+        # session/close is registered by the router as unstable. initialize()
+        # advertises the close capability, so without this flag the agent
+        # promises a method that answers "method not found", and a client can
+        # never release a session. session/list is stable and unaffected.
+        await run_agent(cast(Agent, adapter), use_unstable_protocol=True)
     finally:
         with suppress(Exception):
             await adapter.close()

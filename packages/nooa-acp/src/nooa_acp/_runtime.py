@@ -161,10 +161,16 @@ class SessionRuntimePool[T]:
     async def remove(self, session_id: str) -> T:
         """Close and unregister one runtime, returning its adapter value."""
         runtime = await self.get(session_id)
-        await runtime.close()
-        async with self._lock:
-            if self._runtimes.get(session_id) is runtime:
-                del self._runtimes[session_id]
+        try:
+            await runtime.close()
+        finally:
+            # Unregister even when teardown raises or the caller is cancelled.
+            # close() is shielded, so the runtime is going away either way;
+            # keeping the entry would strand the id forever, because the failed
+            # close task is cached and re-raised on every later attempt.
+            async with self._lock:
+                if self._runtimes.get(session_id) is runtime:
+                    del self._runtimes[session_id]
         return runtime.value
 
     async def close(self) -> None:

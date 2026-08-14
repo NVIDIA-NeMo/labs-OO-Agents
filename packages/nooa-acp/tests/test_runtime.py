@@ -151,3 +151,46 @@ async def test_pool_remove_and_close_release_each_runtime_once():
     assert second_value.close_calls == 1
     with pytest.raises(SessionRuntimeClosedError):
         await pool.add("third", _RuntimeValue())
+
+
+async def test_remove_unregisters_even_when_teardown_fails():
+    """A failing close must not strand the session id in the pool.
+
+    The runtime is torn down regardless; leaving the entry registered makes the
+    id permanently unusable — later loads report "already loaded" and later
+    prompts reach a closed runtime.
+    """
+
+    class _Failing:
+        async def close(self) -> None:
+            raise RuntimeError("teardown blew up")
+
+    pool: SessionRuntimePool[_Failing] = SessionRuntimePool()
+    await pool.add("one", _Failing())
+
+    with pytest.raises(RuntimeError, match="teardown blew up"):
+        await pool.remove("one")
+
+    assert await pool.ids() == ()
+    with pytest.raises(KeyError):
+        await pool.get("one")
+
+
+async def test_remove_unregisters_even_when_teardown_is_cancelled():
+    """Cancelling the close request must not strand the session id either."""
+    release = asyncio.Event()
+
+    class _Slow:
+        async def close(self) -> None:
+            await release.wait()
+
+    pool: SessionRuntimePool[_Slow] = SessionRuntimePool()
+    await pool.add("one", _Slow())
+
+    remover = asyncio.create_task(pool.remove("one"))
+    await asyncio.sleep(0)
+    remover.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await remover
+
+    assert await pool.ids() == ()
