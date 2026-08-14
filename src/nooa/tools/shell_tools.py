@@ -43,12 +43,19 @@ from nooa.tools._results import StreamDone, StreamEvent
 
 
 class FileWrite:
-    """Result of a write/replace operation."""
+    """Result of a write/replace operation.
 
-    def __init__(self, path: str, message: str, diff: str = ""):
+    ``new_text`` is the text as it was actually written, after any
+    normalization the write applied. Observers report from it so what they
+    record matches what landed on disk. It is deliberately left out of
+    ``__str__`` — the agent already knows the text it asked for.
+    """
+
+    def __init__(self, path: str, message: str, diff: str = "", new_text: str = ""):
         self.path = path
         self.message = message
         self.diff = diff
+        self.new_text = new_text
 
     def __str__(self) -> str:
         parts = [self.message]
@@ -732,6 +739,7 @@ class ShellTools(Skill):
                 path=target.path,
                 message=f"Edited {target.path} (replaced lines {target.start}-{target.end})",
                 diff=diff,
+                new_text=new_text,
             )
 
         elif isinstance(target, str):
@@ -763,6 +771,7 @@ class ShellTools(Skill):
                 path=target,
                 message=f"Edited {target}",
                 diff=f"--- a/{target}\n+++ b/{target}",
+                new_text=new,
             )
         else:
             raise TypeError(f"target must be a Match or file path str, got {type(target).__name__}")
@@ -786,4 +795,5 @@ class ShellTools(Skill):
         return FileWrite(
             path=path,
             message=f"Created {path} ({line_count} lines)",
+            new_text=content,
         )

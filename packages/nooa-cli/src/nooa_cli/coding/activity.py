@@ -351,12 +351,10 @@ class ActivityShellTools(Skill):
         resolved = self._resolve_path(path)
         if isinstance(target, Match):
             old_text = target.text
-            new_text = old_or_new
             start_line = target.start
             end_line = target.end
         else:
             old_text = old_or_new
-            new_text = new or ""
             start_line = None
             end_line = None
             try:
@@ -370,10 +368,13 @@ class ActivityShellTools(Skill):
                 pass
 
         bounded_old = pformat(old_text, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
-        bounded_new = pformat(new_text, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
         old_truncated = len(old_text) > _MAX_EVENT_TEXT_CHARS
-        new_truncated = len(new_text) > _MAX_EVENT_TEXT_CHARS
         result = await self._shell.replace(target, old_or_new, new)
+        # replace() may re-terminate the region, so report what it wrote rather
+        # than what it was handed.
+        written_text = result.new_text
+        bounded_new = pformat(written_text, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
+        new_truncated = len(written_text) > _MAX_EVENT_TEXT_CHARS
         self._emit(
             FileEdit(
                 path=str(resolved),

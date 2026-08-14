@@ -64,9 +64,27 @@ async def test_match_replace_emits_actual_before_and_after_text(tmp_path):
 
     edit = next(event for event in events if isinstance(event, FileEdit))
     assert edit.old_text == "two\n"
-    assert edit.new_text == "changed"
+    # replace() re-terminates the region so the following line survives; the
+    # event has to report the text that actually landed in the file.
+    assert edit.new_text == "changed\n"
+    assert (tmp_path / "example.txt").read_text() == "one\nchanged\nthree\n"
     assert (edit.start_line, edit.end_line) == (2, 2)
     assert "@@ -2,1 +2,1 @@" in edit.diff
+
+
+async def test_match_replace_at_end_of_file_reports_the_unterminated_text(tmp_path):
+    shell, events = _observed_shell(tmp_path)
+    (tmp_path / "example.txt").write_text("one\ntwo\nthree\n")
+    try:
+        match = await shell.read("example.txt", lines=(3, 3))
+        await shell.replace(match, "changed")
+    finally:
+        await shell.close()
+
+    edit = next(event for event in events if isinstance(event, FileEdit))
+    # Nothing follows the region, so no newline is added and none is reported.
+    assert edit.new_text == "changed"
+    assert (tmp_path / "example.txt").read_text() == "one\ntwo\nchanged"
 
 
 async def test_observing_an_overwrite_does_not_break_binary_file_replacement(tmp_path):
