@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 logger = logging.getLogger(__name__)
 
 from .output import (  # noqa: E402
+    AgentMessage,
     ClearScreen,
     CodeExecution,
     DiffOutput,
@@ -47,6 +48,29 @@ def _mcp_auto_connect_names(value: object) -> list[str]:
     if isinstance(value, list):
         return [v for v in value if isinstance(v, str)]
     return []
+
+
+def _mcp_oauth_markdown_link(auth_url: str) -> str | None:
+    """Return a safe Markdown link whose visible label is the complete URL."""
+    safe_url = auth_url.strip()
+    try:
+        parsed = urllib.parse.urlsplit(safe_url)
+    except ValueError:
+        return None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or any(
+            character.isspace()
+            or character in "<>"
+            or ord(character) < 0x20
+            or 0x7F <= ord(character) <= 0x9F
+            for character in safe_url
+        )
+    ):
+        return None
+    label = re.sub(r"([\\`*_\[\]{}])", r"\\\1", safe_url)
+    return f"[{label}](<{safe_url}>)"
 
 
 def _batch_render_ctx(frontend: "Frontend"):
@@ -2518,9 +2542,26 @@ class CommandRegistry:
             prompt_sensitive = getattr(self.frontend, "prompt_sensitive", None)
             if not callable(prompt_sensitive):
                 raise RuntimeError("This frontend cannot collect MCP OAuth codes securely")
+
+            # Put a full, clickable Markdown link in terminal scrollback before
+            # opening the bounded modal. This survives tmux redraws and remains
+            # selectable when OSC 52 clipboard forwarding is unavailable.
+            markdown_link = _mcp_oauth_markdown_link(auth_url)
+            if markdown_link is not None:
+                await self.frontend.render(
+                    AgentMessage(
+                        "Open the MCP OAuth authorization URL in a browser:\n\n"
+                        f"{markdown_link}\n\n"
+                        "If the link is not clickable (for example through tmux), "
+                        "copy and paste the displayed URL.",
+                        show_rule=False,
+                        soft_wrap=True,
+                    )
+                )
+
             return await prompt_sensitive(
                 "MCP OAuth authorization",
-                "Open the authorization URL below in a browser, authorize the server, "
+                "Open the authorization URL shown in scrollback, authorize the server, "
                 "then paste the authorization code or callback URL.",
                 link_url=auth_url,
             )

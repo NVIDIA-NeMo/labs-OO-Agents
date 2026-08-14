@@ -6,9 +6,30 @@ import base64
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from nooa_cli.tui.commands import _mcp_oauth_markdown_link
 from nooa_cli.tui.subapp import ChoicePromptView, SensitiveTextPromptView, TextPromptView
 from nooa_cli.tui.tui_application import TUIApplication
 from prompt_toolkit.formatted_text import ANSI
+
+
+def test_mcp_oauth_markdown_link_shows_complete_clickable_url():
+    url = "https://login.example.test/authorize?state=" + "a" * 500 + "&scope=read%20write"
+
+    assert _mcp_oauth_markdown_link(url) == f"[{url}](<{url}>)"
+
+
+def test_mcp_oauth_markdown_link_escapes_label_metacharacters():
+    url = "https://example.test/a_[b]?scope=*read*"
+
+    assert _mcp_oauth_markdown_link(url) == (
+        r"[https://example.test/a\_\[b\]?scope=\*read\*]"
+        f"(<{url}>)"
+    )
+
+
+def test_mcp_oauth_markdown_link_rejects_unsafe_target():
+    assert _mcp_oauth_markdown_link("javascript:alert(1)") is None
+    assert _mcp_oauth_markdown_link("https://example.test/a b") is None
 
 
 def test_sensitive_prompt_masks_value_and_submits():
