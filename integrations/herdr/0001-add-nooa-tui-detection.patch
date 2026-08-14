@@ -1,0 +1,385 @@
+diff --git a/docs/next/website/src/content/docs/agent-automation.mdx b/docs/next/website/src/content/docs/agent-automation.mdx
+index 16d694e2..47f5f891 100644
+--- a/docs/next/website/src/content/docs/agent-automation.mdx
++++ b/docs/next/website/src/content/docs/agent-automation.mdx
+@@ -41,7 +41,7 @@ Agent commands accept either a unique live name or the pane ID that currently ho
+ 
+ An available shell pane is at its interactive shell prompt: the shell itself owns the foreground, with no foreground command, editor, or agent running. Return the pane to its prompt before calling `agent start`.
+ 
+-`--kind` selects a supported agent and its canonical executable. Supported kinds are `pi`, `claude`, `codex`, `gemini`, `cursor`, `devin`, `agy`, `cline`, `omp`, `mastracode`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `kilo`, `qodercli`, `qwen`, and `maki`. Arguments after `--` are passed unchanged to that executable.
++`--kind` selects a supported agent and its canonical executable. Supported kinds are `pi`, `claude`, `codex`, `gemini`, `cursor`, `devin`, `agy`, `cline`, `omp`, `mastracode`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `kilo`, `qodercli`, `qwen`, `maki`, and `nooa`. Arguments after `--` are passed unchanged to that executable. NOOA's interactive entry point is a subcommand, so launch it with `herdr agent start <name> --kind nooa -- tui`.
+ 
+ Successful `agent start` returns only after Herdr detects the expected agent in the same terminal and marks it ready for interactive input. If detection reports `blocked` during startup, the command returns `agent_not_ready` immediately. The name remains available for `agent read` and `agent send-keys`, and becomes ready for prompts after detection reports `idle`. Startup waits for 30 seconds by default; `--timeout` must be greater than 3000 and no more than 300000 milliseconds.
+ 
+diff --git a/docs/next/website/src/content/docs/agents.mdx b/docs/next/website/src/content/docs/agents.mdx
+index c43097e2..a711fea6 100644
+--- a/docs/next/website/src/content/docs/agents.mdx
++++ b/docs/next/website/src/content/docs/agents.mdx
+@@ -33,6 +33,7 @@ Automatic detection works out of the box for common coding agents. The table sho
+ | Antigravity CLI | screen manifest | session |
+ | Kiro CLI | screen manifest | none |
+ | Maki | screen manifest | none |
++| NVIDIA Labs Object Oriented Agents (NOOA) | screen manifest | none |
+ 
+ Detected but less thoroughly tested: Gemini CLI and Cline. Unsupported agents still run normally as terminal processes. They just may not get rich state unless you add an integration or report state over the socket API.
+ 
+diff --git a/docs/next/website/src/content/docs/cli-reference.mdx b/docs/next/website/src/content/docs/cli-reference.mdx
+index 6c0cf6bf..e69a3636 100644
+--- a/docs/next/website/src/content/docs/cli-reference.mdx
++++ b/docs/next/website/src/content/docs/cli-reference.mdx
+@@ -305,7 +305,7 @@ herdr agent explain --file PATH --agent LABEL [--json|--verbose]
+ 
+ Agent targets are either a unique live agent name or the pane ID that currently hosts the agent. Terminal IDs and bare agent-kind labels are not agent targets. Agents started through `agent start` require a name; manually launched agents remain unnamed and use their pane ID.
+ 
+-`agent start` activates an existing available shell pane: the pane's interactive shell must own the foreground, with no foreground command, editor, or agent running. Topology must be created separately. Names are unique among live agents and must match `[a-z][a-z0-9_-]{0,31}`. The kind selects Herdr's canonical interactive executable, while arguments after `--` are passed to that executable. Supported kinds are `pi`, `claude`, `codex`, `gemini`, `cursor`, `devin`, `agy`, `cline`, `omp`, `mastracode`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `kilo`, `qodercli`, `qwen`, and `maki`. A name follows the current pane occupant and is cleared when that agent exits, is released, or is replaced. Temporary detection uncertainty does not clear it.
++`agent start` activates an existing available shell pane: the pane's interactive shell must own the foreground, with no foreground command, editor, or agent running. Topology must be created separately. Names are unique among live agents and must match `[a-z][a-z0-9_-]{0,31}`. The kind selects Herdr's canonical interactive executable, while arguments after `--` are passed to that executable. Supported kinds are `pi`, `claude`, `codex`, `gemini`, `cursor`, `devin`, `agy`, `cline`, `omp`, `mastracode`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `kilo`, `qodercli`, `qwen`, `maki`, and `nooa`. NOOA's interactive entry point is a subcommand, so use `herdr agent start <name> --kind nooa -- tui`. A name follows the current pane occupant and is cleared when that agent exits, is released, or is replaced. Temporary detection uncertainty does not clear it.
+ 
+ A successful start returns only after the expected agent owns the same terminal and is ready for interactive input. If detection reports `blocked` during startup, the command returns `agent_not_ready` immediately. The name remains available for `agent read` and `agent send-keys`, and becomes ready for prompts after detection reports `idle`. The default startup timeout is 30000 milliseconds; explicit values must be greater than 3000 and no more than 300000.
+ 
+diff --git a/src/config/sidebar.rs b/src/config/sidebar.rs
+index c548c839..ddf29792 100644
+--- a/src/config/sidebar.rs
++++ b/src/config/sidebar.rs
+@@ -623,6 +623,7 @@ rows = [[{ token = "git_status", fg = "#ff00aa" }], [{ token = "$jj", bold = tru
+             Agent::Qodercli,
+             Agent::Qwen,
+             Agent::Maki,
++            Agent::Nooa,
+         ];
+         let entries = agents
+             .iter()
+diff --git a/src/config/sound.rs b/src/config/sound.rs
+index c84f0d59..8db7a98d 100644
+--- a/src/config/sound.rs
++++ b/src/config/sound.rs
+@@ -142,6 +142,7 @@ impl AgentSoundOverrides {
+             Some(Agent::Qodercli) => self.qodercli,
+             Some(Agent::Qwen) => self.qwen,
+             Some(Agent::Maki) => self.maki,
++            Some(Agent::Nooa) => AgentSoundSetting::Default,
+             None => AgentSoundSetting::Default,
+         }
+     }
+diff --git a/src/detect/manifest.rs b/src/detect/manifest.rs
+index b9fe786a..15362220 100644
+--- a/src/detect/manifest.rs
++++ b/src/detect/manifest.rs
+@@ -252,6 +252,7 @@ const BUNDLED_MANIFESTS: &[(&str, &str)] = &[
+     ("kimi", include_str!("manifests/kimi.toml")),
+     ("kiro", include_str!("manifests/kiro.toml")),
+     ("maki", include_str!("manifests/maki.toml")),
++    ("nooa", include_str!("manifests/nooa.toml")),
+     ("opencode", include_str!("manifests/opencode.toml")),
+     ("pi", include_str!("manifests/pi.toml")),
+     ("qodercli", include_str!("manifests/qodercli.toml")),
+diff --git a/src/detect/manifests/nooa.toml b/src/detect/manifests/nooa.toml
+new file mode 100644
+index 00000000..a2c0b8a4
+--- /dev/null
++++ b/src/detect/manifests/nooa.toml
+@@ -0,0 +1,35 @@
++id = "nooa"
++version = "2026.08.14.1"
++min_engine_version = 1
++updated_at = "2026-08-14T00:00:00Z"
++
++# NOOA keeps its prompt visible while turns run. Higher-priority working and
++# blocked rules therefore override the idle prompt rule when their live status
++# chrome is present.
++
++[[rules]]
++id = "interactive_prompt"
++state = "blocked"
++priority = 300
++region = "whole_recent"
++visible_blocker = true
++any = [
++  { contains = ["Enter submit", "Esc cancel"] },
++  { contains = ["Enter choose", "Esc cancel"] },
++]
++
++[[rules]]
++id = "thinking_status"
++state = "working"
++priority = 200
++region = "bottom_non_empty_lines(5)"
++visible_working = true
++line_regex = ['^[\x{2800}-\x{28FF}] (thinking|cancelling agent turn)\.\.\.$']
++
++[[rules]]
++id = "input_prompt"
++state = "idle"
++priority = 100
++region = "bottom_non_empty_lines(3)"
++visible_idle = true
++line_regex = ['^❯\s*$']
+diff --git a/src/detect/mod.rs b/src/detect/mod.rs
+index f78567f6..7f02ee28 100644
+--- a/src/detect/mod.rs
++++ b/src/detect/mod.rs
+@@ -63,10 +63,11 @@ pub enum Agent {
+     Qodercli,
+     Qwen,
+     Maki,
++    Nooa,
+ }
+ 
+ impl Agent {
+-    pub const ALL: [Self; 22] = [
++    pub const ALL: [Self; 23] = [
+         Self::Pi,
+         Self::Claude,
+         Self::Codex,
+@@ -89,9 +90,10 @@ impl Agent {
+         Self::Qodercli,
+         Self::Qwen,
+         Self::Maki,
++        Self::Nooa,
+     ];
+ 
+-    pub const SCREEN_MANIFEST_AGENTS: [Self; 20] = [
++    pub const SCREEN_MANIFEST_AGENTS: [Self; 21] = [
+         Self::Pi,
+         Self::Claude,
+         Self::Codex,
+@@ -112,6 +114,7 @@ impl Agent {
+         Self::Qodercli,
+         Self::Qwen,
+         Self::Maki,
++        Self::Nooa,
+     ];
+ }
+ 
+@@ -139,6 +142,7 @@ pub fn agent_label(agent: Agent) -> &'static str {
+         Agent::Qodercli => "qodercli",
+         Agent::Qwen => "qwen",
+         Agent::Maki => "maki",
++        Agent::Nooa => "nooa",
+     }
+ }
+ 
+@@ -172,6 +176,7 @@ pub fn interactive_agent_executable(agent: Agent) -> &'static str {
+         Agent::Qodercli => "qodercli",
+         Agent::Qwen => "qwen",
+         Agent::Maki => "maki",
++        Agent::Nooa => "nooa",
+     }
+ }
+ 
+@@ -209,6 +214,7 @@ fn lookup_agent(name: &str) -> Option<Agent> {
+         "qodercli" | "qoderclicn" | "qoder" | "qodercn" => Some(Agent::Qodercli),
+         "qwen" | "qwen-code" | "qwen code" => Some(Agent::Qwen),
+         "maki" => Some(Agent::Maki),
++        "nooa" => Some(Agent::Nooa),
+         _ => None,
+     }
+ }
+@@ -339,6 +345,15 @@ fn normalized_process_name(process: &crate::platform::ForegroundProcess) -> Stri
+     let effective = process.argv0.as_deref().unwrap_or(&process.name);
+     let lower_effective = effective.to_lowercase();
+ 
++    if normalized_agent_lookup_name(path_basename(effective)) == agent_label(Agent::Nooa) {
++        return process
++            .argv
++            .as_deref()
++            .filter(|argv| argv_runs_nooa_tui(argv))
++            .map(|_| agent_label(Agent::Nooa).to_string())
++            .unwrap_or_default();
++    }
++
+     if is_generic_runtime_or_shell(&lower_effective) {
+         if let Some(wrapped_agent) =
+             wrapped_agent_name_from_runtime_argv(&lower_effective, process.argv.as_deref())
+@@ -377,15 +392,41 @@ fn wrapped_agent_name_from_runtime_argv(runtime: &str, argv: Option<&[String]>)
+     let argv = argv?;
+     let runtime_name = normalized_agent_lookup_name(path_basename(runtime));
+ 
+-    match runtime_name.as_str() {
++    let candidate = match runtime_name.as_str() {
+         "node" | "bun" => script_arg_agent_name(argv, &["-e", "--eval", "-p", "--print"], &[]),
+         name if is_python_runtime(name) => script_arg_agent_name(argv, &["-c"], &["-m"]),
+         "sh" | "bash" | "zsh" | "fish" => script_arg_agent_name(argv, &["-c"], &[]),
+         "cmd" => windows_cmd_arg_agent_name(argv),
+         "powershell" | "pwsh" => powershell_arg_agent_name(argv),
++        "uv" => uv_run_agent_name(argv),
+         "tmux" => None,
+         _ => None,
++    }?;
++
++    if candidate == agent_label(Agent::Nooa) && !argv_runs_nooa_tui(argv) {
++        return None;
+     }
++
++    Some(candidate)
++}
++
++fn uv_run_agent_name(argv: &[String]) -> Option<String> {
++    let run_index = argv.iter().position(|arg| arg == "run")?;
++    let command = argv.get(run_index + 1)?;
++    let candidate = agent_name_from_path_token(command)?;
++    (candidate == agent_label(Agent::Nooa)
++        && argv
++            .get(run_index + 2)
++            .is_some_and(|arg| arg.eq_ignore_ascii_case("tui")))
++    .then_some(candidate)
++}
++
++fn argv_runs_nooa_tui(argv: &[String]) -> bool {
++    argv.windows(2).any(|window| {
++        agent_name_from_basename(path_basename(&window[0])).as_deref()
++            == Some(agent_label(Agent::Nooa))
++            && window[1].eq_ignore_ascii_case("tui")
++    })
+ }
+ 
+ fn windows_cmd_arg_agent_name(argv: &[String]) -> Option<String> {
+@@ -636,6 +677,7 @@ fn is_generic_runtime_or_shell(name: &str) -> bool {
+                 | "tmux"
+                 | "node"
+                 | "bun"
++                | "uv"
+                 | "cmd"
+                 | "powershell"
+                 | "pwsh"
+@@ -734,6 +776,7 @@ mod tests {
+         assert_eq!(identify_agent("qwen"), Some(Agent::Qwen));
+         assert_eq!(identify_agent("Qwen Code"), Some(Agent::Qwen));
+         assert_eq!(identify_agent("maki"), Some(Agent::Maki));
++        assert_eq!(identify_agent("nooa"), Some(Agent::Nooa));
+     }
+ 
+     #[test]
+@@ -761,6 +804,7 @@ mod tests {
+         assert_eq!(parse_agent_label("qwen-code"), Some(Agent::Qwen));
+         assert_eq!(parse_agent_label("maki"), Some(Agent::Maki));
+         assert_eq!(parse_agent_label("kilo-code"), Some(Agent::Kilo));
++        assert_eq!(parse_agent_label("nooa"), Some(Agent::Nooa));
+     }
+ 
+     #[test]
+@@ -804,6 +848,7 @@ mod tests {
+             (Agent::Qodercli, "qodercli"),
+             (Agent::Qwen, "qwen"),
+             (Agent::Maki, "maki"),
++            (Agent::Nooa, "nooa"),
+         ];
+         assert_eq!(expected.len(), Agent::ALL.len());
+         for (agent, executable) in expected {
+@@ -948,6 +993,77 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn identify_agent_in_job_detects_uv_run_nooa_tui() {
++        let job = crate::platform::ForegroundJob {
++            process_group_id: 123,
++            processes: vec![
++                foreground_process(
++                    123,
++                    "uv",
++                    &["uv", "run", "nooa", "tui", "--working-dir", "/tmp/project"],
++                ),
++                foreground_process(
++                    124,
++                    "nooa",
++                    &[
++                        "/tmp/.venv/bin/python3",
++                        "/tmp/.venv/bin/nooa",
++                        "tui",
++                        "--working-dir",
++                        "/tmp/project",
++                    ],
++                ),
++            ],
++        };
++
++        assert_eq!(
++            identify_agent_in_job(&job),
++            Some((Agent::Nooa, "nooa".to_string()))
++        );
++    }
++
++    #[test]
++    fn identify_agent_in_job_detects_python_wrapped_nooa_tui() {
++        let job = crate::platform::ForegroundJob {
++            process_group_id: 123,
++            processes: vec![foreground_process(
++                123,
++                "python3.13",
++                &[
++                    "/tmp/.venv/bin/python3.13",
++                    "/tmp/.venv/bin/nooa",
++                    "tui",
++                    "--working-dir",
++                    "/tmp/project",
++                ],
++            )],
++        };
++
++        assert_eq!(
++            identify_agent_in_job(&job),
++            Some((Agent::Nooa, "nooa".to_string()))
++        );
++    }
++
++    #[test]
++    fn identify_agent_in_job_ignores_non_tui_nooa_commands() {
++        for (name, argv) in [
++            ("nooa", vec!["nooa", "start-dev"]),
++            (
++                "python3",
++                vec!["python3", "/tmp/.venv/bin/nooa", "start-dev"],
++            ),
++            ("uv", vec!["uv", "run", "nooa", "start-dev"]),
++        ] {
++            let job = crate::platform::ForegroundJob {
++                process_group_id: 123,
++                processes: vec![foreground_process(123, name, &argv)],
++            };
++            assert_eq!(identify_agent_in_job(&job), None, "matched {argv:?}");
++        }
++    }
++
+     #[test]
+     fn identify_agent_in_job_detects_nix_wrapped_codex_from_cmdline_argv0() {
+         let job = crate::platform::ForegroundJob {
+@@ -1306,6 +1422,25 @@ mod tests {
+         assert_eq!(detect_state(None, "anything"), AgentState::Unknown);
+     }
+ 
++    #[test]
++    fn nooa_manifest_classifies_live_tui_chrome() {
++        assert_eq!(detect_state(Some(Agent::Nooa), "❯\n"), AgentState::Idle);
++        assert_eq!(
++            detect_state(
++                Some(Agent::Nooa),
++                "⠼ thinking...\n──────────────── session\n❯\n"
++            ),
++            AgentState::Working
++        );
++        assert_eq!(
++            detect_state(
++                Some(Agent::Nooa),
++                " Model setup ─────\nSelect a model\nEnter choose  Esc cancel\n"
++            ),
++            AgentState::Blocked
++        );
++    }
++
+     // ---- Process identification (real PTY) ----
+ 
+     #[cfg(target_os = "linux")]
+diff --git a/src/platform/windows.rs b/src/platform/windows.rs
+index 83f85e6a..bda24d07 100644
+--- a/src/platform/windows.rs
++++ b/src/platform/windows.rs
+@@ -1104,7 +1104,8 @@ fn select_pane_foreground_job(
+ }
+ 
+ fn process_entry_identifies_agent(entry: &WindowsProcessEntry) -> bool {
+-    crate::detect::identify_agent(&entry.name).is_some()
++    crate::detect::identify_agent(&entry.name)
++        .is_some_and(|agent| agent != crate::detect::Agent::Nooa)
+         || crate::detect::identify_agent_in_job(&foreground_job_from_entry(entry)).is_some()
+ }
+ 
