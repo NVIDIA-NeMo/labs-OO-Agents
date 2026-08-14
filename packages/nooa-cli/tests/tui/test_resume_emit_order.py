@@ -9,8 +9,7 @@ emit into build_registry() (after skill activation) fixes the ordering.
 """
 
 import pytest
-
-from nooa.sessions import SessionResumed
+from nooa_cli.sessions import SessionResumed
 
 
 @pytest.mark.asyncio

@@ -342,7 +342,7 @@ async def _reset_agent_working_state(agent: "Agent") -> None:
     em = getattr(agent, "event_manager", None)
     if em is not None:
         try:
-            from nooa.sessions import SessionCleared
+            from nooa_cli.sessions import SessionCleared
 
             em.register_event_type(SessionCleared)
             sid = None
@@ -1407,7 +1407,7 @@ class SessionCommand(Command):
                 async def _restore_and_emit() -> list[Output]:
                     restored = new_sm._storage.restore_latest_snapshot(self.agent)
                     try:
-                        from nooa.sessions import SessionResumed
+                        from nooa_cli.sessions import SessionResumed
 
                         self.agent.event_manager.register_event_type(SessionResumed)
                         self.agent.event_manager.add(

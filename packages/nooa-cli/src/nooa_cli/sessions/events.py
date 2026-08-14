@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Durable metadata for interactive coding-agent sessions."""
+"""Durable metadata and transient lifecycle events for coding-agent sessions."""
 
-from typing import ClassVar
+from typing import Annotated, ClassVar
 
-from nooa.context_blocks import Metadata
+from pydantic import Field
+
+from nooa.context_blocks import EventBase, Metadata
 from nooa.context_blocks.roles import Role
 
 
@@ -36,6 +38,33 @@ class SessionUserMessage(Metadata):
     content: str = ""
 
 
+class SessionResumed(EventBase):  # type: ignore[misc]
+    """An interactive agent has been restored or initialized for a session."""
+
+    _role: ClassVar[Role] = Role.RUNTIME_EVENT
+    handler_aliases: ClassVar[tuple[str, ...]] = ("TuiSessionResumed",)
+
+    session_id: Annotated[str, Field(description="The resumed or started session ID")]
+    restored: Annotated[
+        bool,
+        Field(description="Whether a snapshot was restored into the agent"),
+    ]
+
+
+class SessionCleared(EventBase):  # type: ignore[misc]
+    """An interactive agent's working state has been reset."""
+
+    _role: ClassVar[Role] = Role.RUNTIME_EVENT
+    handler_aliases: ClassVar[tuple[str, ...]] = ("TuiSessionCleared",)
+
+    session_id: Annotated[
+        str | None,
+        Field(default=None, description="The new post-clear session ID, when known"),
+    ]
+
+
+# Transient lifecycle events are deliberately absent here: this tuple is the
+# set persisted with the session, and those two are runtime-only.
 SESSION_EVENT_TYPES: tuple[type[Metadata], ...] = (
     SessionStarted,
     SessionTitleUpdated,

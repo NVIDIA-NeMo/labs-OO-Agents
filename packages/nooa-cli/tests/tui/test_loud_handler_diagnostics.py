@@ -511,7 +511,9 @@ class TestBangShell:
         session.agent.shell.cwd = Path(tempfile.gettempdir())
 
         shell = await session._get_bang_shell()
-        assert str(shell.cwd) == tempfile.gettempdir()
+        # Resolve both sides: on macOS the temp dir is reached through the
+        # /var -> /private/var symlink, and the shell reports the real path.
+        assert Path(shell.cwd).resolve() == Path(tempfile.gettempdir()).resolve()
 
         # Simulate agent changing directory to a real path
         session.agent.shell.cwd = Path("/")

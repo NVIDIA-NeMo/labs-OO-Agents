@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from nooa.sessions import SessionResumed
+from nooa_cli.sessions import SessionResumed
 
 from .output import Output, TextOutput
 

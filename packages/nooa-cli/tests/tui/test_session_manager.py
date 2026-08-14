@@ -106,8 +106,13 @@ class TestListSessions:
         ids = [s.id for s in sessions]
         assert ids.index(sm_new.session_id) < ids.index(sm_old.session_id)
 
-    def test_turn_count_reflects_all_turns(self, tmp_path):
-        """list_sessions includes turn_count = number of user + agent turns."""
+    def test_turn_count_counts_user_turns(self, tmp_path):
+        """list_sessions includes turn_count = number of user turns.
+
+        Agent replies are not counted. The live path increments once per
+        ``record_user`` and the summary query matches it; ``turns()`` still
+        returns both roles, so it stays the longer of the two.
+        """
         from nooa.interactive import AgentMessage
 
         with patch("nooa_cli.tui.session_manager.SESSIONS_DIR", tmp_path):
@@ -121,7 +126,7 @@ class TestListSessions:
             metas = SessionManager.list_sessions()
 
         meta = next(m for m in metas if m.id == sid)
-        assert meta.turn_count == 3  # 2 user + 1 agent
+        assert meta.turn_count == 2  # 2 user; the agent reply is not a turn
 
     def test_limit_is_respected(self, tmp_path):
         """list_sessions(limit=N) returns at most N results."""
