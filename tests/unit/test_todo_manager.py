@@ -11,7 +11,7 @@ Covers the methods that were previously untested:
   - status()                               (display rendering)
 """
 
-from nooa.tools.todo import Todo, TodoManager
+from nooa.tools.todo import TodoManager
 
 
 # =============================================================================
@@ -367,7 +367,7 @@ class TestListTodos:
     def test_list_todos_filter_done(self) -> None:
         tm = TodoManager()
         a = tm.add("A")
-        b = tm.add("B")
+        tm.add("B")
         tm.done(a.id)
         done_todos = tm.list_todos(status="done")
         assert len(done_todos) == 1
