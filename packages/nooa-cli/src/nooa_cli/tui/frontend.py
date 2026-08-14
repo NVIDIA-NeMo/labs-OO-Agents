@@ -298,7 +298,9 @@ class TerminalFrontend:
         self._console.print_help(output.commands)
 
     def _render_agent_message(self, output: AgentMessage) -> None:
-        self._console.print_agent(output.content, show_rule=output.show_rule)
+        self._console.print_agent(
+            output.content, show_rule=output.show_rule, soft_wrap=output.soft_wrap
+        )
 
     def _render_clear(self, _output: ClearScreen) -> None:
         stream = getattr(self._console.console, "file", None)

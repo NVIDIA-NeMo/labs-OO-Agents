@@ -84,9 +84,16 @@ class AgentMessage:
     content: str
     # False for 2nd+ message() calls in the same turn — suppresses the OO ── rule
     show_rule: bool = True
+    # Delegate wrapping to the terminal so copied long lines contain no hard newlines.
+    soft_wrap: bool = False
 
     def to_json(self) -> dict:
-        return {"type": "agent_message", "content": self.content, "show_rule": self.show_rule}
+        return {
+            "type": "agent_message",
+            "content": self.content,
+            "show_rule": self.show_rule,
+            "soft_wrap": self.soft_wrap,
+        }
 
 
 @dataclass
