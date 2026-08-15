@@ -180,6 +180,7 @@ def probe_capabilities() -> Capabilities:
     """Probe the host once for every enforcement mechanism the sandbox uses."""
     try:
         import resource
+
         has_rlimit = hasattr(resource, "RLIMIT_AS") and hasattr(resource, "RLIMIT_CPU")
     except ImportError:
         has_rlimit = False
