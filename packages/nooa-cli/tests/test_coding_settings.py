@@ -2,7 +2,26 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for workspace-aware coding host settings."""
 
+import pytest
 from nooa_cli.coding import load_coding_skills_dirs
+
+
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path, monkeypatch):
+    """Point ``Path.home()`` at an empty directory.
+
+    ``load_coding_skills_dirs`` reads conventional user roots such as
+    ``~/.agents/skills`` straight from the real home — correct in production,
+    since those are third-party conventions rather than NOOA config, and so
+    unaffected by NEMO_OO_USER_DIR. Without this, every assertion here depends
+    on whether the developer happens to have those directories, so the suite
+    passes on a clean CI runner and fails on a working machine.
+    """
+    home = tmp_path / "isolated-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    return home
 
 
 def test_project_tui_skill_dirs_remain_compatible(tmp_path, monkeypatch):
