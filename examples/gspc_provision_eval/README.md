@@ -1,6 +1,6 @@
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-<!-- Contributed by CSOAI (csoai.org) — Council for the Safety of Artificial Intelligence. -->
+<!-- Contributed by CSOAI (csoai.org) — Council of AI (CSOAI LTD, UK #16939677). -->
 
 # GSPC Provision-Anchored Evaluator
 
@@ -13,8 +13,7 @@ optional generation method (`explain_verdict`) lets an LLM narrate the verdict
 in plain English, but the verdict itself is produced by ordinary Python and
 never depends on a model.
 
-Contributed by [CSOAI](https://csoai.org) (Council for the Safety of Artificial
-Intelligence, UK) to the Open Secure AI Alliance's **evaluations and
+Contributed by [CSOAI](https://csoai.org) (Council of AI (CSOAI LTD, UK #16939677)) to the Open Secure AI Alliance's **evaluations and
 benchmarks** lane, as a minimal reference for the deterministic-core /
 LLM-narrated split that audit-grade evaluation requires.
 
@@ -111,3 +110,44 @@ top — which scales to a larger corpus without design changes.
 | `provision_evaluator.py` | The `ProvisionEvaluator` agent (corpus, deterministic core, `explain_verdict`) |
 | `test_provision_evaluator.py` | Hermetic pytest suite for the deterministic core |
 | `conftest.py` | Makes the example importable when pytest runs this directory |
+| `verify_offline.py` | Public-key offline verifier for signed measurement cards (zero network, zero secrets) |
+| `sample_card.json` | A real signed fleet measurement card to verify (id af0a3e88..., 2026-08-16) |
+
+## Verify a real signed measurement card offline
+
+ is a real Ed25519-signed measurement card from the Council
+of AI live fleet board (EU AI Act Art-5 prohibited-practice screening across
+13 open-weight models, 2026-08-16). The verifier is public-key only — zero
+network, zero secrets:
+
+```bash
+uv run python examples/gspc_provision_eval/verify_offline.py --card examples/gspc_provision_eval/sample_card.json
+# VALID fleet-art5-sov6 id=af0a3e88a649ea0e...
+```
+
+Card format: `id = SHA-256(canonical JSON of body)` (sorted keys, compact
+separators); `signature = Ed25519(id)` under the card's `pubkey`; `prev`
+links each card to the previous one, forming a tamper-evident chain. Flip any
+byte of the body and verification fails.
+
+## What this example does NOT measure
+
+Honesty block, kept in code-review form:
+
+- The 6-provision demo corpus is a teaching corpus. It does not determine
+  legal compliance, and a `PERMITTED_WITH_CONDITIONS` verdict is not legal
+  advice.
+- Keyword anchoring is a demonstration matcher; production measurement uses
+  per-axis method hashes so a reader can tell exactly which method produced
+  a number. Anything not measured is disclosed as `UNMEASURED` — never
+  interpolated, never averaged over.
+- The fleet-extent claim is bounded and live: the evaluator's provision bank
+  is measured nightly across 22 open models x 13 axes, with a public
+  scoreboard and signed ledger at https://csoai.org — check the numbers there
+  rather than trusting this sentence.
+
+## The containment framing
+
+**deterministic core decides; LLM narrates; the harness never trusts the
+narrator.** The signed record is the evidence; the narration is presentation.
+An audit pipeline can strip the narration entirely and lose nothing.

@@ -618,4 +618,4 @@ And [`quickstart/`](quickstart/) also contains a few beyond-numbered examples: `
 
 ### Community examples
 
-- [`gspc_provision_eval/`](gspc_provision_eval/) — deterministic, provision-anchored AI-compliance evaluator with signed verdict records and an LLM-narrated explanation layer (Python decides, the LLM narrates). Contributed by [CSOAI](https://csoai.org) (Council for the Safety of Artificial Intelligence) for the Open Secure AI Alliance's evaluations-and-benchmarks lane.
+- [`gspc_provision_eval/`](gspc_provision_eval/) — deterministic, provision-anchored AI-compliance evaluator with signed verdict records and an LLM-narrated explanation layer (Python decides, the LLM narrates). Contributed by [CSOAI](https://csoai.org) (Council of AI (CSOAI LTD, UK #16939677)) for the Open Secure AI Alliance's evaluations-and-benchmarks lane.
