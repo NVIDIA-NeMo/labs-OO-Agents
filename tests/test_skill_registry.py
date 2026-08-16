@@ -300,3 +300,31 @@ class TestContextBlockRegistration:
 
         cm = agent_ctx.context_manager
         assert "skills" in cm
+
+
+def test_a_skill_cannot_take_over_another_skills_agent_attribute():
+    """Two registry names must not resolve to one agent attribute.
+
+    The collision check was skipped once an attr appeared in _attr_map, so the
+    second registrant silently replaced the first. That is how a repo-supplied
+    `cmd.shell` or a client-supplied `mcp.shell` removed the agent's real shell.
+    """
+
+    class _Agent:
+        # Declares the attrs carrying its own tools, as CodingAgent does.
+        __protected_skill_attrs__ = frozenset({"shell"})
+
+    class _Tool:
+        pass
+
+    agent = _Agent()
+    registry = SkillRegistry(agent)
+    registry.register("nemo.shell", _Tool())
+    original = agent.shell
+
+    with pytest.raises(ValueError, match="shell"):
+        registry.register("mcp.shell", _Tool())
+
+    assert agent.shell is original
+    # Re-registering the same name stays allowed.
+    registry.register("nemo.shell", _Tool())

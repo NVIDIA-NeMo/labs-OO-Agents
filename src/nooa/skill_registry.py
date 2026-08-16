@@ -542,7 +542,24 @@ class SkillRegistry(Skill):
         attr = self._attr_name(name)
         if attr.startswith("_") or attr in _RESERVED_ATTRS:
             raise ValueError(f"Cannot register skill with reserved attr name {attr!r}")
-        if hasattr(self._agent, attr) and attr not in self._attr_map.values():
+        owner = next(
+            (held for held, held_attr in self._attr_map.items() if held_attr == attr), None
+        )
+        protected = getattr(type(self._agent), "__protected_skill_attrs__", frozenset())
+        if attr in protected and owner is not None and owner != name:
+            # Colliding leaves are supported in general — reload disambiguates
+            # by fully-qualified name — but an agent may declare attributes that
+            # carry its own tools. Those must not be taken over: the previous
+            # check was suppressed once an attr was in _attr_map, so the second
+            # claimant silently won. That is how a repo-supplied `cmd.shell` or
+            # a client-supplied `mcp.shell` removed the agent's real shell while
+            # the model kept being told it still had one. Re-registering the
+            # same name is still fine.
+            raise ValueError(
+                f"Cannot register skill {name!r} as agent attr {attr!r}: "
+                f"already provided by {owner!r}"
+            )
+        if hasattr(self._agent, attr) and owner is None:
             logger.warning("Skill %s overwrites existing agent attr '%s'", name, attr)
         setattr(self._agent, attr, skill)
         if hasattr(skill, "attach"):

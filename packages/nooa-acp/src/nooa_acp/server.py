@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -70,6 +71,8 @@ from nooa_acp._runtime import (
 from nooa_acp.coding_agent import CodingInteractiveAgent
 from nooa_acp.dispatcher import InteractiveSessionDispatcher
 from nooa_acp.event_bridge import ACPEventBridge
+
+logger = logging.getLogger(__name__)
 
 _SESSION_PAGE_SIZE = 50
 
@@ -276,6 +279,24 @@ class CodingACPAdapter:
                             session.agent.message(message)
                             await session.bridge.flush()
                             return PromptResponse(stop_reason="end_turn")
+                        except Exception as exc:
+                            # Command bodies are third-party code from workspace
+                            # and installed skills. Letting one raise turns the
+                            # whole prompt into a JSON-RPC internal_error, and
+                            # the user's turn is already durably recorded — so
+                            # the session replays a question with no answer.
+                            # The same failure inside execute_python is caught by
+                            # the strategy and shown to the model; this path had
+                            # no equivalent.
+                            logger.warning(
+                                "Slash command /%s failed in session %s",
+                                name,
+                                session_id,
+                                exc_info=True,
+                            )
+                            session.agent.message(f"/{name} failed: {exc}")
+                            await session.bridge.flush()
+                            return PromptResponse(stop_reason="end_turn")
                         if submission is None:
                             result = None
                         else:
@@ -352,10 +373,19 @@ class CodingACPAdapter:
                 libs_dir=root / ".nooa" / "libs",
                 skills_dirs=load_coding_skills_dirs(root),
             )
+            registration_warnings: list[str] = []
             for name, tool in mcp.items():
                 registry_name = f"mcp.{name}"
-                agent.skills.register(registry_name, tool)
-                agent.skills.activate([registry_name])
+                try:
+                    agent.skills.register(registry_name, tool)
+                    agent.skills.activate([registry_name])
+                except ValueError as exc:
+                    # A server name can collide with a core agent attribute
+                    # (`shell`, `repo`) or a reserved one (`runtime`). Skipping
+                    # it keeps the session usable — the same contract the
+                    # connect path already offers for an unreachable server —
+                    # instead of failing session/new with an opaque error.
+                    registration_warnings.append(f"MCP server {name!r} was not registered: {exc}")
             dispatcher = InteractiveSessionDispatcher(agent)
             bridge = ACPEventBridge(agent, self._client, handle.id)
             commands = CodingSlashCommandRegistry(agent)
@@ -365,7 +395,7 @@ class CodingACPAdapter:
                 dispatcher,
                 bridge,
                 commands,
-                startup_warnings=mcp_warnings,
+                startup_warnings=(*mcp_warnings, *registration_warnings),
             )
             commands.set_on_change(
                 lambda available: bridge.publish(_available_commands_update(available)),

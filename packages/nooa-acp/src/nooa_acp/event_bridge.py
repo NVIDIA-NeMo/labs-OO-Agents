@@ -29,6 +29,7 @@ from nooa_cli.coding import (
     TerminalCommandStarted,
 )
 
+from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
 from nooa.events import LLMComplete, PythonOutput
 from nooa.interactive import AgentMessage
@@ -39,7 +40,10 @@ from nooa_acp.coding_agent import CodingInteractiveAgent
 logger = logging.getLogger(__name__)
 
 _STOP = object()
-logger = logging.getLogger(__name__)
+
+# Bound on a rendered Out[n] value; large results belong in the agent's
+# context, not repeated in full inside a client tool card.
+_MAX_VALUE_CHARS = 10_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +112,10 @@ class ACPEventBridge:
             not isinstance(event, ToolCallEvent)
             or event.name != "execute_python"
             or event.metadata.get("prefill") is True
+            # codeact manufactures an execute_python call to carry a prose-only
+            # reply. Nothing ran, so showing it as a Python card would present
+            # the model's own text, commented out, as a completed execution.
+            or event.metadata.get("synthetic") is True
         ):
             return
         code = event.arguments.get("code", "")
@@ -137,6 +145,13 @@ class ACPEventBridge:
         parts = [
             part.rstrip() for part in (event.stdout, event.stderr, event.error) if part.strip()
         ]
+        # A cell whose last line is a bare expression produces no stdout: the
+        # result arrives as ``value`` and codeact shows it to the model as
+        # Out[n]. Without this the client is told there was no output while the
+        # agent is reasoning from one.
+        if event.value is not None:
+            rendered = pformat(event.value, max_string=_MAX_VALUE_CHARS, unquote_strings=True)
+            parts.append(f"Out[{event.execution_count}]: {rendered}")
         output = "\n".join(parts) or "Completed."
         status: Literal["failed", "completed"] = (
             "failed" if event.execution_status is ResultStatus.ERROR else "completed"
@@ -326,6 +341,12 @@ class ACPEventBridge:
             return
         for unsubscribe in self._unsubscribers:
             unsubscribe()
+        # A turn that ended before its PythonOutput — an exception escaping the
+        # strategy, say — leaves cards in_progress and their source retained.
+        # fail_open_tools is otherwise only reached from session/cancel, so this
+        # is the sole purge on an ordinary close.
+        with suppress(Exception):
+            await self.fail_open_tools("Session closed before this finished.")
         with suppress(Exception):
             await self.flush()
         self._closed = True
