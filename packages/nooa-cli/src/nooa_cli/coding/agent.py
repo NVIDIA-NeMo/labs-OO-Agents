@@ -46,6 +46,12 @@ class CodingAgent(InteractiveAgent):
     and ``WAIT`` only while an actual background job is active.
     """
 
+    # Attributes carrying this agent's own tools. SkillRegistry refuses to let
+    # a later skill — a workspace SKILL.md, a client-forwarded MCP server —
+    # take one over, which would remove the tool while the model is still told
+    # it has it.
+    __protected_skill_attrs__ = frozenset({"shell", "repo", "todo", "libs", "skills"})
+
     cwd: Annotated[Path, nosnapshot]
     shell: Annotated[ActivityShellTools, nosnapshot]
     repo: Annotated[RepoTools, nosnapshot]

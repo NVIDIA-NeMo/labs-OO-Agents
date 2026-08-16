@@ -383,3 +383,74 @@ async def test_a_cancelled_command_reads_as_cancellation_not_a_crash(tmp_path):
     assert "Cancelled by user." in rendered
     assert "CancelledError" not in rendered
     await bridge.close()
+
+
+async def test_bare_expression_result_is_shown_not_reported_as_no_output(tmp_path):
+    """A cell whose value is its result must not render as "Completed.".
+
+    codeact puts the value in the model's own context as Out[n], so dropping it
+    means the client is told there was no output while the agent reasons from
+    one.
+    """
+    agent = CodingInteractiveAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="t1", name="execute_python", arguments={"code": "1 + 1"})
+    )
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="t1",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=3,
+            value=42,
+        )
+    )
+    await bridge.flush()
+
+    rendered = "".join(str(update) for _, update in client.updates)
+    assert "42" in rendered
+    assert "Completed." not in rendered
+    await bridge.close()
+
+
+async def test_synthetic_text_replies_are_not_rendered_as_python_runs(tmp_path):
+    """codeact turns a prose-only reply into a synthetic execute_python call.
+
+    Nothing was executed, so surfacing it as a Python tool call shows the user
+    a run that never happened, with their model's prose commented out inside.
+    """
+    agent = CodingInteractiveAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+
+    agent.event_manager.add(
+        ToolCallEvent(
+            tool_call_id="t2",
+            name="execute_python",
+            arguments={"code": "# I think the answer is 42"},
+            metadata={"synthetic": True, "synthetic_type": "text_response"},
+        )
+    )
+    await bridge.flush()
+
+    assert not [u for _, u in client.updates if isinstance(u, ToolCallStart)]
+    await bridge.close()
+
+
+async def test_an_unfinished_tool_call_does_not_leak_for_the_session(tmp_path):
+    """Closing the bridge must not leave a card spinning or state retained."""
+    agent = CodingInteractiveAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="t3", name="execute_python", arguments={"code": "boom"})
+    )
+    await bridge.flush()
+    assert bridge._open_tools == {"t3"}
+
+    await bridge.close()
+    assert bridge._open_tools == set()
+    assert bridge._python_source == {}

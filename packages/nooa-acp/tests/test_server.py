@@ -1272,3 +1272,45 @@ async def test_sessions_on_different_workspaces_get_separate_library_dirs(tmp_pa
     assert first_agent.agent.libs._path == first_root / ".nooa" / "libs"
     assert second_agent.agent.libs._path == second_root / ".nooa" / "libs"
     await adapter.close()
+
+
+async def test_mcp_server_named_like_a_core_tool_cannot_replace_it(tmp_path):
+    """A client-supplied server name must not remove the agent's own tools.
+
+    `mcp.shell` resolved to the `shell` attribute and silently replaced
+    ActivityShellTools, which also broke close() because the replacement has no
+    close(). The session must survive with its real shell and a warning.
+    """
+    client = _RecordingClient()
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+    server = McpServerStdio(name="shell", command="lookup-server", args=[], env=[])
+
+    with patch(
+        "nooa_acp.server.MCPManager.create_stdio_server",
+        new=AsyncMock(return_value=_MCPTools()),
+    ):
+        created = await adapter.new_session(str(tmp_path), mcp_servers=[server])
+
+    session = await _session(adapter, created.session_id)
+    assert type(session.agent.shell).__name__ == "ActivityShellTools"
+    assert any("shell" in warning for warning in session.startup_warnings)
+    await adapter.close()
+
+
+async def test_mcp_server_with_a_reserved_name_does_not_kill_the_session(tmp_path):
+    """A reserved attr name raised a bare ValueError out of session/new."""
+    client = _RecordingClient()
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+    server = McpServerStdio(name="runtime", command="lookup-server", args=[], env=[])
+
+    with patch(
+        "nooa_acp.server.MCPManager.create_stdio_server",
+        new=AsyncMock(return_value=_MCPTools()),
+    ):
+        created = await adapter.new_session(str(tmp_path), mcp_servers=[server])
+
+    session = await _session(adapter, created.session_id)
+    assert any("runtime" in warning for warning in session.startup_warnings)
+    await adapter.close()
