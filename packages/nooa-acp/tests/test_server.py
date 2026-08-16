@@ -925,6 +925,16 @@ async def test_adapter_routes_distinct_workspace_commands_to_their_sessions(tmp_
     await adapter.close()
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Needs the external-package lifecycle work (SkillPackageConflictError, "
+        "package release on last close) from dev/acp-on-foundation's bed5493. That "
+        "commit rewrites skill_registry.py along a different line than the version "
+        "merged in #127, so it is deferred to its own PR. Remove this marker when it "
+        "lands — strict=True makes an unexpected pass fail here."
+    ),
+)
 async def test_adapter_rejects_conflicting_packaged_skills_without_contamination(
     tmp_path, monkeypatch
 ):
@@ -972,6 +982,16 @@ async def test_adapter_rejects_conflicting_packaged_skills_without_contamination
     await adapter.close()
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Needs the external-package lifecycle work (SkillPackageConflictError, "
+        "package release on last close) from dev/acp-on-foundation's bed5493. That "
+        "commit rewrites skill_registry.py along a different line than the version "
+        "merged in #127, so it is deferred to its own PR. Remove this marker when it "
+        "lands — strict=True makes an unexpected pass fail here."
+    ),
+)
 @pytest.mark.parametrize("first_to_close", [0, 1])
 async def test_same_checkout_stays_live_until_last_acp_session_closes(
     tmp_path, monkeypatch, first_to_close
