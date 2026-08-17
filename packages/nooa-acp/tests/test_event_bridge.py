@@ -454,3 +454,26 @@ async def test_an_unfinished_tool_call_does_not_leak_for_the_session(tmp_path):
     await bridge.close()
     assert bridge._open_tools == set()
     assert bridge._python_source == {}
+
+
+async def test_a_cancelled_tool_card_is_titled_cancelled(tmp_path):
+    """The collapsed card must say what happened.
+
+    "Python interrupted" was used for every reason, so a user who cancelled saw
+    a technical-sounding failure and had to expand the card to learn it was
+    their own action.
+    """
+    agent = CodingInteractiveAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="t9", name="execute_python", arguments={"code": "sleep(60)"})
+    )
+    await bridge.flush()
+    await bridge.fail_open_tools("Cancelled by user.", title="Cancelled")
+    await bridge.flush()
+
+    progress = [u for _, u in client.updates if isinstance(u, ToolCallProgress)]
+    assert progress[-1].title == "Cancelled"
+    await bridge.close()

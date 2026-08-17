@@ -347,7 +347,7 @@ class CodingACPAdapter:
         async with session.cancel_lock:
             try:
                 if await session.dispatcher.cancel():
-                    await session.bridge.fail_open_tools("Cancelled by user.")
+                    await session.bridge.fail_open_tools("Cancelled by user.", title="Cancelled")
                     await session.bridge.flush()
             finally:
                 session.cancel_complete.set()
