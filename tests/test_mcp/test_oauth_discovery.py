@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for RFC 9728 OAuth authorization-server discovery in mcp/oauth.py."""
 
+from urllib.parse import parse_qs, urlparse
+
 import httpx
 import pytest
 
@@ -267,8 +269,11 @@ async def test_handle_mcp_oauth_refreshes_expired_token(monkeypatch, tmp_path):
         ),
     )
 
-    async def fake_discover(client, server_url):
-        return ["https://maas.example/auth"]
+    async def fake_resource_metadata(client, server_url):
+        return {
+            "resource": "https://maas.example/mcp",
+            "authorization_servers": ["https://maas.example/auth"],
+        }
 
     async def fake_metadata(client, auth_server):
         return {
@@ -277,15 +282,18 @@ async def test_handle_mcp_oauth_refreshes_expired_token(monkeypatch, tmp_path):
             "registration_endpoint": f"{auth_server}/register",
         }
 
-    async def fake_refresh(token_endpoint, client_id, refresh_token, client_secret=None):
+    async def fake_refresh(
+        token_endpoint, client_id, refresh_token, client_secret=None, resource=None
+    ):
         assert client_id == "cached-client"
         assert client_secret == "cached-secret"
         assert refresh_token == "ref"
+        assert resource == "https://maas.example/mcp"
         return oauth.OAuthToken(
             access_token="new", refresh_token="ref2", expires_in=3600, obtained_at=oauth.time.time()
         )
 
-    monkeypatch.setattr(oauth, "_discover_authorization_servers", fake_discover)
+    monkeypatch.setattr(oauth, "_fetch_protected_resource_metadata", fake_resource_metadata)
     monkeypatch.setattr(oauth, "_fetch_authorization_server_metadata", fake_metadata)
     monkeypatch.setattr(oauth, "_refresh_access_token", fake_refresh)
 
@@ -293,6 +301,177 @@ async def test_handle_mcp_oauth_refreshes_expired_token(monkeypatch, tmp_path):
     assert token.access_token == "new"
     # Refreshed token is persisted.
     assert oauth._load_cached_token(url).access_token == "new"
+
+
+@pytest.mark.asyncio
+async def test_refresh_access_token_includes_protected_resource(monkeypatch):
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(dict(httpx.QueryParams(request.content.decode())))
+        return httpx.Response(200, json={"access_token": "new-token"})
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(
+        oauth.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: original(transport=httpx.MockTransport(handler)),
+    )
+
+    token = await oauth._refresh_access_token(
+        "https://maas.example/token",
+        "client-id",
+        "refresh-token",
+        "client-secret",
+        "https://maas.example/mcp",
+    )
+
+    assert token is not None
+    assert token.access_token == "new-token"
+    assert captured["resource"] == "https://maas.example/mcp"
+
+
+@pytest.mark.asyncio
+async def test_manual_authorize_retries_delayed_dynamic_registration(monkeypatch):
+    registrations: list[str] = []
+    authorization_checks: list[str] = []
+    original = httpx.AsyncClient
+
+    async def fake_register(self, redirect_uri):
+        client_id = f"client-{len(registrations) + 1}"
+        registrations.append(client_id)
+        self.config.client_id = client_id
+        self.config.client_secret = f"secret-{client_id}"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        client_id = request.url.params["client_id"]
+        authorization_checks.append(client_id)
+        if client_id in {"client-1", "client-2"}:
+            return httpx.Response(400, text="redirect URI not registered for client")
+        return httpx.Response(200)
+
+    async def code_prompt(auth_url: str) -> str:
+        return "authorization-code"
+
+    monkeypatch.setattr(oauth.OAuthHandler, "_register_dynamic_client", fake_register)
+    monkeypatch.setattr(
+        oauth.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: original(transport=httpx.MockTransport(handler)),
+    )
+    config = oauth.OAuthConfig(
+        authorization_endpoint="https://maas.example/authorize",
+        token_endpoint="https://maas.example/token",
+        client_id=None,
+        redirect_uri="urn:ietf:wg:oauth:2.0:oob",
+        registration_endpoint="https://maas.example/register",
+    )
+
+    code = await oauth.OAuthHandler(config, manual=True, code_prompt=code_prompt).authorize(
+        open_browser=False
+    )
+
+    assert code == "authorization-code"
+    assert registrations == ["client-1", "client-2", "client-3"]
+    assert authorization_checks == registrations
+
+
+@pytest.mark.asyncio
+async def test_manual_authorize_continues_when_registration_probe_fails(monkeypatch):
+    registrations: list[str] = []
+    prompted_urls: list[str] = []
+    original = httpx.AsyncClient
+
+    async def fake_register(self, redirect_uri):
+        registrations.append(redirect_uri)
+        self.config.client_id = "client-1"
+        self.config.client_secret = "secret-client-1"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("authorization endpoint unavailable", request=request)
+
+    async def code_prompt(auth_url: str) -> str:
+        prompted_urls.append(auth_url)
+        return "authorization-code"
+
+    monkeypatch.setattr(oauth.OAuthHandler, "_register_dynamic_client", fake_register)
+    monkeypatch.setattr(
+        oauth.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: original(transport=httpx.MockTransport(handler)),
+    )
+    config = oauth.OAuthConfig(
+        authorization_endpoint="https://maas.example/authorize",
+        token_endpoint="https://maas.example/token",
+        client_id=None,
+        redirect_uri="urn:ietf:wg:oauth:2.0:oob",
+        registration_endpoint="https://maas.example/register",
+    )
+
+    code = await oauth.OAuthHandler(config, manual=True, code_prompt=code_prompt).authorize(
+        open_browser=False
+    )
+
+    assert code == "authorization-code"
+    assert registrations == ["urn:ietf:wg:oauth:2.0:oob"]
+    assert len(prompted_urls) == 1
+    assert "client_id=client-1" in prompted_urls[0]
+
+
+@pytest.mark.asyncio
+async def test_manual_authorize_fails_after_registration_retry_limit(monkeypatch):
+    registrations: list[str] = []
+    original = httpx.AsyncClient
+
+    async def fake_register(self, redirect_uri):
+        client_id = f"client-{len(registrations) + 1}"
+        registrations.append(client_id)
+        self.config.client_id = client_id
+        self.config.client_secret = f"secret-{client_id}"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text="redirect URI not registered for client")
+
+    async def code_prompt(auth_url: str) -> str:
+        raise AssertionError("the prompt must not open for an invalid registration")
+
+    monkeypatch.setattr(oauth.OAuthHandler, "_register_dynamic_client", fake_register)
+    monkeypatch.setattr(
+        oauth.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: original(transport=httpx.MockTransport(handler)),
+    )
+    config = oauth.OAuthConfig(
+        authorization_endpoint="https://maas.example/authorize",
+        token_endpoint="https://maas.example/token",
+        client_id=None,
+        redirect_uri="urn:ietf:wg:oauth:2.0:oob",
+        registration_endpoint="https://maas.example/register",
+    )
+
+    with pytest.raises(RuntimeError, match="did not propagate"):
+        await oauth.OAuthHandler(config, manual=True, code_prompt=code_prompt).authorize(
+            open_browser=False
+        )
+
+    assert registrations == ["client-1", "client-2", "client-3"]
+
+
+def test_authorization_url_includes_protected_resource_indicator():
+    config = oauth.OAuthConfig(
+        authorization_endpoint="https://maas.example/auth/authorize",
+        token_endpoint="https://maas.example/auth/token",
+        client_id="client-id",
+        redirect_uri="urn:ietf:wg:oauth:2.0:oob",
+        scope="user_impersonation",
+        resource="https://maas.example/confluence/mcp",
+    )
+
+    url = oauth.OAuthHandler(config)._build_authorization_url()
+    params = parse_qs(urlparse(url).query)
+
+    assert params["resource"] == ["https://maas.example/confluence/mcp"]
+    assert params["scope"] == ["user_impersonation"]
 
 
 @pytest.mark.asyncio
@@ -304,6 +483,8 @@ async def test_manual_authorize_uses_oob_and_code_prompt(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         import json as _json
 
+        if request.method == "GET":
+            return httpx.Response(200)
         body = _json.loads(request.content)
         registered.extend(body["redirect_uris"])
         return httpx.Response(201, json={"client_id": "oob-client"})
@@ -339,6 +520,31 @@ async def test_manual_authorize_uses_oob_and_code_prompt(monkeypatch):
     assert handler_obj._actual_redirect_uri == "urn:ietf:wg:oauth:2.0:oob"
 
 
+@pytest.mark.asyncio
+async def test_manual_authorize_preserves_registered_client_redirect(monkeypatch):
+    """A fixed client must not be switched to an unregistered OOB redirect."""
+    seen_url: list[str] = []
+
+    async def code_prompt(auth_url: str) -> str:
+        seen_url.append(auth_url)
+        return "pasted-code"
+
+    config = oauth.OAuthConfig(
+        authorization_endpoint="https://maas.example/auth/authorize",
+        token_endpoint="https://maas.example/auth/token",
+        client_id="registered-client",
+        redirect_uri="http://localhost:8090/callback",
+    )
+    handler_obj = oauth.OAuthHandler(config, manual=True, code_prompt=code_prompt)
+
+    code = await handler_obj.authorize(open_browser=False)
+
+    assert code == "pasted-code"
+    params = parse_qs(urlparse(seen_url[0]).query)
+    assert params["redirect_uri"] == ["http://localhost:8090/callback"]
+    assert handler_obj._actual_redirect_uri == "http://localhost:8090/callback"
+
+
 def test_extract_authorization_code_accepts_oob_callback_url():
     pasted = "urn:ietf:wg:oauth:2.0:oob?code=abc123&state=xyz"
 
@@ -359,9 +565,11 @@ def test_extract_authorization_code_preserves_raw_code():
 async def test_handle_mcp_oauth_defaults_scope_from_resource_metadata(monkeypatch, tmp_path):
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(tmp_path))
     seen_scopes: list[str | None] = []
+    seen_resources: list[str | None] = []
 
     async def fake_resource_metadata(client, server_url):
         return {
+            "resource": "https://maas.example/confluence/mcp",
             "authorization_servers": ["https://maas.example/auth"],
             "scopes_supported": ["READ", "WRITE"],
         }
@@ -375,6 +583,7 @@ async def test_handle_mcp_oauth_defaults_scope_from_resource_metadata(monkeypatc
 
     async def fake_complete_flow(self, open_browser=True):
         seen_scopes.append(self.config.scope)
+        seen_resources.append(self.config.resource)
         return oauth.OAuthToken(access_token="token")
 
     monkeypatch.setattr(oauth, "_fetch_protected_resource_metadata", fake_resource_metadata)
@@ -384,11 +593,12 @@ async def test_handle_mcp_oauth_defaults_scope_from_resource_metadata(monkeypatc
     await oauth.handle_mcp_oauth("https://maas.example/mcp", client_id="client-id")
 
     assert seen_scopes == ["READ WRITE"]
+    assert seen_resources == ["https://maas.example/confluence/mcp"]
 
 
 @pytest.mark.asyncio
 async def test_authorize_falls_back_to_manual_when_no_browser(monkeypatch):
-    """Headless sessions auto-use manual OOB when a code prompt is available."""
+    """Headless fixed clients use a secure prompt with their registered redirect."""
     monkeypatch.setattr(oauth, "_system_browser_available", lambda: False)
 
     config = oauth.OAuthConfig(
@@ -415,7 +625,7 @@ async def test_authorize_falls_back_to_manual_when_no_browser(monkeypatch):
 
     assert code == "pasted-code"
     assert seen and seen[0].startswith("https://maas.example/auth/authorize")
-    assert handler._actual_redirect_uri == "urn:ietf:wg:oauth:2.0:oob"
+    assert handler._actual_redirect_uri == "http://127.0.0.1:0/callback"
 
 
 @pytest.mark.asyncio
@@ -454,6 +664,9 @@ def test_system_browser_available_false_when_no_browser(monkeypatch):
 
 def test_system_browser_available_true_when_browser_present(monkeypatch):
     """Returns True when webbrowser.get() succeeds without raising."""
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SANDBOX_VM_ID", raising=False)
+    monkeypatch.delenv("SBX_NO_DISPLAY", raising=False)
     monkeypatch.setattr(oauth.webbrowser, "get", lambda *a, **k: object())
     assert oauth._system_browser_available() is True
 
