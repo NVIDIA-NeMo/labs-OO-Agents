@@ -80,15 +80,12 @@ def _safe_http_url(value: str | None) -> str | None:
     return safe
 
 
-def _terminal_hyperlink(label: str, url: str) -> str:
-    """Build an OSC 8 link wrapped as prompt_toolkit zero-width escapes."""
-    start = f"\x01\x1b]8;;{url}\x07\x02"
-    end = "\x01\x1b]8;;\x07\x02"
-    return start + _safe_terminal_text(label) + end
-
-
 class TextPromptView:
     """Single-line text input hosted by the existing TUI application."""
+
+    # Keep prompts in prompt_toolkit's bounded live region instead of growing
+    # them into a terminal-sized modal. Longer messages remain scrollable.
+    max_height = 10
 
     # Prompt views do not consume mouse events. Leaving terminal mouse mode off
     # lets users use native selection/copy while the modal is open.
@@ -126,16 +123,17 @@ class TextPromptView:
 
     def render(self, width: int, height: int) -> str:
         width = max(int(width), 40)
-        height = max(int(height), 4)
+        height = min(max(int(height), 4), self.max_height)
         header = f" {self.title} ".ljust(width, "─")[:width]
         message_lines: list[str] = []
         safe_message = _safe_terminal_text(self.message)
         for paragraph in safe_message.splitlines():
             message_lines.extend(textwrap.wrap(paragraph, width=width) or [""])
         if self.link_url:
-            message_lines.extend(
-                ("", _terminal_hyperlink("Open authorization URL", self.link_url))
-            )
+            # Do not emit OSC-8 hyperlinks here. A few terminal emulators leak
+            # hyperlink styling when prompt_toolkit repaints this dynamic view,
+            # underlining all subsequent TUI output. Ctrl+Y copies the full URL.
+            message_lines.extend(("", "Authorization URL ready — press Ctrl+Y to copy"))
         if self._copy_status:
             footer_text = f" {self._copy_status}  Enter submit  Esc cancel "
         elif self.link_url:

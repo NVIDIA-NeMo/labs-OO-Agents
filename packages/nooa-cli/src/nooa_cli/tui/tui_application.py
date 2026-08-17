@@ -51,6 +51,15 @@ from .subapp import InAppSubview, normalize_key_result
 logger = logging.getLogger(__name__)
 
 
+def _is_raw_mouse_report(data: str) -> bool:
+    """Return whether raw input is a supported terminal mouse report."""
+    return (
+        data.startswith("\x1b[M")
+        or data.startswith("\x1b[<")
+        or re.fullmatch(r"\x1b\[\d+(?:;\d+){2}[Mm]", data) is not None
+    )
+
+
 class DispatcherExit(Exception):
     """Raised by handle() to signal the dispatcher should exit.
 
@@ -526,6 +535,9 @@ class TUIApplication:
             self._subview_control,
             wrap_lines=False,
             always_hide_cursor=True,
+            # Compact prompt views render only their bounded line count, while
+            # explorer views still render a full terminal-sized frame.
+            dont_extend_height=True,
         )
 
         def _root_container():
@@ -826,10 +838,7 @@ class TUIApplication:
                 if kp.key in (Keys.Vt100MouseEvent, Keys.WindowsMouseEvent):
                     return
             data = event.data or ""
-            if data.startswith("\x1b[M") or data.startswith("\x1b[<") or (
-                len(data) > 3 and data[:2] == "\x1b[" and data[-1] in "Mm"
-                and all(c.isdigit() or c == ";" for c in data[2:-1])
-            ):
+            if _is_raw_mouse_report(data):
                 return
             self._subview_key(event, "text", data)
 
@@ -1378,9 +1387,7 @@ class TUIApplication:
             # instructions (such as the one-shot session-title request). Drain
             # them into this notification so housekeeping shares the normal
             # user turn instead of triggering another LLM call.
-            notification = self._drain_pending_queue_items(
-                qm, [("user_messages", item)]
-            )
+            notification = self._drain_pending_queue_items(qm, [("user_messages", item)])
         self._in_respond = True
         self._on_dispatcher_dequeued()
 
