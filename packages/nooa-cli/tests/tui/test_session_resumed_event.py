@@ -109,3 +109,103 @@ async def test_resume_without_snapshot_emits_restored_false(tmp_path, monkeypatc
     assert captured[0].restored is False
     await resumed.agent.close()
     resumed.session_manager.close()
+
+
+def test_configured_skills_activate_before_session_resumed_event() -> None:
+    """Resume hooks exist only when configured skills attach before the event."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from nooa_cli.tui.bootstrap import BootstrapResult, build_registry
+
+    config = Config()
+    config.tui.active_skills = ["nvzurich.agent_mesh"]
+    agent = MagicMock()
+    agent.skills.discovered.return_value = ["nvzurich.agent_mesh"]
+    agent.skills.activated.return_value = ["nvzurich.agent_mesh"]
+    result = BootstrapResult(
+        config=config,
+        agent=agent,
+        session_manager=None,
+        tracing_enabled=False,
+        resumed=True,
+        restored=True,
+        session_id="session-1",
+    )
+
+    def record_event(_event):
+        agent.skills.activate.assert_any_call(["nvzurich.agent_mesh"])
+
+    agent.event_manager.add.side_effect = record_event
+    build_registry(result, SimpleNamespace())
+
+    agent.skills.discover_skills_dirs.assert_called_once_with(config.tui.skills_dirs)
+    agent.skills.activate.assert_any_call(["nvzurich.agent_mesh"])
+    agent.event_manager.add.assert_called_once()
+
+
+def test_failed_configured_skill_activation_warns_before_session_resumed() -> None:
+    """A registry load failure must not be reported as a successful restore."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from nooa_cli.tui.bootstrap import BootstrapResult, build_registry
+
+    config = Config()
+    config.tui.active_skills = ["local.broken"]
+    agent = MagicMock()
+    agent.skills.discovered.return_value = ["local.broken"]
+    agent.skills.activated.return_value = []
+    result = BootstrapResult(
+        config=config,
+        agent=agent,
+        session_manager=None,
+        tracing_enabled=False,
+        resumed=True,
+        restored=True,
+        session_id="session-1",
+    )
+
+    build_registry(result, SimpleNamespace())
+
+    agent.skills.activate.assert_any_call(["local.broken"])
+    assert [output.content for output in result.messages] == [
+        "Could not activate skill local.broken"
+    ]
+    agent.event_manager.add.assert_called_once()
+
+
+def test_configured_deactivation_happens_before_session_resumed_event() -> None:
+    """A constructor-default skill stays inactive when a session starts."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from nooa_cli.tui.bootstrap import BootstrapResult, build_registry
+
+    config = Config()
+    config.tui.inactive_skills = ["nemo.repo"]
+    agent = MagicMock()
+    active = {"nemo.repo"}
+    agent.skills.discovered.return_value = ["nemo.repo"]
+    agent.skills.activated.side_effect = lambda: sorted(active)
+    agent.skills.deactivate.side_effect = lambda names: active.difference_update(names)
+    result = BootstrapResult(
+        config=config,
+        agent=agent,
+        session_manager=None,
+        tracing_enabled=False,
+        resumed=False,
+        restored=False,
+        session_id="session-1",
+    )
+
+    def record_event(_event):
+        agent.skills.deactivate.assert_called_once_with(["nemo.repo"])
+
+    agent.event_manager.add.side_effect = record_event
+    build_registry(result, SimpleNamespace())
+
+    agent.skills.discover_skills_dirs.assert_not_called()
+    agent.skills.deactivate.assert_called_once_with(["nemo.repo"])
+    agent.event_manager.add.assert_called_once()
+    assert result.messages == []
