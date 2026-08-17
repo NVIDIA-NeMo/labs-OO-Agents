@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 from nooa_cli.tui.commands import _mcp_oauth_markdown_link
 from nooa_cli.tui.subapp import ChoicePromptView, SensitiveTextPromptView, TextPromptView
-from nooa_cli.tui.tui_application import TUIApplication
+from nooa_cli.tui.tui_application import TUIApplication, _is_raw_mouse_report
 
 
 def test_mcp_oauth_markdown_link_shows_complete_clickable_url():
@@ -29,6 +29,14 @@ def test_mcp_oauth_markdown_link_escapes_label_metacharacters():
 def test_mcp_oauth_markdown_link_rejects_unsafe_target():
     assert _mcp_oauth_markdown_link("javascript:alert(1)") is None
     assert _mcp_oauth_markdown_link("https://example.test/a b") is None
+
+
+def test_raw_numeric_mouse_report_is_filtered():
+    assert _is_raw_mouse_report("\x1b[0;12;34M") is True
+
+
+def test_non_mouse_numeric_csi_sequence_is_not_filtered():
+    assert _is_raw_mouse_report("\x1b[31m") is False
 
 
 def test_sensitive_prompt_masks_value_and_submits():

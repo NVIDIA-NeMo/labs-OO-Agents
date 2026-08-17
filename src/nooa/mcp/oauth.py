@@ -322,8 +322,14 @@ class OAuthHandler:
             auth_url = self._build_authorization_url(redirect_uri=manual_redirect)
             if not dynamic_client:
                 break
-            async with httpx.AsyncClient(follow_redirects=False) as client:
-                response = await client.get(auth_url, timeout=10.0)
+            try:
+                async with httpx.AsyncClient(follow_redirects=False) as client:
+                    response = await client.get(auth_url, timeout=10.0)
+            except httpx.RequestError as exc:
+                logger.warning(
+                    "Could not probe the OAuth authorization endpoint; continuing: %s", exc
+                )
+                break
             invalid_registration = (
                 response.status_code == 400 and "not registered for client" in response.text.lower()
             )

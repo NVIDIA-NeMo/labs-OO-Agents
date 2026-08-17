@@ -51,6 +51,15 @@ from .subapp import InAppSubview, normalize_key_result
 logger = logging.getLogger(__name__)
 
 
+def _is_raw_mouse_report(data: str) -> bool:
+    """Return whether raw input is a supported terminal mouse report."""
+    return (
+        data.startswith("\x1b[M")
+        or data.startswith("\x1b[<")
+        or re.fullmatch(r"\x1b\[\d+(?:;\d+){2}[Mm]", data) is not None
+    )
+
+
 class DispatcherExit(Exception):
     """Raised by handle() to signal the dispatcher should exit.
 
@@ -829,16 +838,7 @@ class TUIApplication:
                 if kp.key in (Keys.Vt100MouseEvent, Keys.WindowsMouseEvent):
                     return
             data = event.data or ""
-            if (
-                data.startswith("\x1b[M")
-                or data.startswith("\x1b[<")
-                or (
-                    len(data) > 3
-                    and data[:2] == "\x1b["
-                    and data[-1] in "Mm"
-                    and all(c.isdigit() or c == ";" for c in data[2:-1])
-                )
-            ):
+            if _is_raw_mouse_report(data):
                 return
             self._subview_key(event, "text", data)
 

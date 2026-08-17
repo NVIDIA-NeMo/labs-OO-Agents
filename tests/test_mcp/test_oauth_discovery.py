@@ -377,6 +377,48 @@ async def test_manual_authorize_retries_delayed_dynamic_registration(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_manual_authorize_continues_when_registration_probe_fails(monkeypatch):
+    registrations: list[str] = []
+    prompted_urls: list[str] = []
+    original = httpx.AsyncClient
+
+    async def fake_register(self, redirect_uri):
+        registrations.append(redirect_uri)
+        self.config.client_id = "client-1"
+        self.config.client_secret = "secret-client-1"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("authorization endpoint unavailable", request=request)
+
+    async def code_prompt(auth_url: str) -> str:
+        prompted_urls.append(auth_url)
+        return "authorization-code"
+
+    monkeypatch.setattr(oauth.OAuthHandler, "_register_dynamic_client", fake_register)
+    monkeypatch.setattr(
+        oauth.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: original(transport=httpx.MockTransport(handler)),
+    )
+    config = oauth.OAuthConfig(
+        authorization_endpoint="https://maas.example/authorize",
+        token_endpoint="https://maas.example/token",
+        client_id=None,
+        redirect_uri="urn:ietf:wg:oauth:2.0:oob",
+        registration_endpoint="https://maas.example/register",
+    )
+
+    code = await oauth.OAuthHandler(config, manual=True, code_prompt=code_prompt).authorize(
+        open_browser=False
+    )
+
+    assert code == "authorization-code"
+    assert registrations == ["urn:ietf:wg:oauth:2.0:oob"]
+    assert len(prompted_urls) == 1
+    assert "client_id=client-1" in prompted_urls[0]
+
+
+@pytest.mark.asyncio
 async def test_manual_authorize_fails_after_registration_retry_limit(monkeypatch):
     registrations: list[str] = []
     original = httpx.AsyncClient
