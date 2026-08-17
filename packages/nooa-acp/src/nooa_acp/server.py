@@ -321,6 +321,12 @@ class CodingACPAdapter:
                     raise
                 if result is None:
                     await session.cancel_complete.wait()
+                    # stop_reason and the tool card both carry the outcome, but
+                    # a collapsed card shows nothing and the turn just goes
+                    # quiet. Record it as a real message so the conversation —
+                    # and the durable transcript on resume — says what happened.
+                    session.agent.message("Stopped at your request.")
+                    await session.bridge.flush()
                     return PromptResponse(stop_reason="cancelled")
                 await session.bridge.flush()
                 return PromptResponse(stop_reason="end_turn")
