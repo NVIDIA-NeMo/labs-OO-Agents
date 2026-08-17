@@ -526,6 +526,22 @@ def build_registry(result: BootstrapResult, frontend: Frontend) -> CommandRegist
         )
         result.agent.skills.activate(["nemo.mcp"])  # type: ignore[union-attr]
 
+    skills = getattr(result.agent, "skills", None)
+    if skills is not None:
+        discovered = set(skills.discovered())
+        for skill_name in result.config.tui.active_skills:
+            if skill_name not in discovered:
+                result.messages.append(
+                    TextOutput(f"Configured skill not found: {skill_name}", "warning")
+                )
+                continue
+            try:
+                skills.activate([skill_name])
+            except Exception as exc:
+                result.messages.append(
+                    TextOutput(f"Could not activate skill {skill_name}: {exc}", "warning")
+                )
+
     if result.session_id is not None:
         try:
             result.agent.event_manager.add(

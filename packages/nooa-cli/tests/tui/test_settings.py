@@ -57,6 +57,7 @@ class TestRoundTrip:
         original.tui.default_model = "my-model"
         original.tui.vi_mode = True
         original.tui.toolbar_items = ["model", "cwd", "session"]
+        original.tui.active_skills = ["nvzurich.agent_mesh"]
         original.agent.working_dir = "/tmp"
         original.agent.summarization.preserve_recent = 123
         (user_dir / "settings.yaml").write_text(dump_settings(original))
@@ -64,6 +65,7 @@ class TestRoundTrip:
         assert loaded.tui.default_model == "my-model"
         assert loaded.tui.vi_mode is True
         assert loaded.tui.toolbar_items == ["model", "cwd", "session"]
+        assert loaded.tui.active_skills == ["nvzurich.agent_mesh"]
         assert loaded.agent.working_dir == "/tmp"
         assert loaded.agent.summarization.preserve_recent == 123
 

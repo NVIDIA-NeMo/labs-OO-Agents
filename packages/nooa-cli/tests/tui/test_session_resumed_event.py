@@ -109,3 +109,34 @@ async def test_resume_without_snapshot_emits_restored_false(tmp_path, monkeypatc
     assert captured[0].restored is False
     await resumed.agent.close()
     resumed.session_manager.close()
+
+
+def test_configured_skills_activate_before_session_resumed_event() -> None:
+    """Resume hooks exist only when configured skills attach before the event."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from nooa_cli.tui.bootstrap import BootstrapResult, build_registry
+
+    config = Config()
+    config.tui.active_skills = ["nvzurich.agent_mesh"]
+    agent = MagicMock()
+    agent.skills.discovered.return_value = ["nvzurich.agent_mesh"]
+    result = BootstrapResult(
+        config=config,
+        agent=agent,
+        session_manager=None,
+        tracing_enabled=False,
+        resumed=True,
+        restored=True,
+        session_id="session-1",
+    )
+
+    def record_event(_event):
+        agent.skills.activate.assert_any_call(["nvzurich.agent_mesh"])
+
+    agent.event_manager.add.side_effect = record_event
+    build_registry(result, SimpleNamespace())
+
+    agent.skills.activate.assert_any_call(["nvzurich.agent_mesh"])
+    agent.event_manager.add.assert_called_once()

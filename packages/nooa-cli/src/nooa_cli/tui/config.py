@@ -77,6 +77,10 @@ class TUIConfig(BaseModel):
     # Extra roots explicitly added with ``/skills add``. Unlike
     # ``skills_dirs`` (the computed runtime search path), these are persisted.
     additional_skills_dirs: list[Path] = Field(default_factory=list)
+    # Skills explicitly activated with ``/skills activate``. Persisting this
+    # separately from discovery lets lifecycle skills attach before the resume
+    # event on the next process start.
+    active_skills: list[str] = Field(default_factory=list)
 
     # Default LLM model (from unifiedllm registry)
     default_model: str = DEFAULT_MODEL
