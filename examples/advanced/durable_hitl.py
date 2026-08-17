@@ -73,7 +73,7 @@ async def until_a_human_is_needed(db: str) -> str:
             return storage.save_snapshot(agent)
         raise AssertionError("expected the orchestrator to suspend")
     finally:
-        storage.close()  # the child cannot open the database until we let go
+        storage.close()  # release the lock, or the child hits SessionAlreadyActiveError
 
 
 async def resume_and_finish(db: str, snapshot_id: str) -> None:
