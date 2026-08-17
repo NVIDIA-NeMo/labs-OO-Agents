@@ -82,8 +82,8 @@ def test_false_over_ssh_without_display_even_when_xdg_open_exists(monkeypatch):
     assert oauth._system_browser_available() is False
 
 
-def test_false_in_headless_nvidia_sandbox_even_with_forwarded_wayland(monkeypatch):
-    """sbx host-display metadata must not imply a reachable loopback browser."""
+def test_false_in_headless_container_even_with_forwarded_wayland(monkeypatch):
+    """Forwarded host-display metadata must not imply a reachable loopback browser."""
     monkeypatch.setattr(webbrowser, "get", lambda *a, **k: object())
     monkeypatch.setenv("SANDBOX_VM_ID", "agent-example")
     monkeypatch.setenv("SBX_NO_DISPLAY", "1")

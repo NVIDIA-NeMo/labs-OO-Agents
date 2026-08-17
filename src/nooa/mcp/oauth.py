@@ -106,7 +106,7 @@ def _system_browser_available() -> bool:
     the server config to force the out-of-band flow.
     """
     # Explicit sandbox/container signals must win over DISPLAY/WAYLAND_DISPLAY.
-    # NVIDIA sbx deliberately exports host display metadata for forwarding, but
+    # Container runtimes may export host display metadata for forwarding, but
     # SBX_NO_DISPLAY=1 means there is no browser/callback route into the sandbox.
     # Treating the forwarded WAYLAND_DISPLAY as usable makes OAuth launch on the
     # host and then strand the browser at a sandbox-local localhost callback.
