@@ -316,7 +316,13 @@ class ACPEventBridge:
         self._queue.put_nowait(future)
         await asyncio.shield(future)
 
-    async def fail_open_tools(self, reason: str) -> None:
+    async def fail_open_tools(self, reason: str, *, title: str | None = None) -> None:
+        """Close out open tool calls, titling them with what actually happened.
+
+        The title is the collapsed-card text, so it is the only thing a user
+        sees without expanding. A fixed "Python interrupted" made a deliberate
+        cancellation read as a technical failure.
+        """
         for tool_call_id in tuple(self._open_tools):
             code = self._python_source.pop(tool_call_id, None)
             content = (
@@ -327,7 +333,7 @@ class ACPEventBridge:
             self._enqueue(
                 update_tool_call(
                     tool_call_id,
-                    title="Python interrupted" if code is not None else None,
+                    title=title or ("Python interrupted" if code is not None else None),
                     status="failed",
                     content=content,
                 )
@@ -346,7 +352,7 @@ class ACPEventBridge:
         # fail_open_tools is otherwise only reached from session/cancel, so this
         # is the sole purge on an ordinary close.
         with suppress(Exception):
-            await self.fail_open_tools("Session closed before this finished.")
+            await self.fail_open_tools("Session closed before this finished.", title="Unfinished")
         with suppress(Exception):
             await self.flush()
         self._closed = True
