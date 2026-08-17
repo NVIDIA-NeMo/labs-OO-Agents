@@ -221,3 +221,62 @@ async def test_acp_subprocess_closes_a_session_over_the_wire(tmp_path):
 
     capabilities = initialized.agent_capabilities.session_capabilities
     assert capabilities is not None and capabilities.close is not None
+
+
+async def test_cancelling_a_turn_says_so_in_the_conversation(tmp_path):
+    """A cancelled turn must leave a visible trace, not just stop.
+
+    stop_reason=cancelled and the tool card carry the outcome, but a collapsed
+    card shows the user nothing at all — the turn simply goes quiet.
+    """
+    client = _RecordingClient()
+    fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
+
+    async with spawn_agent_process(
+        client,  # type: ignore[arg-type]
+        sys.executable,
+        str(fixture),
+        "--blocking",
+        cwd=tmp_path,
+    ) as (connection, _process):
+        await connection.initialize(PROTOCOL_VERSION)
+        session = await connection.new_session(str(tmp_path))
+        prompt_task = asyncio.create_task(
+            connection.prompt(session.session_id, [text_block("wait forever")])
+        )
+        await asyncio.wait_for(client.tool_started.wait(), timeout=_HANG_TIMEOUT)
+        await connection.cancel(session.session_id)
+        response = await asyncio.wait_for(prompt_task, timeout=_HANG_TIMEOUT)
+
+    assert response.stop_reason == "cancelled"
+    messages = [
+        update.content.text for _, update in client.updates if isinstance(update, AgentMessageChunk)
+    ]
+    assert any("stopped" in text.lower() for text in messages), messages
+
+
+async def test_cancelling_a_shell_command_reports_it_as_cancellation(tmp_path):
+    """Cancellation during a real shell command, which --blocking never reaches."""
+    client = _RecordingClient()
+    fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
+
+    async with spawn_agent_process(
+        client,  # type: ignore[arg-type]
+        sys.executable,
+        str(fixture),
+        "--shell",
+        cwd=tmp_path,
+    ) as (connection, _process):
+        await connection.initialize(PROTOCOL_VERSION)
+        session = await connection.new_session(str(tmp_path))
+        prompt_task = asyncio.create_task(
+            connection.prompt(session.session_id, [text_block("run it")])
+        )
+        await asyncio.wait_for(client.tool_started.wait(), timeout=_HANG_TIMEOUT)
+        await connection.cancel(session.session_id)
+        response = await asyncio.wait_for(prompt_task, timeout=_HANG_TIMEOUT)
+
+    assert response.stop_reason == "cancelled"
+    rendered = "".join(str(update) for _, update in client.updates)
+    assert "Cancelled by user." in rendered
+    assert "CancelledError" not in rendered

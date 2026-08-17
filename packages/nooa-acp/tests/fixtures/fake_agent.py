@@ -11,6 +11,13 @@ from nooa.unifiedllm import FakeLLMClient
 
 
 def llm_factory() -> FakeLLMClient:
+    if "--shell" in sys.argv:
+        # Blocks inside a real shell command, so cancellation exercises
+        # ActivityShellTools.run rather than a bare asyncio wait.
+        return FakeLLMClient.with_tool_call(
+            "execute_python",
+            {"code": "await self.shell.run('sleep 30', timeout=30)"},
+        )
     if "--blocking" in sys.argv:
         return FakeLLMClient.with_tool_call(
             "execute_python",
