@@ -9,7 +9,6 @@ from unittest.mock import MagicMock
 from nooa_cli.tui.commands import _mcp_oauth_markdown_link
 from nooa_cli.tui.subapp import ChoicePromptView, SensitiveTextPromptView, TextPromptView
 from nooa_cli.tui.tui_application import TUIApplication
-from prompt_toolkit.formatted_text import ANSI
 
 
 def test_mcp_oauth_markdown_link_shows_complete_clickable_url():
@@ -67,6 +66,15 @@ def test_sensitive_prompt_strips_terminal_controls_from_server_url():
     assert "\u202e" not in rendered
 
 
+def test_sensitive_prompt_stays_in_bounded_dynamic_area():
+    view = SensitiveTextPromptView("OAuth", "Authorize in your browser.")
+
+    rendered = view.render(120, 40)
+
+    assert len(rendered.splitlines()) == view.max_height
+    assert view.max_height < 40
+
+
 def test_sensitive_prompt_scrolls_long_authorization_url():
     message = "Authorize: https://example.test/" + "a" * 500 + "\nTAIL_VISIBLE"
     view = SensitiveTextPromptView("OAuth", message)
@@ -79,19 +87,16 @@ def test_sensitive_prompt_scrolls_long_authorization_url():
     assert "TAIL_VISIBLE" in last
 
 
-def test_sensitive_prompt_renders_short_clickable_authorization_link():
+def test_sensitive_prompt_renders_safe_authorization_copy_hint():
     url = "https://login.example.test/authorize?" + "state=" + "a" * 500
     view = SensitiveTextPromptView("OAuth", "Authorize in your browser.", link_url=url)
 
     rendered = view.render(60, 10)
-    fragments = ANSI(rendered).__pt_formatted_text__()
-    visible = "".join(text for style, text in fragments if style != "[ZeroWidthEscape]")
-    escapes = "".join(text for style, text in fragments if style == "[ZeroWidthEscape]")
 
-    assert "Open authorization URL" in visible
-    assert url not in visible
-    assert f"\x1b]8;;{url}\x07" in escapes
-    assert "Ctrl+Y copy URL" in visible
+    assert "Authorization URL ready" in rendered
+    assert url not in rendered
+    assert "\x1b" not in rendered
+    assert "Ctrl+Y copy URL" in rendered
 
 
 def test_sensitive_prompt_copies_complete_authorization_url():

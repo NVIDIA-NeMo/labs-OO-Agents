@@ -47,6 +47,7 @@ class OAuthConfig:
         client_id: OAuth client ID, or None until dynamic registration completes
         redirect_uri: Redirect URI for OAuth callback
         scope: Optional OAuth scopes
+        resource: Optional RFC 8707 protected-resource identifier
         client_secret: Optional client secret (for dynamic registration)
         registration_endpoint: Optional OAuth dynamic client registration endpoint
     """
@@ -56,6 +57,7 @@ class OAuthConfig:
     client_id: str | None
     redirect_uri: str
     scope: str | None = None
+    resource: str | None = None
     client_secret: str | None = None
     registration_endpoint: str | None = None
     timeout: float = 300.0  # 5 minutes
@@ -103,11 +105,31 @@ def _system_browser_available() -> bool:
     won't trigger there. Such environments should set ``oauth_manual = true`` in
     the server config to force the out-of-band flow.
     """
+    # Explicit sandbox/container signals must win over DISPLAY/WAYLAND_DISPLAY.
+    # NVIDIA sbx deliberately exports host display metadata for forwarding, but
+    # SBX_NO_DISPLAY=1 means there is no browser/callback route into the sandbox.
+    # Treating the forwarded WAYLAND_DISPLAY as usable makes OAuth launch on the
+    # host and then strand the browser at a sandbox-local localhost callback.
+    no_display = os.environ.get("SBX_NO_DISPLAY", "").strip().lower()
+    if os.environ.get("SANDBOX_VM_ID") and no_display in {"1", "true", "yes", "on"}:
+        return False
+
+    # Check headless SSH before consulting webbrowser's process-global registry.
+    # A prior probe can register xdg-open, after which webbrowser.get() succeeds
+    # even though the launcher still cannot display anything in this session.
+    if (
+        os.name == "posix"
+        and os.environ.get("SSH_CONNECTION")
+        and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    ):
+        return False
+
     try:
         webbrowser.get()
         return True
     except webbrowser.Error:
         pass
+
     # webbrowser.get() misses common launchers that DO open a host browser
     # (e.g. a sandbox's xdg-open that forwards to the host). If one is on PATH,
     # the loopback-callback flow can still complete — prefer it over OOB paste.
@@ -264,6 +286,8 @@ class OAuthHandler:
 
         if self.config.scope:
             params["scope"] = self.config.scope
+        if self.config.resource:
+            params["resource"] = self.config.resource
 
         query_string = urlencode(params)
         return f"{self.config.authorization_endpoint}?{query_string}"
@@ -272,14 +296,51 @@ class OAuthHandler:
         """Out-of-band authorization: show the URL, collect a pasted code.
 
         No local callback server is bound, so this works in headless/remote
-        environments (e.g. a docker sandbox). Uses the OOB redirect URI and the
-        host-provided ``code_prompt`` callback to read the code, never blocking
-        ``input()``.
+        environments (e.g. a docker sandbox). Dynamic clients register an OOB
+        redirect; pre-registered clients retain their configured redirect URI.
+        The host-provided ``code_prompt`` reads the resulting code/callback URL
+        without ever blocking on ``input()``.
         """
-        oob_redirect = "urn:ietf:wg:oauth:2.0:oob"
-        self._actual_redirect_uri = oob_redirect
-        await self._register_dynamic_client(oob_redirect)
-        auth_url = self._build_authorization_url(redirect_uri=oob_redirect)
+        # A pre-registered client can only use redirect URIs provisioned for
+        # that client. In a remote sandbox, keep its configured loopback URI:
+        # the browser may fail to load localhost, but the user can paste that
+        # callback URL into the secure prompt. Dynamic clients can register OOB.
+        dynamic_client = self.config.client_id is None and bool(self.config.registration_endpoint)
+        manual_redirect = (
+            "urn:ietf:wg:oauth:2.0:oob" if dynamic_client else self.config.redirect_uri
+        )
+        self._actual_redirect_uri = manual_redirect
+
+        # Some distributed OAuth gateways acknowledge dynamic registration on
+        # one backend before the client is visible to the authorization backend.
+        # Never hand the user a URL that already reports its redirect URI as
+        # unregistered: discard that client and register a fresh one first.
+        auth_url = ""
+        attempts = range(3) if dynamic_client else range(1)
+        for attempt in attempts:
+            await self._register_dynamic_client(manual_redirect)
+            auth_url = self._build_authorization_url(redirect_uri=manual_redirect)
+            if not dynamic_client:
+                break
+            async with httpx.AsyncClient(follow_redirects=False) as client:
+                response = await client.get(auth_url, timeout=10.0)
+            invalid_registration = (
+                response.status_code == 400 and "not registered for client" in response.text.lower()
+            )
+            if not invalid_registration:
+                break
+            logger.warning(
+                "OAuth authorization endpoint rejected newly registered client; retrying "
+                "dynamic registration (%s/3)",
+                attempt + 1,
+            )
+            self.config.client_id = None
+            self.config.client_secret = None
+        else:
+            raise RuntimeError(
+                "OAuth dynamic registration did not propagate to the authorization endpoint; "
+                "retry the connection later"
+            )
 
         if open_browser:
             with contextlib.suppress(Exception):
@@ -532,6 +593,8 @@ class OAuthHandler:
 
             if self.config.client_secret:
                 data["client_secret"] = self.config.client_secret
+            if self.config.resource:
+                data["resource"] = self.config.resource
 
             try:
                 response = await client.post(self.config.token_endpoint, data=data)
@@ -590,6 +653,8 @@ class OAuthHandler:
         }
         if self.config.scope:
             data["scope"] = self.config.scope
+        if self.config.resource:
+            data["resource"] = self.config.resource
 
         async with httpx.AsyncClient() as client:
             response = await client.post(self.config.token_endpoint, data=data, timeout=30.0)
@@ -842,6 +907,7 @@ async def _refresh_access_token(
     client_id: str,
     refresh_token: str,
     client_secret: str | None = None,
+    resource: str | None = None,
 ) -> OAuthToken | None:
     """Exchange a refresh token for a fresh access token, or None on failure."""
     data = {
@@ -851,6 +917,8 @@ async def _refresh_access_token(
     }
     if client_secret:
         data["client_secret"] = client_secret
+    if resource:
+        data["resource"] = resource
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(token_endpoint, data=data, timeout=10.0)
@@ -916,9 +984,13 @@ async def handle_mcp_oauth(
     token_endpoint = None
     registration_endpoint = None
     grant_types: list[str] = []
+    resource: str | None = None
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
         resource_metadata = await _fetch_protected_resource_metadata(client, server_url)
+        advertised_resource = resource_metadata.get("resource")
+        if isinstance(advertised_resource, str) and advertised_resource:
+            resource = advertised_resource
         if scope is None:
             scopes = resource_metadata.get("scopes_supported") or []
             if all(isinstance(s, str) for s in scopes):
@@ -947,7 +1019,11 @@ async def handle_mcp_oauth(
         refresh_client_id = client_id or cached.client_id if cached else None
         if cached and cached.refresh_token and token_endpoint and refresh_client_id:
             refreshed = await _refresh_access_token(
-                token_endpoint, refresh_client_id, cached.refresh_token, cached.client_secret
+                token_endpoint,
+                refresh_client_id,
+                cached.refresh_token,
+                cached.client_secret,
+                resource,
             )
             if refreshed:
                 logger.info("Refreshed MCP OAuth token from cache")
@@ -977,6 +1053,7 @@ async def handle_mcp_oauth(
         client_secret=final_client_secret,
         redirect_uri=redirect_uri,
         scope=scope,
+        resource=resource,
         registration_endpoint=registration_endpoint,
         # Caller-supplied timeout overrides the OAuthConfig default (300s); this
         # is the single authoritative OAuth wait — the local callback server's
