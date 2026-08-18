@@ -156,6 +156,7 @@ class SkillRegistry(Skill):
         self._activated: set[str] = set()
         self._attr_map: dict[str, str] = {}  # registry name → actual attr name on agent
         self._lib_paths: dict[str, str] = {}  # lib_name → sys.path entry added for it
+        self._lib_targets: dict[str, str] = {}  # registry name → declared entry-point target
         self._discover()
         super().__init__()
         # Self-register our own context block (we're never activated through ourselves)
@@ -216,23 +217,22 @@ class SkillRegistry(Skill):
             if not (lib_dir.is_dir() and (lib_dir / "pyproject.toml").exists()):
                 continue
             lib_name = lib_dir.name
-            reg_name = self._read_skill_name(lib_dir, lib_name)
+            reg_name, target = self._read_skill_entry_point(lib_dir, lib_name)
             if reg_name in self._loaded:
                 continue
             try:
-                skill = self._import_lib(lib_dir, lib_name)
+                skill = self._import_lib(lib_dir, lib_name, target)
                 if skill is not None:
                     skill._source_dir = lib_dir
                     self.register(reg_name, skill)
+                    if target:
+                        self._lib_targets[reg_name] = target
             except Exception:
                 logger.warning("Library %s skipped", lib_name, exc_info=True)
 
     @staticmethod
-    def _read_skill_name(lib_dir: "Path", lib_name: str) -> str:
-        """Read the skill registry name from pyproject.toml entry_points.
-
-        Falls back to ``local.<lib_name>`` if no entry_point is declared.
-        """
+    def _read_skill_entry_point(lib_dir: "Path", lib_name: str) -> "tuple[str, str | None]":
+        """Read the first skill entry-point name and target from pyproject.toml."""
         import tomllib
 
         pyproject = lib_dir / "pyproject.toml"
@@ -241,14 +241,21 @@ class SkillRegistry(Skill):
                 data = tomllib.load(f)
             eps = data.get("project", {}).get("entry-points", {}).get(ENTRY_POINT_GROUP, {})
             if eps:
-                # Use the first declared entry_point name
-                return next(iter(eps))
+                name, target = next(iter(eps.items()))
+                return name, target
         except Exception:
             pass
-        return f"local.{lib_name}"
+        return f"local.{lib_name}", None
 
-    def _import_lib(self, lib_dir: "Path", lib_name: str) -> "Skill | None":
-        """Import a library package and extract its Skill instance."""
+    @staticmethod
+    def _read_skill_name(lib_dir: "Path", lib_name: str) -> str:
+        """Read the skill registry name, retaining the historical helper API."""
+        return SkillRegistry._read_skill_entry_point(lib_dir, lib_name)[0]
+
+    def _import_lib(
+        self, lib_dir: "Path", lib_name: str, target: str | None = None
+    ) -> "Skill | None":
+        """Import a library package and extract its declared Skill instance."""
         import importlib
         import sys as _sys
 
@@ -262,8 +269,11 @@ class SkillRegistry(Skill):
         for key in [k for k in _sys.modules if k == lib_name or k.startswith(prefix)]:
             del _sys.modules[key]
 
+        module_name, separator, object_path = (target or lib_name).partition(":")
+        module_name = module_name.strip()
+        object_path = object_path.partition(" ")[0].strip()
         try:
-            module = importlib.import_module(lib_name)
+            module = importlib.import_module(module_name)
         except Exception:
             if added_to_path:
                 _sys.path.remove(libs_str)
@@ -273,7 +283,18 @@ class SkillRegistry(Skill):
         if added_to_path:
             self._lib_paths[lib_name] = libs_str
 
-        return skill_from_module(module, lib_name, source=f"Library {lib_name!r}")
+        if not separator:
+            return skill_from_module(module, module_name, source=f"Library {lib_name!r}")
+
+        resolved: Any = module
+        for part in object_path.split("."):
+            resolved = getattr(resolved, part)
+        if isinstance(resolved, type) and issubclass(resolved, Skill):
+            return resolved()
+        if isinstance(resolved, Skill):
+            return resolved
+        logger.warning("Library %r entry point %r did not resolve to a Skill", lib_name, target)
+        return None
 
     def discover_skills_dirs(self, dirs: "list[Path]") -> None:
         """Scan skill roots for packaged libraries, TextSkills, and Python skills.
@@ -621,7 +642,9 @@ class SkillRegistry(Skill):
     async def _reload_one(self, name: str) -> str:
         """Reload a single skill by re-importing its module.
 
-        Two strategies, chosen by the skill's top-level package:
+        Source-tree skills with a declared entry-point target are reloaded
+        from that exact module/object. Other skills use one of two strategies,
+        chosen by the skill's top-level package:
 
         * **Package purge** (user/lib skills) — delete every ``sys.modules``
           entry under the top package and re-import it. Safe for self-contained
@@ -637,6 +660,10 @@ class SkillRegistry(Skill):
         skill = getattr(self._agent, attr, None)
         if skill is None:
             return f"Skill {name!r} has no instance on agent"
+
+        target = self._lib_targets.get(name)
+        if target:
+            return await self._reload_target(name, attr, target)
 
         mod_name = type(skill).__module__
         # For package modules (e.g. "excalidraw.__init__"), use the top-level package
@@ -671,6 +698,54 @@ class SkillRegistry(Skill):
                     name,
                     exc_info=True,
                 )
+
+    async def _reload_target(self, name: str, attr: str, target: str) -> str:
+        """Reload a source-tree skill from its declared entry-point target."""
+        import asyncio
+        import importlib
+        import sys as _sys
+
+        module_name, separator, object_path = target.partition(":")
+        module_name = module_name.strip()
+        object_path = object_path.partition(" ")[0].strip()
+        if not separator or not object_path:
+            return f"Reload failed for {name}: invalid entry-point target {target!r}"
+
+        old_skill = getattr(self._agent, attr, None)
+        try:
+            old_skill, old_detached = await self._detach_old_for_reload(attr)
+        except Exception as e:
+            await self._restore_old_after_reload_failure(name, old_skill, old_skill is not None)
+            return f"Reload failed for {name}: {e}"
+
+        top_pkg = module_name.split(".")[0]
+        try:
+            prefix = top_pkg + "."
+            for key in [k for k in _sys.modules if k == top_pkg or k.startswith(prefix)]:
+                del _sys.modules[key]
+            module = await asyncio.to_thread(importlib.import_module, module_name)
+            resolved: Any = module
+            for part in object_path.split("."):
+                resolved = getattr(resolved, part)
+            if isinstance(resolved, Skill):
+                resolved = type(resolved)
+            if not isinstance(resolved, type) or not issubclass(resolved, Skill):
+                await self._restore_old_after_reload_failure(name, old_skill, old_detached)
+                return f"Reloaded {target} but target did not resolve to a Skill"
+        except Exception as e:
+            await self._restore_old_after_reload_failure(name, old_skill, old_detached)
+            return f"Reload failed for {name}: {e}"
+
+        try:
+            return await self._install_reloaded(
+                name,
+                attr,
+                resolved,
+                old_skill=old_skill,
+                old_detached=old_detached,
+            )
+        except Exception as e:
+            return f"Reload failed for {name}: {e}"
 
     async def _reload_package(self, name: str, attr: str, top_pkg: str) -> str:
         """Purge and re-import an entire top-level package (user/lib skills)."""
