@@ -216,11 +216,11 @@ class SkillRegistry(Skill):
             if not (lib_dir.is_dir() and (lib_dir / "pyproject.toml").exists()):
                 continue
             lib_name = lib_dir.name
-            reg_name = self._read_skill_name(lib_dir, lib_name)
+            reg_name, target = self._read_skill_entry_point(lib_dir, lib_name)
             if reg_name in self._loaded:
                 continue
             try:
-                skill = self._import_lib(lib_dir, lib_name)
+                skill = self._import_lib(lib_dir, lib_name, target)
                 if skill is not None:
                     skill._source_dir = lib_dir
                     self.register(reg_name, skill)
@@ -228,11 +228,8 @@ class SkillRegistry(Skill):
                 logger.warning("Library %s skipped", lib_name, exc_info=True)
 
     @staticmethod
-    def _read_skill_name(lib_dir: "Path", lib_name: str) -> str:
-        """Read the skill registry name from pyproject.toml entry_points.
-
-        Falls back to ``local.<lib_name>`` if no entry_point is declared.
-        """
+    def _read_skill_entry_point(lib_dir: "Path", lib_name: str) -> "tuple[str, str | None]":
+        """Read the first skill entry-point name and target from pyproject.toml."""
         import tomllib
 
         pyproject = lib_dir / "pyproject.toml"
@@ -241,14 +238,21 @@ class SkillRegistry(Skill):
                 data = tomllib.load(f)
             eps = data.get("project", {}).get("entry-points", {}).get(ENTRY_POINT_GROUP, {})
             if eps:
-                # Use the first declared entry_point name
-                return next(iter(eps))
+                name, target = next(iter(eps.items()))
+                return name, target
         except Exception:
             pass
-        return f"local.{lib_name}"
+        return f"local.{lib_name}", None
 
-    def _import_lib(self, lib_dir: "Path", lib_name: str) -> "Skill | None":
-        """Import a library package and extract its Skill instance."""
+    @staticmethod
+    def _read_skill_name(lib_dir: "Path", lib_name: str) -> str:
+        """Read the skill registry name, retaining the historical helper API."""
+        return SkillRegistry._read_skill_entry_point(lib_dir, lib_name)[0]
+
+    def _import_lib(
+        self, lib_dir: "Path", lib_name: str, target: str | None = None
+    ) -> "Skill | None":
+        """Import a library package and extract its declared Skill instance."""
         import importlib
         import sys as _sys
 
@@ -262,8 +266,11 @@ class SkillRegistry(Skill):
         for key in [k for k in _sys.modules if k == lib_name or k.startswith(prefix)]:
             del _sys.modules[key]
 
+        module_name, separator, object_path = (target or lib_name).partition(":")
+        module_name = module_name.strip()
+        object_path = object_path.partition(" ")[0].strip()
         try:
-            module = importlib.import_module(lib_name)
+            module = importlib.import_module(module_name)
         except Exception:
             if added_to_path:
                 _sys.path.remove(libs_str)
@@ -273,7 +280,18 @@ class SkillRegistry(Skill):
         if added_to_path:
             self._lib_paths[lib_name] = libs_str
 
-        return skill_from_module(module, lib_name, source=f"Library {lib_name!r}")
+        if not separator:
+            return skill_from_module(module, module_name, source=f"Library {lib_name!r}")
+
+        resolved: Any = module
+        for part in object_path.split("."):
+            resolved = getattr(resolved, part)
+        if isinstance(resolved, type) and issubclass(resolved, Skill):
+            return resolved()
+        if isinstance(resolved, Skill):
+            return resolved
+        logger.warning("Library %r entry point %r did not resolve to a Skill", lib_name, target)
+        return None
 
     def discover_skills_dirs(self, dirs: "list[Path]") -> None:
         """Scan skill roots for packaged libraries, TextSkills, and Python skills.
