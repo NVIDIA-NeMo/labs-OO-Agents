@@ -142,6 +142,7 @@ async def test_baseline_ctrl_d_exits():
 async def test_baseline_ctrl_c_clears_input_and_requires_confirmation():
     async with TUIHarness() as h:
         await h.type_keys("discard this command")
+        await h.wait_input_equals("discard this command")
         await h.press("c-c")
         await h.wait_input_equals("")
         await h.wait_for(lambda: "Press Ctrl+C again to exit" in h.capture_status())
@@ -316,6 +317,19 @@ async def test_input_history_up_on_empty_buffer():
         await h.wait_input_equals("")
         await h.press("up")
         await h.wait_input_equals("first")
+
+
+async def test_ctrl_c_resets_history_navigation_to_most_recent():
+    """Clearing a recalled entry makes the next Up start at newest history."""
+    async with TUIHarness() as h:
+        h.app._history.extend(["first", "second"])
+        await h.press("up")
+        await h.wait_input_equals("second")
+
+        await h.press("c-c")
+        await h.wait_input_equals("")
+        await h.press("up")
+        await h.wait_input_equals("second")
 
 
 async def test_input_cursor_home_and_end():
@@ -638,6 +652,7 @@ async def test_hard_ctrl_c_interrupts_and_clears_buffer():
         await h.submit_async("first")
         await h.wait_for(lambda: h.app.is_thinking())
         await h.type_keys("in-progress")
+        await h.wait_input_equals("in-progress")
         await h.press("c-c")
         # Agent gets cancelled and the in-progress input is discarded.
         await h.wait_for(lambda: not h.app.is_thinking())
