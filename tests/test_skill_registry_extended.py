@@ -343,6 +343,39 @@ class TestDiscoverLibs:
         registry.discover_libs(tmp_path)
         assert "local.my_lib" in registry.loaded()
 
+    @pytest.mark.asyncio
+    async def test_lib_uses_declared_entry_point_target(self, registry, agent, tmp_path):
+        """Source-tree discovery loads the declared object, not a package fallback."""
+        lib_dir = tmp_path / "recovery_lib"
+        lib_dir.mkdir()
+        (lib_dir / "pyproject.toml").write_text(
+            '[project]\nname = "recovery-lib"\n\n'
+            '[project.entry-points."nooa.skills"]\n'
+            '"local.recovery" = "recovery_lib.production:ProductionSkill"\n'
+        )
+        (lib_dir / "__init__.py").write_text(
+            "from nooa.skill import Skill\n\n"
+            "class RecoverySkill(Skill):\n"
+            '    """Package-root fallback that must not be selected."""\n'
+        )
+        (lib_dir / "production.py").write_text(
+            "from nooa.skill import Skill\n\n"
+            "class ProductionSkill(Skill):\n"
+            '    """Skill selected by the declared entry point."""\n'
+        )
+
+        registry.discover_libs(tmp_path)
+
+        assert "local.recovery" in registry.loaded()
+        assert type(agent.recovery).__module__ == "recovery_lib.production"
+        assert type(agent.recovery).__name__ == "ProductionSkill"
+
+        result = await registry.reload("local.recovery")
+
+        assert result == "Reloaded local.recovery (self.recovery)"
+        assert type(agent.recovery).__module__ == "recovery_lib.production"
+        assert type(agent.recovery).__name__ == "ProductionSkill"
+
     def test_dir_without_pyproject_skipped(self, registry, tmp_path):
         """Directories without pyproject.toml are skipped."""
         lib_dir = tmp_path / "no_pyproject"
