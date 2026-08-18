@@ -419,27 +419,39 @@ class ShellTools(Skill):
         command: Annotated[str, spec(description="Shell command to execute")],
         timeout: Annotated[float, spec(description="Max seconds to wait before timeout")] = 30.0,
     ) -> AsyncIterator[StreamEvent | StreamDone]:
-        """Stream command output line-by-line as it arrives, ending with a done event.
+        """Stream command output in decoded chunks as it arrives, ending with a done event.
 
         Yields ``StreamEvent`` chunks (``.kind`` is "stdout"/"stderr", ``.text``
         the chunk) incrementally, then a final ``StreamDone`` (``.returncode``,
         ``.timed_out``) once the command completes. Runs in the persistent
-        session, like ``run``.
+        session, like ``run``. Closing an active stream interrupts processes
+        created by that command while preserving the persistent shell, its
+        state, and background jobs from earlier commands. The shell is reset
+        only if scoped recovery cannot restore a clean command boundary.
+        Persistent background jobs must redirect stdout and stderr; deliberately
+        detached daemons require host-level containment rather than ShellTools.
 
-        This is what ``pyp.arun(self.shell, ...)`` consumes to stream output::
+        Consume the iterator directly when output should be handled as it arrives::
 
-            fails = await self.pyp.arun(self.shell, "make test").grep("FAIL").collect()
+            async for event in self.shell.run_stream("make test"):
+                if event.kind != "done":
+                    print(event.text, end="")
         """
         session = await self._get_session()
         timed_out = False
         exit_code = 0
-        async for stream_name, chunk in session.run_stream(command, timeout=timeout):
-            if stream_name == "__done__":
-                parts = chunk.split(",")
-                exit_code = int(parts[0])
-                timed_out = bool(int(parts[1])) if len(parts) > 1 else False
-                break
-            yield StreamEvent(kind=stream_name, text=chunk)
+        stream = session.run_stream(command, timeout=timeout)
+        try:
+            async for stream_name, chunk in stream:
+                if stream_name == "__done__":
+                    parts = chunk.split(",")
+                    exit_code = int(parts[0])
+                    timed_out = bool(int(parts[1])) if len(parts) > 1 else False
+                    break
+                yield StreamEvent(kind=stream_name, text=chunk)
+        finally:
+            await stream.aclose()
+            self.cwd = session.cwd
         yield StreamDone(kind="done", returncode=exit_code, timed_out=timed_out)
 
     @staticmethod

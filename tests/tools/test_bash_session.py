@@ -2,9 +2,34 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for persistent bash session."""
 
+import asyncio
+import re
+import shlex
+import subprocess
+import tempfile
+from pathlib import Path
+
 import pytest
 
 from nooa.tools._bash_session import BashSession
+
+
+def _pid_is_running(pid: int) -> bool:
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().split()[2]
+        return state != "Z"
+    except (FileNotFoundError, IndexError, OSError):
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "stat=", "-p", str(pid)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            return False
+        state = result.stdout.strip()
+        return result.returncode == 0 and bool(state) and not state.startswith("Z")
 
 
 @pytest.fixture
@@ -70,6 +95,305 @@ class TestBashSession:
         """Very long output should be truncated."""
         out, _, _ = await session.run("python3 -c \"print('x' * 50000)\"")
         assert len(out) <= 31000  # MAX_OUTPUT_CHARS + truncation message
+
+    async def test_buffered_output_preserves_utf8_split_across_reads(self, session):
+        command = (
+            'python3 -c "import os,time; '
+            "os.write(1,b'\\xe2'); os.write(2,b'\\xe2'); time.sleep(.1); "
+            "os.write(1,b'\\x82\\xac'); os.write(2,b'\\x82\\xac')\""
+        )
+
+        stdout, stderr, code = await session.run(command)
+
+        assert (stdout, stderr, code) == ("€", "€", 0)
+
+    async def test_buffered_truncation_keeps_head_and_tail_for_both_streams(self, session):
+        command = (
+            'python3 -c "import os; '
+            "os.write(1, b'OUT_HEAD' + b'x' * 50000 + b'OUT_TAIL'); "
+            "os.write(2, b'ERR_HEAD' + b'y' * 50000 + b'ERR_TAIL')\""
+        )
+
+        stdout, stderr, code = await session.run(command)
+
+        assert code == 0
+        assert "OUT_HEAD" in stdout and "OUT_TAIL" in stdout
+        assert "ERR_HEAD" in stderr and "ERR_TAIL" in stderr
+        assert "<truncated-output>" in stdout
+        assert "<truncated-output>" in stderr
+
+        for output, expected_head, expected_tail in (
+            (stdout, "OUT_HEAD", "OUT_TAIL"),
+            (stderr, "ERR_HEAD", "ERR_TAIL"),
+        ):
+            match = re.search(r"full untruncated output .* is in: (.+)\n", output)
+            assert match is not None
+            output_path = Path(match.group(1))
+            try:
+                full_output = output_path.read_text()
+                assert full_output.startswith(expected_head)
+                assert full_output.endswith(expected_tail)
+                assert len(full_output) == 50_016
+            finally:
+                output_path.unlink()
+
+    async def test_buffered_small_output_removes_backing_files(
+        self, session, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+
+        stdout, stderr, code = await session.run("printf small; printf warning >&2")
+
+        assert (stdout, stderr, code) == ("small", "warning", 0)
+        assert list(tmp_path.glob("nooa_shell_*")) == []
+
+    async def test_streaming_output_is_not_truncated(self, session):
+        chunks = [
+            chunk
+            async for stream, chunk in session.run_stream("python3 -c \"print('x' * 100000)\"")
+            if stream == "stdout"
+        ]
+        output = "".join(chunks)
+        assert output == "x" * 100_000 + "\n"
+        assert "<truncated-output>" not in output
+
+    async def test_streaming_preserves_utf8_split_across_read_chunks(self, session):
+        command = "python3 -c \"import os; os.write(1, b'x' * 4095 + '€'.encode() + b'\\n')\""
+        chunks = [
+            chunk async for stream, chunk in session.run_stream(command) if stream == "stdout"
+        ]
+        assert "".join(chunks) == "x" * 4095 + "€\n"
+
+    async def test_streaming_output_arrives_before_command_finishes(self, session, tmp_path):
+        release = tmp_path / "release-stream"
+        command = (
+            "printf first; "
+            f"while [ ! -f {shlex.quote(str(release))} ]; do sleep 0.01; done; "
+            "printf second"
+        )
+        stream = session.run_stream(command)
+
+        first = await asyncio.wait_for(anext(stream), timeout=1)
+        assert first == ("stdout", "first")
+
+        release.write_text("")
+        remaining = [item async for item in stream]
+        assert ("stdout", "second") in remaining
+        assert remaining[-1] == ("__done__", "0,0")
+
+    async def test_successful_stream_preserves_state_and_multiline_syntax(self, session, tmp_path):
+        subdir = tmp_path / "stream-state"
+        subdir.mkdir()
+        command = f"""\
+stream_fn() {{ printf function; }}
+export STREAM_STATE=preserved
+cd {shlex.quote(str(subdir))}
+value=$(cat <<'EOF'
+heredoc-value
+EOF
+)
+printf '%s' "$value"
+"""
+
+        events = [item async for item in session.run_stream(command)]
+
+        assert "".join(value for name, value in events if name == "stdout") == "heredoc-value"
+        assert events[-1] == ("__done__", "0,0")
+        assert session.cwd == subdir
+        out, err, code = await session.run('printf "$STREAM_STATE:"; stream_fn')
+        assert (out, err, code) == ("preserved:function", "", 0)
+
+    async def test_abandoned_stream_interrupts_command_and_resynchronizes_shell(self, session):
+        await session.run(
+            "export BEFORE_CANCEL=preserved; "
+            "keep_fn() { printf function; }; "
+            "shopt -s expand_aliases; alias keep_alias='printf alias'"
+        )
+        start_count = session._start_count
+        stream = session.run_stream(
+            "export DURING_CANCEL=preserved; printf started; sleep 30; printf stale"
+        )
+        first = await asyncio.wait_for(anext(stream), timeout=1)
+        assert first == ("stdout", "started")
+
+        await asyncio.wait_for(stream.aclose(), timeout=3)
+
+        assert session._start_count == start_count
+        out, err, code = await session.run(
+            'printf "$BEFORE_CANCEL:$DURING_CANCEL:"; keep_fn; printf :; keep_alias'
+        )
+        assert (out, err, code) == ("preserved:preserved:function:alias", "", 0)
+
+    async def test_late_stream_close_preserves_completed_shell_state(self, session, tmp_path):
+        subdir = tmp_path / "completed-cwd"
+        subdir.mkdir()
+        await session.run("export PRESERVE=yes")
+        start_count = session._start_count
+        stream = session.run_stream(f"cd {shlex.quote(str(subdir))}; printf finished")
+
+        assert await asyncio.wait_for(anext(stream), timeout=1) == ("stdout", "finished")
+        await asyncio.sleep(0.1)
+        await asyncio.wait_for(stream.aclose(), timeout=1)
+
+        assert session._start_count == start_count
+        assert session.cwd == subdir
+        out, err, code = await session.run('printf "$PRESERVE:$PWD"')
+        assert (out, err, code) == (f"yes:{subdir}", "", 0)
+
+    async def test_abandoned_stream_kills_nested_descendants(self, session, tmp_path):
+        child_pid_path = tmp_path / "nested-child.pid"
+        inner = (
+            f"sleep 30 & child=$!; printf '%s' $child > "
+            f"{shlex.quote(str(child_pid_path))}; printf ready; wait"
+        )
+        stream = session.run_stream(f"printf started; sh -c {shlex.quote(inner)}")
+        output = ""
+        while "ready" not in output:
+            name, chunk = await asyncio.wait_for(anext(stream), timeout=1)
+            if name == "stdout":
+                output += chunk
+        nested_pid = int(child_pid_path.read_text())
+        start_count = session._start_count
+
+        await asyncio.wait_for(stream.aclose(), timeout=2)
+
+        assert session._start_count == start_count
+        async with asyncio.timeout(3):
+            while _pid_is_running(nested_pid):
+                await asyncio.sleep(0.01)
+        out, err, code = await session.run("printf recovered")
+        assert (out, err, code) == ("recovered", "", 0)
+
+    async def test_abandoned_stream_preserves_existing_background_job(self, session, tmp_path):
+        marker = tmp_path / "background-survived"
+        await session.run(f"(sleep .4; printf alive > {shlex.quote(str(marker))}) </dev/null &")
+        start_count = session._start_count
+        stream = session.run_stream("printf started; sleep 30")
+        assert await asyncio.wait_for(anext(stream), timeout=1) == ("stdout", "started")
+
+        await asyncio.wait_for(stream.aclose(), timeout=2)
+
+        assert session._start_count == start_count
+        await asyncio.sleep(0.5)
+        assert marker.read_text() == "alive"
+
+    async def test_abandoned_builtin_loop_preserves_shell_state(self, session):
+        await session.run(
+            "export BUILTIN_CANCEL=preserved; trap 'printf old-handler >/dev/null' USR1"
+        )
+        start_count = session._start_count
+        stream = session.run_stream("printf started; while :; do :; done")
+        assert await asyncio.wait_for(anext(stream), timeout=1) == ("stdout", "started")
+
+        await asyncio.wait_for(stream.aclose(), timeout=3)
+
+        assert session._start_count == start_count
+        out, err, code = await session.run('printf "$BUILTIN_CANCEL"')
+        assert (out, err, code) == ("preserved", "", 0)
+        trap_out, _, _ = await session.run("trap -p USR1")
+        assert "old-handler" in trap_out
+        assert "return 125" not in trap_out
+
+    async def test_cancel_falls_back_to_reset_when_process_inspection_fails(
+        self, session, monkeypatch
+    ):
+        async def unavailable(_root_pid):
+            return None
+
+        monkeypatch.setattr(session, "_descendant_pids", unavailable)
+        start_count = session._start_count
+        stream = session.run_stream("printf started; sleep 30")
+        assert await asyncio.wait_for(anext(stream), timeout=1) == ("stdout", "started")
+
+        await asyncio.wait_for(stream.aclose(), timeout=2)
+
+        assert session._start_count == start_count + 1
+        out, err, code = await session.run("printf recovered")
+        assert (out, err, code) == ("recovered", "", 0)
+
+    async def test_stream_preserves_usr1_trap_changed_by_command(self, session):
+        await session.run("trap 'printf old-handler >/dev/null' USR1")
+
+        events = [
+            item
+            async for item in session.run_stream(
+                "trap 'printf new-handler >/dev/null' USR1; printf done"
+            )
+        ]
+
+        assert ("stdout", "done") in events
+        trap_out, _, _ = await session.run("trap -p USR1")
+        assert "new-handler" in trap_out
+        assert "return 125" not in trap_out
+
+    async def test_background_output_is_isolated_from_next_command(self, session):
+        first = [
+            item async for item in session.run_stream("(sleep .2; printf late) & printf foreground")
+        ]
+        assert "".join(value for name, value in first if name == "stdout") == "foreground"
+        assert first[-1] == ("__done__", "0,0")
+
+        await asyncio.sleep(0.3)
+        out, err, code = await session.run("printf next")
+        assert (out, err, code) == ("next", "", 0)
+
+    async def test_cancelling_consumer_task_resynchronizes_shell(self, session):
+        received_output = asyncio.Event()
+
+        async def consume() -> None:
+            async for name, _ in session.run_stream("printf started; sleep 30"):
+                if name == "stdout":
+                    received_output.set()
+
+        consumer = asyncio.create_task(consume())
+        await asyncio.wait_for(received_output.wait(), timeout=1)
+        consumer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await consumer
+
+        out, err, code = await asyncio.wait_for(session.run("printf recovered"), timeout=2)
+        assert (out, err, code) == ("recovered", "", 0)
+
+    async def test_slow_stream_consumer_applies_backpressure(self, session, tmp_path):
+        marker = tmp_path / "producer-finished"
+        command = (
+            "python3 -c \"import os; os.write(1, b'x' * 2000000)\"; "
+            f"touch {shlex.quote(str(marker))}"
+        )
+        stream = session.run_stream(command, timeout=10)
+
+        first_name, first_chunk = await asyncio.wait_for(anext(stream), timeout=1)
+        assert first_name == "stdout"
+        await asyncio.sleep(0.1)
+        assert not marker.exists()
+
+        output_size = len(first_chunk)
+        done = None
+        async for name, value in stream:
+            if name == "stdout":
+                output_size += len(value)
+            elif name == "__done__":
+                done = value
+        assert output_size == 2_000_000
+        assert done == "0,0"
+        assert marker.exists()
+
+    async def test_paused_consumer_does_not_drop_other_completed_stream(self, session):
+        stream = session.run_stream("printf OUT; printf ERR >&2")
+        first = await asyncio.wait_for(anext(stream), timeout=1)
+        await asyncio.sleep(0.1)
+        events = [first, *[item async for item in stream]]
+
+        assert "".join(value for name, value in events if name == "stdout") == "OUT"
+        assert "".join(value for name, value in events if name == "stderr") == "ERR"
+        assert events[-1] == ("__done__", "0,0")
+
+    async def test_stream_reader_boundary_failure_is_reported(self, session):
+        with pytest.raises(RuntimeError, match="stdout closed before"):
+            _ = [item async for item in session.run_stream("exec 1>&-")]
+
+        out, err, code = await session.run("printf recovered")
+        assert (out, err, code) == ("recovered", "", 0)
 
     async def test_close_and_restart(self, tmp_path):
         """Session should be closeable and re-startable."""
