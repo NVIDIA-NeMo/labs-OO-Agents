@@ -937,8 +937,11 @@ class TUIApplication:
                 event.app.exit()
                 return
 
-            # While an agent is running, the first C-c requests cancellation
-            # and keeps the input buffer. At an idle prompt it only arms exit.
+            # The first C-c always clears the composer. While an agent is
+            # running it also requests cancellation; at an idle prompt it arms
+            # the existing second-C-c-to-exit confirmation.
+            event.current_buffer.reset()
+            self._history_cursor = None
             if self.request_agent_cancel(source="ctrl-c"):
                 self._arm_ctrl_c_exit()
                 return
