@@ -145,7 +145,8 @@ class TestDiscoverLibs:
         registry.discover_libs(tmp_path)
         assert "local.my_lib" in registry.loaded()
 
-    def test_lib_uses_declared_entry_point_target(self, registry, agent, tmp_path):
+    @pytest.mark.asyncio
+    async def test_lib_uses_declared_entry_point_target(self, registry, agent, tmp_path):
         """Source-tree discovery loads the declared object, not a package fallback."""
         lib_dir = tmp_path / "recovery_lib"
         lib_dir.mkdir()
@@ -168,6 +169,12 @@ class TestDiscoverLibs:
         registry.discover_libs(tmp_path)
 
         assert "local.recovery" in registry.loaded()
+        assert type(agent.recovery).__module__ == "recovery_lib.production"
+        assert type(agent.recovery).__name__ == "ProductionSkill"
+
+        result = await registry.reload("local.recovery")
+
+        assert result == "Reloaded local.recovery (self.recovery)"
         assert type(agent.recovery).__module__ == "recovery_lib.production"
         assert type(agent.recovery).__name__ == "ProductionSkill"
 

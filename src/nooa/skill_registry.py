@@ -156,6 +156,7 @@ class SkillRegistry(Skill):
         self._activated: set[str] = set()
         self._attr_map: dict[str, str] = {}  # registry name → actual attr name on agent
         self._lib_paths: dict[str, str] = {}  # lib_name → sys.path entry added for it
+        self._lib_targets: dict[str, str] = {}  # registry name → declared entry-point target
         self._discover()
         super().__init__()
         # Self-register our own context block (we're never activated through ourselves)
@@ -224,6 +225,8 @@ class SkillRegistry(Skill):
                 if skill is not None:
                     skill._source_dir = lib_dir
                     self.register(reg_name, skill)
+                    if target:
+                        self._lib_targets[reg_name] = target
             except Exception:
                 logger.warning("Library %s skipped", lib_name, exc_info=True)
 
@@ -639,7 +642,9 @@ class SkillRegistry(Skill):
     async def _reload_one(self, name: str) -> str:
         """Reload a single skill by re-importing its module.
 
-        Two strategies, chosen by the skill's top-level package:
+        Source-tree skills with a declared entry-point target are reloaded
+        from that exact module/object. Other skills use one of two strategies,
+        chosen by the skill's top-level package:
 
         * **Package purge** (user/lib skills) — delete every ``sys.modules``
           entry under the top package and re-import it. Safe for self-contained
@@ -655,6 +660,10 @@ class SkillRegistry(Skill):
         skill = getattr(self._agent, attr, None)
         if skill is None:
             return f"Skill {name!r} has no instance on agent"
+
+        target = self._lib_targets.get(name)
+        if target:
+            return await self._reload_target(name, attr, target)
 
         mod_name = type(skill).__module__
         # For package modules (e.g. "excalidraw.__init__"), use the top-level package
@@ -689,6 +698,54 @@ class SkillRegistry(Skill):
                     name,
                     exc_info=True,
                 )
+
+    async def _reload_target(self, name: str, attr: str, target: str) -> str:
+        """Reload a source-tree skill from its declared entry-point target."""
+        import asyncio
+        import importlib
+        import sys as _sys
+
+        module_name, separator, object_path = target.partition(":")
+        module_name = module_name.strip()
+        object_path = object_path.partition(" ")[0].strip()
+        if not separator or not object_path:
+            return f"Reload failed for {name}: invalid entry-point target {target!r}"
+
+        old_skill = getattr(self._agent, attr, None)
+        try:
+            old_skill, old_detached = await self._detach_old_for_reload(attr)
+        except Exception as e:
+            await self._restore_old_after_reload_failure(name, old_skill, old_skill is not None)
+            return f"Reload failed for {name}: {e}"
+
+        top_pkg = module_name.split(".")[0]
+        try:
+            prefix = top_pkg + "."
+            for key in [k for k in _sys.modules if k == top_pkg or k.startswith(prefix)]:
+                del _sys.modules[key]
+            module = await asyncio.to_thread(importlib.import_module, module_name)
+            resolved: Any = module
+            for part in object_path.split("."):
+                resolved = getattr(resolved, part)
+            if isinstance(resolved, Skill):
+                resolved = type(resolved)
+            if not isinstance(resolved, type) or not issubclass(resolved, Skill):
+                await self._restore_old_after_reload_failure(name, old_skill, old_detached)
+                return f"Reloaded {target} but target did not resolve to a Skill"
+        except Exception as e:
+            await self._restore_old_after_reload_failure(name, old_skill, old_detached)
+            return f"Reload failed for {name}: {e}"
+
+        try:
+            return await self._install_reloaded(
+                name,
+                attr,
+                resolved,
+                old_skill=old_skill,
+                old_detached=old_detached,
+            )
+        except Exception as e:
+            return f"Reload failed for {name}: {e}"
 
     async def _reload_package(self, name: str, attr: str, top_pkg: str) -> str:
         """Purge and re-import an entire top-level package (user/lib skills)."""
