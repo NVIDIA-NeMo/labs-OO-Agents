@@ -139,9 +139,11 @@ async def test_baseline_ctrl_d_exits():
         await h.wait_for(lambda: not h.app.is_running)
 
 
-async def test_baseline_ctrl_c_requires_confirmation_then_exits_cleanly():
+async def test_baseline_ctrl_c_clears_input_and_requires_confirmation():
     async with TUIHarness() as h:
+        await h.type_keys("discard this command")
         await h.press("c-c")
+        await h.wait_input_equals("")
         await h.wait_for(lambda: "Press Ctrl+C again to exit" in h.capture_status())
         assert h.app.is_running
 
@@ -629,17 +631,17 @@ async def test_cancelled_agent_run_async_propagates_to_agent_loop():
 # ╚══════════════════════════════════════════════════════════════════════╝
 
 
-async def test_hard_ctrl_c_interrupts_and_preserves_buffer():
-    """C-c while the agent is working cancels the agent but keeps the buffer."""
+async def test_hard_ctrl_c_interrupts_and_clears_buffer():
+    """C-c while the agent is working cancels the agent and clears the buffer."""
     agent = _blocking_agent()
     async with TUIHarness(agent=agent) as h:
         await h.submit_async("first")
         await h.wait_for(lambda: h.app.is_thinking())
         await h.type_keys("in-progress")
         await h.press("c-c")
-        # Agent gets cancelled; buffer contents survive.
+        # Agent gets cancelled and the in-progress input is discarded.
         await h.wait_for(lambda: not h.app.is_thinking())
-        assert h.capture_input() == "in-progress"
+        assert h.capture_input() == ""
 
 
 async def test_hard_agent_error_shown_in_output():
