@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field, field_validator
 if TYPE_CHECKING:
     from nooa.unifiedllm import CompletionClient
 
+
 # Default model — direct litellm-supported name. Override via config or --model.
 DEFAULT_MODEL = "claude-opus-4-8"
 
