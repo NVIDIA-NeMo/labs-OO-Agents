@@ -197,34 +197,78 @@ uv run nooa start-dev        # trace viewer on http://localhost:5001
 
 If the viewer isn't running, tracing is silently disabled — no configuration needed either way.
 
-### 4. Work in a repository interactively
+### 4. Code in your editor — NOOA speaks ACP
 
-Install `nooa-acp`, select any LiteLLM model or configured NOOA alias, then
-configure an ACP-compatible client to launch the agent with the repository as
-its working directory:
+**New: NOOA runs as an [Agent Client Protocol](https://agentclientprotocol.com)
+agent, so you can drive it from Zed.** Same agent as the terminal host — CodeAct,
+repository tools, persistent shell, installed skills, durable sessions — with
+file edits and terminal commands surfaced as structured activity in the editor.
+We would like people to try it and tell us what breaks.
+
+#### Try it in Zed
+
+Install the package and pick a model:
 
 ```bash
-uv add nooa-acp
-export NOOA_MODEL=nvidia_nim/nvidia/nemotron-3-super-120b-a12b
-export NVIDIA_API_KEY=nvapi-...
-
-# Agent command for the ACP client
-uv run nooa-acp
+uv add nooa-acp                 # or: uv add "nooa[acp]"
 ```
 
-> **Opening a repository runs code from it.** Creating a session imports Python
-> from the workspace — skill roots such as `.claude/skills`, additional roots
-> named by the repository's own `.nooa/settings.yaml`, and `.nooa/libs/` — before
-> you send a prompt. This is how workspace skills work, and it means opening a
-> folder is enough to execute code it contains, as you, in a process holding your
-> model credentials. Open repositories you would run; sandbox anything else. See
-> [`packages/nooa-acp/README.md`](packages/nooa-acp/README.md) for the detail.
+Add NOOA to Zed's `settings.json` (`cmd-,`):
 
-`nooa-acp` runs the shared NOOA coding agent, CodeAct strategy, repository
-tools, persistent shell, installed skills, and durable project sessions over
-the standard Agent Client Protocol on stdin/stdout. File edits and terminal
-commands are also sent as structured ACP activity. The adapter registers
-`nooa acp` when both `nooa-cli` and `nooa-acp` are installed.
+```json
+{
+  "agent_servers": {
+    "NOOA": {
+      "type": "custom",
+      "command": "uvx",
+      "args": ["nooa-acp"],
+      "env": {
+        "NOOA_MODEL": "nvidia_nim/nvidia/nemotron-3-super-120b-a12b",
+        "NVIDIA_API_KEY": "nvapi-..."
+      }
+    }
+  }
+}
+```
+
+Open a repository, then pick **NOOA** from the `+` menu in the agent panel.
+Zed launches the command with your worktree as its working directory, so
+`AGENTS.md`, project skills and sessions resolve against the open project.
+
+There is no default model — set `NOOA_MODEL` or pass `--model`, or the command
+exits with a usage error. Credentials go in `env` here rather than Zed's own
+settings, because the agent is a separate process and inherits only what Zed
+passes it; use a secret-manager wrapper as the `command` if you would rather not
+put a key in `settings.json`.
+
+Two things worth knowing before you file a bug:
+
+- **Remote MCP servers you authenticated inside Zed are not forwarded to ACP
+  agents.** That is a known Zed limitation
+  ([zed-industries/zed#54410](https://github.com/zed-industries/zed/issues/54410)),
+  not a NOOA one. Configure the server for NOOA directly and it works.
+- **Opening a repository runs code from it.** Creating a session imports Python
+  from the workspace — skill roots such as `.claude/skills`, additional roots
+  named by the repository's own `.nooa/settings.yaml`, and `.nooa/libs/` — before
+  you send a prompt. That is how workspace skills work, and it means opening a
+  folder is enough to execute code it contains, as you, in a process holding your
+  model credentials. Open repositories you would run; sandbox anything else.
+
+Other ACP clients work the same way — the agent speaks JSON-RPC on stdin/stdout
+and writes diagnostics to stderr. See
+[`packages/nooa-acp/README.md`](packages/nooa-acp/README.md) for the full
+reference, session and skill behaviour, and the security detail.
+
+#### Or run it from the terminal
+
+```bash
+export NOOA_MODEL=nvidia_nim/nvidia/nemotron-3-super-120b-a12b
+export NVIDIA_API_KEY=nvapi-...
+uv run nooa-acp                 # waits for an ACP client on stdin
+```
+
+The adapter also registers `nooa acp` when both `nooa-cli` and `nooa-acp` are
+installed.
 
 Because the agent executes generated code and shell commands, use an OS-level
 sandbox for untrusted tasks. `cwd` scopes the working session but is not a
