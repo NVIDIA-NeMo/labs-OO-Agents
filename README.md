@@ -80,11 +80,11 @@ uv add nooa
 Or with pip: `pip install nooa`.
 
 <details>
-<summary><b>Optional sub-packages</b> — CLI, memory, benchmarks, evaluation pipeline</summary>
+<summary><b>Optional sub-packages</b> — CLI, ACP, memory, benchmarks, evaluation pipeline</summary>
 
 <br />
 
-The CLI, memory, and benchmark packages are separate distributions. Install
+The CLI, ACP, memory, and benchmark packages are separate distributions. Install
 them by name, or pull them in as extras of the core package:
 
 ```bash
