@@ -58,7 +58,7 @@ def _edit_diff(
     if _diff_input_is_too_large(old_text) or _diff_input_is_too_large(new_text):
         return _omitted_diff(path, "file content exceeds the safe diff preview limit")
 
-    output = TruncatingStringIO(limit=_MAX_EVENT_TEXT_CHARS)
+    lines: list[str] = []
     adjusted_hunk = False
     for line in unified_diff(
         old_text.splitlines(keepends=True),
@@ -71,8 +71,24 @@ def _edit_diff(
             new_count = _line_count(new_text)
             line = f"@@ -{start_line},{old_count} +{start_line},{new_count} @@\n"
             adjusted_hunk = True
-        output.write(line)
-    return output.getvalue(), not output.was_truncated
+        lines.extend(line.splitlines(keepends=True))
+
+    diff = "".join(lines)
+    if len(diff) <= _MAX_EVENT_TEXT_CHARS:
+        return diff, True
+
+    head: list[str] = []
+    head_chars = 0
+    for index, line in enumerate(lines):
+        omitted_after_line = len(lines) - index - 1
+        marker = f"… +{omitted_after_line} lines\n"
+        if head_chars + len(line) + len(marker) > _MAX_EVENT_TEXT_CHARS:
+            break
+        head.append(line)
+        head_chars += len(line)
+
+    omitted = len(lines) - len(head)
+    return "".join(head) + f"… +{omitted} lines\n", False
 
 
 class FileEdit(EventBase):  # type: ignore[misc]
