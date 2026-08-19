@@ -72,11 +72,21 @@ class Match:
 
     Pass any ``Match`` to ``self.shell.replace(match, new_text)``. Print it to
     view numbered lines. Slice with ``match[start:end]`` (1-indexed inclusive
-    line numbers) to narrow the region before replacing.
+    line numbers) to narrow the region before replacing. ``resolved_path`` is
+    required so the anchor remains bound to that file if the shell cwd changes.
     """
 
-    def __init__(self, path: str, start: int, end: int, text: str):
+    def __init__(
+        self,
+        path: str,
+        start: int,
+        end: int,
+        text: str,
+        *,
+        resolved_path: str | Path,
+    ):
         self._path = path
+        self._resolved_path = str(Path(resolved_path).resolve())
         self._start = start
         self._end = end
         self._text = text
@@ -85,6 +95,11 @@ class Match:
     def path(self) -> str:
         """File path."""
         return self._path
+
+    @property
+    def resolved_path(self) -> str:
+        """Canonical file path captured when this match was created."""
+        return self._resolved_path
 
     @property
     def start(self) -> int:
@@ -129,7 +144,13 @@ class Match:
             idx_start = start - self._start
             idx_end = stop - self._start + 1
             text = "".join(lines[idx_start:idx_end])
-            return Match(self._path, start, stop, text)
+            return Match(
+                self._path,
+                start,
+                stop,
+                text,
+                resolved_path=self._resolved_path,
+            )
 
         raise TypeError(f"indices must be int or slice, not {type(key).__name__}")
 
@@ -350,14 +371,8 @@ class ShellTools(Skill):
         await self._session.close()
 
     def _resolve_path(self, path: str) -> Path:
-        """Resolve a file-operation path and require it to remain inside cwd."""
-        root = self.cwd.resolve()
-        resolved = (root / path).resolve()
-        try:
-            resolved.relative_to(root)
-        except ValueError as exc:
-            raise ValueError(f"path escapes ShellTools cwd: {path}") from exc
-        return resolved
+        """Resolve a file-operation path relative to cwd when not absolute."""
+        return (self.cwd / path).resolve()
 
     async def run(
         self,
@@ -501,7 +516,7 @@ class ShellTools(Skill):
             return None
 
         anchors: list[tuple[str, int]] = []
-        file_cache: dict[str, list[str]] = {}
+        file_cache: dict[str, tuple[Path, list[str]]] = {}
         for raw in rg_out.splitlines():
             raw = raw.strip()
             if not raw:
@@ -564,13 +579,22 @@ class ShellTools(Skill):
             if mpath not in file_cache:
                 try:
                     resolved = self._resolve_path(mpath)
-                    file_cache[mpath] = resolved.read_text().splitlines(keepends=True)
+                    lines = resolved.read_text().splitlines(keepends=True)
+                    file_cache[mpath] = (resolved, lines)
                 except (OSError, ValueError):
                     return None
-            lines = file_cache[mpath]
+            resolved, lines = file_cache[mpath]
             if not (1 <= line_no <= len(lines)):
                 return None
-            out.append(Match(mpath, line_no, line_no, lines[line_no - 1]))
+            out.append(
+                Match(
+                    mpath,
+                    line_no,
+                    line_no,
+                    lines[line_no - 1],
+                    resolved_path=resolved,
+                )
+            )
         return out
 
     @staticmethod
@@ -661,7 +685,7 @@ class ShellTools(Skill):
 
     async def read(
         self,
-        path: Annotated[str, spec(description="File path (relative to cwd)")],
+        path: Annotated[str, spec(description="File path (relative to cwd or absolute)")],
         lines: Annotated[
             tuple[int, int] | None,
             spec(description="(start, end) 1-indexed inclusive, or None for whole file"),
@@ -674,7 +698,7 @@ class ShellTools(Skill):
         Slice with match[start:end] to narrow the region.
 
         Args:
-            path: File path (relative to cwd).
+            path: File path (relative to cwd or absolute).
             lines: Optional (start, end) range, 1-indexed inclusive.
 
         Returns:
@@ -690,9 +714,9 @@ class ShellTools(Skill):
             start = max(1, start)
             end = min(total, end)
             text = "".join(all_lines[start - 1 : end])
-            return Match(str(path), start, end, text)
+            return Match(str(path), start, end, text, resolved_path=resolved)
 
-        return Match(str(path), 1, total, content)
+        return Match(str(path), 1, total, content, resolved_path=resolved)
 
     async def replace(
         self,
@@ -722,7 +746,7 @@ class ShellTools(Skill):
         """
         if isinstance(target, Match):
             new_text = old_or_new
-            resolved = self._resolve_path(target.path)
+            resolved = Path(target.resolved_path)
             content = resolved.read_text()
             all_lines = content.splitlines(keepends=True)
 
@@ -778,14 +802,14 @@ class ShellTools(Skill):
 
     async def write_file(
         self,
-        path: Annotated[str, spec(description="File path (relative to cwd)")],
+        path: Annotated[str, spec(description="File path (relative to cwd or absolute)")],
         content: Annotated[str, spec(description="Full file content")],
     ) -> FileWrite:
         """
         Create or overwrite a file with content (no shell quoting needed).
 
         Args:
-            path: File path (relative to cwd).
+            path: File path (relative to cwd or absolute).
             content: Full file content.
         """
         resolved = self._resolve_path(path)

@@ -320,7 +320,7 @@ class ActivityShellTools(Skill):
     @wraps(ShellTools.read)
     async def read(
         self,
-        path: Annotated[str, spec(description="File path (relative to cwd)")],
+        path: Annotated[str, spec(description="File path (relative to cwd or absolute)")],
         lines: Annotated[
             tuple[int, int] | None,
             spec(description="(start, end) 1-indexed inclusive, or None for whole file"),
@@ -348,7 +348,9 @@ class ActivityShellTools(Skill):
         if not isinstance(path, str):
             return await self._shell.replace(target, old_or_new, new)
 
-        resolved = self._resolve_path(path)
+        resolved = (
+            Path(target.resolved_path) if isinstance(target, Match) else self._resolve_path(path)
+        )
         if isinstance(target, Match):
             old_text = target.text
             start_line = target.start
@@ -392,7 +394,7 @@ class ActivityShellTools(Skill):
     @wraps(ShellTools.write_file)
     async def write_file(
         self,
-        path: Annotated[str, spec(description="File path (relative to cwd)")],
+        path: Annotated[str, spec(description="File path (relative to cwd or absolute)")],
         content: Annotated[str, spec(description="Full file content")],
     ) -> FileWrite:
         resolved = self._resolve_path(path)
