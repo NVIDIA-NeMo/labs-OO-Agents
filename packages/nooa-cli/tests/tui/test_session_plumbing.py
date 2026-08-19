@@ -191,7 +191,7 @@ def test_print_exit_message_includes_name_and_short_hash(capsys) -> None:
     assert "my-debug-run [abc12345]" in err
 
 
-def test_print_exit_message_exposes_controls_in_session_name(capsys) -> None:
+def test_print_exit_message_neutralizes_controls_in_session_name(capsys) -> None:
     from unittest.mock import Mock
 
     from nooa_cli.tui.session import Session

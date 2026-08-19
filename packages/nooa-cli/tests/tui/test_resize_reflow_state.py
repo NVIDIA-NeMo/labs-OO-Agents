@@ -45,6 +45,25 @@ def test_explicit_recovery_replays_at_the_same_width() -> None:
     assert state.replay_required is False
 
 
+def test_recovery_replay_is_ignored_before_the_first_observation() -> None:
+    state = TranscriptResizeState()
+
+    assert state.request_replay() is False
+    assert state.has_pending_replay is False
+
+
+def test_duplicate_recovery_request_preserves_the_pending_request() -> None:
+    state = TranscriptResizeState()
+    state.observe((120, 40))
+    assert state.request_replay() is True
+    request = state.prepare_replay()
+    assert request is not None
+
+    assert state.request_replay() is False
+    assert state.generation == request.generation
+    assert state.is_current(request) is True
+
+
 def test_height_change_extends_an_already_pending_width_resize() -> None:
     state = TranscriptResizeState()
     state.observe((120, 40))

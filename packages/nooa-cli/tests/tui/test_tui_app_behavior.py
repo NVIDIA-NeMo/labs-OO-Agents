@@ -76,6 +76,38 @@ async def test_pre_run_emit_uses_the_same_normalized_block_as_replay(
     assert app._transcript_blocks[0].source == "bootstrap\x1b[2J\r\x07"
 
 
+async def test_untagged_transcript_retention_is_bounded_before_resize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    monkeypatch.setattr("sys.stdout", io.StringIO())
+    app = TUIApplication()
+
+    for index in range(app._untagged_replay_tail + 5):
+        app.emit_block(f"block {index}\n")
+
+    assert len(app._transcript_blocks) == app._untagged_replay_tail
+    assert app._transcript_blocks[0].source == "block 5\n"
+
+
+async def test_no_active_identity_preserves_tagged_blocks_but_caps_untagged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    monkeypatch.setattr("sys.stdout", io.StringIO())
+    app = TUIApplication()
+    app.emit_block("tagged\n", event_id="event-without-manager")
+    for index in range(app._untagged_replay_tail + 1):
+        app.emit_block(f"untagged {index}\n")
+
+    app._prune_transcript_blocks_for_active_events()
+
+    assert app._transcript_blocks[0].source == "tagged\n"
+    assert len(app._transcript_blocks) == app._untagged_replay_tail + 1
+
+
 async def test_input_composer_has_blank_row_above_and_below_input():
     """The default composer is three rows and expands for multiline input."""
     async with TUIHarness() as h:
@@ -1515,7 +1547,15 @@ async def test_permanent_replay_failure_stops_after_one_retry(
 
         for _ in range(5):
             h.app._app.invalidate()
-            await asyncio.sleep(0.03)
+            await asyncio.sleep(0)
+
+        await h.wait_for(
+            lambda: (
+                h.app._resize_replay_timer is None
+                and h.app._queued_resize_replay_generation is None
+            )
+        )
+        await asyncio.sleep(0)
 
         assert capture.attempts == 2
         assert h.app._resize_reflow.has_pending_replay is True
@@ -1711,7 +1751,14 @@ async def test_fullscreen_transient_resize_back_to_replayed_width_is_ignored() -
             max(observed[1] - 10, 1),
         )
         await h.resize_from_terminal(*observed)
-        await asyncio.sleep(0.15)
+        await h.wait_for(
+            lambda: (
+                h.app._resize_replay_timer is None
+                and h.app._queued_resize_replay_generation is None
+                and not h.app._resize_reflow.has_pending_replay
+            )
+        )
+        await asyncio.sleep(0)
 
         assert h.app._fullscreen_invalidate_count == 0
         assert h.app._resize_replay_timer is None
@@ -1735,7 +1782,7 @@ async def test_pending_resize_is_cancelled_before_terminal_teardown(
         assert observed is not None
         await h.resize_from_terminal(max(observed[0] - 10, 20), observed[1])
 
-    await asyncio.sleep(0.15)
+    await asyncio.sleep(0)
 
     assert app is not None
     assert app._fullscreen_invalidate_count == 0

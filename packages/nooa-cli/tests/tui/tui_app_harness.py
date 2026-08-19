@@ -230,6 +230,7 @@ class MutableRecordingOutput(DummyOutput):
     """
 
     def __init__(self, columns: int = 80, rows: int = 40) -> None:
+        super().__init__()
         self._size = Size(rows=int(rows), columns=int(columns))
         self.events: list[tuple[Any, ...]] = []
 
@@ -356,17 +357,17 @@ class TUIHarness(AbstractAsyncContextManager["TUIHarness"]):
         await asyncio.sleep(0)
 
     async def resize_from_terminal(self, columns: int, rows: int) -> None:
-        """Drive prompt_toolkit's production SIGWINCH callback at a new size."""
+        """Change terminal geometry and drive the supported redraw path."""
         output = self.output
         if not isinstance(output, MutableRecordingOutput):
             raise TypeError("resize_from_terminal requires MutableRecordingOutput")
         assert self.app is not None
+        previous_size_reads = sum(event[0] == "get_size" for event in output.events)
         output.set_size(columns, rows)
-        previous_render = self.app._app.render_counter
-        self.app._app._on_resize()
-        await asyncio.sleep(0)
-        if self.app._app.render_counter <= previous_render:
-            raise AssertionError("prompt_toolkit did not redraw after resize")
+        self.app._app.invalidate()
+        await self.wait_for(
+            lambda: sum(event[0] == "get_size" for event in output.events) > previous_size_reads
+        )
 
     async def submit_async(self, text: str) -> None:
         """Type ``text`` and press Enter. Doesn't wait for any side-effect."""

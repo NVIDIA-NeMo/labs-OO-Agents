@@ -2181,6 +2181,23 @@ class TUIApplication:
     def _retain_transcript_block(self, block: TranscriptBlock) -> None:
         block.transcript_epoch = self._transcript_epoch
         self._transcript_blocks.append(block)
+        if not block.keep and block.event_id is None and not block.tags:
+            self._trim_untagged_transcript_tail()
+
+    def _trim_untagged_transcript_tail(self) -> None:
+        """Bound source retention even when no resize replay has run yet."""
+        untagged_indexes = [
+            index
+            for index, block in enumerate(self._transcript_blocks)
+            if not block.keep and block.event_id is None and not block.tags
+        ]
+        excess = len(untagged_indexes) - self._untagged_replay_tail
+        if excess <= 0:
+            return
+        discard = set(untagged_indexes[:excess])
+        self._transcript_blocks = [
+            block for index, block in enumerate(self._transcript_blocks) if index not in discard
+        ]
 
     def _enqueue_transcript_block(self, block: TranscriptBlock) -> None:
         rendered = self._render_replay_source(block.source)
@@ -2697,18 +2714,19 @@ class TUIApplication:
         if not self._transcript_blocks:
             return
         active_ids, active_ranges = self._active_replay_identity()
-        if not active_ids and not active_ranges:
-            return
+        has_active_identity = bool(active_ids or active_ranges)
         keep_indexes: set[int] = set()
         untagged_indexes: list[int] = []
         for i, block in enumerate(self._transcript_blocks):
             if block.keep:
                 keep_indexes.add(i)
             elif block.event_id is not None:
-                if block.event_id in active_ids:
+                if not has_active_identity or block.event_id in active_ids:
                     keep_indexes.add(i)
             elif block.tags:
-                if any(self._tag_is_active(tag, active_ranges) for tag in block.tags):
+                if not has_active_identity or any(
+                    self._tag_is_active(tag, active_ranges) for tag in block.tags
+                ):
                     keep_indexes.add(i)
             else:
                 untagged_indexes.append(i)
