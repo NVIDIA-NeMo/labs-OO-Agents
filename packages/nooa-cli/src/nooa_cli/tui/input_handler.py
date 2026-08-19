@@ -18,6 +18,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 
 from .completer import _MENTION_PATTERN, Completer
+from .terminal_safety import sanitize_live_text
 from .theme import COLORS
 
 if TYPE_CHECKING:
@@ -44,6 +45,11 @@ class SlashCommandCompleter(PtCompleter):
             return
 
         for item in self._completer.complete(text):
+            # Completion labels are presentation data, not terminal input.
+            # Keep dynamic filenames/plugin help on one inert menu row while
+            # leaving ``item.text`` unchanged for insertion.
+            display = sanitize_live_text(item.display).replace("\n", r"\n")
+            description = sanitize_live_text(item.description).replace("\n", r"\n")
             # Calculate how much text to replace: the item.text is the full
             # replacement, so we insert the suffix after what's already typed.
             suffix = item.text[len(text) :] if item.text.startswith(text) else item.text
@@ -54,15 +60,15 @@ class SlashCommandCompleter(PtCompleter):
                 yield Completion(
                     "",
                     start_position=0,
-                    display=item.display,
-                    display_meta=item.description,
+                    display=display,
+                    display_meta=description,
                 )
                 continue
             yield Completion(
                 suffix if item.text.startswith(text) else item.text,
                 start_position=0 if item.text.startswith(text) else -len(text),
-                display=item.display,
-                display_meta=item.description,
+                display=display,
+                display_meta=description,
             )
 
 

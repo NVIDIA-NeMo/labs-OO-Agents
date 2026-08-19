@@ -24,14 +24,27 @@ from __future__ import annotations
 
 import asyncio
 import io
+import threading
 
 import pytest
 
-from .tui_app_harness import FakeAgent, ThreadGate, TUIHarness
+from .tui_app_harness import FakeAgent, MutableRecordingOutput, ThreadGate, TUIHarness
 
 XFAIL = pytest.mark.xfail(strict=True, reason="not yet implemented in Plan-C TUIApplication")
 
 pytestmark = pytest.mark.asyncio
+
+
+def _last_screen_text(app) -> str:
+    screen = app._app.renderer.last_rendered_screen
+    if screen is None:
+        return ""
+    rows: list[str] = []
+    for y in range(screen.height):
+        row = screen.data_buffer[y]
+        end = max(row, default=-1)
+        rows.append("".join(row[x].char for x in range(end + 1)))
+    return "\n".join(rows)
 
 
 # ╔══════════════════════════════════════════════════════════════════════╗
@@ -45,6 +58,56 @@ async def test_baseline_prompt_visible_at_startup():
         await h.wait_for(lambda: h.app.prompt_char_visible())  # new API
 
 
+async def test_pre_run_emit_uses_the_same_normalized_block_as_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    capture = io.StringIO()
+    monkeypatch.setattr("sys.stdout", capture)
+    app = TUIApplication()
+
+    app.emit_block("bootstrap\x1b[2J\r\x07")
+
+    written = capture.getvalue()
+    assert "\x1b[2J" not in written
+    assert "\x07" not in written
+    assert r"bootstrap\x1b[2J\r\x07" in written
+    assert app._transcript_blocks[0].source == "bootstrap\x1b[2J\r\x07"
+
+
+async def test_untagged_transcript_retention_is_bounded_before_resize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    monkeypatch.setattr("sys.stdout", io.StringIO())
+    app = TUIApplication()
+
+    for index in range(app._untagged_replay_tail + 5):
+        app.emit_block(f"block {index}\n")
+
+    assert len(app._transcript_blocks) == app._untagged_replay_tail
+    assert app._transcript_blocks[0].source == "block 5\n"
+
+
+async def test_no_active_identity_preserves_tagged_blocks_but_caps_untagged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    monkeypatch.setattr("sys.stdout", io.StringIO())
+    app = TUIApplication()
+    app.emit_block("tagged\n", event_id="event-without-manager")
+    for index in range(app._untagged_replay_tail + 1):
+        app.emit_block(f"untagged {index}\n")
+
+    app._prune_transcript_blocks_for_active_events()
+
+    assert app._transcript_blocks[0].source == "tagged\n"
+    assert len(app._transcript_blocks) == app._untagged_replay_tail + 1
+
+
 async def test_input_composer_has_blank_row_above_and_below_input():
     """The default composer is three rows and expands for multiline input."""
     async with TUIHarness() as h:
@@ -53,12 +116,14 @@ async def test_input_composer_has_blank_row_above_and_below_input():
         assert len(composer.children) == 3
 
         one_line = composer.preferred_height(80, 24)
-        assert one_line.min == 3
+        # Padding is preferred at ordinary sizes but optional when the terminal
+        # is short.  The input row is the only hard minimum.
+        assert one_line.min == 1
         assert one_line.preferred == 3
 
         h.app.input_buffer.text = "first\nsecond"
         two_lines = composer.preferred_height(80, 24)
-        assert two_lines.min == 3
+        assert two_lines.min == 1
         assert two_lines.preferred == 4
 
 
@@ -694,8 +759,9 @@ async def test_hard_spinner_and_session_label_in_status():
 
 
 async def test_hard_terminal_resize_does_not_crash():
-    async with TUIHarness() as h:
-        h.app.handle_resize(cols=40, rows=20)
+    output = MutableRecordingOutput()
+    async with TUIHarness(output=output) as h:
+        await h.resize_from_terminal(40, 20)
         await h.type_keys("still works")
         await h.wait_input_equals("still works")
 
@@ -933,19 +999,42 @@ async def test_prompt_toolkit_resize_polling_disabled_to_avoid_delayed_double_re
         assert h.app._app.terminal_size_polling_interval is None
 
 
-async def test_resize_with_active_subview_redraws_once_without_transcript_replay() -> None:
+async def test_row_only_resize_in_subview_needs_no_transcript_replay() -> None:
+    output = MutableRecordingOutput()
     view = _DummySubview()
-    async with TUIHarness(full_screen=True) as h:
-        h.app.emit_block("transcript behind subview\n")
-        await h.wait_output_contains("transcript behind subview")
+    async with TUIHarness(full_screen=True, output=output) as h:
+        observed = h.app._resize_reflow.observed_size
+        assert observed is not None
         task = asyncio.create_task(h.app.open_subview(view))
         await h.wait_for(lambda: h.app.active_subview is view)
 
-        h.app.handle_resize(cols=40, rows=20)
+        await h.resize_from_terminal(observed[0], max(observed[1] - 1, 1))
+
+        assert h.app._resize_reflow.has_pending_replay is False
         assert h.app._fullscreen_invalidate_count == 0
+        await h.press("q")
+        await asyncio.wait_for(task, timeout=1)
+
+
+async def test_production_width_resize_waits_for_subview_to_close() -> None:
+    output = MutableRecordingOutput()
+    view = _DummySubview()
+    async with TUIHarness(full_screen=True, output=output) as h:
+        h.app.emit_block("transcript behind subview\n")
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+        task = asyncio.create_task(h.app.open_subview(view))
+        await h.wait_for(lambda: h.app.active_subview is view)
+
+        await h.resize_from_terminal(60, 30)
+        await h.wait_for(lambda: h.app._resize_replay_timer is None)
+        assert h.app._fullscreen_invalidate_count == 0
+        assert h.app._resize_reflow.has_pending_replay is True
 
         await h.press("q")
         await asyncio.wait_for(task, timeout=1)
+        await h.wait_for(lambda: h.app._fullscreen_invalidate_count == 1)
+        assert h.app._resize_reflow.replayed_width == 60
 
 
 async def test_fullscreen_mode_rewrites_scrollback_on_resize() -> None:
@@ -956,31 +1045,34 @@ async def test_fullscreen_mode_rewrites_scrollback_on_resize() -> None:
         self.emit_message("A long traceback-ish line in native scrollback")
 
     agent.queue(step)
-    async with TUIHarness(agent=agent, full_screen=True) as h:
+    output = MutableRecordingOutput()
+    async with TUIHarness(agent=agent, full_screen=True, output=output) as h:
         assert h.app.full_screen is True
         assert h.app._app.full_screen is False
         assert h.app._output_window is None
         await h.submit_async("trigger")
         await h.wait_output_contains("traceback-ish line")
         assert h.app._fullscreen_invalidate_count == 0
-        h.app.handle_resize(cols=40, rows=20)
-        assert h.app._fullscreen_invalidate_count == 1
+        await h.resize_from_terminal(40, 20)
+        await h.wait_for(lambda: h.app._fullscreen_invalidate_count == 1)
 
 
 async def test_fullscreen_streaming_output_rewrites_scrollback_on_resize() -> None:
-    async with TUIHarness(full_screen=True) as h:
+    output = MutableRecordingOutput()
+    async with TUIHarness(full_screen=True, output=output) as h:
         for i in range(25):
             h.app.emit_block(f"chunk {i}\n")
         await h.wait_output_contains("chunk 24")
         assert h.app._fullscreen_invalidate_count == 0
-        h.app.handle_resize(cols=50, rows=20)
-        assert h.app._fullscreen_invalidate_count == 1
+        await h.resize_from_terminal(50, 20)
+        await h.wait_for(lambda: h.app._fullscreen_invalidate_count == 1)
 
 
 async def test_fullscreen_resize_replays_semantic_callbacks_and_clears_scrollback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with TUIHarness(full_screen=True) as h:
+    output = MutableRecordingOutput()
+    async with TUIHarness(full_screen=True, output=output) as h:
         calls = 0
 
         def replay() -> str:
@@ -990,38 +1082,775 @@ async def test_fullscreen_resize_replays_semantic_callbacks_and_clears_scrollbac
 
         h.app.emit_block("old width\n", replay=replay)
         await h.wait_output_contains("old width")
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
         capture = io.StringIO()
         monkeypatch.setattr("sys.__stdout__", capture)
 
-        h.app.handle_resize(cols=50, rows=20)
+        await h.resize_from_terminal(50, 20)
+        await h.wait_for(lambda: h.app._fullscreen_invalidate_count == 1)
 
         rewritten = capture.getvalue()
         assert calls == 1
-        assert rewritten.startswith("\x1b[H\x1b[2J\x1b[3J")
+        assert rewritten.startswith("\x1b[r\x1b[0m\x1b[H\x1b[2J\x1b[3J\x1b[H")
         assert "reflowed width=50" in rewritten
         assert "old width" not in rewritten
         assert h.app._fullscreen_invalidate_count == 1
 
 
+async def test_semantic_replay_cannot_inject_terminal_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = MutableRecordingOutput()
+    async with TUIHarness(full_screen=True, output=output) as h:
+        h.app.emit_block(
+            "safe initial\n",
+            replay=lambda: "semantic\x1b[2J\r\x07",
+        )
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+        capture = io.StringIO()
+        monkeypatch.setattr("sys.__stdout__", capture)
+
+        await h.resize_from_terminal(50, 20)
+        await h.wait_for(lambda: h.app._fullscreen_invalidate_count == 1)
+
+        rewritten = capture.getvalue()
+        # The one clear sequence belongs to the replay engine.  The callback's
+        # erase/CR/BEL are represented as printable diagnostics.
+        assert rewritten.count("\x1b[2J") == 1
+        assert "semantic\\x1b[2J\\r\\x07" in rewritten
+        assert "\x07" not in rewritten
+
+
 async def test_clear_screen_resets_rewritten_scrollback_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with TUIHarness(full_screen=True) as h:
+    output = MutableRecordingOutput()
+    async with TUIHarness(full_screen=True, output=output) as h:
         h.app.emit_block("before clear\n")
         await h.wait_output_contains("before clear")
         h.app.clear_transcript()
         h.app.emit_block("after clear\n")
         await h.wait_output_contains("after clear")
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
         capture = io.StringIO()
         monkeypatch.setattr("sys.__stdout__", capture)
 
-        h.app.handle_resize(cols=50, rows=20)
+        await h.resize_from_terminal(50, 20)
+        await h.wait_for(lambda: h.app._fullscreen_invalidate_count == 1)
 
         replayed = capture.getvalue()
-        assert replayed.startswith("\x1b[H\x1b[2J\x1b[3J")
+        assert replayed.startswith("\x1b[r\x1b[0m\x1b[H\x1b[2J\x1b[3J\x1b[H")
         assert "after clear" in replayed
         assert "before clear" not in replayed
         assert h.app._fullscreen_invalidate_count == 1
+
+
+async def test_prompt_toolkit_row_only_resize_redraws_without_rewriting_scrollback() -> None:
+    output = MutableRecordingOutput()
+    async with TUIHarness(full_screen=True, output=output) as h:
+        h.app.emit_block("stable transcript\n")
+        await h.wait_output_contains("stable transcript")
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+        observed = h.app._resize_reflow.observed_size
+        assert observed is not None
+        prior_render_count = h.app._app.render_counter
+        output.events.clear()
+
+        await h.resize_from_terminal(observed[0], max(observed[1] - 1, 1))
+
+        assert h.app._app.render_counter > prior_render_count
+        assert ("erase_down",) in output.events
+        assert h.app._resize_reflow.observed_size == (observed[0], max(observed[1] - 1, 1))
+        assert h.app._resize_replay_timer is None
+        assert h.app._resize_reflow.has_pending_replay is False
+        assert h.app._fullscreen_invalidate_count == 0
+
+
+async def test_tiny_height_never_uses_window_too_small_and_recovers_once() -> None:
+    output = MutableRecordingOutput(columns=80, rows=40)
+    async with TUIHarness(full_screen=True, output=output) as h:
+        h.app.emit_block("stable transcript\n")
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+
+        await h.resize_from_terminal(80, 4)
+
+        assert "Window too small" not in _last_screen_text(h.app)
+        assert h.app._height_compaction_needs_replay is True
+        assert h.app._fullscreen_invalidate_count == 0
+
+        await h.resize_from_terminal(80, 40)
+        await h.wait_for(lambda: h.app._fullscreen_invalidate_count == 1)
+
+        assert "Window too small" not in _last_screen_text(h.app)
+        assert h.app._height_compaction_needs_replay is False
+        assert h.app._resize_reflow.has_pending_replay is False
+
+
+async def test_oversized_completion_menu_shrinks_instead_of_replacing_layout() -> None:
+    from prompt_toolkit.buffer import CompletionState
+    from prompt_toolkit.completion import Completion
+
+    output = MutableRecordingOutput(columns=80, rows=6)
+    async with TUIHarness(full_screen=True, output=output) as h:
+        before = h.app._app.render_counter
+        h.app.input_buffer.complete_state = CompletionState(
+            h.app.input_buffer.document,
+            [Completion(f"/command-{index}") for index in range(20)],
+        )
+        h.app._app.invalidate()
+        await h.wait_for(lambda: h.app._app.render_counter > before)
+
+        assert "Window too small" not in _last_screen_text(h.app)
+        assert h.app._fullscreen_invalidate_count == 0
+        assert h.app._height_compaction_needs_replay is False
+
+        before = h.app._app.render_counter
+        h.app.input_buffer.complete_state = None
+        h.app._app.invalidate()
+        await h.wait_for(lambda: h.app._app.render_counter > before)
+        assert h.app._fullscreen_invalidate_count == 0
+
+
+async def test_fullscreen_resize_coalesces_transient_sizes_to_final_width() -> None:
+    output = MutableRecordingOutput()
+    async with TUIHarness(full_screen=True, output=output) as h:
+        replay_widths: list[int] = []
+
+        def replay() -> str:
+            replay_widths.append(h.app.output_columns())
+            return "stable transcript\n"
+
+        h.app.emit_block("stable transcript\n", replay=replay)
+        await h.wait_output_contains("stable transcript")
+
+        await h.resize_from_terminal(40, 18)
+        await h.resize_from_terminal(50, 20)
+        await h.wait_for(lambda: h.app._fullscreen_invalidate_count == 1)
+
+        assert replay_widths == [50]
+
+
+async def test_production_before_render_path_debounces_to_latest_width() -> None:
+    output = MutableRecordingOutput()
+    async with TUIHarness(full_screen=True, output=output) as h:
+        replay_widths: list[int] = []
+        observed = h.app._resize_reflow.observed_size
+        assert observed is not None
+
+        def replay() -> str:
+            replay_widths.append(h.app.output_columns())
+            return "stable transcript\n"
+
+        h.app.emit_block("stable transcript\n", replay=replay)
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+
+        first = (max(observed[0] - 10, 30), max(observed[1] - 2, 1))
+        final = (max(observed[0] - 20, 20), max(observed[1] - 4, 1))
+        await h.resize_from_terminal(*first)
+        first_timer = h.app._resize_replay_timer
+        assert first_timer is not None
+        await h.resize_from_terminal(*final)
+
+        assert first_timer.cancelled() is True
+        assert h.app._fullscreen_invalidate_count == 0
+        await h.wait_for(lambda: h.app._fullscreen_invalidate_count == 1)
+
+        assert replay_widths == [final[0]]
+
+
+async def test_stale_resize_timer_cannot_enqueue_before_latest_quiet_period() -> None:
+    output = MutableRecordingOutput()
+    async with TUIHarness(full_screen=True, output=output) as h:
+        h.app.emit_block("stable transcript\n")
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+
+        await h.resize_from_terminal(70, 38)
+        stale_generation = h.app._resize_replay_schedule_generation
+        await h.resize_from_terminal(60, 36)
+        latest_generation = h.app._resize_replay_schedule_generation
+        assert latest_generation > stale_generation
+
+        # A cancelled TimerHandle may already be in the loop's ready queue.
+        # Its generation check must still make it harmless.
+        h.app._start_resize_replay(stale_generation)
+        assert h.app._fullscreen_invalidate_count == 0
+
+        await h.wait_for(lambda: h.app._fullscreen_invalidate_count == 1)
+        assert h.app._resize_reflow.replayed_width == 60
+
+
+async def test_slow_output_keeps_at_most_one_resize_barrier_queued(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = MutableRecordingOutput()
+    first_write_started = asyncio.Event()
+    release_first_write = asyncio.Event()
+    calls = 0
+
+    async def controlled_run_in_terminal(callback):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_write_started.set()
+            await release_first_write.wait()
+        return callback()
+
+    monkeypatch.setattr(
+        "prompt_toolkit.application.run_in_terminal",
+        controlled_run_in_terminal,
+    )
+    async with TUIHarness(full_screen=True, output=output) as h:
+        h.app.emit_block("slow first block\n")
+        await asyncio.wait_for(first_write_started.wait(), timeout=1)
+
+        await h.resize_from_terminal(70, 38)
+        await h.wait_for(lambda: h.app._queued_resize_replay_generation is not None)
+        await h.resize_from_terminal(60, 36)
+        await h.wait_for(lambda: h.app._resize_replay_timer is None)
+
+        assert h.app._block_queue is not None
+        assert h.app._block_queue.qsize() == 1
+
+        release_first_write.set()
+        await h.wait_for(lambda: h.app._fullscreen_invalidate_count == 1)
+        await h.app._block_queue.join()
+        assert h.app._resize_reflow.replayed_width == 60
+
+
+async def test_row_change_replaces_a_queued_width_barrier_without_extra_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = MutableRecordingOutput()
+    first_write_started = asyncio.Event()
+    release_first_write = asyncio.Event()
+    calls = 0
+
+    async def controlled_run_in_terminal(callback):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_write_started.set()
+            await release_first_write.wait()
+        return callback()
+
+    monkeypatch.setattr(
+        "prompt_toolkit.application.run_in_terminal",
+        controlled_run_in_terminal,
+    )
+    async with TUIHarness(full_screen=True, output=output) as h:
+        h.app.emit_block("slow first block\n")
+        await asyncio.wait_for(first_write_started.wait(), timeout=1)
+
+        await h.resize_from_terminal(70, 38)
+        await h.wait_for(lambda: h.app._queued_resize_replay_generation is not None)
+        first_barrier_generation = h.app._queued_resize_replay_generation
+        await h.resize_from_terminal(70, 30)
+        assert h.app._resize_reflow.generation > first_barrier_generation
+
+        release_first_write.set()
+        await h.wait_for(lambda: h.app._fullscreen_invalidate_count == 1)
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+
+        assert h.app._resize_reflow.replayed_width == 70
+        assert h.app._resize_reflow.observed_size == (70, 30)
+        assert h.app._resize_reflow.has_pending_replay is False
+
+
+async def test_clear_invalidates_a_queued_resize_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = MutableRecordingOutput()
+    first_write_started = asyncio.Event()
+    release_first_write = asyncio.Event()
+    calls = 0
+
+    async def controlled_run_in_terminal(callback):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_write_started.set()
+            await release_first_write.wait()
+        return callback()
+
+    monkeypatch.setattr(
+        "prompt_toolkit.application.run_in_terminal",
+        controlled_run_in_terminal,
+    )
+    capture = io.StringIO()
+    monkeypatch.setattr("sys.__stdout__", capture)
+    async with TUIHarness(full_screen=True, output=output) as h:
+        h.app.emit_block("A cleared transcript\n")
+        await asyncio.wait_for(first_write_started.wait(), timeout=1)
+
+        await h.resize_from_terminal(70, 38)
+        await h.wait_for(lambda: h.app._queued_resize_replay_generation is not None)
+        h.app.clear_transcript()
+        h.app.emit_block("B after clear\n")
+        release_first_write.set()
+
+        await h.wait_for(lambda: h.app._fullscreen_invalidate_count == 1)
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+
+        after_last_clear = capture.getvalue().split("\x1b[3J")[-1]
+        assert "A cleared transcript" not in after_last_clear
+        assert after_last_clear.count("B after clear") == 1
+        assert [block.source for block in h.app._transcript_blocks] == ["B after clear\n"]
+
+
+async def test_clear_invalidates_an_inflight_ordinary_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_started = asyncio.Event()
+    release_write = asyncio.Event()
+
+    async def controlled_run_in_terminal(callback):
+        write_started.set()
+        await release_write.wait()
+        return callback()
+
+    monkeypatch.setattr(
+        "prompt_toolkit.application.run_in_terminal",
+        controlled_run_in_terminal,
+    )
+    capture = io.StringIO()
+    monkeypatch.setattr("sys.__stdout__", capture)
+    async with TUIHarness(full_screen=True) as h:
+        h.app.emit_block("must stay cleared\n")
+        await asyncio.wait_for(write_started.wait(), timeout=1)
+
+        h.app.clear_transcript()
+        release_write.set()
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+
+        assert "must stay cleared" not in capture.getvalue()
+        assert "\x1b[3J" in capture.getvalue()
+        assert h.app._transcript_blocks == []
+        assert h.capture_output() == ""
+
+
+async def test_clear_physically_purges_a_stale_resize_with_no_later_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = MutableRecordingOutput()
+    first_write_started = asyncio.Event()
+    release_first_write = asyncio.Event()
+    calls = 0
+
+    async def controlled_run_in_terminal(callback):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_write_started.set()
+            await release_first_write.wait()
+        return callback()
+
+    monkeypatch.setattr(
+        "prompt_toolkit.application.run_in_terminal",
+        controlled_run_in_terminal,
+    )
+    capture = io.StringIO()
+    monkeypatch.setattr("sys.__stdout__", capture)
+    async with TUIHarness(full_screen=True, output=output) as h:
+        h.app.emit_block("A before empty clear\n")
+        await asyncio.wait_for(first_write_started.wait(), timeout=1)
+
+        await h.resize_from_terminal(70, 38)
+        await h.wait_for(lambda: h.app._queued_resize_replay_generation is not None)
+        h.app.clear_transcript()
+        release_first_write.set()
+
+        await h.wait_for(
+            lambda: (
+                h.app._resize_replay_timer is None
+                and h.app._queued_resize_replay_generation is None
+                and not h.app._resize_reflow.has_pending_replay
+            )
+        )
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+
+        assert "\x1b[3J" in capture.getvalue()
+        assert "A before empty clear" not in capture.getvalue().split("\x1b[3J")[-1]
+        assert h.app._transcript_blocks == []
+
+
+async def test_transient_replay_write_failure_retries_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailFirstReplay(io.StringIO):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed = False
+
+        def write(self, text: str) -> int:
+            if not self.failed and "\x1b[3J" in text:
+                self.failed = True
+                raise OSError("transient terminal write failure")
+            return super().write(text)
+
+    output = MutableRecordingOutput()
+    async with TUIHarness(full_screen=True, output=output) as h:
+        h.app.emit_block("stable transcript\n")
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+        capture = FailFirstReplay()
+        monkeypatch.setattr("sys.__stdout__", capture)
+
+        await h.resize_from_terminal(70, 38)
+        await h.wait_for(lambda: h.app._fullscreen_invalidate_count == 1)
+
+        assert capture.failed is True
+        assert h.app._resize_reflow.replayed_width == 70
+        assert h.app._resize_reflow.has_pending_replay is False
+
+
+async def test_permanent_replay_failure_stops_after_one_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class AlwaysFailReplay(io.StringIO):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts = 0
+
+        def write(self, text: str) -> int:
+            if "\x1b[3J" in text:
+                self.attempts += 1
+                raise OSError("permanent terminal write failure")
+            return super().write(text)
+
+    output = MutableRecordingOutput()
+    async with TUIHarness(full_screen=True, output=output) as h:
+        h.app.emit_block("stable transcript\n")
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+        capture = AlwaysFailReplay()
+        monkeypatch.setattr("sys.__stdout__", capture)
+
+        await h.resize_from_terminal(70, 38)
+        await h.wait_for(
+            lambda: (
+                capture.attempts == 2
+                and h.app._resize_replay_timer is None
+                and h.app._queued_resize_replay_generation is None
+            )
+        )
+
+        for _ in range(5):
+            h.app._app.invalidate()
+            await asyncio.sleep(0)
+
+        await h.wait_for(
+            lambda: (
+                h.app._resize_replay_timer is None
+                and h.app._queued_resize_replay_generation is None
+            )
+        )
+        await asyncio.sleep(0)
+
+        assert capture.attempts == 2
+        assert h.app._resize_reflow.has_pending_replay is True
+
+
+async def test_ordinary_block_uses_width_at_physical_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = MutableRecordingOutput(columns=20, rows=40)
+    write_waiting = asyncio.Event()
+    release_write = asyncio.Event()
+
+    async def gated_run_in_terminal(callback):
+        write_waiting.set()
+        await release_write.wait()
+        return callback()
+
+    monkeypatch.setattr(
+        "prompt_toolkit.application.run_in_terminal",
+        gated_run_in_terminal,
+    )
+    capture = io.StringIO()
+    monkeypatch.setattr("sys.__stdout__", capture)
+    async with TUIHarness(full_screen=False, output=output) as h:
+        h.app.emit_block("abcdefghijklmnop\n")
+        await asyncio.wait_for(write_waiting.wait(), timeout=1)
+        output.set_size(6, 40)
+        release_write.set()
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+
+        from nooa_cli.tui.terminal_safety import strip_safe_ansi
+        from rich.cells import cell_len
+
+        visible_lines = strip_safe_ansi(capture.getvalue()).splitlines()
+        assert "".join(visible_lines) == "abcdefghijklmnop"
+        assert all(cell_len(line) <= 5 for line in visible_lines)
+
+
+async def test_resize_replay_barrier_orders_ui_and_off_thread_output_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = MutableRecordingOutput()
+    async with TUIHarness(full_screen=True, output=output) as h:
+        h.app.emit_block("before barrier\n")
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+        capture = io.StringIO()
+        monkeypatch.setattr("sys.__stdout__", capture)
+
+        observed = h.app._resize_reflow.observed_size
+        assert observed is not None
+        target = (max(observed[0] - 10, 20), observed[1])
+        output.set_size(*target)
+        h.app._resize_reflow.observe(target)
+        h.app._resize_replay_schedule_generation += 1
+        generation = h.app._resize_replay_schedule_generation
+        h.app._start_resize_replay(generation)
+
+        h.app.emit_block("after barrier ui\n")
+        producer = threading.Thread(
+            target=h.app.emit_block,
+            args=("after barrier thread\n",),
+        )
+        producer.start()
+        producer.join(timeout=1)
+        assert producer.is_alive() is False
+
+        await asyncio.sleep(0)
+        await h.app._block_queue.join()
+
+        rendered = capture.getvalue()
+        assert rendered.count("before barrier") == 1
+        assert rendered.count("after barrier ui") == 1
+        assert rendered.count("after barrier thread") == 1
+        assert rendered.index("before barrier") < rendered.index("after barrier ui")
+        assert rendered.index("after barrier ui") < rendered.index("after barrier thread")
+
+
+async def test_output_committed_before_resize_barrier_is_in_replayed_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = MutableRecordingOutput()
+    async with TUIHarness(full_screen=True, output=output) as h:
+        h.app.emit_block("A before resize\n")
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+        capture = io.StringIO()
+        monkeypatch.setattr("sys.__stdout__", capture)
+
+        # B occupies the FIFO before the replay marker, so the marker's source
+        # snapshot must contain both A and B.
+        h.app.emit_block("B before barrier\n")
+        observed = h.app._resize_reflow.observed_size
+        assert observed is not None
+        target = (max(observed[0] - 10, 20), observed[1])
+        output.set_size(*target)
+        h.app._resize_reflow.observe(target)
+        h.app._resize_replay_schedule_generation += 1
+        generation = h.app._resize_replay_schedule_generation
+        h.app._start_resize_replay(generation)
+        await h.app._block_queue.join()
+
+        after_last_clear = capture.getvalue().split("\x1b[3J")[-1]
+        assert after_last_clear.count("A before resize") == 1
+        assert after_last_clear.count("B before barrier") == 1
+        assert after_last_clear.index("A before resize") < after_last_clear.index(
+            "B before barrier"
+        )
+
+
+async def test_semantic_replay_emission_is_queued_after_immutable_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = MutableRecordingOutput()
+    async with TUIHarness(full_screen=True, output=output) as h:
+        callback_count = 0
+
+        def replay() -> str:
+            nonlocal callback_count
+            callback_count += 1
+            if callback_count == 1:
+                h.app.emit_block("C emitted during replay\n")
+            return "A semantic replay\n"
+
+        h.app.emit_block("A original\n", replay=replay)
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+        capture = io.StringIO()
+        monkeypatch.setattr("sys.__stdout__", capture)
+
+        observed = h.app._resize_reflow.observed_size
+        assert observed is not None
+        await h.resize_from_terminal(max(observed[0] - 10, 20), observed[1])
+        await h.wait_for(lambda: h.app._fullscreen_invalidate_count == 1)
+        await h.app._block_queue.join()
+
+        after_last_clear = capture.getvalue().split("\x1b[3J")[-1]
+        assert after_last_clear.count("A semantic replay") == 1
+        assert after_last_clear.count("C emitted during replay") == 1
+        assert [block.source for block in h.app._transcript_blocks] == [
+            "A original\n",
+            "C emitted during replay\n",
+        ]
+
+
+async def test_size_change_during_semantic_render_aborts_stale_replay() -> None:
+    output = MutableRecordingOutput()
+    async with TUIHarness(full_screen=True, output=output) as h:
+        observed = h.app._resize_reflow.observed_size
+        assert observed is not None
+        narrow = (max(observed[0] - 20, 20), observed[1])
+        replay_widths: list[int] = []
+
+        def replay() -> str:
+            replay_widths.append(h.app.output_columns())
+            if len(replay_widths) == 1:
+                # Model a physical tmux pane change while synchronous semantic
+                # rendering owns the UI loop. SIGWINCH cannot update Nooa's
+                # state until the callback returns, so the final physical-width
+                # guard must catch this directly from the Output.
+                output.set_size(*observed)
+            return "stable transcript\n"
+
+        h.app.emit_block("stable transcript\n", replay=replay)
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+
+        await h.resize_from_terminal(*narrow)
+        await h.wait_for(
+            lambda: (
+                h.app._resize_replay_timer is None
+                and h.app._queued_resize_replay_generation is None
+                and not h.app._resize_reflow.has_pending_replay
+            )
+        )
+
+        assert replay_widths == [narrow[0]]
+        assert h.app._fullscreen_invalidate_count == 0
+        assert h.app._resize_reflow.replayed_width == observed[0]
+
+
+async def test_fullscreen_transient_resize_back_to_replayed_width_is_ignored() -> None:
+    output = MutableRecordingOutput()
+    async with TUIHarness(full_screen=True, output=output) as h:
+        h.app.emit_block("stable transcript\n")
+        await h.wait_output_contains("stable transcript")
+        observed = h.app._resize_reflow.observed_size
+        assert observed is not None
+
+        await h.resize_from_terminal(
+            max(observed[0] - 20, 20),
+            max(observed[1] - 10, 1),
+        )
+        await h.resize_from_terminal(*observed)
+        await h.wait_for(
+            lambda: (
+                h.app._resize_replay_timer is None
+                and h.app._queued_resize_replay_generation is None
+                and not h.app._resize_reflow.has_pending_replay
+            )
+        )
+        await asyncio.sleep(0)
+
+        assert h.app._fullscreen_invalidate_count == 0
+        assert h.app._resize_replay_timer is None
+        assert h.app._resize_reflow.has_pending_replay is False
+
+
+async def test_pending_resize_is_cancelled_before_terminal_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = io.StringIO()
+    monkeypatch.setattr("sys.__stdout__", capture)
+    app = None
+
+    output = MutableRecordingOutput()
+    async with TUIHarness(full_screen=True, output=output) as h:
+        app = h.app
+        h.app.emit_block("stable transcript\n")
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+        observed = h.app._resize_reflow.observed_size
+        assert observed is not None
+        await h.resize_from_terminal(max(observed[0] - 10, 20), observed[1])
+
+    await asyncio.sleep(0)
+
+    assert app is not None
+    assert app._fullscreen_invalidate_count == 0
+    assert app._resize_replay_timer is None
+    assert "\x1b[3J" not in capture.getvalue()
+
+
+async def test_inflight_resize_barrier_cannot_clear_after_app_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = MutableRecordingOutput()
+    replay_started = asyncio.Event()
+    release_replay = asyncio.Event()
+    capture = io.StringIO()
+    monkeypatch.setattr("sys.__stdout__", capture)
+
+    async def gated_run_in_terminal(callback):
+        replay_started.set()
+        await release_replay.wait()
+        return callback()
+
+    monkeypatch.setattr(
+        "prompt_toolkit.application.run_in_terminal",
+        gated_run_in_terminal,
+    )
+    app = None
+    async with TUIHarness(full_screen=True, output=output) as h:
+        app = h.app
+        h.app.emit_block("stable transcript\n")
+        await asyncio.wait_for(replay_started.wait(), timeout=1)
+        release_replay.set()
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+
+        replay_started.clear()
+        release_replay.clear()
+        await h.resize_from_terminal(60, 36)
+        await asyncio.wait_for(replay_started.wait(), timeout=1)
+        asyncio.get_running_loop().call_later(0.05, release_replay.set)
+
+    assert app is not None
+    assert app._fullscreen_invalidate_count == 0
+    assert "\x1b[3J" not in capture.getvalue()
+
+
+async def test_inflight_clear_cannot_purge_terminal_after_app_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_started = asyncio.Event()
+    release_clear = asyncio.Event()
+    capture = io.StringIO()
+    monkeypatch.setattr("sys.__stdout__", capture)
+
+    async def gated_run_in_terminal(callback):
+        clear_started.set()
+        await release_clear.wait()
+        return callback()
+
+    monkeypatch.setattr(
+        "prompt_toolkit.application.run_in_terminal",
+        gated_run_in_terminal,
+    )
+    async with TUIHarness(full_screen=True) as h:
+        h.app.clear_transcript()
+        await asyncio.wait_for(clear_started.wait(), timeout=1)
+        asyncio.get_running_loop().call_later(0.05, release_clear.set)
+
+    assert "\x1b[3J" not in capture.getvalue()
 
 
 async def test_non_fullscreen_keeps_native_scrollback_path() -> None:

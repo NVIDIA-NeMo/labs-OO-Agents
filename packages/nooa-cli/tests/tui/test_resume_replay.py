@@ -144,7 +144,7 @@ class TestBatchRendering:
         from nooa_cli.tui.frontend import TerminalFrontend
 
         # Create a mock console
-        mock_file = MagicMock()
+        mock_file = MagicMock(spec=["write", "flush"])
         mock_console = MagicMock()
         mock_console.console.width = 80
         mock_console.console.file = mock_file
@@ -173,6 +173,22 @@ class TestBatchRendering:
         assert "hello" in written
         assert "world" in written
         assert "bye" in written
+
+    def test_history_renderer_honors_pathologically_narrow_width(self):
+        from nooa_cli.tui.frontend import render_history_replay_to_ansi
+        from nooa_cli.tui.terminal_safety import strip_safe_ansi
+        from rich.cells import cell_len
+
+        replay = HistoryReplay(
+            turns=[HistoryTurn(role="agent", content="abcdefghij")],
+            session_id="narrow",
+            show_header=False,
+            show_footer=False,
+        )
+
+        rendered = render_history_replay_to_ansi(replay, 3)
+
+        assert all(cell_len(line) <= 3 for line in strip_safe_ansi(rendered).splitlines())
 
     def test_history_replay_on_emit_stream_keeps_semantic_replay_callback(self):
         """Live TUI rendering stores resumed HistoryReplay as a reflowable block."""

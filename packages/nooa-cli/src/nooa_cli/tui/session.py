@@ -24,8 +24,15 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from rich.cells import chop_cells, set_cell_size
 from rich.console import Console as RichConsole
 from rich.text import Text
+
+from .terminal_safety import (
+    fallback_transcript_columns,
+    normalize_transcript_block,
+    sanitize_live_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,14 +105,14 @@ def _effective_slash_output_to_agent(agent: Any, slash_result: Any) -> bool:
 
 
 def _build_user_bar(text: str, app: "TUIApplication", colors: dict) -> str:
-    """Build a full-width highlighted user-message bar as raw ANSI.
+    """Build a highlighted user-message bar as safe raw ANSI.
 
     Bypasses Rich because reconciling Rich's wrap/crop/overflow logic
     with manual ``ljust`` padding is brittle across Rich versions and
     terminal emulators — direct CSI emission always renders the full
     width-spanning highlighted row the spec asks for.
 
-    Each input line becomes one bar row:
+    Each input line becomes one bar row (or more when it wraps):
       ``ESC[fg;bg m{prefix}{line}{padding}{ ESC[0m}\\n``
     where the first row carries the ``❯`` prompt glyph and
     continuation rows start flush-left.
@@ -115,15 +122,14 @@ def _build_user_bar(text: str, app: "TUIApplication", colors: dict) -> str:
     # terminal_cols helper if the app output can't report.
     cols: int
     try:
-        cols = app.output_columns(minimum=20)
+        cols = app.transcript_columns()
     except Exception:
         try:
-            cols = app._app.output.get_size().columns  # type: ignore[attr-defined]
+            cols = max(int(app._app.output.get_size().columns) - 1, 1)  # type: ignore[attr-defined]
         except Exception:
             from .tui_application import terminal_cols
 
-            cols = terminal_cols(minimum=40)
-    cols = max(cols, 20)
+            cols = max(terminal_cols(minimum=1) - 1, 1)
 
     fg = _hex_to_ansi256(colors["text"])
     bg = _hex_to_ansi256(colors["surface2"])
@@ -131,14 +137,13 @@ def _build_user_bar(text: str, app: "TUIApplication", colors: dict) -> str:
     off = "\x1b[0m"
 
     rows: list[str] = []
-    for i, line in enumerate(text.split("\n")):
+    for i, line in enumerate(sanitize_live_text(text).split("\n")):
         shown = f" ❯ {line} " if i == 0 else f" {line} "
-        # Clamp to cols so an overlong line becomes multiple bar rows
-        # rather than wrapping chaotically at the terminal's edge.
-        while len(shown) > cols:
-            rows.append(f"{on}{shown[:cols]}{off}")
-            shown = shown[cols:]
-        rows.append(f"{on}{shown.ljust(cols)}{off}")
+        # Rich's cell helpers preserve grapheme clusters and measure wide
+        # glyphs correctly.  Every row is exactly the safe content width,
+        # which is one cell narrower than the physical terminal.
+        chunks = chop_cells(shown, cols) or [""]
+        rows.extend(f"{on}{set_cell_size(chunk, cols)}{off}" for chunk in chunks)
     return "\n".join(rows) + "\n"
 
 
@@ -298,7 +303,6 @@ class Session:
         self._app: TUIApplication | None = None
         self._renderer: AgentEventRenderer | None = None
         self._unsub_activity: Callable[[], None] | None = None
-        self._emit_console: RichConsole | None = None
         self._loud_handler_reentrant: bool = False
         # Own ShellTools for bang (!) commands — avoids cross-loop issues
         # when the agent's shell was created on a different event loop.
@@ -350,7 +354,6 @@ class Session:
 
     def _dump_exit_diagnostics(self) -> None:
         """Print pending tasks, threads, and subprocesses on exit for debugging hangs."""
-        import sys
         import threading
 
         lines: list[str] = []
@@ -386,11 +389,8 @@ class Session:
                 lines.append(f"  - {t.get_name()}")
 
         if lines:
-            sys.stderr.write("\n\033[2m[exit diagnostics]\n")
-            for line in lines:
-                sys.stderr.write(f"  {line}\n")
-            sys.stderr.write("\033[0m\n")
-            sys.stderr.flush()
+            body = "".join(f"  {line}\n" for line in lines)
+            self._write_terminal_fallback(f"\n\033[2m[exit diagnostics]\n{body}\033[0m\n")
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -425,16 +425,6 @@ class Session:
                 self._saved_termios = termios.tcgetattr(sys.stdin.fileno())
         except (ImportError, OSError):
             pass
-
-        # The block-rendering Rich Console: re-used across ``_emit_text``
-        # calls with width reset per-call to track live terminal width.
-        self._emit_console = RichConsole(
-            file=io.StringIO(),
-            force_terminal=True,
-            color_system="256",
-            width=120,
-            theme=CATPPUCCIN_THEME,
-        )
 
         self._app = TUIApplication(
             agent=self.agent,
@@ -515,7 +505,7 @@ class Session:
                 RichConsole(
                     file=_EmitStream(
                         self._app.emit_block,
-                        replay_width=lambda app=self._app: app.output_columns(minimum=40),
+                        replay_width=lambda app=self._app: app.transcript_columns(),
                         clear=self._app.clear_transcript,
                     ),  # type: ignore[arg-type]
                     force_terminal=True,
@@ -709,16 +699,33 @@ class Session:
                 tag = ""
         else:
             tag = ""
-        suffix = f" — {tag}" if tag else ""
-        sys.stderr.write(f"\n\x1b[2mGoodbye! Stay vibing.{suffix}\x1b[0m\n")
+        safe_tag = sanitize_live_text(tag).replace("\n", " ")
+        suffix = f" — {safe_tag}" if safe_tag else ""
+        message = f"\n\x1b[2mGoodbye! Stay vibing.{suffix}\x1b[0m\n"
         if sm is not None and short:
-            sys.stderr.write(
-                f"\x1b[2mResume this session with \x1b[0m\x1b[1mnooa tui -c {short}\x1b[0m\n"
-            )
+            message += f"\x1b[2mResume this session with \x1b[0m\x1b[1mnooa tui -c {short}\x1b[0m\n"
+        self._write_terminal_fallback(message)
+
+    def _write_terminal_fallback(self, value: str, stream: Any = None) -> None:
+        """Write degraded-path diagnostics through transcript safety rules."""
+        target = stream if stream is not None else sys.stderr
+        try:
+            app = getattr(self, "_app", None)
+            if app is not None:
+                candidate = app.transcript_columns()
+                columns = candidate if isinstance(candidate, int) else fallback_transcript_columns()
+            else:
+                columns = fallback_transcript_columns()
+            target.write(normalize_transcript_block(value, columns=max(int(columns), 1)))
+            target.flush()
+        except Exception:
+            # This is the last-resort path used while the UI itself is failing.
+            # Never recurse through the asyncio exception handler from here.
+            pass
 
     # ------------------------------------------------------------------
     # Handlers — driven by TUIApplication, called in run()'s event loop.
-    # Each closes over ``self._app`` / ``self._renderer`` / ``self._emit_console``
+    # Each closes over ``self._app`` / ``self._renderer``
     # set up in ``run()``. Don't call any of these before ``run()`` has
     # started; calling an assertion-gated attribute access ("``self._app``
     # is None") raises a descriptive error.
@@ -734,17 +741,25 @@ class Session:
 
     def _render_to_ansi(self, renderable: Any) -> str:
         """Render a Rich renderable using the current terminal width."""
-        assert self._emit_console is not None
+        from .theme import CATPPUCCIN_THEME
         from .tui_application import terminal_cols
 
         try:
-            width = self._app.output_columns(minimum=40)  # type: ignore[union-attr]
+            width = self._app.transcript_columns()  # type: ignore[union-attr]
         except Exception:
-            width = terminal_cols(minimum=40)
-        self._emit_console.width = max(int(width), 40)
+            width = max(terminal_cols(minimum=1) - 1, 1)
+        # Live agent output and resize replay may render concurrently on two
+        # loops. A per-call console keeps width and destination local instead
+        # of coupling those threads through mutable Rich Console state.
         buf = io.StringIO()
-        self._emit_console.file = buf
-        self._emit_console.print(renderable)
+        console = RichConsole(
+            file=buf,
+            force_terminal=True,
+            color_system="256",
+            width=max(int(width), 1),
+            theme=CATPPUCCIN_THEME,
+        )
+        console.print(renderable)
         return buf.getvalue()
 
     def _emit_text(
@@ -758,7 +773,7 @@ class Session:
         """Render a Rich renderable → ANSI → enqueue to the block queue.
 
         In fullscreen mode, also retain a replay callback that re-renders the
-        same semantic Rich/Markdown object at the current width on resize.
+        same semantic Rich/Markdown object after a settled width resize.
         """
         assert self._app is not None
 
@@ -835,6 +850,7 @@ class Session:
                 self._session_title_requested = False
             finally:
                 self._app._session_transitioning = False
+
         async def _render_result_outputs() -> None:
             frontend = getattr(self, "frontend", None)
             render = getattr(frontend, "render", None)
@@ -1077,8 +1093,7 @@ class Session:
             if self._loud_handler_reentrant:
                 err = sys.__stderr__
                 if err is not None:
-                    err.write(diag_msg)
-                    err.flush()
+                    self._write_terminal_fallback(diag_msg, err)
             else:
                 self._loud_handler_reentrant = True
                 try:
@@ -1088,8 +1103,7 @@ class Session:
                     # fall back to stderr so the diagnostic isn't lost.
                     err = sys.__stderr__
                     if err is not None:
-                        err.write(diag_msg)
-                        err.flush()
+                        self._write_terminal_fallback(diag_msg, err)
                 finally:
                     self._loud_handler_reentrant = False
             # Fall through to normal handler for the full traceback
@@ -1143,11 +1157,7 @@ class Session:
         if self._loud_handler_reentrant:
             err = sys.__stderr__
             if err is not None:
-                try:
-                    err.write(line)
-                    err.flush()
-                except Exception:
-                    pass
+                self._write_terminal_fallback(line, err)
             return
         self._loud_handler_reentrant = True
         try:
@@ -1155,11 +1165,10 @@ class Session:
         except Exception as inner:
             err = sys.__stderr__
             if err is not None:
-                try:
-                    err.write(f"[loud_handler fallback] {inner}\n{line}")
-                    err.flush()
-                except Exception:
-                    pass
+                self._write_terminal_fallback(
+                    f"[loud_handler fallback] {inner}\n{line}",
+                    err,
+                )
         finally:
             self._loud_handler_reentrant = False
 

@@ -50,7 +50,7 @@ def render_history_replay_to_ansi(output: HistoryReplay, width: int) -> str:
     dim = COLORS["overlay1"]
     user_color = COLORS["subtext1"]
 
-    render_width = max(int(width), 20)
+    render_width = max(int(width), 1)
     buf = io.StringIO()
     # Rich ignores ``width=`` for force_terminal consoles when it can read the
     # real terminal size.  Supplying COLUMNS pins the semantic replay width.
@@ -256,6 +256,15 @@ class TerminalFrontend:
         """Dispatch *output* to the appropriate Rich rendering call."""
         handler = self._renderers.get(type(output))
         if handler is not None:
+            # The live Console is long-lived, but terminal width is not.  Keep
+            # every structured render inside the native-scrollback safe width
+            # instead of retaining the constructor's arbitrary 120 columns.
+            stream = getattr(self._console.console, "file", None)
+            replay_width = getattr(stream, "replay_width", None)
+            if callable(replay_width):
+                self._console.console.width = max(
+                    int(replay_width(self._console.console.width or 80)), 1
+                )
             handler(output)
 
     def batch_render(self):
