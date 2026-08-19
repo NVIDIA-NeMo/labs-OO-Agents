@@ -27,17 +27,15 @@ buffer is set, i.e. exactly the stray-write case we care about.
 
 from __future__ import annotations
 
-import re
 import threading
 from collections.abc import Callable
 from typing import IO, Any
 
-# Strip ANSI escape sequences for pattern matching.
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-
-
-def _strip_ansi(s: str) -> str:
-    return _ANSI_RE.sub("", s)
+from .terminal_safety import (
+    fallback_transcript_columns,
+    normalize_transcript_block,
+    sanitize_live_text,
+)
 
 
 class _StrayStreamForwarder:
@@ -124,8 +122,12 @@ class _StrayStreamForwarder:
 
     def _emit_line(self, line: str) -> None:
         """Wrap a single line in the configured ANSI style and emit it."""
+        # Even the fallback below can write to the real terminal.  Normalize
+        # before dedup/styling so subprocess cursor controls, BEL, CR, OSC,
+        # and malformed CSI can never escape by making ``emit_block`` fail.
+        line = sanitize_live_text(line).replace("\n", "\\n")
         # Suppress purely empty/whitespace lines.
-        stripped = _strip_ansi(line).strip()
+        stripped = line.strip()
         if not stripped:
             return
 
@@ -147,26 +149,32 @@ class _StrayStreamForwarder:
         self._repeat_count = 1
 
         styled = f"\x1b[{self._ansi_color}m{self._prefix}{line}\x1b[0m\n"
+        self._emit_styled(styled)
+
+        self._notify_stray(stripped, "emitted")
+
+    def _emit_styled(self, styled: str) -> None:
+        """Use the transcript pipeline, with one normalized terminal fallback."""
         try:
             self._emit_block(styled)
         except Exception:
             try:
-                self._original.write(styled)
+                self._original.write(
+                    normalize_transcript_block(
+                        styled,
+                        columns=fallback_transcript_columns(),
+                    )
+                )
                 self._original.flush()
             except Exception:
                 pass
-
-        self._notify_stray(stripped, "emitted")
 
     def _flush_dedup(self) -> None:
         """Emit a repeat summary if the last line was seen more than once."""
         if self._repeat_count > 1:
             summary = f"{self._last_line} (×{self._repeat_count - 1} more)"
             styled = f"\x1b[{self._ansi_color}m{self._prefix}{summary}\x1b[0m\n"
-            try:
-                self._emit_block(styled)
-            except Exception:
-                pass
+            self._emit_styled(styled)
         self._last_stripped = ""
         self._last_line = ""
         self._repeat_count = 0
