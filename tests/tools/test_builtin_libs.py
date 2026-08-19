@@ -46,6 +46,25 @@ def test_codeact_strategy_instructions_no_longer_has_decomposition():
     assert "Task decomposition" not in src
 
 
+def test_codeact_strategy_instructions_define_current_call_contract():
+    from nooa.strategies.codeact import CodeActStrategy
+
+    src = inspect.getsource(CodeActStrategy.strategy_instructions)
+    assert "Execute the current method invocation" in src
+    assert "Submit the requested return value itself" in src
+    assert "input order and cardinality" in src
+
+
+def test_predict_strategy_instructions_handle_incomplete_evidence():
+    from nooa.strategies.predict import PredictStrategy
+
+    src = inspect.getsource(PredictStrategy.strategy_instructions)
+    assert "before or after an explicit truncation or elision marker" in src
+    assert "the right: the last shown value" in src
+    assert "before it is second-to-last" in src
+    assert "Never assume what those omitted entries contain" in src
+
+
 def test_context_api_not_in_protected_blocks():
     """context_api and events_api should not be registered as protected blocks."""
     from unittest.mock import MagicMock

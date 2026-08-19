@@ -100,6 +100,8 @@ class TestAnnotatedReturnTypeDescriptions:
         # Should not have description
         assert "description" not in result_field
         assert result_field["type"] == "string"
+        assert "current `my_method` call for its live inputs" in tool.description
+        assert "not a description, implementation, test, or status report" in tool.description
 
     def test_build_return_result_tool_with_field(self):
         """Test that existing Field descriptions are preserved."""

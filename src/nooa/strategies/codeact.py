@@ -568,6 +568,21 @@ Standard Python builtins and agent instance (`self`) are available."""
         - `execute_python(code)` — run a code cell
         - `return_result(value)` — submit your final answer (also callable from inside `execute_python`)
 
+        ## Current call contract
+
+        Execute the current method invocation shown in the task. Do not write,
+        redefine, or explain an implementation of that method unless its return
+        type explicitly asks for source code. Existing public methods on `self`
+        are callable tools, not methods you need to implement. Treat the current
+        parameter variables as the live task: do not substitute invented test
+        inputs or redefine the agent class. Compute from those variables and
+        return the resulting value.
+
+        Submit the requested return value itself — never a status report saying
+        that work was implemented, completed, or tested. Before returning, check
+        the value against the annotated return type. For batch results, preserve
+        input order and cardinality unless the method contract says otherwise.
+
         ## When to use which tool
 
         Use `return_result(...)` directly for simple answers determinable from the inputs alone (yes/no, one field, a single lookup).
@@ -2431,6 +2446,12 @@ Standard Python builtins and agent instance (`self`) are available."""
         """
         from pydantic import Field
 
+        value_contract = (
+            f"The `result` argument is the value returned by the current `{method_name}` "
+            "call for its live inputs, not a description, implementation, test, or status "
+            "report about completing the call. "
+        )
+
         def return_result(result: Any = None) -> Any:
             """Return the final result for the task.
 
@@ -2478,7 +2499,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             type_name = _format_type(return_type)
             if schema_type is Any and schema_type is not return_type:
                 description = (
-                    f"Return the final result for the task. "
+                    f"{value_contract}"
                     f"Call this ONLY when you have computed the final answer. "
                     f"Expected return type: {type_name}. "
                     f"IMPORTANT: This type cannot be passed directly via this tool. "
@@ -2495,7 +2516,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     description += f"\n\nReturn type reference:\n{type_doc}"
             else:
                 description = (
-                    f"Return the final result for the task. "
+                    f"{value_contract}"
                     f"Call this ONLY when you have computed the final answer. "
                     f"Expected return type: {type_name}. "
                     f"Tip: prefer calling return_result(variable) from within execute_python() "

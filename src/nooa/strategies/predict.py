@@ -102,6 +102,15 @@ class PredictStrategy(GenerationStrategy):
         3. Follows the exact schema structure
         4. Contains no extra fields beyond the schema
 
+        Base factual claims only on information present in the rendered inputs.
+        Values displayed before or after an explicit truncation or elision marker
+        are known values; use them normally. For a displayed suffix, count from
+        the right: the last shown value is the collection's last item, the value
+        before it is second-to-last, and so on. The marker stands only for omitted
+        entries. Never assume what those omitted entries contain. If the requested
+        claim depends on them, use the return schema's uncertainty or unanswerable
+        representation when one is available.
+
         The LLM will automatically format your output as JSON."""
         ...
 
