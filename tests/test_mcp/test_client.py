@@ -936,3 +936,46 @@ async def test_create_stdio_server_closes_connection_on_cancellation():
             await task
 
     assert closed.is_set()
+
+
+async def test_a_refreshed_client_keeps_the_configured_tool_call_timeout():
+    """The rebuilt client must not silently revert to the 60s default.
+
+    `refresh_ctx` did not carry `tool_call_timeout`, so after a 401 the client
+    rebuilt by `_refresh_access_token` used the factory default. A server given
+    a longer timeout on purpose started failing once its token first refreshed.
+    """
+    session = AsyncMock()
+    remote_tool = MagicMock()
+    remote_tool.name = "echo"
+    remote_tool.description = "Echo a value"
+    remote_tool.inputSchema = {"type": "object", "properties": {}}
+    session.list_tools.return_value.tools = [remote_tool]
+
+    class Context:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    client = MagicMock()
+    client.connect_to_server.return_value = Context()
+    configured = timedelta(seconds=300)
+
+    with patch("nooa.mcp.tool.create_mcp_client", return_value=client):
+        tool = await MCPManager.create_url_server(
+            "slow",
+            "https://mcp.example.test/mcp",
+            transport="streamable-http",
+            tool_call_timeout=configured,
+        )
+
+    token = MagicMock(token_type="Bearer", access_token="refreshed")
+    with (
+        patch("nooa.mcp.oauth.handle_mcp_oauth", new=AsyncMock(return_value=token)),
+        patch("nooa.mcp.tool.create_mcp_client", return_value=client) as rebuild,
+    ):
+        assert await tool._refresh_access_token() is True
+
+    assert rebuild.call_args.kwargs["tool_call_timeout"] == configured
