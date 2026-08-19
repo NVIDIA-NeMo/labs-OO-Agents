@@ -259,12 +259,17 @@ and writes diagnostics to stderr. See
 [`packages/nooa-acp/README.md`](packages/nooa-acp/README.md) for the full
 reference, session and skill behaviour, and the security detail.
 
-#### Or run it from the terminal
+#### Launching it yourself
+
+`nooa-acp` is a JSON-RPC server, not an interactive program: it speaks ACP on
+stdin/stdout and exits when its input closes. Running it in a terminal is only
+useful for wiring up another ACP client, or for watching the diagnostics it
+writes to stderr while a client drives it.
 
 ```bash
 export NOOA_MODEL=nvidia_nim/nvidia/nemotron-3-super-120b-a12b
 export NVIDIA_API_KEY=nvapi-...
-uv run nooa-acp                 # waits for an ACP client on stdin
+uv run nooa-acp                 # blocks until an ACP client connects on stdin
 ```
 
 The adapter also registers `nooa acp` when both `nooa-cli` and `nooa-acp` are
