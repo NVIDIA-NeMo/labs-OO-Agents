@@ -15,9 +15,9 @@ from acp.schema import (
     ToolCallStart,
     UsageUpdate,
 )
-from nooa_acp.coding_agent import CodingInteractiveAgent
 from nooa_acp.event_bridge import ACPEventBridge
 from nooa_cli.coding import (
+    CodingAgent,
     FileEdit,
     TerminalCommandFinished,
     TerminalCommandOutput,
@@ -44,7 +44,7 @@ def _content_text(content: ContentToolCallContent) -> str:
 
 
 async def test_bridge_preserves_message_tool_and_usage_order(tmp_path):
-    agent = CodingInteractiveAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
 
@@ -125,7 +125,7 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path):
 
 
 async def test_bridge_marks_failed_python_output(tmp_path):
-    agent = CodingInteractiveAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
 
@@ -164,7 +164,7 @@ async def test_bridge_marks_failed_python_output(tmp_path):
 
 
 async def test_bridge_retains_python_source_when_interrupted(tmp_path):
-    agent = CodingInteractiveAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
 
@@ -198,7 +198,7 @@ async def test_bridge_retains_python_source_when_interrupted(tmp_path):
 async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
     llm = FakeLLMClient()
     cast(Any, llm)._context_window = None
-    agent = CodingInteractiveAgent(llm=llm, cwd=tmp_path)
+    agent = CodingAgent(llm=llm, cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
 
@@ -211,7 +211,7 @@ async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
 
 
 async def test_bridge_emits_structured_file_edit(tmp_path):
-    agent = CodingInteractiveAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
     path = str(tmp_path / "example.py")
@@ -248,7 +248,7 @@ async def test_bridge_emits_structured_file_edit(tmp_path):
 
 
 async def test_bridge_emits_terminal_lifecycle(tmp_path):
-    agent = CodingInteractiveAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
 
@@ -299,7 +299,7 @@ class _BlockingClient(_RecordingClient):
 
 
 async def test_cancelled_flush_does_not_stop_update_pump(tmp_path):
-    agent = CodingInteractiveAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _BlockingClient()
     bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
     agent.event_manager.add(AgentMessage(content="First"))
@@ -329,7 +329,7 @@ async def test_a_failed_update_does_not_silence_the_session_for_good(tmp_path):
     on every future flush — the agent kept running turns, at full cost, that
     the client never saw.
     """
-    agent = CodingInteractiveAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
 
     class _FlakyClient:
         def __init__(self) -> None:
@@ -363,7 +363,7 @@ async def test_a_failed_update_does_not_silence_the_session_for_good(tmp_path):
 
 async def test_a_cancelled_command_reads_as_cancellation_not_a_crash(tmp_path):
     """The client must see the user's action, not a Python exception name."""
-    agent = CodingInteractiveAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
 
@@ -392,7 +392,7 @@ async def test_bare_expression_result_is_shown_not_reported_as_no_output(tmp_pat
     means the client is told there was no output while the agent reasons from
     one.
     """
-    agent = CodingInteractiveAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
 
@@ -421,7 +421,7 @@ async def test_synthetic_text_replies_are_not_rendered_as_python_runs(tmp_path):
     Nothing was executed, so surfacing it as a Python tool call shows the user
     a run that never happened, with their model's prose commented out inside.
     """
-    agent = CodingInteractiveAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
 
@@ -441,7 +441,7 @@ async def test_synthetic_text_replies_are_not_rendered_as_python_runs(tmp_path):
 
 async def test_an_unfinished_tool_call_does_not_leak_for_the_session(tmp_path):
     """Closing the bridge must not leave a card spinning or state retained."""
-    agent = CodingInteractiveAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
 
@@ -463,7 +463,7 @@ async def test_a_cancelled_tool_card_is_titled_cancelled(tmp_path):
     a technical-sounding failure and had to expand the card to learn it was
     their own action.
     """
-    agent = CodingInteractiveAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
 
@@ -477,3 +477,29 @@ async def test_a_cancelled_tool_card_is_titled_cancelled(tmp_path):
     progress = [u for _, u in client.updates if isinstance(u, ToolCallProgress)]
     assert progress[-1].title == "Cancelled"
     await bridge.close()
+
+
+async def test_a_dead_pump_fails_flush_instead_of_hanging(tmp_path):
+    """A BaseException from the transport must not strand every later flush.
+
+    _pump caught only Exception, so a CancelledError raised by
+    client.session_update — a disconnect during transport teardown — killed the
+    pump task without resolving the queued flush marker. flush() waits on that
+    marker and never observed the task, so it blocked forever, and close()
+    flushes before awaiting the pump, hanging session teardown too.
+    """
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+
+    class _DyingClient:
+        async def session_update(self, session_id: str, update: object, **kwargs) -> None:
+            raise asyncio.CancelledError()
+
+    bridge = ACPEventBridge(agent, _DyingClient(), "session-1")  # type: ignore[arg-type]
+    agent.event_manager.add(AgentMessage(content="first"))
+
+    with pytest.raises(BaseException):  # noqa: B017 - must not hang
+        await asyncio.wait_for(bridge.flush(), timeout=5)
+
+    # And teardown must not hang either.
+    await asyncio.wait_for(bridge.close(), timeout=5)
+    await agent.close()

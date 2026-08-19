@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import AsyncIterator
 from difflib import unified_diff
 from functools import wraps
@@ -49,6 +50,20 @@ def _omitted_diff(path: str, reason: str) -> tuple[str, bool]:
     )
 
 
+_HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
+
+
+def _offset_hunk_header(line: str, offset: int) -> str:
+    """Shift one hunk header into file coordinates, keeping difflib's counts."""
+    match = _HUNK_HEADER.match(line.rstrip("\n"))
+    if match is None:
+        return line
+    old_start, old_count, new_start, new_count, trailer = match.groups()
+    old_part = f"-{int(old_start) + offset}" + (f",{old_count}" if old_count else "")
+    new_part = f"+{int(new_start) + offset}" + (f",{new_count}" if new_count else "")
+    return f"@@ {old_part} {new_part} @@{trailer}\n"
+
+
 def _edit_diff(
     path: str,
     old_text: str,
@@ -60,18 +75,23 @@ def _edit_diff(
         return _omitted_diff(path, "file content exceeds the safe diff preview limit")
 
     output = TruncatingStringIO(limit=_MAX_EVENT_TEXT_CHARS)
-    adjusted_hunk = False
+    # A region diff is generated in region coordinates; every hunk shifts by the
+    # same amount to reach file coordinates. Rewriting only the first one, with
+    # the whole region's counts, left later hunks region-relative — able to point
+    # before the first hunk, and unappliable by patch.
+    offset = start_line - 1 if start_line is not None else 0
     for line in unified_diff(
         old_text.splitlines(keepends=True),
         new_text.splitlines(keepends=True),
         fromfile=f"a/{path}",
         tofile=f"b/{path}",
     ):
-        if start_line is not None and not adjusted_hunk and line.startswith("@@ "):
-            old_count = _line_count(old_text)
-            new_count = _line_count(new_text)
-            line = f"@@ -{start_line},{old_count} +{start_line},{new_count} @@\n"
-            adjusted_hunk = True
+        if offset and line.startswith("@@ "):
+            line = _offset_hunk_header(line, offset)
+        if not line.endswith("\n"):
+            # difflib emits the source line verbatim, so unterminated content
+            # would run the next marker onto the same line ("-a+b").
+            line = f"{line}\n\\ No newline at end of file\n"
         output.write(line)
     return output.getvalue(), not output.was_truncated
 

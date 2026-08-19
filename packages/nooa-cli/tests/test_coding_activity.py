@@ -75,7 +75,8 @@ async def test_match_replace_emits_actual_before_and_after_text(tmp_path):
     assert edit.new_text == "changed\n"
     assert (tmp_path / "example.txt").read_text() == "one\nchanged\nthree\n"
     assert (edit.start_line, edit.end_line) == (2, 2)
-    assert "@@ -2,1 +2,1 @@" in edit.diff
+    # difflib omits the count for a single-line hunk; the offset is what matters.
+    assert "@@ -2 +2 @@" in edit.diff
 
 
 async def test_match_replace_at_end_of_file_reports_the_unterminated_text(tmp_path):
@@ -265,3 +266,37 @@ async def test_cancelling_a_command_is_not_reported_as_an_error(tmp_path):
     finished = next(event for event in events if isinstance(event, TerminalCommandFinished))
     assert finished.cancelled is True
     assert "CancelledError" not in finished.error
+
+
+def test_every_hunk_is_offset_not_just_the_first():
+    """Multi-hunk diffs must stay in one coordinate system.
+
+    Only the first header was rewritten, and its counts were replaced with the
+    size of the whole region — so later hunks kept region-relative numbers and
+    could point *before* the first hunk.
+    """
+    old = "".join(f"line{i}\n" for i in range(1, 42))
+    new = old.replace("line2\n", "CHANGED2\n").replace("line20\n", "CHANGED20\n")
+
+    diff, complete = activity._edit_diff("f.py", old, new, start_line=10)
+
+    def hunk_starts(text: str) -> list[int]:
+        return [
+            int(line.split()[1].lstrip("-").split(",")[0])
+            for line in text.splitlines()
+            if line.startswith("@@ ")
+        ]
+
+    raw, _ = activity._edit_diff("f.py", old, new, start_line=None)
+    assert len(hunk_starts(raw)) >= 2, raw
+    # Every hunk shifts by the same amount; none keeps region-relative numbers.
+    assert hunk_starts(diff) == [start + 9 for start in hunk_starts(raw)]
+    assert complete is True
+
+
+def test_a_missing_final_newline_is_marked():
+    """Unterminated content needs the marker, or the diff is not applicable."""
+    diff, _ = activity._edit_diff("f.py", "a", "b", start_line=None)
+
+    assert "-a" in diff and "+b" in diff
+    assert "\\ No newline at end of file" in diff, diff

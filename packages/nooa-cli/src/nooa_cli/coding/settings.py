@@ -57,9 +57,15 @@ def load_coding_skills_dirs(
     # workspace settings file supersedes the legacy file, and an explicit
     # NEMO_OO_SETTINGS file remains a full override.
     project_settings = _read_project_settings(root / ".nooa" / _SETTINGS_FILENAME)
-    if not os.environ.get(_SETTINGS_ENV_VAR) and not (
-        _setting_paths(project_settings, "coding") or _setting_paths(project_settings, "tui")
-    ):
+    # Presence of the key, not truthiness of its value: `additional_skills_dirs: []`
+    # is an explicit "none", and treating it as absent silently resurrected the
+    # legacy paths the user had just emptied.
+    modern_key_set = any(
+        isinstance(project_settings.get(section), Mapping)
+        and "additional_skills_dirs" in project_settings[section]
+        for section in ("coding", "tui")
+    )
+    if not os.environ.get(_SETTINGS_ENV_VAR) and not modern_key_set:
         configured.extend(_legacy_project_paths(root / ".nooa" / _LEGACY_CONFIG_FILENAME))
 
     candidates: list[Path] = []

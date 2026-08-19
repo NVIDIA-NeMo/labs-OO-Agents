@@ -142,3 +142,28 @@ def test_environment_settings_override_user_and_workspace_layers(tmp_path, monke
     monkeypatch.setenv("NEMO_OO_SETTINGS", str(override))
 
     assert load_coding_skills_dirs(workspace) == [override_skills.resolve()]
+
+
+def test_an_explicit_empty_modern_list_disables_the_legacy_config(tmp_path, monkeypatch):
+    """Setting the modern key to [] must mean "none", not "fall back".
+
+    The compatibility check tested whether the modern key produced any paths,
+    not whether it was set — so a workspace that deliberately emptied it kept
+    loading .nooa/config.toml's [tui].libs_dirs, and went on importing Python
+    from directories the user believed they had removed.
+    """
+    workspace = tmp_path / "workspace"
+    legacy = tmp_path / "stale-skills"
+    user_config = tmp_path / "user-config"
+    workspace.mkdir()
+    legacy.mkdir()
+    user_config.mkdir()
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_config))
+    monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
+
+    config_dir = workspace / ".nooa"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(f'[tui]\nlibs_dirs = ["{legacy}"]\n')
+    (config_dir / "settings.yaml").write_text("coding:\n  additional_skills_dirs: []\n")
+
+    assert load_coding_skills_dirs(workspace) == []

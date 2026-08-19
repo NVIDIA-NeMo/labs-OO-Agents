@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from nooa import Context, hidden, strategy
 from nooa.agentdoc import doc, spec
-from nooa.config import CodeActConfig
+from nooa.config import CodeActConfig, PredictConfig
 from nooa.interactive import (
     InteractiveAgent,
     RespondReason,
@@ -20,7 +20,7 @@ from nooa.interactive import (
 from nooa.paths import get_project_dir
 from nooa.skill_registry import SkillRegistry
 from nooa.storage.markers import nosnapshot
-from nooa.strategies import CodeActStrategy
+from nooa.strategies import CodeActStrategy, PredictStrategy
 from nooa.tools import SkillWriting, TodoManager
 from nooa.tools.shell_tools import ShellTools
 from nooa_cli.coding.activity import ActivityShellTools
@@ -28,6 +28,7 @@ from nooa_cli.coding.instructions import render_agent_instructions
 from nooa_cli.tools.repo_tools import RepoTools
 
 if TYPE_CHECKING:
+    from nooa.runtime.channels import Channel
     from nooa.unifiedllm import UnifiedLLM
 
 __all__ = ["CodingAgent", "RespondReason"]
@@ -53,6 +54,14 @@ class CodingAgent(InteractiveAgent):
     __protected_skill_attrs__ = frozenset({"shell", "repo", "todo", "libs", "skills"})
 
     cwd: Annotated[Path, nosnapshot]
+    # Host-driven input channels. These live here rather than on
+    # InteractiveAgent because they are coding-host concepts: slash commands
+    # are a UI affordance whose registry is in this package, and
+    # system_messages carries host continuations such as keep-going.
+    _slash_commands_in: Annotated[Channel, hidden, nosnapshot]
+    slash_commands: Annotated[Any, nosnapshot]
+    _system_messages_in: Annotated[Channel, hidden, nosnapshot]
+    system_messages: Annotated[Any, nosnapshot]
     shell: Annotated[ActivityShellTools, nosnapshot]
     repo: Annotated[RepoTools, nosnapshot]
     todo: TodoManager
@@ -72,6 +81,10 @@ class CodingAgent(InteractiveAgent):
         **kwargs: Any,
     ) -> None:
         super().__init__(llm=llm, **kwargs)
+        self._slash_commands_in = self.queue_manager.queue("slash_commands")
+        self.slash_commands = self._slash_commands_in.reader
+        self._system_messages_in = self.queue_manager.queue("system_messages")
+        self.system_messages = self._system_messages_in.reader
         self.cwd = Path(cwd).resolve()
         self._base_shell = ShellTools(cwd=str(self.cwd))
         self.shell = ActivityShellTools(self._base_shell, self.event_manager)
@@ -142,6 +155,15 @@ class CodingAgent(InteractiveAgent):
             "max_tokens": getattr(summarizer, "max_tokens", 0) if summarizer else 0,
             "preserve_recent": getattr(summarizer, "preserve_recent", 0) if summarizer else 0,
         }
+
+    @hidden
+    @strategy(PredictStrategy(PredictConfig(output_serialization="tool_call")))
+    async def name_session(self, user_message: str) -> str:
+        """Generate an ultra-short 2-5 word session title.
+
+        Conversation starts with: {user_message}
+        """
+        ...
 
     @hidden
     @strategy(CodeActStrategy(config=CodeActConfig(cell_timeout=1800.0)))

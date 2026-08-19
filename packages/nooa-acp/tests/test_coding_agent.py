@@ -5,8 +5,8 @@
 import asyncio
 from typing import Any
 
-from nooa_acp.coding_agent import CodingInteractiveAgent
 from nooa_acp.dispatcher import InteractiveSessionDispatcher
+from nooa_cli.coding import CodingAgent
 
 from nooa.context_blocks.events import ToolCallEvent
 from nooa.events import PythonOutput
@@ -27,7 +27,7 @@ def _completed_llm(message: str = "Finished **successfully**.") -> FakeLLMClient
 
 
 async def test_coding_agent_runs_through_nooa_codeact(tmp_path):
-    agent = CodingInteractiveAgent(llm=_completed_llm(), cwd=tmp_path)
+    agent = CodingAgent(llm=_completed_llm(), cwd=tmp_path)
     dispatcher = InteractiveSessionDispatcher(agent)
 
     result = await dispatcher.submit("inspect the repository")
@@ -54,7 +54,7 @@ class _BlockingLLM(FakeLLMClient):
         raise AssertionError("unreachable")
 
 
-class _WaitingAgent(CodingInteractiveAgent):
+class _WaitingAgent(CodingAgent):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.handle_calls = 0
@@ -68,7 +68,7 @@ class _WaitingAgent(CodingInteractiveAgent):
         return RespondResult(kind=RespondReason.DONE, explanation="job finished")
 
 
-class _BackgroundAgent(CodingInteractiveAgent):
+class _BackgroundAgent(CodingAgent):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.job_started = asyncio.Event()
@@ -83,7 +83,7 @@ class _BackgroundAgent(CodingInteractiveAgent):
         return RespondResult(kind=RespondReason.WAIT, explanation="waiting for job")
 
 
-class _RestartableAgent(CodingInteractiveAgent):
+class _RestartableAgent(CodingAgent):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.started = asyncio.Event()
@@ -99,7 +99,7 @@ class _RestartableAgent(CodingInteractiveAgent):
 
 async def test_dispatcher_cancels_active_nooa_turn(tmp_path):
     llm = _BlockingLLM()
-    agent = CodingInteractiveAgent(llm=llm, cwd=tmp_path)
+    agent = CodingAgent(llm=llm, cwd=tmp_path)
     dispatcher = InteractiveSessionDispatcher(agent)
     prompt_task = asyncio.create_task(dispatcher.submit("wait forever"))
     await asyncio.wait_for(llm.started.wait(), timeout=2)

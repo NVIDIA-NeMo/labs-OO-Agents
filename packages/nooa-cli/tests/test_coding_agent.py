@@ -114,3 +114,33 @@ async def test_library_directory_can_be_scoped_by_the_host(tmp_path):
         assert agent.libs._path == libs_dir
     finally:
         await agent.close()
+
+
+async def test_coding_agent_declares_the_host_input_channels(tmp_path):
+    """slash_commands and system_messages belong to the coding host.
+
+    InteractiveAgent only declares user_messages: being dispatcher-driven does
+    not imply slash commands (a UI affordance whose registry is in this
+    package) or host continuations such as keep-going.
+    """
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        channels = agent.queue_manager.channels()
+        assert {"user_messages", "slash_commands", "system_messages"} <= channels.keys()
+        assert agent.slash_commands is agent._slash_commands_in.reader
+        assert agent.system_messages is agent._system_messages_in.reader
+    finally:
+        await agent.close()
+
+
+async def test_coding_agent_owns_session_naming(tmp_path):
+    """name_session sits with the session model it feeds.
+
+    SessionHandle and SessionTitleUpdated live in nooa_cli.sessions, so the
+    generator belongs at this layer rather than in core, which has no notion
+    of a session at all.
+    """
+    from nooa.interactive import InteractiveAgent
+
+    assert hasattr(CodingAgent, "name_session")
+    assert not hasattr(InteractiveAgent, "name_session")

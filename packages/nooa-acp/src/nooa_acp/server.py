@@ -48,6 +48,7 @@ from acp.schema import (
     SessionInfo as ACPSessionInfo,
 )
 from nooa_cli.coding import (
+    CodingAgent,
     CodingSlashCommand,
     CodingSlashCommandRegistry,
     load_coding_skills_dirs,
@@ -69,7 +70,6 @@ from nooa_acp._runtime import (
     SessionRuntimeClosedError,
     SessionRuntimePool,
 )
-from nooa_acp.coding_agent import CodingInteractiveAgent
 from nooa_acp.dispatcher import InteractiveSessionDispatcher
 from nooa_acp.event_bridge import ACPEventBridge
 
@@ -83,7 +83,7 @@ class _ACPSession:
     """Live resources owned by one ACP session runtime."""
 
     handle: SessionHandle
-    agent: CodingInteractiveAgent
+    agent: CodingAgent
     dispatcher: InteractiveSessionDispatcher
     bridge: ACPEventBridge
     commands: CodingSlashCommandRegistry
@@ -390,12 +390,12 @@ class CodingACPAdapter:
         if self._client is None:
             await llm.aclose()
             raise RequestError.internal_error({"reason": "ACP client is not connected"})
-        agent: CodingInteractiveAgent | None = None
+        agent: CodingAgent | None = None
         commands: CodingSlashCommandRegistry | None = None
         value: _ACPSession | None = None
         try:
             mcp, mcp_warnings = await self._create_mcp_tools(mcp_servers)
-            agent = CodingInteractiveAgent(
+            agent = CodingAgent(
                 llm=llm,
                 cwd=root,
                 storage=handle.storage,

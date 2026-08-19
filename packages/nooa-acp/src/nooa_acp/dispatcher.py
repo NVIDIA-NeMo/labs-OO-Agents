@@ -7,15 +7,14 @@ from collections.abc import Coroutine
 from contextlib import suppress
 from typing import Any, cast
 
-from nooa_cli.coding import CodingSlashCommandRegistry
+from nooa_cli.coding import CodingAgent, CodingSlashCommandRegistry
 
 from nooa.interactive import RespondReason, RespondResult
 from nooa.slash_dispatch import SlashCommandResult
-from nooa_acp.coding_agent import CodingInteractiveAgent
 
 
 class InteractiveSessionDispatcher:
-    def __init__(self, agent: CodingInteractiveAgent) -> None:
+    def __init__(self, agent: CodingAgent) -> None:
         self.agent = agent
         self._active_task: asyncio.Task[Any] | None = None
         self._cancel_requested = False

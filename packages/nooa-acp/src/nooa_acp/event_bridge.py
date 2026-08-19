@@ -23,6 +23,7 @@ from acp import (
 from acp.interfaces import Client
 from acp.schema import ContentToolCallContent, Cost, ToolCallLocation, UsageUpdate
 from nooa_cli.coding import (
+    CodingAgent,
     FileEdit,
     TerminalCommandFinished,
     TerminalCommandOutput,
@@ -33,7 +34,6 @@ from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
 from nooa.events import LLMComplete, PythonOutput
 from nooa.interactive import AgentMessage
-from nooa_acp.coding_agent import CodingInteractiveAgent
 
 # ACP owns stdout for JSON-RPC; diagnostics belong on stderr, which is where
 # the logging default sends them.
@@ -67,12 +67,15 @@ def _python_content(code: str, output: str | None = None) -> list[ContentToolCal
 
 
 class ACPEventBridge:
-    def __init__(self, agent: CodingInteractiveAgent, client: Client, session_id: str) -> None:
+    def __init__(self, agent: CodingAgent, client: Client, session_id: str) -> None:
         self.agent = agent
         self.client = client
         self.session_id = session_id
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
         self._error: Exception | None = None
+        # Set when the pump exits on a BaseException it cannot handle. Nothing
+        # resolves flush markers after that, so flush must fail rather than wait.
+        self._pump_failure: BaseException | None = None
         self._closed = False
         self._open_tools: set[str] = set()
         self._python_source: dict[str, str] = {}
@@ -267,7 +270,35 @@ class ACPEventBridge:
             )
         )
 
+    def _stopped_error(self, cause: BaseException) -> RuntimeError:
+        error = RuntimeError("ACP event bridge stopped")
+        error.__cause__ = cause
+        return error
+
+    def _fail_pending_flushes(self, cause: BaseException) -> None:
+        """Resolve every queued flush marker once the pump can no longer run."""
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            if isinstance(item, asyncio.Future) and not item.done():
+                item.set_exception(self._stopped_error(cause))
+            self._queue.task_done()
+
     async def _pump(self) -> None:
+        try:
+            await self._pump_loop()
+        except BaseException as exc:
+            # CancelledError is a BaseException, so a transport cancelled during
+            # client disconnect used to kill this task silently. flush() waits on
+            # a marker only the pump resolves, so every later flush — and close(),
+            # which flushes first — blocked forever.
+            self._pump_failure = exc
+            self._fail_pending_flushes(exc)
+            raise
+
+    async def _pump_loop(self) -> None:
         while True:
             item = await self._queue.get()
             try:
@@ -312,9 +343,17 @@ class ACPEventBridge:
     async def flush(self) -> None:
         if self._closed:
             return
+        if self._pump_failure is not None:
+            raise self._stopped_error(self._pump_failure)
         future = asyncio.get_running_loop().create_future()
         self._queue.put_nowait(future)
-        await asyncio.shield(future)
+        # Race the pump: if it dies without draining this marker, waiting on the
+        # marker alone would never return.
+        await asyncio.wait({future, self._pump_task}, return_when=asyncio.FIRST_COMPLETED)
+        if future.done():
+            future.result()
+            return
+        raise self._stopped_error(self._pump_failure or RuntimeError("pump exited"))
 
     async def fail_open_tools(self, reason: str, *, title: str | None = None) -> None:
         """Close out open tool calls, titling them with what actually happened.
@@ -357,4 +396,5 @@ class ACPEventBridge:
             await self.flush()
         self._closed = True
         self._queue.put_nowait(_STOP)
-        await self._pump_task
+        with suppress(BaseException):
+            await self._pump_task
