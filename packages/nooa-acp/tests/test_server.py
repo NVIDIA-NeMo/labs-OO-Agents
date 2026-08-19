@@ -27,6 +27,7 @@ from nooa_acp.cli import command
 from nooa_acp.server import CodingACPAdapter
 from nooa_cli.commands import discover_commands
 
+from nooa.context_blocks.events import ToolCallEvent
 from nooa.errors import GenerationError
 from nooa.interactive import RespondReason, RespondResult
 from nooa.skill import Skill, slash_command
@@ -1388,3 +1389,94 @@ async def test_initialize_advertises_the_mcp_transports_it_supports():
     assert mcp is not None, "no MCP capabilities advertised at all"
     assert mcp.http is True
     assert mcp.sse is True
+
+
+class _YieldingClient:
+    """A client whose session_update yields, as a real transport does."""
+
+    def __init__(self) -> None:
+        self.updates: list[object] = []
+
+    async def session_update(self, session_id: str, update: object, **kwargs) -> None:
+        await asyncio.sleep(0)
+        self.updates.append(update)
+
+
+async def test_slash_command_still_reports_generation_limits(tmp_path):
+    """GenerationError must keep its stop reason on the slash path.
+
+    The catch-all that stops a raising command from killing the RPC also
+    catches GenerationError, which subclasses Exception — so a command hitting
+    the token ceiling was reported as an ordinary command failure with a normal
+    end of turn, losing max_tokens.
+    """
+    client = _RecordingClient()
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    session = await _session(adapter, created.session_id)
+
+    boom = GenerationError("Empty response: the model used all available output tokens")
+    with (
+        # The session has no workspace commands, so force the slash branch.
+        patch.object(CodingACPAdapter, "_slash_invocation", return_value=("anything", "now")),
+        patch.object(session.dispatcher, "invoke_slash", side_effect=boom),
+    ):
+        response = await adapter.prompt(created.session_id, [text_block("/anything now")])
+
+    assert response.stop_reason == "max_tokens"
+    await adapter.close()
+
+
+async def test_a_turn_that_ends_early_closes_its_open_tool_cards(tmp_path):
+    """An open card must not survive the turn that opened it.
+
+    fail_open_tools was reachable only from cancel and session close, so a turn
+    ending on a generation limit left its card in_progress for the session — and
+    a later cancel then retitled that stale card "Cancelled".
+    """
+    client = _RecordingClient()
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    session = await _session(adapter, created.session_id)
+
+    async def open_a_card_then_fail(_text):
+        session.agent.event_manager.add(
+            ToolCallEvent(tool_call_id="stale", name="execute_python", arguments={"code": "x"})
+        )
+        raise GenerationError("Empty response: the model used all available output tokens")
+
+    with patch.object(session.dispatcher, "submit", side_effect=open_a_card_then_fail):
+        await adapter.prompt(created.session_id, [text_block("do the work")])
+
+    assert session.bridge._open_tools == set(), session.bridge._open_tools
+    await adapter.close()
+
+
+async def test_bootstrap_updates_do_not_interleave_into_a_replay(tmp_path):
+    """Restored history must arrive as one contiguous run.
+
+    Replay writes straight to the client while the bridge pump drains bootstrap
+    updates, so every await in the replay loop let a commands update or an MCP
+    warning land in the middle of the restored conversation.
+    """
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    session = await _session(adapter, created.session_id)
+    for index in range(6):
+        session.handle.record_user_message(f"turn-{index}")
+    await adapter.close_session(created.session_id)
+
+    client = _YieldingClient()
+    adapter.on_connect(client)  # type: ignore[arg-type]
+    await adapter.load_session(str(tmp_path), created.session_id)
+    await asyncio.sleep(0.1)
+
+    kinds = [type(u).__name__ for u in client.updates]
+    replayed = [i for i, k in enumerate(kinds) if k == "UserMessageChunk"]
+    assert replayed, kinds
+    # The replayed turns must be contiguous — nothing wedged between them.
+    assert replayed == list(range(replayed[0], replayed[0] + len(replayed))), kinds
+    await adapter.close()

@@ -181,11 +181,12 @@ class CodingACPAdapter:
             await llm.aclose()
             raise
         try:
-            await self._create_runtime(handle, root, mcp_servers, llm=llm)
+            runtime = await self._create_runtime(handle, root, mcp_servers, llm=llm)
         except BaseException:
             handle.close()
             self._store(root).delete(handle.id)
             raise
+        self._defer_bootstrap_updates(runtime.value)
         return NewSessionResponse(session_id=handle.id)
 
     async def load_session(
@@ -205,7 +206,12 @@ class CodingACPAdapter:
         runtime: SessionRuntime[_ACPSession] | None = None
         try:
             runtime = await self._create_runtime(handle, root, mcp_servers)
+            # After the replay, never during it: replay writes straight to the
+            # client while the bridge pump drains bootstrap updates, so every
+            # await here would otherwise let a commands update or an MCP warning
+            # land in the middle of the restored conversation.
             await self._replay_session(handle)
+            self._defer_bootstrap_updates(runtime.value)
         except BaseException:
             if runtime is not None:
                 with suppress(KeyError):
@@ -287,6 +293,12 @@ class CodingACPAdapter:
                             session.agent.message(message)
                             await session.bridge.flush()
                             return PromptResponse(stop_reason="end_turn")
+                        except GenerationError:
+                            # Subclasses Exception, so the catch-all below would
+                            # swallow it and lose the stop reason the outer
+                            # handler maps. Generation limits are the runtime's
+                            # to report, not a command failure.
+                            raise
                         except Exception as exc:
                             # Command bodies are third-party code from workspace
                             # and installed skills. Letting one raise turns the
@@ -316,6 +328,12 @@ class CodingACPAdapter:
                                 await session.bridge.flush()
                                 return PromptResponse(stop_reason="end_turn")
                 except GenerationError as exc:
+                    # The strategy does not guarantee a PythonOutput for a call
+                    # it already announced, so a turn ending on a generation
+                    # limit can leave its card in_progress. Nothing else closes
+                    # it before session close, and a later cancel would retitle
+                    # this turn's stale card "Cancelled".
+                    await session.bridge.fail_open_tools("Did not finish.", title="Unfinished")
                     await session.bridge.flush()
                     message = str(exc)
                     if message.startswith(
@@ -416,7 +434,6 @@ class CodingACPAdapter:
             )
             try:
                 runtime = await self._sessions.add(handle.id, value)
-                self._defer_bootstrap_updates(value)
                 return runtime
             except ValueError:
                 raise RequestError.invalid_request(
