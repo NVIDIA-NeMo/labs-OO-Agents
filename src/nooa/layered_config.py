@@ -196,7 +196,9 @@ def load_layered_yaml(
     ):
         try:
             data = yaml.safe_load(path.read_text())
-        except (OSError, yaml.YAMLError) as e:
+        # UnicodeError too: a non-UTF-8 settings file otherwise aborts every
+        # caller of this loader rather than degrading to the other layers.
+        except (OSError, UnicodeError, yaml.YAMLError) as e:
             logger.warning("Failed to load config file %s: %s", path, e)
             continue
         if data is None:

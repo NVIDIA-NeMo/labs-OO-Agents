@@ -109,7 +109,7 @@ def _read_project_settings(path: Path) -> Mapping[str, Any]:
         import yaml
 
         value = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError) as exc:
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
         logger.warning("Failed to read coding settings %s: %s", path, exc)
         return {}
     return value if isinstance(value, Mapping) else {}
@@ -123,7 +123,7 @@ def _legacy_project_paths(path: Path) -> list[str | Path]:
         import tomllib
 
         data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         logger.warning("Failed to read legacy coding settings %s: %s", path, exc)
         return []
     tui = data.get("tui")

@@ -300,3 +300,17 @@ def test_a_missing_final_newline_is_marked():
 
     assert "-a" in diff and "+b" in diff
     assert "\\ No newline at end of file" in diff, diff
+
+
+async def test_overwriting_an_empty_file_reports_no_original_lines(tmp_path):
+    """An existing empty file has no line 1 to point at."""
+    shell, events = _observed_shell(tmp_path)
+    (tmp_path / "empty.txt").write_text("")
+    try:
+        await shell.write_file("empty.txt", "now has content\n")
+    finally:
+        await shell.close()
+
+    edit = next(event for event in events if isinstance(event, FileEdit))
+    assert edit.operation == "update"
+    assert (edit.start_line, edit.end_line) == (None, None)

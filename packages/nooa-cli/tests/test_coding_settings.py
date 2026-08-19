@@ -167,3 +167,24 @@ def test_an_explicit_empty_modern_list_disables_the_legacy_config(tmp_path, monk
     (config_dir / "settings.yaml").write_text("coding:\n  additional_skills_dirs: []\n")
 
     assert load_coding_skills_dirs(workspace) == []
+
+
+def test_a_non_utf8_settings_file_does_not_abort_discovery(tmp_path, monkeypatch):
+    """read_text raises UnicodeError, which neither handler caught.
+
+    A malformed workspace settings file then aborted skill discovery entirely
+    instead of logging and falling back.
+    """
+    workspace = tmp_path / "workspace"
+    conventional = workspace / ".agents" / "skills"
+    user_config = tmp_path / "user-config"
+    conventional.mkdir(parents=True)
+    user_config.mkdir()
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_config))
+    monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
+
+    config_dir = workspace / ".nooa"
+    config_dir.mkdir()
+    (config_dir / "settings.yaml").write_bytes(b"\xff\xfe coding:\n")
+
+    assert load_coding_skills_dirs(workspace) == [conventional.resolve()]

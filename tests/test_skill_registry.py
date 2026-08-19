@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for SkillRegistry — entry-point discovery, load, activate lifecycle."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -328,3 +329,45 @@ def test_a_skill_cannot_take_over_another_skills_agent_attribute():
     assert agent.shell is original
     # Re-registering the same name stays allowed.
     registry.register("nemo.shell", _Tool())
+
+
+def test_load_also_refuses_to_take_over_a_protected_attribute():
+    """register() was guarded; load() assigned directly and was not.
+
+    activate() calls load() for anything not yet loaded, so a *discovered*
+    mcp.shell could still replace the agent's real shell after nemo.shell
+    owned it — the guard only covered the explicit registration path.
+    """
+
+    class _Agent:
+        __protected_skill_attrs__ = frozenset({"shell"})
+
+    class _Tool(Skill):
+        pass
+
+    agent = _Agent()
+    registry = SkillRegistry(agent)
+    registry.register("nemo.shell", _Tool())
+    original = agent.shell
+
+    # load() resolves via entry_point.load(), so the stub must provide it.
+    entry = SimpleNamespace(
+        name="mcp.shell",
+        entry_point=SimpleNamespace(load=lambda: _Tool),
+        category="entry_point",
+    )
+    registry._discovered["mcp.shell"] = entry
+    registry.load(["mcp.shell"])
+
+    assert agent.shell is original, "a discovered skill took over a protected attr"
+    assert "mcp.shell" not in registry.loaded()
+
+    # Control: the same machinery loads a non-colliding name, so the assertions
+    # above are about the guard rather than a broken stub.
+    registry._discovered["mcp.notes"] = SimpleNamespace(
+        name="mcp.notes",
+        entry_point=SimpleNamespace(load=lambda: _Tool),
+        category="entry_point",
+    )
+    registry.load(["mcp.notes"])
+    assert "mcp.notes" in registry.loaded()

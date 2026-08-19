@@ -509,12 +509,16 @@ class ActivityShellTools(Skill):
                 operation="update" if existed else "create",
                 old_text=bounded_old,
                 new_text=bounded_content,
+                # An existing *empty* file has no original line to point at, so
+                # reporting 1..1 names lines that never existed.
                 start_line=(
-                    1 if existed and old_content_complete and old_diff_text is not None else None
+                    1
+                    if existed and old_content_complete and _line_count(old_diff_text or "")
+                    else None
                 ),
                 end_line=(
-                    max(1, _line_count(old_diff_text))
-                    if existed and old_content_complete and old_diff_text is not None
+                    _line_count(old_diff_text or "")
+                    if existed and old_content_complete and _line_count(old_diff_text or "")
                     else None
                 ),
                 diff=diff,

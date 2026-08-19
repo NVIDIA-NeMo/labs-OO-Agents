@@ -679,6 +679,10 @@ class MCPTool:
             )
             headers = dict(ctx.get("headers") or {})
             headers["Authorization"] = f"{token.token_type} {token.access_token}"
+            # Without the configured timeout the rebuilt client silently falls
+            # back to the 60s factory default, so a server deliberately given a
+            # longer one starts failing after its first token refresh.
+            timeout = ctx.get("tool_call_timeout")
             self._client = create_mcp_client(
                 transport=ctx.get("transport"),
                 url=server_url,
@@ -686,6 +690,7 @@ class MCPTool:
                 args=ctx.get("args"),
                 env=ctx.get("env"),
                 headers=headers,
+                **({"tool_call_timeout": timeout} if timeout is not None else {}),
             )
             return True
         except Exception:
@@ -818,6 +823,7 @@ class MCPManager:
         tools_result = await _list_server_tools(server_name, client)
         refresh_ctx = {
             "server_url": "",
+            "tool_call_timeout": tool_call_timeout,
             "transport": "stdio",
             "command": command,
             "args": args,
@@ -852,6 +858,7 @@ class MCPManager:
         tools_result = await _list_server_tools(server_name, client)
         refresh_ctx = {
             "server_url": url,
+            "tool_call_timeout": tool_call_timeout,
             "headers": resolved_headers,
             "transport": transport,
         }
@@ -1030,6 +1037,7 @@ class MCPManager:
         assert tools_result is not None, "tools_result must be set by connect or OAuth retry"
         refresh_ctx = {
             "server_url": url or config_server.get("url") or "",
+            "tool_call_timeout": tool_call_timeout,
             "redirect_uri": oauth_redirect_uri,
             "client_id": oauth_client_id,
             "scope": oauth_scope,

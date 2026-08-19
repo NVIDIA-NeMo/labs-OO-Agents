@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def discover_agent_instruction_files(working_directory: str | Path) -> tuple[Path, ...]:
@@ -25,16 +28,37 @@ def discover_agent_instruction_files(working_directory: str | Path) -> tuple[Pat
     return tuple(path for directory in directories if (path := directory / "AGENTS.md").is_file())
 
 
+#: Per-file and combined caps on repository instructions. The content is
+#: workspace-controlled and lands in a prefix context block on every turn, so an
+#: unbounded read is a memory and context-window risk at session setup.
+_MAX_INSTRUCTION_FILE_CHARS = 100_000
+_MAX_INSTRUCTION_TOTAL_CHARS = 200_000
+
+
+def _truncate(content: str, limit: int, path: Path) -> str:
+    if len(content) <= limit:
+        return content
+    logger.warning("Truncating repository instructions from %s at %d chars", path, limit)
+    return content[:limit] + f"\n\n[... truncated at {limit} characters ...]"
+
+
 def render_agent_instructions(working_directory: str | Path) -> str:
-    """Render applicable repository instructions as one context block."""
+    """Render applicable repository instructions as one bounded context block."""
     sections: list[str] = []
+    remaining = _MAX_INSTRUCTION_TOTAL_CHARS
     for path in discover_agent_instruction_files(working_directory):
+        if remaining <= 0:
+            logger.warning("Skipping repository instructions from %s: total limit reached", path)
+            continue
         try:
             content = path.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeError):
             continue
-        if content:
-            sections.append(f"Instructions from {path}:\n\n{content}")
+        if not content:
+            continue
+        content = _truncate(content, min(_MAX_INSTRUCTION_FILE_CHARS, remaining), path)
+        remaining -= len(content)
+        sections.append(f"Instructions from {path}:\n\n{content}")
     return "\n\n---\n\n".join(sections)
 
 

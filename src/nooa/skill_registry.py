@@ -487,6 +487,15 @@ class SkillRegistry(Skill):
                 if attr_name.startswith("_") or attr_name in _RESERVED_ATTRS:
                     logger.warning("Refusing to load skill with reserved name %s", attr_name)
                     continue
+                held_by = self._protected_owner(name, attr_name)
+                if held_by is not None:
+                    logger.warning(
+                        "Refusing to load skill %s as '%s': already provided by %s",
+                        name,
+                        attr_name,
+                        held_by,
+                    )
+                    continue
                 if hasattr(self._agent, attr_name) and attr_name not in set(
                     self._attr_map.values()
                 ):
@@ -506,6 +515,24 @@ class SkillRegistry(Skill):
                 logger.warning("Failed to load skill %s", name, exc_info=True)
         if changed:
             self._refresh_host_commands()
+
+    def _protected_owner(self, name: str, attr: str) -> str | None:
+        """Return the skill already owning *attr*, when the agent protects it.
+
+        Agents declare the attributes carrying their own tools via
+        ``__protected_skill_attrs__``. Those may be claimed once: a second,
+        different skill taking one over removes the tool while the model is
+        still told it has it. Re-registering the same name stays allowed.
+        Both ``register()`` and ``load()`` consult this, so the explicit and
+        discovered paths cannot drift apart.
+        """
+        protected = getattr(type(self._agent), "__protected_skill_attrs__", frozenset())
+        if attr not in protected:
+            return None
+        owner = next(
+            (held for held, held_attr in self._attr_map.items() if held_attr == attr), None
+        )
+        return owner if owner is not None and owner != name else None
 
     def register(
         self, name: str, skill_or_cls: "Skill | type[Skill] | None" = None, /, **kwargs
@@ -542,11 +569,7 @@ class SkillRegistry(Skill):
         attr = self._attr_name(name)
         if attr.startswith("_") or attr in _RESERVED_ATTRS:
             raise ValueError(f"Cannot register skill with reserved attr name {attr!r}")
-        owner = next(
-            (held for held, held_attr in self._attr_map.items() if held_attr == attr), None
-        )
-        protected = getattr(type(self._agent), "__protected_skill_attrs__", frozenset())
-        if attr in protected and owner is not None and owner != name:
+        if self._protected_owner(name, attr) is not None:
             # Colliding leaves are supported in general — reload disambiguates
             # by fully-qualified name — but an agent may declare attributes that
             # carry its own tools. Those must not be taken over: the previous
@@ -557,9 +580,9 @@ class SkillRegistry(Skill):
             # same name is still fine.
             raise ValueError(
                 f"Cannot register skill {name!r} as agent attr {attr!r}: "
-                f"already provided by {owner!r}"
+                f"already provided by {self._protected_owner(name, attr)!r}"
             )
-        if hasattr(self._agent, attr) and owner is None:
+        if hasattr(self._agent, attr) and attr not in set(self._attr_map.values()):
             logger.warning("Skill %s overwrites existing agent attr '%s'", name, attr)
         setattr(self._agent, attr, skill)
         if hasattr(skill, "attach"):
