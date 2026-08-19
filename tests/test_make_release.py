@@ -117,6 +117,31 @@ def test_flags_collapse_and_new_error_type(mr, tmp_path):
     assert not diff.clean
 
 
+def test_case_collapse_is_not_hidden_by_passing_sibling_case(mr, tmp_path):
+    """Collapse detection must retain test-case granularity.
+
+    Grouping only by (model, test_name) makes this look like a 50% test-family
+    result and misses that one case fell from 100% to 0%.
+    """
+    base_rows = [
+        ("claude-haiku", "truncation", case, "stable", True, None)
+        for case in ("visible_suffix", "hidden_middle")
+        for _ in range(3)
+    ]
+    head_rows = [
+        ("claude-haiku", "truncation", case, "stable", case == "hidden_middle", None)
+        for case in ("visible_suffix", "hidden_middle")
+        for _ in range(3)
+    ]
+    base = mr.parse_results(write_eval(tmp_path / "b.jsonl", base_rows), "base")
+    head = mr.parse_results(write_eval(tmp_path / "h.jsonl", head_rows), "head")
+
+    diff = mr.compare(base, head, "base", "head")
+
+    assert len(diff.regressions) == 1
+    assert "visible_suffix" in diff.regressions[0]
+
+
 def test_tier_regression_is_caught_when_aggregate_is_flat(mr, tmp_path):
     """Frontier gains must not mask a stable-tier drop.
 
@@ -191,7 +216,7 @@ def test_added_tests_are_listed_but_do_not_block(mr, tmp_path):
     head = mr.parse_results(write_eval(tmp_path / "h.jsonl", head_rows), "head")
     diff = mr.compare(base, head, "v0.0.8", "abc123456789")
 
-    assert diff.added == ["claude-haiku/brand_new"]
+    assert diff.added == ["claude-haiku/brand_new/brand_new_001"]
     assert diff.removed == []
     assert "*(new)*" in diff.markdown
     assert diff.clean
@@ -210,7 +235,10 @@ def test_removed_test_is_not_clean(mr, tmp_path):
     head = mr.parse_results(write_eval(tmp_path / "h.jsonl", head_rows), "head")
     diff = mr.compare(base, head, "v0.0.8", "abc123456789")
 
-    assert sorted(diff.removed) == ["claude-haiku/router_multi", "gpt-5.4-mini/router_multi"]
+    assert sorted(diff.removed) == [
+        "claude-haiku/router_multi/router_multi_001",
+        "gpt-5.4-mini/router_multi/router_multi_001",
+    ]
     assert not diff.clean, "a disappearing test must not report as clean"
     assert "removed test(s)" in diff.markdown
 
@@ -245,6 +273,18 @@ def test_markdown_report_has_the_expected_sections(mr, tmp_path):
     md = mr.compare(base, head, "v0.0.8", "abc123456789", runs=3).markdown
 
     assert md.startswith("## 🧪 Capability Test Results")
-    for section in ("Per-tier breakdown", "Per-test breakdown", "| Tests Passed |", "Total Tokens"):
+    for section in (
+        "Per-model breakdown",
+        "Per-tier breakdown",
+        "Per-test breakdown",
+        "| Samples Passed |",
+        "Task-bootstrap delta",
+        "Total Tokens",
+    ):
         assert section in md
     assert md.rstrip().endswith("*2 models × 3 runs* | *both arms run fresh*")
+
+
+def test_release_script_reuses_shared_capability_comparator(mr):
+    assert mr.compare is mr.capability_ab.compare
+    assert mr.parse_results is mr.capability_ab.parse_results

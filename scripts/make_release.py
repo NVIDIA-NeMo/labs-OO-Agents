@@ -25,17 +25,18 @@ delta is attributable to our code.
 from __future__ import annotations
 
 import argparse
-import json
-import re
 import shutil
 import subprocess
 import sys
 import tempfile
-from collections import defaultdict
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NoReturn
+
+try:
+    from scripts import capability_ab
+except ImportError:  # `python scripts/make_release.py`
+    import capability_ab
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -273,585 +274,48 @@ def build_and_smoke(tag: str, sha: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class ArmResults:
-    """Everything one checkout's eval run produced, indexed for comparison."""
-
-    label: str
-    # test_case ("sentiment_single_001") -> pass flags across every model and run
-    by_case: dict[str, list[bool]] = field(default_factory=lambda: defaultdict(list))
-    case_tier: dict[str, str] = field(default_factory=dict)
-    # (model, test_name) -> pass flags; the granularity collapse detection needs
-    by_test: dict[tuple[str, str], list[bool]] = field(default_factory=lambda: defaultdict(list))
-    errors: dict[tuple[str, str], dict[str, int]] = field(
-        default_factory=lambda: defaultdict(lambda: defaultdict(int))
-    )
-    output_tokens: int = 0
-    total_tokens: int = 0
-    errored: int = 0
-
-    def error_rate(self) -> float:
-        _, total = self.counts()
-        return self.errored / total if total else 0.0
-
-    def rate(self, key: tuple[str, str]) -> float | None:
-        results = self.by_test.get(key)
-        return sum(results) / len(results) if results else None
-
-    def counts(self) -> tuple[int, int]:
-        flags = [p for rs in self.by_case.values() for p in rs]
-        return sum(flags), len(flags)
-
-    def overall(self) -> float:
-        passed, total = self.counts()
-        return passed / total if total else 0.0
-
-    def tier_counts(self) -> dict[str, tuple[int, int]]:
-        acc: dict[str, list[bool]] = defaultdict(list)
-        for case, flags in self.by_case.items():
-            acc[self.case_tier.get(case, "stable")].extend(flags)
-        return {t: (sum(f), len(f)) for t, f in acc.items()}
-
-    def per_model(self) -> dict[str, float]:
-        acc: dict[str, list[bool]] = defaultdict(list)
-        for (model, _), results in self.by_test.items():
-            acc[model].extend(results)
-        return {m: sum(r) / len(r) for m, r in acc.items() if r}
-
-
-def parse_results(path: Path, label: str) -> ArmResults:
-    arm = ArmResults(label=label)
-    for line in path.read_text().splitlines():
-        if not line.strip():
-            continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if rec.get("_type") != "result":
-            continue
-        passed = bool(rec.get("passed"))
-        test_name = rec.get("test_name") or rec.get("agent_class", "?")
-        case = rec.get("test_case") or test_name
-        arm.by_case[case].append(passed)
-        arm.case_tier.setdefault(case, rec.get("tier") or "stable")
-        arm.by_test[(rec.get("model", "?"), test_name)].append(passed)
-        if rec.get("error_type"):
-            arm.errors[(rec.get("model", "?"), test_name)][rec["error_type"]] += 1
-            arm.errored += 1
-        arm.output_tokens += rec.get("output_tokens") or 0
-        arm.total_tokens += rec.get("total_tokens") or 0
-    return arm
-
-
-def env_extras() -> list[str]:
-    """Install specs present in this venv but absent from `uv.lock`.
-
-    The NVIDIA model aliases the gate resolves through (`claude-haiku`,
-    `nemotron3-nano-30b`, …) ship in `nemo-oo-agents-nvidia`, which is installed
-    from a local path and deliberately not in the lock. A freshly synced
-    worktree would not have it, so those models would fail to resolve on the
-    baseline arm and the two sides would not be comparable. Mirroring whatever
-    the current env carries keeps both arms resolving the same aliases.
-    """
-    locked = {
-        name.lower()
-        for name in re.findall(r'^name = "([^"]+)"', (REPO / "uv.lock").read_text(), re.MULTILINE)
-    }
-    extras: list[str] = []
-    for raw in run(["uv", "pip", "freeze"]).stdout.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        # freeze emits three shapes, and all three occur in this project:
-        #   -e file:///path          editable install
-        #   name @ file:///path      direct-URL (non-editable) install
-        #   name==version            ordinary registry install
-        if line.startswith("-e "):
-            name, location = "", line[3:]
-        elif " @ " in line:
-            name, _, location = line.partition(" @ ")
-        elif "==" in line:
-            name, location = line.split("==")[0], ""
-        else:
-            continue
-
-        # CRITICAL: skip anything inside this checkout. `uv pip freeze` lists
-        # the workspace packages themselves as local installs pointing at REPO,
-        # and mirroring those would put HEAD's nooa into the baseline worktree —
-        # silently comparing HEAD against itself.
-        if location.strip().removeprefix("file://").startswith(str(REPO)):
-            continue
-        if name.strip().lower() in locked:
-            continue
-        # The worktree is disposable, so a plain (non-editable) install is fine.
-        extras.append(line.removeprefix("-e ").strip())
-    return extras
-
-
-def newest_eval(out_dir: Path) -> Path | None:
-    """Most recent `.noo-eval.jsonl` under `out_dir`.
-
-    Recursive on purpose: eval_pipeline writes into a timestamped subdirectory
-    (`capability_<ts>_p40/capability_<ts>.noo-eval.jsonl`), not into the
-    `--output-dir` root, so a plain glob finds nothing.
-    """
-    found = sorted(out_dir.rglob("*.noo-eval.jsonl"), key=lambda p: p.stat().st_mtime)
-    return found[-1] if found else None
-
-
-def run_capability_arm(
-    tree: Path,
-    label: str,
-    cache_key: str,
-    models: list[str],
-    runs: int,
-    limit: int | None,
-) -> ArmResults:
-    """Run the capability suite in `tree`, reusing cached results when present.
-
-    The script has two human gates and a run takes a while; without a cache,
-    aborting at the review prompt costs another full paid run to get back. The
-    signature covers models/runs/limit so a cheap smoke run never gets mistaken
-    for a real gate run.
-    """
-    out_dir = REPO / "tmp" / "release-check" / cache_key
-    out_dir.mkdir(parents=True, exist_ok=True)
-    marker = out_dir / "run.json"
-    signature = {"models": sorted(models), "runs": runs, "limit": limit}
-
-    existing = newest_eval(out_dir)
-    if existing and marker.exists() and json.loads(marker.read_text()) == signature:
-        ok(f"{label}: reusing cached results ({existing.name})")
-        return parse_results(existing, label)
-
-    scope = f"{len(models)} models × {runs} runs" + (f" × {limit} samples" if limit else "")
-    print(f"  {DIM}{label}: full suite × {scope}{RESET}")
-
-    if tree != REPO:
-        # A worktree is a clean git checkout, so gitignored local config does
-        # not come with it. Without .env the baseline arm has no credentials and
-        # every sample fails with "Missing credentials" — which reads as a
-        # spectacular improvement rather than a broken run.
-        dotenv = REPO / ".env"
-        if dotenv.exists():
-            target = tree / ".env"
-            shutil.copyfile(dotenv, target)
-            target.chmod(0o600)
-            print(f"  {DIM}copied .env into the worktree (removed with it){RESET}")
-
-        print(f"  {DIM}syncing {tree}...{RESET}")
-        # --inexact: this repo's dev env legitimately carries packages that are
-        # not in the lock (see env_extras), and an exact sync would strip them.
-        run(
-            ["uv", "sync", "--all-extras", "--no-extra", "sandbox", "--inexact"],
-            cwd=tree,
-            capture=True,
-        )
-        extras = env_extras()
-        if extras:
-            print(f"  {DIM}mirroring {len(extras)} out-of-lock package(s) into the worktree{RESET}")
-            # --python is load-bearing. `uv sync`/`uv run` are project commands
-            # and use the worktree's .venv, but `uv pip install` is a pip
-            # interface command that honours VIRTUAL_ENV — which this script
-            # inherits from its own `uv run`, pointing at the MAIN repo venv.
-            # Without --python the packages land back in the developer's env and
-            # the worktree silently has no model aliases.
-            venv_python = tree / ".venv" / "bin" / "python"
-            run(
-                ["uv", "pip", "install", "--python", str(venv_python), *extras],
-                cwd=tree,
-                capture=True,
-            )
-            # Fail here rather than 5 minutes into an eval that resolves no
-            # models: this exact mistake produced "Config models: []".
-            installed = run(
-                ["uv", "pip", "list", "--python", str(venv_python)], cwd=tree
-            ).stdout.lower()
-            for spec in extras:
-                name = Path(spec.removeprefix("file://")).name.lower()
-                if name and name not in installed.replace("_", "-"):
-                    die(f"{label}: {name} did not install into {venv_python}")
-
-    cmd = [
-        "uv",
-        "run",
-        # The env for each arm is prepared above; --no-sync keeps `uv run` from
-        # touching it again mid-run (and from mutating the developer's own venv
-        # on the HEAD arm).
-        "--no-sync",
-        "python",
-        "-m",
-        "eval_pipeline",
-        "--config",
-        str(CAPABILITY_CONFIG),
-        "--models",
-        ",".join(models),
-        "--runs",
-        str(runs),
-        "--parallel",
-        str(GATE_PARALLEL),
-        "--output-dir",
-        str(out_dir),
-    ]
-    if limit:
-        cmd += ["--limit", str(limit)]
-    run(cmd, cwd=tree, capture=False)
-
-    produced = newest_eval(out_dir)
-    if not produced:
-        die(f"{label}: eval produced no .noo-eval.jsonl under {out_dir}")
-    arm = parse_results(produced, label)
-    # The eval CLI exits 0 even when every sample errors, so these two checks are
-    # the only thing standing between an infrastructure outage and a meaningless
-    # report. A broken BASELINE arm is the dangerous case: it reads as a huge
-    # improvement and sails through the gate as "no regressions". Refuse to
-    # compare rather than emit numbers that describe the network.
-    if not arm.by_case:
-        die(f"{label}: eval produced no usable results — check credentials and model aliases")
-    if arm.error_rate() > MAX_ERROR_RATE:
-        top = sorted(((n, e) for d in arm.errors.values() for e, n in d.items()), reverse=True)[:1]
-        detail = f" (most common: {top[0][1]})" if top else ""
-        die(
-            f"{label}: {arm.error_rate():.0%} of samples errored{detail} — "
-            f"this is an infrastructure failure, not a capability result"
-        )
-    marker.write_text(json.dumps(signature))
-    return arm
-
-
-@contextmanager
-def worktree_at(tag: str):
-    """A detached worktree at `tag`, cleaned up afterwards.
-
-    Each arm runs entirely against its own checkout — its own nooa, its own
-    capability config and agents. That keeps each side self-consistent (HEAD's
-    test agents may use APIs the old nooa lacks), at the cost that a change to
-    the harness itself shows up as a capability delta. Tests that exist on only
-    one side are reported separately rather than compared.
-    """
-    tmp = Path(tempfile.mkdtemp(prefix="nooa-release-"))
-    path = tmp / "tree"
-    git("worktree", "add", "--detach", str(path), tag)
-    try:
-        yield path
-    finally:
-        git("worktree", "remove", "--force", str(path), check=False)
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-@dataclass
-class Diff:
-    regressions: list[str] = field(default_factory=list)
-    new_errors: list[str] = field(default_factory=list)
-    beyond_noise: list[str] = field(default_factory=list)
-    added: list[str] = field(default_factory=list)
-    removed: list[str] = field(default_factory=list)
-    models_changed: list[str] = field(default_factory=list)
-    floor_breach: str | None = None
-    markdown: str = ""
-
-    @property
-    def clean(self) -> bool:
-        # `removed` counts, `added` does not: a test that vanished may be hiding
-        # a regression, whereas a new test has no baseline to regress from.
-        return not (
-            self.regressions
-            or self.new_errors
-            or self.beyond_noise
-            or self.removed
-            or self.floor_breach
-        )
-
-
-def _mark(delta: float, *, inverse: bool = False) -> str:
-    """Trend marker matching the MR report's vocabulary."""
-    if delta == 0:
-        return "➖"
-    good = delta < 0 if inverse else delta > 0
-    return "✅" if good else "❌"
-
-
-def _bar(base_rate: float, head_rate: float, width: int = 20) -> str:
-    """Blue up to the shared level, green for gain / red for loss, grey for the rest."""
-    now, was = round(head_rate * width), round(base_rate * width)
-    shared = min(now, was)
-    gained, lost = max(0, now - was), max(0, was - now)
-    return "🟦" * shared + "🟩" * gained + "🟥" * lost + "⬜" * (width - shared - gained - lost)
-
-
-def compare(
-    base: ArmResults, head: ArmResults, prev_tag: str, sha: str, runs: int = GATE_RUNS
-) -> Diff:
-    diff = Diff()
-    bp, bt = base.counts()
-    hp, ht = head.counts()
-    b, h = base.overall(), head.overall()
-    delta_pts = (h - b) * 100
-
-    # A model present in only one arm makes every one of its tests look added or
-    # removed. That is a change to GATE_MODELS, not to the test suite, so it is
-    # tracked separately and never counted as a disappearing test.
-    shared_models = {m for m, _ in base.by_test} & {m for m, _ in head.by_test}
-    diff.models_changed = sorted(
-        ({m for m, _ in base.by_test} | {m for m, _ in head.by_test}) - shared_models
-    )
-
-    # ---- collapse / new-error detection, at (model, test) granularity -------
-    # Per-test deltas are reported only on collapse. With ~3 samples per test
-    # per run a per-test wobble is mostly noise, and a report that lists every
-    # wobble trains people to skim past the part that matters.
-    for key in sorted(set(base.by_test) | set(head.by_test)):
-        model, test = key
-        if model not in shared_models:
-            continue
-        br, hr = base.rate(key), head.rate(key)
-        if br is None:
-            diff.added.append(f"{model}/{test}")
-            continue
-        if hr is None:
-            # Counts against `clean`: deleting or renaming a failing test would
-            # otherwise erase the regression it represents, and the run would
-            # report "no regressions" while quietly testing less than before.
-            diff.removed.append(f"{model}/{test}")
-            continue
-        if br >= COLLAPSE_BEFORE and hr <= COLLAPSE_AFTER:
-            diff.regressions.append(
-                f"| `{test}` | {model} | {br:.0%} | {hr:.0%} | {(hr - br) * 100:+.1f}% ❌ |"
-            )
-        before = set(base.errors.get(key, {}))
-        for etype, count in head.errors.get(key, {}).items():
-            if etype not in before:
-                diff.new_errors.append(f"| `{test}` | {model} | {count}× `{etype}` | 0 before |")
-
-    if delta_pts < -AGGREGATE_NOISE_PTS:
-        diff.beyond_noise.append(f"overall {delta_pts:+.1f} pts (band ±{AGGREGATE_NOISE_PTS})")
-    bm, hm = base.per_model(), head.per_model()
-    for model in sorted(set(bm) & set(hm)):
-        d = (hm[model] - bm[model]) * 100
-        if d < -AGGREGATE_NOISE_PTS:
-            diff.beyond_noise.append(f"{model} {d:+.1f} pts")
-
-    # Per tier as well as overall: a stable-tier regression can be masked in the
-    # aggregate by frontier tests improving at the same time, which is exactly
-    # the trade nobody wants to make silently.
-    tiers_head, tiers_base = head.tier_counts(), base.tier_counts()
-    for tier in sorted(set(tiers_head) & set(tiers_base)):
-        p0, t0 = tiers_base[tier]
-        p1, t1 = tiers_head[tier]
-        if not (t0 and t1):
-            continue
-        d = (p1 / t1 - p0 / t0) * 100
-        if d < -AGGREGATE_NOISE_PTS:
-            diff.beyond_noise.append(f"{tier} tier {d:+.1f} pts")
-
-    # ---- floor gate --------------------------------------------------------
-    # An absolute floor, not a delta threshold. A low floor survives run-to-run
-    # LLM variance while still catching catastrophe; the delta stays advisory.
-    stable_p, stable_t = tiers_head.get("stable", (0, 0))
-    stable_rate = stable_p / stable_t if stable_t else 0.0
-    if stable_t and stable_rate < STABLE_FLOOR:
-        diff.floor_breach = f"stable tier at {stable_rate:.1%}, floor is {STABLE_FLOOR:.0%}"
-
-    # ---- markdown ----------------------------------------------------------
-    md: list[str] = ["## 🧪 Capability Test Results", ""]
-    if diff.floor_breach:
-        md.append(f"❌ **Release BLOCKED** — {diff.floor_breach}")
-    elif diff.clean:
-        md.append(
-            f"✅ **Release OK** — Stable tier at {stable_rate:.1%} "
-            f"(floor: {STABLE_FLOOR:.0%}), no regressions beyond noise"
-        )
-    else:
-        md.append(
-            f"⚠️ **Review required** — Stable tier at {stable_rate:.1%} "
-            f"(floor: {STABLE_FLOOR:.0%}), {len(diff.regressions)} collapse(s), "
-            f"{len(diff.new_errors)} new error type(s), "
-            f"{len(diff.removed)} removed test(s)"
-        )
-    md += [
-        "",
-        "---",
-        "",
-        f"**{h:.1%}** {_bar(b, h)} **{delta_pts:+.1f}%**",
-        "",
-        f"{hp}/{ht} tests passing *({hp - bp:+d} from {prev_tag})*",
-        "",
-        "| Metric | " + prev_tag + " | This release | Change |",
-        "|--------|----------|--------------|--------|",
-        f"| Tests Passed | {bp}/{bt} | {hp}/{ht} | {hp - bp:+d} {_mark(hp - bp)} |",
-        f"| Success Rate | {b:.1%} | {h:.1%} | {delta_pts:+.1f}% {_mark(delta_pts)} |",
-        f"| Collapsed tests | — | {len(diff.regressions)} | "
-        f"{len(diff.regressions)} {_mark(len(diff.regressions), inverse=True)} |",
-        f"| New error types | — | {len(diff.new_errors)} | "
-        f"{len(diff.new_errors)} {_mark(len(diff.new_errors), inverse=True)} |",
-        f"| Output Tokens | {base.output_tokens:,} | {head.output_tokens:,} | "
-        f"{head.output_tokens - base.output_tokens:+,} |",
-        f"| Total Tokens | {base.total_tokens:,} | {head.total_tokens:,} | "
-        f"{head.total_tokens - base.total_tokens:+,} |",
-        "",
-        "<details>",
-        "<summary>📊 Per-tier breakdown</summary>",
-        "",
-        f"| Tier | {prev_tag} | This release | Change | Expected |",
-        "|------|----------|--------------|--------|----------|",
-    ]
-    for tier in sorted(set(tiers_head) | set(tiers_base)):
-        p0, t0 = tiers_base.get(tier, (0, 0))
-        p1, t1 = tiers_head.get(tier, (0, 0))
-        r0 = p0 / t0 if t0 else 0.0
-        r1 = p1 / t1 if t1 else 0.0
-        d = (r1 - r0) * 100
-        expected = f"≥{STABLE_FLOOR:.0%}" if tier == "stable" else "—"
-        md.append(
-            f"| {tier.title()} | {p0}/{t0} ({r0:.1%}) | {p1}/{t1} ({r1:.1%}) | "
-            f"{p1 - p0:+d} / {d:+.1f}% {_mark(d)} | {expected} |"
-        )
-    md += ["", "</details>", ""]
-
-    if diff.regressions:
-        md += [
-            "<details open>",
-            "<summary>❌ Collapsed tests</summary>",
-            "",
-            f"| Test | Model | {prev_tag} | This release | Change |",
-            "|------|-------|----------|--------------|--------|",
-            *diff.regressions,
-            "",
-            "</details>",
-            "",
-        ]
-    if diff.new_errors:
-        md += [
-            "<details open>",
-            "<summary>❌ New error types</summary>",
-            "",
-            "| Test | Model | This release | Baseline |",
-            "|------|-------|--------------|----------|",
-            *diff.new_errors,
-            "",
-            "</details>",
-            "",
-        ]
-
-    md += [
-        "<details>",
-        "<summary>📋 Per-test breakdown</summary>",
-        "",
-        "| Test | Status |",
-        "|------|--------|",
-    ]
-    for case in sorted(set(head.by_case) | set(base.by_case)):
-        flags = head.by_case.get(case)
-        if flags is None:
-            md.append(f"| {case} | ⬜ removed |")
-            continue
-        icon = "✅" if all(flags) else "❌"
-        new = " *(new)*" if case not in base.by_case else ""
-        md.append(f"| {case} | {icon} {sum(flags)}/{len(flags)}{new} |")
-    md += [
-        "",
-        "</details>",
-        "",
-        f"*{prev_tag} → `{sha[:8]}`* | *{len({m for m, _ in head.by_test})} models × "
-        f"{runs} runs* | *both arms run fresh*",
-    ]
-    diff.markdown = "\n".join(md)
-
-    # ---- terminal view -----------------------------------------------------
-    print()
-    print(f"{BOLD}{'═' * 72}{RESET}")
-    print(f"{BOLD} CAPABILITY DIFF   {prev_tag} → HEAD ({sha[:8]}){RESET}")
-    n_models = len({m for m, _ in head.by_test})
-    print(f" {DIM}{n_models} models · {len(head.by_case)} cases · {runs} runs{RESET}")
-    print(f"{BOLD}{'═' * 72}{RESET}\n")
-    print(f" {_bar(b, h)}")
-    colour = RED if delta_pts < -AGGREGATE_NOISE_PTS else (GREEN if delta_pts > 0 else "")
-    print(
-        f" {BOLD}{h:.1%}{RESET}  {colour}{delta_pts:+.1f} pts{RESET}   "
-        f"{hp}/{ht} passing ({hp - bp:+d})\n"
-    )
-
-    print(f" {BOLD}PER TIER{RESET}")
-    for tier in sorted(set(tiers_head) | set(tiers_base)):
-        p0, t0 = tiers_base.get(tier, (0, 0))
-        p1, t1 = tiers_head.get(tier, (0, 0))
-        r0, r1 = (p0 / t0 if t0 else 0.0), (p1 / t1 if t1 else 0.0)
-        d = (r1 - r0) * 100
-        c = RED if d < -AGGREGATE_NOISE_PTS else ""
-        print(f"   {tier:<12} {r0:>6.1%} → {r1:>6.1%}  {c}{d:+5.1f}{RESET}  ({p1}/{t1})")
-
-    print(f"\n {BOLD}PER MODEL{RESET}")
-    for model in sorted(set(bm) | set(hm)):
-        if model not in bm or model not in hm:
-            print(f"   {model:<26} {DIM}only in one arm{RESET}")
-            continue
-        d = (hm[model] - bm[model]) * 100
-        c = RED if d < -AGGREGATE_NOISE_PTS else ""
-        print(f"   {model:<26} {bm[model]:>6.1%} → {hm[model]:>6.1%}  {c}{d:+5.1f}{RESET}")
-
-    if diff.regressions:
-        print(
-            f"\n {BOLD}{RED}COLLAPSED{RESET} {DIM}(≥{COLLAPSE_BEFORE:.0%} → "
-            f"≤{COLLAPSE_AFTER:.0%}){RESET}"
-        )
-        for row in diff.regressions:
-            print(f"   {RED}!{RESET} {row.strip('|').replace('|', ' ').replace('`', '')}")
-    if diff.new_errors:
-        print(f"\n {BOLD}{RED}NEW ERROR TYPES{RESET}")
-        for row in diff.new_errors:
-            print(f"   {RED}!{RESET} {row.strip('|').replace('|', ' ').replace('`', '')}")
-    if diff.added or diff.removed or diff.models_changed:
-        print(f"\n {BOLD}TEST SET CHANGES{RESET}")
-        for line in diff.added[:10]:
-            print(f"   {GREEN}+{RESET} {line} {DIM}(no baseline){RESET}")
-        if len(diff.added) > 10:
-            print(f"   {DIM}… and {len(diff.added) - 10} more added{RESET}")
-        for line in diff.removed[:10]:
-            print(f"   {RED}-{RESET} {line} {DIM}(gone from HEAD){RESET}")
-        if len(diff.removed) > 10:
-            print(f"   {DIM}… and {len(diff.removed) - 10} more removed{RESET}")
-        for model in diff.models_changed:
-            print(f"   {YELLOW}~{RESET} {model} {DIM}ran in only one arm — not compared{RESET}")
-
-    print(f"\n{BOLD}{'─' * 72}{RESET}")
-    if diff.floor_breach:
-        print(f" {RED}VERDICT: BLOCKED — {diff.floor_breach}.{RESET}")
-    elif diff.clean:
-        print(
-            f" {GREEN}VERDICT: OK — stable tier {stable_rate:.1%}, no regressions "
-            f"beyond noise.{RESET}"
-        )
-    else:
-        print(
-            f" {YELLOW}VERDICT: {len(diff.regressions)} collapse(s), "
-            f"{len(diff.new_errors)} new error type(s), "
-            f"{len(diff.beyond_noise)} aggregate drop(s), "
-            f"{len(diff.removed)} removed test(s) — REVIEW REQUIRED.{RESET}"
-        )
-    print(f"{BOLD}{'─' * 72}{RESET}")
-    return diff
+# Re-export the pure comparison API for callers and existing release tests.
+ArmResults = capability_ab.ArmResults
+Diff = capability_ab.Diff
+parse_results = capability_ab.parse_results
+compare = capability_ab.compare
+_bar = capability_ab._bar
+_mark = capability_ab._mark
 
 
 def capability_diff(
     prev_tag: str, sha: str, models: list[str], runs: int, limit: int | None
 ) -> Diff:
+    """Run the shared commit-to-commit capability A/B workflow for a release."""
     step(f"Capability diff vs {prev_tag} (both arms run fresh)")
-    # The cache key carries the scope, so a `--limit 1` smoke run and a real
-    # gate run never share a directory.
     scope = f"m{len(models)}r{runs}" + (f"l{limit}" if limit else "")
-    head_arm = run_capability_arm(
-        REPO, f"HEAD ({sha[:8]})", f"{sha[:12]}-{scope}", models, runs, limit
+    experiment = f"release-{prev_tag.replace('/', '_')}-{sha[:12]}-{scope}"
+    result = capability_ab.run_ab(
+        repo=REPO,
+        base_ref=prev_tag,
+        head_ref=sha,
+        config=CAPABILITY_CONFIG,
+        models=models,
+        runs=runs,
+        parallel=GATE_PARALLEL,
+        output_root=REPO / "tmp" / "release-check",
+        experiment=experiment,
+        env_file=REPO / ".env",
+        limit=limit,
+        reuse=True,
+        head_first=True,
+        policy=capability_ab.ComparisonPolicy(
+            stable_floor=STABLE_FLOOR,
+            aggregate_noise_points=AGGREGATE_NOISE_PTS,
+            max_error_rate=MAX_ERROR_RATE,
+            collapse_before=COLLAPSE_BEFORE,
+            collapse_after=COLLAPSE_AFTER,
+        ),
     )
-    with worktree_at(prev_tag) as tree:
-        base_arm = run_capability_arm(
-            tree, prev_tag, f"{prev_tag.replace('/', '_')}-{scope}", models, runs, limit
-        )
-    diff = compare(base_arm, head_arm, prev_tag, sha, runs)
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_PATH.write_text(diff.markdown)
+    REPORT_PATH.write_text(result.diff.markdown)
     print(f"\n  {DIM}markdown report: {REPORT_PATH}{RESET}")
-    return diff
+    return result.diff
 
 
 # ---------------------------------------------------------------------------
