@@ -7,7 +7,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from nooa_cli.tui.input_handler import TUIInputHandler, create_key_bindings
+from nooa_cli.tui.input_handler import SlashCommandCompleter, TUIInputHandler, create_key_bindings
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -60,6 +60,39 @@ class TestPromptContinuation:
             result = await handler.get_input("❯ ")
 
         assert result == "hello world"
+
+
+def test_completion_presentation_is_single_line_and_control_safe(mock_registry) -> None:
+    from nooa_cli.tui.completer import CompletionItem
+    from prompt_toolkit.completion import CompleteEvent
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.formatted_text import fragment_list_to_text
+
+    adapter = SlashCommandCompleter(mock_registry)
+    adapter._completer.complete = MagicMock(
+        return_value=[
+            CompletionItem(
+                text="/unsafe",
+                display="unsafe\nlabel\x1b[2J",
+                description="help\r\nnext\x07",
+            )
+        ]
+    )
+
+    [completion] = list(
+        adapter.get_completions(
+            Document("/u", cursor_position=2),
+            CompleteEvent(completion_requested=True),
+        )
+    )
+    display = fragment_list_to_text(completion.display)
+    meta = fragment_list_to_text(completion.display_meta)
+    assert "\n" not in display
+    assert "\n" not in meta
+    assert "\x1b[2J" not in display
+    assert "\x07" not in meta
+    assert r"unsafe\nlabel\x1b[2J" == display
+    assert r"help\nnext\x07" == meta
 
 
 # ---------------------------------------------------------------------------

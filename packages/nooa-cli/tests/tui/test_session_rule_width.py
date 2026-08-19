@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import pytest
 from nooa_cli.tui.tui_application import format_session_rule
+from rich.cells import cell_len
 
 
 def _rendered_width(fragments: list[tuple[str, str]]) -> int:
@@ -69,3 +70,13 @@ def test_rule_label_is_preserved() -> None:
     frags = format_session_rule(120, label)
     rendered = "".join(text for _style, text in frags)
     assert label in rendered
+
+
+def test_rule_is_cell_aware_and_cannot_emit_terminal_controls() -> None:
+    cols = 40
+    fragments = format_session_rule(cols, "wide 界\x1b[2J\r")
+    rendered = "".join(text for _style, text in fragments)
+
+    assert cell_len(rendered) <= cols - 1
+    assert "\x1b[2J" not in rendered
+    assert r"\x1b[2J\r" in rendered
