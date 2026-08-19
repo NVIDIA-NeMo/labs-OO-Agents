@@ -1371,3 +1371,20 @@ async def test_replay_separates_consecutive_turns_from_one_speaker(tmp_path):
     assert len(replayed) == 2, replayed
     assert "firstsecond" not in "".join(replayed)
     await adapter.close()
+
+
+async def test_initialize_advertises_the_mcp_transports_it_supports():
+    """Advertise HTTP and SSE, because the adapter connects them.
+
+    McpCapabilities defaults to all-false. A client that honours the handshake
+    filters its HTTP/SSE servers out of session/new, so the agent sees no MCP
+    servers at all however they are configured — observed against Zed, which
+    had authenticated servers and forwarded none.
+    """
+    adapter = CodingACPAdapter(_completed_llm)
+    initialized = await adapter.initialize(PROTOCOL_VERSION)
+
+    mcp = initialized.agent_capabilities.mcp_capabilities
+    assert mcp is not None, "no MCP capabilities advertised at all"
+    assert mcp.http is True
+    assert mcp.sse is True

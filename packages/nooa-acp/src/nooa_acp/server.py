@@ -36,6 +36,7 @@ from acp.schema import (
     HttpMcpServer,
     Implementation,
     ListSessionsResponse,
+    McpCapabilities,
     McpServerStdio,
     SessionCapabilities,
     SessionCloseCapabilities,
@@ -138,6 +139,13 @@ class CodingACPAdapter:
             protocol_version=PROTOCOL_VERSION,
             agent_capabilities=AgentCapabilities(
                 load_session=True,
+                # McpCapabilities defaults to all-false, and a client that
+                # honours the handshake then filters its HTTP/SSE servers out of
+                # session/new — so the agent receives no MCP servers at all,
+                # however the user configured them. _create_mcp_tools connects
+                # both transports, so say so. `acp` stays off: it is unstable in
+                # the spec and not implemented here.
+                mcp_capabilities=McpCapabilities(http=True, sse=True),
                 session_capabilities=SessionCapabilities(
                     list=SessionListCapabilities(),
                     close=SessionCloseCapabilities(),
