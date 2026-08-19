@@ -1080,13 +1080,15 @@ async def test_adapter_lists_closes_loads_and_replays_durable_session(tmp_path):
         for update in replay_client.updates
         if isinstance(update, AgentMessageChunk)
     ]
-    assert replayed_text == ["ACP response"]
+    # Replay terminates each turn so consecutive turns from one speaker keep
+    # their own boundary; see test_replay_separates_consecutive_turns_from_one_speaker.
+    assert replayed_text == ["ACP response\n"]
     replayed_user_text = [
         update.content.text
         for update in replay_client.updates
         if isinstance(update, UserMessageChunk)
     ]
-    assert replayed_user_text == ["remember this"]
+    assert replayed_user_text == ["remember this\n"]
     await replay_adapter.close()
 
 
@@ -1313,4 +1315,59 @@ async def test_mcp_server_with_a_reserved_name_does_not_kill_the_session(tmp_pat
 
     session = await _session(adapter, created.session_id)
     assert any("runtime" in warning for warning in session.startup_warnings)
+    await adapter.close()
+
+
+async def test_a_skipped_mcp_server_is_reported_to_the_client(tmp_path):
+    """The startup warning must reach the user, not just session state.
+
+    A server whose name collides is skipped so the session stays usable, but
+    silently skipping it means the user configured a server and gets no tools
+    and no explanation.
+    """
+    client = _RecordingClient()
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+    server = McpServerStdio(name="shell", command="lookup-server", args=[], env=[])
+
+    with patch(
+        "nooa_acp.server.MCPManager.create_stdio_server",
+        new=AsyncMock(return_value=_MCPTools()),
+    ):
+        await adapter.new_session(str(tmp_path), mcp_servers=[server])
+
+    await asyncio.sleep(0.1)  # let the deferred bootstrap publish
+    rendered = "".join(str(update) for update in client.updates)
+    assert "shell" in rendered, rendered[:400]
+    await adapter.close()
+
+
+async def test_replay_separates_consecutive_turns_from_one_speaker(tmp_path):
+    """Consecutive same-role turns must not run together on reload.
+
+    update_user_message emits a *chunk*, and ACP has no end-of-message marker:
+    a boundary is implied by a different update type arriving. Cancelled turns
+    recorded the prompt and produced nothing else, so several in a row replayed
+    into one bubble — "run sleep(60)run sleep(60)One more time...".
+    """
+    client = _RecordingClient()
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+
+    created = await adapter.new_session(str(tmp_path))
+    session = await _session(adapter, created.session_id)
+    session.handle.record_user_message("first")
+    session.handle.record_user_message("second")
+    await adapter.close_session(created.session_id)
+
+    client.updates.clear()
+    await adapter.load_session(str(tmp_path), created.session_id)
+
+    replayed = [
+        update.content.text
+        for update in client.updates
+        if type(update).__name__ == "UserMessageChunk"
+    ]
+    assert len(replayed) == 2, replayed
+    assert "firstsecond" not in "".join(replayed)
     await adapter.close()

@@ -512,7 +512,14 @@ class CodingACPAdapter:
         if self._client is None:
             return
         for turn in handle.turns():
-            block = text_block(turn.content)
+            # Each update is a *chunk*, and ACP has no end-of-message marker —
+            # a boundary is implied by a different update type arriving. Two
+            # turns from the same speaker in a row therefore land in one bubble.
+            # That happens whenever a turn produced no reply, as a cancelled one
+            # used to, so several stopped prompts replayed as a single run-on
+            # line. Terminate each turn so it keeps its own boundary.
+            content = turn.content if turn.content.endswith("\n") else turn.content + "\n"
+            block = text_block(content)
             update = (
                 update_user_message(block) if turn.role == "user" else update_agent_message(block)
             )
