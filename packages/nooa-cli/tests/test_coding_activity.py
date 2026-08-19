@@ -112,6 +112,28 @@ async def test_large_text_file_keeps_a_real_line_oriented_diff(tmp_path):
     assert "a//" not in edit.diff
 
 
+def test_large_diff_keeps_only_the_head_and_reports_omitted_lines(monkeypatch):
+    old = "".join(f"old {index}\n" for index in range(100))
+    new = "".join(f"new {index}\n" for index in range(100))
+
+    monkeypatch.setattr(activity, "_MAX_EVENT_TEXT_CHARS", 10_000)
+    complete_diff, complete = activity._edit_diff("large.txt", old, new, start_line=None)
+    assert complete is True
+
+    limit = 160
+    monkeypatch.setattr(activity, "_MAX_EVENT_TEXT_CHARS", limit)
+    preview, complete = activity._edit_diff("large.txt", old, new, start_line=None)
+
+    preview_lines = preview.splitlines()
+    complete_lines = complete_diff.splitlines()
+    kept_lines = preview_lines[:-1]
+    assert complete is False
+    assert len(preview) <= limit
+    assert kept_lines == complete_lines[: len(kept_lines)]
+    assert preview_lines[-1] == f"… +{len(complete_lines) - len(kept_lines)} lines"
+    assert "<truncated-output>" not in preview
+
+
 async def test_diff_generation_has_a_separate_input_safety_limit(tmp_path, monkeypatch):
     monkeypatch.setattr(activity, "_MAX_DIFF_INPUT_CHARS", 100)
     shell, events = _observed_shell(tmp_path)
@@ -205,8 +227,10 @@ async def test_activity_payloads_are_bounded(tmp_path):
     )
 
     assert edit.new_text.startswith("str(len=50000,")
-    assert edit.diff.startswith("<truncated-output>")
-    assert "--- a/large.txt" in edit.diff
+    assert edit.diff.startswith("--- a/large.txt\n+++ b/large.txt\n")
+    assert edit.diff.endswith(" lines\n")
+    assert "… +" in edit.diff
+    assert "<truncated-output>" not in edit.diff
     assert "str(len=" not in edit.diff
     assert edit.content_complete is False
     assert edit.diff_complete is False
