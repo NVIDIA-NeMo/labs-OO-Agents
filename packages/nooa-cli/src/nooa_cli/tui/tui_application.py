@@ -45,8 +45,19 @@ from prompt_toolkit.layout.processors import BeforeInput
 from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
 
 from .completer import expand_mentions
-from .input_handler import create_prompt_style
+from .input_handler import _set_completions_sync, create_prompt_style
+from .resize_reflow import (
+    TRANSCRIPT_REFLOW_DEBOUNCE_SECONDS,
+    ResizeReplayRequest,
+    TranscriptResizeState,
+)
 from .subapp import InAppSubview, normalize_key_result
+from .terminal_safety import (
+    normalize_transcript_block,
+    sanitize_live_text,
+    sanitize_transcript_ansi,
+    strip_safe_ansi,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,14 +103,8 @@ class _SubviewControl(FormattedTextControl):
         return super().mouse_handler(mouse_event)
 
 
-# CSI + OSC stripper for the plain-text view of output_buffer. We keep
-# the original ANSI in _output_ansi; tests that assert on buffer text
-# don't want escape sequences in their comparisons.
-_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07")
-
-
 def _strip_ansi(text: str) -> str:
-    return _ANSI_RE.sub("", text)
+    return strip_safe_ansi(text)
 
 
 def terminal_cols(default: int = 120, minimum: int = 20) -> int:
@@ -129,7 +134,11 @@ def format_session_rule(cols: int, label: str = "") -> list[tuple[str, str]]:
     "resize clutter" bug). Reserving the last column keeps the rule on one row so
     the erase stays correct across resizes.
     """
+    from rich.cells import cell_len, set_cell_size
+
     width = max(cols - 1, 1)
+    label = sanitize_live_text(label).replace("\n", " ")
+    label_width = cell_len(label)
     if label:
         # Clamp the whole line (fill + space + label) to ``width`` so an
         # over-long label can't push the rule into the final column and
@@ -138,10 +147,12 @@ def format_session_rule(cols: int, label: str = "") -> list[tuple[str, str]]:
         # width - 2``; otherwise (including ``len(label) == width - 1``, where
         # ``max(..., 1)`` would silently round the fill back up and re-bleed to
         # the final column) fall straight through to truncation, keeping the
-        # label tail (the context-usage / id that matters most).
-        if len(label) > width - 2:
-            return [("class:rule.label", label[-width:])]
-        dashes = width - len(label) - 1  # >= 1 by the guard above
+        # label text.
+        if label_width > width - 2:
+            # Keep grapheme clusters intact. Reversing code points to preserve
+            # the tail can detach combining marks and ZWJ emoji sequences.
+            return [("class:rule.label", set_cell_size(label, width).rstrip())]
+        dashes = width - label_width - 1  # >= 1 by the guard above
         return [
             ("class:rule", "─" * dashes + " "),
             ("class:rule.label", label),
@@ -151,15 +162,29 @@ def format_session_rule(cols: int, label: str = "") -> list[tuple[str, str]]:
 
 PROMPT_MARKER = "❯ "
 _CTRL_C_EXIT_WINDOW_SECONDS = 2.0
+_TRANSCRIPT_CLEAR_SEQUENCE = "\x1b[r\x1b[0m\x1b[H\x1b[2J\x1b[3J\x1b[H"
 
 
 @dataclass
-class ReplayBlock:
-    raw: str
+class TranscriptBlock:
+    source: str
     replay: Callable[[], str] | None = None
     event_id: str | None = None
     tags: frozenset[str] = frozenset()
     keep: bool = False
+    transcript_epoch: int = 0
+
+
+@dataclass(frozen=True)
+class _ResizeReplayQueueItem:
+    request: ResizeReplayRequest
+    transcript_blocks: tuple[TranscriptBlock, ...]
+    transcript_epoch: int
+
+
+@dataclass(frozen=True)
+class _ClearTranscriptQueueItem:
+    transcript_epoch: int
 
 
 def _coalesce_string_into_queue(inq: Any, text: str) -> None:
@@ -235,8 +260,8 @@ class TUIApplication:
             completer: Optional prompt_toolkit ``Completer`` for Tab
                 completion. When omitted no completion is offered.
             full_screen: Native-scrollback mode. Transcript output is written to
-                the terminal scrollback; resize only redraws prompt_toolkit's
-                live input/status region.
+                terminal scrollback; settled width changes rebuild retained
+                transcript output before prompt_toolkit redraws its live region.
             submission_guard: Returns an actionable error when plain agent-bound
                 input must be rejected. Slash and bang commands remain available.
 
@@ -271,16 +296,14 @@ class TUIApplication:
                 qm.set_notify_callback(self._on_queue_notify)
         self.full_screen = full_screen
 
-        # Output scrollback. Two parallel stores:
-        #   * ``output_buffer`` — plain-text view, used by tests and by
-        #     callers that want a printable transcript. ANSI stripped.
-        #   * ``_output_ansi`` — raw ANSI chunks rendered into the live
-        #     TUI via FormattedTextControl so Rich styling survives.
+        # ``output_buffer`` is the ANSI-stripped logical transcript used by
+        # tests and printable-transcript callers. Source-bearing blocks below
+        # are the single retained representation used for terminal replay.
         self.output_buffer = Buffer(read_only=False)
-        self._output_ansi: list[str] = []
         # Retained transcript replay units. On resize we intentionally clear
         # the visible screen + terminal scrollback, then rewrite these blocks.
-        self._replay_blocks: list[ReplayBlock] = []
+        self._transcript_blocks: list[TranscriptBlock] = []
+        self._transcript_epoch = 0
         self._untagged_replay_tail = 200
 
         # In-app subview host. These are modal views inside the single
@@ -349,18 +372,34 @@ class TUIApplication:
         self._keep_going_tasks: set[asyncio.Task[Any]] = set()
         self._keep_going_generation: int = 0
 
-        # Single producer-many-consumers path for transcript content:
+        # Many-producer, single-consumer path for transcript content:
         # emit_block() enqueues one ANSI chunk; a single background task
         # (started in run_async) drains the queue in order and writes
         # each chunk via run_in_terminal → sys.__stdout__. Everything
         # that used to have its own scheduling (patch_stdout proxy,
         # direct run_in_terminal in _render_message, etc.) now funnels
         # through this one queue — no races.
-        self._block_queue: asyncio.Queue[str] | None = None
+        self._block_queue: (
+            asyncio.Queue[TranscriptBlock | _ResizeReplayQueueItem | _ClearTranscriptQueueItem]
+            | None
+        ) = None
         self._consumer_task: asyncio.Task | None = None
-        # Diagnostic/test counter for fullscreen clear+rewrite replays.
+        # Diagnostic/test counter for fullscreen clear+rewrite replays. Resize
+        # state distinguishes transient geometry observations from the width
+        # that actually rebuilt scrollback.
         self._fullscreen_invalidate_count = 0
-        self._last_rendered_size: tuple[int, int] | None = None
+        self._resize_reflow = TranscriptResizeState()
+        self._resize_replay_timer: asyncio.TimerHandle | None = None
+        self._resize_replay_schedule_generation = 0
+        self._queued_resize_replay_generation: int | None = None
+        self._resize_replay_failure_generation: int | None = None
+        # A real height shrink can compress the non-full-screen live region
+        # below its preferred height.  prompt_toolkit erases using a cursor
+        # offset captured before SIGWINCH, so one rebuild is required after the
+        # normal layout fits again even though transcript wrapping did not
+        # change.
+        self._height_compaction_needs_replay = False
+        self._resize_replays_enabled = False
         self._replay_columns_override: int | None = None
         # Captured in run_async; used by emit_block for thread-safe
         # enqueue without calling the deprecated asyncio.get_event_loop().
@@ -377,8 +416,9 @@ class TUIApplication:
         kb = self._build_key_bindings()
 
         # Transcript output lives in terminal scrollback. In full_screen mode we
-        # still use native scrollback during steady state, but on resize we clear
-        # the visible screen and replay the retained transcript at the new width.
+        # still use native scrollback during steady state, but after a settled
+        # width resize we clear the visible screen and replay the retained
+        # transcript at the new width.
         self._output_window = None
 
         # Queue window: shown whenever the agent has unconsumed messages
@@ -402,9 +442,9 @@ class TUIApplication:
                 rows.append(f"│ {len(command_queue)} {noun} queued")
                 for index, text in enumerate(command_queue):
                     branch = "└─" if index == len(command_queue) - 1 else "├─"
-                    rows.append(f"{branch} {text}")
+                    rows.append(f"{branch} {sanitize_live_text(text)}")
             for text in _queue_pending():
-                for line in str(text).split("\n"):
+                for line in sanitize_live_text(str(text)).split("\n"):
                     rows.append(f"│ {line}")
             if not rows:
                 return []
@@ -430,24 +470,31 @@ class TUIApplication:
             style=input_style,
         )
         self._input_window = input_window
+        optional_row = Dimension(min=0, preferred=1, max=1)
         self._input_container = HSplit(
             [
-                Window(height=1, char=" ", style=input_style),
+                Window(height=optional_row, char=" ", style=input_style),
                 input_window,
-                Window(height=1, char=" ", style=input_style),
+                Window(height=optional_row, char=" ", style=input_style),
             ],
             style=input_style,
+            # The children above have a one-row aggregate minimum.  Keep a
+            # blank final fallback as a belt-and-suspenders guard for terminal
+            # implementations that briefly report zero rows.
+            window_too_small=Window(),
         )
 
         # Status line at the bottom — shows spinner + session label.
         def _status_formatted():
-            text = self.status_text()
+            text = sanitize_live_text(self.status_text())
             return [("class:status", text)] if text else []
 
         def _status_height() -> Dimension:
             lines = self.status_text().splitlines()
             height = max(1, len(lines))
-            return Dimension(min=height, max=height, preferred=height)
+            # Status is useful chrome, not a reason to replace the entire UI
+            # with prompt_toolkit's emergency "Window too small" window.
+            return Dimension(min=0, max=height, preferred=height)
 
         status_window = Window(
             FormattedTextControl(_status_formatted, focusable=False),
@@ -460,10 +507,13 @@ class TUIApplication:
         # Rule) so it re-measures with the live terminal width.
         def _session_rule_formatted():
             label = self._session_label_fn() if self._session_label_fn is not None else ""
-            return format_session_rule(terminal_cols(minimum=20), label)
+            current = self._read_terminal_size()
+            columns = current[0] if current is not None else terminal_cols(minimum=1)
+            return format_session_rule(columns, label)
 
         session_rule = Window(
-            FormattedTextControl(_session_rule_formatted, focusable=False), height=1
+            FormattedTextControl(_session_rule_formatted, focusable=False),
+            height=optional_row,
         )
 
         # Completion menu as a real layout region below the input.
@@ -480,12 +530,15 @@ class TUIApplication:
         def _completions_height() -> Dimension:
             state = self.input_buffer.complete_state
             n = len(state.completions) if state is not None else 0
-            exact = min(max(n, 1), _COMPLETION_MAX)
+            exact = min(n, _COMPLETION_MAX)
             # Exact, not a range. Dimension(min=1, max=12) lets HSplit
             # inflate the window when extra space is available — which
             # is exactly what causes growing blank gaps between the
             # prompt and the menu as completions narrow.
-            return Dimension(min=exact, max=exact, preferred=exact)
+            # A large completion set consumes only rows left after the input's
+            # one-row minimum; it can shrink all the way to zero instead of
+            # forcing HSplit's "Window too small" fallback.
+            return Dimension(min=0, max=exact, preferred=exact)
 
         completions_window = ConditionalContainer(
             Window(
@@ -495,7 +548,12 @@ class TUIApplication:
                 dont_extend_height=True,
                 right_margins=[ScrollbarMargin(display_arrows=True)],
             ),
-            filter=Condition(lambda: self.input_buffer.complete_state is not None),
+            filter=Condition(
+                lambda: (
+                    self.input_buffer.complete_state is not None
+                    and bool(self.input_buffer.complete_state.completions)
+                )
+            ),
         )
 
         # Active bottom region (top → bottom):
@@ -512,7 +570,9 @@ class TUIApplication:
                 self._input_container,
                 completions_window,
             ],
+            window_too_small=Window(),
         )
+        self._main_container = main_container
 
         def _subview_formatted():
             view = self._active_subview
@@ -523,7 +583,11 @@ class TUIApplication:
                 width, height = int(size.columns), int(size.rows)
             except Exception:
                 width, height = terminal_cols(minimum=80), 24
-            return ANSI(view.render(width, height))
+            # Subviews intentionally return SGR-colored ANSI, but their rows
+            # also contain session names, model output, server text, and other
+            # untrusted data.  Apply the same allowlist as transcript blocks
+            # before prompt_toolkit explodes it into screen cells.
+            return ANSI(sanitize_transcript_ansi(view.render(width, height)))
 
         self._subview_control = _SubviewControl(
             _subview_formatted,
@@ -735,6 +799,8 @@ class TUIApplication:
                 pass
             if self._app.is_running:
                 self._app.invalidate()
+            if self._resize_reflow.has_pending_replay:
+                self._schedule_resize_replay()
 
     def _prefill_input(self, text: str) -> None:
         self.input_buffer.text = text
@@ -958,7 +1024,9 @@ class TUIApplication:
             # advance on repeat presses — complete_next does both.
             buf = event.current_buffer
             if buf.complete_state is None:
-                buf.start_completion(select_first=True)
+                _set_completions_sync(buf)
+                if buf.complete_state is not None and buf.complete_state.completions:
+                    buf.complete_next()
             else:
                 buf.complete_next()
 
@@ -1993,9 +2061,29 @@ class TUIApplication:
 
     def clear_transcript(self) -> None:
         """Clear live transcript buffers and fullscreen resize replay retention."""
-        self._output_ansi.clear()
-        self._replay_blocks.clear()
+        loop = self._loop
+        if loop is not None:
+            try:
+                on_ui_loop = asyncio.get_running_loop() is loop
+            except RuntimeError:
+                on_ui_loop = False
+            if not on_ui_loop:
+                try:
+                    loop.call_soon_threadsafe(self._clear_transcript_on_ui_loop)
+                except RuntimeError:
+                    # The UI loop has already closed; there is no live prompt
+                    # buffer left to update.
+                    pass
+                return
+        self._clear_transcript_on_ui_loop()
+
+    def _clear_transcript_on_ui_loop(self) -> None:
+        self._transcript_epoch += 1
+        self._transcript_blocks.clear()
         self.output_buffer.set_document(Document(""), bypass_readonly=True)
+        queue = self._block_queue
+        if queue is not None:
+            queue.put_nowait(_ClearTranscriptQueueItem(self._transcript_epoch))
 
     def _on_stray_output(self, content: str, disposition: str) -> None:
         """Record stray stdout/stderr intercepts as hidden runtime events."""
@@ -2029,35 +2117,33 @@ class TUIApplication:
         task drains the queue and writes each block in FIFO order via
         ``run_in_terminal`` → ``sys.__stdout__``. No races.
 
-        Thread-safe: any mutation of prompt_toolkit state (``Buffer``
-        document, which fires callbacks synchronously) is routed through
-        ``call_soon_threadsafe`` so it always runs on the loop thread.
-        ``list.append`` on ``_output_ansi`` is already GIL-safe.
+        Thread-safe: retention, prompt_toolkit state, and terminal-queue
+        insertion are committed together on the UI loop. This keeps the replay
+        snapshot order identical to the terminal write order.
         """
         if not text:
             return
 
-        # GIL-safe: list.append is atomic. Reading from off-thread is fine.
-        self._output_ansi.append(text)
-        self._replay_blocks.append(
-            ReplayBlock(
-                raw=text,
-                replay=replay,
-                event_id=str(event_id) if event_id is not None else None,
-                tags=frozenset(str(t) for t in (tags or ())),
-                keep=keep,
-            )
+        block = TranscriptBlock(
+            source=text,
+            replay=replay,
+            event_id=str(event_id) if event_id is not None else None,
+            tags=frozenset(str(t) for t in (tags or ())),
+            keep=keep,
         )
 
         # Before the consumer is up (pre-run_async) we're single-threaded
         # by construction — safe to touch the buffer directly + emit to
         # stdout. After run_async, route everything via the loop.
-        if self._block_queue is None or self._loop is None:
-            self._append_stripped_to_buffer(text)
+        loop = self._loop
+        if self._block_queue is None or loop is None:
+            rendered = self._render_replay_source(block.source)
+            self._retain_transcript_block(block)
+            self._append_stripped_to_buffer(rendered)
             import sys as _sys
 
             try:
-                _sys.stdout.write(text)
+                _sys.stdout.write(rendered)
                 _sys.stdout.flush()
             except Exception:
                 pass
@@ -2067,19 +2153,56 @@ class TUIApplication:
         # inspect ``output_buffer.text`` right after a call see the
         # update without waiting for a loop tick.
         try:
-            on_thread = asyncio.get_running_loop() is self._loop
+            on_thread = asyncio.get_running_loop() is loop
         except RuntimeError:
             on_thread = False
         if on_thread:
-            self._append_stripped_to_buffer(text)
-            self._block_queue.put_nowait(text)
+            self._enqueue_transcript_block(block)
             return
 
-        # Off-thread: route everything through the loop so off-thread
-        # producers (e.g. background workers, OTEL exporter) never touch
-        # prompt_toolkit state directly.
-        self._loop.call_soon_threadsafe(self._append_stripped_to_buffer, text)
-        self._loop.call_soon_threadsafe(self._block_queue.put_nowait, text)
+        # Off-thread: use one callback so retention order and queue order cannot
+        # diverge, and replay cannot observe a block before the queue does.
+        try:
+            loop.call_soon_threadsafe(self._enqueue_transcript_block, block)
+        except RuntimeError:
+            # Teardown won the race with a late producer. prompt_toolkit no
+            # longer owns the terminal, so preserve the diagnostic directly.
+            rendered = self._render_replay_source(block.source)
+            import sys as _sys
+
+            out = _sys.__stdout__
+            if out is not None:
+                try:
+                    out.write(rendered)
+                    out.flush()
+                except Exception:
+                    pass
+
+    def _retain_transcript_block(self, block: TranscriptBlock) -> None:
+        block.transcript_epoch = self._transcript_epoch
+        self._transcript_blocks.append(block)
+
+    def _enqueue_transcript_block(self, block: TranscriptBlock) -> None:
+        rendered = self._render_replay_source(block.source)
+        self._retain_transcript_block(block)
+        self._append_stripped_to_buffer(rendered)
+        queue = self._block_queue
+        if queue is not None:
+            queue.put_nowait(block)
+            return
+
+        # A call_soon_threadsafe callback can outlive the queue during
+        # teardown. The terminal is no longer owned by prompt_toolkit then, so
+        # deliver the already-retained block directly instead of dropping it.
+        import sys as _sys
+
+        out = _sys.__stdout__
+        if out is not None:
+            try:
+                out.write(rendered)
+                out.flush()
+            except Exception:
+                pass
 
     def _append_stripped_to_buffer(self, text: str) -> None:
         """Append the ANSI-stripped transcript text to ``output_buffer``.
@@ -2105,6 +2228,7 @@ class TUIApplication:
         # any thread without calling the deprecated get_event_loop().
         self._loop = asyncio.get_running_loop()
         self._block_queue = asyncio.Queue()
+        self._resize_replays_enabled = True
         self._consumer_task = asyncio.ensure_future(self._consume_blocks())
 
         # Route stray sys.stdout / sys.stderr writes (aiohttp warnings,
@@ -2127,6 +2251,10 @@ class TUIApplication:
             # swallows every other diagnostic field.
             await self._app.run_async(set_exception_handler=False)
         finally:
+            # No resize callback or queued replay may clear the terminal after
+            # prompt_toolkit gives up ownership of it.
+            self._resize_replays_enabled = False
+            self._cancel_resize_replay_work()
             self._clear_ctrl_c_exit()
             # Restore sys.stdout / sys.stderr FIRST so any post-exit
             # prints from teardown code (spinner cleanup, snapshot save,
@@ -2150,26 +2278,24 @@ class TUIApplication:
             except Exception:
                 logger.debug("queue manager shutdown during TUI teardown failed", exc_info=True)
 
-            # Drain any blocks queued during teardown (e.g. 'Goodbye!
-            # Stay vibing.' from /exit) straight to the real stdout —
-            # the consumer task's run_in_terminal no longer works once
-            # the app has exited.
+            # Stop the remaining producer thread before the final output drain;
+            # otherwise it can enqueue after the consumer has been cancelled.
+            await self._stop_agent_loop()
+
+            # Let the single consumer finish ordinary blocks queued during
+            # teardown (e.g. 'Goodbye! Stay vibing.' from /exit). Once the
+            # prompt_toolkit app has exited, run_in_terminal executes its
+            # callable directly, so preserving the FIFO is both safe and less
+            # lossy than racing a manual drain against an in-flight consumer.
             import sys as _sys
 
             q = self._block_queue
-            if q is not None:
-                while not q.empty():
-                    try:
-                        chunk = q.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
-                    out = _sys.__stdout__
-                    if out is not None:
-                        try:
-                            out.write(chunk)
-                            out.flush()
-                        except Exception:
-                            pass
+            if q is not None and self._consumer_task is not None:
+                await asyncio.sleep(0)
+                try:
+                    await asyncio.wait_for(q.join(), timeout=1.0)
+                except TimeoutError:
+                    logger.debug("timed out draining TUI output during teardown")
             if self._consumer_task is not None:
                 self._consumer_task.cancel()
                 try:
@@ -2178,6 +2304,34 @@ class TUIApplication:
                     pass
                 except BaseException:
                     pass
+            # Later UI-loop cleanup callbacks bypass the retired queue and use
+            # emit_block's direct-output path. Keep the local q for the final
+            # fallback drain below.
+            self._block_queue = None
+
+            # A timed-out or exceptionally stopped consumer can leave queued
+            # ordinary blocks behind. Flush those directly, but deliberately
+            # discard resize barriers now that replay is disabled.
+            if q is not None:
+                while not q.empty():
+                    try:
+                        item = q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    try:
+                        if (
+                            isinstance(item, TranscriptBlock)
+                            and item.transcript_epoch == self._transcript_epoch
+                        ):
+                            out = _sys.__stdout__
+                            if out is not None:
+                                try:
+                                    out.write(self._render_replay_source(item.source))
+                                    out.flush()
+                                except Exception:
+                                    pass
+                    finally:
+                        q.task_done()
             if self._spinner_task is not None and not self._spinner_task.done():
                 self._spinner_task.cancel()
                 # Await so the spinner's finally block runs (invalidate())
@@ -2187,10 +2341,10 @@ class TUIApplication:
                     await self._spinner_task
                 except (asyncio.CancelledError, BaseException):
                     pass
-            await self._stop_agent_loop()
             self._consumer_task = None
             self._spinner_task = None
-            self._block_queue = None
+            self._queued_resize_replay_generation = None
+            self._replay_columns_override = None
             self._loop = None
 
     async def _consume_blocks(self) -> None:
@@ -2208,25 +2362,39 @@ class TUIApplication:
 
         assert self._block_queue is not None
         while True:
-            text = await self._block_queue.get()
-
-            def _write(t: str = text) -> None:
-                out = _sys.__stdout__
-                if out is not None:
-                    out.write(t)
-                    out.flush()
+            item = await self._block_queue.get()
 
             try:
-                await run_in_terminal(_write)
+                if isinstance(item, TranscriptBlock):
+
+                    def _write(block: TranscriptBlock = item) -> None:
+                        if block.transcript_epoch != self._transcript_epoch:
+                            return
+                        out = _sys.__stdout__
+                        if out is not None:
+                            # A block may have waited behind another terminal
+                            # operation while the pane narrowed. Enforce the
+                            # physical-width invariant at the actual write,
+                            # not only when the item entered the FIFO.
+                            out.write(self._render_replay_source(block.source))
+                            out.flush()
+
+                    await run_in_terminal(_write)
+                elif isinstance(item, _ResizeReplayQueueItem):
+                    await self._consume_resize_replay(item)
+                else:
+                    await self._consume_clear_transcript(item)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 # Best-effort — a single failed write shouldn't wedge
                 # the consumer. Fall through and pick up the next block.
                 continue
+            finally:
+                self._block_queue.task_done()
 
     def output_columns(self, minimum: int = 20) -> int:
-        """Current transcript render width, including forced resize replays."""
+        """Current transcript render width, including an active resize replay."""
         if self._replay_columns_override is not None:
             return max(int(self._replay_columns_override), minimum)
         try:
@@ -2234,23 +2402,256 @@ class TUIApplication:
         except Exception:
             return terminal_cols(minimum=minimum)
 
+    def transcript_columns(self) -> int:
+        """Safe printable width for native-scrollback blocks.
+
+        Direct terminal output runs with autowrap enabled.  Reserving the last
+        physical column avoids the delayed-wrap ambiguity where a subsequent
+        newline can create an extra row and move prompt_toolkit's live-region
+        origin.  Unlike ``output_columns``, this never inflates a genuinely
+        narrow terminal to an arbitrary rendering minimum.
+        """
+        if self._replay_columns_override is not None:
+            physical = int(self._replay_columns_override)
+        else:
+            current = self._read_terminal_size()
+            physical = current[0] if current is not None else terminal_cols(minimum=1)
+        return max(physical - 1, 1)
+
+    def _render_replay_source(self, source: str) -> str:
+        """Normalize source text at the terminal's current safe width."""
+        return normalize_transcript_block(source, columns=self.transcript_columns())
+
     def _before_render(self, _app) -> None:
-        """Replay retained transcript when fullscreen mode sees a terminal resize."""
+        """Observe terminal geometry before prompt_toolkit renders a frame."""
         if not self.full_screen:
             return
+        current = self._read_terminal_size()
+        if current is None:
+            return
+        self._observe_terminal_size(current)
+
+    def _read_terminal_size(self) -> tuple[int, int] | None:
         try:
             size = self._app.output.get_size()
-            current = (int(size.columns), int(size.rows))
+            return int(size.columns), int(size.rows)
         except Exception:
+            return None
+
+    def _observe_terminal_size(
+        self,
+        size: tuple[int, int],
+    ) -> None:
+        previous_size = self._resize_reflow.observed_size
+        observation = self._resize_reflow.observe(size)
+        recovery_requested = False
+        if self._active_subview is None:
+            compressed = self._main_layout_is_compressed(size)
+            rows_changed = previous_size is not None and previous_size[1] != size[1]
+            if rows_changed and compressed:
+                self._height_compaction_needs_replay = True
+            elif self._height_compaction_needs_replay and not compressed:
+                recovery_requested = self._resize_reflow.request_replay()
+                self._height_compaction_needs_replay = False
+        if observation.changed:
+            self._resize_replay_failure_generation = None
+        replay_is_queued = self._queued_resize_replay_generation == self._resize_reflow.generation
+        replay_failed = self._resize_replay_failure_generation == self._resize_reflow.generation
+        should_schedule = (
+            recovery_requested
+            or observation.should_debounce
+            or (
+                self._resize_reflow.has_pending_replay
+                and self._resize_replay_timer is None
+                and not replay_is_queued
+                and not replay_failed
+            )
+        )
+        if self._active_subview is None and should_schedule:
+            self._schedule_resize_replay()
+
+    def _main_layout_is_compressed(self, size: tuple[int, int]) -> bool:
+        """Return whether optional main-view rows cannot all fit."""
+        if self._active_subview is not None:
+            return False
+        columns, rows = size
+        try:
+            preferred = self._main_container.preferred_height(columns, rows).preferred
+        except Exception:
+            # The fixed normal chrome is status + rule + padded input.  This
+            # fallback is only for a broken third-party dimension callback.
+            preferred = 5
+        return preferred > rows
+
+    def _schedule_resize_replay(self) -> None:
+        loop = self._loop
+        if loop is None or loop.is_closed():
             return
-        if self._last_rendered_size is None:
-            self._last_rendered_size = current
+        if self._resize_replay_timer is not None:
+            self._resize_replay_timer.cancel()
+        self._resize_replay_schedule_generation += 1
+        schedule_generation = self._resize_replay_schedule_generation
+        self._resize_replay_timer = loop.call_later(
+            TRANSCRIPT_REFLOW_DEBOUNCE_SECONDS,
+            self._start_resize_replay,
+            schedule_generation,
+        )
+
+    def _start_resize_replay(
+        self,
+        schedule_generation: int,
+    ) -> None:
+        if schedule_generation != self._resize_replay_schedule_generation:
             return
-        if current != self._last_rendered_size:
-            self._last_rendered_size = current
+        self._resize_replay_timer = None
+        if not self._resize_replays_enabled:
+            return
+        current = self._read_terminal_size()
+        if current is None:
+            # Keep the pending width. A later successful before_render sample
+            # will schedule it again without retrying a broken Output.
+            return
+        observation = self._resize_reflow.observe(current)
+        if observation.should_debounce:
+            self._schedule_resize_replay()
+            return
+
+        if self._active_subview is not None:
+            return
+
+        request = self._resize_reflow.prepare_replay()
+        if request is None:
+            return
+
+        queue = self._block_queue
+        if queue is None:
+            return
+        if self._queued_resize_replay_generation is not None:
+            # Keep at most one replay barrier in the FIFO. If this one is stale,
+            # its consumer schedules the latest pending width after removing it.
+            return
+
+        # Replay is a barrier in the same FIFO as ordinary terminal writes. The
+        # snapshot is taken at the barrier's exact queue position, so later
+        # blocks are written once after the rebuilt prefix instead of appearing
+        self._prune_transcript_blocks_for_active_events()
+        self._queued_resize_replay_generation = request.generation
+        queue.put_nowait(
+            _ResizeReplayQueueItem(
+                request=request,
+                transcript_blocks=tuple(self._transcript_blocks),
+                transcript_epoch=self._transcript_epoch,
+            )
+        )
+
+    async def _consume_clear_transcript(self, item: _ClearTranscriptQueueItem) -> None:
+        from prompt_toolkit.application import run_in_terminal
+
+        await run_in_terminal(lambda: self._clear_terminal_if_current(item))
+
+    def _clear_terminal_if_current(self, item: _ClearTranscriptQueueItem) -> bool:
+        if not self._resize_replays_enabled or item.transcript_epoch != self._transcript_epoch:
+            return False
+        import sys as _sys
+
+        out = _sys.__stdout__
+        if out is None:
+            return False
+        try:
+            out.write(_TRANSCRIPT_CLEAR_SEQUENCE)
+            out.flush()
+            self._height_compaction_needs_replay = False
+            return True
+        except Exception:
+            return False
+
+    async def _consume_resize_replay(self, item: _ResizeReplayQueueItem) -> None:
+        schedule_latest_pending = False
+        try:
+            if (
+                not self._resize_replays_enabled
+                or item.transcript_epoch != self._transcript_epoch
+                or not self._resize_reflow.is_current(item.request)
+            ):
+                schedule_latest_pending = self._resize_reflow.has_pending_replay
+                return
             if self._active_subview is not None:
                 return
-            self._replay_fullscreen_transcript()
+            if not item.transcript_blocks and not item.request.required:
+                self._resize_reflow.mark_replayed(item.request)
+                self._resize_replay_failure_generation = None
+                return
+
+            from prompt_toolkit.application import run_in_terminal
+
+            self._replay_columns_override = item.request.width
+            try:
+                replayed = await run_in_terminal(lambda: self._replay_queue_item_if_current(item))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                replayed = False
+            finally:
+                self._replay_columns_override = None
+
+            if replayed:
+                self._resize_reflow.mark_replayed(item.request)
+                self._resize_replay_failure_generation = None
+                self._height_compaction_needs_replay = False
+                # Some terminal stacks report final geometry only after the
+                # replay-triggered prompt_toolkit redraw.
+                self._schedule_resize_replay()
+            elif (
+                item.transcript_epoch != self._transcript_epoch
+                or not self._resize_reflow.is_current(item.request)
+            ):
+                schedule_latest_pending = self._resize_reflow.has_pending_replay
+            elif self._resize_replay_failure_generation != item.request.generation:
+                # One automatic retry recovers a transient stdout failure but
+                # cannot spin forever on a permanently broken terminal.
+                self._resize_replay_failure_generation = item.request.generation
+                schedule_latest_pending = self._resize_reflow.has_pending_replay
+        finally:
+            if self._queued_resize_replay_generation == item.request.generation:
+                self._queued_resize_replay_generation = None
+            if (
+                schedule_latest_pending
+                and self._resize_replays_enabled
+                and self._active_subview is None
+                and self._resize_replay_timer is None
+            ):
+                self._schedule_resize_replay()
+
+    def _replay_queue_item_if_current(self, item: _ResizeReplayQueueItem) -> bool:
+        if (
+            not self._resize_replays_enabled
+            or self._active_subview is not None
+            or item.transcript_epoch != self._transcript_epoch
+            or not self._resize_reflow.is_current(item.request)
+            or not self._resize_output_width_is_current(item)
+        ):
+            return False
+        return self._replay_fullscreen_transcript(
+            item.transcript_blocks,
+            clear_even_if_empty=item.request.required,
+            still_current=lambda: (
+                self._resize_replays_enabled
+                and self._active_subview is None
+                and item.transcript_epoch == self._transcript_epoch
+                and self._resize_reflow.is_current(item.request)
+                and self._resize_output_width_is_current(item)
+            ),
+        )
+
+    def _resize_output_width_is_current(self, item: _ResizeReplayQueueItem) -> bool:
+        current = self._read_terminal_size()
+        return current is not None and current[0] == item.request.width
+
+    def _cancel_resize_replay_work(self) -> None:
+        self._resize_replay_schedule_generation += 1
+        if self._resize_replay_timer is not None:
+            self._resize_replay_timer.cancel()
+            self._resize_replay_timer = None
 
     @staticmethod
     def _tag_range(tag: str) -> tuple[int, int] | None:
@@ -2292,15 +2693,15 @@ class TUIApplication:
             for active_start, active_end in active_ranges
         )
 
-    def _prune_replay_blocks_for_active_events(self) -> None:
-        if not self._replay_blocks:
+    def _prune_transcript_blocks_for_active_events(self) -> None:
+        if not self._transcript_blocks:
             return
         active_ids, active_ranges = self._active_replay_identity()
         if not active_ids and not active_ranges:
             return
         keep_indexes: set[int] = set()
         untagged_indexes: list[int] = []
-        for i, block in enumerate(self._replay_blocks):
+        for i, block in enumerate(self._transcript_blocks):
             if block.keep:
                 keep_indexes.add(i)
             elif block.event_id is not None:
@@ -2312,35 +2713,53 @@ class TUIApplication:
             else:
                 untagged_indexes.append(i)
         keep_indexes.update(untagged_indexes[-self._untagged_replay_tail :])
-        self._replay_blocks = [
-            block for i, block in enumerate(self._replay_blocks) if i in keep_indexes
+        self._transcript_blocks = [
+            block for i, block in enumerate(self._transcript_blocks) if i in keep_indexes
         ]
 
-    def _replay_fullscreen_transcript(self) -> None:
-        if not self.full_screen or not self._replay_blocks:
-            return
+    def _replay_fullscreen_transcript(
+        self,
+        transcript_blocks: tuple[TranscriptBlock, ...] | None = None,
+        *,
+        clear_even_if_empty: bool = False,
+        still_current: Callable[[], bool] | None = None,
+    ) -> bool:
+        if not self.full_screen:
+            return False
         import sys as _sys
 
         out = _sys.__stdout__
         if out is None:
-            return
-        self._prune_replay_blocks_for_active_events()
+            return False
+        if transcript_blocks is None:
+            self._prune_transcript_blocks_for_active_events()
+            transcript_blocks = tuple(self._transcript_blocks)
+        if not transcript_blocks and not clear_even_if_empty:
+            return False
         chunks: list[str] = []
-        for block in self._replay_blocks:
-            if block.replay is None:
-                chunks.append(block.raw)
-                continue
+        for block in transcript_blocks:
             try:
-                chunks.append(block.replay())
+                # Semantic callbacks and retained sources cross the same
+                # trust/width boundary at replay time. Re-normalizing sources
+                # is what makes arbitrary diagnostics and stream
+                # output safe after a narrower resize too.
+                source = block.replay() if block.replay is not None else block.source
             except Exception:
-                chunks.append(block.raw)
+                source = block.source
+            chunks.append(self._render_replay_source(source))
+        if still_current is not None and not still_current():
+            return False
         try:
-            out.write("\x1b[H\x1b[2J\x1b[3J")
+            # Reset scroll region + style state before clearing. Homing again
+            # after the purge gives prompt_toolkit a stable origin for its live
+            # input/status redraw when run_in_terminal returns.
+            out.write(_TRANSCRIPT_CLEAR_SEQUENCE)
             out.write("".join(chunks))
             out.flush()
             self._fullscreen_invalidate_count += 1
+            return True
         except Exception:
-            return
+            return False
 
     def exit(self) -> None:
         if self._app.is_running:
@@ -2444,23 +2863,3 @@ class TUIApplication:
     def set_session_label(self, label: str) -> None:
         """Set the bracketed label shown on the right of the status line."""
         self._session_label = label
-
-    def handle_resize(self, cols: int, rows: int) -> None:
-        """Hint the app to re-layout for a new terminal size.
-
-        prompt_toolkit handles real resize events internally; this hook
-        exists for tests (and callers that want to force a redraw after
-        a non-SIGWINCH layout change).
-        """
-        if self.full_screen:
-            size = (int(cols), int(rows))
-            if self._last_rendered_size != size:
-                self._last_rendered_size = size
-                if self._active_subview is None:
-                    self._replay_columns_override = int(cols)
-                    try:
-                        self._replay_fullscreen_transcript()
-                    finally:
-                        self._replay_columns_override = None
-        if self._app.is_running:
-            self._app.invalidate()

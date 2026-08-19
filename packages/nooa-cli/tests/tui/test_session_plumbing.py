@@ -17,11 +17,62 @@ these components don't need an ``Application`` to be testable.
 from __future__ import annotations
 
 import asyncio
+import threading
 
 from nooa_cli.tui.console import TUIConsole
 from nooa_cli.tui.session import _EmitStream
 from rich.console import Console
 from rich.table import Table
+
+
+def test_session_semantic_render_uses_isolated_consoles_across_threads(
+    monkeypatch,
+) -> None:
+    """Resize replay and live rendering must not share mutable Console state."""
+    from types import SimpleNamespace
+
+    import nooa_cli.tui.session as session_module
+    from nooa_cli.tui.session import Session
+
+    first_inside_print = threading.Event()
+    release_first = threading.Event()
+    second_finished = threading.Event()
+
+    class BlockingConsole:
+        def __init__(self, *, file, **_kwargs) -> None:
+            self.file = file
+
+        def print(self, renderable) -> None:
+            if renderable == "first":
+                first_inside_print.set()
+                assert release_first.wait(timeout=1)
+            self.file.write(renderable)
+
+    monkeypatch.setattr(session_module, "RichConsole", BlockingConsole)
+    session = Session.__new__(Session)
+    session._app = SimpleNamespace(transcript_columns=lambda: 79)
+    rendered: dict[str, str] = {}
+
+    first = threading.Thread(
+        target=lambda: rendered.setdefault("first", session._render_to_ansi("first"))
+    )
+
+    def render_second() -> None:
+        rendered["second"] = session._render_to_ansi("second")
+        second_finished.set()
+
+    second = threading.Thread(target=render_second)
+    first.start()
+    assert first_inside_print.wait(timeout=1)
+    second.start()
+    assert second_finished.wait(timeout=1)
+    second.join(timeout=1)
+    assert second.is_alive() is False
+    release_first.set()
+    first.join(timeout=1)
+
+    assert first.is_alive() is False
+    assert rendered == {"first": "first", "second": "second"}
 
 
 def test_emit_stream_coalesces_one_print_into_one_emit_call() -> None:
@@ -138,6 +189,26 @@ def test_print_exit_message_includes_name_and_short_hash(capsys) -> None:
     err = capsys.readouterr().err
     assert "Goodbye! Stay vibing." in err
     assert "my-debug-run [abc12345]" in err
+
+
+def test_print_exit_message_exposes_controls_in_session_name(capsys) -> None:
+    from unittest.mock import Mock
+
+    from nooa_cli.tui.session import Session
+
+    session = Session.__new__(Session)
+    session._app = None
+    session._session_manager = Mock(
+        session_id="abc1234567890def",
+        name="unsafe\x1b[2J\r\x07",
+    )
+
+    session._print_exit_message()
+
+    err = capsys.readouterr().err
+    assert "\x1b[2J" not in err
+    assert "\x07" not in err
+    assert r"unsafe\x1b[2J\r\x07" in err
 
 
 def test_print_exit_message_short_hash_only_when_name_missing(capsys) -> None:
