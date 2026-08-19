@@ -212,6 +212,14 @@ export NVIDIA_API_KEY=nvapi-...
 uv run nooa-acp
 ```
 
+> **Opening a repository runs code from it.** Creating a session imports Python
+> from the workspace — skill roots such as `.claude/skills`, additional roots
+> named by the repository's own `.nooa/settings.yaml`, and `.nooa/libs/` — before
+> you send a prompt. This is how workspace skills work, and it means opening a
+> folder is enough to execute code it contains, as you, in a process holding your
+> model credentials. Open repositories you would run; sandbox anything else. See
+> [`packages/nooa-acp/README.md`](packages/nooa-acp/README.md) for the detail.
+
 `nooa-acp` runs the shared NOOA coding agent, CodeAct strategy, repository
 tools, persistent shell, installed skills, and durable project sessions over
 the standard Agent Client Protocol on stdin/stdout. File edits and terminal
