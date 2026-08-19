@@ -13,6 +13,19 @@ from pydantic import BaseModel
 
 from nooa.agentdoc import hidden
 
+_MISSING = object()
+
+
+class SkillMeta(type):
+    """Consume instance context views without constraining subclass constructors."""
+
+    def __call__(cls, *args: Any, context_view: Any = _MISSING, **kwargs: Any):
+        instance = super().__call__(*args, **kwargs)
+        if context_view is not _MISSING:
+            instance._context_view = context_view
+        return instance
+
+
 # ---------------------------------------------------------------------------
 # @slash_command decorator
 # ---------------------------------------------------------------------------
@@ -252,7 +265,7 @@ def _build_script_command(
     return cmd.strip()
 
 
-class Skill:
+class Skill(metaclass=SkillMeta):
     """Base class for agent skills.
 
     Wraps a Python object or inline content so the LLM can discover it via
@@ -280,12 +293,18 @@ class Skill:
     # transitively when activate() is called.
     requires: Annotated[tuple[str, ...], hidden] = ()
 
-    # If set, SkillRegistry.activate() registers a dynamic context block
-    # with this (key, expr) pair. deactivate() removes it.
+    # Legacy shorthand materialized by DefaultSkillView when the skill is active.
     context_block: Annotated[tuple[str, str] | None, hidden] = None
+
+    _context_view: Annotated[Any, hidden] = None
 
     _agent: Any = None
     _source_dir: Path
+
+    def __init_subclass__(cls, context_view: Any = None, **kwargs: Any):
+        super().__init_subclass__(**kwargs)
+        if context_view is not None:
+            cls._context_view = context_view
 
     def __init__(self, obj: Any = None, *, content: str | None = None, name: str | None = None):
         n_given = sum(x is not None for x in (obj, content))

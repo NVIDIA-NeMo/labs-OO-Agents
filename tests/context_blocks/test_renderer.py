@@ -7,8 +7,6 @@ them via BlockFormatter + ProviderFormatter. No eval function, no expression
 evaluation, no class — just a pure function.
 """
 
-import pytest
-
 from nooa.context_blocks.formatter import (
     AnthropicProviderFormatter,
     MarkdownBlockFormatter,
@@ -123,9 +121,9 @@ class TestRenderContextBasic:
             provider_formatter=OpenAIProviderFormatter(),
         ).output
 
-        assert len(result) == 3  # system + user + assistant
-        assert result[2]["role"] == "assistant"
-        assert "Hello!" in result[2]["content"]
+        assert len(result) == 2
+        assert result[1]["role"] == "assistant"
+        assert "Hello!" in result[1]["content"]
 
 
 class TestRenderContextTruncation:
@@ -243,13 +241,12 @@ class TestRenderContextToolCalls:
             provider_formatter=OpenAIProviderFormatter(),
         ).output
 
-        # System + assistant (tool_calls) + tool (result)
-        assert len(result) == 3
-        assert result[1]["role"] == "assistant"
-        assert "tool_calls" in result[1]
-        assert result[1]["tool_calls"][0]["function"]["name"] == "search"
-        assert result[2]["role"] == "tool"
-        assert result[2]["content"] == "Found it"
+        assert len(result) == 2
+        assert result[0]["role"] == "assistant"
+        assert "tool_calls" in result[0]
+        assert result[0]["tool_calls"][0]["function"]["name"] == "search"
+        assert result[1]["role"] == "tool"
+        assert result[1]["content"] == "Found it"
 
 
 class TestRenderContextNoMutation:
@@ -542,7 +539,7 @@ class TestRenderContextEventSerialization:
         ).output
 
         # Content must appear in the user message
-        user_msg = result[1]
+        user_msg = result[0]
         assert user_msg["role"] == "user"
         assert "Hello world" in user_msg["content"]
 
@@ -571,7 +568,7 @@ class TestRenderContextEventSerialization:
             provider_formatter=OpenAIProviderFormatter(),
         ).output
 
-        user_msg = result[1]
+        user_msg = result[0]
         # Content was serialized (not empty)
         assert "UserEvent" in user_msg["content"] or long_content in user_msg["content"]
         # No legacy wrapper
@@ -600,7 +597,7 @@ class TestRenderContextEventSerialization:
         ).output
 
         # Tool call should appear as assistant tool_calls message, not as a user message
-        msgs = result[1:]
+        msgs = result
         assert any(m["role"] == "assistant" and "tool_calls" in m for m in msgs)
 
     def test_block_with_no_event_preserves_existing_content(self):
@@ -617,24 +614,23 @@ class TestRenderContextEventSerialization:
             provider_formatter=OpenAIProviderFormatter(),
         ).output
 
-        user_msg = result[1]
+        user_msg = result[0]
         assert user_msg["role"] == "user"
         assert "pre-existing content" in user_msg["content"]
 
 
 class TestCountTokens:
-    """Tests for count_tokens parameter in render_context()."""
+    """Rendering accepts legacy budget arguments but applies no policy."""
 
-    def test_raises_if_context_limit_set_without_counter(self):
-        """ValueError when context_limit set but no count_tokens."""
-        with pytest.raises(ValueError, match="max_context_tokens requires a token counter"):
-            render_context(
-                [],
-                block_formatter=XMLBlockFormatter(),
-                provider_formatter=OpenAIProviderFormatter(),
-                context_limit=10_000,
-                count_tokens=None,
-            )
+    def test_accepts_context_limit_without_counter(self):
+        result = render_context(
+            [],
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+            context_limit=10_000,
+            count_tokens=None,
+        )
+        assert result.output == []
 
     def test_accepts_none_counter_when_no_token_limits(self):
         """No error when context_limit is not set."""
@@ -646,8 +642,7 @@ class TestCountTokens:
         ).output
         assert result is not None
 
-    def test_uses_count_tokens_for_context_limit(self):
-        """count_tokens is called when context_limit is set."""
+    def test_does_not_use_count_tokens_for_context_limit(self):
         call_count = []
 
         def counter(s: str) -> int:
@@ -662,4 +657,4 @@ class TestCountTokens:
             context_limit=10_000,
             count_tokens=counter,
         )
-        assert len(call_count) > 0
+        assert call_count == []

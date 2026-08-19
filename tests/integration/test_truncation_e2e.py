@@ -30,6 +30,7 @@ from nooa.context_blocks import BlockMetadata, ResolvedBlock, Role
 from nooa.context_blocks.events import ResultStatus
 from nooa.context_blocks.formatter import XMLBlockFormatter
 from nooa.context_blocks.renderer import render_context
+from nooa.context_view import _apply_default_budget
 from nooa.events import PythonOutput
 from nooa.runtime.actor import _current_llm_var
 from nooa.unifiedllm import FakeLLMClient
@@ -105,6 +106,18 @@ def _make_python_output(
 def _count_tokens(text: str) -> int:
     """Simple char-based token approximation for tests."""
     return max(1, len(text) // 4)
+
+
+def _render_default_budget(blocks, limit):
+    budgeted, dropped = _apply_default_budget(blocks, limit, _count_tokens)
+    return render_context(
+        budgeted,
+        block_formatter=XMLBlockFormatter(),
+        provider_formatter=_openai_formatter(),
+        context_limit=limit,
+        count_tokens=_count_tokens,
+        context_blocks_dropped=dropped,
+    )
 
 
 # ── L2 → L3: stdout/stderr truncation → event rendering ─────────────────
@@ -304,13 +317,7 @@ class TestL4ContextBlockEviction:
                 metadata=BlockMetadata(),
             ),
         ]
-        result = render_context(
-            blocks,
-            block_formatter=XMLBlockFormatter(),
-            provider_formatter=_openai_formatter(),
-            context_limit=50,
-            count_tokens=_count_tokens,
-        )
+        result = _render_default_budget(blocks, 50)
         assert result.stats.context_blocks_dropped > 0
         assert "EVICTED" in str(result.output)
 
@@ -324,13 +331,7 @@ class TestL4ContextBlockEviction:
                 metadata=BlockMetadata(static=True),
             ),
         ]
-        result = render_context(
-            blocks,
-            block_formatter=XMLBlockFormatter(),
-            provider_formatter=_openai_formatter(),
-            context_limit=10,
-            count_tokens=_count_tokens,
-        )
+        result = _render_default_budget(blocks, 10)
         assert result.stats.context_blocks_dropped == 0
 
     def test_newest_blocks_evicted_first(self):
@@ -356,13 +357,7 @@ class TestL4ContextBlockEviction:
             )
 
         # Budget fits ~2 blocks + system_prompt; the rest must be evicted
-        result = render_context(
-            blocks,
-            block_formatter=XMLBlockFormatter(),
-            provider_formatter=_openai_formatter(),
-            context_limit=260,
-            count_tokens=_count_tokens,
-        )
+        result = _render_default_budget(blocks, 260)
         dropped = result.stats.context_blocks_dropped
         assert dropped >= 2, f"Expected at least 2 evicted, got {dropped}"
         # Eviction works from the end — newest blocks (block_4, block_3, ...)
@@ -388,13 +383,7 @@ class TestL4ContextBlockEviction:
                 metadata=BlockMetadata(static=False, user_block=True),
             ),
         ]
-        result = render_context(
-            blocks,
-            block_formatter=XMLBlockFormatter(),
-            provider_formatter=_openai_formatter(),
-            context_limit=60,
-            count_tokens=_count_tokens,
-        )
+        result = _render_default_budget(blocks, 60)
         assert result.stats.context_blocks_dropped >= 1, (
             f"Expected at least one block to be evicted, got {result.stats.context_blocks_dropped}"
         )
@@ -429,13 +418,7 @@ class TestL4ContextBlockEviction:
                 metadata=BlockMetadata(),
             ),
         ]
-        result = render_context(
-            blocks,
-            block_formatter=XMLBlockFormatter(),
-            provider_formatter=_openai_formatter(),
-            context_limit=100,
-            count_tokens=_count_tokens,
-        )
+        result = _render_default_budget(blocks, 100)
         output_str = str(result.output)
         # Block A (oldest non-static) should survive
         assert "a" * 380 in output_str, "Block A should survive — it was added first"
@@ -463,13 +446,7 @@ class TestL4ContextBlockEviction:
                 metadata=BlockMetadata(),
             ),
         ]
-        result = render_context(
-            blocks,
-            block_formatter=XMLBlockFormatter(),
-            provider_formatter=_openai_formatter(),
-            context_limit=100,
-            count_tokens=_count_tokens,
-        )
+        result = _render_default_budget(blocks, 100)
         assert result.stats.context_blocks_dropped == 0
         assert "EVICTED" not in str(result.output)
         assert "a" * 396 in str(result.output)

@@ -26,6 +26,15 @@ from nooa._visible import visible  # noqa: E402
 from nooa.agent import Agent  # noqa: E402
 from nooa.agentdoc import hidden, spec  # noqa: E402
 from nooa.context_blocks import Context, ContextWindowStats, DynamicContext  # noqa: E402
+from nooa.context_view import (  # noqa: E402
+    AssembledContext,
+    Block,
+    ContextItem,
+    ContextView,
+    DefaultAgentView,
+    DefaultSkillView,
+    resolve_context_view,
+)
 from nooa.decorators import strategy  # noqa: E402
 
 # Export errors
@@ -113,6 +122,13 @@ __all__ = [
     "ContextWindowStats",  # Re-exported from context_blocks
     "Context",  # Re-exported from context_blocks
     "DynamicContext",  # Re-exported from context_blocks (deprecated, use Context)
+    "Block",
+    "ContextItem",
+    "AssembledContext",
+    "ContextView",
+    "DefaultAgentView",
+    "DefaultSkillView",
+    "resolve_context_view",
     "EventQuery",  # Event filtering configuration
     "ContextApi",  # LLM-facing context API wrapper (Skill)
     "ContextManager",  # Context block state backend

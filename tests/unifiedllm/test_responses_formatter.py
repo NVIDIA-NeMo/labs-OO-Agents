@@ -110,16 +110,17 @@ class TestResponsesProviderFormatter:
             {"role": "user", "content": "Now multiply by 3"},
         ]
 
-    def test_skips_metadata_and_runtime_event_roles(self):
+    def test_rejects_metadata_and_runtime_event_roles(self):
         messages = [
             RenderedMessage(role=Role.RUNTIME_EVENT, content="internal"),
             RenderedMessage(role=Role.METADATA, content="meta"),
             RenderedMessage(role=Role.USER, content="visible"),
         ]
         formatter = ResponsesProviderFormatter()
-        result = formatter.format(messages)
+        from nooa.context_blocks import UnsupportedContextLayout
 
-        assert result == [{"role": "user", "content": "visible"}]
+        with pytest.raises(UnsupportedContextLayout):
+            formatter.format(messages)
 
 
 class TestResponsesClientTransformMessages:

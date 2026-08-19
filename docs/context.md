@@ -121,4 +121,4 @@ Replace scoped context overrides and formatter-owned partitioning with views. A 
 
 ## Status
 
-The v4 agent-view slice and live Nemotron test validate agent resolution, ordered blocks, typed events, rendering, and structured output. Skill view resolution and removal of formatter partitioning remain to be implemented and tested.
+Implemented. The compatibility defaults preserve current state APIs while agent and skill views own assembly. Renderers preserve order or reject unsupported layouts.

@@ -36,6 +36,9 @@ class CurrentCall:
         is_async: Whether the method is async (for proper def/async def in prompts).
         return_type: Return type annotation (optional, for prefill/error hints).
         pre_ellipsis_code: Setup code before `...` marker (optional, for prefill).
+        agent: Active owner for component context views.
+        strategy: Resolved strategy for this generation.
+        event_query: Resolved event filter visible to context views.
 
     Example:
         call = CurrentCall(
@@ -71,6 +74,11 @@ class CurrentCall:
     # avoids re-parsing the stringified signature (which can't reliably split on
     # commas inside Annotated[...]/defaults).
     param_names: list[str] | None = None
+    # Runtime owners used by component views. They are deliberately excluded
+    # from repr/comparison; the call remains an immutable invocation snapshot.
+    agent: Any | None = field(default=None, repr=False, compare=False)
+    strategy: Any | None = field(default=None, repr=False, compare=False)
+    event_query: Any | None = field(default=None, repr=False, compare=False)
 
     def __hash__(self) -> int:
         """Hash by id for use in sets/dicts."""

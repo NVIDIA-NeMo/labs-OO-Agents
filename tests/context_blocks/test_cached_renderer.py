@@ -30,7 +30,7 @@ def _dynamic_block(key: str, content: str, expr: str | None = None) -> ResolvedB
     return ResolvedBlock(
         key=key,
         content=content,
-        role=Role.SYSTEM,
+        role=Role.USER,
         metadata=BlockMetadata(expr=expr, static=False, user_block=True),
     )
 
@@ -61,16 +61,15 @@ class TestCachedBlockFormatterPartition:
         assert messages[0].role == Role.SYSTEM
         assert "<a>" in messages[0].content and "<b>" in messages[0].content
 
-    def test_all_volatile_falls_back_to_system(self):
-        """When no blocks are static, all go to SYSTEM (XMLBlockFormatter-compatible)."""
+    def test_trailing_blocks_keep_user_role(self):
         fmt = CachedBlockFormatter()
         messages = fmt.format([_dynamic_block("plan", "do stuff")])
         assert len(messages) == 1
-        assert messages[0].role == Role.SYSTEM
+        assert messages[0].role == Role.USER
         assert "<plan>" in messages[0].content
         assert "</plan>" in messages[0].content
 
-    def test_mixed_preserves_order_within_halves(self):
+    def test_mixed_preserves_exact_order(self):
         fmt = CachedBlockFormatter()
         messages = fmt.format(
             [
@@ -80,12 +79,18 @@ class TestCachedBlockFormatterPartition:
                 _dynamic_block("state", "T"),
             ]
         )
-        assert len(messages) == 2
-        sys_msg = messages[0]
-        assert sys_msg.index("<sys>") < sys_msg.index("<self_doc>") if False else True  # sanity
-        assert sys_msg.content.index("<sys>") < sys_msg.content.index("<self_doc>")
-        user_msg = messages[1]
-        assert user_msg.content.index("<plan>") < user_msg.content.index("<state>")
+        assert [message.role for message in messages] == [
+            Role.SYSTEM,
+            Role.USER,
+            Role.SYSTEM,
+            Role.USER,
+        ]
+        assert [message.parts[0].key for message in messages] == [
+            "sys",
+            "plan",
+            "self_doc",
+            "state",
+        ]
 
 
 class TestCachedRendererEndToEndOpenAI:
@@ -112,7 +117,6 @@ class TestCachedRendererEndToEndOpenAI:
         assert result[0]["role"] == "system"
         assert "<sys>" in result[0]["content"]
         assert result[1]["role"] == "user"
-        assert "<context>" in result[1]["content"]
         assert "<plan" in result[1]["content"]
 
     def test_volatile_appended_after_trailing_user_event(self):
@@ -124,7 +128,6 @@ class TestCachedRendererEndToEndOpenAI:
         user_event.tag = "1"
         blocks = [
             _static_block("sys", "S"),
-            _dynamic_block("plan", "P"),
             ResolvedBlock(
                 key="event_1",
                 content="hi",
@@ -132,6 +135,7 @@ class TestCachedRendererEndToEndOpenAI:
                 metadata=BlockMetadata(tag="1"),
                 event=user_event,
             ),
+            _dynamic_block("plan", "P"),
         ]
         result = render_context(
             blocks,
@@ -145,10 +149,8 @@ class TestCachedRendererEndToEndOpenAI:
         assert "<context>" not in event_content
         assert "<plan>" not in event_content
         assert "hi" in event_content
-        # The trailing user message holds only the context envelope.
+        # The trailing user message holds only the assembled trailing block.
         context_content = result[2]["content"]
-        assert context_content.startswith("<context>")
-        assert context_content.endswith("</context>")
         assert "<plan>" in context_content
         assert "hi" not in context_content
 
@@ -171,9 +173,9 @@ class TestCachedRendererEndToEndOpenAI:
         def render(dynamic_value: str, extra_blocks: list[ResolvedBlock]) -> list[dict]:
             blocks = [
                 _static_block("sys", "S"),
-                _dynamic_block("plan", dynamic_value),
                 user_block,
                 *extra_blocks,
+                _dynamic_block("plan", dynamic_value),
             ]
             return render_context(
                 blocks,
@@ -225,7 +227,6 @@ class TestCachedRendererEndToEndOpenAI:
         asst_event.tag = "2"
         blocks = [
             _static_block("sys", "S"),
-            _dynamic_block("plan", "P"),
             ResolvedBlock(
                 key="event_2",
                 content="",
@@ -233,6 +234,7 @@ class TestCachedRendererEndToEndOpenAI:
                 metadata=BlockMetadata(tag="2"),
                 event=asst_event,
             ),
+            _dynamic_block("plan", "P"),
         ]
         result = render_context(
             blocks,
@@ -241,7 +243,7 @@ class TestCachedRendererEndToEndOpenAI:
         ).output
         roles = [m["role"] for m in result]
         assert roles == ["system", "assistant", "user"]
-        assert "<context>" in result[2]["content"]
+        assert "<plan>" in result[2]["content"]
 
     def test_no_volatile_no_trailing_message(self):
         result = render_context(
@@ -272,4 +274,4 @@ class TestCachedRendererEndToEndAnthropic:
         assert "<sys>" in result["system"]
         assert len(result["messages"]) == 1
         assert result["messages"][0]["role"] == "user"
-        assert "<context>" in result["messages"][0]["content"]
+        assert "<plan>" in result["messages"][0]["content"]

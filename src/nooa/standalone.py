@@ -144,6 +144,7 @@ def _make_adapter(func: Callable[..., Any], strategy: Any = None) -> Callable[..
     adapted._plan_strategy = strategy or getattr(func, "_plan_strategy", None)  # type: ignore[attr-defined]
     adapted._strategy_context = getattr(func, "_strategy_context", None)  # type: ignore[attr-defined]
     adapted._strategy_events = getattr(func, "_strategy_events", None)  # type: ignore[attr-defined]
+    adapted._strategy_context_view = getattr(func, "_strategy_context_view", None)  # type: ignore[attr-defined]
     adapted._needs_generation = True  # type: ignore[attr-defined]
     adapted._agent_decorator = "auto"  # type: ignore[attr-defined]
 

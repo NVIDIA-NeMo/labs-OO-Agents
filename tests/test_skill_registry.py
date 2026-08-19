@@ -223,14 +223,14 @@ def registry_ctx(agent_ctx):
 
 
 class TestContextBlockRegistration:
-    def test_activate_registers_context_block(self, registry_ctx, agent_ctx):
+    def test_activate_selects_skill_without_mutating_context_manager(self, registry_ctx, agent_ctx):
         skill = SkillWithContextBlock()
         registry_ctx.register("nemo.my_skill", skill)
         registry_ctx.activate(["nemo.my_skill"])
 
-        # The context_manager should now have the dynamic block
         cm = agent_ctx.context_manager
-        assert "my_status" in cm
+        assert "my_status" not in cm
+        assert registry_ctx.active_skills() == (skill,)
 
     def test_activate_does_not_register_when_no_context_block(self, registry_ctx, agent_ctx):
         skill = SkillWithoutContextBlock()
@@ -240,18 +240,19 @@ class TestContextBlockRegistration:
         cm = agent_ctx.context_manager
         assert "my_status" not in cm
 
-    def test_deactivate_removes_context_block(self, registry_ctx, agent_ctx):
+    def test_deactivate_deselects_skill_without_manager_mutation(self, registry_ctx, agent_ctx):
         skill = SkillWithContextBlock()
         registry_ctx.register("nemo.my_skill", skill)
         registry_ctx.activate(["nemo.my_skill"])
 
-        # Verify it's registered
         cm = agent_ctx.context_manager
-        assert "my_status" in cm
+        assert "my_status" not in cm
+        assert registry_ctx.active_skills() == (skill,)
 
         # Deactivate should remove it
         registry_ctx.deactivate(["nemo.my_skill"])
         assert "my_status" not in cm
+        assert registry_ctx.active_skills() == ()
 
     def test_deactivate_does_not_remove_protected_block(self, registry_ctx, agent_ctx):
         """If a context block key happens to be protected, deactivate won't remove it."""
@@ -274,22 +275,18 @@ class TestContextBlockRegistration:
         registry_ctx.activate(["nemo.mocked"])
 
         cm = agent_ctx.context_manager
-        # Only the SkillRegistry's own "skills" block should exist (from __init__),
-        # NOT a block from the MagicMock skill
         non_protected = [k for k in cm if k not in cm.protected_keys]
-        assert "skills" in non_protected  # from SkillRegistry itself
-        assert len(non_protected) == 1  # no block from the mock
+        assert non_protected == []
 
     @pytest.mark.asyncio
     async def test_aclose_removes_registry_context_block(self, registry_ctx, agent_ctx):
-        assert "skills" in agent_ctx.context_manager
+        assert "skills" not in agent_ctx.context_manager
 
         await registry_ctx.aclose()
 
         assert "skills" not in agent_ctx.context_manager
 
-    def test_skill_registry_registers_own_context_block(self, agent_ctx):
-        """SkillRegistry itself has context_block and registers it on activate."""
+    def test_skill_registry_never_registers_own_context_block(self, agent_ctx):
         # SkillRegistry is registered on the agent as "skills" attr
         with patch("nooa.skill_registry.entry_points", return_value=[]):
             reg = SkillRegistry(agent_ctx)
@@ -300,7 +297,7 @@ class TestContextBlockRegistration:
         reg.activate(["nemo.skills"])
 
         cm = agent_ctx.context_manager
-        assert "skills" in cm
+        assert "skills" not in cm
 
 
 def test_a_skill_cannot_take_over_another_skills_agent_attribute():

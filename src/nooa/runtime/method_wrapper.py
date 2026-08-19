@@ -154,7 +154,7 @@ def create_agent_method_wrapper(
             if hasattr(self, "runtime"):
                 _fw_kwargs = {
                     _name: kwargs.pop(_name)
-                    for _name in ("_session_locals", "_strategy")
+                    for _name in ("_session_locals", "_strategy", "context_view")
                     if _name in kwargs
                 }
                 try:

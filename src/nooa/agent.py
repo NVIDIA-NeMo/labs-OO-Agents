@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
     from nooa.context_blocks.models import ContextWindowStats
     from nooa.context_blocks.render_config import RenderConfig
+    from nooa.context_view import ContextView
     from nooa.runtime.actor import ActorRuntime
     from nooa.runtime.context import ContextApi
     from nooa.runtime.context_manager import ContextManager
@@ -125,6 +126,7 @@ class Agent(metaclass=AgentMeta):
     _agent_truncation: Annotated["TruncationConfig", hidden]
     _agent_context_blocks: Annotated["dict[str, str | DynamicContext | None]", hidden]
     _agent_event_query: Annotated["EventQuery | None", hidden]
+    _context_view: Annotated["ContextView[Agent] | None", hidden, nosnapshot]
 
     # Enable tracing for Agent classes (convention for metaclass)
     _enable_tracing = True  # type: ignore[assignment]
@@ -136,6 +138,7 @@ class Agent(metaclass=AgentMeta):
         execution: "ExecutionConfig | None" = None,
         context: "dict[str, str | DynamicContext | None] | None" = None,
         event_query: "EventQuery | None" = None,
+        context_view: "ContextView[Agent] | None" = None,
         **kwargs: Any,
     ):
         """Configure agent class with metaclass.
@@ -149,6 +152,7 @@ class Agent(metaclass=AgentMeta):
                 - DynamicContext("expr"): DynamicContext expression, re-evaluated each turn
                 - None: Remove block
             event_query: Default EventQuery for filtering events in context.
+            context_view: Class-level complete context view.
             **kwargs: Additional arguments for multiple inheritance support.
         """
         _validate_llm_param(llm, cls.__name__)
@@ -163,6 +167,8 @@ class Agent(metaclass=AgentMeta):
             cls._agent_context_blocks = context  # type: ignore[attr-defined]
         if event_query is not None:
             cls._agent_event_query = event_query  # type: ignore[attr-defined]
+        if context_view is not None:
+            cls._context_view = context_view  # type: ignore[attr-defined]
 
         from nooa.config.execution_config import ExecutionConfig as _EC
 
@@ -177,6 +183,7 @@ class Agent(metaclass=AgentMeta):
         context: "dict[str, str | DynamicContext | None] | None" = None,
         event_query: "EventQuery | None" = None,
         storage: "StorageManager | None" = None,
+        context_view: "ContextView[Agent] | None" = None,
     ):
         """Initialize agent with its own runtime.
 
@@ -191,6 +198,7 @@ class Agent(metaclass=AgentMeta):
             event_query: Instance-level EventQuery for filtering events in context.
             storage: Optional StorageManager for persistence. Defaults to
                 InMemoryStorageManager (no persistence, same as current behavior).
+            context_view: Instance-level complete context view.
 
         Core attributes (all hidden from LLM):
         - context_manager: ContextManager — raw context block state
@@ -235,6 +243,9 @@ class Agent(metaclass=AgentMeta):
         # Resolve and store event query (instance overrides class-level)
         self.event_query = self._resolve_event_query(event_query)
 
+        if context_view is not None:
+            self._context_view = context_view
+
         # Initialize context state (always present, hidden)
         self.context_manager = ContextManager()
 
@@ -269,6 +280,36 @@ class Agent(metaclass=AgentMeta):
 
         # Create runtime (manages execution, caching, signals)
         self.runtime = ActorRuntime(self)
+
+    @no_trace
+    @hidden
+    def active_skills(self) -> tuple[Any, ...]:
+        """Return visible attached skills in stable attribute order."""
+        from nooa.skill import Skill
+
+        values = tuple(self.__instance_values__().values())
+        managed_ids = {
+            id(skill)
+            for value in values
+            if isinstance(value, Skill)
+            for skill in getattr(value, "_managed_skills", lambda: ())()
+        }
+        skills: list[Skill] = []
+        seen: set[int] = set()
+        for value in values:
+            if not isinstance(value, Skill) or id(value) in seen:
+                continue
+            if id(value) in managed_ids:
+                continue
+            seen.add(id(value))
+            skills.append(value)
+            active = getattr(value, "active_skills", None)
+            if callable(active):
+                for nested in cast("tuple[Skill, ...]", active()):
+                    if id(nested) not in seen:
+                        seen.add(id(nested))
+                        skills.append(nested)
+        return tuple(skills)
 
     @no_trace
     @hidden
