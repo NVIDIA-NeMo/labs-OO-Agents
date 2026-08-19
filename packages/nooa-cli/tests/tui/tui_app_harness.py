@@ -12,14 +12,14 @@ Usage::
 The harness owns:
 
 - a ``PipeInput`` — bytes written with ``send_text()`` look like keystrokes
-- a ``DummyOutput`` — swallows rendering but the app still thinks it has a TTY
+- a prompt_toolkit ``Output`` — ``DummyOutput`` by default, or a mutable
+  recording output for production resize-path tests
 - a background task running ``app.run_async()``
 - a scriptable ``FakeAgent`` that yields controllable responses
 
-Assertions read the app's *logical* state (input/output buffer text, queue
-messages, status line) rather than parsed terminal output — terminal-level
-correctness is covered by manual smoke, and tying unit tests to rendered
-ANSI bytes is brittle.
+Most assertions read the app's *logical* state (input/output buffer text,
+queue messages, status line). Resize tests additionally record prompt_toolkit
+redraw operations and the transcript bytes written around a replay barrier.
 
 Timing model: writing to the pipe is synchronous, but prompt_toolkit
 parses input on the event loop. Every driver method ends with an
@@ -37,8 +37,9 @@ from contextlib import AbstractAsyncContextManager
 from typing import TYPE_CHECKING, Any
 
 from prompt_toolkit.application import create_app_session
+from prompt_toolkit.data_structures import Size
 from prompt_toolkit.input import create_pipe_input
-from prompt_toolkit.output import DummyOutput
+from prompt_toolkit.output import DummyOutput, Output
 
 if TYPE_CHECKING:
     from nooa_cli.tui.tui_application import TUIApplication
@@ -219,6 +220,40 @@ async def _maybe_await(value: Any) -> Any:
 # ── the harness itself -------------------------------------------------------
 
 
+class MutableRecordingOutput(DummyOutput):
+    """A prompt_toolkit output whose terminal geometry tests can change.
+
+    ``DummyOutput`` always reports 80×40, which means calling the real
+    prompt_toolkit resize callback cannot exercise Nooa's geometry observer.
+    This small test output keeps DummyOutput's no-op terminal behavior while
+    recording enough of the redraw path to prove a resize reached the renderer.
+    """
+
+    def __init__(self, columns: int = 80, rows: int = 40) -> None:
+        super().__init__()
+        self._size = Size(rows=int(rows), columns=int(columns))
+        self.events: list[tuple[Any, ...]] = []
+
+    def get_size(self) -> Size:
+        self.events.append(("get_size", self._size.columns, self._size.rows))
+        return self._size
+
+    def get_rows_below_cursor_position(self) -> int:
+        return self._size.rows
+
+    def set_size(self, columns: int, rows: int) -> None:
+        self._size = Size(rows=int(rows), columns=int(columns))
+
+    def erase_down(self) -> None:
+        self.events.append(("erase_down",))
+
+    def reset_attributes(self) -> None:
+        self.events.append(("reset_attributes",))
+
+    def flush(self) -> None:
+        self.events.append(("flush",))
+
+
 class TUIHarness(AbstractAsyncContextManager["TUIHarness"]):
     """Drive a ``TUIApplication`` from tests.
 
@@ -227,11 +262,16 @@ class TUIHarness(AbstractAsyncContextManager["TUIHarness"]):
     """
 
     def __init__(
-        self, agent: FakeAgent | None = None, config: Any = None, full_screen: bool | None = None
+        self,
+        agent: FakeAgent | None = None,
+        config: Any = None,
+        full_screen: bool | None = None,
+        output: Output | None = None,
     ) -> None:
         self.agent = agent or FakeAgent()
         self._config = config
         self._full_screen = full_screen
+        self.output = output or DummyOutput()
         self._pipe_ctx: Any = None
         self._session_ctx: Any = None
         self._run_task: asyncio.Task | None = None
@@ -240,7 +280,7 @@ class TUIHarness(AbstractAsyncContextManager["TUIHarness"]):
     async def __aenter__(self) -> TUIHarness:
         self._pipe_ctx = create_pipe_input()
         pipe = self._pipe_ctx.__enter__()
-        self._session_ctx = create_app_session(input=pipe, output=DummyOutput())
+        self._session_ctx = create_app_session(input=pipe, output=self.output)
         self._session_ctx.__enter__()
 
         # Import locally so the stub can evolve without breaking harness
@@ -316,6 +356,19 @@ class TUIHarness(AbstractAsyncContextManager["TUIHarness"]):
         self._pipe.send_text(_key_sequence(key))
         await asyncio.sleep(0)
 
+    async def resize_from_terminal(self, columns: int, rows: int) -> None:
+        """Change terminal geometry and drive the supported redraw path."""
+        output = self.output
+        if not isinstance(output, MutableRecordingOutput):
+            raise TypeError("resize_from_terminal requires MutableRecordingOutput")
+        assert self.app is not None
+        previous_size_reads = sum(event[0] == "get_size" for event in output.events)
+        output.set_size(columns, rows)
+        self.app._app.invalidate()
+        await self.wait_for(
+            lambda: sum(event[0] == "get_size" for event in output.events) > previous_size_reads
+        )
+
     async def submit_async(self, text: str) -> None:
         """Type ``text`` and press Enter. Doesn't wait for any side-effect."""
         await self.type_keys(text)
@@ -357,10 +410,9 @@ class TUIHarness(AbstractAsyncContextManager["TUIHarness"]):
         return self.app.output_buffer.text
 
     def capture_output_ansi(self) -> str:
-        """Raw (ANSI-bearing) output. ``capture_output`` strips ANSI; this
-        preserves it so ``\\x1b[`` round-trip tests can assert styling."""
+        """Raw retained sources for ANSI round-trip assertions."""
         assert self.app is not None
-        return "".join(self.app._output_ansi)
+        return "".join(block.source for block in self.app._transcript_blocks)
 
     def capture_queued(self) -> list[str]:
         """Return queued items (pending user messages) in submission order.
