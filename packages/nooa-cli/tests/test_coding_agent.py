@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shared coding-agent construction and repository instructions."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from nooa_cli.coding import CodingAgent, discover_agent_instruction_files
@@ -144,3 +145,38 @@ async def test_coding_agent_owns_session_naming(tmp_path):
 
     assert hasattr(CodingAgent, "name_session")
     assert not hasattr(InteractiveAgent, "name_session")
+
+
+def test_repository_instructions_are_read_boundedly(tmp_path, monkeypatch):
+    """The cap must bound the read, not just what is kept.
+
+    Truncating after read_text() still pulls a workspace-controlled file into
+    memory in full. The budget also has to cover the rendered text — headers,
+    separators, truncation markers — or the declared total is not the real one.
+    """
+    from nooa_cli.coding import instructions
+
+    (tmp_path / ".git").mkdir()
+    reads: list[int | None] = []
+    real_open = Path.open
+
+    def spying_open(self, *args, **kwargs):
+        stream = real_open(self, *args, **kwargs)
+        real_read = stream.read
+
+        def read(size=-1):
+            reads.append(size)
+            return real_read(size)
+
+        stream.read = read  # type: ignore[method-assign]
+        return stream
+
+    monkeypatch.setattr(Path, "open", spying_open)
+    monkeypatch.setattr(instructions, "_MAX_INSTRUCTION_FILE_CHARS", 100)
+    (tmp_path / "AGENTS.md").write_text("x" * 10_000)
+
+    rendered = instructions.render_agent_instructions(tmp_path)
+
+    assert reads and all(size is not None and size <= 101 for size in reads), reads
+    assert "[... truncated ...]" in rendered
+    assert len(rendered) < 1_000

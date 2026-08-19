@@ -33,33 +33,44 @@ def discover_agent_instruction_files(working_directory: str | Path) -> tuple[Pat
 #: unbounded read is a memory and context-window risk at session setup.
 _MAX_INSTRUCTION_FILE_CHARS = 100_000
 _MAX_INSTRUCTION_TOTAL_CHARS = 200_000
-
-
-def _truncate(content: str, limit: int, path: Path) -> str:
-    if len(content) <= limit:
-        return content
-    logger.warning("Truncating repository instructions from %s at %d chars", path, limit)
-    return content[:limit] + f"\n\n[... truncated at {limit} characters ...]"
+_SECTION_SEPARATOR = "\n\n---\n\n"
 
 
 def render_agent_instructions(working_directory: str | Path) -> str:
-    """Render applicable repository instructions as one bounded context block."""
+    """Render applicable repository instructions as one bounded context block.
+
+    Reads are bounded rather than truncated after the fact: the content is
+    workspace-controlled and lands in a prefix context block on every turn, so
+    reading a huge file in full before discarding most of it would still cost
+    the memory. The budget covers the rendered text — headers, separators and
+    truncation markers included — not just the retained file content.
+    """
     sections: list[str] = []
     remaining = _MAX_INSTRUCTION_TOTAL_CHARS
     for path in discover_agent_instruction_files(working_directory):
         if remaining <= 0:
             logger.warning("Skipping repository instructions from %s: total limit reached", path)
             continue
+        budget = min(_MAX_INSTRUCTION_FILE_CHARS, remaining)
         try:
-            content = path.read_text(encoding="utf-8").strip()
+            with path.open("r", encoding="utf-8") as stream:
+                # One char past the budget is enough to know it was cut.
+                content = stream.read(budget + 1)
         except (OSError, UnicodeError):
             continue
+        truncated = len(content) > budget
+        if truncated:
+            content = content[:budget]
+            logger.warning("Truncating repository instructions from %s at %d chars", path, budget)
+        content = content.strip()
         if not content:
             continue
-        content = _truncate(content, min(_MAX_INSTRUCTION_FILE_CHARS, remaining), path)
-        remaining -= len(content)
-        sections.append(f"Instructions from {path}:\n\n{content}")
-    return "\n\n---\n\n".join(sections)
+        if truncated:
+            content += "\n\n[... truncated ...]"
+        section = f"Instructions from {path}:\n\n{content}"
+        remaining -= len(section) + len(_SECTION_SEPARATOR)
+        sections.append(section)
+    return _SECTION_SEPARATOR.join(sections)
 
 
 def _git_root(cwd: Path) -> Path | None:
