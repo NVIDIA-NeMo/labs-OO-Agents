@@ -1,4 +1,4 @@
-# Context 2.0 v5
+# Context Management in NOOA
 
 ## Goal
 
