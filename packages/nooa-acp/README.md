@@ -7,6 +7,34 @@ terminal path. Repository instructions (`AGENTS.md`), coding tools,
 summarization, installed `nooa.skills` entry points, and semantic file and
 terminal activity therefore do not have separate ACP implementations.
 
+## Opening a repository runs code from it
+
+**Creating a session imports Python from the workspace, before you send a
+prompt.** This is deliberate — it is how workspace skills work — but it means
+opening a folder is enough to execute code it contains. Treat opening a
+repository with NOOA as equivalent to running its build.
+
+Three paths load workspace code at `session/new` and `session/load`:
+
+- **Skill roots.** Every `.py` file under `.agents/skills`, `.cursor/skills`,
+  `.claude/skills`, or `.claude/commands` is imported. Module-level code runs
+  during import, before anything checks whether the file defines a skill, so the
+  contents are irrelevant.
+- **Workspace settings.** `<workspace>/.nooa/settings.yaml` and the legacy
+  `.nooa/config.toml` may name *additional* skill roots. Those paths are not
+  confined to the workspace: a relative path escaping it, an absolute path, or a
+  symlink is accepted as written.
+- **Libraries.** `<workspace>/.nooa/libs/<package>/` is imported and its
+  directory is prepended to `sys.path` for the life of the process. One ACP
+  server serves several workspaces, so a package name there can shadow the same
+  import for later sessions on other workspaces.
+
+The agent runs as you, in a process holding your model credentials. There is no
+consent prompt on these paths.
+
+**Open repositories you would run.** For anything else, use an OS-level sandbox,
+or start a separate server per workspace with credentials scoped to that task.
+
 ## Connect an ACP client
 
 Set the model and its provider credentials, then configure the client to launch
