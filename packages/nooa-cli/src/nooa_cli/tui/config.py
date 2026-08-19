@@ -118,7 +118,7 @@ class TUIConfig(BaseModel):
     reflection_debounce_s: float = 10.0
     reflection_grace_s: float = 0.5
 
-    # Native scrollback with clear+rewrite transcript replay on resize.
+    # Native scrollback with debounced clear+rewrite replay on width resize.
     full_screen: bool = True
 
     # Ordered, structured toolbar providers. Third-party packages can register

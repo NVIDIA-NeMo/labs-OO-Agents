@@ -136,6 +136,20 @@ class TestEmitBlockFailureSafety:
         fw.write("critical\n")
         assert "critical" in original.getvalue()
 
+    def test_fallback_exposes_terminal_controls_instead_of_executing_them(self):
+        original = io.StringIO()
+
+        def broken_emit(_: str) -> None:
+            raise RuntimeError("block queue exploded")
+
+        fw = _StrayStreamForwarder(original, broken_emit, prefix="! ", ansi_color="31")
+        fw.write("oops\x1b[2J\r\x07\n")
+        rendered = original.getvalue()
+
+        assert "\x1b[2J" not in rendered
+        assert "\x07" not in rendered
+        assert r"\x1b[2J\r\x07" in rendered
+
 
 class TestInstallUninstall:
     def test_install_replaces_both_streams_uninstall_restores(self):
