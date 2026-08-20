@@ -24,6 +24,7 @@ from nooa.strategies import CodeActStrategy, PredictStrategy
 from nooa.tools import SkillWriting, TodoManager
 from nooa.tools.shell_tools import ShellTools
 from nooa_cli.coding.activity import ActivityShellTools
+from nooa_cli.coding.delegation import CodingDelegationMixin
 from nooa_cli.coding.instructions import render_agent_instructions
 from nooa_cli.tools.repo_tools import RepoTools
 
@@ -34,12 +35,14 @@ if TYPE_CHECKING:
 __all__ = ["CodingAgent", "RespondReason"]
 
 
-class CodingAgent(InteractiveAgent):
+class CodingAgent(CodingDelegationMixin, InteractiveAgent):
     """A careful software-development agent working in one local repository.
 
     Inspect repository instructions and relevant code before editing. Preserve
     unrelated worktree changes. Use the shell for files and commands, the repo
-    tools for definitions and references, and todos for multi-step work.
+    tools for definitions and references, and todos for multi-step work. Use
+    ``delegate(objective, supplied_context)`` for bounded context-heavy research,
+    review, or independent implementation; inspect and integrate worker reports.
 
     Complete and verify the requested work before returning ``DONE``. Send each
     user-facing answer or question through ``self.message()`` as a complete
