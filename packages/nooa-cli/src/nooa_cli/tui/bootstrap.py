@@ -34,6 +34,7 @@ def _instantiate_custom_agent(
     storage,
     working_directory: str | Path,
     skills_dirs: list[Path],
+    summarization=None,
 ):
     """Instantiate an extension agent with the host arguments it declares."""
     parameters = inspect.signature(agent_cls).parameters
@@ -42,6 +43,8 @@ def _instantiate_custom_agent(
         kwargs["cwd"] = working_directory
     if "skills_dirs" in parameters:
         kwargs["skills_dirs"] = skills_dirs
+    if "summarization" in parameters:
+        kwargs["summarization"] = summarization
     return agent_cls(**kwargs)
 
 
@@ -433,6 +436,7 @@ async def bootstrap(
                 storage=session_manager._storage,
                 working_directory=config.agent.working_dir,
                 skills_dirs=config.tui.skills_dirs,
+                summarization=config.agent.summarization,
             )
             session_manager.update_agent_cls(type(agent).__name__)
             messages.append(
