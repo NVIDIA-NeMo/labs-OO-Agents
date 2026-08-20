@@ -47,7 +47,7 @@ class TextSkillInventory(BaseModel):
 
 
 class ScriptArgumentPlan(BaseModel):
-    """One inferred command-line argument for a generated script API."""
+    """One inferred parameter for a script-backed package API."""
 
     param_name: str
     cli_name: str | None = None
@@ -228,9 +228,9 @@ class TextSkillTranslator(Skill):
                 continue
             script_path = inventory.source_dir / file.path
 
-            # Every supported script gets a raw runner. The inferred APIs below
-            # are additive ergonomics: a CLI-shaped method for argparse scripts
-            # and direct methods for import-safe top-level Python functions.
+            # Every supported script gets a raw runner. The inferred methods
+            # below are additive package APIs: typed script-backed methods from
+            # argparse declarations and direct methods for import-safe functions.
             arguments = _infer_script_arguments(script_path)
             api_method_name = _api_method_name(file.path, used_api_names) if arguments else None
             function_methods = _infer_script_functions(script_path, used_api_names)
@@ -484,7 +484,7 @@ def _default_interpreter(file: TextSkillFile) -> str | None:
 
 
 def _infer_script_arguments(path: Path) -> list[ScriptArgumentPlan]:
-    """Infer a named package method from simple argparse declarations."""
+    """Infer a named package API from simple argparse declarations."""
     if path.suffix.lower() != ".py":
         return []
     try:
@@ -827,7 +827,7 @@ def _render_readme(plan: ConversionPlan) -> str:
 def _render_init(plan: ConversionPlan) -> str:
     # Generated skills have three API layers: resource access, raw script
     # runners that preserve TextSkill behavior, and any inferred ergonomic
-    # methods planned from argparse declarations or import-safe functions.
+    # package methods planned from argparse declarations or import-safe functions.
     methods = "\n".join(
         rendered
         for method in plan.script_methods
@@ -983,7 +983,7 @@ def _render_api_method(method: ScriptMethodPlan) -> str:
 
     lines: list[str] = [
         f"async def {method.api_method_name}(self, {signature}) -> str:",
-        f'    """Run `{method.script_path}` with named command-line arguments."""',
+        f'    """Execute `{method.script_path}` through a typed package API."""',
         "    args: list[str] = []",
     ]
     for argument in method.arguments:
