@@ -7,7 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 from nooa_cli.coding import CodingAgent, discover_agent_instruction_files
+from nooa_cli.coding import delegation as delegation_module
 
+from nooa.agentdoc import doc
 from nooa.skill import Skill, get_slash_commands, slash_command
 from nooa.unifiedllm import FakeLLMClient
 
@@ -229,3 +231,48 @@ async def test_a_directly_assigned_protected_attribute_is_still_protected(tmp_pa
         agent.skills.register("nemo.shell", shell)
     finally:
         await agent.close()
+
+
+async def test_coding_agent_delegates_with_same_model_and_workspace(tmp_path, monkeypatch):
+    """TUI/ACP coding hosts expose the tested context-isolated worker primitive."""
+    observed = {}
+
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            observed.update(kwargs)
+
+        async def investigate(self, objective: str, supplied_context=None) -> str:
+            observed.update(objective=objective, supplied_context=supplied_context)
+            return "review complete"
+
+        async def close(self) -> None:
+            observed["closed"] = True
+
+    monkeypatch.setattr(delegation_module, "CodingWorker", FakeWorker)
+    llm = FakeLLMClient()
+    agent = CodingAgent(llm=llm, cwd=tmp_path)
+    try:
+        todos = [agent.todo.add("Review empty-input handling")]
+        result = await agent.delegate("review parser", todos)
+        assert result == "review complete"
+        assert observed.pop("supplied_context") is todos
+        assert observed == {
+            "llm": llm,
+            "cwd": agent.shell.cwd,
+            "init_command": None,
+            "objective": "review parser",
+            "closed": True,
+        }
+    finally:
+        await agent.close()
+
+
+def test_coding_agent_prompt_exposes_bounded_delegation(tmp_path):
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        rendered = doc(agent)
+        assert "delegate" in rendered
+        assert "bounded context-heavy" in (CodingAgent.__doc__ or "")
+    finally:
+        # This sync test does not start shell work; close is covered elsewhere.
+        pass

@@ -12,4 +12,9 @@ nemo-harbor --help
 See the [main repository](https://github.com/NVIDIA-NeMo/labs-OO-Agents) for
 documentation.
 
+Two agent variants are available through `nemo-harbor --agent-type`:
+
+- `bench` — compact single-agent CodeAct baseline with automatic summarization.
+- `rlm` — the same controller plus explicit context-isolated coding workers.
+
 Apache-2.0 licensed.
