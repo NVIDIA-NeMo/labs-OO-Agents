@@ -182,6 +182,7 @@ dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
     "pytest-rerunfailures>=14.0",
+    "pytest-timeout>=2.3.0",
     "mypy>=1.7.0",
     "ruff>=0.14.14",
     "httpx[socks]>=0.28.1",
@@ -204,6 +205,12 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# A hang is a failure, not a pending result. Without this a test that wedges —
+# a lock that never releases, a subprocess prompt that never answers — stalls
+# CI instead of reporting, and a stalled job reads as "still running" rather
+# than "broken". Deliberately far above any real test: the slowest here is a
+# few seconds, so this only ever fires on a genuine hang.
+timeout = 300
 testpaths = [
     "tests",
     "tests/agentdoc",
