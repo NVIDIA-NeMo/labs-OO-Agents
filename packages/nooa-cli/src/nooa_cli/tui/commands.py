@@ -301,13 +301,35 @@ class HelpCommand(Command):
 
     @classmethod
     def help_text(cls) -> dict[str, str]:
-        return {"/help": "Show this help message"}
+        return {"/help [COMMAND]": "Show all commands, or detailed help for one command"}
+
+    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
+        if len(args) > 1:
+            return False, "Usage: /help [command]"
+        return True, None
+
+    @staticmethod
+    def _command_token(help_entry: str) -> str:
+        """Return the command name from a help entry such as ``/model [NAME]``."""
+        token = help_entry.split(None, 1)[0].strip()
+        return token.removeprefix("/").lower()
 
     async def execute(self, args: list[str]) -> "CommandResult":
         commands_dict = (
             self._registry.get_builtin_help() if self._registry else CommandRegistry.get_help()
         )
-        return CommandResult.ok(HelpOutput(commands_dict))
+        if not args:
+            return CommandResult.ok(HelpOutput(commands_dict))
+
+        query = args[0].removeprefix("/").lower()
+        filtered = {
+            entry: description
+            for entry, description in commands_dict.items()
+            if self._command_token(entry) == query
+        }
+        if not filtered:
+            return CommandResult.err(f"No help found for /{query}. Type /help for commands.")
+        return CommandResult.ok(HelpOutput(filtered))
 
 
 class ExitCommand(Command):
@@ -757,9 +779,7 @@ class ModelCommand(Command):
             pending_secret=pending_secret,
         )
 
-    async def _persist_pending_secret(
-        self, pending: tuple[str, str]
-    ) -> "CommandResult | None":
+    async def _persist_pending_secret(self, pending: tuple[str, str]) -> "CommandResult | None":
         """Write a validated secret to project secrets.yaml; return err on failure."""
         from nooa.paths import get_project_dir
 
@@ -767,9 +787,7 @@ class ModelCommand(Command):
 
         name, value = pending
         try:
-            await asyncio.to_thread(
-                write_secret_env, get_project_dir("secrets.yaml"), name, value
-            )
+            await asyncio.to_thread(write_secret_env, get_project_dir("secrets.yaml"), name, value)
         except (ModelCatalogError, OSError, ValueError) as exc:
             return CommandResult.err(f"Could not save {name} to secrets.yaml: {exc}")
         return None
