@@ -5,7 +5,6 @@
 from types import SimpleNamespace
 
 from nooa_cli.coding import CodingAgent, discover_agent_instruction_files
-from nooa_cli.coding import delegation as delegation_module
 from nooa_cli.tui.bootstrap import _instantiate_custom_agent
 
 from nooa.agentdoc import doc
@@ -118,7 +117,7 @@ async def test_coding_agent_delegates_with_same_model_and_workspace(tmp_path, mo
         async def close(self) -> None:
             observed["closed"] = True
 
-    monkeypatch.setattr(delegation_module, "CodingWorker", FakeWorker)
+    monkeypatch.setattr(CodingAgent, "_worker_type", FakeWorker)
     llm = FakeLLMClient()
     agent = CodingAgent(llm=llm, cwd=tmp_path)
     try:
