@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import keyword
@@ -45,12 +46,46 @@ class TextSkillInventory(BaseModel):
         return [file for file in self.files if file.kind == "script"]
 
 
+class ScriptArgumentPlan(BaseModel):
+    """One inferred command-line argument for a generated script API."""
+
+    param_name: str
+    cli_name: str | None = None
+    positional: bool = False
+    required: bool = False
+    annotation: Literal["str", "int", "float", "bool"] = "str"
+    default: str | int | float | bool | None = None
+    action: Literal["store", "store_true", "store_false"] = "store"
+
+
+class FunctionParameterPlan(BaseModel):
+    """One inferred Python function parameter for a generated module API."""
+
+    param_name: str
+    annotation: str = "object"
+    required: bool = True
+    default: str | int | float | bool | None = None
+
+
+class ScriptFunctionPlan(BaseModel):
+    """Plan for one generated wrapper around a Python function in a script."""
+
+    function_name: str
+    method_name: str
+    parameters: list[FunctionParameterPlan] = Field(default_factory=list)
+    return_annotation: str = "object"
+    docstring: str = ""
+
+
 class ScriptMethodPlan(BaseModel):
     """Plan for one generated wrapper method around a bundled script."""
 
     script_path: str
     method_name: str
     interpreter: str | None = None
+    api_method_name: str | None = None
+    arguments: list[ScriptArgumentPlan] = Field(default_factory=list)
+    function_methods: list[ScriptFunctionPlan] = Field(default_factory=list)
 
 
 class ConversionPlan(BaseModel):
@@ -183,16 +218,24 @@ class TextSkillTranslator(Skill):
         docstring = _build_docstring(inventory)
 
         used_names: set[str] = set()
+        used_api_names: set[str] = set()
         script_methods: list[ScriptMethodPlan] = []
         for file in inventory.scripts:
             interpreter = _default_interpreter(file)
             if interpreter is None and not file.executable:
                 continue
+            script_path = inventory.source_dir / file.path
+            arguments = _infer_script_arguments(script_path)
+            api_method_name = _api_method_name(file.path, used_api_names) if arguments else None
+            function_methods = _infer_script_functions(script_path, used_api_names)
             script_methods.append(
                 ScriptMethodPlan(
                     script_path=file.path,
                     method_name=_script_method_name(file.path, used_names),
                     interpreter=interpreter,
+                    api_method_name=api_method_name,
+                    arguments=arguments,
+                    function_methods=function_methods,
                 )
             )
 
@@ -410,8 +453,21 @@ def _script_method_name(script_path: str, used_names: set[str]) -> str:
     return name
 
 
+def _api_method_name(script_path: str, used_names: set[str]) -> str:
+    name = _normalize_identifier(Path(script_path).stem)
+    if name in {"run_resource_script", "read_resource", "list_resources", "_resource_root"}:
+        name = f"{name}_api"
+    base = name
+    index = 2
+    while name in used_names:
+        name = f"{base}_{index}"
+        index += 1
+    used_names.add(name)
+    return name
+
+
 def _default_interpreter(file: TextSkillFile) -> str | None:
-    if file.shebang:
+    if file.shebang and file.executable:
         return None
     suffix = Path(file.path).suffix.lower()
     if suffix == ".py":
@@ -419,6 +475,286 @@ def _default_interpreter(file: TextSkillFile) -> str | None:
     if suffix in {".sh", ".bash"}:
         return '"bash"'
     return None
+
+
+def _infer_script_arguments(path: Path) -> list[ScriptArgumentPlan]:
+    if path.suffix.lower() != ".py":
+        return []
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return []
+
+    arguments: list[ScriptArgumentPlan] = []
+    used_names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Attribute) or node.func.attr != "add_argument":
+            continue
+        argument = _argument_from_add_argument(node, used_names)
+        if argument is not None:
+            arguments.append(argument)
+    return arguments
+
+
+def _infer_script_functions(path: Path, used_names: set[str]) -> list[ScriptFunctionPlan]:
+    if path.suffix.lower() != ".py":
+        return []
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return []
+    if not _module_top_level_is_import_safe(tree):
+        return []
+
+    methods: list[ScriptFunctionPlan] = []
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        if node.name.startswith("_") or node.name in {"main", "app", "get_args"}:
+            continue
+        parameters = _function_parameters(node)
+        if parameters is None:
+            continue
+        method_name = _function_method_name(node.name, used_names)
+        methods.append(
+            ScriptFunctionPlan(
+                function_name=node.name,
+                method_name=method_name,
+                parameters=parameters,
+                return_annotation=_safe_annotation(node.returns),
+                docstring=ast.get_docstring(node) or "",
+            )
+        )
+    return methods
+
+
+def _module_top_level_is_import_safe(tree: ast.Module) -> bool:
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef)):
+            continue
+        if _is_module_docstring(node) or _is_main_guard(node):
+            continue
+        if isinstance(node, ast.Assign) and _literal_container(node.value):
+            continue
+        if isinstance(node, ast.AnnAssign) and _literal_container(node.value):
+            continue
+        return False
+    return True
+
+
+def _is_module_docstring(node: ast.AST) -> bool:
+    return isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+
+
+def _is_main_guard(node: ast.AST) -> bool:
+    if not isinstance(node, ast.If):
+        return False
+    test = node.test
+    if not isinstance(test, ast.Compare):
+        return False
+    if not isinstance(test.left, ast.Name) or test.left.id != "__name__":
+        return False
+    if len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq):
+        return False
+    if len(test.comparators) != 1:
+        return False
+    comparator = test.comparators[0]
+    return isinstance(comparator, ast.Constant) and comparator.value == "__main__"
+
+
+def _literal_container(node: ast.AST | None) -> bool:
+    if node is None:
+        return True
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, (str, int, float, bool, type(None)))
+    if _literal_number(node) is not None:
+        return True
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return all(_literal_container(item) for item in node.elts)
+    if isinstance(node, ast.Dict):
+        return all(
+            _literal_container(key) and _literal_container(value)
+            for key, value in zip(node.keys, node.values, strict=True)
+        )
+    return False
+
+
+def _function_parameters(node: ast.FunctionDef) -> list[FunctionParameterPlan] | None:
+    args = node.args
+    if args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg:
+        return None
+    defaults = list(args.defaults)
+    required_count = len(args.args) - len(defaults)
+    padded_defaults: list[ast.AST | None] = [None] * required_count + defaults
+    parameters: list[FunctionParameterPlan] = []
+    used_names: set[str] = set()
+    for arg, default_node in zip(args.args, padded_defaults, strict=True):
+        param_name = arg.arg
+        if not param_name or param_name in used_names:
+            return None
+        used_names.add(param_name)
+        default, default_supported = _function_default(default_node)
+        if not default_supported:
+            return None
+        parameters.append(
+            FunctionParameterPlan(
+                param_name=param_name,
+                annotation=_safe_annotation(arg.annotation),
+                required=default_node is None,
+                default=default,
+            )
+        )
+    return parameters
+
+
+def _function_method_name(function_name: str, used_names: set[str]) -> str:
+    name = _normalize_identifier(function_name)
+    if name in {"run_resource_script", "read_resource", "list_resources", "_resource_root"}:
+        name = f"{name}_function"
+    base = name
+    index = 2
+    while name in used_names:
+        name = f"{base}_{index}"
+        index += 1
+    used_names.add(name)
+    return name
+
+
+def _safe_annotation(node: ast.AST | None) -> str:
+    if isinstance(node, ast.Name) and node.id in {"str", "int", "float", "bool"}:
+        return node.id
+    if isinstance(node, ast.Constant) and node.value is None:
+        return "None"
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        left = _safe_annotation(node.left)
+        right = _safe_annotation(node.right)
+        if "object" in {left, right}:
+            return "object"
+        return f"{left} | {right}"
+    if isinstance(node, ast.Subscript):
+        base = _annotation_name(node.value)
+        if base == "Optional":
+            inner = _safe_annotation(node.slice)
+            return "object | None" if inner == "object" else f"{inner} | None"
+        if base == "Union":
+            elements = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+            rendered = [_safe_annotation(element) for element in elements]
+            if any(annotation == "object" for annotation in rendered):
+                return "object"
+            return " | ".join(rendered)
+        builtin_base = {"List": "list", "Tuple": "tuple", "Dict": "dict", "Set": "set"}.get(base, base)
+        if builtin_base not in {"list", "tuple", "dict", "set"}:
+            return "object"
+        elements = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+        rendered = [_safe_annotation(element) for element in elements]
+        if any(annotation == "object" for annotation in rendered):
+            return "object"
+        return f"{builtin_base}[{', '.join(rendered)}]"
+    return "object"
+
+
+def _annotation_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    return None
+
+
+def _argument_from_add_argument(
+    node: ast.Call, used_names: set[str]
+) -> ScriptArgumentPlan | None:
+    raw_names = [_literal_string(arg) for arg in node.args]
+    names = [name for name in raw_names if name]
+    if not names:
+        return None
+    kwargs = {
+        keyword.arg: keyword.value
+        for keyword in node.keywords
+        if keyword.arg is not None
+    }
+    if "nargs" in kwargs:
+        return None
+
+    positional = not any(name.startswith("-") for name in names)
+    cli_name = None if positional else _choose_cli_name(names)
+    dest = _literal_string(kwargs.get("dest")) if "dest" in kwargs else None
+    param_source = dest or (names[0] if positional else cli_name)
+    if param_source is None:
+        return None
+    param_name = _normalize_identifier(param_source.lstrip("-").replace("-", "_"))
+    if not param_name or param_name in used_names:
+        return None
+    used_names.add(param_name)
+
+    action = _literal_string(kwargs.get("action")) if "action" in kwargs else None
+    if action in {"store_true", "store_false"}:
+        annotation: Literal["str", "int", "float", "bool"] = "bool"
+        default: str | int | float | bool | None = action == "store_false"
+        normalized_action: Literal["store", "store_true", "store_false"] = action
+    elif action not in {None, "store"}:
+        return None
+    else:
+        annotation = _annotation_from_type(kwargs.get("type"))
+        default = _literal_default(kwargs.get("default"))
+        normalized_action = "store"
+
+    required = positional or bool(_literal_default(kwargs.get("required")))
+    return ScriptArgumentPlan(
+        param_name=param_name,
+        cli_name=cli_name,
+        positional=positional,
+        required=required,
+        annotation=annotation,
+        default=default,
+        action=normalized_action,
+    )
+
+
+def _literal_string(node: ast.AST | None) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _literal_default(node: ast.AST | None) -> str | int | float | bool | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, (str, int, float, bool)):
+        return node.value
+    number = _literal_number(node)
+    if number is not None:
+        return number
+    return None
+
+
+def _function_default(node: ast.AST | None) -> tuple[str | int | float | bool | None, bool]:
+    if node is None:
+        return None, True
+    if isinstance(node, ast.Constant) and node.value is None:
+        return None, True
+    default = _literal_default(node)
+    return default, default is not None
+
+
+def _literal_number(node: ast.AST | None) -> int | float | None:
+    if not isinstance(node, ast.UnaryOp) or not isinstance(node.op, (ast.USub, ast.UAdd)):
+        return None
+    if not isinstance(node.operand, ast.Constant) or not isinstance(node.operand.value, (int, float)):
+        return None
+    return -node.operand.value if isinstance(node.op, ast.USub) else node.operand.value
+
+
+def _choose_cli_name(names: list[str]) -> str | None:
+    long_names = [name for name in names if name.startswith("--")]
+    if long_names:
+        return max(long_names, key=len)
+    option_names = [name for name in names if name.startswith("-")]
+    return option_names[0] if option_names else None
+
+
+def _annotation_from_type(node: ast.AST | None) -> Literal["str", "int", "float", "bool"]:
+    if isinstance(node, ast.Name) and node.id in {"str", "int", "float"}:
+        return node.id  # type: ignore[return-value]
+    return "str"
 
 
 def _build_docstring(inventory: TextSkillInventory) -> str:
@@ -474,13 +810,23 @@ def _render_readme(plan: ConversionPlan) -> str:
 
 
 def _render_init(plan: ConversionPlan) -> str:
-    methods = "\n".join(_render_script_method(method) for method in plan.script_methods)
+    methods = "\n".join(
+        rendered
+        for method in plan.script_methods
+        for rendered in (
+            _render_script_method(method),
+            _render_api_method(method),
+            *(_render_function_method(method, function) for function in method.function_methods),
+        )
+        if rendered
+    )
     if methods:
         methods = "\n" + methods
     docstring = textwrap.indent(_triple_quoted(plan.docstring), "    ")
     template = textwrap.dedent(f'''\
         from __future__ import annotations
 
+        import importlib.util
         import sys
         from importlib import resources
         from pathlib import Path
@@ -494,6 +840,28 @@ def _render_init(plan: ConversionPlan) -> str:
 
             def _resource_root(self):
                 return resources.files(__package__) / "{plan.resource_prefix}"
+
+            def _load_resource_module(self, path: str):
+                root = Path(self._resource_root()).resolve()
+                module_path = (root / path).resolve()
+                if not module_path.is_relative_to(root):
+                    raise ValueError(f"Path {{path!r}} escapes package resources")
+                if not module_path.is_file():
+                    raise FileNotFoundError(path)
+                cache = getattr(self, "_module_cache", None)
+                if cache is None:
+                    cache = {{}}
+                    self._module_cache = cache
+                if path in cache:
+                    return cache[path]
+                module_name = f"{{__package__}}._resource_{{abs(hash(path))}}"
+                spec = importlib.util.spec_from_file_location(module_name, module_path)
+                if spec is None or spec.loader is None:
+                    raise ImportError(f"Cannot import resource module {{path!r}}")
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                cache[path] = module
+                return module
 
             def list_resources(self) -> list[str]:
                 """Return all bundled resource paths."""
@@ -577,21 +945,122 @@ def _render_script_method(method: ScriptMethodPlan) -> str:
     )
 
 
-def _render_tests(plan: ConversionPlan) -> str:
-    script_assertions = "\n".join(
-        f"    assert {method.script_path!r} in skill.list_resources()"
-        for method in plan.script_methods
+def _render_api_method(method: ScriptMethodPlan) -> str:
+    if not method.api_method_name or not method.arguments:
+        return ""
+
+    timeout_name = "timeout"
+    arg_names = {argument.param_name for argument in method.arguments}
+    if timeout_name in arg_names:
+        timeout_name = "execution_timeout"
+
+    required_args = [
+        argument for argument in method.arguments if argument.required and argument.action == "store"
+    ]
+    optional_args = [argument for argument in method.arguments if argument not in required_args]
+    signature_parts = [_render_api_parameter(argument, required=True) for argument in required_args]
+    signature_parts.extend(_render_api_parameter(argument, required=False) for argument in optional_args)
+    signature_parts.append(f"{timeout_name}: float = 30.0")
+    signature = ", ".join(signature_parts)
+
+    lines: list[str] = [
+        f"async def {method.api_method_name}(self, {signature}) -> str:",
+        f'    """Run `{method.script_path}` with named command-line arguments."""',
+        "    args: list[str] = []",
+    ]
+    for argument in method.arguments:
+        lines.extend(_render_argument_append(argument))
+    lines.extend(
+        [
+            f"    return await self.{method.method_name}(*args, timeout={timeout_name})",
+            "",
+        ]
     )
-    if not script_assertions:
-        script_assertions = "    assert isinstance(skill.list_resources(), list)"
-    return textwrap.dedent(f"""\
-        from {plan.package_name} import {plan.class_name}
+    return textwrap.indent("\n".join(lines), "    ")
 
 
-        def test_skill_instantiates_and_lists_resources():
-            skill = {plan.class_name}()
-        {script_assertions}
-    """)
+def _render_function_method(method: ScriptMethodPlan, function: ScriptFunctionPlan) -> str:
+    signature_parts = [_render_function_parameter(parameter) for parameter in function.parameters]
+    signature = ", ".join(signature_parts)
+    if signature:
+        signature = f", {signature}"
+    call_args = ", ".join(f"{parameter.param_name}={parameter.param_name}" for parameter in function.parameters)
+    docstring = function.docstring.strip() or f"Call `{function.function_name}` from `{method.script_path}`."
+    lines = [
+        f"def {function.method_name}(self{signature}) -> {function.return_annotation}:",
+        f"    {_triple_quoted(docstring)}",
+        f"    module = self._load_resource_module({method.script_path!r})",
+        f"    return module.{function.function_name}({call_args})",
+        "",
+    ]
+    return textwrap.indent("\n".join(lines), "    ")
+
+
+def _render_function_parameter(parameter: FunctionParameterPlan) -> str:
+    if parameter.required:
+        return f"{parameter.param_name}: {parameter.annotation}"
+    default = repr(parameter.default)
+    return f"{parameter.param_name}: {parameter.annotation} = {default}"
+
+
+def _render_api_parameter(argument: ScriptArgumentPlan, *, required: bool) -> str:
+    annotation = argument.annotation
+    if argument.action in {"store_true", "store_false"}:
+        default = "False" if argument.action == "store_true" else "True"
+        return f"{argument.param_name}: bool = {default}"
+    if required:
+        return f"{argument.param_name}: {annotation}"
+    default = repr(argument.default) if argument.default is not None else "None"
+    return f"{argument.param_name}: {annotation} | None = {default}"
+
+
+def _render_argument_append(argument: ScriptArgumentPlan) -> list[str]:
+    name = argument.param_name
+    if argument.positional:
+        return [f"    args.append(str({name}))"]
+    if argument.cli_name is None:
+        return []
+    if argument.action == "store_true":
+        return [
+            f"    if {name}:",
+            f"        args.append({argument.cli_name!r})",
+        ]
+    if argument.action == "store_false":
+        return [
+            f"    if not {name}:",
+            f"        args.append({argument.cli_name!r})",
+        ]
+    if argument.required:
+        return [f"    args.extend([{argument.cli_name!r}, str({name})])"]
+    return [
+        f"    if {name} is not None:",
+        f"        args.extend([{argument.cli_name!r}, str({name})])",
+    ]
+
+
+def _render_tests(plan: ConversionPlan) -> str:
+    lines = [
+        f"from {plan.package_name} import {plan.class_name}",
+        "",
+        "",
+        "def test_skill_instantiates_and_lists_resources():",
+        f"    skill = {plan.class_name}()",
+    ]
+    if plan.script_methods:
+        for method in plan.script_methods:
+            lines.extend(_test_assertions(method))
+    else:
+        lines.append("    assert isinstance(skill.list_resources(), list)")
+    return "\n".join(lines) + "\n"
+
+
+def _test_assertions(method: ScriptMethodPlan) -> list[str]:
+    assertions = [f"    assert {method.script_path!r} in skill.list_resources()"]
+    if method.api_method_name:
+        assertions.append(f"    assert hasattr(skill, {method.api_method_name!r})")
+    for function in method.function_methods:
+        assertions.append(f"    assert hasattr(skill, {function.method_name!r})")
+    return assertions
 
 
 def _triple_quoted(value: str) -> str:
