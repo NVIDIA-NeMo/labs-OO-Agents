@@ -202,9 +202,16 @@ async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
     client = _RecordingClient()
     bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
 
+    agent.event_manager.add(AgentMessage(content="alive"))
     agent.event_manager.add(LLMComplete(prompt_tokens=40, completion_tokens=10, cost_usd=0.25))
     await bridge.flush()
 
+    # Positive control: prove the bridge is actually forwarding before asserting
+    # an absence. Without it this passes even with every handler unsubscribed.
+    assert any(
+        isinstance(update, AgentMessageChunk) and update.content.text == "alive"
+        for _, update in client.updates
+    )
     assert not any(isinstance(update, UsageUpdate) for _, update in client.updates)
     await bridge.close()
     await agent.close()
