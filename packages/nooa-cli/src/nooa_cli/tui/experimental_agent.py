@@ -4,16 +4,14 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 from nooa import hidden, strategy
 from nooa.config import CodeActConfig
 from nooa.interactive import RespondResult
 from nooa.strategies.codeact_experimental import CodeActExperimental
+from nooa_cli.coding.agent import CodingAgent
 from nooa_cli.coding.delegation import CodingWorker
-from nooa_cli.tui.agent import TUIAgent
 
 
 class ExperimentalCodingWorker(CodingWorker):
@@ -39,7 +37,7 @@ class ExperimentalCodingWorker(CodingWorker):
         ...
 
 
-class ExperimentalTUIAgent(TUIAgent):
+class ExperimentalTUIAgent(CodingAgent):
     """Opt-in TUI coding agent backed by :class:`CodeActExperimental`.
 
     Select it without changing the default TUI behavior::
@@ -48,18 +46,6 @@ class ExperimentalTUIAgent(TUIAgent):
     """
 
     _worker_type = ExperimentalCodingWorker
-
-    def __init__(
-        self,
-        llm=None,
-        *,
-        cwd: str | Path = ".",
-        skills_dirs: list[Path] | None = None,
-        **kwargs: Any,
-    ) -> None:
-        # Custom TUI agents receive ``cwd`` rather than the host's AgentConfig.
-        config = kwargs.pop("config", None) or SimpleNamespace(working_dir=cwd)
-        super().__init__(llm=llm, config=config, skills_dirs=skills_dirs, **kwargs)
 
     @hidden
     @strategy(CodeActExperimental(config=CodeActConfig(cell_timeout=1800.0)))

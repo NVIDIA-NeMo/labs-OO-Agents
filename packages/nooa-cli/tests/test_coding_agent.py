@@ -276,3 +276,38 @@ def test_coding_agent_prompt_exposes_bounded_delegation(tmp_path):
     finally:
         # This sync test does not start shell work; close is covered elsewhere.
         pass
+
+def test_custom_coding_agent_receives_workspace_extension_arguments(tmp_path):
+    captured = {}
+
+    class CustomAgent:
+        def __init__(self, *, llm, storage, cwd, skills_dirs, summarization):
+            captured.update(
+                llm=llm,
+                storage=storage,
+                cwd=cwd,
+                skills_dirs=skills_dirs,
+                summarization=summarization,
+            )
+
+    llm = object()
+    storage = object()
+    skills_dirs = [tmp_path / "skills"]
+    summarization = object()
+    agent = _instantiate_custom_agent(
+        CustomAgent,
+        llm=llm,
+        storage=storage,
+        working_directory=tmp_path,
+        skills_dirs=skills_dirs,
+        summarization=summarization,
+    )
+
+    assert isinstance(agent, CustomAgent)
+    assert captured == {
+        "llm": llm,
+        "storage": storage,
+        "cwd": tmp_path,
+        "skills_dirs": skills_dirs,
+        "summarization": summarization,
+    }
