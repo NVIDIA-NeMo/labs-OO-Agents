@@ -26,7 +26,6 @@ with _hidden:
     import os
     from typing import TYPE_CHECKING, Any
 
-    from nooa_cli.coding.delegation import CodingDelegationMixin
     from nooa_cli.tools.repo_tools import RepoTools
     from pydantic import BaseModel, Field
 
@@ -34,7 +33,7 @@ with _hidden:
     from nooa.agentdoc import doc
     from nooa.config import CodeActConfig
     from nooa.interactive import SummarizationConfig, install_summarizer
-    from nooa.strategies import CodeActStrategy
+    from nooa.strategies.codeact_experimental import CodeActExperimental
     from nooa.tools.shell_tools import ShellTools
     from nooa.tools.todo import TodoManager
     from nooa.unifiedllm import FakeLLMClient
@@ -88,7 +87,7 @@ class BenchAgent(
     llm=FakeLLMClient(),
     context={"todo_status": Context(expr="self.todo.status()")},
 ):
-    """Compact benchmark agent for code and system tasks.
+    """You are an autonomous software engineering agent.
 
     Read relevant code before editing, preserve unrelated work, make the smallest
     sufficient change, and verify with an observed command result. Use todos only
@@ -104,13 +103,22 @@ class BenchAgent(
         llm: UnifiedLLM | None = None,
         *,
         summarization: SummarizationConfig | None = None,
+        working_dir: str | None = None,
+        delegation_depth: int = 0,
+        max_delegation_depth: int = 4,
         **kwargs: Any,
     ) -> None:
         super().__init__(llm=llm, **kwargs)
-        cwd = next((d for d in ("/testbed", "/app") if os.path.isdir(d)), os.getcwd())
+        cwd = working_dir or next(
+            (d for d in ("/testbed", "/app") if os.path.isdir(d)), os.getcwd()
+        )
+        self._delegation_depth = delegation_depth
+        self._max_delegation_depth = max_delegation_depth
         self._install_python_tools(cwd)
         self.todo = TodoManager()
-        self.context_manager["python_tools"] = Context(doc(RepoTools, ShellTools), prefix=True)
+        self.context_manager["python_tools"] = Context(
+            doc(ShellTools, RepoTools, TodoManager), prefix=True
+        )
         install_summarizer(summarization or SummarizationConfig(), self)
 
     def _install_python_tools(self, cwd: str) -> None:
@@ -150,8 +158,33 @@ class BenchAgent(
             _logger.error("BenchAgent failed: %s", e)
             return {"response": "", "success": False, "error": str(e)}
 
+    async def delegate(self, objective: str, supplied_context: Any = None) -> TaskResult:
+        """Ask an isolated subagent of your own type to complete a bounded objective.
+
+        Use this when an independent context is useful for exploration, diagnosis,
+        review, or implementation. Make ``objective`` self-contained and state
+        whether edits are allowed. ``supplied_context`` may be any useful object or
+        collection. Independent calls may run concurrently with ``asyncio.gather``.
+        Inspect and integrate each result; you retain final verification ownership.
+        """
+        if self._delegation_depth >= self._max_delegation_depth:
+            raise RuntimeError(f"maximum delegation depth ({self._max_delegation_depth}) reached")
+        subagent = type(self)(
+            llm=self.llm,
+            working_dir=str(self.shell.cwd),
+            delegation_depth=self._delegation_depth + 1,
+            max_delegation_depth=self._max_delegation_depth,
+        )
+        description = objective
+        if supplied_context is not None:
+            description += f"\n\nSupplied context:\n{supplied_context!r}"
+        try:
+            return await subagent._solve_task(description)
+        finally:
+            await subagent.shell.close()
+
     @strategy(
-        CodeActStrategy(
+        CodeActExperimental(
             config=CodeActConfig(
                 max_iterations=300, max_retries=10, text_only_stop_behavior="synthetic_comment"
             )
@@ -168,19 +201,23 @@ class BenchAgent(
         ...
 
 
-class RLMBenchAgent(CodingDelegationMixin, BenchAgent):
-    """Benchmark controller with explicit context-isolated worker delegation.
+class RLMBenchAgent(BenchAgent):
+    """You are an autonomous software engineering agent.
 
-    Delegate bounded, context-heavy exploration, diagnosis, review, or independent
-    implementation. Keep planning, integration, final verification, and the final
-    ``TaskResult`` in the controller. Independent calls may use ``asyncio.gather``;
-    dependent calls must be sequential.
+    Read relevant code before editing, preserve unrelated work, make the smallest
+    sufficient change, and verify with an observed command result. Use todos only
+    when they clarify multi-step work. Finish with ``TaskResult``.
+
+    Use context-isolated subagents deliberately for bounded, context-heavy work.
+    Keep planning, integration, final verification, and the final ``TaskResult``
+    in this agent. Run independent delegations concurrently and dependent
+    delegations sequentially.
     """
 
     _worker_init_command = _OPTIONAL_TESTBED_ACTIVATE
 
     @strategy(
-        CodeActStrategy(
+        CodeActExperimental(
             config=CodeActConfig(
                 max_iterations=300, max_retries=10, text_only_stop_behavior="synthetic_comment"
             )
