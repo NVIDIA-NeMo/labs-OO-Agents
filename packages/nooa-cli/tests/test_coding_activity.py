@@ -3,6 +3,7 @@
 """Semantic activity emitted by the shared interactive coding tools."""
 
 import asyncio
+from pathlib import Path
 
 import nooa_cli.coding.activity as activity
 import pytest
@@ -314,3 +315,56 @@ async def test_overwriting_an_empty_file_reports_no_original_lines(tmp_path):
     edit = next(event for event in events if isinstance(event, FileEdit))
     assert edit.operation == "update"
     assert (edit.start_line, edit.end_line) == (None, None)
+
+
+async def test_a_path_outside_the_workspace_is_made_relative(tmp_path):
+    """The fallback branch was unreachable from the other tests.
+
+    Every fixture file lives under tmp_path, which is the shell cwd, so
+    relative_to() always succeeds and the except branch never ran — leaving
+    `assert "a//" not in edit.diff` unable to fail.
+    """
+    shell, _ = _observed_shell(tmp_path)
+    try:
+        assert shell._diff_path(Path("/etc/hosts")) == "etc/hosts"
+        inside = tmp_path / "kept.txt"
+        assert shell._diff_path(inside) == "kept.txt"
+    finally:
+        await shell.close()
+
+
+async def test_overwrite_reads_the_previous_content_boundedly(tmp_path):
+    """The bound must be on the read, not only on what is emitted.
+
+    The other activity tests assert on the emitted event, which is produced by
+    pformat/TruncatingStringIO *after* the read — so reverting to an unbounded
+    read_text() of a workspace-controlled file is invisible to them.
+    """
+    reads: list[int] = []
+    real_open = Path.open
+
+    def spying_open(self, *args, **kwargs):
+        stream = real_open(self, *args, **kwargs)
+        real_read = stream.read
+
+        def read(size=-1):
+            reads.append(size)
+            return real_read(size)
+
+        stream.read = read  # type: ignore[method-assign]
+        return stream
+
+    target = tmp_path / "big.txt"
+    target.write_text("x" * 5000)
+    shell, _ = _observed_shell(tmp_path)
+    try:
+        with pytest.MonkeyPatch.context() as patcher:
+            patcher.setattr(Path, "open", spying_open)
+            await shell.write_file("big.txt", "replacement\n")
+    finally:
+        await shell.close()
+
+    # Positive sizes only: an unbounded read records -1, which satisfies any
+    # "<= limit" assertion.
+    assert reads, "the previous content was never read"
+    assert all(0 < size <= activity._MAX_DIFF_INPUT_CHARS + 1 for size in reads), reads

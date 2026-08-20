@@ -6,6 +6,7 @@ import asyncio
 import sys
 from pathlib import Path
 
+import pytest
 from acp import PROTOCOL_VERSION, spawn_agent_process, text_block
 from acp.connection import StreamDirection
 from acp.schema import (
@@ -88,7 +89,10 @@ async def test_acp_subprocess_transcript(tmp_path, monkeypatch):
         initialized = await connection.initialize(PROTOCOL_VERSION)
         session = await connection.new_session(str(tmp_path))
         await asyncio.wait_for(client.commands_updated.wait(), timeout=5)
-        response = await connection.prompt(session.session_id, [text_block("run smoke test")])
+        response = await asyncio.wait_for(
+            connection.prompt(session.session_id, [text_block("run smoke test")]),
+            timeout=_HANG_TIMEOUT,
+        )
 
     assert initialized.agent_info is not None
     assert initialized.agent_info.name == "nooa-acp"
@@ -156,9 +160,12 @@ async def test_acp_subprocess_dispatches_advertised_slash_command(tmp_path, monk
     ) as (connection, _process):
         await connection.initialize(PROTOCOL_VERSION)
         session = await connection.new_session(str(tmp_path))
-        response = await connection.prompt(
-            session.session_id,
-            [text_block("/protocol-check ready")],
+        response = await asyncio.wait_for(
+            connection.prompt(
+                session.session_id,
+                [text_block("/protocol-check ready")],
+            ),
+            timeout=_HANG_TIMEOUT,
         )
 
     assert response.stop_reason == "end_turn"
@@ -218,6 +225,14 @@ async def test_acp_subprocess_closes_a_session_over_the_wire(tmp_path):
         initialized = await connection.initialize(PROTOCOL_VERSION)
         session = await connection.new_session(str(tmp_path))
         await connection.close_session(session.session_id)
+
+        # Routable is only half of it: a no-op handler leaks the runtime for the
+        # process lifetime. Prompting a closed session must now be rejected.
+        with pytest.raises(Exception, match="(?i)not found|no such|unknown"):
+            await asyncio.wait_for(
+                connection.prompt(session.session_id, [text_block("still there?")]),
+                timeout=_HANG_TIMEOUT,
+            )
 
     capabilities = initialized.agent_capabilities.session_capabilities
     assert capabilities is not None and capabilities.close is not None

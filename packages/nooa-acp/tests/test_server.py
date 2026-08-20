@@ -6,6 +6,7 @@ import asyncio
 import os
 import sys
 import threading
+from contextlib import suppress
 from typing import Literal
 from unittest.mock import AsyncMock, call, patch
 
@@ -52,6 +53,37 @@ def isolated_user_config(tmp_path_factory, monkeypatch):
     monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
     (home / "user-config").mkdir(parents=True, exist_ok=True)
     return home
+
+
+# JSON-RPC code for resource_not_found; asserting it distinguishes a typed
+# protocol error from the generic -32603 internal_error.
+_RESOURCE_NOT_FOUND = -32002
+
+
+@pytest.fixture(autouse=True)
+async def close_every_adapter(monkeypatch):
+    """Guarantee teardown for every adapter a test builds.
+
+    Each test closes its adapter as the last statement, so a failing assertion
+    leaks the pump task, bootstrap task, agent, MCP tools and SQLite handle onto
+    the shared event loop for the rest of the module — which has been observed
+    turning one failure into unrelated intermittent failures later. Closing is
+    idempotent, so tests keep their explicit close and this only covers the
+    paths that do not reach it.
+    """
+    built: list[CodingACPAdapter] = []
+    original = CodingACPAdapter.__init__
+
+    def tracking_init(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        built.append(self)
+
+    monkeypatch.setattr(CodingACPAdapter, "__init__", tracking_init)
+    yield built
+
+    for adapter in built:
+        with suppress(Exception):
+            await adapter.close()
 
 
 def _completed_llm() -> FakeLLMClient:
@@ -1267,8 +1299,11 @@ async def test_prompt_on_a_closing_session_is_a_clean_protocol_error(tmp_path):
     runtime = await adapter._sessions.get(session.session_id)
     await runtime.close()
 
-    with pytest.raises(RequestError):
+    # The code, not merely "some RequestError": a bare raises() accepts the
+    # -32603 internal_error this test exists to rule out.
+    with pytest.raises(RequestError) as raised:
         await adapter.prompt(session.session_id, [text_block("do the work")])
+    assert raised.value.code == _RESOURCE_NOT_FOUND, raised.value.code
     await adapter.close()
 
 

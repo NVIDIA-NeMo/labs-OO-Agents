@@ -178,7 +178,10 @@ def test_repository_instructions_are_read_boundedly(tmp_path, monkeypatch):
 
     rendered = instructions.render_agent_instructions(tmp_path)
 
-    assert reads and all(size is not None and size <= 101 for size in reads), reads
+    # Positive sizes only: an unbounded .read() records -1, which satisfies
+    # any `<= limit` assertion and made this test pass against the very
+    # regression it names.
+    assert reads == [101], reads
     assert "[... truncated ...]" in rendered
     assert len(rendered) < 1_000
 

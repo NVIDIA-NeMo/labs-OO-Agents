@@ -14,6 +14,9 @@ from nooa_acp._runtime import (
     SessionRuntimePool,
 )
 
+# Bounds a hang, not the expected duration.
+_HANG_TIMEOUT = 30
+
 
 class _RuntimeValue:
     def __init__(self) -> None:
@@ -25,11 +28,17 @@ class _RuntimeValue:
 
 async def test_same_session_rejects_a_second_foreground_turn():
     runtime = SessionRuntime("one", object())
+
+    async def _claim_again() -> None:
+        async with runtime.turn():
+            pass
+
     async with runtime.turn():
         assert runtime.busy is True
+        # Bounded: if turns start queueing instead of failing fast — the exact
+        # regression — this wedges on the inner lock and hangs the suite.
         with pytest.raises(SessionBusyError):
-            async with runtime.turn():
-                pass
+            await asyncio.wait_for(_claim_again(), timeout=_HANG_TIMEOUT)
 
 
 async def test_simultaneous_turn_claims_do_not_queue():
@@ -95,7 +104,10 @@ async def test_close_waits_for_active_turn_and_is_idempotent():
     turn_task = asyncio.create_task(active_turn())
     await turn_started.wait()
     close_task = asyncio.create_task(runtime.close())
-    await asyncio.sleep(0)
+    # A single yield is satisfied by scheduling latency — _close_once has not
+    # even started — so it passes with the turn lock removed entirely.
+    for _ in range(20):
+        await asyncio.sleep(0)
     assert close_task.done() is False
     assert value.close_calls == 0
     release_turn.set()

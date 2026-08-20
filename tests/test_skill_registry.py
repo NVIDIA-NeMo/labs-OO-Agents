@@ -371,3 +371,45 @@ def test_load_also_refuses_to_take_over_a_protected_attribute():
     )
     registry.load(["mcp.notes"])
     assert "mcp.notes" in registry.loaded()
+
+
+def test_an_undeclared_attribute_is_still_freely_overwritten():
+    """The guard must apply only to declared attributes.
+
+    Negative control for the two tests above: without it, deleting the
+    `__protected_skill_attrs__` opt-in — which turns a long-standing warning
+    into a hard ValueError for every ordinary skill — leaves them all green.
+    """
+
+    class _Agent:
+        __protected_skill_attrs__ = frozenset({"shell"})
+
+    class _Tool(Skill):
+        pass
+
+    agent = _Agent()
+    registry = SkillRegistry(agent)
+    registry.register("nemo.notes", _Tool())
+    first = agent.notes
+
+    # 'notes' is not declared, so a second claimant is allowed as before.
+    registry.register("mcp.notes", _Tool())
+    assert agent.notes is not first
+
+
+def test_a_directly_assigned_undeclared_attribute_is_not_protected():
+    """Direct assignment alone must not confer protection."""
+
+    class _Agent:
+        __protected_skill_attrs__ = frozenset({"shell"})
+
+        def __init__(self):
+            self.notes = object()
+
+    class _Tool(Skill):
+        pass
+
+    agent = _Agent()
+    registry = SkillRegistry(agent)
+    registry.register("mcp.notes", _Tool())
+    assert isinstance(agent.notes, _Tool)

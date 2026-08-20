@@ -216,6 +216,19 @@ async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
     await bridge.close()
     await agent.close()
 
+    # Paired positive: the same event with a known context window must emit a
+    # UsageUpdate. Without this, `return` at the top of _on_llm_complete passes
+    # both halves — an AgentMessageChunk control comes from a different handler
+    # and cannot tell "the guard works" from "usage never fires".
+    sized = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    sized_client = _RecordingClient()
+    sized_bridge = ACPEventBridge(sized, sized_client, "session-2")  # type: ignore[arg-type]
+    sized.event_manager.add(LLMComplete(prompt_tokens=40, completion_tokens=10, cost_usd=0.25))
+    await sized_bridge.flush()
+    assert any(isinstance(update, UsageUpdate) for _, update in sized_client.updates)
+    await sized_bridge.close()
+    await sized.close()
+
 
 async def test_bridge_emits_structured_file_edit(tmp_path):
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
@@ -389,6 +402,9 @@ async def test_a_cancelled_command_reads_as_cancellation_not_a_crash(tmp_path):
     rendered = str(finished)
     assert "Cancelled by user." in rendered
     assert "CancelledError" not in rendered
+    # Status too: dropping `or event.cancelled` renders a cancelled command as a
+    # green completed card while the reason text still reads correctly.
+    assert finished.status == "failed"
     await bridge.close()
 
 
@@ -417,7 +433,7 @@ async def test_bare_expression_result_is_shown_not_reported_as_no_output(tmp_pat
     await bridge.flush()
 
     rendered = "".join(str(update) for _, update in client.updates)
-    assert "42" in rendered
+    assert "Out[3]: 42" in rendered, rendered
     assert "Completed." not in rendered
     await bridge.close()
 
@@ -461,6 +477,15 @@ async def test_an_unfinished_tool_call_does_not_leak_for_the_session(tmp_path):
     await bridge.close()
     assert bridge._open_tools == set()
     assert bridge._python_source == {}
+    # And the card was actually closed out for the client: clearing the private
+    # state alone leaves it spinning, which is what the docstring forbids.
+    closing = [
+        update
+        for _, update in client.updates
+        if isinstance(update, ToolCallProgress) and update.tool_call_id == "t3"
+    ]
+    assert closing and closing[-1].status == "failed", client.updates
+    assert closing[-1].title == "Unfinished"
 
 
 async def test_a_cancelled_tool_card_is_titled_cancelled(tmp_path):

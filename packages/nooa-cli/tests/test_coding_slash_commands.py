@@ -121,11 +121,57 @@ async def test_async_command_is_cooperatively_cancellable_on_agent_loop(tmp_path
     registry = CodingSlashCommandRegistry(agent)
     try:
         invocation = asyncio.create_task(registry.invoke("wait", ""))
-        await started.wait()
+        # Bounded: a regression that stops the coroutine reaching the host loop
+        # would otherwise wedge here forever, so CI stalls instead of going red.
+        await asyncio.wait_for(started.wait(), timeout=30)
         invocation.cancel()
 
         with pytest.raises(asyncio.CancelledError):
-            await invocation
+            await asyncio.wait_for(invocation, timeout=30)
+    finally:
+        registry.close()
+        await agent.close()
+
+
+async def test_commands_are_sorted_deduplicated_and_case_insensitive(tmp_path):
+    """Three registry behaviours that no test exercised.
+
+    Every existing case registers one command and reads it back in canonical
+    case, so unsorted output, a dropped duplicate guard, and lost case
+    normalisation were all invisible.
+    """
+
+    class _Beta(Skill):
+        @slash_command("beta")
+        def beta(self, args: str) -> str:
+            """Beta."""
+            return "beta"
+
+    class _Alpha(Skill):
+        @slash_command("alpha")
+        def alpha(self, args: str) -> str:
+            """Alpha."""
+            return "alpha"
+
+    class _AlphaAgain(Skill):
+        @slash_command("alpha")
+        def alpha(self, args: str) -> str:
+            """Duplicate."""
+            return "duplicate"
+
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    # Registered out of order, and with a colliding name.
+    # Registry names sort opposite to the command names they provide, so
+    # _commands is built in [beta, alpha] order and sorting is observable.
+    agent.skills.register("test.aaa", _Beta())
+    agent.skills.register("test.zzz", _Alpha())
+    agent.skills.register("test.zzzz", _AlphaAgain())
+    registry = CodingSlashCommandRegistry(agent)
+    try:
+        names = [command.name for command in registry.commands()]
+        assert names == sorted(names), names
+        assert names.count("alpha") == 1, names
+        assert registry.get("ALPHA") is not None, "lookup is not case-insensitive"
     finally:
         registry.close()
         await agent.close()

@@ -188,3 +188,42 @@ def test_a_non_utf8_settings_file_does_not_abort_discovery(tmp_path, monkeypatch
     (config_dir / "settings.yaml").write_bytes(b"\xff\xfe coding:\n")
 
     assert load_coding_skills_dirs(workspace) == [conventional.resolve()]
+
+
+def test_a_non_utf8_legacy_config_does_not_abort_discovery(tmp_path, monkeypatch):
+    """The legacy TOML reader needs the same UnicodeError guard as the YAML one.
+
+    The sibling test only feeds a bad settings.yaml, so dropping UnicodeError
+    from the config.toml handler went unnoticed.
+    """
+    workspace = tmp_path / "workspace"
+    conventional = workspace / ".agents" / "skills"
+    conventional.mkdir(parents=True)
+    monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
+
+    config_dir = workspace / ".nooa"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_bytes(b"\xff\xfe [tui]\n")
+
+    assert load_coding_skills_dirs(workspace) == [conventional.resolve()]
+
+
+def test_an_env_override_suppresses_a_legacy_only_workspace(tmp_path, monkeypatch):
+    """The env half of the legacy guard had no test.
+
+    Every existing case also has a modern settings.yaml, so `modern_key_set`
+    short-circuits and the NEMO_OO_SETTINGS check is never exercised.
+    """
+    workspace = tmp_path / "workspace"
+    legacy = tmp_path / "legacy-skills"
+    override = tmp_path / "override.yaml"
+    workspace.mkdir()
+    legacy.mkdir()
+    override.write_text("coding:\n  additional_skills_dirs: []\n")
+    monkeypatch.setenv("NEMO_OO_SETTINGS", str(override))
+
+    config_dir = workspace / ".nooa"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(f'[tui]\nlibs_dirs = ["{legacy}"]\n')
+
+    assert load_coding_skills_dirs(workspace) == []
