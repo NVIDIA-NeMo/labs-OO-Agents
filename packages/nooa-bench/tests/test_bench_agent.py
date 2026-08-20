@@ -7,7 +7,6 @@ from __future__ import annotations
 import pytest
 from nooa_bench import bench_agent as bench_agent_module
 from nooa_bench.bench_agent import BenchAgent, RLMBenchAgent, TaskResult
-from nooa_cli.coding import delegation as delegation_module
 
 from nooa.agentdoc import doc
 from nooa.unifiedllm import FakeLLMClient
@@ -89,7 +88,7 @@ def test_bench_agent_hides_manual_context_maintenance_apis():
 
     agent_doc = doc(agent)
 
-    assert "context:" not in agent_doc
+    assert "    context:" not in agent_doc
     assert "events:" not in agent_doc
 
 
@@ -197,8 +196,8 @@ async def test_run_evaluation_requires_problem_statement(monkeypatch, tmp_path):
         await agent._run_evaluation({"working_dir": str(tmp_path)})
 
 
-def test_bench_agent_uses_narrow_python_tools_context():
-    """The prompt documents primary tools without duplicating the todo API."""
+def test_bench_agent_python_tools_follow_agent_attribute_order():
+    """Python tool docs follow the model-facing shell, repo, todo order."""
     agent = BenchAgent(llm=FakeLLMClient())
 
     keys = list(agent.context_manager.keys())
@@ -207,10 +206,13 @@ def test_bench_agent_uses_narrow_python_tools_context():
     assert "todo" not in keys
 
     python_tools_doc = agent.context_manager["python_tools"]
-    assert "class RepoTools" in python_tools_doc
-    assert "def symbols(" in python_tools_doc
     assert "class ShellTools" in python_tools_doc
     assert "def run(" in python_tools_doc
+    assert "class RepoTools" in python_tools_doc
+    assert "def symbols(" in python_tools_doc
+    assert "class TodoManager" in python_tools_doc
+    assert python_tools_doc.index("class ShellTools") < python_tools_doc.index("class RepoTools")
+    assert python_tools_doc.index("class RepoTools") < python_tools_doc.index("class TodoManager")
 
 
 def test_bench_agent_wires_repo_to_shell_session():
@@ -284,45 +286,73 @@ def test_bounded_worker_has_no_duplicate_plan_or_persistent_vars():
     assert not hasattr(CodingWorker, "v")
 
 
-def test_rlm_variant_is_registered_and_documents_delegation():
+def test_variants_share_identity_and_document_delegation_hierarchy():
     from nooa_bench import AGENT_CLASSES
 
     assert AGENT_CLASSES["rlm"] == "nooa_bench.bench_agent:RLMBenchAgent"
-    assert "delegate" in (RLMBenchAgent._solve_task.__doc__ or "")
+    for agent_type in (BenchAgent, RLMBenchAgent):
+        prompt = doc(agent_type)
+        assert "You are an autonomous software engineering agent." in prompt
+        assert "delegate" in prompt
 
 
 @pytest.mark.asyncio
-async def test_rlm_delegate_builds_isolated_worker(monkeypatch, tmp_path):
+@pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
+async def test_delegate_launches_isolated_subagent_of_same_type(agent_type, monkeypatch, tmp_path):
     observed = {}
+    expected = TaskResult(
+        solution_description="Inspected parser.",
+        evidence="Focused check passed.",
+        command_to_verify="pytest -q tests/test_parser.py",
+    )
 
-    class FakeWorker:
-        def __init__(self, **kwargs):
-            observed.update(kwargs)
+    async def fake_solve(self, description: str):
+        observed.update(
+            child_type=type(self),
+            child=self,
+            description=description,
+            cwd=str(self.shell.cwd),
+            depth=self._delegation_depth,
+        )
+        return expected
 
-        async def investigate(self, objective: str, supplied_context=None) -> str:
-            observed.update(objective=objective, supplied_context=supplied_context)
-            return "concise report"
-
-        async def close(self) -> None:
-            observed["closed"] = True
+    async def fake_close(self):
+        observed["closed"] = True
 
     monkeypatch.setattr(bench_agent_module, "ShellTools", _FakeShell)
     monkeypatch.setattr(bench_agent_module, "RepoTools", _FakeRepo)
-    monkeypatch.setattr(delegation_module, "CodingWorker", FakeWorker)
+    monkeypatch.setattr(agent_type, "_solve_task", fake_solve)
+    monkeypatch.setattr(_FakeShell, "close", fake_close, raising=False)
     llm = FakeLLMClient()
-    agent = RLMBenchAgent(llm=llm)
-    agent._install_python_tools(str(tmp_path))
+    agent = agent_type(llm=llm, working_dir=str(tmp_path))
 
     todo = agent.todo.add("Investigate empty parser input")
     result = await agent.delegate("inspect parser", todo)
 
-    assert result == "concise report"
-    assert observed["objective"] == "inspect parser"
-    assert observed["supplied_context"] is todo
-    assert observed["llm"] is llm
+    assert result == expected
+    assert observed["child_type"] is agent_type
+    assert observed["child"] is not agent
+    assert observed["child"].llm is llm
+    assert observed["description"].startswith("inspect parser\n\nSupplied context:")
+    assert "Investigate empty parser input" in observed["description"]
     assert observed["cwd"] == str(tmp_path)
-    assert observed["init_command"] == bench_agent_module._OPTIONAL_TESTBED_ACTIVATE
+    assert observed["depth"] == 1
     assert observed["closed"] is True
+
+
+@pytest.mark.asyncio
+async def test_delegate_rejects_unbounded_recursion(monkeypatch, tmp_path):
+    monkeypatch.setattr(bench_agent_module, "ShellTools", _FakeShell)
+    monkeypatch.setattr(bench_agent_module, "RepoTools", _FakeRepo)
+    agent = BenchAgent(
+        llm=FakeLLMClient(),
+        working_dir=str(tmp_path),
+        delegation_depth=2,
+        max_delegation_depth=2,
+    )
+
+    with pytest.raises(RuntimeError, match="maximum delegation depth"):
+        await agent.delegate("delegate again")
 
 
 def test_problem_statement_skips_blank_primary_field():
