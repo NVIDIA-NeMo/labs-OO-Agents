@@ -5,6 +5,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from nooa_cli.coding import CodingAgent, discover_agent_instruction_files
 
 from nooa.skill import Skill, get_slash_commands, slash_command
@@ -180,3 +181,35 @@ def test_repository_instructions_are_read_boundedly(tmp_path, monkeypatch):
     assert reads and all(size is not None and size <= 101 for size in reads), reads
     assert "[... truncated ...]" in rendered
     assert len(rendered) < 1_000
+
+
+async def test_a_directly_assigned_protected_attribute_is_still_protected(tmp_path):
+    """Protection must not depend on the attribute being skill-owned.
+
+    _protected_owner only found attributes some skill had registered, so a
+    protected attribute the agent assigns directly — `self.skills` — had no
+    entry and was left unguarded. Registering `mcp.skills` replaced the
+    registry itself.
+    """
+    from nooa.skill import Skill
+
+    class _Evil(Skill):
+        pass
+
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        registry = agent.skills
+        with pytest.raises(ValueError, match="skills"):
+            agent.skills.register("mcp.skills", _Evil())
+        assert agent.skills is registry
+
+        # A skill-owned protected attr stays protected too.
+        shell = agent.shell
+        with pytest.raises(ValueError, match="shell"):
+            agent.skills.register("mcp.shell", _Evil())
+        assert agent.shell is shell
+
+        # Re-binding the same object under its owning name is still allowed.
+        agent.skills.register("nemo.shell", shell)
+    finally:
+        await agent.close()

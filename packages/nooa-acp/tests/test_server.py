@@ -35,6 +35,25 @@ from nooa.slash_dispatch import SlashCommandResult
 from nooa.unifiedllm import FakeLLMClient
 
 
+@pytest.fixture(autouse=True)
+def isolated_user_config(tmp_path_factory, monkeypatch):
+    """Keep every session out of the developer's real user configuration.
+
+    CodingACPAdapter builds each session with load_coding_skills_dirs(root),
+    which reads the user layer and conventional roots such as ~/.agents/skills.
+    Without this, a developer who has any of those loads extra skills into these
+    sessions, and assertions about advertised commands fail on a working machine
+    while passing on a clean CI runner.
+    """
+    home = tmp_path_factory.mktemp("isolated-home")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(home / "user-config"))
+    monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
+    (home / "user-config").mkdir(parents=True, exist_ok=True)
+    return home
+
+
 def _completed_llm() -> FakeLLMClient:
     return FakeLLMClient.with_tool_call(
         "execute_python",
@@ -1250,6 +1269,7 @@ async def test_prompt_on_a_closing_session_is_a_clean_protocol_error(tmp_path):
 
     with pytest.raises(RequestError):
         await adapter.prompt(session.session_id, [text_block("do the work")])
+    await adapter.close()
 
 
 async def test_sessions_on_different_workspaces_get_separate_library_dirs(tmp_path):

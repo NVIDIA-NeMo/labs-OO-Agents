@@ -159,10 +159,8 @@ class CodingAgent(InteractiveAgent):
     @hidden
     @strategy(PredictStrategy(PredictConfig(output_serialization="tool_call")))
     async def name_session(self, user_message: str) -> str:
-        """Generate an ultra-short 2-5 word session title.
-
-        Conversation starts with: {user_message}
-        """
+        """Generate an ultra-short 2-5 word session title for the conversation
+        opened by the given user message."""
         ...
 
     @hidden

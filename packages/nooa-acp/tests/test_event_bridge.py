@@ -497,7 +497,10 @@ async def test_a_dead_pump_fails_flush_instead_of_hanging(tmp_path):
     bridge = ACPEventBridge(agent, _DyingClient(), "session-1")  # type: ignore[arg-type]
     agent.event_manager.add(AgentMessage(content="first"))
 
-    with pytest.raises(BaseException):  # noqa: B017 - must not hang
+    # Must be the specific error flush() raises. pytest.raises(BaseException)
+    # also accepts the TimeoutError from wait_for, so it passed against the
+    # hanging bridge too — the exact regression it claims to cover.
+    with pytest.raises(RuntimeError, match="ACP event bridge stopped"):
         await asyncio.wait_for(bridge.flush(), timeout=5)
 
     # And teardown must not hang either.
