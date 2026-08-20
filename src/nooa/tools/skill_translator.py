@@ -138,8 +138,10 @@ class ValidationReport(BaseModel):
 class TextSkillTranslator(Skill):
     """Translate traditional SKILL.md TextSkills into package-backed Skill libraries.
 
-    The translator preserves TextSkill content first, then exposes package-style
-    APIs around bundled resources and scripts.
+    The translator preserves TextSkill content first, then opportunistically
+    exposes package-style APIs around bundled resources and scripts. The
+    generated package should therefore keep TextSkill behavior available even
+    when no richer API can be inferred.
 
     Typical flow:
 
@@ -225,6 +227,10 @@ class TextSkillTranslator(Skill):
             if interpreter is None and not file.executable:
                 continue
             script_path = inventory.source_dir / file.path
+
+            # Every supported script gets a raw runner. The inferred APIs below
+            # are additive ergonomics: a CLI-shaped method for argparse scripts
+            # and direct methods for import-safe top-level Python functions.
             arguments = _infer_script_arguments(script_path)
             api_method_name = _api_method_name(file.path, used_api_names) if arguments else None
             function_methods = _infer_script_functions(script_path, used_api_names)
@@ -478,6 +484,7 @@ def _default_interpreter(file: TextSkillFile) -> str | None:
 
 
 def _infer_script_arguments(path: Path) -> list[ScriptArgumentPlan]:
+    """Infer a named package method from simple argparse declarations."""
     if path.suffix.lower() != ".py":
         return []
     try:
@@ -499,6 +506,7 @@ def _infer_script_arguments(path: Path) -> list[ScriptArgumentPlan]:
 
 
 def _infer_script_functions(path: Path, used_names: set[str]) -> list[ScriptFunctionPlan]:
+    """Infer direct package methods for safe top-level Python functions."""
     if path.suffix.lower() != ".py":
         return []
     try:
@@ -531,6 +539,13 @@ def _infer_script_functions(path: Path, used_names: set[str]) -> list[ScriptFunc
 
 
 def _module_top_level_is_import_safe(tree: ast.Module) -> bool:
+    """Return true only when importing the script should not execute work.
+
+    Function wrappers import the original script as a resource module. We keep
+    this deliberately conservative: imports, definitions, literal constants,
+    module docstrings, and `if __name__ == "__main__"` blocks are fine; arbitrary
+    top-level calls are not.
+    """
     for node in tree.body:
         if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef)):
             continue
@@ -810,6 +825,9 @@ def _render_readme(plan: ConversionPlan) -> str:
 
 
 def _render_init(plan: ConversionPlan) -> str:
+    # Generated skills have three API layers: resource access, raw script
+    # runners that preserve TextSkill behavior, and any inferred ergonomic
+    # methods planned from argparse declarations or import-safe functions.
     methods = "\n".join(
         rendered
         for method in plan.script_methods
