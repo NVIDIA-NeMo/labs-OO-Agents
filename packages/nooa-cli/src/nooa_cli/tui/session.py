@@ -557,6 +557,7 @@ class Session:
                 auto_connect_result = auto_connect_mcp()
                 if asyncio.iscoroutine(auto_connect_result):
                     self._fire_and_forget(auto_connect_result)
+            self._start_llm_health_check()
             await self._app.run_async()
         except (KeyboardInterrupt, EOFError):
             await self.frontend.render(
@@ -652,6 +653,72 @@ class Session:
 
         future = asyncio.run_coroutine_threadsafe(_render(), loop)
         await asyncio.wrap_future(future)
+
+    def _start_llm_health_check(self) -> None:
+        """Run the startup LLM probe without blocking first paint."""
+        health = getattr(self.registry, "blocking_llm_health", None)
+        if getattr(health, "pending", False) is not True:
+            return
+        self._set_llm_probe_status("probing LLM endpoint...")
+        llm = getattr(self.agent, "llm", None)
+        if llm is None:
+            self.registry.blocking_llm_health = None
+            self._set_llm_probe_status("")
+            self._invalidate_app()
+            return
+        model_at_start = getattr(llm, "model", None)
+
+        async def _probe() -> None:
+            from .health_check import probe_llm
+            from .output import TextOutput
+
+            result = await probe_llm(llm)
+            if getattr(self.agent, "llm", None) is not llm:
+                self._set_llm_probe_status("")
+                return
+            current_model = getattr(llm, "model", None)
+            if model_at_start is not None and current_model != model_at_start:
+                self._set_llm_probe_status("")
+                return
+            if result.ok:
+                self.registry.blocking_llm_health = None
+                startup_info = getattr(self.registry, "startup_info", None)
+                if startup_info is not None:
+                    startup_info.llm_ready = True
+                    startup_info.llm_status = "ready"
+                self._set_llm_probe_status("")
+                self._invalidate_app()
+                return
+
+            if result.blocking:
+                self.registry.blocking_llm_health = result
+            else:
+                self.registry.blocking_llm_health = None
+            startup_info = getattr(self.registry, "startup_info", None)
+            if startup_info is not None:
+                startup_info.llm_ready = not result.blocking
+                startup_info.llm_status = "unavailable" if result.blocking else "ready"
+            self._set_llm_probe_status("")
+            self._invalidate_app()
+
+            level = "error" if result.blocking else "warning"
+            await self.frontend.render(TextOutput(f"⚠️  {result.error_message}", level))
+            if result.fix_hint:
+                await self.frontend.render(TextOutput(result.fix_hint, "info"))
+
+        self._fire_and_forget(_probe())
+
+    def _invalidate_app(self) -> None:
+        app = getattr(self, "_app", None)
+        invalidate = getattr(app, "invalidate", None)
+        if callable(invalidate):
+            invalidate()
+
+    def _set_llm_probe_status(self, text: str) -> None:
+        app = getattr(self, "_app", None)
+        set_status = getattr(app, "set_llm_probe_status", None)
+        if callable(set_status):
+            set_status(text)
 
     def _restore_terminal(self) -> None:
         """Best-effort restoration of terminal state on exit.
@@ -990,6 +1057,20 @@ class Session:
         health = getattr(self.registry, "blocking_llm_health", None)
         if health is None or getattr(health, "blocking", False) is not True:
             return None
+        if getattr(health, "pending", False) is True:
+            lines = [
+                "Cannot send this message because the configured LLM is still being checked.",
+            ]
+            if health.error_message:
+                lines.append(health.error_message)
+            lines.extend(
+                (
+                    "",
+                    "Slash commands and !shell commands still work.",
+                    "Prompts will be enabled automatically if the check succeeds.",
+                )
+            )
+            return "\n".join(lines)
         lines = [
             "Cannot send this message because the configured LLM is unavailable.",
         ]
