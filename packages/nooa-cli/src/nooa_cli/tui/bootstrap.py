@@ -335,15 +335,15 @@ async def bootstrap(
     from nooa.unifiedllm import FakeLLMClient
 
     if not isinstance(llm, FakeLLMClient):
-        from .health_check import probe_llm
+        from .health_check import HealthCheckResult
 
-        health = await probe_llm(llm)
-        if not health.ok:
-            messages.append(TextOutput(f"⚠️  {health.error_message}", "error"))
-            if health.fix_hint:
-                messages.append(TextOutput(health.fix_hint, "info"))
-            if health.blocking:
-                blocking_llm_health = health
+        blocking_llm_health = HealthCheckResult(
+            ok=False,
+            error_message=f"Checking LLM endpoint for model '{config.tui.default_model}'.",
+            fix_hint="Slash commands and !shell commands are available while the check runs.",
+            blocking=True,
+            pending=True,
+        )
 
     from nooa.storage.sqlite import SessionAlreadyActiveError
 
@@ -485,6 +485,13 @@ def build_startup_info(result: BootstrapResult) -> Output:
 
     config = result.config
     agent = result.agent
+    health = result.blocking_llm_health
+    if health is None:
+        llm_status = "ready"
+    elif getattr(health, "pending", False):
+        llm_status = "checking"
+    else:
+        llm_status = "unavailable"
     trace_dir: str | None = None
     if result.tracing_enabled and config.tui.trace_dir:
         from nooa.paths import get_project_dir
@@ -507,7 +514,8 @@ def build_startup_info(result: BootstrapResult) -> Output:
             if config.tui.agent_spec and not isinstance(agent, TUIAgent)
             else None
         ),
-        llm_ready=result.blocking_llm_health is None,
+        llm_ready=llm_status == "ready",
+        llm_status=llm_status,
     )
 
 

@@ -313,6 +313,16 @@ async def test_status_text_separates_thinking_and_command_status():
         h.app._agent_task.cancel()
 
 
+async def test_llm_probe_status_is_transient_status_line():
+    async with TUIHarness() as h:
+        h.app.set_llm_probe_status("probing LLM endpoint...")
+        await h.wait_for(lambda: "probing LLM endpoint..." in h.app.status_text())
+        assert "probing LLM endpoint..." in h.app.status_text()
+
+        h.app.set_llm_probe_status("")
+        assert "probing LLM endpoint..." not in h.app.status_text()
+
+
 async def test_baseline_command_queue_is_dynamic_not_scrollback():
     """Queued commands live in dynamic UI state, not transcript scrollback."""
     async with TUIHarness() as h:
