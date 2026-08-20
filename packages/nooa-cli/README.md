@@ -84,6 +84,13 @@ class InternalCodingAgent(CodingAgent):
 nooa tui --agent internal_agents:InternalCodingAgent
 ```
 
+To try the experimental single-tool CodeAct agent without changing the default,
+select the packaged agent explicitly:
+
+```bash
+nooa tui --agent nooa_cli.tui.experimental_agent:ExperimentalTUIAgent
+```
+
 Private or organization-specific model registries stay outside this package.
 Place the registry at `.nooa/llm_config.yaml` for automatic project-local
 discovery, or pass a downloaded file explicitly:
