@@ -248,7 +248,7 @@ async def test_coding_agent_delegates_with_same_model_and_workspace(tmp_path, mo
         async def close(self) -> None:
             observed["closed"] = True
 
-    monkeypatch.setattr(delegation_module, "CodingWorker", FakeWorker)
+    monkeypatch.setattr(CodingAgent, "_worker_type", FakeWorker)
     llm = FakeLLMClient()
     agent = CodingAgent(llm=llm, cwd=tmp_path)
     try:

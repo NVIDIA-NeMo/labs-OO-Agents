@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 from nooa import Agent, Context, strategy
 from nooa.agentdoc import doc
@@ -78,6 +78,7 @@ class CodingDelegationMixin:
 
     llm: Any
     shell: Any
+    _worker_type: ClassVar[type[CodingWorker]] = CodingWorker
 
     async def delegate(self, objective: str, supplied_context: Any = None) -> str:
         """Run one isolated coding worker and return its concise report.
@@ -90,7 +91,7 @@ class CodingDelegationMixin:
         final verification ownership.
         Independent calls may be run concurrently with ``asyncio.gather``.
         """
-        worker = CodingWorker(
+        worker = self._worker_type(
             llm=self.llm,
             cwd=self.shell.cwd,
             init_command=getattr(self, "_worker_init_command", None),
