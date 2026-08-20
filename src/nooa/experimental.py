@@ -24,6 +24,14 @@ def _warn_experimental(name: str) -> None:
     )
 
 
+def CodeActExperimental(*args: Any, **kwargs: Any) -> Any:
+    """Create a single-tool experimental CodeAct strategy."""
+    _warn_experimental("CodeActExperimental")
+    from nooa.strategies.codeact_experimental import CodeActExperimental as _Cls
+
+    return _Cls(*args, **kwargs)
+
+
 def PurePythonStrategy(*args: Any, **kwargs: Any) -> Any:
     """Create a PurePythonStrategy instance (experimental, emits FutureWarning)."""
     _warn_experimental("PurePythonStrategy")
@@ -49,6 +57,7 @@ def ReflexionStrategy(*args: Any, **kwargs: Any) -> Any:
 
 
 __all__ = [
+    "CodeActExperimental",
     "CodeActLiteStrategy",
     "PurePythonStrategy",
     "ReflexionStrategy",
