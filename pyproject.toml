@@ -51,6 +51,7 @@ trace-explorer = "nooa.trace_explorer:main"
 "nemo.web" = "nooa.tools.web_publisher:WebPublisher"
 "nemo.libwriting" = "nooa.tools.library_writing_lib:SkillWriting"
 "nemo.methodwriting" = "nooa.tools.method_writing_lib:MethodWriting"
+"nemo.skill_translator" = "nooa.tools.skill_translator:TextSkillTranslator"
 
 [tool.uv.sources]
 eval_pipeline = { workspace = true }

@@ -3,6 +3,7 @@
 from .library_writing_lib import SkillWriting
 from .method_writing_lib import MethodWriting
 from .shell_tools import Match, ShellResult, ShellTools
+from .skill_translator import TextSkillTranslator
 from .todo import Todo, TodoManager
 
 __all__ = [
@@ -11,6 +12,7 @@ __all__ = [
     "ShellTools",
     "SkillWriting",
     "MethodWriting",
+    "TextSkillTranslator",
     "Todo",
     "TodoManager",
 ]
