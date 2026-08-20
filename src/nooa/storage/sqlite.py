@@ -40,6 +40,10 @@ from nooa.events import (
     TuiSessionCleared,
     TuiSessionResumed,
 )
+from nooa.storage.durable_execution import (
+    SQLiteExecutionStore,
+    initialize_execution_schema,
+)
 from nooa.storage.json_snapshot import snapshot_from_dict, snapshot_to_dict
 from nooa.storage.snapshot import AgentSnapshot
 
@@ -99,7 +103,7 @@ for _cls in (
         )
     _CORE_TYPES[_key] = _cls
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -212,13 +216,22 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA)
     row = conn.execute("SELECT version FROM schema_version").fetchone()
     if row is None:
+        initialize_execution_schema(conn)
         conn.execute("INSERT INTO schema_version (version) VALUES (?)", (_SCHEMA_VERSION,))
         conn.commit()
+    elif row[0] == 1:
+        # Version 2 is additive: existing event, tag, and snapshot rows remain
+        # untouched while the durable-operation tables are created atomically.
+        with conn:
+            initialize_execution_schema(conn)
+            conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
     elif row[0] != _SCHEMA_VERSION:
         raise RuntimeError(
             f"SQLite schema version mismatch: DB has v{row[0]}, "
             f"code expects v{_SCHEMA_VERSION}. Migration required."
         )
+    else:
+        initialize_execution_schema(conn)
 
 
 class SQLiteEventBackend:
@@ -745,6 +758,7 @@ class SQLiteStorageManager:
             _ensure_schema(self._conn)
             self._backend = SQLiteEventBackend(self._conn, lock=self._db_lock)
             self._backend._on_io_error = self._reconnect
+            self._execution_store = SQLiteExecutionStore(self._conn, lock=self._db_lock)
         except Exception:
             self.close()
             raise
@@ -797,10 +811,17 @@ class SQLiteStorageManager:
             raise
         self._conn = new_conn
         self._backend._conn = self._conn
+        self._execution_store._conn = self._conn
 
     @property
     def event_backend(self) -> SQLiteEventBackend:
         return self._backend
+
+    @property
+    def execution_store(self) -> SQLiteExecutionStore:
+        """Durable operation ledger sharing this manager's transaction boundary."""
+
+        return self._execution_store
 
     @property
     def path(self) -> Path | None:

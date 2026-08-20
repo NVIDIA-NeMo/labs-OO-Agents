@@ -2,6 +2,23 @@
 # SPDX-License-Identifier: Apache-2.0
 """Agent persistence — StorageManager protocol and implementations."""
 
+from nooa.storage.durable_execution import (
+    CorruptExecutionStateError,
+    EffectClass,
+    ExecutionAlreadyRunningError,
+    ExecutionClaim,
+    ExecutionConflictError,
+    ExecutionKey,
+    ExecutionReconciliationError,
+    ExecutionRecord,
+    ExecutionStatus,
+    ExecutionStore,
+    ExecutionTransition,
+    LeaseLostError,
+    SQLiteExecutionStore,
+    initialize_execution_schema,
+    request_hash,
+)
 from nooa.storage.in_memory import InMemoryStorageManager
 from nooa.storage.json_snapshot import snapshot_from_json, snapshot_to_json
 from nooa.storage.manager import StorageManager
@@ -16,9 +33,22 @@ from nooa.storage.sqlite import (
 
 __all__ = [
     "AgentSnapshot",
+    "CorruptExecutionStateError",
+    "EffectClass",
+    "ExecutionAlreadyRunningError",
+    "ExecutionClaim",
+    "ExecutionConflictError",
+    "ExecutionKey",
+    "ExecutionReconciliationError",
+    "ExecutionRecord",
+    "ExecutionStatus",
+    "ExecutionStore",
+    "ExecutionTransition",
     "InMemoryStorageManager",
+    "LeaseLostError",
     "SKIP",
     "SQLiteStorageManager",
+    "SQLiteExecutionStore",
     "SessionAlreadyActiveError",
     "StorageManager",
     "deserialize",
@@ -28,4 +58,6 @@ __all__ = [
     "snapshotable",
     "snapshot_from_json",
     "snapshot_to_json",
+    "initialize_execution_schema",
+    "request_hash",
 ]
