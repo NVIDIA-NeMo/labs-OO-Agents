@@ -186,6 +186,75 @@ class TestCodeActStrategySimpleExecution:
         assert result == 42
 
     @pytest.mark.asyncio
+    async def test_inline_only_mode_hides_provider_return_result_tool(self):
+        """Inline-only mode exposes one provider tool and still completes."""
+
+        class TestAgent(Agent, llm=_TEST_LLM):
+            @strategy(CodeActStrategy(config=CodeActConfig(expose_return_result_tool=False)))
+            async def answer(self) -> int:
+                """Return the answer to everything."""
+                ...
+
+        fake_llm = FakeLLMClient(
+            scripted_responses=[
+                _resp("", tool_calls=[_tool_call("return_result(42)")]),
+            ]
+        )
+
+        result = await TestAgent(llm=fake_llm).answer()
+
+        assert result == 42
+        assert fake_llm.last_tools is not None
+        assert [tool.name for tool in fake_llm.last_tools] == ["execute_python"]
+        system_prompt = "\n".join(
+            str(message.get("content", ""))
+            for message in fake_llm.last_messages
+            if message.get("role") == "system"
+        )
+        assert "**Your tool:**" in system_prompt
+        assert "not a separate tool" in system_prompt
+        assert "**Your two tools:**" not in system_prompt
+
+    @pytest.mark.asyncio
+    async def test_inline_only_mode_preserves_text_only_string_completion(self):
+        """Hiding the provider tool does not change stop-to-result behavior."""
+
+        class TestAgent(Agent, llm=_TEST_LLM):
+            @strategy(CodeActStrategy(config=CodeActConfig(expose_return_result_tool=False)))
+            async def answer(self) -> str:
+                """Return a short answer."""
+                ...
+
+        fake_llm = FakeLLMClient(scripted_responses=[_resp("plain answer")])
+
+        assert await TestAgent(llm=fake_llm).answer() == "plain answer"
+        assert fake_llm.last_tools is not None
+        assert [tool.name for tool in fake_llm.last_tools] == ["execute_python"]
+
+    @pytest.mark.asyncio
+    async def test_default_mode_exposes_both_provider_tools(self):
+        """The compatibility default continues to expose both provider tools."""
+
+        class TestAgent(Agent, llm=_TEST_LLM):
+            @strategy(CodeActStrategy(config=CodeActConfig()))
+            async def answer(self) -> int:
+                """Return the answer to everything."""
+                ...
+
+        fake_llm = FakeLLMClient(
+            scripted_responses=[
+                _resp("", tool_calls=[_return_result(result=42)]),
+            ]
+        )
+
+        assert await TestAgent(llm=fake_llm).answer() == 42
+        assert fake_llm.last_tools is not None
+        assert [tool.name for tool in fake_llm.last_tools] == [
+            "execute_python",
+            "return_result",
+        ]
+
+    @pytest.mark.asyncio
     async def test_single_tool_call_then_result(self):
         """LLM calling execute_python once then return_result."""
 

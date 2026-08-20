@@ -39,6 +39,9 @@ class CodeActConfig(BaseModel):
 
     max_iterations: int | None = None
     max_retries: int = 3
+    # Expose return_result as a provider tool. When disabled, completion still
+    # happens through return_result(...) inside execute_python.
+    expose_return_result_tool: bool = True
     # Maximum consecutive turns where the LLM returns plain text instead of a
     # tool call before the run is aborted. A real tool call resets the counter.
     # Set to 0 to disable the guard (legacy behavior). See also

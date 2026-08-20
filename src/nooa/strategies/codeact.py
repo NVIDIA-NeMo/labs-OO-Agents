@@ -358,7 +358,12 @@ class CodeActStrategy(CompositeStrategy):
 
     def get_block_overrides(self) -> dict[str, "str | DynamicContext | None"]:
         overrides: dict[str, str | DynamicContext | None] = {
-            "strategy_prompt": DynamicContext("strategy.strategy_instructions(runtime)"),
+            "strategy_prompt": DynamicContext(
+                "strategy.strategy_instructions("
+                "runtime, tool_guidance=strategy._tool_guidance(), "
+                "simple_answer_guidance=strategy._simple_answer_guidance(), "
+                "language_guidance=strategy._language_guidance())"
+            ),
             "execution_context": DynamicContext("strategy.execution_context(runtime)"),
         }
         # Tell the agent about the active sandbox guardrails (only when enabled).
@@ -557,24 +562,48 @@ Standard Python builtins and agent instance (`self`) are available."""
         except Exception:
             return ", ".join(name for name, _ in ordered)
 
+    def _tool_guidance(self) -> str:
+        if self.config.expose_return_result_tool:
+            return """**Your two tools:**
+- `execute_python(code)` — run a code cell
+- `return_result(value)` — submit your final answer (also callable from inside `execute_python`)"""
+        return """**Your tool:**
+- `execute_python(code)` — run a code cell
+
+To finish, call `return_result(value)` **inside** an `execute_python` cell. `return_result` is a Python builtin in the session, not a separate tool."""
+
+    def _simple_answer_guidance(self) -> str:
+        if self.config.expose_return_result_tool:
+            return "Use `return_result(...)` directly for simple answers determinable from the inputs alone (yes/no, one field, a single lookup)."
+        return "For simple answers determinable from the inputs alone, use one `execute_python` call containing `return_result(value)`."
+
+    def _language_guidance(self) -> str:
+        if self.config.expose_return_result_tool:
+            return "answer directly via `return_result`"
+        return "submit the answer with `return_result(...)` inside `execute_python`"
+
     @strategy(TemplateStrategy())
-    async def strategy_instructions(self, runtime: RuntimeServices) -> str:
+    async def strategy_instructions(
+        self,
+        runtime: RuntimeServices,
+        tool_guidance: str,
+        simple_answer_guidance: str,
+        language_guidance: str,
+    ) -> str:
         """
         ## Strategy
 
         Jupyter-like Python session. Parameters pre-loaded as locals; state persists across cells. Use `await` directly, `print`/`pprint` to debug, `doc(obj)` to inspect types. You MUST call a tool each turn — **plain-text responses do NOT end the session**. To finish, call `return_result(value)`. Repeated text-only responses will abort the run with an error.
 
-        **Your two tools:**
-        - `execute_python(code)` — run a code cell
-        - `return_result(value)` — submit your final answer (also callable from inside `execute_python`)
+        {tool_guidance}
 
-        ## When to use which tool
+        ## Choosing an action
 
-        Use `return_result(...)` directly for simple answers determinable from the inputs alone (yes/no, one field, a single lookup).
+        {simple_answer_guidance}
 
         Use `execute_python(...)` for lists/batches, arithmetic, multi-step computation, transforms, or iteration. Always iterate in code — never construct large arrays by hand.
 
-        For language tasks (classification, extraction, interpretation), use LLM reasoning — answer directly via `return_result`, or delegate to a `@strategy(PredictStrategy())` standalone function (see below). Don't keyword-match or regex.
+        For language tasks (classification, extraction, interpretation), use LLM reasoning — {language_guidance}, or delegate to a `@strategy(PredictStrategy())` standalone function (see below). Don't keyword-match or regex.
 
         ## Returning computed results
 
@@ -616,12 +645,23 @@ Standard Python builtins and agent instance (`self`) are available."""
         ...
 
     @strategy(TemplateStrategy())
-    async def _tool_use_reminder(self, runtime: RuntimeServices, reason: str) -> str:
-        """{reason} Use `execute_python(code)` to run code, or `return_result(...)` to submit your answer."""
+    async def _tool_use_reminder(
+        self, runtime: RuntimeServices, reason: str, tool_instruction: str
+    ) -> str:
+        """{reason} {tool_instruction}"""
         ...
 
-    @staticmethod
-    def _add_text_only_correction(runtime: RuntimeServices, call: "CurrentCall") -> None:
+    def _available_tool_names(self) -> str:
+        if self.config.expose_return_result_tool:
+            return "execute_python, return_result"
+        return "execute_python"
+
+    def _completion_tool_instruction(self) -> str:
+        if self.config.expose_return_result_tool:
+            return "Use `execute_python(code)` to run code, or `return_result(...)` to submit your answer."
+        return "Use `execute_python(code)` and finish by calling `return_result(...)` inside the code cell."
+
+    def _add_text_only_correction(self, runtime: RuntimeServices, call: "CurrentCall") -> None:
         """Add a model-visible correction after a text-only turn.
 
         Mirrors PredictStrategy's validation-retry feedback (``Error``,
@@ -632,11 +672,17 @@ Standard Python builtins and agent instance (`self`) are available."""
         runtime.event_manager.add(
             Error(
                 content=(
-                    f"Your last reply was plain text with no tool call, so it was "
-                    f"dropped — a bare message cannot end the turn or run code. "
-                    f"To finish `{call.method_name}`, call `return_result(value)`. "
-                    f"To do more work, call `execute_python(code)`. "
-                    f"Re-issue your response now as one of those tool calls."
+                    "Your last reply was plain text with no tool call, so it was "
+                    "dropped — a bare message cannot end the turn or run code. "
+                    + (
+                        f"To finish `{call.method_name}`, call `return_result(value)` "
+                        f"inside `execute_python(code)`. Re-issue your response now "
+                        f"as an `execute_python` tool call."
+                        if not self.config.expose_return_result_tool
+                        else f"To finish `{call.method_name}`, call `return_result(value)`. "
+                        f"To do more work, call `execute_python(code)`. "
+                        f"Re-issue your response now as one of those tool calls."
+                    )
                 )
             )
         )
@@ -719,11 +765,11 @@ Standard Python builtins and agent instance (`self`) are available."""
             logger.debug(f"[CODEACT] sandbox teardown error (ignored): {exc}")
 
     async def execute(self, runtime: RuntimeServices, call: "CurrentCall") -> Any:
-        """Execute CodeAct strategy with two-tool approach.
+        """Execute the CodeAct strategy.
 
-        Uses two tools:
-        - execute_python(code): Run Python code for computation
-        - return_result(...): Return the final structured answer
+        Always exposes execute_python(code). Depending on configuration, it may
+        also expose return_result(...) as a provider tool; the equivalent inline
+        Python builtin remains available in either mode.
 
         Args:
             runtime: RuntimeServices providing LLM, execution, and event management.
@@ -785,10 +831,13 @@ Standard Python builtins and agent instance (`self`) are available."""
             if self.config.execution_backend == "sandbox":
                 session.sandbox_executor = self._create_sandbox_executor(runtime, call, builtins)
 
-            # Build both tools
+            # The inline return_result(...) builtin is always available. The
+            # provider-level tool is optional so callers can present a single,
+            # unambiguous action interface to the model.
             execute_python_tool = self._build_execute_python_tool()
-            return_result_tool = self._build_return_result_tool(return_type, call.method_name)
-            tools = [execute_python_tool, return_result_tool]
+            tools = [execute_python_tool]
+            if self.config.expose_return_result_tool:
+                tools.append(self._build_return_result_tool(return_type, call.method_name))
 
             # Use the task event's tag as the call ID so the LLM sees a stable reference.
             # _build_task_message reads only method_name/docstring, so it's safe to build
@@ -1119,7 +1168,11 @@ Standard Python builtins and agent instance (`self`) are available."""
                         "Increase `max_tokens` in the model config "
                         "(16384+ recommended for reasoning models)."
                     )
-                feedback = await self._tool_use_reminder(runtime, reason="Empty response received.")
+                feedback = await self._tool_use_reminder(
+                    runtime,
+                    reason="Empty response received.",
+                    tool_instruction=self._completion_tool_instruction(),
+                )
                 runtime.event_manager.add(Error(content=feedback))
 
         # Loop exhausted without success
@@ -1367,7 +1420,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                         result=ToolResult(
                             tool_call_id=tool_call.id,
                             content=f"Unknown tool `{tool_call.name}`. "
-                            f"Available tools: execute_python, return_result",
+                            "Available tools: " + self._available_tool_names(),
                             result_status=ResultStatus.ERROR,
                         ),
                     )
