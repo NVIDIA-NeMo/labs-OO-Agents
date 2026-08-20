@@ -498,6 +498,14 @@ class ModelCommand(Command):
         self.config.default_model = selected
         if self._registry is not None:
             self._registry.blocking_llm_health = None
+            startup_info = getattr(self._registry, "startup_info", None)
+            if startup_info is not None:
+                from nooa_cli.tui.session import _short_model_name
+
+                startup_info.model = selected
+                startup_info.short_model = _short_model_name(selected)
+                startup_info.llm_ready = True
+                startup_info.llm_status = "ready"
         try:
             settings_path = self._persist_tui_setting("default_model", selected)
         except Exception as e:

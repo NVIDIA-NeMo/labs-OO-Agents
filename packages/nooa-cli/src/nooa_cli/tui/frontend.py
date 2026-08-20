@@ -549,7 +549,8 @@ class TerminalFrontend:
         sapphire = COLORS["sapphire"]
         peach = COLORS["peach"]
 
-        if info.llm_ready:
+        llm_status = getattr(info, "llm_status", "ready" if info.llm_ready else "unavailable")
+        if llm_status in {"ready", "checking"}:
             title = f"[bold {COLORS['mauve']}]NOOA ready[/]"
         else:
             title = f"[bold {COLORS['red']}]NOOA — LLM unavailable[/]"

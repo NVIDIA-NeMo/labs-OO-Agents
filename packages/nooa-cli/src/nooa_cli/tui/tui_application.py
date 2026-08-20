@@ -351,6 +351,7 @@ class TUIApplication:
         self._spinner_task: asyncio.Task | None = None
         self._command_status_text: str = ""
         self._command_queue_texts: list[str] = []
+        self._llm_probe_status_text: str = ""
 
         self._prompt_processor = BeforeInput(PROMPT_MARKER, style="class:prompt")
         self._agent_task: asyncio.Future | None = None
@@ -1161,16 +1162,16 @@ class TUIApplication:
         return task
 
     def _ensure_spinner_task(self) -> None:
-        """Start a background task cycling the spinner frame while the
-        agent is thinking. Invalidates the app each tick so the status
-        line redraws; exits when ``is_thinking()`` becomes False."""
+        """Start a background task cycling the spinner frame while live work
+        needs animation. Invalidates the app each tick so the status line
+        redraws; exits when the animated statuses clear."""
         if self._spinner_task is not None and not self._spinner_task.done():
             return
 
         async def _animate() -> None:
             i = 0
             try:
-                while self.is_thinking():
+                while self.is_thinking() or self._llm_probe_status_text:
                     self._spinner_frame = self._spinner_frames[i % len(self._spinner_frames)]
                     if self._app.is_running:
                         self._app.invalidate()
@@ -2846,6 +2847,15 @@ class TUIApplication:
         if app is not None and app.is_running:
             app.invalidate()
 
+    def set_llm_probe_status(self, text: str) -> None:
+        """Set transient LLM startup probe text in the dynamic status area."""
+        self._llm_probe_status_text = text
+        if text:
+            self._ensure_spinner_task()
+        app = getattr(self, "_app", None)
+        if app is not None and app.is_running:
+            app.invalidate()
+
     def status_text(self) -> str:
         """One-line status area text.
 
@@ -2861,6 +2871,8 @@ class TUIApplication:
             lines.append(f"{self._spinner_frame} cancelling agent turn...")
         elif self.is_thinking():
             lines.append(f"{self._spinner_frame} thinking...")
+        if self._llm_probe_status_text:
+            lines.append(f"{self._spinner_frame} {self._llm_probe_status_text}")
         reflection_frame = ""
         runner = self._reflection_runner()
         if runner is not None:
@@ -2881,3 +2893,9 @@ class TUIApplication:
     def set_session_label(self, label: str) -> None:
         """Set the bracketed label shown on the right of the status line."""
         self._session_label = label
+
+    def invalidate(self) -> None:
+        """Request a prompt/layout redraw after external state changes."""
+        app = getattr(self, "_app", None)
+        if app is not None and app.is_running:
+            app.invalidate()
