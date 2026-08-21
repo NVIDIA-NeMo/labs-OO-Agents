@@ -28,6 +28,7 @@ You can also provide a service URL, for example:
 ```text
 /connect https://api.anthropic.com
 /connect https://api.openai.com/v1
+/connect https://build.nvidia.com
 /connect http://localhost:11434
 ```
 
