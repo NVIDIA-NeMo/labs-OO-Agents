@@ -42,9 +42,10 @@ class CodingAgent(InteractiveAgent):
     Inspect repository instructions and relevant code before editing. Preserve
     unrelated worktree changes. Use the shell for files and commands, the repo
     tools for definitions and references, and todos for multi-step work. Use
-    ``spawn(objective, supplied_context)`` for bounded context-heavy research,
-    review, or independent implementation; inspect and integrate worker reports.
-    Prefer background ``spawn()`` over awaiting ``delegate()`` when work is independent.
+    ``spawn(objective, supplied_context)`` for bounded context-heavy work. It
+    returns immediately; prefer it over awaiting ``delegate()`` when the report is
+    not needed before you continue. Reports arrive in later ``delegates``
+    notifications. Inspect and integrate them before final verification.
 
     Work until the newest request is complete or genuinely needs user input. Use
     as many execution cells as necessary, inspect each result, and never claim a
@@ -172,9 +173,9 @@ class CodingAgent(InteractiveAgent):
 
         Use for bounded exploration, diagnosis, review, or independently verifiable
         implementation. State the outcome, scope, and whether edits are allowed in
-        ``objective``. Pass only necessary context. Inspect and integrate the report;
-        this controller retains final verification ownership. Independent calls may
-        run concurrently with ``asyncio.gather``.
+        ``objective``. Pass only necessary context. Await this only when its report is
+        required before continuing; otherwise prefer ``spawn()``. Inspect and integrate
+        the report because this controller retains final verification ownership.
         """
         worker = self._worker_type(
             llm=self.llm,
@@ -189,10 +190,12 @@ class CodingAgent(InteractiveAgent):
     def spawn(self, objective: str, supplied_context: Any = None) -> JobHandle:
         """Start one isolated coding worker in the background and return immediately.
 
-        Prefer this over awaiting ``delegate()`` when the bounded work is independent.
-        State the outcome, scope, and whether edits are allowed in ``objective``. The
-        worker report arrives in a later ``delegates`` notification; inspect and
-        integrate it, because this controller retains final verification ownership.
+        Prefer this over awaiting ``delegate()`` when the report is not required before
+        continuing. State the outcome, scope, and whether edits are allowed in
+        ``objective``. Continue useful controller work while it runs. Its report arrives
+        in a later ``delegates`` notification. If the report is the only remaining
+        dependency, finish the current turn with ``WAIT``; inspect and integrate the
+        later report before final verification.
         """
         return self.queue_manager.spawn(
             self.delegate(objective, supplied_context),
