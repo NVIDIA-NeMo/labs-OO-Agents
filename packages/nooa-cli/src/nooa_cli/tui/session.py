@@ -1282,6 +1282,9 @@ class Session:
             self._app.emit_block(bar, **emit_kwargs)
         else:
             self._app.emit_block(bar, replay=replay, **emit_kwargs)
+        # This runs on the UI owner; emit_block has committed the transcript
+        # source, so queue fallback can now disappear without a blank frame.
+        self._app.complete_pending_input_handoff(text)
         self._renderer.reset_turn()
 
     def _loud_handler(self, _loop: asyncio.AbstractEventLoop, context: dict) -> None:

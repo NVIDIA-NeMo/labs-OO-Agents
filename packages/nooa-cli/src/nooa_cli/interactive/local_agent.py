@@ -473,7 +473,10 @@ class LocalAgentRunner:
                 )
                 return False
             self._pending_user_messages = pending_inputs
-        self._update_pending_inputs(pending_inputs)
+            # Publish while dequeue is still excluded by the lifecycle lock.
+            # Otherwise a newer empty dequeue snapshot can be overwritten by
+            # this older submit snapshot after the lock is released.
+            self._update_pending_inputs(pending_inputs)
         return True
 
     def ensure_dispatcher(self, *, start_with_race: bool = False) -> None:

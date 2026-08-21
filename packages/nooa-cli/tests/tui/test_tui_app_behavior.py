@@ -674,6 +674,88 @@ async def test_queue_displays_above_prompt_while_agent_working():
         await h.wait_for(lambda: h.capture_queued() == ["queued-msg"])
 
 
+async def test_admitted_input_stays_visible_until_accepted_echo_commits():
+    """A fast dequeue cannot create a blank composer→queue→transcript frame."""
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("trigger")
+        await h.wait_for(lambda: h.app.is_thinking())
+
+        # Harness submission bypasses Session's accepted-message UI callback;
+        # retire that setup-only handoff before testing the next admission.
+        h.app.complete_pending_input_handoff("trigger")
+
+        # Simulate the worker consuming immediately, before Session commits its
+        # accepted-message transcript block on the UI owner loop.
+        h.app.submit_message("queued-msg")
+        assert h.app._pending_input_display() == ["queued-msg"]
+
+        # Dequeue publication may already be empty before the Session callback
+        # runs; optimistic queue chrome must still bridge that frame.
+        h.runner._on_user_message_get(
+            "queued-msg",
+            generation=h.runner._binding_generation,
+            user_messages=h.runner._user_messages,
+            previous=None,
+        )
+        assert h.runner.state.pending_inputs == ()
+        assert h.app._pending_input_display() == ["queued-msg"]
+
+        h.app.complete_pending_input_handoff("queued-msg")
+        assert h.app._pending_input_display() == []
+
+
+async def test_submission_exception_retires_only_new_handoff(monkeypatch):
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("trigger")
+        await h.wait_for(lambda: h.app.is_thinking())
+        assert [item.text for item in h.app._pending_input_handoff] == ["trigger"]
+
+        def fail_submit(_text: str) -> bool:
+            raise RuntimeError("agent transition")
+
+        monkeypatch.setattr(h.app._agent_controller, "submit", fail_submit)
+        h.app.submit_message("rejected")
+
+        assert [item.text for item in h.app._pending_input_handoff] == ["trigger"]
+        await h.wait_output_contains("Message rejected.")
+
+
+async def test_coalesced_accepted_echo_retires_all_submission_handoffs():
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("trigger")
+        await h.wait_for(lambda: h.app.is_thinking())
+
+        h.app.complete_pending_input_handoff("trigger")
+        h.app.submit_message("one")
+        h.app.submit_message("two")
+        h.app.submit_message("one\ntwo")
+
+        # FIFO completion must retire the first two submissions, not the later
+        # literal multiline duplicate.
+        h.app.complete_pending_input_handoff("one\ntwo")
+        assert [item.text for item in h.app._pending_input_handoff] == ["one\ntwo"]
+        h.app.complete_pending_input_handoff("one\ntwo")
+        assert h.app._pending_input_handoff == []
+
+
+async def test_withdrawing_coalesced_input_retires_queue_handoff():
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("trigger")
+        await h.wait_for(lambda: h.app.is_thinking())
+        h.app.complete_pending_input_handoff("trigger")
+        await h.submit_async("one")
+        await h.submit_async("two")
+        await h.wait_for(lambda: h.app._pending_input_display() == ["one", "two"])
+
+        await h.press("up")
+        await h.wait_input_equals("one\ntwo")
+        assert h.app._pending_input_display() == []
+
+
 async def test_queue_multiple_enters_merge_into_one_item():
     """Successive Enters typed while the agent is working compose one
     queued message joined with newlines so the agent isn't asked to

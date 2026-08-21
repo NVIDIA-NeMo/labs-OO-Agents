@@ -39,6 +39,7 @@ def test_session_emission_uses_only_resolved_display_mode_for_replay(monkeypatch
             display_mode=mode,
             transcript_columns=lambda: 80,
             emit_block=Mock(),
+            complete_pending_input_handoff=Mock(),
             color_depth=8,
         )
         session = Session.__new__(Session)
@@ -56,6 +57,7 @@ def test_session_emission_uses_only_resolved_display_mode_for_replay(monkeypatch
         session._on_user_message_ui("hello")
         bar_kwargs = app.emit_block.call_args.kwargs
         assert ("replay" in bar_kwargs) is (mode is DisplayMode.FULLSCREEN)
+        app.complete_pending_input_handoff.assert_called_once_with("hello")
 
 
 def test_session_semantic_render_uses_isolated_consoles_across_threads(

@@ -636,6 +636,13 @@ class _ResizeReplayQueueItem:
     transcript_epoch: int
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class _PendingInputHandoff:
+    """One admitted submission awaiting transcript commit or withdrawal."""
+
+    text: str
+
+
 @dataclass(frozen=True)
 class _ClearTranscriptQueueItem:
     transcript_epoch: int
@@ -849,6 +856,9 @@ class TUIApplication:
         self._spinner_task: asyncio.Task | None = None
         self._command_status_text: str = ""
         self._command_queue_texts: list[str] = []
+        # Admitted text remains visible here until its accepted transcript
+        # block is committed. A worker may dequeue before the next paint.
+        self._pending_input_handoff: list[_PendingInputHandoff] = []
         self._llm_probe_status_text: str = ""
 
         self._prompt_processor = BeforeInput(PROMPT_MARKER, style="class:prompt")
@@ -919,10 +929,10 @@ class TUIApplication:
             else None
         )
 
-        # Queue chrome is a pure projection of the current agent state.
+        # Queue chrome is a pure projection of runtime state plus the short
+        # admission→transcript visibility handoff.
         def _queue_pending() -> list[str]:
-            state = self._agent_controller.state
-            return [] if state is None else list(state.pending_inputs)
+            return self._pending_input_display()
 
         def _queue_formatted():
             rows = []
@@ -1953,6 +1963,7 @@ class TUIApplication:
         def _(event):
             popped = _pop_last_queued()
             if popped is not None:
+                self.complete_pending_input_handoff(popped)
                 self.input_buffer.text = popped
                 self.input_buffer.cursor_position = len(popped)
                 return
@@ -2104,6 +2115,13 @@ class TUIApplication:
         self.input_buffer.text = self._history[self._history_cursor]
         self.input_buffer.cursor_position = len(self.input_buffer.text)
 
+    def _pending_input_display(self) -> list[str]:
+        """Return text that queue chrome must show in the current frame."""
+        state = self._agent_controller.state
+        pending = [] if state is None else list(state.pending_inputs)
+        handoff = [item.text for item in self._pending_input_handoff]
+        return handoff or pending
+
     def submit_message(self, user_message: str) -> None:
         """Submit text through the current interactive agent."""
         if self._agent_controller.state is None:
@@ -2117,9 +2135,45 @@ class TUIApplication:
             if problem:
                 self.emit_block(f"\x1b[31m{problem}\x1b[0m\n")
                 return
-        accepted = self._agent_controller.submit(user_message)
-        if not accepted:
+        # Register visibility before admission: another loop may consume and
+        # queue the accepted transcript echo before ``submit`` returns.
+        handoff = _PendingInputHandoff(user_message)
+        self._pending_input_handoff.append(handoff)
+        try:
+            accepted = self._agent_controller.submit(user_message)
+        except Exception:
+            self._discard_pending_input_handoff(handoff)
+            logger.debug("TUI message submission failed", exc_info=True)
             self.emit_block("\x1b[31mMessage rejected.\x1b[0m\n")
+            return
+        if not accepted:
+            self._discard_pending_input_handoff(handoff)
+            self.emit_block("\x1b[31mMessage rejected.\x1b[0m\n")
+            return
+        if self._app.is_running:
+            self._app.invalidate()
+
+    def _discard_pending_input_handoff(self, handoff: _PendingInputHandoff) -> None:
+        """Discard one exact optimistic admission without disturbing duplicates."""
+        for index, candidate in enumerate(self._pending_input_handoff):
+            if candidate is handoff:
+                self._pending_input_handoff.pop(index)
+                break
+
+    def complete_pending_input_handoff(self, text: str) -> None:
+        """Retire the FIFO submissions represented by one consumed queue item."""
+        combined = ""
+        consumed = 0
+        for handoff in self._pending_input_handoff:
+            combined = f"{combined}\n{handoff.text}" if consumed else handoff.text
+            consumed += 1
+            if combined == text:
+                del self._pending_input_handoff[:consumed]
+                break
+            if not text.startswith(f"{combined}\n"):
+                break
+        if self._app.is_running:
+            self._app.invalidate()
 
     def _schedule_agent_callback(self, callback: Callable[[], None]) -> None:
         """Marshal agent observation delivery onto the prompt-toolkit owner loop."""
