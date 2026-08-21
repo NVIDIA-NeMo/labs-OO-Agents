@@ -130,13 +130,18 @@ A slash command performs a TUI action instead of sending ordinary prose to the
 agent. Start typing `/` and use `Tab` to discover commands. `/help` is the
 authoritative list because installed skills and plugins can add more.
 
-### Models and appearance
+### Models and reasoning
 
 ```text
 /connect             # configure a model service
 /models              # browse available models
 /model               # show or select the active model
 /reasoning           # configure model reasoning behavior
+```
+
+### Appearance
+
+```text
 /theme               # choose the color theme
 /toolbar             # inspect or configure toolbar items
 ```
@@ -297,25 +302,6 @@ tui:
 Command-line options override settings for that launch. Run `nooa tui --help`
 for the complete list.
 
-## Display modes
-
-Most users should keep the default `fullscreen` mode.
-
-```bash
-nooa tui --display-mode fullscreen
-nooa tui --display-mode native
-nooa tui --display-mode native-replay
-```
-
-- **`fullscreen`** gives NOOA an alternate screen, stable composer, application
-  scrolling, mouse selection, responsive reflow, and embedded explorers.
-- **`native`** prints inline and relies on terminal scrollback. It does not
-  replay history when the terminal changes size.
-- **`native-replay`** is the older inline behavior and rebuilds retained output
-  after resize.
-
-The mode is chosen at startup and cannot be switched safely in place.
-
 ## Safety and privacy
 
 The fullscreen renderer sanitizes terminal control sequences from models,
@@ -376,11 +362,3 @@ process is no longer responsive, terminate it from another shell and run
 `reset` in the affected terminal if necessary. When reporting a reproducible
 problem, include the terminal, multiplexer, display mode, resize or handoff
 steps, and whether the process was still alive; do not include secrets.
-
-## What is coming next
-
-The fullscreen foundation makes richer interactions possible without giving up
-terminal safety. Planned work includes a unified, polished design for all
-explorers; consistent mouse and copy support; semantic Copy buttons on fenced
-Markdown code blocks; “Copy as Markdown” based on original source; more
-keyboard discoverability; and broader PTY/tmux/SSH lifecycle testing.
