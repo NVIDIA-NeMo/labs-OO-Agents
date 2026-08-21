@@ -272,6 +272,21 @@ class BashSession:
         async with self._lock:
             return await self._run_unlocked(command, timeout)
 
+    async def run_with_cwd(
+        self, command: str, timeout: float = 30.0
+    ) -> tuple[str, str, int, bool, Path]:
+        """Like run_with_timeout_flag(), plus the cwd this command finished in.
+
+        The cwd is read while still holding the lock, so it belongs to *this*
+        command. Callers that instead run a separate ``pwd`` can have another
+        concurrent command (and its ``cd``) land in between and report a cwd
+        that was never this command's.
+        """
+        self._ensure_lock_on_current_loop()
+        async with self._lock:
+            result = await self._run_unlocked(command, timeout)
+            return (*result, self._cwd)
+
     async def _run_unlocked(self, command: str, timeout: float) -> tuple[str, str, int, bool]:
         """Actual run implementation (caller must hold self._lock).
 
