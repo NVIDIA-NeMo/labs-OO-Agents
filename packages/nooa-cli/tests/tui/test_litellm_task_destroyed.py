@@ -30,12 +30,20 @@ class FakeLoggingWorkerTask:
 async def test_agent_loop_exception_handler_suppresses_logging_worker():
     """The custom exception handler on the agent loop drops 'Task was destroyed'
     for LoggingWorker tasks and passes other messages through."""
-    from nooa_cli.tui.tui_application import TUIApplication
+    from nooa_cli.interactive import LocalAgentRunner
 
-    app = TUIApplication(agent=None)
+    from nooa.runtime.channels import QueueManager
 
-    # Create the agent loop (starts the thread)
-    loop = app._ensure_agent_loop()
+    class AgentStub:
+        def __init__(self):
+            self.queue_manager = QueueManager()
+            self._user_messages_in = self.queue_manager.queue("user_messages")
+            self.emit = None
+
+    runner = LocalAgentRunner(AgentStub(), emit_text=lambda _text: None, agent_id="local-test")
+
+    # Create the lifecycle owner's worker loop (starts the thread).
+    loop = runner.ensure_worker_loop()
     assert loop.is_running()
 
     # Collect messages that go through the exception handler
@@ -66,8 +74,8 @@ async def test_agent_loop_exception_handler_suppresses_logging_worker():
     # Give the loop time to process both
     await asyncio.sleep(0.1)
 
-    # Stop the agent loop
-    await app._stop_agent_loop()
+    # Stop the worker loop.
+    await runner.stop_worker_loop()
 
     # Only the non-LoggingWorker message should have been forwarded
     assert "Something else went wrong" in forwarded
@@ -123,26 +131,33 @@ async def test_loud_handler_suppresses_logging_worker_task_destroyed():
     assert any("Some real error" in e for e in emitted)
 
 
-# ─── Test 3: _stop_agent_loop calls litellm stop ─────────────────────
+# ─── Test 3: runner shutdown calls litellm stop ──────────────────────
 
 
 @pytest.mark.asyncio
-async def test_stop_agent_loop_stops_litellm_worker():
-    """_stop_agent_loop gracefully stops litellm's GLOBAL_LOGGING_WORKER."""
-    from nooa_cli.tui.tui_application import TUIApplication
+async def test_runner_shutdown_stops_litellm_worker():
+    """Runner shutdown gracefully stops litellm's GLOBAL_LOGGING_WORKER."""
+    from nooa_cli.interactive import LocalAgentRunner
 
-    app = TUIApplication(agent=None)
-    app._ensure_agent_loop()
+    from nooa.runtime.channels import QueueManager
 
+    class AgentStub:
+        def __init__(self):
+            self.queue_manager = QueueManager()
+            self._user_messages_in = self.queue_manager.queue("user_messages")
+            self.emit = None
+
+    runner = LocalAgentRunner(AgentStub(), emit_text=lambda _text: None, agent_id="local-test")
+    runner.ensure_worker_loop()
     stop_called = []
 
     async def fake_stop():
         stop_called.append(True)
 
     with patch(
-        "nooa_cli.tui.tui_application._stop_litellm_worker",
+        "nooa_cli.interactive.local_agent._stop_litellm_worker",
         new=fake_stop,
     ):
-        await app._stop_agent_loop()
+        await runner.shutdown()
 
-    assert stop_called, "_stop_litellm_worker was not called during _stop_agent_loop"
+    assert stop_called, "litellm worker was not stopped during runner shutdown"

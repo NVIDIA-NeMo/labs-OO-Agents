@@ -19,10 +19,43 @@ from __future__ import annotations
 import asyncio
 import threading
 
+import pytest
 from nooa_cli.tui.console import TUIConsole
 from nooa_cli.tui.session import _EmitStream
 from rich.console import Console
 from rich.table import Table
+
+
+def test_session_emission_uses_only_resolved_display_mode_for_replay(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import nooa_cli.tui.session as session_module
+    from nooa_cli.tui.config import DisplayMode
+    from nooa_cli.tui.session import Session
+
+    for mode in DisplayMode:
+        app = SimpleNamespace(
+            display_mode=mode,
+            transcript_columns=lambda: 80,
+            emit_block=Mock(),
+            color_depth=8,
+        )
+        session = Session.__new__(Session)
+        session._app = app
+        session._renderer = Mock()
+        # The deprecated boolean must not override the already-resolved mode.
+        session.config = SimpleNamespace(tui=SimpleNamespace(full_screen=True))
+
+        session._emit_text("rich output")
+        rich_kwargs = app.emit_block.call_args.kwargs
+        assert ("replay" in rich_kwargs) is (mode is DisplayMode.FULLSCREEN)
+
+        app.emit_block.reset_mock()
+        monkeypatch.setattr(session_module, "_build_user_bar", lambda *_args: "BAR")
+        session._on_user_message_ui("hello")
+        bar_kwargs = app.emit_block.call_args.kwargs
+        assert ("replay" in bar_kwargs) is (mode is DisplayMode.FULLSCREEN)
 
 
 def test_session_semantic_render_uses_isolated_consoles_across_threads(
@@ -399,7 +432,12 @@ async def test_on_command_clear_cancels_agent_task() -> None:
             pass
         return True
 
-    app.cancel_agent_turn = AsyncMock(side_effect=_cancel_agent_turn)
+    async def _cancel_for_transition() -> bool:
+        return await _cancel_agent_turn(source="session")
+
+    runner = MagicMock()
+    runner.cancel_for_transition = AsyncMock(side_effect=_cancel_for_transition)
+    session._local_agent_runner = runner
     session._app = app
     session._emit_text = MagicMock()
 
@@ -420,7 +458,7 @@ async def test_on_command_clear_cancels_agent_task() -> None:
 
     await session._on_command("/clear")
 
-    app.cancel_agent_turn.assert_awaited_once_with(source="session")
+    runner.cancel_for_transition.assert_awaited_once_with()
     assert fake_task.cancelled(), (
         f"_agent_task not cancelled; done={fake_task.done()}, cancelled={fake_task.cancelled()}"
     )
@@ -458,7 +496,9 @@ async def test_on_command_clear_without_running_task() -> None:
 
     app = MagicMock()
     app._agent_task = None  # no running task
-    app.cancel_agent_turn = AsyncMock(return_value=False)
+    runner = MagicMock()
+    runner.cancel_for_transition = AsyncMock(return_value=False)
+    session._local_agent_runner = runner
     session._app = app
     session._emit_text = MagicMock()
 
@@ -478,7 +518,7 @@ async def test_on_command_clear_without_running_task() -> None:
 
     # Must not raise
     await session._on_command("/clear")
-    app.cancel_agent_turn.assert_awaited_once_with(source="session")
+    runner.cancel_for_transition.assert_awaited_once_with()
     assert session._session_title_requested is False
 
 
@@ -508,8 +548,10 @@ async def test_run_command_runs_post_session_swap_on_agent_loop() -> None:
         return value
 
     app = MagicMock()
-    app.cancel_agent_turn = AsyncMock(return_value=True)
-    app.agent_run_async = AsyncMock(side_effect=_agent_run_async)
+    runner = MagicMock()
+    runner.cancel_for_transition = AsyncMock(return_value=True)
+    session._local_agent_runner = runner
+    runner.run_async = AsyncMock(side_effect=_agent_run_async)
     session._app = app
 
     new_sm = MagicMock()
@@ -528,9 +570,9 @@ async def test_run_command_runs_post_session_swap_on_agent_loop() -> None:
 
     render_callback = await session._run_command("/clear")
 
-    app.cancel_agent_turn.assert_awaited_once_with(source="session")
+    runner.cancel_for_transition.assert_awaited_once_with()
     session._swap_session_manager.assert_awaited_once_with(new_sm)
-    app.agent_run_async.assert_awaited_once()
+    runner.run_async.assert_awaited_once()
     assert calls == ["agent_run_async", "post_swap"]
     assert any(getattr(o, "content", None) == "post swap done" for o in fake_result.outputs)
     assert render_callback is not None
@@ -555,16 +597,16 @@ async def test_run_command_marks_session_transition_while_cancelling() -> None:
     app = MagicMock()
     app._session_transitioning = False
 
-    async def _cancel_agent_turn(*, source: str) -> bool:
-        assert source == "session"
+    async def _cancel_agent_turn() -> bool:
         assert app._session_transitioning is True
         return True
 
     async def _swap_session_manager(_new_sm) -> None:
         assert app._session_transitioning is True
 
-    app.cancel_agent_turn = AsyncMock(side_effect=_cancel_agent_turn)
-    app.agent_run_async = AsyncMock()
+    runner = MagicMock()
+    runner.cancel_for_transition = AsyncMock(side_effect=_cancel_agent_turn)
+    session._local_agent_runner = runner
     session._app = app
 
     new_sm = MagicMock()
@@ -579,7 +621,7 @@ async def test_run_command_marks_session_transition_while_cancelling() -> None:
     await session._run_command("/clear")
 
     assert app._session_transitioning is False
-    app.cancel_agent_turn.assert_awaited_once_with(source="session")
+    runner.cancel_for_transition.assert_awaited_once_with()
     session._swap_session_manager.assert_awaited_once_with(new_sm)
 
 
@@ -604,6 +646,14 @@ async def test_on_command_slash_result_posts_to_queue_without_double_submit() ->
     agent = MagicMock()
     agent._slash_commands_in = slash_ch
     session.agent = agent
+    agent_runner = MagicMock()
+
+    def submit_slash_result(result):
+        slash_ch.put(result)
+        return True
+
+    agent_runner.submit_slash_result.side_effect = submit_slash_result
+    session._local_agent_runner = agent_runner
 
     app = MagicMock()
     app._agent_task = None
@@ -648,6 +698,14 @@ async def test_on_command_slash_result_renders_via_frontend_markdown() -> None:
     agent = MagicMock()
     agent._slash_commands_in = slash_ch
     session.agent = agent
+    agent_runner = MagicMock()
+
+    def submit_slash_result(result):
+        slash_ch.put(result)
+        return True
+
+    agent_runner.submit_slash_result.side_effect = submit_slash_result
+    session._local_agent_runner = agent_runner
 
     app = MagicMock()
     app._agent_task = None
@@ -703,6 +761,9 @@ async def test_on_command_slash_result_warns_and_drops_when_no_slash_channel() -
 
     agent = MagicMock(spec=[])  # no _slash_commands_in attribute
     session.agent = agent
+    agent_runner = MagicMock()
+    agent_runner.submit_slash_result.return_value = False
+    session._local_agent_runner = agent_runner
 
     app = MagicMock()
     app._agent_task = None
@@ -727,3 +788,279 @@ async def test_on_command_slash_result_warns_and_drops_when_no_slash_channel() -
     # A loud warning is emitted to scrollback naming the dropped command.
     warned = " ".join(str(c.args[0]) for c in session._emit_text.call_args_list if c.args)
     assert "slash_commands" in warned and "status" in warned
+
+
+async def test_session_run_real_local_composition_submit_output_and_exit(monkeypatch) -> None:
+    """The real composition root carries one submit/output through every boundary."""
+    from types import SimpleNamespace
+
+    from nooa_cli.tui.config import Config, DisplayMode
+    from nooa_cli.tui.session import Session
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    from nooa.runtime.channels import QueueManager
+
+    class EventManagerStub:
+        def __init__(self) -> None:
+            self._handlers: dict[str, list] = {}
+
+        def on(self, name, callback):
+            handlers = self._handlers.setdefault(name, [])
+            handlers.append(callback)
+
+            def unsubscribe() -> None:
+                if callback in handlers:
+                    handlers.remove(callback)
+
+            return unsubscribe
+
+        def items(self):
+            return ()
+
+    class AgentStub:
+        def __init__(self) -> None:
+            self.queue_manager = QueueManager()
+            self._user_messages_in = self.queue_manager.queue("user_messages")
+            self.event_manager = EventManagerStub()
+            self._render_message = None
+            self.notifications: list[dict[str, list[object]]] = []
+
+        async def handle(self, notification):
+            self.notifications.append(notification)
+            assert self._render_message is not None
+            self._render_message("agent output")
+            return SimpleNamespace(kind="WAIT", explanation="")
+
+    class FrontendStub:
+        console = None
+
+        def __init__(self) -> None:
+            self.closed = False
+            self.outputs = []
+
+        async def render(self, output) -> None:
+            self.outputs.append(output)
+
+        def close(self) -> None:
+            self.closed = True
+
+    class RegistryStub:
+        blocking_llm_health = None
+
+        def commands(self):
+            return []
+
+    agent = AgentStub()
+    frontend = FrontendStub()
+    config = Config()
+    session = Session(frontend, agent, config, RegistryStub())
+    session._dump_exit_diagnostics = lambda: None
+    session._restore_terminal = lambda: None
+    session._print_exit_message = lambda: None
+    observed: dict[str, object] = {}
+
+    async def exercise_real_app(self: TUIApplication) -> None:
+        assert self.display_mode is DisplayMode.FULLSCREEN
+        self._loop = asyncio.get_running_loop()
+        self.observe_agent()
+        assert self._agent_controller.state is not None
+
+        self.submit_message("hello through composition")
+        for _ in range(200):
+            if agent.notifications and "agent output" in self._fullscreen_transcript.text:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("real local composition did not deliver submit/output")
+
+        observed["app"] = self
+        assert agent.notifications[0]["user_messages"] == ["hello through composition"]
+        assert "agent output" in self._fullscreen_transcript.text
+
+    monkeypatch.setattr(TUIApplication, "run_async", exercise_real_app)
+
+    await session.run()
+
+    app = observed["app"]
+    assert isinstance(app, TUIApplication)
+    assert app._agent_controller.state is None
+    assert frontend.closed
+
+
+@pytest.mark.parametrize(
+    ("application_fails", "expected_error"),
+    [
+        (True, "application startup failed"),
+        (False, "renderer detach failed"),
+    ],
+)
+async def test_session_run_startup_failure_teardown_order(
+    monkeypatch, application_fails: bool, expected_error: str
+) -> None:
+    """Every teardown phase runs; body errors win, otherwise the first cleanup error does."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    import nooa_cli.interactive as interactive_module
+    import nooa_cli.tui.agent_event_renderer as renderer_module
+    import nooa_cli.tui.config as config_module
+    import nooa_cli.tui.input_handler as input_module
+    import nooa_cli.tui.local_turn_policy as policy_module
+    import nooa_cli.tui.tui_application as app_module
+    import pytest
+    from nooa_cli.tui.session import Session
+
+    order: list[str] = []
+
+    class FakeRunner:
+        def __init__(self, agent, **_kwargs):
+            self.session = object()
+
+        def set_dispatch_hooks(self, **_kwargs):
+            pass
+
+        def set_user_message_accepted_callback(self, _callback):
+            pass
+
+        def run(self, fn):
+            return fn()
+
+        async def run_async(self, fn):
+            value = fn()
+            return await value if hasattr(value, "__await__") else value
+
+        def job_snapshots(self):
+            return ()
+
+        def pop_last_user_message(self):
+            return None
+
+        cancel_requested = False
+
+        def bind(self):
+            pass
+
+        def activate(self, _loop):
+            pass
+
+        async def shutdown(self):
+            order.append("runner shutdown")
+            raise RuntimeError("runner shutdown failed")
+
+    class FakePolicy:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def before_handle(self, _agent):
+            pass
+
+        async def after_handle(self, _agent, _result):
+            pass
+
+        def on_notification(self, _notification):
+            pass
+
+        def invalidate_keep_going(self):
+            pass
+
+        async def shutdown(self):
+            order.append("policy shutdown")
+            raise RuntimeError("policy shutdown failed")
+
+    class FakeRenderer:
+        def __init__(self, **_kwargs):
+            pass
+
+        def attach(self):
+            pass
+
+        def detach(self):
+            order.append("renderer detach")
+            raise RuntimeError("renderer detach failed")
+
+    class FakeApp:
+        def __init__(self, **_kwargs):
+            self._loop = None
+
+        def runtime_state_changed(self, *_args):
+            pass
+
+        def runtime_notification_received(self):
+            pass
+
+        def runtime_cancelled(self):
+            pass
+
+        def invalidate(self):
+            pass
+
+        def close_agent_observation(self):
+            order.append("presentation detach")
+            raise RuntimeError("presentation detach failed")
+
+        async def run_async(self):
+            if application_fails:
+                raise RuntimeError("application startup failed")
+
+    monkeypatch.setattr(interactive_module, "LocalAgentRunner", FakeRunner)
+    monkeypatch.setattr(policy_module, "LocalTurnPolicy", FakePolicy)
+    monkeypatch.setattr(renderer_module, "AgentEventRenderer", FakeRenderer)
+    monkeypatch.setattr(app_module, "TUIApplication", FakeApp)
+    monkeypatch.setattr(input_module, "SlashCommandCompleter", lambda _registry: object())
+    monkeypatch.setattr(config_module, "resolve_display_mode", lambda _config: object())
+
+    session = Session.__new__(Session)
+
+    def _frontend_close() -> None:
+        order.append("frontend close")
+        raise RuntimeError("frontend close failed")
+
+    session.frontend = SimpleNamespace(console=None, render=AsyncMock(), close=_frontend_close)
+    session.agent = SimpleNamespace(event_manager=None)
+    session.config = SimpleNamespace(tui=SimpleNamespace())
+    session.registry = SimpleNamespace(commands=lambda: [])
+    session._handler = SimpleNamespace()
+
+    def _session_manager_close() -> None:
+        order.append("session manager close")
+        raise RuntimeError("session manager close failed")
+
+    session._session_manager = SimpleNamespace(close=_session_manager_close)
+    session._initial_outputs = []
+    session._pending_code = {}
+    session._background_tasks = set()
+
+    async def _cancel_background_tasks() -> None:
+        order.append("background tasks")
+        raise RuntimeError("background task cancellation failed")
+
+    async def _bang_shell_close() -> None:
+        order.append("bang shell close")
+        raise RuntimeError("bang shell close failed")
+
+    session._cancel_background_tasks = _cancel_background_tasks
+    session._bang_shell = SimpleNamespace(close=_bang_shell_close)
+    session._unsub_activity = None
+    session._startup_loop = None
+    session._prev_exception_handler = None
+    session._session_title_requested = False
+    session._dump_exit_diagnostics = lambda: order.append("diagnostics")
+    session._restore_terminal = lambda: order.append("terminal restore")
+    session._print_exit_message = lambda: order.append("exit message")
+
+    with pytest.raises(RuntimeError, match=expected_error):
+        await session.run()
+
+    assert order == [
+        "renderer detach",
+        "presentation detach",
+        "policy shutdown",
+        "runner shutdown",
+        "background tasks",
+        "bang shell close",
+        "diagnostics",
+        "frontend close",
+        "session manager close",
+        "terminal restore",
+        "exit message",
+    ]

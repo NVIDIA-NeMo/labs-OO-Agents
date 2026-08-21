@@ -178,3 +178,58 @@ def test_choice_prompt_supports_arrow_selection_and_escape():
     cancelled = ChoicePromptView("Model", "Choose", ["one"])
     assert cancelled.handle_key("escape") == "close"
     assert cancelled.value is None
+
+
+def test_remote_clipboard_prefers_osc52_over_host_pbcopy(monkeypatch):
+    output = MagicMock()
+    app = TUIApplication.__new__(TUIApplication)
+    app._app = SimpleNamespace(output=output)
+    monkeypatch.setenv("SSH_CONNECTION", "client server")
+    pbcopy = MagicMock()
+    monkeypatch.setattr("nooa_cli.tui.tui_application.shutil.which", pbcopy)
+
+    result = app._copy_to_clipboard_result("remote text")
+
+    assert result.success is True
+    assert result.transport == "osc52"
+    pbcopy.assert_not_called()
+    assert "\x1b]52;c;" in output.write_raw.call_args.args[0]
+
+
+def test_clipboard_reports_size_and_transport_failures(monkeypatch):
+    output = MagicMock()
+    output.write_raw.side_effect = OSError("terminal rejected OSC 52")
+    app = TUIApplication.__new__(TUIApplication)
+    app._app = SimpleNamespace(output=output)
+    monkeypatch.setenv("SSH_TTY", "/dev/pts/1")
+
+    oversized = app._copy_to_clipboard_result("x" * 100_001)
+    failed = app._copy_to_clipboard_result("copy me")
+
+    assert oversized.success is False
+    assert "100 KB" in oversized.reason
+    assert failed.success is False
+    assert "terminal rejected" in failed.reason
+
+
+def test_local_clipboard_prefers_platform_command_over_osc52(monkeypatch):
+    output = MagicMock()
+    app = TUIApplication.__new__(TUIApplication)
+    app._app = SimpleNamespace(output=output)
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    monkeypatch.setattr(
+        "nooa_cli.tui.tui_application.shutil.which",
+        lambda name: "/usr/bin/wl-copy" if name == "wl-copy" else None,
+    )
+    run = MagicMock()
+    monkeypatch.setattr("nooa_cli.tui.tui_application.subprocess.run", run)
+
+    result = app._copy_to_clipboard_result("local text")
+
+    assert result.success is True
+    assert result.transport == "local"
+    run.assert_called_once()
+    assert run.call_args.args[0] == ["/usr/bin/wl-copy"]
+    assert run.call_args.kwargs["input"] == b"local text"
+    output.write_raw.assert_not_called()

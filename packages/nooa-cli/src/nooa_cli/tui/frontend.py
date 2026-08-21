@@ -177,6 +177,16 @@ class Frontend(Protocol):
 # ---------------------------------------------------------------------------
 
 
+FULLSCREEN_EDITOR_POLICY = (
+    "External editors are unavailable in fullscreen mode because they require terminal "
+    "handoff. Restart with --display-mode native or native-replay, then run /edit again."
+)
+
+
+class ExternalEditorUnavailableError(RuntimeError):
+    """Raised when a display mode cannot safely hand the terminal to an editor."""
+
+
 class TerminalFrontend:
     """Frontend backed by Rich (output) + prompt_toolkit (input).
 
@@ -486,6 +496,13 @@ class TerminalFrontend:
         import subprocess
         import tempfile
         from pathlib import Path
+
+        # Alternate-screen mode has one terminal owner for its entire lifetime.
+        # Do not even import the handoff primitive on this policy path.
+        from .config import DisplayMode
+
+        if getattr(self._app, "display_mode", None) is DisplayMode.FULLSCREEN:
+            raise ExternalEditorUnavailableError(FULLSCREEN_EDITOR_POLICY)
 
         from prompt_toolkit.application import run_in_terminal
 

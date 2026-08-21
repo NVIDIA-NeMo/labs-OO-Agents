@@ -1032,6 +1032,9 @@ class QueueManager:
                     await job.aclose()  # type: ignore[union-attr]
                 if self._event_manager is not None:
                     self._event_manager.add(StreamEnd(channel_name=channel))
+                # Job terminal state is observable host state even when no
+                # value was put (for example cancellation or empty streams).
+                self._set_notify()
 
         # Dict created before create_task so the closure can find the
         # handle even if the task runs immediately (single-threaded
@@ -1041,6 +1044,8 @@ class QueueManager:
         handle = JobHandle(name=channel, task=task, buffer=buffer, label=label)
         _handles_by_task[task] = handle
         self._handles.append(handle)
+        # Publish the RUNNING transition independently of channel values.
+        self._set_notify()
         return handle
 
     # ---- shutdown --------------------------------------------------------

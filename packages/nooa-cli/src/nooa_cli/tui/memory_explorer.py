@@ -4,7 +4,7 @@
 
 Rows are prebuilt snapshots: ``build_memory_rows`` touches the SQLite store
 and resolves references against live agent state, so it must run on the
-agent thread (the host dispatches it via ``TUIApplication.agent_run_async``).
+agent thread (the composition root dispatches it through the local runtime).
 The view itself only renders those snapshots; the ``f``/``d`` actions go
 through host-supplied callables that route back to the agent thread.
 """

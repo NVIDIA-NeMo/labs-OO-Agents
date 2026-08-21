@@ -58,16 +58,25 @@ _KEY_SEQUENCES: dict[str, str] = {
     "down": "\x1b[B",
     "right": "\x1b[C",
     "left": "\x1b[D",
+    "s-up": "\x1b[1;2A",
+    "s-down": "\x1b[1;2B",
+    "s-right": "\x1b[1;2C",
+    "s-left": "\x1b[1;2D",
     "home": "\x1b[H",
     "end": "\x1b[F",
     "pageup": "\x1b[5~",
     "pagedown": "\x1b[6~",
+    "c-home": "\x1b[1;5H",
+    "c-end": "\x1b[1;5F",
+    "delete": "\x1b[3~",
     "c-c": "\x03",
     "c-d": "\x04",
+    "c-x": "\x18",
     "c-j": "\n",  # bare LF — used by prompt_toolkit as "Shift+Enter"
     "c-u": "\x15",
     "c-y": "\x19",
     "f2": "\x1bOQ",
+    "f6": "\x1b[17~",
     "s-enter": "\x1b\r",  # Alt+Enter / Esc+Enter — prompt_toolkit treats as newline
 }
 
@@ -153,22 +162,15 @@ class FakeAgent:
         self.script: list[Callable[[FakeAgent, str], Any]] = []
         self.messages_received: list[str] = []
         self.block = ThreadGate(initially_set=True)  # default: handle returns immediately
-        self.emit: Callable[[str], None] | None = None  # set by app
         # Tests don't need event-mode channels, so no event_manager.
         self.queue_manager = QueueManager()
         self._user_messages_in = self.queue_manager.queue("user_messages")
         self.user_messages = self._user_messages_in.reader
         self.next_kind: str = "GET_USER_INPUT"
 
-    def emit_message(self, text: str) -> None:
-        """Render ``text`` as Markdown → ANSI and push to the output buffer.
-
-        Mirrors what the real frontend does with ``AgentMessage`` objects
-        (Rich Markdown renderer), so tests that assert on ANSI presence
-        exercise the same rendering path as production.
-        """
-        if self.emit is None:
-            return
+    @staticmethod
+    def render_message(text: str) -> str:
+        """Render Markdown exactly as the production message frontend does."""
         import io as _io
 
         from rich.console import Console
@@ -178,7 +180,7 @@ class FakeAgent:
         Console(
             file=buf, force_terminal=True, color_system="256", width=80, legacy_windows=False
         ).print(Markdown(text))
-        self.emit(buf.getvalue())
+        return buf.getvalue()
 
     async def handle(
         self,
@@ -250,8 +252,75 @@ class MutableRecordingOutput(DummyOutput):
     def reset_attributes(self) -> None:
         self.events.append(("reset_attributes",))
 
+    def enable_mouse_support(self) -> None:
+        self.events.append(("enable_mouse_support",))
+
+    def disable_mouse_support(self) -> None:
+        self.events.append(("disable_mouse_support",))
+
     def flush(self) -> None:
         self.events.append(("flush",))
+
+
+def _wire_local_turn_policy(agent: Any, runner: Any, app: Any, config: Any) -> Any:
+    """Mirror Session's composition-root policy wiring for focused tests."""
+    from nooa_cli.tui.local_turn_policy import LocalTurnPolicy
+    from nooa_cli.tui.tui_application import DispatcherExit
+
+    async def _emit_output(output: Any) -> None:
+        display_text = getattr(output, "display_text", None)
+        if callable(display_text):
+            app.emit_block(f"\x1b[2m{display_text()}\x1b[0m\n")
+
+    policy = LocalTurnPolicy(
+        agent,
+        runner,
+        config,
+        emit_output=_emit_output,
+        invalidate=app.invalidate,
+    )
+    runner.set_dispatch_hooks(
+        on_state_change=app.runtime_state_changed,
+        on_before_handle=policy.before_handle,
+        on_after_handle=policy.after_handle,
+        on_notification=lambda notification: (
+            policy.on_notification(notification),
+            app.runtime_notification_received(),
+        ),
+        dispatcher_exit=DispatcherExit,
+        on_cancelled=app.runtime_cancelled,
+    )
+    app._test_turn_policy = policy
+    return policy
+
+
+def make_local_tui_app(agent: Any, **kwargs: Any) -> Any:
+    """Compose a TUIApplication with its lifecycle owner for focused tests."""
+    from nooa_cli.interactive import LocalAgentRunner
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    app_ref: list[TUIApplication] = []
+    runner = LocalAgentRunner(
+        agent,
+        emit_text=lambda text: app_ref[0].emit_block(text),
+        agent_id=f"test-{id(agent):x}",
+    )
+    from nooa_cli.tui.host_services import TUIHostServices
+
+    reflection = getattr(agent, "_tui_reflection_runner", None)
+    if "host_services" not in kwargs:
+        kwargs["host_services"] = TUIHostServices(
+            auxiliary_status=(None if reflection is None else reflection.indicator_frame)
+        )
+    config = kwargs.get("config")
+    kwargs.setdefault("display_mode", "native-replay")
+    app = TUIApplication(agent=runner, **kwargs)
+    app_ref.append(app)
+    app.observe_agent()
+    app._test_agent_runner = runner
+    policy = _wire_local_turn_policy(agent, runner, app, config)
+    app._on_agent_activity = policy.invalidate_keep_going
+    return app
 
 
 class TUIHarness(AbstractAsyncContextManager["TUIHarness"]):
@@ -266,16 +335,19 @@ class TUIHarness(AbstractAsyncContextManager["TUIHarness"]):
         agent: FakeAgent | None = None,
         config: Any = None,
         full_screen: bool | None = None,
+        display_mode: Any = None,
         output: Output | None = None,
     ) -> None:
         self.agent = agent or FakeAgent()
         self._config = config
         self._full_screen = full_screen
+        self._display_mode = display_mode
         self.output = output or DummyOutput()
         self._pipe_ctx: Any = None
         self._session_ctx: Any = None
         self._run_task: asyncio.Task | None = None
         self.app: TUIApplication | None = None
+        self.runner: Any | None = None
 
     async def __aenter__(self) -> TUIHarness:
         self._pipe_ctx = create_pipe_input()
@@ -285,6 +357,8 @@ class TUIHarness(AbstractAsyncContextManager["TUIHarness"]):
 
         # Import locally so the stub can evolve without breaking harness
         # consumers that don't import it.
+        from nooa_cli.interactive import LocalAgentRunner
+        from nooa_cli.tui.host_services import TUIHostServices
         from nooa_cli.tui.tui_application import TUIApplication
         from prompt_toolkit.completion import WordCompleter
 
@@ -297,14 +371,36 @@ class TUIHarness(AbstractAsyncContextManager["TUIHarness"]):
         kwargs = {}
         if self._full_screen is not None:
             kwargs["full_screen"] = self._full_screen
+        if self._display_mode is not None:
+            kwargs["display_mode"] = self._display_mode
+        if self._full_screen is None and self._display_mode is None:
+            kwargs["display_mode"] = "native-replay"
+        app_ref: list[TUIApplication] = []
+        agent_runner = LocalAgentRunner(
+            self.agent,
+            emit_text=lambda text: app_ref[0].emit_block(text),
+            agent_id=f"test-{id(self.agent):x}",
+        )
+        self.runner = agent_runner
         self.app = TUIApplication(
-            agent=self.agent,
+            agent=agent_runner,
+            host_services=TUIHostServices(
+                auxiliary_status=(
+                    self.agent._tui_reflection_runner.indicator_frame
+                    if hasattr(self.agent, "_tui_reflection_runner")
+                    else None
+                )
+            ),
             completer=completer,
             config=self._config,
             **kwargs,
         )
+        app_ref.append(self.app)
+        policy = _wire_local_turn_policy(self.agent, agent_runner, self.app, self._config)
+        self.app._on_agent_activity = policy.invalidate_keep_going
         self._pipe = pipe
 
+        agent_runner.activate(asyncio.get_running_loop())
         self._run_task = asyncio.create_task(self.app.run_async())
         # Let the app install its input reader before the test sends keys.
         await self._wait_for_app_ready()
@@ -315,7 +411,8 @@ class TUIHarness(AbstractAsyncContextManager["TUIHarness"]):
             # Cancel any pending agent task so FakeAgent.handle() awaiting
             # on agent.block doesn't get orphaned at teardown.
             if self.app is not None:
-                agent_task = getattr(self.app, "_agent_task", None)
+                runner = self.runner
+                agent_task = None if runner is None else runner.task
                 if agent_task is not None and not agent_task.done():
                     agent_task.cancel()
                     try:
@@ -329,6 +426,11 @@ class TUIHarness(AbstractAsyncContextManager["TUIHarness"]):
                 except (TimeoutError, asyncio.CancelledError):
                     self._run_task.cancel()
         finally:
+            policy = None if self.app is None else getattr(self.app, "_test_turn_policy", None)
+            if policy is not None:
+                await policy.shutdown()
+            if self.runner is not None:
+                await self.runner.shutdown()
             if self._session_ctx is not None:
                 self._session_ctx.__exit__(None, None, None)
             if self._pipe_ctx is not None:
@@ -423,11 +525,9 @@ class TUIHarness(AbstractAsyncContextManager["TUIHarness"]):
         they dispatch immediately via ``on_command``/``on_bang``.
         """
         assert self.app is not None
-        agent = getattr(self.app, "agent", None)
-        q = getattr(agent, "_user_messages_in", None) if agent is not None else None
-        if q is None:
+        if self.runner is None:
             return []
-        return [str(item) for item in q.snapshot()]
+        return list(self.runner.pending_user_messages())
 
     def capture_status(self) -> str:
         assert self.app is not None
