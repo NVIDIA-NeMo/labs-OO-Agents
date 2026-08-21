@@ -17,7 +17,7 @@ from nooa_cli.interactive import (
     AgentLifecycle,
     CancellationState,
 )
-from nooa_cli.interactive.local_agent import LocalAgentRunner
+from nooa_cli.interactive.local_agent import LocalAgentRunner, _terminal_job_lines
 from nooa_cli.tui.agent_controller import AgentController
 
 from nooa.interactive import InteractiveAgent
@@ -55,6 +55,20 @@ class AgentStub:
         self.entered.set()
         await self.release.wait()
         return SimpleNamespace(kind="WAIT", explanation="")
+
+
+def test_terminal_job_lines_do_not_complete_every_job_on_a_shared_channel() -> None:
+    handles = [
+        SimpleNamespace(name="delegates", label="finished review", state="done"),
+        SimpleNamespace(name="delegates", label="still running", state="running"),
+        SimpleNamespace(name="delegates", label="failed review", state="failed"),
+    ]
+
+    rendered = "".join(_terminal_job_lines(handles, "18:25:06"))
+
+    assert "✓ finished review" in rendered
+    assert "✗ failed review" in rendered
+    assert "still running" not in rendered
 
 
 def test_bind_supports_interactive_agent_without_dynamic_emit_attribute() -> None:

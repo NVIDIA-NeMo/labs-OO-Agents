@@ -35,6 +35,17 @@ _CALLBACK_OWNER_ATTRIBUTE = "_nooa_local_agent_runner_owner"
 _CALLBACK_LEASE_LOCK = threading.RLock()
 
 
+def _terminal_job_lines(handles: list[Any], now: str) -> list[str]:
+    """Render only jobs that actually reached a terminal state."""
+    icons = {"done": ("\x1b[32m", "✓"), "failed": ("\x1b[31m", "✗"), "cancelled": ("\x1b[2m", "⊘")}
+    lines: list[str] = []
+    for handle in handles:
+        style, icon = icons.get(handle.state, ("", ""))
+        if icon:
+            lines.append(f"{style}  {icon} {handle.label} — {now}\x1b[0m\n")
+    return lines
+
+
 async def _stop_litellm_worker() -> None:
     """Stop litellm's global worker before its owning loop is torn down."""
     try:
@@ -560,10 +571,8 @@ class LocalAgentRunner:
                 return
             if running and items:
                 now = datetime.datetime.now().strftime("%H:%M:%S")
-                names = {name for name, _ in items}
-                for handle in running:
-                    if handle.name in names:
-                        self._present(f"\x1b[32m  ✓ {handle.label} — {now}\x1b[0m\n")
+                for line in _terminal_job_lines(running, now):
+                    self._present(line)
             notification = self._drain(qm, items)
 
     @staticmethod
