@@ -207,6 +207,25 @@ def test_fullscreen_sanitizes_terminal_commands_without_native_width_wrapping(
     assert app._fullscreen_transcript.text == r"abcdef\x1b[2J" + "\n"
 
 
+def test_fullscreen_hyperlink_hit_testing_survives_projection_and_wrapping() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+    model = FullscreenTranscriptModel()
+    model.append(
+        "prefix \x1b]8;id=42;https://example.test/docs\x1b\\linked text"
+        "\x1b]8;;\x1b\\ suffix"
+    )
+
+    assert model.hyperlink_at(x=0, y=0, width=8, height=3) == "https://example.test/docs"
+    assert model.hyperlink_at(x=1, y=1, width=8, height=3) == "https://example.test/docs"
+    assert model.hyperlink_at(x=2, y=1, width=8, height=3) is None
+
+    blank = FullscreenTranscriptModel()
+    blank.append("\x1b]8;;https://example.test/docs\x1b\\foo\n\nbar\x1b]8;;\x1b\\")
+    assert blank.hyperlink_at(x=0, y=1, width=20, height=3) is None
+    assert blank.hyperlink_at(x=19, y=1, width=20, height=3) is None
+
+
 def test_fullscreen_projection_does_not_leak_osc8_control_payload() -> None:
     from prompt_toolkit.formatted_text import to_formatted_text
 
@@ -1595,6 +1614,108 @@ def test_fullscreen_selection_is_visibly_styled() -> None:
     selected = "".join(text for style, text, *_ in fragments if "selected" in style)
 
     assert selected == "bcd"
+
+
+def test_fullscreen_click_without_drag_activates_link_but_drag_does_not() -> None:
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    app = _make_fullscreen_app()
+    app.emit_block("\x1b]8;;https://example.test/docs\x1b\\link\x1b]8;;\x1b\\ plain")
+    app._transcript_viewport_size = lambda: (20, 1)
+    opened: list[tuple[int, int]] = []
+    app._open_fullscreen_link_at = lambda x, y: opened.append((x, y)) or True
+    assert app._output_window is not None
+    control = app._output_window.content
+    control._link_callback = app._open_fullscreen_link_at
+    control.create_content(20, 1)
+
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_DOWN, x=1, y=0))
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_UP, x=1, y=0))
+    assert opened == [(1, 0)]
+
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_DOWN, x=1, y=0))
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_MOVE, x=2, y=0))
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_UP, x=2, y=0))
+    assert opened == [(1, 0)]
+
+    # A terminal may omit an intermediate motion report; a changed release
+    # coordinate still belongs to drag selection, never link activation.
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_DOWN, x=1, y=0))
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_UP, x=2, y=0))
+    assert opened == [(1, 0)]
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_link_click_opens_safe_http_url(monkeypatch) -> None:
+    app = _make_fullscreen_app()
+    app.emit_block("\x1b]8;;https://example.test/docs\x1b\\link\x1b]8;;\x1b\\")
+    app._transcript_viewport_size = lambda: (20, 2)
+    calls: list[str] = []
+
+    async def open_browser(url: str) -> bool:
+        calls.append(url)
+        return True
+
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    monkeypatch.setattr(app, "_open_local_url", open_browser)
+
+    assert app._open_fullscreen_link_at(1, 0) is True
+    assert app._link_task is not None
+    await app._link_task
+    assert calls == ["https://example.test/docs"]
+    assert app._open_fullscreen_link_at(8, 0) is False
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_remote_link_click_copies_without_launching(monkeypatch) -> None:
+    app = _make_fullscreen_app()
+    app.emit_block("\x1b]8;;https://example.test/docs\x1b\\link\x1b]8;;\x1b\\")
+    app._transcript_viewport_size = lambda: (20, 2)
+    copied: list[str] = []
+
+    monkeypatch.setenv("SSH_CONNECTION", "client 1 server 2")
+    monkeypatch.setattr(
+        app,
+        "_start_fullscreen_selection_copy",
+        lambda text: copied.append(text),
+    )
+    async def forbidden_open(_url: str) -> bool:
+        raise AssertionError("remote clicks must not launch a host browser")
+    monkeypatch.setattr(app, "_open_local_url", forbidden_open)
+
+    assert app._open_fullscreen_link_at(1, 0) is True
+    assert copied == ["https://example.test/docs"]
+    assert app._link_task is None
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_rapid_link_clicks_do_not_duplicate_launch(monkeypatch) -> None:
+    app = _make_fullscreen_app()
+    app.emit_block("\x1b]8;;https://example.test/docs\x1b\\link\x1b]8;;\x1b\\")
+    app._transcript_viewport_size = lambda: (20, 2)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls: list[str] = []
+
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+
+    async def blocked_open(url: str) -> bool:
+        calls.append(url)
+        started.set()
+        await release.wait()
+        return True
+
+    monkeypatch.setattr(app, "_open_local_url", blocked_open)
+
+    assert app._open_fullscreen_link_at(1, 0) is True
+    await started.wait()
+    assert app._open_fullscreen_link_at(1, 0) is True
+    assert calls == ["https://example.test/docs"]
+    release.set()
+    assert app._link_task is not None
+    await app._link_task
 
 
 def test_fullscreen_click_without_drag_clears_selection_without_copy(monkeypatch) -> None:

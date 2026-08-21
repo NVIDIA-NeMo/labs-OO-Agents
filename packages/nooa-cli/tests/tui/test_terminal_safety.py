@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from nooa_cli.tui.session import _build_user_bar
 from nooa_cli.tui.terminal_safety import (
+    hyperlink_at_plain_offset,
     normalize_transcript_block,
     sanitize_transcript_ansi,
     strip_safe_ansi,
@@ -85,3 +86,15 @@ def test_user_bar_is_control_safe_cell_aware_and_reserves_final_column() -> None
     visible_lines = strip_safe_ansi(sanitize_transcript_ansi(bar)).splitlines()
     assert visible_lines
     assert all(cell_len(line) == 9 for line in visible_lines)
+
+
+def test_hyperlink_hit_testing_accepts_only_http_targets() -> None:
+    linked = "before \x1b]8;id=7;https://example.test/path\x1b\\label\x1b]8;;\x1b\\ after"
+
+    assert hyperlink_at_plain_offset(linked, 7) == "https://example.test/path"
+    assert hyperlink_at_plain_offset(linked, 11) == "https://example.test/path"
+    assert hyperlink_at_plain_offset(linked, 6) is None
+    assert hyperlink_at_plain_offset(linked, 12) is None
+
+    unsafe = "\x1b]8;;file:///tmp/secret\x1b\\local\x1b]8;;\x1b\\"
+    assert hyperlink_at_plain_offset(unsafe, 0) is None

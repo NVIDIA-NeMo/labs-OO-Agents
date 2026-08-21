@@ -197,12 +197,14 @@ class _FullscreenTranscriptControl(FormattedTextControl):
         scroll_callback: Callable[[int], None],
         mouse_navigation_enabled: Callable[[], bool],
         selection_callback: Callable[[str, int, int], None],
+        link_callback: Callable[[int, int], bool],
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._scroll_callback = scroll_callback
         self._mouse_navigation_enabled = mouse_navigation_enabled
         self._selection_callback = selection_callback
+        self._link_callback = link_callback
         self._render_width: int | None = None
         self._render_height: int | None = None
         self._dragging = False
@@ -304,7 +306,10 @@ class _FullscreenTranscriptControl(FormattedTextControl):
             self._selection_callback("extend", x, y)
             return None
         if mouse_event.event_type is MouseEventType.MOUSE_UP and self._dragging:
-            self._finish_drag(x, y, moved=self._drag_moved)
+            moved = self._drag_moved or self._drag_position != (x, y)
+            self._finish_drag(x, y, moved=moved)
+            if not moved:
+                self._link_callback(x, y)
             return None
         return super().mouse_handler(mouse_event)
 
@@ -770,6 +775,7 @@ class TUIApplication:
         self._transient_status_style = "class:status"
         self._transient_status_timer: asyncio.TimerHandle | None = None
         self._clipboard_task: asyncio.Task[None] | None = None
+        self._link_task: asyncio.Task[None] | None = None
 
         self._agent_controller = AgentController(
             _CallbackScheduler(self._schedule_agent_callback),
@@ -900,6 +906,7 @@ class TUIApplication:
                     scroll_callback=self._scroll_fullscreen_transcript,
                     mouse_navigation_enabled=lambda: self._fullscreen_mouse_navigation,
                     selection_callback=self._handle_fullscreen_selection,
+                    link_callback=self._open_fullscreen_link_at,
                 ),
                 wrap_lines=False,
                 # The model virtualizes formatted content to exactly the visible
@@ -1516,6 +1523,88 @@ class TUIApplication:
         if not isinstance(control, _FullscreenTranscriptControl) or not control.dragging:
             return False
         return control.handle_external_mouse(mouse_event, below=True)
+
+    def _open_fullscreen_link_at(self, x: int, y: int) -> bool:
+        """Open the safe HTTP(S) hyperlink under a click without affecting drag-copy."""
+        if not self._is_fullscreen:
+            return False
+        width, height = self._transcript_viewport_size()
+        url = self._fullscreen_transcript.hyperlink_at(x=x, y=y, width=width, height=height)
+        if url is None:
+            return False
+
+        # A browser on an SSH host is not the user's browser. Reuse the
+        # remote-aware clipboard path (OSC 52 fallback) so the URL reaches the
+        # terminal that received the click without launching anything remotely.
+        if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
+            self._start_fullscreen_selection_copy(url)
+            return True
+
+        # Opening a URL is irreversible. Ignore duplicate clicks while one
+        # launch is in flight rather than cancelling an await whose subprocess
+        # may already have accepted the request.
+        if self._link_task is not None and not self._link_task.done():
+            return True
+
+        async def open_link() -> None:
+            task = asyncio.current_task()
+            try:
+                opened = await self._open_local_url(url)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("failed to open transcript hyperlink", exc_info=True)
+                opened = False
+            finally:
+                if self._link_task is task:
+                    self._link_task = None
+            if not opened:
+                # A local machine without a browser helper still gets a useful,
+                # explicit result instead of a swallowed click.
+                self._start_fullscreen_selection_copy(url)
+
+        self._link_task = asyncio.create_task(open_link())
+        return True
+
+    @staticmethod
+    def _browser_open_command(url: str) -> tuple[str, ...] | None:
+        """Return a direct-argv browser opener, avoiding shell interpretation."""
+        candidates = (
+            ("open", (url,)),
+            ("xdg-open", (url,)),
+            ("wslview", (url,)),
+            ("gio", ("open", url)),
+            ("rundll32.exe", ("url.dll,FileProtocolHandler", url)),
+        )
+        for executable, arguments in candidates:
+            path = shutil.which(executable)
+            if path is not None:
+                return (path, *arguments)
+        return None
+
+    async def _open_local_url(self, url: str) -> bool:
+        """Launch a validated URL with a cancellable local helper process."""
+        command = self._browser_open_command(url)
+        if command is None:
+            return False
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except OSError:
+            return False
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except asyncio.CancelledError:
+            await self._terminate_clipboard_process(process)
+            raise
+        except TimeoutError:
+            await self._terminate_clipboard_process(process)
+            return False
+        return process.returncode == 0
 
     def _handle_fullscreen_selection(self, action: str, x: int, y: int) -> None:
         """Apply one mouse-selection transition and copy on button release."""
@@ -2459,6 +2548,15 @@ class TUIApplication:
                     pass
                 if self._clipboard_task is clipboard_task:
                     self._clipboard_task = None
+            link_task = self._link_task
+            if link_task is not None:
+                link_task.cancel()
+                try:
+                    await link_task
+                except asyncio.CancelledError:
+                    pass
+                if self._link_task is link_task:
+                    self._link_task = None
             self._cancel_fullscreen_drag()
             # Restore sys.stdout / sys.stderr FIRST so any post-exit
             # prints from teardown code (spinner cleanup, snapshot save,

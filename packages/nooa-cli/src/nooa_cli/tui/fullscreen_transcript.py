@@ -16,6 +16,7 @@ from rich.cells import split_graphemes
 from wcwidth import wcswidth
 
 from .terminal_safety import (
+    hyperlink_at_plain_offset,
     project_prompt_toolkit_ansi,
     sanitize_transcript_ansi,
     strip_safe_ansi,
@@ -192,6 +193,17 @@ class FullscreenTranscriptModel:
         self._selection_active = self._selection_hit(x=x, y=y, width=width, height=height)
         self._formatted_cache.clear()
 
+    def hyperlink_at(self, *, x: int, y: int, width: int, height: int) -> str | None:
+        """Return the safe OSC-8 target under one visible transcript cell."""
+        hit = self._selection_hit(x=x, y=y, width=width, height=height, clamp=False)
+        if hit is None:
+            return None
+        records, _bases = self._record_indexes()
+        record = records.get(hit.record_id)
+        if record is None:
+            return None
+        return hyperlink_at_plain_offset(record.ansi, hit.before)
+
     def clear_selection(self) -> None:
         """Discard renderer-owned selection without changing the viewport."""
         self._selection_anchor = None
@@ -219,7 +231,15 @@ class FullscreenTranscriptModel:
             offset = record_stop
         return "".join(pieces)
 
-    def _selection_hit(self, *, x: int, y: int, width: int, height: int) -> _SelectionHit | None:
+    def _selection_hit(
+        self,
+        *,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+        clamp: bool = True,
+    ) -> _SelectionHit | None:
         width = max(1, width)
         height = max(1, height)
         rows = self._projection(width)
@@ -238,6 +258,8 @@ class FullscreenTranscriptModel:
         if record is None:
             return None
         if not display_spans or not row.source_spans:
+            if not clamp:
+                return None
             insertion = min(
                 len(record.plain), self._character_offset(record, row.anchor.source_offset)
             )
@@ -245,6 +267,9 @@ class FullscreenTranscriptModel:
 
         cell = max(0, x)
         occupied = 0
+        total_cells = sum(max(1, cells) for _start, _stop, cells in display_spans)
+        if not clamp and cell >= total_cells:
+            return None
         selected = len(display_spans) - 1
         for index, (_start, _stop, cells) in enumerate(display_spans):
             next_occupied = occupied + max(1, cells)
