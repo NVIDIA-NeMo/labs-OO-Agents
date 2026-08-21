@@ -212,8 +212,7 @@ def test_fullscreen_hyperlink_hit_testing_survives_projection_and_wrapping() -> 
 
     model = FullscreenTranscriptModel()
     model.append(
-        "prefix \x1b]8;id=42;https://example.test/docs\x1b\\linked text"
-        "\x1b]8;;\x1b\\ suffix"
+        "prefix \x1b]8;id=42;https://example.test/docs\x1b\\linked text\x1b]8;;\x1b\\ suffix"
     )
 
     assert model.hyperlink_at(x=0, y=0, width=8, height=3) == "https://example.test/docs"
@@ -226,18 +225,30 @@ def test_fullscreen_hyperlink_hit_testing_survives_projection_and_wrapping() -> 
     assert blank.hyperlink_at(x=19, y=1, width=20, height=3) is None
 
 
-def test_fullscreen_projection_does_not_leak_osc8_control_payload() -> None:
+def test_fullscreen_projection_keeps_osc8_only_as_zero_width_metadata() -> None:
     from prompt_toolkit.formatted_text import to_formatted_text
 
     app = _make_fullscreen_app()
     app.emit_block("\x1b]8;;https://example.test\x1b\\label\x1b]8;;\x1b\\\n")
 
-    rendered = "".join(
-        fragment[1] for fragment in to_formatted_text(app._fullscreen_transcript.formatted_text())
-    )
+    fragments = to_formatted_text(app._fullscreen_transcript.formatted_text())
+    rendered = "".join(text for style, text, *_ in fragments if "[ZeroWidthEscape]" not in style)
+    raw = "".join(text for style, text, *_ in fragments if "[ZeroWidthEscape]" in style)
+
     assert rendered == "label\n"
-    assert "example.test" not in rendered
-    assert "8;;" not in rendered
+    assert raw == "\x1b]8;;https://example.test\x1b\\" * len("label")
+
+
+def test_fullscreen_does_not_emit_native_metadata_for_unsafe_link_target() -> None:
+    from prompt_toolkit.formatted_text import to_formatted_text
+
+    app = _make_fullscreen_app()
+    app.emit_block("\x1b]8;;file:///tmp/secret\x1b\\label\x1b]8;;\x1b\\")
+
+    fragments = to_formatted_text(app._fullscreen_transcript.formatted_text())
+
+    assert "".join(text for _style, text, *_ in fragments) == "label\n"
+    assert all("[ZeroWidthEscape]" not in style for style, _text, *_ in fragments)
 
 
 def test_fullscreen_projection_drops_unsupported_colon_sgr_without_leaking_parameters() -> None:
@@ -948,6 +959,73 @@ def _fullscreen_window_cells(app, *, width: int, height: int) -> list[str]:
         ).rstrip()
         for y in range(height)
     ]
+
+
+def test_fullscreen_screen_preserves_native_osc8_metadata_across_wrapped_rows() -> None:
+    from prompt_toolkit.application.current import set_app
+    from prompt_toolkit.layout.mouse_handlers import MouseHandlers
+    from prompt_toolkit.layout.screen import Screen, WritePosition
+
+    app = _make_fullscreen_app()
+    app.emit_block(
+        "plain \x1b]8;id=docs;https://example.test/docs\x1b\\linked text\x1b]8;;\x1b\\ tail"
+    )
+    app._transcript_viewport_size = lambda: (8, 3)
+    assert app._output_window is not None
+    app._app.render_counter += 1
+    screen = Screen()
+    with set_app(app._app):
+        app._output_window.write_to_screen(
+            screen,
+            MouseHandlers(),
+            WritePosition(xpos=0, ypos=0, width=8, height=3),
+            parent_style="",
+            erase_bg=False,
+            z_index=None,
+        )
+
+    target = "\x1b]8;;https://example.test/docs\x1b\\"
+    close = "\x1b]8;;\x1b\\"
+    assert screen.zero_width_escapes[0][6] == target
+    assert screen.zero_width_escapes[1][0] == target
+    assert screen.zero_width_escapes[1][3] == close
+    assert all(
+        "id=docs" not in sequence
+        for row in screen.zero_width_escapes.values()
+        for sequence in row.values()
+    )
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_renderer_emits_native_osc8_through_raw_output() -> None:
+    from prompt_toolkit.application.current import set_app
+
+    app = _make_fullscreen_app()
+    app.emit_block("\x1b]8;;https://example.test/docs\x1b\\link\x1b]8;;\x1b\\")
+    raw_writes: list[str] = []
+    plain_writes: list[str] = []
+    app._app.output.write_raw = raw_writes.append  # type: ignore[method-assign]
+    app._app.output.write = plain_writes.append  # type: ignore[method-assign]
+
+    with set_app(app._app):
+        app._app.renderer.render(app._app, app._app.layout)
+
+    opening = "\x1b]8;;https://example.test/docs\x1b\\"
+    assert opening in "".join(raw_writes)
+    assert opening not in "".join(plain_writes)
+
+
+def test_fullscreen_after_render_closes_native_hyperlink_state() -> None:
+    app = _make_fullscreen_app()
+    writes: list[str] = []
+    flushes: list[None] = []
+    app._app.output.write_raw = writes.append  # type: ignore[method-assign]
+    app._app.output.flush = lambda: flushes.append(None)  # type: ignore[method-assign]
+
+    app._after_render(app._app)
+
+    assert writes == ["\x1b]8;;\x1b\\"]
+    assert flushes == [None]
 
 
 def test_short_fullscreen_transcript_is_bottom_aligned_in_viewport() -> None:
@@ -1680,8 +1758,10 @@ async def test_fullscreen_remote_link_click_copies_without_launching(monkeypatch
         "_start_fullscreen_selection_copy",
         lambda text: copied.append(text),
     )
+
     async def forbidden_open(_url: str) -> bool:
         raise AssertionError("remote clicks must not launch a host browser")
+
     monkeypatch.setattr(app, "_open_local_url", forbidden_open)
 
     assert app._open_fullscreen_link_at(1, 0) is True

@@ -8,6 +8,7 @@ from bisect import bisect_right
 from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
+from hashlib import sha256
 from unicodedata import normalize
 
 from prompt_toolkit.data_structures import Point
@@ -18,6 +19,7 @@ from wcwidth import wcswidth
 from .terminal_safety import (
     hyperlink_at_plain_offset,
     project_prompt_toolkit_ansi,
+    safe_hyperlink_spans,
     sanitize_transcript_ansi,
     strip_safe_ansi,
 )
@@ -57,6 +59,7 @@ class _Record:
     ansi: str
     plain: str
     has_separator: bool = False
+    hyperlinks: tuple[tuple[int, int, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +67,7 @@ class _ProjectedRow:
     anchor: ViewportAnchor
     fragments: tuple[tuple[str, str], ...]
     source_spans: tuple[tuple[int, int], ...] = ()
+    hyperlinks: tuple[tuple[int, int, str], ...] = ()
 
 
 class FullscreenTranscriptModel:
@@ -292,7 +296,14 @@ class FullscreenTranscriptModel:
             self._next_record_id += 1
         else:
             self._next_record_id = max(self._next_record_id, record_id + 1)
-        record = _Record(record_id, separator + safe, separator + plain, bool(separator))
+        record_ansi = separator + safe
+        record = _Record(
+            record_id,
+            record_ansi,
+            separator + plain,
+            bool(separator),
+            safe_hyperlink_spans(record_ansi),
+        )
         prior_ends_newline = self._ends_newline
         self._records.append(record)
         if record.plain:
@@ -364,7 +375,16 @@ class FullscreenTranscriptModel:
                 if not matches and record_id == self._next_record_id:
                     self._next_record_id += 1
             self._next_record_id = max(self._next_record_id, record_id + 1)
-            rebuilt.append(_Record(record_id, separator + safe, separator + plain, bool(separator)))
+            record_ansi = separator + safe
+            rebuilt.append(
+                _Record(
+                    record_id,
+                    record_ansi,
+                    separator + plain,
+                    bool(separator),
+                    safe_hyperlink_spans(record_ansi),
+                )
+            )
             accumulated_plain += separator + plain
         self._records = rebuilt
         self._projectable_record_count = sum(bool(record.plain) for record in rebuilt)
@@ -420,7 +440,14 @@ class FullscreenTranscriptModel:
         if self._records and self._records[0].has_separator:
             first = self._records[0]
             stripped_record_id = first.record_id
-            self._records[0] = _Record(first.record_id, first.ansi[1:], first.plain[1:], False)
+            record_ansi = first.ansi[1:]
+            self._records[0] = _Record(
+                first.record_id,
+                record_ansi,
+                first.plain[1:],
+                False,
+                safe_hyperlink_spans(record_ansi),
+            )
             # Selection endpoints are record-local character offsets. Removing
             # the synthetic joining newline must not move a selection that is
             # wholly contained in the surviving record.
@@ -525,6 +552,7 @@ class FullscreenTranscriptModel:
                         ViewportAnchor(record.record_id, row_source_offset, row_semantic_offset),
                         tuple(row),
                         tuple(row_source_spans),
+                        record.hyperlinks,
                     )
                 )
                 source_offset += 1
@@ -556,6 +584,7 @@ class FullscreenTranscriptModel:
                         ViewportAnchor(record.record_id, row_source_offset, row_semantic_offset),
                         tuple(row),
                         tuple(row_source_spans),
+                        record.hyperlinks,
                     )
                 )
                 row = []
@@ -575,6 +604,7 @@ class FullscreenTranscriptModel:
                         ViewportAnchor(record.record_id, row_source_offset, row_semantic_offset),
                         tuple(row),
                         tuple(row_source_spans),
+                        record.hyperlinks,
                     )
                 )
                 row = []
@@ -588,6 +618,7 @@ class FullscreenTranscriptModel:
                     ViewportAnchor(record.record_id, row_source_offset, row_semantic_offset),
                     tuple(row),
                     tuple(row_source_spans),
+                    record.hyperlinks,
                 )
             )
         return rows
@@ -649,33 +680,46 @@ class FullscreenTranscriptModel:
         for _ in range(top_padding):
             fragments.append(("", "\n"))
         selected = self._selection_bounds()
-        if selected is None:
-            records: dict[int, _Record] = {}
-            record_bases: dict[int, int] = {}
-        else:
-            records, record_bases = self._record_indexes()
+        records, record_bases = self._record_indexes()
         for index, row in enumerate(rows):
             if index:
                 fragments.append(("", "\n"))
-            if selected is None:
-                fragments.extend(row.fragments)
-                continue
             record = records.get(row.anchor.record_id)
-            if record is None:
+            if record is None or not row.source_spans:
                 fragments.extend(row.fragments)
                 continue
             display_chars = [(style, char) for style, text in row.fragments for char in text]
             display_spans = self._grapheme_spans(display_chars)
             base = record_bases[record.record_id]
+            link_index = 0
+            link_markers: dict[str, str] = {}
             for offset, (start, stop, _cells) in enumerate(display_spans):
                 highlighted = False
+                link: str | None = None
                 if offset < len(row.source_spans):
                     source_start, source_stop = row.source_spans[offset]
-                    highlighted = (
-                        base + source_start < selected[1] and base + source_stop > selected[0]
-                    )
-                cluster = display_chars[start:stop]
-                for style, char in cluster:
+                    if selected is not None:
+                        highlighted = (
+                            base + source_start < selected[1] and base + source_stop > selected[0]
+                        )
+                    while (
+                        link_index < len(row.hyperlinks)
+                        and row.hyperlinks[link_index][1] <= source_start
+                    ):
+                        link_index += 1
+                    if link_index < len(row.hyperlinks):
+                        link_start, link_stop, target = row.hyperlinks[link_index]
+                        if link_start < source_stop and link_stop > source_start:
+                            link = target
+                if row.hyperlinks:
+                    sequence = f"\x1b]8;;{link}\x1b\\" if link is not None else "\x1b]8;;\x1b\\"
+                    fragments.append(("[ZeroWidthEscape]", sequence))
+                for style, char in display_chars[start:stop]:
+                    if link is not None:
+                        marker = link_markers.setdefault(
+                            link, sha256(link.encode()).hexdigest()[:12]
+                        )
+                        style = f"{style} class:native-hyperlink-{marker}".strip()
                     if highlighted:
                         style = f"{style} class:selected".strip()
                     fragments.append((style, char))

@@ -150,12 +150,23 @@ class _GraphemeWindow(Window):
             for x in range(xpos, xpos + width):
                 row[x] = Char()
             fragments = ui_content.get_line(line_number)
-            styled_chars = [
-                (style, char)
-                for style, text, *_rest in fragments
-                if "[ZeroWidthEscape]" not in style
-                for char in text
-            ]
+            styled_chars: list[tuple[str, str]] = []
+            raw_at_offset: dict[int, str] = {}
+            for style, text, *_rest in fragments:
+                if "[ZeroWidthEscape]" in style:
+                    raw_at_offset[len(styled_chars)] = raw_at_offset.get(
+                        len(styled_chars), ""
+                    ) + str(text)
+                else:
+                    styled_chars.extend((style, char) for char in text)
+
+            # The superclass positions raw escapes using code-point widths. We
+            # replace its coordinates because this window projects extended
+            # graphemes atomically and can therefore use different cell widths.
+            escape_row = new_screen.zero_width_escapes[ypos + screen_y]
+            for screen_x in range(xpos, xpos + width + 1):
+                escape_row.pop(screen_x, None)
+
             x = xpos
             logical_cell = 0
             for start, stop, cells in FullscreenTranscriptModel._grapheme_spans(styled_chars):
@@ -175,6 +186,8 @@ class _GraphemeWindow(Window):
                 atom = Char(cluster, styled_chars[start][0] if start < stop else "")
                 atom.width = cells
                 if x < xpos + width:
+                    if sequence := raw_at_offset.get(start):
+                        escape_row[x] += sequence
                     row[x] = atom
                     for continuation in range(cells):
                         grapheme_coordinates[line_number, logical_cell + continuation] = (
@@ -185,6 +198,7 @@ class _GraphemeWindow(Window):
                         row[x + continuation] = Char("")
                 x += cells
                 logical_cell += cells
+
         return visible_lines, grapheme_coordinates
 
 
@@ -1159,6 +1173,7 @@ class TUIApplication:
             style=create_prompt_style(),
             full_screen=self._is_fullscreen,
             before_render=self._before_render,
+            after_render=self._after_render,
             # When the Application exits (e.g. /exit), erase the live
             # region so the final screen is just the committed
             # scrollback. Otherwise the empty ❯ from the input line
@@ -2801,6 +2816,12 @@ class TUIApplication:
             return
         if self.full_screen:
             self._observe_terminal_size(current)
+
+    def _after_render(self, app) -> None:
+        """Never leave terminal-native OSC-8 state open beyond one rendered frame."""
+        if self._is_fullscreen:
+            app.output.write_raw("\x1b]8;;\x1b\\")
+            app.output.flush()
 
     def _read_terminal_size(self) -> tuple[int, int] | None:
         try:

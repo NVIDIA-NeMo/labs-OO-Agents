@@ -172,6 +172,33 @@ def hyperlink_at_plain_offset(value: str, offset: int) -> str | None:
     return active if plain_offset == offset else None
 
 
+def safe_hyperlink_spans(value: str) -> tuple[tuple[int, int, str], ...]:
+    """Return safe OSC-8 targets as spans in ANSI-stripped character offsets."""
+    safe = sanitize_transcript_ansi(value)
+    spans: list[tuple[int, int, str]] = []
+    active: tuple[int, str] | None = None
+    plain_offset = 0
+    index = 0
+    while index < len(safe):
+        match = _SAFE_ANSI_RE.match(safe, index)
+        if match is not None:
+            sequence = match.group(0)
+            if sequence.startswith(f"{_ESC}]8;"):
+                if active is not None and active[0] < plain_offset:
+                    spans.append((active[0], plain_offset, active[1]))
+                payload = sequence[4:-1] if sequence.endswith("\x07") else sequence[4:-2]
+                _parameters, _separator, target = payload.partition(";")
+                url = safe_http_url(target)
+                active = (plain_offset, url) if url is not None else None
+            index = match.end()
+            continue
+        plain_offset += 1
+        index += 1
+    if active is not None and active[0] < plain_offset:
+        spans.append((active[0], plain_offset, active[1]))
+    return tuple(spans)
+
+
 def strip_safe_ansi(value: str) -> str:
     """Strip the presentation escapes accepted by ``sanitize_transcript_ansi``."""
     return _SAFE_ANSI_RE.sub("", value)
