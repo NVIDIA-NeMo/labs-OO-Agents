@@ -804,6 +804,10 @@ class _ClassAssignmentVisitor(ast.NodeVisitor):
         self.class_ref_vars: set[str] = set()
         # Track variables assigned from self - type(var) is equivalent to type(self)
         self.self_ref_vars: set[str] = set()
+        # Line of the first top-level `ClassName = <expr>` reassignment, per
+        # class name - top-level only, so a reassignment nested in if/for/try
+        # can't fake a shadow on a branch that never runs.
+        self.shadow_lines: dict[str, int] = {}
 
     def _collect_class_names(self) -> set[str]:
         """Collect names that refer to classes in the execution context."""
@@ -860,6 +864,22 @@ class _ClassAssignmentVisitor(ast.NodeVisitor):
         if arg.id in self.self_ref_vars:
             return True
         return False
+
+    def visit_Module(self, node: ast.Module) -> None:
+        """Precompute top-level class-name shadowing before the recursive walk."""
+        for stmt in node.body:
+            name: str | None = None
+            if isinstance(stmt, ast.Assign):
+                for target in stmt.targets:
+                    if isinstance(target, ast.Name) and target.id in self.known_class_names:
+                        name = target.id
+                        break
+            elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                if stmt.target.id in self.known_class_names:
+                    name = stmt.target.id
+            if name is not None and name not in self.shadow_lines:
+                self.shadow_lines[name] = stmt.lineno
+        self.generic_visit(node)
 
     def visit_Assign(self, node: ast.Assign) -> None:
         """Check for ClassName.attr = value and track self/type(self) assignments."""
@@ -985,7 +1005,11 @@ class _ClassAssignmentVisitor(ast.NodeVisitor):
         if name == "self":
             return
 
-        # Check if name is a known class
+        # Check if name is a known class (unless shadowed by an earlier
+        # top-level reassignment - see shadow_lines above)
+        shadow_line = self.shadow_lines.get(name)
+        if shadow_line is not None and node.lineno > shadow_line:
+            return
         if name in self.known_class_names:
             self.issues.append(
                 ValidationIssue(
