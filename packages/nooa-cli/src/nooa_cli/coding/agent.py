@@ -195,8 +195,26 @@ class CodingAgent(InteractiveAgent):
             "report": await self.delegate(objective, supplied_context),
         }
 
-    def spawn(self, objective: str, supplied_context: Any = None) -> JobHandle:
-        """Start one isolated coding worker in the background and return immediately.
+    @staticmethod
+    def _delegation_label(objective: str, label: str | None = None, max_length: int = 80) -> str:
+        """Return a concise display label without discarding the full objective."""
+        source = label if label is not None else objective.splitlines()[0]
+        compact = " ".join(source.split())
+        if label is None:
+            first_sentence, separator, _rest = compact.partition(".")
+            compact = f"{first_sentence}." if separator else compact
+        if len(compact) <= max_length:
+            return compact or "Delegated task"
+        return f"{compact[: max_length - 1].rstrip()}…"
+
+    def spawn(
+        self,
+        objective: str,
+        supplied_context: Any = None,
+        *,
+        label: str | None = None,
+    ) -> JobHandle:
+        """Start one isolated coding worker and return immediately.
 
         Prefer this over awaiting ``delegate()`` when the report is not required before
         continuing. State the outcome, scope, and whether edits are allowed in
@@ -205,11 +223,14 @@ class CodingAgent(InteractiveAgent):
         dependency, finish the current turn with ``WAIT``; inspect and integrate the
         later report before final verification. Each notification item is
         ``{"objective": <str>, "report": <str>}``, so concurrent jobs remain identifiable.
+        The host displays a short label derived from the objective while the worker and
+        notification retain the complete text. Pass ``label`` to override the display
+        text without changing the worker objective.
         """
         return self.queue_manager.spawn(
             self._delegation_report(objective, supplied_context),
             channel="delegates",
-            label=objective,
+            label=self._delegation_label(objective, label),
         )
 
     def get_summarization_status(self) -> dict[str, Any]:
