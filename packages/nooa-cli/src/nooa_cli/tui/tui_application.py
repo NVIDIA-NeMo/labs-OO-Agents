@@ -197,12 +197,17 @@ class _FullscreenTranscriptControl(FormattedTextControl):
         scroll_callback: Callable[[int], None],
         mouse_navigation_enabled: Callable[[], bool],
         selection_callback: Callable[[str, int, int], None],
+        code_action_at: Callable[[int, int], str | None],
+        copy_code_callback: Callable[[str], None],
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._scroll_callback = scroll_callback
         self._mouse_navigation_enabled = mouse_navigation_enabled
         self._selection_callback = selection_callback
+        self._code_action_at = code_action_at
+        self._copy_code_callback = copy_code_callback
+        self._pressed_code_payload: str | None = None
         self._render_width: int | None = None
         self._render_height: int | None = None
         self._dragging = False
@@ -254,9 +259,11 @@ class _FullscreenTranscriptControl(FormattedTextControl):
             # Stop any application drag/autoscroll without clearing the visible
             # selection; the modified gesture belongs to the terminal.
             self.cancel_drag()
+            self._pressed_code_payload = None
             return NotImplemented
         if not self._mouse_navigation_enabled():
             self.cancel_drag()
+            self._pressed_code_payload = None
             return NotImplemented
 
         delta = _fullscreen_wheel_delta(mouse_event)
@@ -271,9 +278,30 @@ class _FullscreenTranscriptControl(FormattedTextControl):
             and mouse_event.button is MouseButton.LEFT
         ):
             self.cancel_drag()
+            payload = self._code_action_at(x, y)
+            if payload is not None:
+                self._pressed_code_payload = payload
+                return None
+            self._pressed_code_payload = None
             self._dragging = True
             self._drag_position = (x, y)
             self._selection_callback("start", x, y)
+            return None
+        if (
+            mouse_event.event_type is MouseEventType.MOUSE_MOVE
+            and self._pressed_code_payload is not None
+        ):
+            if self._code_action_at(x, y) != self._pressed_code_payload:
+                self._pressed_code_payload = None
+            return None
+        if (
+            mouse_event.event_type is MouseEventType.MOUSE_UP
+            and self._pressed_code_payload is not None
+        ):
+            payload = self._pressed_code_payload
+            self._pressed_code_payload = None
+            if self._code_action_at(x, y) == payload:
+                self._copy_code_callback(payload)
             return None
         if mouse_event.event_type is MouseEventType.MOUSE_MOVE and self._dragging:
             # tmux cannot forward a release that happens outside its pane.  In
@@ -306,6 +334,8 @@ class _FullscreenTranscriptControl(FormattedTextControl):
         if mouse_event.event_type is MouseEventType.MOUSE_UP and self._dragging:
             self._finish_drag(x, y, moved=self._drag_moved)
             return None
+        if mouse_event.event_type is MouseEventType.MOUSE_UP:
+            self._pressed_code_payload = None
         return super().mouse_handler(mouse_event)
 
     @property
@@ -622,6 +652,7 @@ class TranscriptBlock:
     resident_bytes: int = 0
     replay_cache: dict[int, str] = field(default_factory=dict)
     fullscreen_rendered: str | None = None
+    code_copy_actions: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -900,6 +931,8 @@ class TUIApplication:
                     scroll_callback=self._scroll_fullscreen_transcript,
                     mouse_navigation_enabled=lambda: self._fullscreen_mouse_navigation,
                     selection_callback=self._handle_fullscreen_selection,
+                    code_action_at=self._fullscreen_code_action_at,
+                    copy_code_callback=self._start_fullscreen_selection_copy,
                 ),
                 wrap_lines=False,
                 # The model virtualizes formatted content to exactly the visible
@@ -1516,6 +1549,16 @@ class TUIApplication:
         if not isinstance(control, _FullscreenTranscriptControl) or not control.dragging:
             return False
         return control.handle_external_mouse(mouse_event, below=True)
+
+    def _fullscreen_code_action_at(self, x: int, y: int) -> str | None:
+        """Resolve a code-copy action at one visible transcript cell."""
+        width, height = self._transcript_viewport_size()
+        return self._fullscreen_transcript.copy_action_at(
+            x=x,
+            y=y,
+            width=width,
+            height=height,
+        )
 
     def _handle_fullscreen_selection(self, action: str, x: int, y: int) -> None:
         """Apply one mouse-selection transition and copy on button release."""
@@ -2209,6 +2252,7 @@ class TUIApplication:
         event_id: str | None = None,
         tags: set[str] | frozenset[str] | None = None,
         keep: bool = False,
+        code_copy_actions: dict[str, str] | None = None,
     ) -> None:
         """Enqueue one ANSI-bearing block for the transcript.
 
@@ -2231,6 +2275,7 @@ class TUIApplication:
             event_id=str(event_id) if event_id is not None else None,
             tags=frozenset(str(t) for t in (tags or ())),
             keep=keep,
+            code_copy_actions=dict(code_copy_actions or {}),
         )
 
         # Before the consumer is up (pre-run_async) we're single-threaded
@@ -2241,7 +2286,11 @@ class TUIApplication:
             rendered = self._render_transcript_source(block.source)
             evicted = self._retain_transcript_block(block, rendered)
             if self._is_fullscreen:
-                self._fullscreen_transcript.append(rendered, record_id=block.transcript_record_id)
+                self._fullscreen_transcript.append(
+                    rendered,
+                    record_id=block.transcript_record_id,
+                    copy_actions=block.code_copy_actions,
+                )
                 self._fullscreen_transcript.evict_prefix(evicted)
                 self._app.invalidate()
                 return
@@ -2297,12 +2346,22 @@ class TUIApplication:
         Python container overhead is deliberately outside this byte contract.
         """
         source_bytes = len(block.source.encode("utf-8"))
+        copy_action_bytes = sum(
+            len(action_id.encode("utf-8")) + len(payload.encode("utf-8"))
+            for action_id, payload in block.code_copy_actions.items()
+        )
         replay_cache_bytes = sum(
             len(source.encode("utf-8")) for source in block.replay_cache.values()
         )
         rendered_bytes = len(rendered.encode("utf-8"))
         plain_bytes = len(_strip_ansi(rendered).encode("utf-8"))
-        return source_bytes + replay_cache_bytes + (2 * rendered_bytes) + (5 * plain_bytes)
+        return (
+            source_bytes
+            + copy_action_bytes
+            + replay_cache_bytes
+            + (2 * rendered_bytes)
+            + (5 * plain_bytes)
+        )
 
     def _retain_transcript_block(self, block: TranscriptBlock, rendered: str) -> int:
         block.transcript_epoch = self._transcript_epoch
@@ -2364,7 +2423,11 @@ class TUIApplication:
         rendered = self._render_transcript_source(block.source)
         evicted = self._retain_transcript_block(block, rendered)
         if self._is_fullscreen:
-            self._fullscreen_transcript.append(rendered, record_id=block.transcript_record_id)
+            self._fullscreen_transcript.append(
+                rendered,
+                record_id=block.transcript_record_id,
+                copy_actions=block.code_copy_actions,
+            )
             self._fullscreen_transcript.evict_prefix(evicted)
             self._app.invalidate()
             return
@@ -2765,6 +2828,7 @@ class TUIApplication:
                 block.transcript_record_id if block.transcript_record_id is not None else index
                 for index, block in enumerate(self._transcript_blocks)
             ],
+            copy_actions=[block.code_copy_actions for block in self._transcript_blocks],
         )
         self._fullscreen_invalidate_count += 1
         self._app.invalidate()

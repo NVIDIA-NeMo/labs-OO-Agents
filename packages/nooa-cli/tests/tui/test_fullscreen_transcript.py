@@ -2422,3 +2422,177 @@ def test_fullscreen_retention_hard_byte_cap_can_evict_oversized_newest_block(
     assert app._transcript_blocks == []
     assert app._fullscreen_transcript_bytes == 0
     assert app._fullscreen_transcript.text == ""
+
+
+def _copyable_markdown_ansi(markdown: str, *, width: int = 60):
+    from io import StringIO
+
+    from nooa_cli.tui.copyable_markdown import CopyableMarkdown
+    from nooa_cli.tui.theme import CATPPUCCIN_THEME
+    from rich.console import Console
+
+    renderable = CopyableMarkdown(markdown)
+    buffer = StringIO()
+    Console(
+        file=buffer,
+        force_terminal=True,
+        color_system="256",
+        width=width,
+        theme=CATPPUCCIN_THEME,
+    ).print(renderable)
+    return renderable, buffer.getvalue()
+
+
+def _copy_label_position(model, *, width: int, height: int) -> tuple[int, int]:
+    formatted = model.formatted_text(width=width, height=height)
+    lines = "".join(text for _style, text, *_rest in formatted).splitlines()
+    for y, line in enumerate(lines):
+        if "Copy" in line:
+            return line.index("Copy"), y
+    raise AssertionError("copy label was not rendered")
+
+
+def test_copyable_markdown_exposes_exact_fenced_code_payloads() -> None:
+    renderable, ansi = _copyable_markdown_ansi(
+        "before\n\n```python title=demo\nprint('one')\n```\n\n```\n  exact spacing  \n```"
+    )
+
+    assert "Copy" in ansi
+    assert list(renderable.copy_actions.values()) == ["print('one')", "  exact spacing  "]
+
+
+def test_copyable_markdown_does_not_offer_copy_for_empty_fence() -> None:
+    renderable, ansi = _copyable_markdown_ansi("```python\n```")
+
+    assert renderable.copy_actions == {}
+    assert "Copy" not in ansi
+
+
+def test_model_authored_internal_link_cannot_forge_code_copy_action() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+    renderable, ansi = _copyable_markdown_ansi(
+        "[Copy](nooa-copy://code-0)\n\n```python\nSECRET\n```", width=60
+    )
+    model = FullscreenTranscriptModel()
+    model.append(ansi, copy_actions=renderable.copy_actions)
+    formatted = model.formatted_text(width=60, height=20)
+    lines = "".join(text for _style, text, *_rest in formatted).splitlines()
+    copy_positions = [(line.index("Copy"), y) for y, line in enumerate(lines) if "Copy" in line]
+
+    assert len(copy_positions) == 2
+    assert (
+        model.copy_action_at(x=copy_positions[0][0], y=copy_positions[0][1], width=60, height=20)
+        is None
+    )
+    assert (
+        model.copy_action_at(x=copy_positions[1][0], y=copy_positions[1][1], width=60, height=20)
+        == "SECRET"
+    )
+
+
+def test_identical_code_blocks_keep_distinct_copy_targets() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+    renderable, ansi = _copyable_markdown_ansi(
+        "```python\nsame()\n```\n\n```python\nsame()\n```", width=60
+    )
+    assert len(renderable.copy_actions) == 2
+    model = FullscreenTranscriptModel()
+    model.append(ansi, copy_actions=renderable.copy_actions)
+    formatted = model.formatted_text(width=60, height=30)
+    lines = "".join(text for _style, text, *_rest in formatted).splitlines()
+    positions = [(line.index("Copy"), y) for y, line in enumerate(lines) if "Copy" in line]
+
+    assert len(positions) == 2
+    assert [model.copy_action_at(x=x, y=y, width=60, height=30) for x, y in positions] == [
+        "same()",
+        "same()",
+    ]
+
+
+def test_fullscreen_copy_action_hit_testing_survives_resize() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+    renderable, ansi = _copyable_markdown_ansi("```python\nprint('exact')\n```", width=60)
+    model = FullscreenTranscriptModel()
+    model.append(ansi, record_id=7, copy_actions=renderable.copy_actions)
+
+    x, y = _copy_label_position(model, width=60, height=20)
+    assert model.copy_action_at(x=x, y=y, width=60, height=20) == "print('exact')"
+    assert model.copy_action_at(x=max(0, x - 1), y=y, width=60, height=20) is None
+
+    renderable, resized = _copyable_markdown_ansi("```python\nprint('exact')\n```", width=42)
+    model.replace(
+        [resized],
+        record_ids=[7],
+        copy_actions=[renderable.copy_actions],
+    )
+    x, y = _copy_label_position(model, width=42, height=20)
+    assert model.copy_action_at(x=x, y=y, width=42, height=20) == "print('exact')"
+
+
+def test_fullscreen_code_copy_click_copies_source_without_starting_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nooa_cli.tui.tui_application import _ClipboardResult
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    app = _make_fullscreen_app()
+    renderable, ansi = _copyable_markdown_ansi("```python\nprint('exact')\n```", width=60)
+    app.emit_block(ansi, code_copy_actions=renderable.copy_actions)
+    app._transcript_viewport_size = lambda: (60, 20)
+    copied: list[str] = []
+    monkeypatch.setattr(
+        app,
+        "_copy_to_clipboard_result",
+        lambda text: copied.append(text) or _ClipboardResult(True, "test"),
+    )
+    assert app._output_window is not None
+    control = app._output_window.content
+    control.create_content(60, 20)
+    x, y = _copy_label_position(app._fullscreen_transcript, width=60, height=20)
+
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_DOWN, x=x, y=y))
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_UP, x=x, y=y))
+
+    assert copied == ["print('exact')"]
+    assert app._fullscreen_transcript.selected_text() == ""
+    assert app._transient_status_text == "Copied 14 characters"
+
+
+def test_code_copy_metadata_tracks_prefix_eviction() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+    first, first_ansi = _copyable_markdown_ansi("```python\nfirst()\n```", width=60)
+    second, second_ansi = _copyable_markdown_ansi("```python\nsecond()\n```", width=60)
+    model = FullscreenTranscriptModel()
+    model.append(first_ansi, record_id=1, copy_actions=first.copy_actions)
+    model.append(second_ansi, record_id=2, copy_actions=second.copy_actions)
+    model.evict_prefix(1)
+
+    x, y = _copy_label_position(model, width=60, height=20)
+    assert model.copy_action_at(x=x, y=y, width=60, height=20) == "second()"
+
+
+def test_fullscreen_code_copy_drag_away_does_not_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    app = _make_fullscreen_app()
+    renderable, ansi = _copyable_markdown_ansi("```python\nprint('exact')\n```", width=60)
+    app.emit_block(ansi, code_copy_actions=renderable.copy_actions)
+    app._transcript_viewport_size = lambda: (60, 20)
+    copied: list[str] = []
+    monkeypatch.setattr(app, "_start_fullscreen_selection_copy", copied.append)
+    assert app._output_window is not None
+    control = app._output_window.content
+    control.create_content(60, 20)
+    x, y = _copy_label_position(app._fullscreen_transcript, width=60, height=20)
+
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_DOWN, x=x, y=y))
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_MOVE, x=0, y=y))
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_UP, x=x, y=y))
+
+    assert copied == []
