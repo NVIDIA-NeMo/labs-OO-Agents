@@ -604,11 +604,38 @@ agent.event_manager.on("message", lambda e: print(f"Message: {e.content}"))
 recent = agent.events.query()
 ```
 
+### Durable human-in-the-loop
+
+Orchestrators are pure Python — but a method's progress lives on the call stack, and
+`AgentSnapshot` captures agent *attributes*, not the stack. Keep the orchestrator's progress in a
+snapshotted field and the run survives the process:
+
+```python
+class PipelineAgent(Agent, llm=llm):
+    steps_done: dict[str, str]      # snapshotted — this is the resumable part
+    inputs: dict[str, str]
+
+    async def run(self, payload: str) -> str:
+        if "summary" not in self.steps_done:
+            self.steps_done["summary"] = await self.summarise(payload)
+        if "threshold" not in self.inputs:
+            raise SuspendForInput("what risk threshold should apply?")
+        ...
+```
+
+Re-entering `run()` after `storage.restore_snapshot(...)` skips whatever is already done, so a run
+can pause for a human and finish in a different process without repeating completed steps.
+
+```bash
+uv run python examples/advanced/durable_hitl.py
+```
+
 ### Additional examples
 
 Beyond the numbered quickstart, [`advanced/`](advanced/) contains focused demos of specific mechanics:
 
 - [`codeact_event_sequence.py`](advanced/codeact_event_sequence.py) — inspect the raw event stream during a CodeAct run
+- [`durable_hitl.py`](advanced/durable_hitl.py) — pause a run for a human, resume it in a different process
 - [`memory.py`](advanced/memory.py) — persistent memory patterns
 - [`prefill.py`](advanced/prefill.py) — pre-populate agent state before running
 - [`swappable_execution_engines.py`](advanced/swappable_execution_engines.py) — replace the default Python execution engine
