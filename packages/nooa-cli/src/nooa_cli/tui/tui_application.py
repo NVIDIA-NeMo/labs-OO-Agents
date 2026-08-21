@@ -35,7 +35,14 @@ from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI, AnyFormattedText
 from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.keys import Keys
-from prompt_toolkit.layout import ConditionalContainer, DynamicContainer, HSplit, Layout, Window
+from prompt_toolkit.layout import (
+    ConditionalContainer,
+    DynamicContainer,
+    HSplit,
+    Layout,
+    VSplit,
+    Window,
+)
 from prompt_toolkit.layout.containers import WindowAlign
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl, UIContent
 from prompt_toolkit.layout.dimension import Dimension
@@ -810,7 +817,9 @@ class TUIApplication:
         # tests and printable-transcript callers. Source-bearing blocks below
         # are the single retained representation used for terminal replay.
         self.output_buffer = Buffer(read_only=False)
-        self._fullscreen_transcript = FullscreenTranscriptModel()
+        self._fullscreen_transcript = FullscreenTranscriptModel(
+            show_trailing_blank=lambda: not bool(self._status_rows())
+        )
         # Fullscreen requests mouse reporting immediately so ordinary drag and
         # wheel gestures reach prompt_toolkit rather than terminal scrollback.
         # Option/Alt-drag can bypass reporting in supporting terminals; F6 is
@@ -1007,13 +1016,16 @@ class TUIApplication:
         # Status line at the bottom — shows spinner + session label.
         def _status_formatted():
             fragments: list[tuple[str, str]] = []
-            for index, row in enumerate(self._status_rows()):
+            rows = self._status_rows(include_transient=not self._is_fullscreen)
+            for index, row in enumerate(rows):
                 if index:
-                    fragments.append(("class:status", "\n\n"))
+                    fragments.append(("class:status", "   " if self._is_fullscreen else "\n\n"))
                 fragments.extend((style, sanitize_live_text(text)) for style, text in row)
             return fragments
 
         def _status_height() -> Dimension:
+            if self._is_fullscreen:
+                return Dimension(min=0, max=1, preferred=1)
             lines = self.status_text().splitlines()
             height = max(1, len(lines))
             # Status is useful chrome, not a reason to replace the entire UI
@@ -1031,6 +1043,23 @@ class TUIApplication:
         status_window = Window(
             self._status_control,
             height=_status_height,
+        )
+
+        self._transient_status_container = ConditionalContainer(
+            Window(
+                FormattedTextControl(
+                    lambda: [
+                        (
+                            self._transient_status_style,
+                            sanitize_live_text(self._transient_status_text),
+                        )
+                    ],
+                    focusable=False,
+                ),
+                height=1,
+                dont_extend_width=True,
+            ),
+            filter=Condition(lambda: self._is_fullscreen and bool(self._transient_status_text)),
         )
 
         self._return_to_tail_control = _ReturnToTailControl(self._jump_fullscreen_to_tail)
@@ -1108,15 +1137,35 @@ class TUIApplication:
         #   session rule — always visible while at the transcript tail
         #   input composer (one padding row above and below the input)
         #   completions (only while completing)
+        if self._is_fullscreen:
+            self._status_region_container = ConditionalContainer(
+                VSplit(
+                    [
+                        status_window,
+                        self._transient_status_container,
+                        self._return_to_tail_container,
+                    ],
+                    padding=1,
+                ),
+                filter=Condition(
+                    lambda: (
+                        bool(self._status_rows())
+                        or not self._fullscreen_transcript.viewport.follows_tail
+                    )
+                ),
+            )
+            status_region = self._status_region_container
+        else:
+            self._status_region_container = None
+            status_region = status_window
         main_children = [
-            status_window,
+            status_region,
             queue_window,
             session_rule,
             self._input_container,
             completions_window,
         ]
         if self._output_window is not None:
-            main_children.insert(0, self._return_to_tail_container)
             main_children.insert(0, self._output_window)
         main_container = HSplit(main_children, window_too_small=Window())
         self._main_container = main_container
@@ -3300,7 +3349,7 @@ class TUIApplication:
             self._ensure_spinner_task()
         self.invalidate()
 
-    def _status_rows(self) -> list[list[tuple[str, str]]]:
+    def _status_rows(self, *, include_transient: bool = True) -> list[list[tuple[str, str]]]:
         """Return dynamic status rows as independently styled fragments."""
         rows: list[list[tuple[str, str]]] = []
         state = self._agent_controller.state
@@ -3320,7 +3369,7 @@ class TUIApplication:
                 logger.debug("auxiliary status callback failed", exc_info=True)
         if auxiliary_status:
             rows.append([("class:status", auxiliary_status)])
-        if self._transient_status_text:
+        if include_transient and self._transient_status_text:
             rows.append([(self._transient_status_style, self._transient_status_text)])
         if self._command_status_text:
             rows.append([("class:status", self._command_status_text)])

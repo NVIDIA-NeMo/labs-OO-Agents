@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from unicodedata import normalize
@@ -73,7 +73,12 @@ class _ProjectedRow:
 class FullscreenTranscriptModel:
     """Ordered transcript plus bounded, incremental visual-row projections."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        show_trailing_blank: bool | Callable[[], bool] = True,
+    ) -> None:
+        self._show_trailing_blank = show_trailing_blank
         self._records: list[_Record] = []
         self._projectable_record_count = 0
         self._next_record_id = 0
@@ -107,7 +112,7 @@ class FullscreenTranscriptModel:
         if width is None:
             width = max(1, *(max(0, wcswidth(line)) for line in self.text.split("\n")))
         width = max(1, width)
-        rows = self._projection(width)
+        rows = self._display_rows(width)
         top = 0
         top_padding = 0
         if height is not None:
@@ -132,7 +137,7 @@ class FullscreenTranscriptModel:
 
     def cursor_position(self, *, width: int, height: int = 1) -> Point:
         """Expose a cursor within the virtualized visible transcript."""
-        rows = self._projection(width)
+        rows = self._display_rows(width)
         if not rows:
             return Point(x=0, y=0)
         top = self.top_row(width=width, height=height)
@@ -147,7 +152,7 @@ class FullscreenTranscriptModel:
 
     def top_row(self, *, width: int, height: int) -> int:
         """Return the exact first visual row for the current viewport."""
-        rows = self._projection(width)
+        rows = self._display_rows(width)
         if not rows:
             return 0
         if self._viewport.follows_tail or self._viewport.anchor is None:
@@ -160,7 +165,7 @@ class FullscreenTranscriptModel:
 
     def scroll_visual_lines(self, delta: int, *, width: int, height: int) -> None:
         """Move the top visual row; positive deltas move toward the tail."""
-        rows = self._projection(width)
+        rows = self._display_rows(width)
         if not rows:
             self.jump_to_tail()
             return
@@ -174,7 +179,7 @@ class FullscreenTranscriptModel:
         self._formatted_cache.clear()
 
     def jump_to_start(self, *, width: int) -> None:
-        rows = self._projection(width)
+        rows = self._display_rows(width)
         if rows:
             self._viewport = ViewportState(False, rows[0].anchor)
             self._formatted_cache.clear()
@@ -246,7 +251,7 @@ class FullscreenTranscriptModel:
     ) -> _SelectionHit | None:
         width = max(1, width)
         height = max(1, height)
-        rows = self._projection(width)
+        rows = self._display_rows(width)
         top = self.top_row(width=width, height=height)
         top_padding = max(0, height - len(rows)) if len(rows) <= height else 0
         visual_y = max(0, min(height - 1, y))
@@ -491,6 +496,22 @@ class FullscreenTranscriptModel:
         self._projection_cache.clear()
         self._projection_index_cache.clear()
         self._formatted_cache.clear()
+
+    def _display_rows(self, width: int) -> Sequence[_ProjectedRow]:
+        """Return viewport rows, optionally omitting the synthetic final blank."""
+        rows = self._projection(width)
+        show_trailing_blank = self._show_trailing_blank
+        if callable(show_trailing_blank):
+            show_trailing_blank = show_trailing_blank()
+        if (
+            not show_trailing_blank
+            and self._viewport.follows_tail
+            and self._records
+            and self._ends_newline
+            and len(rows) > 1
+        ):
+            return rows[:-1]
+        return rows
 
     def _projection(self, width: int) -> list[_ProjectedRow]:
         width = max(1, width)

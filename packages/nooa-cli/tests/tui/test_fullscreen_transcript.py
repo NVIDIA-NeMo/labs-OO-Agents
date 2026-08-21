@@ -32,6 +32,51 @@ def test_fullscreen_shell_owns_alternate_screen_and_transcript_window() -> None:
     assert app._output_window is not None
 
 
+def test_fullscreen_copy_and_return_actions_share_status_region() -> None:
+    from prompt_toolkit.layout import VSplit
+
+    app = _make_fullscreen_app()
+    app.emit_block("".join(f"line {index}\n" for index in range(30)))
+    app._transcript_viewport_size = lambda: (20, 4)
+    app._show_transient_status("Copied 5 characters", style="class:return-to-tail")
+    app._scroll_fullscreen_transcript(-4)
+
+    status_container = app._main_container.children[1]
+    status_region = status_container.content
+    assert isinstance(status_region, VSplit)
+    assert app._transient_status_container in status_region.children
+    assert app._return_to_tail_container in status_region.children
+    assert bool(status_container.filter())
+    assert bool(app._transient_status_container.filter())
+    assert bool(app._return_to_tail_container.filter())
+
+
+def test_fullscreen_status_removes_visual_transcript_gap() -> None:
+    from prompt_toolkit.formatted_text import fragment_list_to_text, to_formatted_text
+
+    app = _make_fullscreen_app()
+    app.emit_block("answer\n")
+
+    assert not bool(app._status_region_container.filter())
+    assert (
+        fragment_list_to_text(
+            to_formatted_text(app._fullscreen_transcript.formatted_text(width=20, height=2))
+        )
+        == "answer\n"
+    )
+
+    app._command_status_text = "thinking..."
+
+    assert bool(app._status_region_container.filter())
+    assert app._fullscreen_transcript.text == "answer\n"
+    assert (
+        fragment_list_to_text(
+            to_formatted_text(app._fullscreen_transcript.formatted_text(width=20, height=1))
+        )
+        == "answer"
+    )
+
+
 def test_fullscreen_bootstrap_output_only_mutates_renderer_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1890,18 +1935,11 @@ async def test_fullscreen_copy_notice_expires_without_touching_command_status() 
         style="class:return-to-tail",
     )
     assert app._transient_status_text == "Copied 5 characters"
-    status_controls = [
-        child.content
-        for child in app._main_container.children
-        if hasattr(child, "content")
-        and hasattr(child.content, "text")
-        and "Copied 5 characters" in str(child.content.text())
-    ]
-    assert len(status_controls) == 1
+    assert bool(app._transient_status_container.filter())
     assert (
         "class:return-to-tail",
         "Copied 5 characters",
-    ) in status_controls[0].text()
+    ) in app._transient_status_container.content.content.text()
     await asyncio.sleep(0.03)
 
     assert app._transient_status_text == ""
