@@ -32,6 +32,7 @@ CLI flags are layered on top of this by :meth:`Config.load`.
 from __future__ import annotations
 
 import logging
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -49,10 +50,20 @@ SETTINGS_ENV_VAR = "NEMO_OO_SETTINGS"
 # fields directly (no assignment-time validation), so Path-typed fields are
 # coerced here. Dotted path (section.field) → callable; unlisted = set as-is.
 _COERCE: dict[str, Any] = {
+    "tui.display_mode": lambda v: _coerce_display_mode(v),
     "tui.mcp_file": lambda v: Path(v),
     "tui.trace_dir": lambda v: Path(v) if v is not None else None,
     "tui.additional_skills_dirs": lambda v: [Path(item) for item in (v or [])],
 }
+
+
+def _coerce_display_mode(value: Any) -> Any:
+    if value is None:
+        return None
+    from .config import DisplayMode
+
+    return DisplayMode(value)
+
 
 # Fields that are computed / runtime-only and must NOT be persisted or
 # applied from file (skills_dirs is derived from discovery + CLI in
@@ -111,13 +122,21 @@ def _model_to_dict(obj: BaseModel, prefix: str) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for name in type(obj).model_fields:
         dotted = f"{prefix}.{name}"
-        if dotted in _SKIP_FIELDS:
+        if dotted in _SKIP_FIELDS or dotted == "tui.full_screen":
             continue
         value = getattr(obj, name)
+        if dotted == "tui.display_mode" and value is None:
+            # Persist the effective mode without importing config at module load
+            # time (config imports this module from Config.load()).
+            from .config import resolve_display_mode
+
+            value = resolve_display_mode(obj).value
         if isinstance(value, BaseModel):
             out[name] = _model_to_dict(value, dotted)
         elif isinstance(value, Path):
             out[name] = str(value)
+        elif isinstance(value, Enum):
+            out[name] = value.value
         elif isinstance(value, list):
             out[name] = [str(v) if isinstance(v, Path) else v for v in value]
         else:
