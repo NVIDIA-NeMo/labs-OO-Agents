@@ -1,58 +1,105 @@
-# TUI rendering and interactive-agent architecture
+# How the NOOA terminal UI works
 
-Status: as-built ownership map for the fullscreen renderer and direct Python agent interface.
+This document explains the terminal UI (TUI) from first principles. It is for
+contributors who have not worked on a terminal application before.
 
-## Why this architecture exists
+If you want to **use** the TUI rather than change it, start with the
+[practical user guide](tui-user-guide.md).
 
-Fullscreen mode gives prompt_toolkit sole ownership of the terminal. `TUIApplication`
-uses `prompt_toolkit.Application(full_screen=True)`, and transcript output enters its
-semantic model instead of a second terminal writer. The explicit `native` and
-`native-replay` modes remain operational escape hatches. No mode uses terminal-position
-queries: CPR, private renderer-position mutation, and additional transcript writers are
-prohibited.
+## The short version
 
-## Display modes
+The TUI is the interactive home for a NOOA agent. It has three jobs:
 
-The application exposes three restart-only modes:
+1. turn keyboard and mouse actions into requests for the agent;
+2. turn the agent's changing state into a readable conversation; and
+3. leave the terminal exactly as it found it, even when something fails.
 
-| Mode | prompt_toolkit mode | Transcript owner | Resize behavior |
-| --- | --- | --- | --- |
-| `native-replay` | inline (`full_screen=False`) | ordered `run_in_terminal` consumer | clear and replay retained blocks |
-| `native` | inline (`full_screen=False`) | ordered `run_in_terminal` consumer | no historical replay |
-| `fullscreen` | alternate screen (`full_screen=True`) | application transcript model/window | invalidate and reproject; never replay terminal bytes |
+The default experience is a fullscreen application built with
+[prompt_toolkit](https://python-prompt-toolkit.readthedocs.io/). One component,
+`TUIApplication`, owns the screen for the lifetime of the application. Agent
+work happens outside that renderer. The two sides meet through a small Python
+interface called `InteractiveAgent`.
 
-Resolution precedence is CLI `--display-mode`, explicit `tui.display_mode`, the
-older `tui.full_screen` setting, then the application-owned `fullscreen` default.
-The boolean setting maps `true` to `native-replay` and `false` to `native`.
+```mermaid
+flowchart LR
+    Person[Person] -->|keys and mouse| UI[TUIApplication]
+    UI -->|submit / interrupt / stop| Controller[AgentController]
+    Controller --> Agent[InteractiveAgent]
+    Agent -->|immutable AgentState snapshots| Controller
+    Controller --> UI
+    UI --> Transcript[FullscreenTranscriptModel]
+    Session[Session] --> UI
+    Session --> Agent
+    Session --> Services[storage, commands, skills, shell]
+```
 
-Fullscreen owns every visible cell for its complete lifetime. Ordinary transcript
-traffic, logging, and exception diagnostics enter the ordered presentation path; they
-may not use `run_in_terminal`, stdout/stderr, destructive screen or scrollback clears,
-semantic replay callbacks, or CPR. ANSI received from an agent, model, tool,
-subprocess, or exception is untrusted. In fullscreen it is parsed into styled text
-with an allow-list of SGR attributes and safe hyperlink metadata; OSC clipboard/title
-commands, DCS/APC, C0/C1 controls, cursor/erase commands, and malformed or incomplete
-escapes are rendered visibly or discarded, never emitted as terminal control bytes.
+That separation is the central design decision: the renderer presents state,
+the agent owns work, and the session composes and cleans up both.
 
-## Current ownership map
+## Why we built it this way
 
-| Responsibility | Owner and important seams |
-| --- | --- |
-| PTK layout, focus, key bindings, subviews | `TUIApplication` renderer shell |
-| Transcript ordering and presentation | one ordered consumer feeding either the native sink or `FullscreenTranscriptModel` |
-| Agent state and direct controls | structural `InteractiveAgent` interface |
-| Local dispatch, callbacks, and worker lifecycle | `LocalAgentRunner`, outside renderer classes |
-| Observation replacement and stale-callback rejection | `AgentController` |
-| Session/storage/command integration | `Session` composition root plus narrow `TUIHostServices` |
+A terminal looks like a grid of characters, but it is really a shared stream of
+commands. Printing a line can move the cursor. A resize can change where old
+text wraps. Mouse reporting changes what the terminal sends for a click. ANSI
+escape sequences can alter color, erase the screen, set the window title, or
+even write to the clipboard.
 
-`Session` coordinates concrete-agent storage, event-manager, shell, and command
-integration. Concrete queue and callback details are isolated in `LocalAgentRunner`.
-The renderer receives an `InteractiveAgent`; it does not receive concrete queues,
-storage backends, shell objects, event managers, or transport protocol objects.
+An ordinary command-line program can mostly print and move on. An interactive
+agent cannot:
 
-## Python-native boundary
+- answers stream while the user is typing;
+- tools and background jobs produce output concurrently;
+- the transcript must scroll without moving the composer;
+- resize must reflow Unicode text correctly;
+- selection must copy the text the user saw, not terminal control bytes;
+- the user must be able to interrupt, switch agents, or leave at any time; and
+- failures must not strand the shell in an alternate screen or raw input mode.
 
-The host-neutral interface lives in `nooa_cli.interactive` and uses structural typing:
+The first and most important rule is therefore:
+
+> While fullscreen mode is running, prompt_toolkit is the only owner of the
+> terminal. Everything else updates application state.
+
+No background task prints directly to stdout. No second renderer tries to
+repair cursor position. No component asks the terminal where the cursor is.
+The application redraws from its model, like a small GUI.
+
+## What the user sees
+
+The fullscreen layout has three durable regions:
+
+```text
+┌──────────────── transcript ────────────────┐
+│ messages, tool output, progress, errors    │
+│                                            │
+├──────────────── composer ──────────────────┤
+│ ❯ editable multi-line input                │
+├──────────────── status / toolbar ──────────┤
+│ model, context, session, transient notices │
+└────────────────────────────────────────────┘
+```
+
+Commands such as `/events` can temporarily replace the transcript with a
+**subview**. The outer application still owns input, mouse routing, resize, and
+terminal cleanup. Closing the subview reveals the transcript at the same
+logical position.
+
+## The pieces and their responsibilities
+
+### `Session`: the composition root
+
+`session.py` builds a running interaction. It knows about project storage,
+event history, commands, skills, the shell, and the concrete local agent. It
+creates those resources, connects them, and closes what it created.
+
+`Session` is deliberately not the screen renderer. This keeps persistence and
+agent lifecycle testable without a terminal and prevents UI code from reaching
+through layers to concrete queues or databases.
+
+### `InteractiveAgent`: the boundary around an agent
+
+The renderer does not know how an agent runs. It sees this structural Python
+interface from `nooa_cli.interactive`:
 
 ```python
 class InteractiveAgent(Protocol):
@@ -65,92 +112,227 @@ class InteractiveAgent(Protocol):
     def stop(self) -> bool: ...
 ```
 
-The boundary is ordinary Python, not a transport model. There are no public action
-unions, receipts, capability strings, event envelopes, sequence numbers, reconnect
-states, or replay handshakes. A future subprocess or remote implementation may be a
-proxy with the same Python surface, but transport concerns stay private to that proxy.
-`nooa_acp` remains an edge adapter and is not the native TUI contract.
+The contract uses ordinary Python calls and immutable `AgentState` snapshots.
+It is not a network protocol. A future remote agent can provide a proxy that
+implements the same interface, but reconnect messages and wire formats belong
+inside that proxy rather than in the renderer.
 
-`AgentState` and every nested value are immutable. The UI reads complete snapshots
-rather than reducing a public event stream. A successful direct command means that the
-operation was admitted, not completed; its state effect is visible through `state`
-before the method returns. `stop()` requests owned lifecycle shutdown, while closing an
-`Observation` only stops that frontend from observing.
+A command returning `True` means the request was accepted. The resulting state
+is already observable before the call returns; completion can happen later.
 
-## Observation and switching invariants
+### `LocalAgentRunner`: local execution
 
-* `observe()` atomically registers against the latest state and schedules an initial
-  delivery after releasing the agent state lock.
-* Each observation retains only its latest pending state. Publications coalesce into at
-  most one scheduled or running drain, callbacks are serialized, and an older snapshot
-  cannot overwrite a newer one.
-* A scheduler may execute inline or raise. Scheduler/listener failure closes only that
-  observation, records `Observation.failure`, and invokes `on_terminated` exactly once.
-  The controller enters a visible disconnected state and gates commands rather than
-  continuing against a frozen snapshot. Agent locks are never held while invoking
-  scheduler or listener code.
-* `Observation.close()` is idempotent. It prevents queued callbacks from starting;
-  a callback already running may finish. It never stops the agent.
-* `AgentController` installs replacement observation and captured state transactionally.
-  Setup failure leaves the old agent active. On success it publishes the new generation,
-  closes the old observation, and rejects every late old-generation callback. A reserved
-  transition rejects callback-issued commands without holding a routing lock while it
-  waits for callback completion; observation cleanup failure cannot poison controller
-  bookkeeping or later close/replace operations.
-* Agent switching does not reconstruct the renderer or stop the previous agent merely
-  because it is no longer observed. The composition root owns resources it creates and
-  closes them exactly once.
-* UI mutation is marshalled onto the prompt_toolkit owner loop. Background producers do
-  not mutate renderer state directly.
+`LocalAgentRunner` adapts the in-process coding agent to `InteractiveAgent`. It
+owns local dispatch, callbacks, queue interaction, and its worker lifecycle.
+Those details stay outside both `TUIApplication` and the public interface.
 
-## Fullscreen transcript and viewport invariants
+### `AgentController`: safe observation and switching
 
-The transcript model stores safe immutable presentation records with stable IDs. It
-supports append, streaming replacement/finalization, clear/tag removal, and bounded
-retention. Live fullscreen retention is capped at 10,000 records or a conservative
-16 MiB resident-text budget, whichever is reached first; durable event history remains
-a separate authority. The byte budget charges source, rendered replay expansion, model
-ANSI/plain copies, and the model's bounded projection/format caches. Source blocks and
-model records are evicted together, including after resize replay changes their size.
-Projection wraps records for the current cell width and caches only derived data.
+`AgentController` is the renderer-facing coordinator. It subscribes to one
+agent, holds its latest snapshot, and routes user actions to it.
 
-At the tail, append and resize continue following the tail. While scrolled up, the
-viewport preserves a logical record ID plus visual-line offset across append and
-geometry changes. Prefix eviction also adjusts record-local selection offsets when it
-removes a synthetic joining separator, so wholly retained selections keep their exact
-payload. Eviction and clear have deterministic fallback anchors.
+Its less visible job is handling races. If an agent is replaced, callbacks from
+the previous observation may already be queued. The controller labels each
+subscription with a generation and ignores late callbacks from old
+generations. A replacement is transactional: if observing the new agent fails,
+the old one remains active.
 
-Unicode width uses terminal cells and grapheme clusters, including CJK, emoji, and
-combining marks. Source and export text always preserve valid Unicode. If a grapheme is
-physically wider than a one-cell viewport, only the screen projection uses a narrow
-ellipsis; emitting the original wide glyph would desynchronize the terminal cursor from
-prompt_toolkit's screen model. Tiny terminals keep the composer usable without
-prompt_toolkit's `Window too small` replacement becoming the UI.
+If observation itself fails, the controller exposes a disconnected state and
+rejects commands. Showing a failure is safer than accepting input against a
+frozen screen.
 
-Fullscreen width observations do not replay static records: the transcript model already
-projects those records for the requested width. Width-sensitive semantic callbacks are
-coalesced until resize activity settles and cache their latest width result. This keeps
-the ordinary 10,000-record resize callback constant-time while retaining exact semantic
-rerendering for Rich output that genuinely depends on width.
+### `TUIApplication`: terminal owner and interaction shell
 
-## Validation and rollout
+`tui_application.py` creates the prompt_toolkit `Application`, layout, key
+bindings, mouse handlers, composer, toolbar, transcript window, and subview
+host. It marshals changes from background threads onto the application's event
+loop and requests redraws there.
 
-Unit tests cover immutable state, observation scheduling/coalescing/failure/close races,
-controller replacement and stale-callback filtering, direct command routing, local
-lifecycle races, transcript projection, and terminal safety. Component tests inspect
-prompt_toolkit screen cells. A composition test exercises `Session.run()` through the
-real local runner, direct agent observation, renderer, and first submit/output cycle.
-Fault-injection tests prove that independent teardown failures cannot skip later cleanup,
-that the primary application exception wins, and that terminal restoration still runs.
-A POSIX PTY test verifies alternate-screen entry and restoration on normal exit.
+It does not run the agent. It displays snapshots and calls the narrow
+controller API when the user submits, interrupts, or stops.
 
-EOF, interrupt, startup-failure PTY cases and tmux/SSH resize soak tests remain rollout
-work. Explicit native modes retain characterization coverage while fullscreen is the
-resolved default.
+### `AgentEventRenderer`: meaning into presentation
 
-## Explicit non-goals
+Agent events have meaning: a message is Markdown, a tool call has a status, a
+file edit has a diff. `agent_event_renderer.py` turns those semantic events
+into Rich renderables and presentation blocks. `frontend.py` provides the
+higher-level presentation operations used by the session and commands.
 
-This project does not provide remote transport, authentication, durable event replay,
-multi-client arbitration, generalized arbitrary-call RPC, an ACP-driven native API, a
-Rust frontend, or a Textual rewrite. PyO3 is reserved for measured pure-computation
-hotspots, not terminal ownership.
+Keeping this step explicit prevents every producer from inventing its own
+terminal behavior.
+
+### `FullscreenTranscriptModel`: text that can be reprojected
+
+A terminal screen stores cells, not a document. The fullscreen transcript must
+nevertheless behave like a document when it wraps, scrolls, resizes, and copies.
+`fullscreen_transcript.py` supplies that model.
+
+It stores immutable, terminal-safe records with stable IDs. Projection turns
+those records into visual rows for the current terminal width. The viewport is
+anchored to a logical record and row, not merely an absolute screen offset.
+That is why incoming output and resize do not make a scrolled-up view jump.
+
+The live model is intentionally bounded to 10,000 records or a conservative
+16 MiB resident-text budget, whichever comes first. This is only the visible
+working set; durable event history has separate storage and remains available
+through `/events`.
+
+### Explorers and overlays
+
+`event_explorer.py`, `memory_explorer.py`, `session_explorer.py`,
+`todo_explorer.py`, `job_explorer.py`, and `activity_overlay.py` implement
+focused views. The fullscreen application hosts them as subviews rather than
+starting nested terminal applications. The host keeps one input loop and one
+terminal owner.
+
+### Terminal safety
+
+`terminal_safety.py` treats output from models, tools, subprocesses, logs, and
+exceptions as untrusted. Fullscreen mode accepts a small safe subset of ANSI
+styling and hyperlink metadata. Cursor movement, erase commands, title and
+clipboard operations, device-control strings, and malformed escapes are never
+sent back to the terminal as commands.
+
+This is both a security boundary and a correctness boundary: arbitrary control
+sequences would invalidate prompt_toolkit's idea of the screen.
+
+## How one turn travels through the system
+
+1. The user edits text in the composer and presses Enter.
+2. `TUIApplication` asks `AgentController.submit()` to route the text.
+3. The controller calls the active `InteractiveAgent`.
+4. The local runner admits the input and publishes a new immutable state.
+5. The observation schedules delivery on the prompt_toolkit owner loop.
+6. The UI compares the snapshot with what it has presented.
+7. Semantic events are rendered and appended or updated in the transcript.
+8. The application invalidates the screen; prompt_toolkit paints the next frame.
+9. Streaming updates repeat steps 4–8 without blocking composer editing.
+
+An observation keeps only its latest pending state and serializes callbacks.
+Fast publishers therefore coalesce instead of creating an unbounded redraw
+backlog, while an older state can never overwrite a newer one.
+
+## Scrolling, selection, and resize
+
+At the bottom of the transcript, the viewport follows new output. As soon as
+the user scrolls upward, it records a logical anchor. New output continues to
+arrive, but the visible rows stay put. A “Return to bottom” affordance resumes
+following the tail.
+
+Fullscreen drag selection maps screen cells back to logical text offsets. Copy
+therefore excludes soft wraps and ANSI styling and preserves Unicode grapheme
+clusters. Selection remains valid when unrelated old records are evicted.
+Modified drag or `F6` releases mouse ownership so the terminal or tmux can make
+its own native selection.
+
+On resize, ordinary records are projected at the new cell width; they are not
+re-emitted as terminal bytes. Width-sensitive Rich content has a semantic
+rerender callback that is cached and coalesced until resizing settles. This
+keeps normal resize proportional to visible projection rather than invoking
+thousands of render callbacks.
+
+Terminal width is measured in cells, not Python characters. CJK characters,
+emoji, combining marks, and other grapheme clusters remain atomic. In the
+pathological case where a valid grapheme is wider than a one-cell viewport, the
+model keeps the original text and shows a narrow ellipsis only in the screen
+projection.
+
+## Display modes
+
+Fullscreen is the default. Two restart-only escape hatches remain for terminals
+or workflows that need native scrollback.
+
+| Mode | Screen ownership | History on resize |
+| --- | --- | --- |
+| `fullscreen` | prompt_toolkit owns the alternate screen | reproject the model |
+| `native` | inline terminal output | keep terminal scrollback as-is |
+| `native-replay` | inline terminal output | clear and replay retained blocks |
+
+Choose a mode with `nooa tui --display-mode <mode>` or set
+`tui.display_mode` in `.nooa/settings.yaml`. An explicitly configured legacy
+`tui.full_screen` boolean is still interpreted, with a deprecation warning.
+
+Native modes are compatibility paths, not a second implementation of every
+fullscreen interaction. In particular, application-owned mouse selection and
+subview composition depend on fullscreen ownership.
+
+## Startup and shutdown
+
+Terminal applications are judged as much by how they leave as by how they run.
+The session therefore treats cleanup as independent phases. It closes
+observations, background producers, the renderer, local agent resources, and
+terminal state even when an earlier phase raises. The original application
+failure remains the primary exception; cleanup failures do not hide it.
+
+Tests exercise the complete local composition path and use a real POSIX pseudo
+terminal to verify alternate-screen entry and restoration on normal exit.
+Fault-injection tests verify cleanup order and exception precedence.
+
+## Design rules for contributors
+
+When adding a feature, preserve these rules:
+
+1. **One terminal owner.** In fullscreen mode, update application state; do not
+   print, call `run_in_terminal`, clear scrollback, or issue cursor controls.
+2. **Meaning before pixels.** Preserve semantic source until presentation. Do
+   not reverse-engineer Markdown, code, or links from rendered ANSI text.
+3. **Immutable observations.** Publish complete `AgentState` values. Do not let
+   renderer code inspect a concrete agent's queues or locks.
+4. **The owner loop mutates the UI.** Background work schedules changes; it
+   does not edit prompt_toolkit state directly.
+5. **Logical anchors survive geometry.** Selection and scrolling refer to
+   record IDs and source offsets rather than transient screen rows.
+6. **Input and output are untrusted.** Validate clipboard text and sanitize all
+   terminal sequences at the boundary.
+7. **Resource ownership is explicit.** The component that creates a resource
+   closes it exactly once. Observation lifetime is not agent lifetime.
+8. **Failure stays visible and recoverable.** Reject actions rather than
+   pretending a disconnected or stopped agent accepted them.
+9. **Test behavior at the right layer.** Use model tests for projection,
+   component tests for screen cells, race tests for lifecycle, and PTYs for
+   terminal restoration.
+
+## Where to start in the code
+
+| If you want to change… | Start with… |
+| --- | --- |
+| layout, keys, mouse, composer, status | `tui_application.py` |
+| transcript wrapping, anchors, selection | `fullscreen_transcript.py` |
+| rendering of agent messages and tools | `agent_event_renderer.py` and `frontend.py` |
+| commands and completion | `commands.py`, `command_runner.py`, `completer.py` |
+| events, memories, sessions, jobs, todos | the corresponding `*_explorer.py` |
+| local agent execution | `interactive/local_agent.py` and `tui/agent.py` |
+| state observation and switching | `interactive/state.py` and `agent_controller.py` |
+| terminal escape handling | `terminal_safety.py` |
+| composition, persistence, teardown | `session.py` |
+| colors and status items | `theme.py` and `toolbar.py` |
+
+Tests under `packages/nooa-cli/tests/tui/` mirror these boundaries. The direct
+agent contract is covered in `packages/nooa-cli/tests/test_interactive_agent.py`
+and `test_local_agent_runtime.py`.
+
+## Future work
+
+The architecture is intentionally ready for several improvements without
+changing terminal ownership:
+
+- **A unified explorer system.** Events, memories, sessions, jobs, todos, and
+  activity should share layout primitives, navigation, mouse interaction,
+  selection, copy feedback, empty states, and responsive behavior.
+- **Semantic code-block actions.** Markdown rendering should retain source maps
+  for fenced blocks so a visible Copy action can copy exact code—not borders,
+  line numbers, styling, or soft wraps. The same provenance enables “Copy as
+  Markdown” for semantic selections.
+- **More terminal lifecycle diagnostics.** Opt-in traces around application
+  entry/exit, intentional handoffs, teardown phases, and signal-triggered
+  asyncio task dumps will make rare terminal ownership failures diagnosable.
+- **Broader PTY and soak coverage.** EOF, interrupt, startup failure, repeated
+  resize, tmux, and SSH scenarios should become automated where practical.
+- **Remote agents behind the same interface.** A transport proxy may implement
+  `InteractiveAgent`; transport state must remain private to that adapter.
+- **Accessibility and discoverability.** A built-in shortcut overlay, clearer
+  focus cues, and keyboard equivalents for every mouse action should accompany
+  visual polish.
+
+These are extensions of the current model, not reasons to introduce another
+screen writer or couple the renderer to agent internals.
