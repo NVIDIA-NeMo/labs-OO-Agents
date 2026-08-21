@@ -4,7 +4,8 @@
 
 import inspect
 import re
-import shlex
+from collections.abc import Awaitable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -212,44 +213,30 @@ def _parse_skill_md(path: Path) -> tuple[str, str, str]:
     return skill_id, description, body.strip()
 
 
-def _resolve_skill_path(skill_root: Path, relative: str) -> Path:
-    """Resolve a relative path and verify it stays within skill_root.
+@dataclass(frozen=True, slots=True)
+class SkillFile:
+    """A file packaged with a text skill.
 
-    Raises:
-        ValueError: If the path escapes the skill directory.
-        FileNotFoundError: If the resolved path does not exist.
+    ``path`` is POSIX-style and relative to the skill root, so it can be
+    passed directly to the skill's ``shell`` methods on every platform.
     """
-    resolved = (skill_root / relative).resolve()
-    if not resolved.is_relative_to(skill_root.resolve()):
-        raise ValueError(
-            f"Path {relative!r} escapes the skill directory. Only paths within {skill_root} are allowed."
-        )
-    if not resolved.exists():
-        raise FileNotFoundError(f"{relative!r} not found in skill directory {skill_root}")
-    return resolved
+
+    path: str
 
 
-def _build_script_command(
-    script: Path, args: tuple[str, ...], interpreter: str | None = None
-) -> str:
-    """Build the shell command to run a script.
-
-    Priority: explicit interpreter > shebang line > direct execution.
-    Pass ``interpreter`` explicitly for scripts without a shebang.
-    """
-    quoted_script = shlex.quote(str(script))
-    quoted_args = " ".join(shlex.quote(a) for a in args)
-
-    if interpreter:
-        cmd = (
-            f"{interpreter} {quoted_script} {quoted_args}"
-            if quoted_args
-            else f"{interpreter} {quoted_script}"
-        )
-        return cmd.strip()
-
-    cmd = f"{quoted_script} {quoted_args}" if quoted_args else quoted_script
-    return cmd.strip()
+def _discover_skill_files(skill_root: Path) -> list[SkillFile]:
+    """Return a deterministic manifest of regular files contained by a skill."""
+    root = skill_root.resolve()
+    files: list[SkillFile] = []
+    for candidate in sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix()):
+        if not candidate.is_file():
+            continue
+        # A symlink that resolves outside the skill is not part of the package
+        # and ShellTools would reject it at access time as well.
+        if not candidate.resolve().is_relative_to(root):
+            continue
+        files.append(SkillFile(path=candidate.relative_to(root).as_posix()))
+    return files
 
 
 class Skill:
@@ -309,8 +296,12 @@ class Skill:
         """
         self._agent = agent
 
-    def detach(self) -> None:
-        """Called when this skill is removed from an agent."""
+    def detach(self) -> Awaitable[None] | None:
+        """Called when this skill is removed from an agent.
+
+        Implementations may release resources asynchronously; SkillRegistry
+        awaits the returned object when needed.
+        """
         self._agent = None
 
     def __dir__(self) -> list[str]:
@@ -347,87 +338,80 @@ class Skill:
         return source_path
 
 
-class TextSkill(Skill):
-    """Skill loaded from a SKILL.md directory. Has id, description, run_script, read_file."""
+class _GeneratedTextSkill(Skill):
+    """Runtime base for data-driven skills constructed from a SKILL.md directory."""
 
-    def __init__(self, *, path: Path | str, id: str | None = None):
-        skill_id, description, body = _parse_skill_md(Path(path))
-        docstring = f"{description}\n---\n{body}"
-        class_name = "".join(word.capitalize() for word in skill_id.split("-"))
-        self._skill_path = Path(path)
-        self.__class__ = type(  # pyright: ignore[reportAttributeAccessIssue]
-            class_name, (TextSkill,), {"__doc__": docstring, "_id": id or skill_id}
-        )
+    id: str
+    description: str
+    files: list[SkillFile]
 
-    @property
-    def id(self) -> str:
-        return str(type(self)._id)  # pyright: ignore[reportAttributeAccessIssue]  # _id set dynamically in __init__
+    def __init__(self, *, path: Path, skill_id: str, description: str) -> None:
+        # Import lazily: ShellTools itself subclasses Skill, so importing it at
+        # module initialization time would create a circular import.
+        from nooa.tools.shell_tools import ShellTools
+
+        self._skill_path = path.resolve()
+        self.id = skill_id
+        self.description = description
+        self.files = _discover_skill_files(self._skill_path)
+        self.shell = ShellTools(cwd=str(self._skill_path))
+        super().__init__()
 
     @property
     def source_dir(self) -> Path | None:
-        return self._skill_path.resolve()
+        return self._skill_path
 
-    @property
-    def description(self) -> str:
-        doc = type(self).__doc__ or ""
-        return doc.split("\n---\n")[0].split("\n")[0]
-
-    async def run_script(
-        self,
-        name: str,
-        *args: str,
-        interpreter: str | None = None,
-        timeout: float = 30.0,
-    ) -> str:
-        """Run a script from this skill's scripts/ directory.
-
-        Supports any script type — Python, shell, Ruby, Node.js, Perl, etc.
-        Scripts with a shebang line run directly. For scripts without one,
-        pass ``interpreter`` explicitly.
-
-            output = await self.my_skill.run_script("run_eval.py", "--limit", "10")
-            output = await self.my_skill.run_script("report.sh")
-            output = await self.my_skill.run_script("query.sql", interpreter="psql -f")
-            output = await self.my_skill.run_script("process.js", "input.json")
-        """
-        script = _resolve_skill_path(self._skill_path, f"scripts/{name}")
-        if not script.is_file():
-            scripts_dir = self._skill_path / "scripts"
-            available = (
-                sorted(p.name for p in scripts_dir.iterdir() if p.is_file())
-                if scripts_dir.is_dir()
-                else []
-            )
-            raise FileNotFoundError(
-                f"Script {name!r} not found in {scripts_dir}. Available: {available}"
-            )
-
-        from nooa.tools._bash_session import BashSession
-
-        cmd = _build_script_command(script, args, interpreter=interpreter)
-        session = BashSession(cwd=self._skill_path)
+    async def detach(self) -> None:
+        """Release the skill-local shell when the registry replaces this object."""
         try:
-            await session.start()
-            stdout, stderr, exit_code = await session.run(cmd, timeout=timeout)
+            await self.shell.close()
         finally:
-            await session.close()
+            super().detach()
 
-        # Format output to match the previous BashResult.__str__() contract
-        output = stdout
-        if stderr:
-            output += f"\n[stderr]\n{stderr}"
-        if exit_code != 0:
-            output += f"\n[exit code: {exit_code}]"
-        return output
 
-    def read_file(self, path: str) -> str:
-        """Read a file from anywhere within this skill's directory.
+def _load_text_skill(*, path: Path | str, id: str | None = None) -> Skill:
+    """Construct a normal Skill object from a SKILL.md directory."""
+    from nooa.tools.shell_tools import ShellTools
 
-        content = self.my_skill.read_file("scripts/run_eval.py")
-        content = self.my_skill.read_file("assets/prompt.txt")
-        content = self.my_skill.read_file("SKILL.md")
-        """
-        resolved = _resolve_skill_path(self._skill_path, path)
-        if not resolved.is_file():
-            raise ValueError(f"{path!r} is not a file.")
-        return resolved.read_text()
+    skill_path = Path(path).resolve()
+    skill_id, description, body = _parse_skill_md(skill_path)
+    docstring = f"{description}\n---\n{body}"
+    class_name = "".join(word.capitalize() for word in skill_id.split("-"))
+    generated_class = type(
+        class_name,
+        (_GeneratedTextSkill,),
+        {
+            "__doc__": docstring,
+            "__module__": __name__,
+            "__annotations__": {
+                "shell": ShellTools,
+                "files": list[SkillFile],
+            },
+        },
+    )
+    return generated_class(
+        path=skill_path,
+        skill_id=id or skill_id,
+        description=description,
+    )
+
+
+class TextSkill(Skill):
+    """Compatibility factory for loading a SKILL.md directory as a normal Skill.
+
+    The returned object is a generated ``Skill`` with documentation from
+    ``SKILL.md``, a skill-root-scoped ``shell``, and a ``files`` manifest.
+    ``TextSkill`` remains importable so existing construction sites continue
+    to work, but the returned object has no text-skill-specific tool methods.
+    """
+
+    def __new__(cls, *, path: Path | str, id: str | None = None) -> Skill:
+        if cls is not TextSkill:
+            return super().__new__(cls)
+        return _load_text_skill(path=path, id=id)
+
+    def __init__(self, *, path: Path | str, id: str | None = None) -> None:
+        # ``__new__`` returns a generated Skill, so this initializer is skipped
+        # for normal TextSkill(...) calls. Keep the signature for introspection
+        # and fail clearly for unsupported TextSkill subclassing.
+        raise TypeError("TextSkill is a compatibility factory and cannot be subclassed")

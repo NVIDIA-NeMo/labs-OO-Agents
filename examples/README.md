@@ -463,6 +463,17 @@ class FrontendAgent(Agent, llm=llm):
         ...
 ```
 
+Each loaded text skill is a regular `Skill` object. Its class documentation
+comes from `SKILL.md`, `files` lists the packaged files using paths relative to
+the skill root, and `shell` is a `ShellTools` instance scoped to that root:
+
+```python
+skill = TextSkill(path=ASSETS / "frontend-design")
+print([file.path for file in skill.files])
+guide = await skill.shell.read("SKILL.md")
+result = await skill.shell.run("python3 scripts/check.py")
+```
+
 Load a whole directory by attaching each `SKILL.md` subdirectory as a `TextSkill` attribute:
 
 ```python
@@ -472,6 +483,28 @@ for entry in sorted(ASSETS.iterdir()):
 ```
 
 > **Key insight.** A skill is just a class attribute. Because visibility follows Python rules, anything you attach to `self` is discoverable to the model — no separate registration step, no split between "code" and "knowledge".
+
+#### Migrating existing text skills
+
+`TextSkill(path=...)` remains the supported compatibility constructor, but the
+returned object no longer has the bespoke `read_file()` and `run_script()`
+methods. Use the shared ShellTools API instead:
+
+```python
+# Before
+content = skill.read_file("assets/prompt.txt")
+output = await skill.run_script("build.py", "--check", interpreter="python3")
+
+# Now
+content = (await skill.shell.read("assets/prompt.txt")).text
+output = await skill.shell.run("python3 scripts/build.py --check")
+```
+
+The shell working directory is the skill root, so the relative paths exposed
+by `skill.files` can be passed directly to file operations such as
+`shell.read()`, `shell.replace()`, and `shell.write_file()`, or used in commands
+passed to `shell.run()`. Registry reloads rebuild the documentation, file
+manifest, and skill-local shell from the current directory contents.
 
 ```bash
 uv run python examples/quickstart/10_skills.py

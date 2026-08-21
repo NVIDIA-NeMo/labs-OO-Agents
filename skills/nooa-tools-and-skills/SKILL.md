@@ -69,7 +69,8 @@ class MyAgent(Agent, llm=llm):
 ```
 
 - Agents see a `# Skills` block (one-liner per skill) in their execution context and call `doc(self.<skill>)` for the full guide.
-- `TextSkill` exposes `read_file(path)` and `await run_script(name, *args)` for files/scripts bundled with the SKILL.md.
+- `TextSkill(path=...)` is a compatibility constructor that returns a regular dynamically generated `Skill`. Its class docstring comes from `SKILL.md`, `files: list[SkillFile]` lists packaged files using stable skill-root-relative paths, and `shell: ShellTools` is scoped to the skill root.
+- Read bundled files with `await skill.shell.read(file.path)` and run scripts with `await skill.shell.run("python3 scripts/task.py")`. The old `read_file()` / `run_script()` helpers are intentionally absent; all file and process behavior goes through ShellTools.
 - SKILL.md frontmatter: required `name`, `description`; optional `compatibility`, `metadata`, `user-invocable`, `allowed-tools` — Claude-Code-compatible format.
 - Bulk discovery/activation is `SkillRegistry(agent)` + `discover_skills_dirs([...])` / `activate([...])`. **`SkillManager` does not exist** — `README`/`examples/quickstart/10_skills.py` referencing `SkillManager.install(...)` are stale.
 - `@slash_command` on a `Skill` method marks it user-invocable via a host that reads the agent's `slash_commands` queue (see `InteractiveAgent`).

@@ -55,7 +55,7 @@ from nooa.runtime.context_manager import ContextManager  # noqa: E402
 # Export event filtering
 from nooa.runtime.event_query import EventQuery  # noqa: E402
 from nooa.runtime.events import EventsApi  # noqa: E402
-from nooa.skill import Skill, TextSkill, get_slash_commands, slash_command  # noqa: E402
+from nooa.skill import Skill, SkillFile, TextSkill, get_slash_commands, slash_command  # noqa: E402
 from nooa.skill_registry import skill_from_module  # noqa: E402
 
 # Export storage
@@ -143,6 +143,7 @@ __all__ = [
     # Agent and decorators
     "Agent",
     "Skill",
+    "SkillFile",
     "TextSkill",
     "slash_command",
     "get_slash_commands",
