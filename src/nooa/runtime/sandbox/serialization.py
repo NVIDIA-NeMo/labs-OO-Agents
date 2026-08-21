@@ -85,8 +85,9 @@ class ResultDTO:
 class _SurrogateCellError(Exception):
     """Parent-side reconstruction of a worker exception.
 
-    Preserves the original type name and formatted traceback so the CodeAct
-    error formatter renders the same guidance the in-process path would.
+    Preserves the original type name. The worker-rendered diagnostic remains
+    separate in :attr:`ErrorDTO.formatted_error` and is copied to the parent
+    ``ExecutionResult.formatted_error`` by :func:`dto_to_result`.
     """
 
     def __init__(self, dto: ErrorDTO):
@@ -186,9 +187,9 @@ def _reconstruct_error(err: ErrorDTO) -> Exception:
 
     Common builtin exceptions (ValueError, KeyError, MemoryError, ...) are
     re-instantiated as their real type so ``_format_error`` and the IPython
-    formatter render the faithful ``<Type>: <message>``; the formatted worker
-    traceback is preserved on the exception for callers that surface it. Anything
-    else falls back to :class:`_SurrogateCellError`.
+    formatter render the faithful ``<Type>: <message>``. The worker-rendered
+    diagnostic remains in :attr:`ErrorDTO.formatted_error`; it is not attached to
+    the exception. Anything else falls back to :class:`_SurrogateCellError`.
     """
     import builtins as _bi
 

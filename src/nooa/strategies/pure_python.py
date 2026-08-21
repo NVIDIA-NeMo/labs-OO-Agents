@@ -890,7 +890,7 @@ class PurePythonStrategy(CompositeStrategy):
                 stderr=stderr,
                 error=error_msg,
                 execution_status=ResultStatus.ERROR,
-                metadata=metadata if metadata is not None else {"execution_error": True},
+                metadata={**(metadata or {}), "execution_error": True},
             )
         )
 

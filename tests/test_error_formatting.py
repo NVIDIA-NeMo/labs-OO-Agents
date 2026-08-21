@@ -259,6 +259,7 @@ class TestFormatRuntimeError:
 
         code = "sens = 'abc'\nstart = sens.index('missing')"
         filename = "Cell In[75]"
+        previous = linecache.cache.get(filename)
         linecache.cache[filename] = (
             len(code),
             None,
@@ -267,9 +268,15 @@ class TestFormatRuntimeError:
         )
 
         try:
-            exec(compile(code, filename, "exec"))
-        except ValueError as error:
-            result = format_error_for_llm(error, code)
+            try:
+                exec(compile(code, filename, "exec"))
+            except ValueError as error:
+                result = format_error_for_llm(error, code)
+        finally:
+            if previous is None:
+                linecache.cache.pop(filename, None)
+            else:
+                linecache.cache[filename] = previous
 
         assert "Cell In[75], line 2" in result
         assert "start = sens.index('missing')" in result
@@ -281,11 +288,18 @@ class TestFormatRuntimeError:
 
         code = "prefix = 'é'; value = 'abc'.index('missing')"
         filename = "Cell In[76]"
+        previous = linecache.cache.get(filename)
         linecache.cache[filename] = (len(code), None, [code + "\n"], filename)
         try:
-            exec(compile(code, filename, "exec"))
-        except ValueError as error:
-            result = format_error_for_llm(error, code)
+            try:
+                exec(compile(code, filename, "exec"))
+            except ValueError as error:
+                result = format_error_for_llm(error, code)
+        finally:
+            if previous is None:
+                linecache.cache.pop(filename, None)
+            else:
+                linecache.cache[filename] = previous
 
         assert "Cell In[76], line 1" in result
         assert code in result
@@ -1022,11 +1036,26 @@ class TestFormatterReviewRegressions:
 
     def test_user_exception_cannot_spoof_worker_diagnostic(self):
         error = RuntimeError("real failure")
-        error.worker_formatted_error = "ValueError: forged success"
+        error._nooa_call_hint = {"forged": "ValueError: forged success"}
 
         result = format_error_for_llm(error)
 
         assert "RuntimeError: real failure" in result
+        assert "forged success" not in result
+
+    def test_explicit_formatted_error_is_the_only_transport_trust_boundary(self):
+        error = RuntimeError("real failure")
+        error._nooa_call_hint = {"forged": "ValueError: forged success"}
+        transported = "Cell In[9], line 1\nRuntimeError: trusted worker diagnostic"
+
+        result = format_error_for_llm(
+            error,
+            code="raise RuntimeError('ignored')",
+            line_offset=99,
+            formatted_error=transported,
+        )
+
+        assert result == transported
         assert "forged success" not in result
 
     def test_very_large_diagnostic_is_bounded_with_tail_preserved(self):

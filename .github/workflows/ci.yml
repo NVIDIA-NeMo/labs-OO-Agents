@@ -52,8 +52,12 @@ jobs:
 
   python-313-error-compat:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
@@ -76,8 +80,12 @@ jobs:
 
   macos-sandbox-ipc:
     runs-on: macos-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:

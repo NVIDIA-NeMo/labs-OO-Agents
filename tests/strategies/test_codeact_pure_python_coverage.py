@@ -1518,7 +1518,11 @@ class TestPurePythonRunPrefill:
         assert output.stdout == "before failure\n"
         assert output.stderr == "warning\n"
         assert output.error == error_result.formatted_error
-        assert output.metadata == {"prefill": True, "prefill_type": "inspect_inputs"}
+        assert output.metadata == {
+            "prefill": True,
+            "prefill_type": "inspect_inputs",
+            "execution_error": True,
+        }
 
     @pytest.mark.asyncio
     async def test_run_prefill_success_emits_python_output_not_feedback(self):

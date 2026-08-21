@@ -461,6 +461,11 @@ def format_error_for_llm(
         line_offset: Number of wrapper lines to subtract from line numbers.
             This compensates for lines added by the async wrapper (e.g.,
             "async def __repl_wrapper__():", "try:", etc.).
+        formatted_error: Optional preformatted diagnostic produced by a trusted
+            execution backend such as the sandbox worker. When non-empty, it
+            bypasses local formatting (including ``code``, ``line_offset``, and
+            bad-call hint handling) and is only bounded to the capture limit. The
+            producer is responsible for applying any required line adjustment.
 
     Returns:
         Formatted error string suitable for LLM consumption.
