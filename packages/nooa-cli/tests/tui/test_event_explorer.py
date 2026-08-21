@@ -1443,3 +1443,41 @@ async def test_tui_app_session_explorer_resume_prefills_input(monkeypatch) -> No
 
         assert h.app.active_subview is None
         assert h.capture_input() == "/session resume aaaa0000"
+
+
+def test_event_explorer_copy_preserves_semantic_markdown() -> None:
+    from nooa_cli.tui.event_explorer import EventExplorerView
+
+    markdown = "## User input\n\n```python\nprint('exact')\n```"
+    event = _FakeEvent("TUIUserInput", text="print exact")
+    view = EventExplorerView(SimpleNamespace(items=lambda: [("1", event)]))
+    view.model.rows[0].markdown = markdown
+    copied: list[str] = []
+    view.set_copy_handler(lambda text: copied.append(text) or True)
+
+    assert view.handle_key("copy") == "handled"
+    assert copied == [markdown]
+
+
+def test_session_explorer_copy_preserves_unwrapped_dialog() -> None:
+    from nooa_cli.tui.session_explorer import SessionExplorerModel, SessionExplorerView
+
+    view = SessionExplorerView.__new__(SessionExplorerView)
+    view.model = SessionExplorerModel(
+        [
+            _session_row(
+                "aaaa0000-0000-0000-0000-000000000001",
+                "copy session",
+                [("user", "a very long source line"), ("agent", "exact answer")],
+            )
+        ]
+    )
+    view.native_selection = False
+    view._copy_handler = None
+    view._copy_status = ""
+
+    copied = view.copy_text()
+
+    assert copied is not None
+    assert "You:\n  a very long source line" in copied
+    assert "OO:\n  exact answer" in copied

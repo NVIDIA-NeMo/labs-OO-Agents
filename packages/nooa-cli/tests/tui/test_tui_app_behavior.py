@@ -385,6 +385,36 @@ async def test_explorer_f2_temporarily_restores_native_terminal_selection():
         await asyncio.wait_for(opened, timeout=1)
 
 
+async def test_explorer_ctrl_y_uses_host_clipboard(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from nooa_cli.tui.explorer_base import ExplorerConfig, ExplorerModel, ExplorerView
+
+    class CopyView(ExplorerView):
+        def detail_lines(self, row, width):
+            return ["rendered detail"]
+
+        def copy_text(self):
+            return "semantic detail"
+
+    copied = []
+    view = CopyView(
+        ExplorerModel([MagicMock(search_text="copy me")]),
+        ExplorerConfig(title="Copy Explorer"),
+    )
+    async with TUIHarness() as h:
+        monkeypatch.setattr(h.app, "_copy_to_clipboard", lambda value: copied.append(value) or True)
+        opened = asyncio.create_task(h.app.open_subview(view))
+        await h.wait_for(lambda: h.app.active_subview is view)
+
+        await h.press("c-y")
+        await h.wait_for(lambda: copied == ["semantic detail"])
+        assert "Copied item" in view.render(80, 10)
+
+        await h.press("q")
+        await asyncio.wait_for(opened, timeout=1)
+
+
 async def test_oauth_modal_ctrl_y_copies_full_authorization_url(monkeypatch):
     url = "https://login.example.test/authorize?state=" + "a" * 500
     copied = []

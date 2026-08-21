@@ -13,6 +13,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
+from .explorer_base import ExplorerInteraction, bar_with_action
 from .output import CodeExecution, Output, TableOutput, TextOutput
 from .subapp import SubviewKeyResult
 from .theme import COLORS
@@ -150,7 +151,44 @@ def _output_lines(output: Output, width: int, *, ansi: bool) -> list[str]:
     return _plain_wrap(str(output), width)
 
 
-class ActivityOverlayView:
+def _output_copy_text(output: Output) -> str:
+    """Return a stable, width-independent text representation of one output."""
+    if isinstance(output, TextOutput):
+        return output.content
+    if isinstance(output, TableOutput):
+        lines: list[str] = []
+        if output.title:
+            lines.append(output.title)
+        if output.show_header and output.columns:
+            lines.append("\t".join(str(column) for column in output.columns))
+        lines.extend("\t".join(str(cell) for cell in row) for row in output.rows)
+        if output.footer:
+            if lines:
+                lines.append("")
+            lines.append(output.footer)
+        return "\n".join(lines)
+    if isinstance(output, CodeExecution):
+        parts: list[str] = []
+        if output.code is not None:
+            parts.append(f"```python\n{output.code}\n```")
+        for label, value in (
+            ("stdout", output.stdout),
+            ("stderr", output.stderr),
+            ("error", output.error),
+            ("value", output.value),
+        ):
+            if value is not None:
+                parts.append(f"{label}:\n{value}")
+        return "\n\n".join(parts)
+    to_json = getattr(output, "to_json", None)
+    if callable(to_json):
+        import json
+
+        return json.dumps(to_json(), ensure_ascii=False, indent=2, sort_keys=True)
+    return str(output)
+
+
+class ActivityOverlayView(ExplorerInteraction):
     """Static activity snapshot shown as a full-screen in-app overlay."""
 
     title = "activity"
@@ -160,11 +198,22 @@ class ActivityOverlayView:
         self.offset = 0
         self._last_line_count = 0
         self._last_visible_lines = 0
+        self.native_selection = False
+        self._copy_handler = None
+        self._copy_status = ""
+
+    def copy_text(self) -> str | None:
+        """Serialize the activity snapshot from source data, never viewport text."""
+        parts = [_output_copy_text(output) for output in self.outputs]
+        return "\n\n".join(part for part in parts if part) or None
 
     def render(self, width: int, height: int) -> str:
         return render_activity_overlay(self, width, height, ansi=True)
 
     def handle_key(self, action: str, value: str = "") -> SubviewKeyResult:
+        interaction = self.handle_interaction_action(action)
+        if interaction != "ignored":
+            return interaction
         if action in {"quit", "escape", "enter"}:
             return "close"
         if action in {"down", "j", "scroll_down"}:
@@ -187,6 +236,14 @@ class ActivityOverlayView:
             return "handled"
         return "handled" if action == "text" else "ignored"
 
+    def handle_mouse(self, action: str, x: int, y: int) -> SubviewKeyResult:
+        if action == "click" and y == 0 and x >= getattr(self, "_copy_action_start", 10**9):
+            return self.handle_interaction_action("copy")
+        if action in {"scroll_up", "scroll_down"}:
+            self.scroll(-3 if action == "scroll_up" else 3)
+            return "handled"
+        return "ignored"
+
     def scroll(self, delta: int) -> None:
         max_offset = max(self._last_line_count - max(self._last_visible_lines, 1), 0)
         self.offset = min(max(self.offset + delta, 0), max_offset)
@@ -203,9 +260,14 @@ def render_activity_overlay(
 ) -> str:
     width = max(int(width), 40)
     height = max(int(height), 1)
-    header = _style_bar(" Activity ".ljust(width, "─")[:width], ansi=ansi)
+    header_label = " Activity "
+    copy_hint = view.copy_hint()
+    view._copy_action_start = max(width - len(f" {copy_hint} "), 0)
+    header = bar_with_action(header_label, copy_hint, width, ansi=ansi)
     footer = _style_bar(
-        " ↑/↓ scroll  PgUp/PgDn page  Home/End  Enter/Esc/q close ".ljust(width, "─")[:width],
+        (
+            f" ↑/↓ scroll  PgUp/PgDn page  Home/End  {view.selection_hint()}  Enter/Esc/q close "
+        ).ljust(width, "─")[:width],
         ansi=ansi,
     )
     body_height = max(height - 2, 0)

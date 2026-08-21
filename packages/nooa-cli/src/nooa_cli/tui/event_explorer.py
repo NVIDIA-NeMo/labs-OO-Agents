@@ -12,9 +12,9 @@ from typing import Any
 from .explorer_base import (
     BAR_STYLE,
     ExplorerInteraction,
+    bar_with_action,
     highlight_terms,
     search_terms,
-    style_bar,
     style_fts_prompt,
     style_mode_label,
     wrap_plain_line,
@@ -74,6 +74,8 @@ class EventExplorerModel:
         self._last_detail_match_lines: list[int] = []
         self._last_detail_match_occurrences: list[tuple[int, int]] = []
         self._last_detail_visible_lines = 0
+        self._last_divider_y = 0
+        self._last_list_rows: dict[int, int] = {}
 
     @property
     def empty(self) -> bool:
@@ -196,6 +198,19 @@ class EventExplorerView(ExplorerInteraction):
 
     def __init__(self, event_manager: Any) -> None:
         self.model = EventExplorerModel(build_event_rows(event_manager))
+        self.native_selection = False
+        self._copy_handler = None
+        self._copy_status = ""
+
+    def copy_text(self) -> str | None:
+        row = self.model.current
+        if row is None:
+            return None
+        if row.markdown is not None:
+            return row.markdown
+        if row.code:
+            return row.code
+        return row.detail
 
     def render(self, width: int, height: int) -> str:
         return render_event_explorer(
@@ -204,6 +219,7 @@ class EventExplorerView(ExplorerInteraction):
             height,
             ansi=True,
             selection_hint=self.selection_hint(),
+            copy_hint=self.copy_hint(),
         )
 
     def handle_key(self, action: str, value: str = "") -> SubviewKeyResult:
@@ -904,6 +920,7 @@ def render_event_explorer(
     *,
     ansi: bool = False,
     selection_hint: str = "F2 select/copy",
+    copy_hint: str = "Ctrl+Y copy detail",
 ) -> str:
     """Render the current explorer state as text/ANSI."""
     width = max(int(width), 40)
@@ -915,9 +932,9 @@ def render_event_explorer(
     query = f" search={model.query!r}" if model.query else ""
     pos = f" {model.cursor + 1}/{match_count}" if match_count else " 0/0"
     match_label = f" match {model.cursor + 1}/{match_count}" if model.query and match_count else ""
-    header = style_bar(
-        f" {title}{pos} of {total}{match_label}{query} ".ljust(width, "─")[:width], ansi=ansi
-    )
+    header_label = f" {title}{pos} of {total}{match_label}{query} "
+    model._copy_action_start = max(width - len(f" {copy_hint} "), 0)
+    header = bar_with_action(header_label, copy_hint, width, ansi=ansi)
     pane_label = "events" if model.focus == "list" else "event text"
     if model.search_active:
         mode_text = "FTS MODE"
@@ -951,6 +968,7 @@ def render_event_explorer(
         footer = footer_plain
     body_height = max(height - 2, 0)
     model._last_divider_y = 0
+    model._last_list_rows = {}
     if not total:
         body = ["No events recorded."]
     elif row is None:
@@ -963,6 +981,7 @@ def render_event_explorer(
         start = max(0, end - list_count)
         body = []
         for visible_i in range(start, end):
+            model._last_list_rows[1 + len(body)] = visible_i
             row_i = model.matches[visible_i]
             item = model.rows[row_i]
             marker = (
