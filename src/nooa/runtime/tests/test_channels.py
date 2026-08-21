@@ -363,6 +363,46 @@ def test_output_queue_status_delegates_to_input_queue():
     assert q.reader.status() == q.status()
 
 
+def test_status_metadata_only_when_preview_content_false():
+    """A message-input channel reports the pending count without its content.
+
+    The content is delivered to the agent through the dispatcher's
+    notification; previewing it in the per-turn status block would show it a
+    second time and make the agent answer the same message twice (#124).
+    """
+    q: Channel[str] = Channel("user_messages", "queue", preview_content=False)
+    q.put("what is the capital of France?")
+    status = q.status()
+    assert status == "user_messages: 1 pending (awaiting delivery)"
+    assert "capital of France" not in status
+
+
+def test_status_metadata_only_hides_every_item():
+    q: Channel[str] = Channel("user_messages", "queue", preview_content=False)
+    q.put("first")
+    q.put("second")
+    status = q.status()
+    assert "user_messages: 2 pending" in status
+    assert "first" not in status
+    assert "second" not in status
+    assert "1." not in status  # no numbered preview lines
+
+
+def test_queue_manager_threads_preview_content_flag():
+    qm = QueueManager()
+    ch = qm.queue("user_messages", preview_content=False)
+    ch.put("hello")
+    assert "user_messages: 1 pending (awaiting delivery)" in qm.status()
+    assert "hello" not in qm.status()
+
+
+def test_status_default_still_previews_content():
+    """Regression: producer channels keep their content previews."""
+    q: Channel[str] = Channel("job_outputs", "queue")
+    q.put("build finished")
+    assert "build finished" in q.status()
+
+
 # ---------------------------------------------------------------------------
 # QueueManager.race()
 # ---------------------------------------------------------------------------
