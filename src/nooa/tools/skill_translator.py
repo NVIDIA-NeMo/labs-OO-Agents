@@ -100,6 +100,13 @@ class ScriptMethodPlan(BaseModel):
     function_methods: list[ScriptFunctionPlan] = Field(default_factory=list)
 
 
+class OmittedScriptPlan(BaseModel):
+    """One script intentionally left out of the generated package API."""
+
+    script_path: str
+    reason: str
+
+
 class ConversionPlan(BaseModel):
     """Deterministic plan for converting a TextSkill into a package skill."""
 
@@ -111,6 +118,7 @@ class ConversionPlan(BaseModel):
     description: str
     docstring: str
     script_methods: list[ScriptMethodPlan] = Field(default_factory=list)
+    omitted_scripts: list[OmittedScriptPlan] = Field(default_factory=list)
     resource_prefix: str = "resources"
 
 
@@ -122,6 +130,7 @@ class PackageTranslationResult(BaseModel):
     registry_name: str
     class_name: str
     files_written: list[str]
+    omitted_scripts: list[OmittedScriptPlan] = Field(default_factory=list)
 
 
 class ValidationReport(BaseModel):
@@ -240,25 +249,38 @@ class TextSkillTranslator(Skill):
         project = package.replace("_", "-")
         registry = registry_name or f"local.{inventory.skill_name}"
         cls_name = class_name or _class_name(package)
-        docstring = _build_docstring(inventory)
 
         used_names: set[str] = set()
         used_api_names: set[str] = set()
         script_methods: list[ScriptMethodPlan] = []
+        omitted_scripts: list[OmittedScriptPlan] = []
         for file in inventory.scripts:
             interpreter = _default_interpreter(file)
             if interpreter is None and not file.executable:
+                omitted_scripts.append(
+                    OmittedScriptPlan(
+                        script_path=file.path,
+                        reason="No supported Python or shell entry point was detected.",
+                    )
+                )
                 continue
             script_path = inventory.source_dir / file.path
 
             arguments = _infer_script_arguments(script_path)
+            can_render_argparse = bool(arguments) and _can_render_native_argparse_api(script_path)
             api_method_name = (
                 _api_method_name(file.path, used_api_names)
-                if arguments and _can_render_native_argparse_api(script_path)
+                if can_render_argparse
                 else None
             )
             function_methods = _infer_script_functions(script_path, used_api_names)
             if not api_method_name and not function_methods:
+                omitted_scripts.append(
+                    OmittedScriptPlan(
+                        script_path=file.path,
+                        reason=_omission_reason(script_path),
+                    )
+                )
                 continue
             script_methods.append(
                 ScriptMethodPlan(
@@ -270,6 +292,7 @@ class TextSkillTranslator(Skill):
                     function_methods=function_methods,
                 )
             )
+        docstring = _build_docstring(inventory, script_methods)
 
         return ConversionPlan(
             source_dir=inventory.source_dir,
@@ -280,6 +303,7 @@ class TextSkillTranslator(Skill):
             description=inventory.description,
             docstring=docstring,
             script_methods=script_methods,
+            omitted_scripts=omitted_scripts,
         )
 
     def write_package(
@@ -343,6 +367,7 @@ class TextSkillTranslator(Skill):
             registry_name=plan.registry_name,
             class_name=plan.class_name,
             files_written=sorted(written),
+            omitted_scripts=plan.omitted_scripts,
         )
 
     def translate(
@@ -424,11 +449,13 @@ def _iter_skill_files(root: Path) -> list[Path]:
 
 
 def _iter_package_resource_files(plan: ConversionPlan) -> list[Path]:
-    return [
-        path
-        for path in _iter_skill_files(plan.source_dir)
-        if not path.relative_to(plan.source_dir).as_posix().startswith("scripts/")
-    ]
+    resources: list[Path] = []
+    for path in _iter_skill_files(plan.source_dir):
+        rel = path.relative_to(plan.source_dir).as_posix()
+        if rel == "SKILL.md" or rel.startswith("scripts/"):
+            continue
+        resources.append(path)
+    return resources
 
 
 def _is_executable(path: Path) -> bool:
@@ -858,12 +885,76 @@ def _annotation_from_type(node: ast.AST | None) -> Literal["str", "int", "float"
     return None
 
 
-def _build_docstring(inventory: TextSkillInventory) -> str:
+def _omission_reason(path: Path) -> str:
+    if _has_argparse_api_shape(path):
+        return "Argparse usage was detected, but the script shape is not safe to translate into a native method."
+    return "No import-safe public functions or supported argparse API could be inferred."
+
+
+def _has_argparse_api_shape(path: Path) -> bool:
+    if path.suffix.lower() != ".py":
+        return False
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return False
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"add_argument", "parse_args", "add_subparsers"}
+        for node in ast.walk(tree)
+    )
+
+
+def _build_docstring(inventory: TextSkillInventory, script_methods: list[ScriptMethodPlan]) -> str:
     title = inventory.description.strip() or inventory.skill_name
-    body = inventory.body.strip()
-    if body:
-        return f"{title}\n\nOriginal SKILL.md guidance:\n\n{body}"
-    return title
+    lines = [
+        title,
+        "",
+        "Package-native skill translated from a traditional TextSkill.",
+        "Use the public Python methods on this skill instead of invoking scripts or subprocesses.",
+    ]
+    public_methods = _public_method_guidance(script_methods)
+    if public_methods:
+        lines.extend(["", "Public APIs:", *public_methods])
+    else:
+        lines.extend(
+            [
+                "",
+                "No public script APIs were inferred. This package only carries private bundled resources for package code.",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _public_method_guidance(script_methods: list[ScriptMethodPlan]) -> list[str]:
+    lines: list[str] = []
+    for method in script_methods:
+        if method.api_method_name:
+            parameters = ", ".join(_guidance_argument(argument) for argument in method.arguments)
+            lines.append(f"- {method.api_method_name}({parameters}) -> str: returns captured text output.")
+        for function in method.function_methods:
+            parameters = ", ".join(_guidance_parameter(parameter) for parameter in function.parameters)
+            lines.append(
+                f"- {function.method_name}({parameters}) -> {function.return_annotation}: "
+                "returns the Python value from the translated implementation."
+            )
+    return lines
+
+
+def _guidance_argument(argument: ScriptArgumentPlan) -> str:
+    return _render_api_parameter(argument, required=argument.required and argument.action == "store")
+
+
+def _guidance_parameter(parameter: FunctionParameterPlan) -> str:
+    suffix = "" if parameter.required else f" = {parameter.default!r}"
+    return f"{parameter.param_name}: {parameter.annotation}{suffix}"
+
+
+def _method_return_guidance(function: ScriptFunctionPlan) -> str:
+    if function.return_annotation == "object":
+        return "Return the Python value from the translated implementation."
+    return f"Return `{function.return_annotation}` from the translated implementation."
 
 
 def _toml_string(value: str) -> str:
@@ -1127,7 +1218,7 @@ def _render_api_method(plan: ConversionPlan, method: ScriptMethodPlan) -> str:
 
     lines: list[str] = [
         f"def {method.api_method_name}(self{signature_suffix}) -> str:",
-        f'    """Run the translated `{method.script_path}` logic as a native Python method."""',
+        '    """Run the translated package implementation and return captured text output."""',
     ]
     lines.extend(f"    {line}" if line else "" for line in native_body)
     lines.append("")
@@ -1140,7 +1231,7 @@ def _render_function_method(method: ScriptMethodPlan, function: ScriptFunctionPl
     if signature:
         signature = f", {signature}"
     call_args = ", ".join(f"{parameter.param_name}={parameter.param_name}" for parameter in function.parameters)
-    docstring = function.docstring.strip() or f"Call `{function.function_name}` from `{method.script_path}`."
+    docstring = function.docstring.strip() or _method_return_guidance(function)
     lines = [
         f"def {function.method_name}(self{signature}) -> {function.return_annotation}:",
         f"    {_triple_quoted(docstring)}",

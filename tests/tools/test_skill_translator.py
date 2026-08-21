@@ -204,6 +204,18 @@ def _run_generated_tests(package_dir: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _generated_text(package_dir: Path) -> str:
+    parts: list[str] = []
+    for path in package_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            parts.append(path.read_text(encoding="utf-8"))
+        except UnicodeDecodeError:
+            continue
+    return "\n".join(parts)
+
+
 def test_inspect_text_skill_inventory(tmp_path):
     skill_dir = _make_text_skill(tmp_path)
     translator = TextSkillTranslator()
@@ -236,6 +248,9 @@ def test_plan_conversion_creates_package_skill_names_without_raw_script_plan(tmp
     assert plan.registry_name == "local.hello-skill"
     assert plan.class_name == "HelloSkill"
     assert plan.script_methods == []
+    assert [(script.script_path, script.reason) for script in plan.omitted_scripts] == [
+        ("scripts/hello.py", "No import-safe public functions or supported argparse API could be inferred.")
+    ]
 
 
 def test_plan_conversion_infers_argparse_api_method(tmp_path):
@@ -294,11 +309,15 @@ async def test_translate_writes_valid_package_without_archiving_raw_scripts(tmp_
     assert report.ok
     assert result.package_name == "hello_skill"
     assert result.registry_name == "local.hello-skill"
-    assert "src/hello_skill/resources/SKILL.md" in result.files_written
+    assert [script.script_path for script in result.omitted_scripts] == ["scripts/hello.py"]
+    assert "src/hello_skill/resources/SKILL.md" not in result.files_written
     assert "src/hello_skill/resources/references/notes.txt" in result.files_written
     assert "src/hello_skill/resources/scripts/hello.py" not in result.files_written
     assert (result.package_dir / "pyproject.toml").exists()
     assert (result.package_dir / "src" / "hello_skill" / "__init__.py").exists()
+    generated_text = _generated_text(result.package_dir)
+    assert "No import-safe public functions or supported argparse API could be inferred" not in generated_text
+    assert "Use this skill to greet people" not in generated_text
     generated_tests = _run_generated_tests(result.package_dir)
     assert generated_tests.returncode == 0, generated_tests.stdout + generated_tests.stderr
 
@@ -409,8 +428,11 @@ async def test_translated_argparse_script_has_named_api_method(tmp_path):
     assert "def search(" in init_source
     assert "def run_search(" not in init_source
     assert "run_resource_script" not in init_source
-    assert "Original SKILL.md guidance" in init_source
-    assert "Use this skill to search records" in init_source
+    assert "Original SKILL.md guidance" not in init_source
+    assert "Use this skill to search records" not in init_source
+    assert "Use the public Python methods" in init_source
+    assert "search(path: str, query: str, limit: int | None = 10, dry_run: bool = False) -> str" in init_source
+    assert "Use this skill to search records" not in _generated_text(result.package_dir)
 
     registry = SkillRegistry(_Agent())
     registry.discover_libs(result.package_dir.parent)
@@ -543,6 +565,12 @@ def test_unsupported_argparse_shape_is_omitted_instead_of_partial_api(tmp_path):
     result = translator.translate(skill_dir, tmp_path / "libs")
 
     assert plan.script_methods == []
+    assert [(script.script_path, script.reason) for script in plan.omitted_scripts] == [
+        (
+            "scripts/batch.py",
+            "Argparse usage was detected, but the script shape is not safe to translate into a native method.",
+        )
+    ]
     assert "src/batch_skill/resources/scripts/batch.py" not in result.files_written
 
 
@@ -591,6 +619,7 @@ def test_argparse_with_nonliteral_required_is_omitted(tmp_path):
     result = translator.translate(skill_dir, tmp_path / "libs")
 
     assert "scripts/query.py" not in {method.script_path for method in plan.script_methods}
+    assert [script.script_path for script in plan.omitted_scripts] == ["scripts/hello.py", "scripts/query.py"]
     assert "src/hello_skill/resources/scripts/query.py" not in result.files_written
 
 
@@ -649,6 +678,7 @@ def test_script_with_sibling_import_is_omitted_until_import_graph_can_be_package
     planned_scripts = {method.script_path for method in plan.script_methods}
     assert "scripts/main_tool.py" not in planned_scripts
     assert "scripts/helper.py" in planned_scripts
+    assert any(script.script_path == "scripts/main_tool.py" for script in plan.omitted_scripts)
     assert "src/hello_skill/resources/scripts/main_tool.py" not in result.files_written
 
 
@@ -678,6 +708,7 @@ def test_main_argparse_script_with_unsafe_top_level_assignment_is_omitted(tmp_pa
     result = translator.translate(skill_dir, tmp_path / "libs")
 
     assert "scripts/main_tool.py" not in {method.script_path for method in plan.script_methods}
+    assert any(script.script_path == "scripts/main_tool.py" for script in plan.omitted_scripts)
     assert "src/hello_skill/_impl/_scripts_main_tool.py" not in result.files_written
 
 
@@ -797,6 +828,7 @@ def test_unknown_non_executable_script_has_no_specific_wrapper(tmp_path):
     plan = translator.plan_conversion(translator.inspect_text_skill(skill_dir))
 
     assert "scripts/query.sql" not in {method.script_path for method in plan.script_methods}
+    assert any(script.script_path == "scripts/query.sql" for script in plan.omitted_scripts)
 
 
 def test_non_executable_python_shebang_script_without_package_api_is_omitted(tmp_path):
@@ -809,3 +841,4 @@ def test_non_executable_python_shebang_script_without_package_api_is_omitted(tmp
     plan = translator.plan_conversion(translator.inspect_text_skill(skill_dir))
 
     assert "scripts/hello.py" not in {method.script_path for method in plan.script_methods}
+    assert any(script.script_path == "scripts/hello.py" for script in plan.omitted_scripts)
