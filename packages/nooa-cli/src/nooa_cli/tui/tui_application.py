@@ -17,15 +17,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import datetime
+import inspect
 import logging
+import os
 import re
 import shutil
 import subprocess
-import threading
 from collections.abc import Awaitable, Callable
-from concurrent.futures import Future as ConcurrentFuture
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from prompt_toolkit.application import Application
@@ -33,18 +32,35 @@ from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import Completer
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
-from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.formatted_text import ANSI, AnyFormattedText
 from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import ConditionalContainer, DynamicContainer, HSplit, Layout, Window
-from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.layout.containers import WindowAlign
+from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl, UIContent
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.layout.menus import CompletionsMenuControl
 from prompt_toolkit.layout.processors import BeforeInput
-from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
+from prompt_toolkit.layout.screen import Char, Screen, WritePosition
+from prompt_toolkit.mouse_events import (
+    MouseButton,
+    MouseEvent,
+    MouseEventType,
+    MouseModifier,
+)
+from prompt_toolkit.selection import SelectionType
 
+from nooa_cli.interactive.state import (
+    AgentLifecycle,
+    CancellationState,
+    InteractiveAgent,
+)
+
+from .agent_controller import AgentController
 from .completer import expand_mentions
+from .fullscreen_transcript import FullscreenTranscriptModel
+from .host_services import TUIHostServices
 from .input_handler import _set_completions_sync, create_prompt_style
 from .resize_reflow import (
     TRANSCRIPT_REFLOW_DEBOUNCE_SECONDS,
@@ -54,6 +70,7 @@ from .resize_reflow import (
 from .subapp import InAppSubview, normalize_key_result
 from .terminal_safety import (
     normalize_transcript_block,
+    project_prompt_toolkit_ansi,
     sanitize_live_text,
     sanitize_transcript_ansi,
     strip_safe_ansi,
@@ -79,6 +96,427 @@ class DispatcherExit(Exception):
     """
 
 
+class _GraphemeWindow(Window):
+    """Window that installs extended graphemes as atomic terminal cells.
+
+    prompt_toolkit normally expands formatted text by code point. That gives
+    flags, ZWJ emoji, modifiers, and keycaps the wrong width and can clip half
+    a valid grapheme at the viewport edge. The transcript model already wraps
+    on extended-grapheme boundaries; this final screen projection preserves
+    those boundaries and supplies the terminal cluster width to the renderer.
+    """
+
+    def _copy_body(
+        self,
+        ui_content: UIContent,
+        new_screen: Screen,
+        write_position: WritePosition,
+        move_x: int,
+        width: int,
+        vertical_scroll: int = 0,
+        horizontal_scroll: int = 0,
+        wrap_lines: bool = False,
+        highlight_lines: bool = False,
+        vertical_scroll_2: int = 0,
+        always_hide_cursor: bool = False,
+        has_focus: bool = False,
+        align: WindowAlign = WindowAlign.LEFT,
+        get_line_prefix: Callable[[int, int], AnyFormattedText] | None = None,
+    ) -> tuple[dict[int, tuple[int, int]], dict[tuple[int, int], tuple[int, int]]]:
+        mappings = super()._copy_body(
+            ui_content,
+            new_screen,
+            write_position,
+            move_x,
+            width,
+            vertical_scroll,
+            horizontal_scroll,
+            wrap_lines,
+            highlight_lines,
+            vertical_scroll_2,
+            always_hide_cursor,
+            has_focus,
+            align,
+            get_line_prefix,
+        )
+        visible_lines, _ = mappings
+        grapheme_coordinates: dict[tuple[int, int], tuple[int, int]] = {}
+        xpos = write_position.xpos + move_x
+        ypos = write_position.ypos
+        for screen_y, (line_number, _column) in visible_lines.items():
+            if screen_y < 0 or screen_y >= write_position.height:
+                continue
+            row = new_screen.data_buffer[ypos + screen_y]
+            for x in range(xpos, xpos + width):
+                row[x] = Char()
+            fragments = ui_content.get_line(line_number)
+            styled_chars = [
+                (style, char)
+                for style, text, *_rest in fragments
+                if "[ZeroWidthEscape]" not in style
+                for char in text
+            ]
+            x = xpos
+            logical_cell = 0
+            for start, stop, cells in FullscreenTranscriptModel._grapheme_spans(styled_chars):
+                cluster = "".join(char for _style, char in styled_chars[start:stop])
+                if cluster == "\n":
+                    break
+                cells = max(0, cells)
+                if cells > width:
+                    # Keep source/export text intact, but never emit a glyph
+                    # the physical terminal cannot fit in this viewport. A
+                    # one-cell ellipsis keeps prompt_toolkit and the terminal's
+                    # cursor model in agreement.
+                    cluster = "…"
+                    cells = 1
+                elif x + cells > xpos + width:
+                    break
+                atom = Char(cluster, styled_chars[start][0] if start < stop else "")
+                atom.width = cells
+                if x < xpos + width:
+                    row[x] = atom
+                    for continuation in range(cells):
+                        grapheme_coordinates[line_number, logical_cell + continuation] = (
+                            ypos + screen_y,
+                            x + continuation,
+                        )
+                    for continuation in range(1, cells):
+                        row[x + continuation] = Char("")
+                x += cells
+                logical_cell += cells
+        return visible_lines, grapheme_coordinates
+
+
+class _FullscreenTranscriptControl(FormattedTextControl):
+    """Transcript control owning wheel navigation and drag selection."""
+
+    def __init__(
+        self,
+        *args: Any,
+        scroll_callback: Callable[[int], None],
+        mouse_navigation_enabled: Callable[[], bool],
+        selection_callback: Callable[[str, int, int], None],
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._scroll_callback = scroll_callback
+        self._mouse_navigation_enabled = mouse_navigation_enabled
+        self._selection_callback = selection_callback
+        self._render_width: int | None = None
+        self._render_height: int | None = None
+        self._dragging = False
+        self._drag_moved = False
+        self._drag_position = (0, 0)
+        self._autoscroll_direction = 0
+        self._autoscroll_timer: asyncio.TimerHandle | None = None
+
+    @property
+    def render_size(self) -> tuple[int, int] | None:
+        if self._render_width is None or self._render_height is None:
+            return None
+        return self._render_width, self._render_height
+
+    def create_content(self, width: int, height: int | None):
+        # Window supplies current-frame geometry before requesting fragments.
+        # This avoids reusing Window.render_info from the previous frame on
+        # height-only resize and on the first frame after closing a subview.
+        self._render_width = max(1, width)
+        if height is not None:
+            self._render_height = max(1, height)
+        content = super().create_content(width, height)
+
+        def get_line(index: int):
+            line = content.get_line(index)
+            if any(text for _style, text, *_rest in line):
+                return line
+            # prompt_toolkit only installs coordinate mappings for painted
+            # cells. A visually blank space keeps logical blank transcript
+            # rows mouse-addressable without changing model/exported text.
+            return [("", " ")]
+
+        return UIContent(
+            get_line=get_line,
+            line_count=content.line_count,
+            cursor_position=content.cursor_position,
+            menu_position=content.menu_position,
+            show_cursor=content.show_cursor,
+        )
+
+    def mouse_handler(self, mouse_event: MouseEvent):
+        # Terminals commonly reserve Option/Alt (or Shift in tmux) to bypass
+        # mouse reporting and perform native selection. If such a modified
+        # event is reported anyway, do not mutate application selection state.
+        if (
+            MouseModifier.ALT in mouse_event.modifiers
+            or MouseModifier.SHIFT in mouse_event.modifiers
+        ):
+            # Stop any application drag/autoscroll without clearing the visible
+            # selection; the modified gesture belongs to the terminal.
+            self.cancel_drag()
+            return NotImplemented
+        if not self._mouse_navigation_enabled():
+            self.cancel_drag()
+            return NotImplemented
+
+        delta = _fullscreen_wheel_delta(mouse_event)
+        if delta is not None:
+            self._scroll_callback(delta)
+            return None
+
+        x = mouse_event.position.x
+        y = mouse_event.position.y
+        if (
+            mouse_event.event_type is MouseEventType.MOUSE_DOWN
+            and mouse_event.button is MouseButton.LEFT
+        ):
+            self.cancel_drag()
+            self._dragging = True
+            self._drag_position = (x, y)
+            self._selection_callback("start", x, y)
+            return None
+        if mouse_event.event_type is MouseEventType.MOUSE_MOVE and self._dragging:
+            # tmux cannot forward a release that happens outside its pane.  In
+            # all-motion mode, the first event after the pointer re-enters is a
+            # no-button move; treat that as the missing release instead of
+            # leaving the drag lease and edge autoscroll stranded.
+            if mouse_event.button is MouseButton.NONE:
+                self._finish_drag(x, y, moved=True)
+                return None
+            self._drag_moved = True
+            self._drag_position = (x, y)
+            direction = 0
+            if self._render_height is not None:
+                if self._render_height == 1:
+                    direction = 0
+                elif self._render_height < 4:
+                    distance_from_top = y
+                    distance_from_bottom = self._render_height - 1 - y
+                    if distance_from_top < distance_from_bottom:
+                        direction = -1
+                    elif distance_from_bottom < distance_from_top:
+                        direction = 1
+                elif y < 2:
+                    direction = -1
+                elif y >= self._render_height - 2:
+                    direction = 1
+            self._set_autoscroll(direction)
+            self._selection_callback("extend", x, y)
+            return None
+        if mouse_event.event_type is MouseEventType.MOUSE_UP and self._dragging:
+            self._finish_drag(x, y, moved=self._drag_moved)
+            return None
+        return super().mouse_handler(mouse_event)
+
+    @property
+    def dragging(self) -> bool:
+        """Whether this control currently owns an application selection drag."""
+        return self._dragging
+
+    def handle_external_mouse(self, mouse_event: MouseEvent, *, below: bool) -> bool:
+        """Handle move/release routed to chrome beyond this control's window."""
+        if not self._dragging:
+            return False
+        if (
+            MouseModifier.ALT in mouse_event.modifiers
+            or MouseModifier.SHIFT in mouse_event.modifiers
+        ):
+            self.cancel_drag()
+            return False
+        if mouse_event.event_type not in (
+            MouseEventType.MOUSE_MOVE,
+            MouseEventType.MOUSE_UP,
+        ):
+            return False
+        height = max(1, self._render_height or 1)
+        x = max(0, mouse_event.position.x)
+        y = height - 1 if below else 0
+        self._drag_moved = True
+        self._drag_position = (x, y)
+        if mouse_event.event_type is MouseEventType.MOUSE_MOVE:
+            if mouse_event.button is MouseButton.NONE:
+                self._finish_drag(x, y, moved=True)
+            else:
+                self._set_autoscroll(1 if below else -1)
+                self._selection_callback("extend", x, y)
+        else:
+            self._finish_drag(x, y, moved=True)
+        return True
+
+    def _finish_drag(self, x: int, y: int, *, moved: bool) -> None:
+        """Resolve an owned drag at the latest observable pointer position."""
+        self._dragging = False
+        self._drag_moved = False
+        self._drag_position = (x, y)
+        self._set_autoscroll(0)
+        self._selection_callback("finish" if moved else "cancel", x, y)
+
+    def cancel_drag(self) -> None:
+        """Cancel an active drag and any stationary edge autoscroll."""
+        self._dragging = False
+        self._drag_moved = False
+        self._set_autoscroll(0)
+
+    def _set_autoscroll(self, direction: int, *, delay: float = 0.35) -> None:
+        if direction == self._autoscroll_direction and self._autoscroll_timer is not None:
+            return
+        self._autoscroll_direction = direction
+        if self._autoscroll_timer is not None:
+            self._autoscroll_timer.cancel()
+            self._autoscroll_timer = None
+        if not direction or not self._dragging:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._autoscroll_timer = loop.call_later(delay, self._autoscroll_tick)
+
+    def _autoscroll_tick(self) -> None:
+        self._autoscroll_timer = None
+        if not self._dragging or not self._autoscroll_direction:
+            return
+        self._scroll_callback(self._autoscroll_direction)
+        self._selection_callback("extend", *self._drag_position)
+        self._set_autoscroll(self._autoscroll_direction, delay=0.12)
+
+
+class _ComposerBuffer(Buffer):
+    """Input buffer with conventional selection-aware editing semantics."""
+
+    def insert_text(
+        self,
+        data: str,
+        overwrite: bool = False,
+        move_cursor: bool = True,
+        fire_event: bool = True,
+    ) -> None:
+        if self.selection_state is not None:
+            self.cut_selection()
+        super().insert_text(
+            data,
+            overwrite=overwrite,
+            move_cursor=move_cursor,
+            fire_event=fire_event,
+        )
+
+    def delete(self, count: int = 1) -> str:
+        if self.selection_state is not None:
+            return self.cut_selection().text
+        return super().delete(count=count)
+
+    def delete_before_cursor(self, count: int = 1) -> str:
+        if self.selection_state is not None:
+            return self.cut_selection().text
+        return super().delete_before_cursor(count=count)
+
+
+def _fullscreen_wheel_delta(mouse_event: MouseEvent) -> int | None:
+    """Map one prompt_toolkit wheel report to transcript visual rows."""
+    return {
+        MouseEventType.SCROLL_UP: -3,
+        MouseEventType.SCROLL_DOWN: 3,
+    }.get(mouse_event.event_type)
+
+
+class _FullscreenDragBoundaryControl(FormattedTextControl):
+    """Chrome control that hands pointer gestures back to the transcript.
+
+    prompt_toolkit routes mouse events to the window under the pointer. Without
+    this handoff, releasing over bottom chrome strands the transcript control's
+    drag lease, and wheel gestures over chrome never reach transcript scrolling.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        transcript_drag_callback: Callable[[MouseEvent], bool],
+        transcript_scroll_callback: Callable[[int], None] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._transcript_drag_callback = transcript_drag_callback
+        self._transcript_scroll_callback = transcript_scroll_callback
+
+    def mouse_handler(self, mouse_event: MouseEvent):
+        if self._transcript_drag_callback(mouse_event):
+            return None
+        delta = _fullscreen_wheel_delta(mouse_event)
+        if delta is not None and self._transcript_scroll_callback is not None:
+            self._transcript_scroll_callback(delta)
+            return None
+        return super().mouse_handler(mouse_event)
+
+
+class _NativeSelectionBufferControl(BufferControl):
+    """Composer control that hands transcript-wide pointer gestures to their owner."""
+
+    def __init__(
+        self,
+        *args: Any,
+        transcript_drag_callback: Callable[[MouseEvent], bool] | None = None,
+        transcript_scroll_callback: Callable[[int], None] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._transcript_drag_callback = transcript_drag_callback
+        self._transcript_scroll_callback = transcript_scroll_callback
+
+    def mouse_handler(self, mouse_event: MouseEvent):
+        if (
+            MouseModifier.ALT in mouse_event.modifiers
+            or MouseModifier.SHIFT in mouse_event.modifiers
+        ):
+            return NotImplemented
+        if self._transcript_drag_callback is not None and self._transcript_drag_callback(
+            mouse_event
+        ):
+            return None
+        delta = _fullscreen_wheel_delta(mouse_event)
+        if delta is not None and self._transcript_scroll_callback is not None:
+            self._transcript_scroll_callback(delta)
+            return None
+        return super().mouse_handler(mouse_event)
+
+
+class _NativeSelectionCompletionsMenuControl(CompletionsMenuControl):
+    """Completion menu that leaves native-selection modifiers unconsumed."""
+
+    def mouse_handler(self, mouse_event: MouseEvent):
+        if (
+            MouseModifier.ALT in mouse_event.modifiers
+            or MouseModifier.SHIFT in mouse_event.modifiers
+        ):
+            return NotImplemented
+        return super().mouse_handler(mouse_event)
+
+
+class _ReturnToTailControl(FormattedTextControl):
+    """One-row fullscreen affordance for resuming live transcript output."""
+
+    def __init__(self, callback: Callable[[], None]) -> None:
+        super().__init__(
+            lambda: [("class:return-to-tail", "↓ Return to bottom (Ctrl+End)")],
+            focusable=False,
+            show_cursor=False,
+        )
+        self._callback = callback
+
+    def mouse_handler(self, mouse_event: MouseEvent):
+        if (
+            mouse_event.button is not MouseButton.LEFT
+            or MouseModifier.ALT in mouse_event.modifiers
+            or MouseModifier.SHIFT in mouse_event.modifiers
+        ):
+            return NotImplemented
+        if mouse_event.event_type is MouseEventType.MOUSE_DOWN:
+            return None
+        if mouse_event.event_type is MouseEventType.MOUSE_UP:
+            self._callback()
+            return None
+        return NotImplemented
+
+
 class _SubviewControl(FormattedTextControl):
     """Formatted subview content with position-aware wheel dispatch."""
 
@@ -92,6 +530,11 @@ class _SubviewControl(FormattedTextControl):
         self._mouse_callback = mouse_callback
 
     def mouse_handler(self, mouse_event: MouseEvent):
+        if (
+            MouseModifier.ALT in mouse_event.modifiers
+            or MouseModifier.SHIFT in mouse_event.modifiers
+        ):
+            return NotImplemented
         action = {
             MouseEventType.SCROLL_UP: "scroll_up",
             MouseEventType.SCROLL_DOWN: "scroll_down",
@@ -163,6 +606,8 @@ def format_session_rule(cols: int, label: str = "") -> list[tuple[str, str]]:
 PROMPT_MARKER = "❯ "
 _CTRL_C_EXIT_WINDOW_SECONDS = 2.0
 _TRANSCRIPT_CLEAR_SEQUENCE = "\x1b[r\x1b[0m\x1b[H\x1b[2J\x1b[3J\x1b[H"
+_FULLSCREEN_TRANSCRIPT_MAX_RECORDS = 10_000
+_FULLSCREEN_TRANSCRIPT_MAX_BYTES = 16 * 1024 * 1024
 
 
 @dataclass
@@ -173,6 +618,10 @@ class TranscriptBlock:
     tags: frozenset[str] = frozenset()
     keep: bool = False
     transcript_epoch: int = 0
+    transcript_record_id: int | None = None
+    resident_bytes: int = 0
+    replay_cache: dict[int, str] = field(default_factory=dict)
+    fullscreen_rendered: str | None = None
 
 
 @dataclass(frozen=True)
@@ -221,27 +670,47 @@ def _short_exception_message(exc: BaseException) -> str:
     return text[:160]
 
 
+class _CallbackScheduler:
+    """Small UIScheduler adapter around a thread-safe callback marshal."""
+
+    def __init__(self, schedule: Callable[[Callable[[], None]], None]) -> None:
+        self._schedule = schedule
+
+    def schedule(self, callback: Callable[[], None]) -> None:
+        self._schedule(callback)
+
+
+@dataclass(frozen=True, slots=True)
+class _ClipboardResult:
+    success: bool
+    transport: str = ""
+    reason: str = "clipboard unavailable"
+
+
 class TUIApplication:
     """Owns a single, long-lived ``prompt_toolkit.Application`` for the TUI."""
 
     def __init__(
         self,
-        agent: Any = None,
         *,
+        agent: InteractiveAgent | None = None,
+        host_services: TUIHostServices | None = None,
         on_command: Callable[[str], Awaitable[None] | None] | None = None,
         on_cancel_command: Callable[[], bool] | None = None,
         on_bang: Callable[[str], Awaitable[None] | None] | None = None,
         on_output: Callable[[Any], Awaitable[None] | None] | None = None,
+        on_agent_activity: Callable[[], None] | None = None,
         completer: Completer | None = None,
         session_label: Callable[[], str] | None = None,
         config: Any = None,
-        full_screen: bool = True,
+        full_screen: bool | None = None,
+        display_mode: Any = None,
         submission_guard: Callable[[], str | None] | None = None,
     ) -> None:
         """
         Args:
-            agent: Object with an async ``handle()`` method that pumps
-                input queues (see ``BaseTUIAgent.handle``).
+            agent: Host-neutral direct state/control boundary for the
+                currently rendered agent.
             on_command: Called with the raw slash text (e.g. ``"/help"``)
                 whenever the user submits one. Session wires this to its
                 CommandRegistry. If omitted, commands still land in
@@ -259,9 +728,11 @@ class TUIApplication:
                 ``frontend.render(...)``.
             completer: Optional prompt_toolkit ``Completer`` for Tab
                 completion. When omitted no completion is offered.
-            full_screen: Native-scrollback mode. Transcript output is written to
-                terminal scrollback; settled width changes rebuild retained
-                transcript output before prompt_toolkit redraws its live region.
+            full_screen: Deprecated compatibility boolean. True selects
+                ``native-replay`` and false selects ``native`` when
+                ``display_mode`` is omitted.
+            display_mode: Resolved restart-only display mode. Fullscreen uses
+                one alternate-screen Application-owned transcript renderer.
             submission_guard: Returns an actionable error when plain agent-bound
                 input must be rejected. Slash and bang commands remain available.
 
@@ -271,39 +742,60 @@ class TUIApplication:
         dispatcher itself doesn't call back — that would double-fire
         the echo when the agent dequeues a message mid-turn.
         """
-        self.agent = agent
+        from .config import DisplayMode, TUIConfig, resolve_display_mode
+
+        mode_config: dict[str, Any] = {}
+        if display_mode is not None:
+            mode_config["display_mode"] = display_mode
+        if full_screen is not None:
+            mode_config["full_screen"] = full_screen
+        resolved_display_mode = resolve_display_mode(TUIConfig(**mode_config))
+
+        self.display_mode = resolved_display_mode
+        self._is_fullscreen = resolved_display_mode is DisplayMode.FULLSCREEN
+        self._agent = agent
+        self._host_services = host_services or TUIHostServices()
         self._on_command = on_command
         self._on_cancel_command = on_cancel_command
         self._on_bang = on_bang
         self._on_output = on_output
+        self._on_agent_activity = on_agent_activity
         self._session_label_fn: Callable[[], str] | None = session_label
         self._config = config
         self._submission_guard = submission_guard
         self._ctrl_c_exit_armed = False
         self._ctrl_c_exit_timer: asyncio.TimerHandle | None = None
         self._exit_hint_text = ""
+        self._transient_status_text = ""
+        self._transient_status_style = "class:status"
+        self._transient_status_timer: asyncio.TimerHandle | None = None
+        self._clipboard_task: asyncio.Task[None] | None = None
 
-        # Register a QueueManager notify callback to also start the
-        # dispatcher when items arrive on non-user channels while idle.
-        # Without this, slash commands or spawned jobs that produce output
-        # before any user message is typed would queue items indefinitely.
-        # The callback may fire from the agent-loop thread (spawned jobs),
-        # so schedule _ensure_dispatcher_task on the UI loop to avoid
-        # attaching dispatcher state to the wrong event loop.
-        if agent is not None:
-            qm = getattr(agent, "queue_manager", None)
-            if qm is not None:
-                qm.set_notify_callback(self._on_queue_notify)
-        self.full_screen = full_screen
+        self._agent_controller = AgentController(
+            _CallbackScheduler(self._schedule_agent_callback),
+            self._on_agent_change,
+        )
+
+        # Compatibility attribute used by the existing replay implementation.
+        self.full_screen = resolved_display_mode is DisplayMode.NATIVE_REPLAY
 
         # ``output_buffer`` is the ANSI-stripped logical transcript used by
         # tests and printable-transcript callers. Source-bearing blocks below
         # are the single retained representation used for terminal replay.
         self.output_buffer = Buffer(read_only=False)
+        self._fullscreen_transcript = FullscreenTranscriptModel()
+        # Fullscreen requests mouse reporting immediately so ordinary drag and
+        # wheel gestures reach prompt_toolkit rather than terminal scrollback.
+        # Option/Alt-drag can bypass reporting in supporting terminals; F6 is
+        # the reliable escape hatch that disables application mouse handling.
+        self._fullscreen_mouse_navigation = self._is_fullscreen
         # Retained transcript replay units. On resize we intentionally clear
         # the visible screen + terminal scrollback, then rewrite these blocks.
         self._transcript_blocks: list[TranscriptBlock] = []
+        self._fullscreen_transcript_bytes = 0
+        self._fullscreen_semantic_replay_count = 0
         self._transcript_epoch = 0
+        self._next_transcript_record_id = 0
         self._untagged_replay_tail = 200
 
         # In-app subview host. These are modal views inside the single
@@ -318,7 +810,7 @@ class TUIApplication:
         from prompt_toolkit.completion import DummyCompleter
 
         self._completer = completer or DummyCompleter()
-        self.input_buffer = Buffer(
+        self.input_buffer = _ComposerBuffer(
             multiline=True,
             completer=self._completer,
             complete_while_typing=False,
@@ -354,25 +846,6 @@ class TUIApplication:
         self._llm_probe_status_text: str = ""
 
         self._prompt_processor = BeforeInput(PROMPT_MARKER, style="class:prompt")
-        self._agent_task: asyncio.Future | None = None
-        self._agent_thread_future: ConcurrentFuture | None = None
-        self._agent_loop_task: asyncio.Task | None = None
-        self._agent_loop: asyncio.AbstractEventLoop | None = None
-        self._agent_sentinel: asyncio.Task | None = None
-        self._agent_thread: threading.Thread | None = None
-        self._agent_loop_ready = threading.Event()
-        self._agent_loop_stopped = threading.Event()
-        # True while the dispatcher is inside an ``agent.handle()`` call.
-        # ``is_thinking()`` checks this flag rather than the user_messages
-        # queue's waiter count — counting waiters conflated "dispatcher
-        # idle between turns" with "agent mid-turn awaiting clarification
-        # via await self.user_messages.get()". The latter case had the
-        # spinner stop while the agent was genuinely working.
-        self._in_respond: bool = False
-        self._agent_cancel_requested: bool = False
-        self._keep_going_tasks: set[asyncio.Task[Any]] = set()
-        self._keep_going_generation: int = 0
-
         # Many-producer, single-consumer path for transcript content:
         # emit_block() enqueues one ANSI chunk; a single background task
         # (started in run_async) drains the queue in order and writes
@@ -391,6 +864,8 @@ class TUIApplication:
         self._fullscreen_invalidate_count = 0
         self._resize_reflow = TranscriptResizeState()
         self._resize_replay_timer: asyncio.TimerHandle | None = None
+        self._fullscreen_rebuild_timer: asyncio.TimerHandle | None = None
+        self._fullscreen_rebuild_generation = 0
         self._resize_replay_schedule_generation = 0
         self._queued_resize_replay_generation: int | None = None
         self._resize_replay_failure_generation: int | None = None
@@ -409,31 +884,38 @@ class TUIApplication:
         # the finally to restore the real streams.
         self._uninstall_stream_capture: Callable[[], None] | None = None
 
-        # Let the FakeAgent (or real agent) push output into our scrollback
-        # without knowing about our internals.
-        if hasattr(agent, "emit"):
-            agent.emit = self.emit_block  # type: ignore[attr-defined]
-
         kb = self._build_key_bindings()
 
-        # Transcript output lives in terminal scrollback. In full_screen mode we
-        # still use native scrollback during steady state, but after a settled
-        # width resize we clear the visible screen and replay the retained
-        # transcript at the new width.
-        self._output_window = None
+        # Fullscreen owns transcript cells inside the Application. Compatibility
+        # modes keep their historical native-scrollback output path exactly.
+        self._output_window = (
+            _GraphemeWindow(
+                _FullscreenTranscriptControl(
+                    lambda: self._fullscreen_transcript.formatted_text(
+                        width=self._transcript_viewport_size()[0],
+                        height=self._transcript_viewport_size()[1],
+                    ),
+                    focusable=False,
+                    show_cursor=False,
+                    scroll_callback=self._scroll_fullscreen_transcript,
+                    mouse_navigation_enabled=lambda: self._fullscreen_mouse_navigation,
+                    selection_callback=self._handle_fullscreen_selection,
+                ),
+                wrap_lines=False,
+                # The model virtualizes formatted content to exactly the visible
+                # rows.  prompt_toolkit therefore renders from row zero rather
+                # than rescanning/skipping the full retained document.
+                get_vertical_scroll=lambda _window: 0,
+                always_hide_cursor=True,
+            )
+            if self._is_fullscreen
+            else None
+        )
 
-        # Queue window: shown whenever the agent has unconsumed messages
-        # in its user_messages input queue. Mirrors the pre-rewrite
-        # ``│ foo`` visual. Reads the hidden Channel
-        # (``_user_messages_in``) — the public ``user_messages`` is the
-        # LLM-facing OutputQueue facade and doesn't expose snapshot.
+        # Queue chrome is a pure projection of the current agent state.
         def _queue_pending() -> list[str]:
-            if self.agent is None:
-                return []
-            q = getattr(self.agent, "_user_messages_in", None)
-            if q is None:
-                return []
-            return q.snapshot()
+            state = self._agent_controller.state
+            return [] if state is None else list(state.pending_inputs)
 
         def _queue_formatted():
             rows = []
@@ -461,9 +943,15 @@ class TUIApplication:
 
         input_style = "class:input-area"
         input_window = Window(
-            BufferControl(
+            _NativeSelectionBufferControl(
                 self.input_buffer,
                 input_processors=[self._prompt_processor],
+                transcript_drag_callback=(
+                    self._handle_fullscreen_drag_over_bottom_chrome if self._is_fullscreen else None
+                ),
+                transcript_scroll_callback=(
+                    self._scroll_fullscreen_transcript if self._is_fullscreen else None
+                ),
             ),
             wrap_lines=True,
             height=Dimension(min=1),
@@ -487,8 +975,12 @@ class TUIApplication:
 
         # Status line at the bottom — shows spinner + session label.
         def _status_formatted():
-            text = sanitize_live_text(self.status_text())
-            return [("class:status", text)] if text else []
+            fragments: list[tuple[str, str]] = []
+            for index, row in enumerate(self._status_rows()):
+                if index:
+                    fragments.append(("class:status", "\n\n"))
+                fragments.extend((style, sanitize_live_text(text)) for style, text in row)
+            return fragments
 
         def _status_height() -> Dimension:
             lines = self.status_text().splitlines()
@@ -497,9 +989,31 @@ class TUIApplication:
             # with prompt_toolkit's emergency "Window too small" window.
             return Dimension(min=0, max=height, preferred=height)
 
+        self._status_control = _FullscreenDragBoundaryControl(
+            _status_formatted,
+            focusable=False,
+            transcript_drag_callback=self._handle_fullscreen_drag_over_bottom_chrome,
+            transcript_scroll_callback=(
+                self._scroll_fullscreen_transcript if self._is_fullscreen else None
+            ),
+        )
         status_window = Window(
-            FormattedTextControl(_status_formatted, focusable=False),
+            self._status_control,
             height=_status_height,
+        )
+
+        self._return_to_tail_control = _ReturnToTailControl(self._jump_fullscreen_to_tail)
+        self._return_to_tail_container = ConditionalContainer(
+            Window(
+                self._return_to_tail_control,
+                height=1,
+                dont_extend_width=True,
+            ),
+            filter=Condition(
+                lambda: (
+                    self._is_fullscreen and not self._fullscreen_transcript.viewport.follows_tail
+                )
+            ),
         )
 
         # Session rule: right above the input, always visible. Shows the
@@ -543,7 +1057,7 @@ class TUIApplication:
 
         completions_window = ConditionalContainer(
             Window(
-                content=CompletionsMenuControl(),
+                content=_NativeSelectionCompletionsMenuControl(),
                 width=Dimension(min=8),
                 height=_completions_height,
                 dont_extend_height=True,
@@ -563,16 +1077,17 @@ class TUIApplication:
         #   session rule — always visible while at the transcript tail
         #   input composer (one padding row above and below the input)
         #   completions (only while completing)
-        main_container = HSplit(
-            [
-                status_window,
-                queue_window,
-                session_rule,
-                self._input_container,
-                completions_window,
-            ],
-            window_too_small=Window(),
-        )
+        main_children = [
+            status_window,
+            queue_window,
+            session_rule,
+            self._input_container,
+            completions_window,
+        ]
+        if self._output_window is not None:
+            main_children.insert(0, self._return_to_tail_container)
+            main_children.insert(0, self._output_window)
+        main_container = HSplit(main_children, window_too_small=Window())
         self._main_container = main_container
 
         def _subview_formatted():
@@ -588,7 +1103,9 @@ class TUIApplication:
             # also contain session names, model output, server text, and other
             # untrusted data.  Apply the same allowlist as transcript blocks
             # before prompt_toolkit explodes it into screen cells.
-            return ANSI(sanitize_transcript_ansi(view.render(width, height)))
+            return ANSI(
+                project_prompt_toolkit_ansi(sanitize_transcript_ansi(view.render(width, height)))
+            )
 
         self._subview_control = _SubviewControl(
             _subview_formatted,
@@ -610,7 +1127,11 @@ class TUIApplication:
 
         def _subview_mouse_enabled() -> bool:
             view = self._active_subview
-            return view is not None and bool(getattr(view, "mouse_support", True))
+            if view is None:
+                return self._is_fullscreen and self._fullscreen_mouse_navigation
+            if self._is_fullscreen and not self._fullscreen_mouse_navigation:
+                return False
+            return bool(getattr(view, "mouse_support", True))
 
         self._app = Application(
             layout=Layout(
@@ -619,7 +1140,7 @@ class TUIApplication:
             ),
             key_bindings=kb,
             style=create_prompt_style(),
-            full_screen=False,
+            full_screen=self._is_fullscreen,
             before_render=self._before_render,
             # When the Application exits (e.g. /exit), erase the live
             # region so the final screen is just the committed
@@ -633,6 +1154,16 @@ class TUIApplication:
             # fullscreen subviews after terminal resize.
             terminal_size_polling_interval=None,
         )
+
+    def observe_agent(self) -> None:
+        """Observe the configured agent for this application run.
+
+        Construction remains side-effect free so composition failures cannot
+        leak a subscription. ``run_async`` invokes this inside its teardown
+        guard, and composition roots may invoke it explicitly once guarded.
+        """
+        if self._agent is not None and self._agent_controller.state is None:
+            self._agent_controller.observe(self._agent)
 
     def refresh_style(self) -> None:
         """Apply the current TUI palette to the live prompt-toolkit app."""
@@ -657,36 +1188,117 @@ class TUIApplication:
 
         await self.open_subview(ActivityOverlayView(outputs))
 
-    def _copy_to_clipboard(self, text: str) -> bool:
-        """Copy explicit user-requested text through the host or terminal."""
-        if not text or len(text.encode("utf-8")) > 100_000:
-            return False
+    @staticmethod
+    def _validate_clipboard_text(text: str) -> _ClipboardResult | None:
+        if not text:
+            return _ClipboardResult(False, reason="selection is empty")
+        if len(text.encode("utf-8")) > 100_000:
+            return _ClipboardResult(False, reason="selection exceeds 100 KB")
+        return None
 
-        # Native macOS copy is the most reliable path for a locally hosted TUI.
-        pbcopy = shutil.which("pbcopy")
-        if pbcopy:
+    async def _copy_to_local_clipboard_async(self, text: str) -> _ClipboardResult | None:
+        """Try a cancellable local clipboard helper without blocking the UI loop."""
+        invalid = self._validate_clipboard_text(text)
+        if invalid is not None:
+            return invalid
+        command = self._local_clipboard_command()
+        if command is None:
+            return None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except OSError:
+            return None
+        try:
+            await asyncio.wait_for(process.communicate(text.encode("utf-8")), timeout=2)
+        except asyncio.CancelledError:
+            await self._terminate_clipboard_process(process)
+            raise
+        except TimeoutError:
+            await self._terminate_clipboard_process(process)
+            return None
+        except OSError:
+            await self._terminate_clipboard_process(process)
+            return None
+        return _ClipboardResult(True, transport="local") if process.returncode == 0 else None
+
+    @staticmethod
+    async def _terminate_clipboard_process(
+        process: asyncio.subprocess.Process,
+    ) -> None:
+        if process.returncode is None:
             try:
-                subprocess.run(
-                    [pbcopy],
-                    input=text.encode("utf-8"),
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=True,
-                    timeout=2,
-                )
-                return True
-            except (OSError, subprocess.SubprocessError):
+                process.kill()
+            except ProcessLookupError:
                 pass
+        try:
+            await process.wait()
+        except ProcessLookupError:
+            pass
 
-        # OSC 52 asks the user's terminal to set its clipboard, which also
-        # works across SSH when the terminal permits clipboard requests.
+    @staticmethod
+    def _local_clipboard_command() -> tuple[str, ...] | None:
+        local_commands = (
+            ("pbcopy", ()),
+            ("wl-copy", ()),
+            ("xclip", ("-selection", "clipboard")),
+            ("xsel", ("--clipboard", "--input")),
+        )
+        for executable, arguments in local_commands:
+            path = shutil.which(executable)
+            if path is not None:
+                return (path, *arguments)
+        return None
+
+    def _copy_to_local_clipboard_result(self, text: str) -> _ClipboardResult | None:
+        """Try one available platform clipboard command, otherwise return None."""
+        invalid = self._validate_clipboard_text(text)
+        if invalid is not None:
+            return invalid
+        command = self._local_clipboard_command()
+        if command is None:
+            return None
+        try:
+            subprocess.run(
+                list(command),
+                input=text.encode("utf-8"),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+                timeout=2,
+            )
+            return _ClipboardResult(True, transport="local")
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    def _copy_to_osc52_result(self, text: str) -> _ClipboardResult:
+        invalid = self._validate_clipboard_text(text)
+        if invalid is not None:
+            return invalid
         try:
             payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
             self._app.output.write_raw(f"\x1b]52;c;{payload}\x07")
             self._app.output.flush()
-            return True
-        except Exception:
-            return False
+            return _ClipboardResult(True, transport="osc52")
+        except Exception as exc:
+            return _ClipboardResult(False, reason=_short_exception_message(exc))
+
+    def _copy_to_clipboard_result(self, text: str) -> _ClipboardResult:
+        """Copy text locally when possible, with OSC 52 for remote terminals."""
+        invalid = self._validate_clipboard_text(text)
+        if invalid is not None:
+            return invalid
+        remote = bool(os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"))
+        local = None if remote else self._copy_to_local_clipboard_result(text)
+        return local if local is not None else self._copy_to_osc52_result(text)
+
+    def _copy_to_clipboard(self, text: str) -> bool:
+        """Compatibility callback used by in-app sensitive prompts."""
+        return self._copy_to_clipboard_result(text).success
 
     async def prompt_sensitive(
         self, title: str, message: str, *, link_url: str | None = None
@@ -723,48 +1335,34 @@ class TUIApplication:
         """Open the job explorer as an in-app subview."""
         from .job_explorer import JobExplorerView
 
-        qm = getattr(self.agent, "queue_manager", None) if self.agent else None
-        await self.open_subview(JobExplorerView(qm))
+        state = self._agent_controller.state
+        jobs = () if state is None else state.workspace.jobs
+        await self.open_subview(JobExplorerView(jobs))
 
     async def open_todo_explorer(self) -> None:
-        """Open the todo explorer as an in-app subview."""
-        from .todo_explorer import TodoExplorerView
-
-        todo_mgr = getattr(self.agent, "todo", None) if self.agent else None
-        await self.open_subview(TodoExplorerView(todo_mgr))
+        """Open the host-provided todo explorer view."""
+        if self._host_services.open_todo_view is None:
+            raise RuntimeError("Todo explorer is not available for this session.")
+        view = self._host_services.open_todo_view()
+        if inspect.isawaitable(view):
+            view = await view
+        await self.open_subview(view)
 
     async def open_memory_explorer(self) -> None:
-        """Open the memory explorer as an in-app subview."""
-        from .memory_explorer import (
-            MemoryExplorerView,
-            build_memory_rows,
-            last_reflection_summary,
-        )
-
-        agent = self.agent
-        memory_skill = getattr(agent, "memory", None) if agent else None
-        manager = memory_skill._mgr if memory_skill is not None else None
-        if manager is None:
+        """Open the host-provided memory explorer view."""
+        if self._host_services.open_memory_view is None:
             raise RuntimeError("Memory is not enabled for this agent (see /memory).")
+        view = self._host_services.open_memory_view()
+        if inspect.isawaitable(view):
+            view = await view
+        await self.open_subview(view)
 
-        rows, reflection_line = await self.agent_run_async(
-            lambda: (build_memory_rows(agent, manager), last_reflection_summary(manager))
-        )
-
-        def _forget(memory_id: str) -> None:
-            self.agent_run(lambda: manager.forget(memory_id))
-
-        def _mark_done(memory_id: str) -> None:
-            self.agent_run(lambda: manager.update(memory_id, status="done"))
-
-        await self.open_subview(
-            MemoryExplorerView(
-                rows,
-                forget=_forget,
-                mark_done=_mark_done,
-                last_reflection=reflection_line,
-            )
-        )
+    def _cancel_fullscreen_drag(self) -> None:
+        """Cancel renderer selection when transcript mouse ownership is lost."""
+        self._fullscreen_transcript.clear_selection()
+        control = self._output_window.content if self._output_window else None
+        if isinstance(control, _FullscreenTranscriptControl):
+            control.cancel_drag()
 
     async def open_subview(self, view: InAppSubview) -> None:
         """Open *view* inside the existing prompt_toolkit Application.
@@ -778,6 +1376,7 @@ class TUIApplication:
         """
         if self._active_subview_done is not None and not self._active_subview_done.done():
             return
+        self._cancel_fullscreen_drag()
         self._active_subview = view
         loop = asyncio.get_running_loop()
         self._active_subview_done = loop.create_future()
@@ -881,6 +1480,136 @@ class TUIApplication:
             self._app.invalidate()
         return True
 
+    def _transcript_viewport_size(self) -> tuple[int, int]:
+        """Return the rendered fullscreen transcript geometry when available."""
+        window = self._output_window
+        control = None if window is None else window.content
+        if isinstance(control, _FullscreenTranscriptControl):
+            current = control.render_size
+            if current is not None:
+                return current
+        try:
+            size = self._app.output.get_size()
+            return max(1, int(size.columns)), max(1, int(size.rows) - 6)
+        except Exception:
+            return terminal_cols(minimum=1), 18
+
+    def _scroll_fullscreen_transcript(self, delta: int) -> None:
+        if not self._is_fullscreen:
+            return
+        width, height = self._transcript_viewport_size()
+        self._fullscreen_transcript.scroll_visual_lines(delta, width=width, height=height)
+        if self._app.is_running:
+            self._app.invalidate()
+
+    def _jump_fullscreen_to_tail(self) -> None:
+        """Resume following live output from a key binding or mouse click."""
+        if not self._is_fullscreen:
+            return
+        self._fullscreen_transcript.jump_to_tail()
+        if self._app.is_running:
+            self._app.invalidate()
+
+    def _handle_fullscreen_drag_over_bottom_chrome(self, mouse_event: MouseEvent) -> bool:
+        """Resolve an active transcript drag when the pointer enters bottom chrome."""
+        control = self._output_window.content if self._output_window else None
+        if not isinstance(control, _FullscreenTranscriptControl) or not control.dragging:
+            return False
+        return control.handle_external_mouse(mouse_event, below=True)
+
+    def _handle_fullscreen_selection(self, action: str, x: int, y: int) -> None:
+        """Apply one mouse-selection transition and copy on button release."""
+        width, height = self._transcript_viewport_size()
+        if action == "cancel":
+            self._fullscreen_transcript.clear_selection()
+        elif action == "start":
+            self._fullscreen_transcript.begin_selection(x=x, y=y, width=width, height=height)
+        else:
+            self._fullscreen_transcript.update_selection(x=x, y=y, width=width, height=height)
+        if action == "finish":
+            text = self._fullscreen_transcript.selected_text()
+            # The mouse gesture is complete once the button is released. Capture
+            # its payload, then remove the visual selection immediately so every
+            # release target behaves alike while clipboard I/O runs asynchronously.
+            self._fullscreen_transcript.clear_selection()
+            if text:
+                self._start_fullscreen_selection_copy(text)
+        if self._app.is_running:
+            self._app.invalidate()
+
+    def _start_fullscreen_selection_copy(self, text: str) -> None:
+        """Copy without blocking prompt_toolkit's event loop on local helpers."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            self._report_fullscreen_copy(text, self._copy_to_clipboard_result(text))
+            return
+        previous = self._clipboard_task
+        if previous is not None:
+            previous.cancel()
+        self._clipboard_task = asyncio.create_task(
+            self._copy_fullscreen_selection(text, previous=previous)
+        )
+
+    async def _copy_fullscreen_selection(
+        self, text: str, *, previous: asyncio.Task[None] | None = None
+    ) -> None:
+        task = asyncio.current_task()
+        try:
+            if previous is not None:
+                try:
+                    await previous
+                except asyncio.CancelledError:
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling():
+                        raise
+            remote = bool(os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"))
+            result = None if remote else await self._copy_to_local_clipboard_async(text)
+            if result is None:
+                result = self._copy_to_osc52_result(text)
+            self._report_fullscreen_copy(text, result)
+        finally:
+            if self._clipboard_task is task:
+                self._clipboard_task = None
+
+    def _report_fullscreen_copy(self, text: str, result: _ClipboardResult) -> None:
+        if result.success:
+            count = len(text)
+            noun = "character" if count == 1 else "characters"
+            self._show_transient_status(f"Copied {count} {noun}", style="class:return-to-tail")
+        else:
+            self._show_transient_status(
+                f"Copy failed: {result.reason}. Try Option/Alt-drag, or press F6 for native selection."
+            )
+
+    def _show_transient_status(
+        self,
+        text: str,
+        *,
+        seconds: float = 3.0,
+        style: str = "class:status",
+    ) -> None:
+        self._transient_status_text = text
+        self._transient_status_style = style
+        if self._transient_status_timer is not None:
+            self._transient_status_timer.cancel()
+            self._transient_status_timer = None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            self._transient_status_timer = loop.call_later(seconds, self._clear_transient_status)
+        if self._app.is_running:
+            self._app.invalidate()
+
+    def _clear_transient_status(self) -> None:
+        self._transient_status_timer = None
+        self._transient_status_text = ""
+        self._transient_status_style = "class:status"
+        if self._app.is_running:
+            self._app.invalidate()
+
     # ── key bindings --------------------------------------------------
 
     def _build_key_bindings(self):  # returns KeyBindingsBase (union of KB + merged)
@@ -895,6 +1624,47 @@ class TUIApplication:
         kb = KeyBindings()
         subview_active = Condition(lambda: self._active_subview is not None)
         subview_inactive = ~subview_active
+        input_selection_active = (
+            Condition(lambda: self.input_buffer.selection_state is not None) & subview_inactive
+        )
+        fullscreen_transcript = Condition(lambda: self._is_fullscreen) & subview_inactive
+
+        @kb.add("pageup", filter=fullscreen_transcript, eager=True)
+        def _(event):
+            _, height = self._transcript_viewport_size()
+            self._scroll_fullscreen_transcript(-height)
+
+        @kb.add("pagedown", filter=fullscreen_transcript, eager=True)
+        def _(event):
+            _, height = self._transcript_viewport_size()
+            self._scroll_fullscreen_transcript(height)
+
+        @kb.add(Keys.ControlHome, filter=fullscreen_transcript, eager=True)
+        def _(event):
+            width, _ = self._transcript_viewport_size()
+            self._fullscreen_transcript.jump_to_start(width=width)
+            event.app.invalidate()
+
+        @kb.add(Keys.ControlEnd, filter=fullscreen_transcript, eager=True)
+        def _(event):
+            self._jump_fullscreen_to_tail()
+
+        @kb.add("f6", filter=Condition(lambda: self._is_fullscreen), eager=True)
+        def _(event):
+            self._fullscreen_mouse_navigation = not self._fullscreen_mouse_navigation
+            if not self._fullscreen_mouse_navigation:
+                self._fullscreen_transcript.clear_selection()
+                if isinstance(
+                    self._output_window.content if self._output_window else None,
+                    _FullscreenTranscriptControl,
+                ):
+                    self._output_window.content.cancel_drag()
+            self._command_status_text = (
+                "Mouse navigation enabled (Option/Alt-drag where supported; F6 otherwise)"
+                if self._fullscreen_mouse_navigation
+                else "Native terminal selection enabled (F6 to restore app mouse)"
+            )
+            event.app.invalidate()
 
         @kb.add(Keys.Any, filter=subview_active, eager=True)
         def _(event):
@@ -994,6 +1764,47 @@ class TUIApplication:
         def _(event):
             self._close_subview()
 
+        def _extend_input_selection(event, move: Callable[[int], None]) -> None:
+            buffer = event.current_buffer
+            if buffer.selection_state is None:
+                buffer.start_selection(selection_type=SelectionType.CHARACTERS)
+            move(event.arg)
+
+        @kb.add("s-left", filter=subview_inactive, eager=True)
+        def _(event):
+            _extend_input_selection(event, event.current_buffer.cursor_left)
+
+        @kb.add("s-right", filter=subview_inactive, eager=True)
+        def _(event):
+            _extend_input_selection(event, event.current_buffer.cursor_right)
+
+        @kb.add("s-up", filter=subview_inactive, eager=True)
+        def _(event):
+            _extend_input_selection(event, event.current_buffer.cursor_up)
+
+        @kb.add("s-down", filter=subview_inactive, eager=True)
+        def _(event):
+            _extend_input_selection(event, event.current_buffer.cursor_down)
+
+        @kb.add("c-c", filter=input_selection_active, eager=True)
+        def _(event):
+            # Copy composer selection without turning Ctrl-C into cancellation.
+            # Keep the selection visible so repeated copy is harmless.
+            _document, clipboard_data = self.input_buffer.document.cut_selection()
+            if clipboard_data.text:
+                event.app.clipboard.set_data(clipboard_data)
+                self._start_fullscreen_selection_copy(clipboard_data.text)
+
+        @kb.add("c-x", filter=input_selection_active, eager=True)
+        def _(event):
+            # Retain the text in prompt_toolkit's clipboard before deleting it.
+            # This leaves an in-app recovery path if the system copy later fails.
+            _document, clipboard_data = self.input_buffer.document.cut_selection()
+            if clipboard_data.text:
+                event.app.clipboard.set_data(clipboard_data)
+                self._start_fullscreen_selection_copy(clipboard_data.text)
+                self.input_buffer.cut_selection()
+
         @kb.add("c-c", filter=subview_inactive)
         def _(event):
             # The second C-c in the confirmation window exits through the
@@ -1045,13 +1856,9 @@ class TUIApplication:
         empty_buffer = Condition(lambda: self.input_buffer.text == "") & subview_inactive
 
         def _pop_last_queued() -> str | None:
-            if self.agent is None:
+            if self._agent_controller.state is None:
                 return None
-            q = getattr(self.agent, "_user_messages_in", None)
-            if q is None:
-                return None
-            item = q.pop_last()
-            return None if item is None else str(item)
+            return self._agent_controller.withdraw_pending_input()
 
         @kb.add("up", filter=empty_buffer)
         def _(event):
@@ -1112,7 +1919,8 @@ class TUIApplication:
             self._run_callback(self._on_bang, body)
             return False
 
-        mention_base = getattr(self.agent, "cwd", None) if self.agent is not None else None
+        state = self._agent_controller.state
+        mention_base = None if state is None else state.working_directory
         self.submit_message(expand_mentions(text, base_dir=mention_base))
         return False
 
@@ -1182,7 +1990,13 @@ class TUIApplication:
                 if self._app.is_running:
                     self._app.invalidate()
 
-        self._spinner_task = asyncio.ensure_future(_animate())
+        # Agent snapshots may arrive synchronously during construction,
+        # before run_async() establishes the application owner loop.  In that
+        # case the initial render will start the spinner after startup.
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return
+        self._spinner_task = loop.create_task(_animate())
 
     def _history_navigate(self, direction: int) -> None:
         """Move the history cursor by ``direction`` (-1=older, +1=newer)."""
@@ -1201,72 +2015,9 @@ class TUIApplication:
         self.input_buffer.text = self._history[self._history_cursor]
         self.input_buffer.cursor_position = len(self.input_buffer.text)
 
-    async def swap_agent(self, new_agent: Any) -> None:
-        """Hot-swap the agent the dispatcher drives (slash-inception).
-
-        The dispatcher loop binds ``agent = self.agent`` once per loop and
-        then calls ``agent.handle()`` each turn, so a bare ``self.agent =
-        new`` reassignment does NOT redirect a *running* loop. This method
-        performs the supported swap: acknowledge-cancel the current dispatcher,
-        re-point ``self.agent``, and lazy-restart it bound to the new agent.
-
-        The new agent is expected to already share the OLD agent's live
-        channels (``queue_manager`` / ``_user_messages_in`` / readers) and
-        ``_render_message`` callback, so input routing + output rendering are
-        unchanged. Any messages already queued on the shared
-        ``_user_messages_in`` (e.g. an inception seed prompt) are drained by
-        the fresh dispatcher and delivered to ``new_agent.handle``.
-
-        Call via ``await app.agent_run_async(lambda: app.swap_agent(new))`` so
-        cancellation is acknowledged before the new dispatcher starts.
-        """
-        self._swapping = True
-        old_task = self._agent_task
-        old_thread_future = self._agent_thread_future
-        await self.cancel_agent_turn(source="swap")
-
-        # In the two-loop TUI, the UI-loop wrapper future's done callback can
-        # lag behind the acknowledged agent-loop cancellation. Detach the old
-        # wrapper before re-arming so a stale callback cannot block or clobber
-        # the dispatcher bound to the new agent.
-        if old_task is self._agent_task:
-            self._agent_task = None
-        if old_thread_future is self._agent_thread_future:
-            self._agent_thread_future = None
-        self._agent_cancel_requested = False
-        self._agent_loop_task = None
-        self._swapping = False
-        self.agent = new_agent
-
-        # Re-arm a fresh dispatcher bound to the new agent if there's pending
-        # input (the inception seed prompt is already queued by the caller).
-        q = getattr(new_agent, "_user_messages_in", None)
-        if q is not None and q.qsize() > 0:
-            self._ensure_dispatcher_task()
-
     def submit_message(self, user_message: str) -> None:
-        """Treat ``user_message`` as if the user just typed and submitted it.
-
-        Pushes the text onto the agent's user_messages Channel and
-        lazy-starts the dispatcher task. The user-bar echo + session
-        bookkeeping fire later — on the Channel's ``on_get`` hook,
-        when the message is actually dequeued — so a message typed
-        while the agent is working only shows in the queue pane until
-        its turn comes up. The hook fires identically whether the
-        dispatcher or agent code pulls the item.
-
-        Consecutive submissions that land while the dispatcher is
-        still busy are *merged* into the trailing queue item with a
-        ``\\n`` separator. That preserves the old "type, Enter, type,
-        Enter → one message" UX where the user is composing a
-        multi-line thought across several Enters.
-
-        Public so ``Session`` can submit a message programmatically —
-        e.g. a slash command that returns an ``agent_message``
-        (``/compact``) and wants to drive the same path as a typed
-        message.
-        """
-        if self.agent is None:
+        """Submit text through the current interactive agent."""
+        if self._agent_controller.state is None:
             return
         if self._submission_guard is not None:
             try:
@@ -1277,404 +2028,54 @@ class TUIApplication:
             if problem:
                 self.emit_block(f"\x1b[31m{problem}\x1b[0m\n")
                 return
-        inq = getattr(self.agent, "_user_messages_in", None)
-        if inq is None:
-            self.emit_block("[submit_message dropped] agent has no user_messages queue\n")
-            return
-        _coalesce_string_into_queue(inq, user_message)
-        self._ensure_dispatcher_task()
+        accepted = self._agent_controller.submit(user_message)
+        if not accepted:
+            self.emit_block("\x1b[31mMessage rejected.\x1b[0m\n")
 
-    def _ensure_dispatcher_task(self, *, start_with_race: bool = False) -> None:
-        """Start the per-turn dispatcher if not already live.
-
-        The dispatcher is the outer loop around ``agent.handle()``:
-        it reads the result's ``kind`` and waits on the appropriate
-        queue before calling ``handle()`` again with the new
-        ``(queue_name, item)`` notification.
-
-        Lazy-started: on session load there's no task. The first user
-        message triggers submit_message → put onto user_messages →
-        _ensure_dispatcher_task → dispatcher loops until exit or cancel.
-        """
-        if self.agent is None:
+    def _schedule_agent_callback(self, callback: Callable[[], None]) -> None:
+        """Marshal agent observation delivery onto the prompt-toolkit owner loop."""
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            callback()
             return
-        if self._agent_task is not None and not self._agent_task.done():
-            return
-        if self._agent_cancel_requested:
-            return
-        if self._loop is None:
-            # Unit tests call submit_message() without running the prompt_toolkit
-            # app. In that mode there is no UI loop to protect, so preserve the
-            # old same-loop dispatcher semantics.
-            self._agent_task = asyncio.ensure_future(
-                self._dispatcher_loop(start_with_race=start_with_race)
-            )
-            self._agent_loop_task = self._agent_task
+        try:
+            on_ui_loop = asyncio.get_running_loop() is loop
+        except RuntimeError:
+            on_ui_loop = False
+        if on_ui_loop:
+            callback()
         else:
-            agent_loop = self._ensure_agent_loop()
+            loop.call_soon_threadsafe(callback)
 
-            async def _run_dispatcher() -> None:
-                self._agent_loop_task = asyncio.current_task()
-                try:
-                    await self._dispatcher_loop(start_with_race=start_with_race)
-                finally:
-                    self._agent_loop_task = None
-
-            self._agent_thread_future = asyncio.run_coroutine_threadsafe(
-                _run_dispatcher(), agent_loop
-            )
-            self._agent_task = asyncio.wrap_future(self._agent_thread_future)
-        self._agent_task.add_done_callback(self._on_agent_done)
+    def _on_agent_change(self, _state: Any) -> None:
+        app = getattr(self, "_app", None)
+        if app is not None and app.is_running:
+            app.invalidate()
         self._ensure_spinner_task()
 
-    def _ensure_agent_loop(self) -> asyncio.AbstractEventLoop:
-        """Return the dedicated event loop used for agent dispatch.
-
-        prompt_toolkit stays on the main/UI loop. Agent turns run here so
-        synchronous work inside ``agent.handle()`` cannot freeze input or
-        spinner redraws.
-
-        A sentinel task keeps the loop alive even when the dispatcher exits
-        (gl-212). Without it, run_forever() returns when the last task
-        finishes, closing the loop and invalidating BashSession pipes.
-        """
-        if self._agent_loop is not None and self._agent_loop.is_running():
-            return self._agent_loop
-
-        self._agent_loop_ready.clear()
-        self._agent_loop_stopped.clear()
-        loop = asyncio.new_event_loop()
-        self._agent_loop = loop
-
-        def _run() -> None:
-            asyncio.set_event_loop(loop)
-
-            def _suppress_litellm_task_destroyed(
-                loop_: asyncio.AbstractEventLoop, context: dict
-            ) -> None:
-                msg = context.get("message", "")
-                if "Task was destroyed" in msg:
-                    task = context.get("task")
-                    if task is not None and "LoggingWorker" in repr(task):
-                        return
-                loop_.default_exception_handler(context)
-
-            loop.set_exception_handler(_suppress_litellm_task_destroyed)
-
-            # gl-212 sentinel: keeps run_forever() alive across dispatcher restarts.
-            async def _sentinel():
-                await asyncio.Future()
-
-            self._agent_sentinel = loop.create_task(_sentinel(), name="agent-loop-sentinel")
-            self._agent_loop_ready.set()
-            try:
-                loop.run_forever()
-            finally:
-                try:
-                    pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
-                    for task in pending:
-                        task.cancel()
-                    if pending:
-                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                    loop.run_until_complete(loop.shutdown_asyncgens())
-                finally:
-                    loop.close()
-                    self._agent_loop_stopped.set()
-
-        self._agent_thread = threading.Thread(
-            target=_run,
-            name="nemo-tui-agent-loop",
-            daemon=True,
-        )
-        self._agent_thread.start()
-        if not self._agent_loop_ready.wait(timeout=5.0):
-            raise RuntimeError("Agent event loop thread failed to start within 5s")
-        return loop
-
-    async def _stop_agent_loop(self) -> None:
-        """Stop the dedicated agent loop without blocking prompt_toolkit."""
-        loop = self._agent_loop
-        thread = self._agent_thread
-        if loop is None:
-            return
-        if self._agent_thread_future is not None and not self._agent_thread_future.done():
-            self._agent_thread_future.cancel()
-        # Cancel the sentinel so run_forever() can exit (gl-212).
-        # Use call_soon_threadsafe: sentinel lives on the agent loop thread.
-        if self._agent_sentinel is not None:
-            loop.call_soon_threadsafe(self._agent_sentinel.cancel)
-            self._agent_sentinel = None
-        # Gracefully stop litellm's global logging worker so its tasks are
-        # cancelled before we tear down the loop (prevents "Task was destroyed
-        # but it is pending!" warnings from orphaned _worker_loop tasks).
-        try:
-            fut = asyncio.run_coroutine_threadsafe(_stop_litellm_worker(), loop)
-            await asyncio.wait_for(asyncio.wrap_future(fut), timeout=2.0)
-        except Exception:
-            pass
-        loop.call_soon_threadsafe(loop.stop)
-        if thread is not None and thread.is_alive():
-            await asyncio.to_thread(thread.join, 5.0)
-            if thread.is_alive():
-                logger.warning("Agent loop thread did not stop within 5s — abandoning")
-        self._agent_loop = None
-        self._agent_thread = None
-        self._agent_thread_future = None
-
-    async def _dispatcher_loop(self, *, start_with_race: bool = False) -> None:
-        """Drive ``agent.handle()`` turn-by-turn until DispatcherExit or cancellation.
-
-        The "queued → accepted" echo (user-bar render, SessionUserMessage
-        log) is fired by the user_messages channel's ``on_get`` hook —
-        installed by ``Session`` — not from this dispatcher loop. That
-        way the echo is symmetric: it fires both when the dispatcher
-        takes the next user_messages item AND when the agent dequeues
-        one mid-turn via ``await self.user_messages.get()``. Calling
-        the hook here would double-render the dispatcher case.
-
-        ``QueueManager.race()`` returns ``list[(name, item)]`` —
-        currently always length 1, but the list shape is the contract
-        so future ``deliver=`` modes can return more items per call
-        without changing the dispatcher's loop body.
-        """
-        from nooa.runtime.channels import Channel
-
-        from .output import StopReasonOutput
-
-        agent = self.agent
-        assert agent is not None
-
-        user_messages_in: Channel = agent._user_messages_in
-        qm = agent.queue_manager
-
-        if start_with_race:
-            notification = await self._next_race_notification(qm)
-            if not notification:
-                return
-        else:
-            # Wait for the first user message (already queued by submit_message
-            # that started us). qsize()>0 → get() returns immediately.
-            item = await user_messages_in.get()
-            # The user's on_get hook may synchronously enqueue host-owned
-            # instructions (such as the one-shot session-title request). Drain
-            # them into this notification so housekeeping shares the normal
-            # user turn instead of triggering another LLM call.
-            notification = self._drain_pending_queue_items(qm, [("user_messages", item)])
-        self._in_respond = True
+    def runtime_notification_received(self) -> None:
+        """Refresh native chrome after the host dequeues runtime work."""
         self._on_dispatcher_dequeued()
 
-        while True:
-            self._in_respond = True
-            try:
-                # Reflection owns only idle windows. Any channel notification
-                # that is about to start a turn interrupts it first.
-                runner = self._reflection_runner()
-                if runner is not None:
-                    await runner.interrupt()
-                result = await agent.handle(notification)
-            except DispatcherExit:
-                return
-            finally:
-                self._in_respond = False
-
-            result_explanation = getattr(result, "explanation", "")
-            logger.info(
-                "[DISPATCHER] handle() returned kind=%r explanation=%r",
-                result.kind,
-                result_explanation,
-            )
-
-            reflection_deferred = False
-            keep_going_enabled, keep_going_model = self._keep_going_state(agent)
-            if keep_going_enabled and str(result.kind) == "DONE":
-                if keep_going_model:
-                    reflection_deferred = True
-                    generation = self._keep_going_generation
-                    task = asyncio.create_task(
-                        self._run_keep_going_audit(
-                            agent,
-                            result,
-                            keep_going_model,
-                            generation,
-                        ),
-                        name="keep-going-audit",
-                    )
-                    self._keep_going_tasks.add(task)
-                    task.add_done_callback(self._keep_going_tasks.discard)
-                    logger.info("[DISPATCHER] keep-going audit scheduled")
-                else:
-                    logger.warning("keep-going enabled without keep_going_model; audit skipped")
-                    await self._emit_structured_output(
-                        StopReasonOutput(
-                            "KEEP_GOING",
-                            "disabled: configure a model with /keep-going model <model-id>",
-                        )
-                    )
-
-            if not reflection_deferred:
-                self._schedule_reflection(agent)
-
-            if result_explanation:
-                await self._emit_structured_output(
-                    StopReasonOutput(result.kind, result_explanation)
-                )
-
-            # Every stop reason uses the same dispatcher wake path: race all
-            # declared channels/events and re-enter with the first arrival.
-            # ``kind`` explains why the agent stopped; it does not select a
-            # different queue primitive.
-            running = qm.running_handles()
-            if running:
-                now = datetime.datetime.now().strftime("%H:%M:%S")
-                lines = "".join(f"  ⠿ {h.label}\n" for h in running)
-                self.emit_block(
-                    f"\x1b[2m{now} waiting — {len(running)} job(s) running:\n{lines}\x1b[0m"
-                )
-
-            # Race all channels for the next item(s). Returns
-            # [(name, item)] for queue-mode winners or [] for
-            # event-triggered wakes (events already in the prompt).
-            try:
-                items = await qm.race()
-            except ValueError:
-                return
-            # Show which job(s) fired.
-            if running and items:
-                now = datetime.datetime.now().strftime("%H:%M:%S")
-                fired_names = {name for name, _ in items}
-                fired = [h for h in running if h.name in fired_names]
-                for h in fired:
-                    self.emit_block(f"\x1b[32m  ✓ {h.label} — {now}\x1b[0m\n")
-
-            # Drain all pending items across all channels, grouped by name.
-            pending = self._drain_pending_queue_items(qm, items)
-            if "user_messages" in pending or "slash_commands" in pending:
-                self._invalidate_keep_going_audits()
-            self._in_respond = True
-            self._on_dispatcher_dequeued()
-            notification = pending
-
-    async def _emit_structured_output(self, output: Any) -> None:
-        """Emit dispatcher-owned structured output through the frontend path.
-
-        Unit tests and minimal harnesses may construct ``TUIApplication``
-        without a frontend callback; in that case keep the terminal fallback so
-        existing same-loop dispatcher tests can inspect ``emit_block`` output.
-        """
-        if self._on_output is not None:
-            result = self._on_output(output)
-            if result is not None:
-                await result
-            return
-        display_text = getattr(output, "display_text", None)
-        if callable(display_text):
-            self.emit_block(f"\x1b[2m{display_text()}\x1b[0m\n")
-
-    def _keep_going_state(self, agent: Any) -> tuple[bool, str | None]:
-        vars_obj = getattr(agent, "vars", None)
-        if vars_obj is not None and "tui_keep_going" in vars_obj:
-            enabled = bool(vars_obj.get("tui_keep_going"))
+    def runtime_state_changed(self) -> None:
+        """Marshal a host-runtime state change onto the UI owner loop."""
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(self._refresh_runner_state)
         else:
-            enabled = bool(
-                self._config is not None
-                and getattr(getattr(self._config, "tui", None), "keep_going", False)
-            )
+            self._refresh_runner_state()
 
-        if vars_obj is not None and "tui_keep_going_model" in vars_obj:
-            value = vars_obj.get("tui_keep_going_model")
-        else:
-            value = getattr(getattr(self._config, "tui", None), "keep_going_model", None)
-        model = str(value).strip() if value is not None else ""
-        if not model or model.lower() == "none":
-            model = ""
-        return enabled, model or None
+    def _refresh_runner_state(self) -> None:
+        if self._app.is_running:
+            self._app.invalidate()
+        self._ensure_spinner_task()
 
-    def _invalidate_keep_going_audits(self) -> None:
-        """Make in-flight audits stale and cancel them on their owning loop."""
-        self._keep_going_generation += 1
-        loop = self._agent_loop
-        for task in list(self._keep_going_tasks):
-            try:
-                task_loop = task.get_loop()
-            except RuntimeError:
-                task_loop = None
-            if loop is not None and loop.is_running() and task_loop is loop:
-                loop.call_soon_threadsafe(task.cancel)
-            else:
-                task.cancel()
+    def runtime_cancelled(self) -> None:
+        """Render the existing interruption marker for a cancelled local turn."""
+        self.emit_block("\x1b[33m✗ Interrupted agent turn.\x1b[0m\n")
 
-    async def _run_keep_going_audit(
-        self, agent: Any, result: Any, model: str, generation: int
-    ) -> None:
-        """Audit DONE in the background and queue a current continuation."""
-        from .output import StopReasonOutput
-
-        try:
-            from .keep_going import build_keep_going_prompt
-
-            keep_going_prompt = await build_keep_going_prompt(agent, result, model=model)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            if generation != self._keep_going_generation:
-                return
-            message = _short_exception_message(exc)
-            logger.warning("keep-going audit failed: %s", message)
-            await self._emit_structured_output(
-                StopReasonOutput(
-                    "KEEP_GOING",
-                    f"judge failed: {message}; use /keep-going off or /keep-going model <model-id>",
-                )
-            )
-            self._schedule_reflection(agent)
-            return
-        if generation != self._keep_going_generation:
-            return
-        if not keep_going_prompt:
-            self._schedule_reflection(agent)
-            return
-        enabled, current_model = self._keep_going_state(agent)
-        if not enabled or current_model != model:
-            self._schedule_reflection(agent)
-            return
-
-        prompt_text = getattr(keep_going_prompt, "prompt", keep_going_prompt)
-        display_reason = getattr(
-            keep_going_prompt,
-            "display_reason",
-            "continuing unfinished work",
-        )
-        if display_reason:
-            await self._emit_structured_output(StopReasonOutput("KEEP_GOING", str(display_reason)))
-
-        system_messages_in = getattr(agent, "_system_messages_in", None)
-        if system_messages_in is not None:
-            system_messages_in.put(str(prompt_text))
-            logger.info("[DISPATCHER] keep-going queued system continuation prompt")
-            return
-
-        user_messages_in = getattr(agent, "_user_messages_in", None)
-        if user_messages_in is not None:
-            user_messages_in.put(str(prompt_text))
-            logger.info("[DISPATCHER] keep-going queued fallback user continuation prompt")
-            return
-        self._schedule_reflection(agent)
-
-    def _reflection_runner(self) -> Any | None:
-        """Return the configured runner and wire its thread-safe repaint hook."""
-        agent = self.agent
-        runner = getattr(agent, "_tui_reflection_runner", None) if agent is not None else None
-        if runner is not None:
-            runner.invalidate = self._invalidate_for_reflection
-        return runner
-
-    def _schedule_reflection(self, agent: Any) -> None:
-        runner = getattr(agent, "_tui_reflection_runner", None)
-        if runner is not None:
-            runner.invalidate = self._invalidate_for_reflection
-            runner.on_response_done()
-
-    def _invalidate_for_reflection(self) -> None:
+    def invalidate(self) -> None:
+        """Thread-safe repaint hook for composition-root-owned policies."""
         loop = self._loop
 
         def _invalidate() -> None:
@@ -1686,131 +2087,16 @@ class TUIApplication:
         else:
             _invalidate()
 
-    async def interrupt_reflection(self, *, teardown: bool = False) -> None:
-        """Stop idle reflection on its owning loop, optionally detaching it."""
-        runner = self._reflection_runner()
-        if runner is None:
-            return
-
-        async def _stop() -> None:
-            await runner.interrupt()
-            if teardown:
-                runner.teardown()
-
-        await self.agent_run_async(_stop)
-
-    async def _next_race_notification(self, qm: Any) -> dict[str, list]:
-        """Wait for QueueManager output and drain all pending queue items."""
-        try:
-            items = await qm.race()
-        except ValueError:
-            return {}
-        return self._drain_pending_queue_items(qm, items)
-
-    def _on_queue_notify(self) -> None:
-        """QueueManager notify callback: (re)start the dispatcher on any put.
-
-        Registered via ``QueueManager.set_notify_callback``. May fire from
-        the agent-loop thread (spawned jobs), so marshal onto the UI loop
-        before touching dispatcher state to avoid attaching it to the wrong
-        event loop.
-
-        Fires for every channel put (user/system messages included), but
-        ``_ensure_dispatcher_task`` is idempotent — it early-returns when a
-        dispatcher is already running — so an extra call when a turn is
-        already in flight is a harmless no-op.
-        """
-        ui_loop = self._loop
-        if ui_loop is not None and ui_loop.is_running():
-            ui_loop.call_soon_threadsafe(lambda: self._ensure_dispatcher_task(start_with_race=True))
-        else:
-            self._ensure_dispatcher_task(start_with_race=True)
-
-    def _drain_pending_queue_items(self, qm: Any, items: list[tuple[str, Any]]) -> dict[str, list]:
-        """Group race winners and already-buffered queue items by channel name."""
-        pending: dict[str, list] = {}
-        for name, value in items:
-            pending.setdefault(name, []).append(value)
-        for ch in qm.channels().values():
-            if ch.mode == "queue":
-                for val in ch.drain():
-                    pending.setdefault(ch.name, []).append(val)
-        return pending
-
-    def _restart_dispatcher_if_pending(self) -> None:
-        """Restart the dispatcher if user messages or non-user work is pending."""
-        q = getattr(self.agent, "_user_messages_in", None) if self.agent else None
-        if q is not None and q.qsize() > 0:
-            self._ensure_dispatcher_task()
-        elif self._has_pending_or_running_non_user_work():
-            self._ensure_dispatcher_task(start_with_race=True)
-
-    def _has_pending_or_running_non_user_work(self) -> bool:
-        """True when post-cancel background channel work should wake the agent."""
-        agent = self.agent
-        qm = getattr(agent, "queue_manager", None) if agent is not None else None
-        if qm is None:
-            return False
-        if qm.running_handles():
-            return True
-        for name, ch in qm.channels().items():
-            if name == "user_messages":
-                continue
-            if ch.mode == "queue" and not ch.is_empty():
-                return True
-        return False
-
     def request_agent_cancel(self, *, source: str = "escape") -> bool:
-        """Request cancellation of the current agent turn.
-
-        Esc/Ctrl-C cancel the active agent turn only. They deliberately do
-        not cancel ``QueueManager.spawn`` jobs: those are background work and
-        remain controlled by ``queue_manager.cancel(...)``/``shutdown()``.
-
-        The TUI runs agent turns on a dedicated event loop in production. Do
-        not cancel the UI-loop ``wrap_future`` proxy directly; that proxy can
-        look done before the real agent-loop task has observed cancellation
-        and finished cleanup. Cancelling the source task keeps the status in
-        ``cancelling...`` until the done callback receives acknowledgement.
-        """
-        task = self._agent_task
-        if task is None or task.done():
+        """Request user-visible cancellation through the interactive agent boundary."""
+        if source in {"swap", "session"}:
+            raise ValueError("host transitions must cancel through their lifecycle owner")
+        if self._agent_controller.state is None:
             return False
-        if self._agent_cancel_requested:
-            return source != "ctrl-c"
-        if not self._in_respond and source not in {"swap", "session"}:
-            return False
-
-        self._agent_cancel_requested = True
-        self._invalidate_keep_going_audits()
-        if self._app.is_running:
-            self._app.invalidate()
-        self._ensure_spinner_task()
-
-        loop_task = self._agent_loop_task
-        if loop_task is not None:
-            try:
-                target_loop = loop_task.get_loop()
-            except RuntimeError:
-                target_loop = None
-            if target_loop is not None and target_loop.is_running():
-
-                def _cancel_loop_task() -> None:
-                    if not loop_task.done():
-                        loop_task.cancel()
-
-                target_loop.call_soon_threadsafe(_cancel_loop_task)
-            else:
-                loop_task.cancel()
-        elif self._agent_thread_future is not None and not self._agent_thread_future.done():
-            # The dispatcher coroutine may be running before its task pointer is
-            # published back to the UI thread. Cancel the source future rather
-            # than the UI wrapper so cancellation is still delivered to the
-            # agent loop and acknowledged through _on_agent_done.
-            self._agent_thread_future.cancel()
-        else:
-            task.cancel()
-        return True
+        accepted = self._agent_controller.interrupt()
+        if accepted and self._on_agent_activity is not None:
+            self._on_agent_activity()
+        return accepted
 
     def _on_input_text_changed(self, _buffer: Buffer) -> None:
         """Typing after an exit warning cancels the double-Ctrl-C gesture."""
@@ -1852,60 +2138,6 @@ class TUIApplication:
         if changed and app is not None and app.is_running:
             app.invalidate()
 
-    async def cancel_agent_turn(self, *, source: str = "escape") -> bool:
-        """Request turn cancellation and await the dispatcher acknowledgement."""
-        task = self._agent_task
-        if task is None or task.done():
-            return False
-        if not self.request_agent_cancel(source=source):
-            return False
-        try:
-            current_loop = asyncio.get_running_loop()
-            current_task = asyncio.current_task()
-            task_loop = task.get_loop() if hasattr(task, "get_loop") else None
-            loop_task = self._agent_loop_task
-            loop_task_loop = loop_task.get_loop() if loop_task is not None else None
-
-            if task_loop is current_loop and task is not current_task:
-                await task
-            elif (
-                loop_task is not None
-                and loop_task is not current_task
-                and loop_task_loop is current_loop
-            ):
-                await loop_task
-            elif self._agent_thread_future is not None:
-                await asyncio.wrap_future(self._agent_thread_future)
-            elif task is not current_task:
-                while not task.done():
-                    await asyncio.sleep(0)
-        except asyncio.CancelledError:
-            pass
-        return True
-
-    async def shutdown_agent_queue_manager(
-        self, *, agent: Any | None = None, flush: bool = False
-    ) -> None:
-        """Shutdown an agent's QueueManager on the loop that owns spawned jobs."""
-        target = self.agent if agent is None else agent
-        qm = getattr(target, "queue_manager", None) if target is not None else None
-        if qm is None:
-            return
-
-        async def _shutdown_and_flush() -> None:
-            await qm.shutdown()
-            if flush:
-                for name in qm.names():
-                    ch = qm.get_channel(name)
-                    if ch.mode == "queue":
-                        ch.flush()
-
-        loop = self._agent_loop
-        if loop is not None and loop.is_running():
-            await self.agent_run_async(_shutdown_and_flush)
-        else:
-            await _shutdown_and_flush()
-
     def _on_dispatcher_dequeued(self) -> None:
         """React to a just-dequeued item: redraw queue pane, restart spinner.
 
@@ -1926,137 +2158,6 @@ class TUIApplication:
         if self._app.is_running:
             self._app.invalidate()
         self._ensure_spinner_task()
-
-    def _on_agent_done(self, task: asyncio.Task) -> None:
-        """Fired when the dispatcher exits (STOP, error, or cancellation).
-
-        On cancellation OR exception with messages still pending we
-        lazy-restart so neither soft-cancel (Esc) nor a crashed turn
-        strands queued input — the user can keep typing and the next
-        message wakes the dispatcher again. STOP exits cleanly.
-        """
-        if task is not self._agent_task:
-            return
-        if task.cancelled():
-            self._agent_cancel_requested = False
-            self._agent_loop_task = None
-            was_swapping = getattr(self, "_swapping", False)
-            was_session_transition = getattr(self, "_session_transitioning", False)
-            suppress_cancel_restart = was_swapping or was_session_transition
-            if was_swapping:
-                self._swapping = False
-            if not suppress_cancel_restart:
-                self.emit_block("\x1b[33m✗ Interrupted agent turn.\x1b[0m\n")
-            if self._app.is_running:
-                self._app.invalidate()
-            q = getattr(self.agent, "_user_messages_in", None) if self.agent else None
-            if not suppress_cancel_restart:
-                if q is not None and q.qsize() > 0:
-                    self._ensure_dispatcher_task()
-                elif self._has_pending_or_running_non_user_work():
-                    self._ensure_dispatcher_task(start_with_race=True)
-            return
-        self._agent_cancel_requested = False
-        self._agent_loop_task = None
-        exc = task.exception()
-        if exc is not None:
-            self.emit_block(f"Agent error: {exc}\n")
-        self._restart_dispatcher_if_pending()
-
-    # ── agent_run: dispatch to agent thread ----------------------------
-
-    def agent_run(self, fn):
-        """Run *fn* on the agent-loop thread, blocking the caller until done.
-
-        Use for any operation that mutates agent state from outside the
-        dispatcher loop (slash commands, shutdown, renderer attach/detach).
-        If no agent loop is running (unit tests, pre-startup), executes
-        inline on the caller's thread.
-
-        *fn* is a zero-arg callable. If it returns a coroutine, the
-        coroutine is awaited on the agent loop. Otherwise the callable
-        itself is scheduled on the agent loop via ``call_soon_threadsafe``.
-
-        Returns whatever *fn* (or the coroutine) returns. Propagates
-        exceptions. Times out after 30 seconds.
-        """
-        loop = self._agent_loop
-        if loop is None or not loop.is_running():
-            # No agent loop (tests or pre-startup) — run inline.
-            result = fn()
-            if asyncio.iscoroutine(result):
-                raise TypeError("agent_run() with a coroutine requires a running agent loop")
-            return result
-
-        # Guard: if already on the agent loop, run inline to avoid deadlock.
-        # (agent_run blocks the caller waiting for the loop to execute the
-        # wrapper — if the caller IS the loop, that's a guaranteed hang.)
-        import threading
-
-        if getattr(loop, "_thread_id", None) == threading.current_thread().ident:
-            result = fn()
-            if asyncio.iscoroutine(result):
-                raise TypeError(
-                    "agent_run() called from agent loop with a coroutine — "
-                    "use 'await' directly instead"
-                )
-            return result
-
-        # Schedule on agent loop. Use an async wrapper so both sync and
-        # async callables go through run_coroutine_threadsafe uniformly.
-        async def _wrapper():
-            result = fn()
-            if asyncio.iscoroutine(result):
-                return await result
-            return result
-
-        future = asyncio.run_coroutine_threadsafe(_wrapper(), loop)
-        try:
-            return future.result(timeout=30)
-        except TimeoutError:
-            future.cancel()
-            raise
-
-    async def agent_run_async(self, fn):
-        """Like ``agent_run``, but awaitable — never blocks the calling loop.
-
-        Slash commands run as tasks on the prompt_toolkit UI loop. Calling the
-        blocking ``agent_run`` from there freezes the UI loop (``future.result``)
-        while the agent loop is busy — starving the block-queue consumer
-        (``self.message()`` output stops appearing) and wedging prompt_toolkit's
-        redraw (status-bar / input flicker). Awaiting the cross-loop future
-        instead yields control so the UI keeps painting and draining output.
-
-        Falls back to inline execution when there is no separate agent loop
-        (tests / pre-startup) or when already on the agent loop.
-        """
-        loop = self._agent_loop
-        if loop is None or not loop.is_running():
-            result = fn()
-            if asyncio.iscoroutine(result):
-                return await result
-            return result
-
-        import threading
-
-        if getattr(loop, "_thread_id", None) == threading.current_thread().ident:
-            result = fn()
-            if asyncio.iscoroutine(result):
-                return await result
-            return result
-
-        async def _wrapper():
-            result = fn()
-            if asyncio.iscoroutine(result):
-                return await result
-            return result
-
-        future = asyncio.run_coroutine_threadsafe(_wrapper(), loop)
-        try:
-            return await asyncio.wait_for(asyncio.wrap_future(future), timeout=30)
-        except TimeoutError:
-            future.cancel()
-            raise
 
     # ── output pipeline -----------------------------------------------
 
@@ -2081,25 +2182,24 @@ class TUIApplication:
     def _clear_transcript_on_ui_loop(self) -> None:
         self._transcript_epoch += 1
         self._transcript_blocks.clear()
+        self._fullscreen_transcript_bytes = 0
+        self._fullscreen_semantic_replay_count = 0
+        if self._is_fullscreen:
+            self._fullscreen_transcript.clear()
+            self._app.invalidate()
+            return
         self.output_buffer.set_document(Document(""), bypass_readonly=True)
         queue = self._block_queue
         if queue is not None:
             queue.put_nowait(_ClearTranscriptQueueItem(self._transcript_epoch))
 
     def _on_stray_output(self, content: str, disposition: str) -> None:
-        """Record stray stdout/stderr intercepts as hidden runtime events."""
-        agent = self.agent
-        if agent is None:
-            return
-        em = getattr(agent, "event_manager", None)
-        if em is None:
-            return
-        try:
-            from nooa.events import DebugTrace
-
-            em.add(DebugTrace(content=f"[stray:{disposition}] {content[:200]}"))
-        except Exception:
-            pass
+        """Forward stray stdout/stderr diagnostics to the host boundary."""
+        if self._host_services.record_stray_output is not None:
+            try:
+                self._host_services.record_stray_output(content, disposition)
+            except Exception:
+                logger.debug("stray-output recorder failed", exc_info=True)
 
     def emit_block(
         self,
@@ -2138,8 +2238,13 @@ class TUIApplication:
         # stdout. After run_async, route everything via the loop.
         loop = self._loop
         if self._block_queue is None or loop is None:
-            rendered = self._render_replay_source(block.source)
-            self._retain_transcript_block(block)
+            rendered = self._render_transcript_source(block.source)
+            evicted = self._retain_transcript_block(block, rendered)
+            if self._is_fullscreen:
+                self._fullscreen_transcript.append(rendered, record_id=block.transcript_record_id)
+                self._fullscreen_transcript.evict_prefix(evicted)
+                self._app.invalidate()
+                return
             self._append_stripped_to_buffer(rendered)
             import sys as _sys
 
@@ -2166,8 +2271,10 @@ class TUIApplication:
         try:
             loop.call_soon_threadsafe(self._enqueue_transcript_block, block)
         except RuntimeError:
-            # Teardown won the race with a late producer. prompt_toolkit no
-            # longer owns the terminal, so preserve the diagnostic directly.
+            # Teardown won the race with a late producer. Fullscreen must never
+            # leak application content onto the restored primary screen.
+            if self._is_fullscreen:
+                return
             rendered = self._render_replay_source(block.source)
             import sys as _sys
 
@@ -2179,11 +2286,56 @@ class TUIApplication:
                 except Exception:
                     pass
 
-    def _retain_transcript_block(self, block: TranscriptBlock) -> None:
+    @staticmethod
+    def _fullscreen_block_resident_bytes(block: TranscriptBlock, rendered: str) -> int:
+        """Conservatively charge all retained textual renderer representations.
+
+        The source and replay result remain live on ``TranscriptBlock``.  The
+        model retains safe ANSI and plain text, and at most two projection plus
+        two formatted-width caches.  Charging those bounded copies up front
+        keeps replay expansion and resize caches inside the advertised budget;
+        Python container overhead is deliberately outside this byte contract.
+        """
+        source_bytes = len(block.source.encode("utf-8"))
+        replay_cache_bytes = sum(
+            len(source.encode("utf-8")) for source in block.replay_cache.values()
+        )
+        rendered_bytes = len(rendered.encode("utf-8"))
+        plain_bytes = len(_strip_ansi(rendered).encode("utf-8"))
+        return source_bytes + replay_cache_bytes + (2 * rendered_bytes) + (5 * plain_bytes)
+
+    def _retain_transcript_block(self, block: TranscriptBlock, rendered: str) -> int:
         block.transcript_epoch = self._transcript_epoch
+        if block.transcript_record_id is None:
+            block.transcript_record_id = self._next_transcript_record_id
+            self._next_transcript_record_id += 1
         self._transcript_blocks.append(block)
+        if self._is_fullscreen:
+            block.fullscreen_rendered = rendered
+            block.resident_bytes = self._fullscreen_block_resident_bytes(block, rendered)
+            self._fullscreen_transcript_bytes += block.resident_bytes
+            if block.replay is not None:
+                self._fullscreen_semantic_replay_count += 1
+            evicted = 0
+            retained_bytes = self._fullscreen_transcript_bytes
+            while evicted < len(self._transcript_blocks) and (
+                len(self._transcript_blocks) - evicted > _FULLSCREEN_TRANSCRIPT_MAX_RECORDS
+                or retained_bytes > _FULLSCREEN_TRANSCRIPT_MAX_BYTES
+            ):
+                retained_bytes -= self._transcript_blocks[evicted].resident_bytes
+                evicted += 1
+            if evicted:
+                self._fullscreen_semantic_replay_count -= sum(
+                    block.replay is not None for block in self._transcript_blocks[:evicted]
+                )
+                del self._transcript_blocks[:evicted]
+                self._fullscreen_transcript_bytes = retained_bytes
+            return evicted
+        # Native replay retains its existing bounded untagged tail (plus
+        # tagged/kept blocks).
         if not block.keep and block.event_id is None and not block.tags:
             self._trim_untagged_transcript_tail()
+        return 0
 
     def _trim_untagged_transcript_tail(self) -> None:
         """Bound source retention even when no resize replay has run yet."""
@@ -2201,10 +2353,22 @@ class TUIApplication:
         ]
 
     def _enqueue_transcript_block(self, block: TranscriptBlock) -> None:
-        rendered = self._render_replay_source(block.source)
-        self._retain_transcript_block(block)
-        self._append_stripped_to_buffer(rendered)
         queue = self._block_queue
+        # An off-thread callback accepted before teardown can run after the
+        # ordered queue has retired and prompt_toolkit has restored the primary
+        # screen. Fullscreen output is renderer-owned, so discard that stale
+        # callback before mutating retained/view state or touching stdout.
+        if queue is None and self._is_fullscreen:
+            return
+
+        rendered = self._render_transcript_source(block.source)
+        evicted = self._retain_transcript_block(block, rendered)
+        if self._is_fullscreen:
+            self._fullscreen_transcript.append(rendered, record_id=block.transcript_record_id)
+            self._fullscreen_transcript.evict_prefix(evicted)
+            self._app.invalidate()
+            return
+        self._append_stripped_to_buffer(rendered)
         if queue is not None:
             queue.put_nowait(block)
             return
@@ -2241,26 +2405,33 @@ class TUIApplication:
     def is_running(self) -> bool:
         return self._app.is_running
 
+    def close_agent_observation(self) -> None:
+        """Stop presentation delivery without owning or stopping the agent."""
+        self._agent_controller.close()
+
     async def run_async(self) -> None:
         # Capture the loop once so emit_block can enqueue safely from
         # any thread without calling the deprecated get_event_loop().
         self._loop = asyncio.get_running_loop()
         self._block_queue = asyncio.Queue()
-        self._resize_replays_enabled = True
-        self._consumer_task = asyncio.ensure_future(self._consume_blocks())
-
-        # Route stray sys.stdout / sys.stderr writes (aiohttp warnings,
-        # litellm noise, stray prints) into the scrollback instead of
-        # letting them corrupt prompt_toolkit's paint. Must install here
-        # — before the first agent cell runs and before the framework
-        # wraps sys.stdout with ContextVarStream — so agent-cell stdout
-        # capture layers on top and still works unchanged.
-        from .stream_forwarder import install_stray_stream_capture
-
-        self._uninstall_stream_capture = install_stray_stream_capture(
-            self.emit_block, on_stray=self._on_stray_output
-        )
+        self._resize_replays_enabled = self.full_screen or self._is_fullscreen
+        self._consumer_task = None
+        self._uninstall_stream_capture = None
         try:
+            self._consumer_task = asyncio.ensure_future(self._consume_blocks())
+
+            # Route stray sys.stdout / sys.stderr writes (aiohttp warnings,
+            # litellm noise, stray prints) into the scrollback instead of
+            # letting them corrupt prompt_toolkit's paint. Must install here
+            # — before the first agent cell runs and before the framework
+            # wraps sys.stdout with ContextVarStream — so agent-cell stdout
+            # capture layers on top and still works unchanged.
+            from .stream_forwarder import install_stray_stream_capture
+
+            self._uninstall_stream_capture = install_stray_stream_capture(
+                self.emit_block, on_stray=self._on_stray_output
+            )
+            self.observe_agent()
             # set_exception_handler=False keeps the handler Session installed
             # (_loud_handler) active for the whole app lifetime. Otherwise
             # prompt_toolkit replaces it with its own, which prints "Exception
@@ -2274,6 +2445,21 @@ class TUIApplication:
             self._resize_replays_enabled = False
             self._cancel_resize_replay_work()
             self._clear_ctrl_c_exit()
+            if self._transient_status_timer is not None:
+                self._transient_status_timer.cancel()
+                self._transient_status_timer = None
+            self._transient_status_text = ""
+            self._transient_status_style = "class:status"
+            clipboard_task = self._clipboard_task
+            if clipboard_task is not None:
+                clipboard_task.cancel()
+                try:
+                    await clipboard_task
+                except asyncio.CancelledError:
+                    pass
+                if self._clipboard_task is clipboard_task:
+                    self._clipboard_task = None
+            self._cancel_fullscreen_drag()
             # Restore sys.stdout / sys.stderr FIRST so any post-exit
             # prints from teardown code (spinner cleanup, snapshot save,
             # goodbye message) go straight to the real terminal rather
@@ -2286,19 +2472,22 @@ class TUIApplication:
                     pass
                 self._uninstall_stream_capture = None
 
+            # Detach before the first teardown await.  Runtime events released
+            # while policy/host shutdown yields are then generation-filtered and
+            # cannot mutate renderer state after prompt-toolkit has exited.
             try:
-                await self.interrupt_reflection(teardown=True)
-            except Exception:
-                logger.debug("reflection shutdown during TUI teardown failed", exc_info=True)
+                self.close_agent_observation()
+            except BaseException:
+                logger.exception("agent observation teardown failed")
 
-            try:
-                await self.shutdown_agent_queue_manager()
-            except Exception:
-                logger.debug("queue manager shutdown during TUI teardown failed", exc_info=True)
-
-            # Stop the remaining producer thread before the final output drain;
-            # otherwise it can enqueue after the consumer has been cancelled.
-            await self._stop_agent_loop()
+            # The composition root owns agent/policy lifecycle. Quiesce every
+            # producer that can still call ``emit_block`` before retiring the
+            # sole ordered consumer, so final in-flight output joins the FIFO.
+            if self._host_services.before_output_drain is not None:
+                try:
+                    await self._host_services.before_output_drain()
+                except Exception:
+                    logger.debug("output producer quiescence failed", exc_info=True)
 
             # Let the single consumer finish ordinary blocks queued during
             # teardown (e.g. 'Goodbye! Stay vibing.' from /exit). Once the
@@ -2436,18 +2625,30 @@ class TUIApplication:
             physical = current[0] if current is not None else terminal_cols(minimum=1)
         return max(physical - 1, 1)
 
+    def _render_transcript_source(self, source: str) -> str:
+        """Normalize a block for its selected renderer ownership model."""
+        if self._is_fullscreen:
+            # prompt_toolkit owns wrapping and reflow in alternate-screen mode.
+            return normalize_transcript_block(source)
+        return self._render_replay_source(source)
+
     def _render_replay_source(self, source: str) -> str:
-        """Normalize source text at the terminal's current safe width."""
+        """Normalize source text at the native terminal's current safe width."""
         return normalize_transcript_block(source, columns=self.transcript_columns())
 
     def _before_render(self, _app) -> None:
         """Observe terminal geometry before prompt_toolkit renders a frame."""
-        if not self.full_screen:
-            return
         current = self._read_terminal_size()
         if current is None:
             return
-        self._observe_terminal_size(current)
+        if self._is_fullscreen:
+            previous = self._resize_reflow.observed_size
+            self._resize_reflow.observe(current)
+            if previous is not None and previous[0] != current[0]:
+                self._schedule_fullscreen_rebuild()
+            return
+        if self.full_screen:
+            self._observe_terminal_size(current)
 
     def _read_terminal_size(self) -> tuple[int, int] | None:
         try:
@@ -2487,6 +2688,86 @@ class TUIApplication:
         )
         if self._active_subview is None and should_schedule:
             self._schedule_resize_replay()
+
+    def _schedule_fullscreen_rebuild(self) -> None:
+        """Coalesce semantic fullscreen re-rendering until resize input settles."""
+        # Static transcript blocks are projected by the model at any width and
+        # need no source rebuild. This makes the 10,000-record common case O(1)
+        # in the render callback.
+        if self._fullscreen_semantic_replay_count == 0:
+            self._cancel_fullscreen_drag()
+            self._fullscreen_invalidate_count += 1
+            self._app.invalidate()
+            return
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            self._rebuild_fullscreen_transcript()
+            return
+        if self._fullscreen_rebuild_timer is not None:
+            self._fullscreen_rebuild_timer.cancel()
+        self._fullscreen_rebuild_generation += 1
+        generation = self._fullscreen_rebuild_generation
+        self._fullscreen_rebuild_timer = loop.call_later(
+            TRANSCRIPT_REFLOW_DEBOUNCE_SECONDS,
+            self._run_scheduled_fullscreen_rebuild,
+            generation,
+        )
+
+    def _run_scheduled_fullscreen_rebuild(self, generation: int) -> None:
+        if generation != self._fullscreen_rebuild_generation:
+            return
+        self._fullscreen_rebuild_timer = None
+        if not self._resize_replays_enabled:
+            return
+        self._rebuild_fullscreen_transcript()
+
+    def _rebuild_fullscreen_transcript(self) -> None:
+        """Refresh width-sensitive semantic blocks from a one-width cache."""
+        self._cancel_fullscreen_drag()
+        width = self.transcript_columns()
+        chunks: list[str] = []
+        retained_bytes = 0
+        for block in self._transcript_blocks:
+            if block.replay is None:
+                rendered = block.fullscreen_rendered
+                if rendered is None:
+                    rendered = self._render_transcript_source(block.source)
+            else:
+                source = block.replay_cache.get(width)
+                if source is None:
+                    try:
+                        source = block.replay()
+                    except Exception:
+                        source = block.source
+                    block.replay_cache = {width: source}
+                rendered = self._render_transcript_source(source)
+            block.fullscreen_rendered = rendered
+            block.resident_bytes = self._fullscreen_block_resident_bytes(block, rendered)
+            retained_bytes += block.resident_bytes
+            chunks.append(rendered)
+        evicted = 0
+        while evicted < len(self._transcript_blocks) and (
+            len(self._transcript_blocks) - evicted > _FULLSCREEN_TRANSCRIPT_MAX_RECORDS
+            or retained_bytes > _FULLSCREEN_TRANSCRIPT_MAX_BYTES
+        ):
+            retained_bytes -= self._transcript_blocks[evicted].resident_bytes
+            evicted += 1
+        if evicted:
+            self._fullscreen_semantic_replay_count -= sum(
+                block.replay is not None for block in self._transcript_blocks[:evicted]
+            )
+            del self._transcript_blocks[:evicted]
+            del chunks[:evicted]
+        self._fullscreen_transcript_bytes = retained_bytes
+        self._fullscreen_transcript.replace(
+            chunks,
+            record_ids=[
+                block.transcript_record_id if block.transcript_record_id is not None else index
+                for index, block in enumerate(self._transcript_blocks)
+            ],
+        )
+        self._fullscreen_invalidate_count += 1
+        self._app.invalidate()
 
     def _main_layout_is_compressed(self, size: tuple[int, int]) -> bool:
         """Return whether optional main-view rows cannot all fit."""
@@ -2670,6 +2951,10 @@ class TUIApplication:
         if self._resize_replay_timer is not None:
             self._resize_replay_timer.cancel()
             self._resize_replay_timer = None
+        self._fullscreen_rebuild_generation += 1
+        if self._fullscreen_rebuild_timer is not None:
+            self._fullscreen_rebuild_timer.cancel()
+            self._fullscreen_rebuild_timer = None
 
     @staticmethod
     def _tag_range(tag: str) -> tuple[int, int] | None:
@@ -2683,23 +2968,14 @@ class TUIApplication:
             return None
 
     def _active_replay_identity(self) -> tuple[set[str], list[tuple[int, int]]]:
-        em = getattr(self.agent, "event_manager", None)
-        if em is None or not hasattr(em, "items"):
+        if self._host_services.replay_identity is None:
             return set(), []
-        active_ids: set[str] = set()
-        ranges: list[tuple[int, int]] = []
         try:
-            items = list(em.items())
+            active_ids, ranges = self._host_services.replay_identity()
         except Exception:
-            return active_ids, ranges
-        for tag, event in items:
-            rng = self._tag_range(str(tag))
-            if rng is not None:
-                ranges.append(rng)
-            event_id = getattr(event, "id", None)
-            if event_id is not None:
-                active_ids.add(str(event_id))
-        return active_ids, ranges
+            logger.debug("replay identity provider failed", exc_info=True)
+            return set(), []
+        return set(active_ids), list(ranges)
 
     def _tag_is_active(self, tag: str, active_ranges: list[tuple[int, int]]) -> bool:
         rng = self._tag_range(tag)
@@ -2801,11 +3077,8 @@ class TUIApplication:
         a waiter — but the agent is genuinely thinking, not idle. The
         flag captures the dispatcher → handle() boundary directly.
         """
-        if self._agent_cancel_requested:
-            return True
-        if self._agent_task is None or self._agent_task.done():
-            return False
-        return self._in_respond
+        state = self._agent_controller.state
+        return state is not None and state.lifecycle is AgentLifecycle.THINKING
 
     def commands_dispatched(self) -> list[str]:
         """Slash commands the user has submitted, in order."""
@@ -2852,50 +3125,46 @@ class TUIApplication:
         self._llm_probe_status_text = text
         if text:
             self._ensure_spinner_task()
-        app = getattr(self, "_app", None)
-        if app is not None and app.is_running:
-            app.invalidate()
+        self.invalidate()
+
+    def _status_rows(self) -> list[list[tuple[str, str]]]:
+        """Return dynamic status rows as independently styled fragments."""
+        rows: list[list[tuple[str, str]]] = []
+        state = self._agent_controller.state
+        if self._agent_controller.failure is not None:
+            rows.append([("class:status", "Agent observation disconnected.")])
+        if state is not None and state.workspace.cancellation is CancellationState.REQUESTED:
+            rows.append([("class:status", f"{self._spinner_frame} cancelling agent turn...")])
+        elif self.is_thinking():
+            rows.append([("class:status", f"{self._spinner_frame} thinking...")])
+        if self._llm_probe_status_text:
+            rows.append([("class:status", f"{self._spinner_frame} {self._llm_probe_status_text}")])
+        auxiliary_status = ""
+        if self._host_services.auxiliary_status is not None:
+            try:
+                auxiliary_status = self._host_services.auxiliary_status()
+            except Exception:
+                logger.debug("auxiliary status callback failed", exc_info=True)
+        if auxiliary_status:
+            rows.append([("class:status", auxiliary_status)])
+        if self._transient_status_text:
+            rows.append([(self._transient_status_style, self._transient_status_text)])
+        if self._command_status_text:
+            rows.append([("class:status", self._command_status_text)])
+        if self._exit_hint_text:
+            rows.append([("class:status", self._exit_hint_text)])
+        if self._session_label:
+            label = f"[{self._session_label}]"
+            if rows:
+                rows[-1].append(("class:status", f"   {label}"))
+            else:
+                rows.append([("class:status", label)])
+        return rows
 
     def status_text(self) -> str:
-        """One-line status area text.
-
-        Shows ``<spinner> thinking...`` while the agent is working,
-        ``<spinner> cancelling agent turn...`` while cancellation is awaiting
-        acknowledgement, and a bracketed session label when one is set. Example::
-
-            ⠋ thinking...    [session-abc]
-
-        """
-        lines: list[str] = []
-        if self._agent_cancel_requested:
-            lines.append(f"{self._spinner_frame} cancelling agent turn...")
-        elif self.is_thinking():
-            lines.append(f"{self._spinner_frame} thinking...")
-        if self._llm_probe_status_text:
-            lines.append(f"{self._spinner_frame} {self._llm_probe_status_text}")
-        reflection_frame = ""
-        runner = self._reflection_runner()
-        if runner is not None:
-            reflection_frame = runner.indicator_frame()
-        if reflection_frame:
-            lines.append(reflection_frame)
-        if self._command_status_text:
-            lines.append(self._command_status_text)
-        if self._exit_hint_text:
-            lines.append(self._exit_hint_text)
-        if self._session_label:
-            if lines:
-                lines[-1] = f"{lines[-1]}   [{self._session_label}]"
-            else:
-                lines.append(f"[{self._session_label}]")
-        return "\n\n".join(lines)
+        """Plain-text projection of the dynamic status rows."""
+        return "\n\n".join("".join(text for _style, text in row) for row in self._status_rows())
 
     def set_session_label(self, label: str) -> None:
         """Set the bracketed label shown on the right of the status line."""
         self._session_label = label
-
-    def invalidate(self) -> None:
-        """Request a prompt/layout redraw after external state changes."""
-        app = getattr(self, "_app", None)
-        if app is not None and app.is_running:
-            app.invalidate()

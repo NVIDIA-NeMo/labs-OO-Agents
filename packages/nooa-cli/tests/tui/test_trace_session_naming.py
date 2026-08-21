@@ -90,6 +90,17 @@ def _make_mock_session(tmp_path, monkeypatch):
     session.registry = registry
     session._session_manager = sm
     session._background_tasks = set()
+    runner = MagicMock()
+
+    async def shutdown_queue_manager(*, flush=False):
+        await agent.queue_manager.shutdown()
+        if flush:
+            for channel in agent.queue_manager._channels.values():
+                if channel.mode == "queue":
+                    channel.flush()
+
+    runner.shutdown_queue_manager = AsyncMock(side_effect=shutdown_queue_manager)
+    session._local_agent_runner = runner
 
     return session, sm, storage
 
@@ -206,6 +217,7 @@ class TestSwapSessionManagerClearsQueues:
         """_swap_session_manager must not crash if agent has no queue_manager."""
         session, old_sm, _ = _make_mock_session(tmp_path, monkeypatch)
         del session.agent.queue_manager
+        session._local_agent_runner = None
 
         new_sm = MagicMock()
         new_sm.session_id = str(uuid.uuid4())

@@ -44,25 +44,42 @@ class ContextVarStream:
         self.mode = getattr(original, "mode", "w")
 
     def write(self, data: str) -> int:
-        """Write to contextvar buffer if set, otherwise to original stream."""
+        """Write to the task buffer, falling back if a stale buffer was closed."""
         buffer = self._buffer_var.get()
         if buffer is not None:
-            return buffer.write(data)
+            try:
+                return buffer.write(data)
+            except ValueError:
+                # Background tasks inherit contextvars.  They can outlive the
+                # execution capture that installed this buffer, leaving a
+                # closed StringIO in their copied context.  Preserve logging
+                # and exception reporting by routing those late writes to the
+                # process stream instead.
+                if not getattr(buffer, "closed", False):
+                    raise
         return self._original.write(data)
 
     def writelines(self, lines: list[str]) -> None:
-        """Write multiple lines."""
+        """Write multiple lines, falling back if a stale buffer was closed."""
         buffer = self._buffer_var.get()
         if buffer is not None:
-            buffer.writelines(lines)
-        else:
-            self._original.writelines(lines)
+            try:
+                buffer.writelines(lines)
+                return
+            except ValueError:
+                if not getattr(buffer, "closed", False):
+                    raise
+        self._original.writelines(lines)
 
     def flush(self) -> None:
-        """Flush both buffer and original stream."""
+        """Flush the active buffer when usable, then the original stream."""
         buffer = self._buffer_var.get()
         if buffer is not None:
-            buffer.flush()
+            try:
+                buffer.flush()
+            except ValueError:
+                if not getattr(buffer, "closed", False):
+                    raise
         self._original.flush()
 
     def fileno(self) -> int:
