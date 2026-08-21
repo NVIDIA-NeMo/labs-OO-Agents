@@ -172,7 +172,7 @@ class FakeAgent:
         self.queue_manager = QueueManager()
         self._user_messages_in = self.queue_manager.queue("user_messages")
         self.user_messages = self._user_messages_in.reader
-        self.next_kind: str = "GET_USER_INPUT"
+        self.next_kind: str = "NEED_INPUT"
 
     @staticmethod
     def render_message(text: str) -> str:
