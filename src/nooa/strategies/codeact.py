@@ -296,7 +296,7 @@ class CodeActStrategy(CompositeStrategy):
     - Code is executed via explicit tool calls (not raw output)
     - Final response must be structured output matching return type
 
-    Configuration:
+    Configuration (fields of CodeActConfig, passed via config=):
         max_iterations: Maximum number of tool call iterations
         max_retries: Maximum consecutive errors before failure
 
