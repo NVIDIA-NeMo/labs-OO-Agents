@@ -22,7 +22,7 @@ Each middleware is `async def mw(ctx, nxt) -> ctx` — a typed context object an
 
 | Kind | Wraps | Context (`ctx`) mutables in | result out |
 |---|---|---|---|
-| `"agent_call"` | one whole agent-method call (all turns) | `args`, `kwargs` (+ `agent`, `method_name`) | `ctx.result` |
+| `"agent_call"` | one instrumented async agent-method call (all turns) — see coverage note below | `args`, `kwargs` (+ `agent`, `method_name`) | `ctx.result` |
 | `"llm_call"` | one LLM round-trip inside `runtime.generate()` | `messages` (the rendered prompt), `params` (tools, output_model, max_tokens, ...) | `ctx.response` (`LLMResponse`) |
 | `"execute_python"` | one CodeAct cell in `runtime.execute_code()` | `code`, `params` (timeout, restrictions, ...) | `ctx.result` (`ExecutionResult`) |
 
@@ -46,6 +46,7 @@ Verified semantics:
 - **Order**: registration order = execution order; first registered is outermost. Nesting across kinds: `agent_call` → per-turn `llm_call` → per-cell `execute_python`.
 - **Short-circuiting** (don't call `nxt`) is allowed for guardrails/caching, but you MUST set the output slot (`ctx.result` / `ctx.response`) — the runtime raises `RuntimeError` if middleware returns without it. To fake an LLM turn, construct an `LLMResponse` (`content`, `tool_calls=[]`, `finish_reason="stop"`, `assistant_message={...}`, `raw_response=None`).
 - **Blocking**: raise from the middleware — the exception propagates to the caller exactly like a failure of the wrapped operation (for `llm_call`, CodeAct counts it against its session error budget).
+- **`agent_call` coverage is narrower than "every agent method"**: it runs only in the wrapper the metaclass builds for traced async methods. Sync (`def`) methods, `@no_trace` methods (sync *or* async), `staticmethod`/`classmethod`, and methods inherited from non-Agent bases all execute with no `AgentCallContext` at all — so a guard will not block them, including when generated CodeAct Python calls them. This matters most for sync deterministic capabilities, which are the usual way to expose functionality to CodeAct. Declare such a capability as a traced `async def` method, or enforce the policy in the method body. Registering `agent_call` middleware on a class with uncovered methods emits a `RuntimeWarning` naming them.
 - **Exceptions are NOT swallowed** — middleware is control flow, unlike hooks.
 - Per-agent: registered on that agent's `EventManager`; subagents have their own.
 - `execute_python` has a re-entry guard: code the middleware itself triggers (e.g. it calls agent methods) skips the middleware, while nested generation methods called by executed code re-enter it for their own cells.
