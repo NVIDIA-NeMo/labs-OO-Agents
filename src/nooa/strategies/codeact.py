@@ -67,7 +67,7 @@ from nooa.strategy_validation import (
     run_postconditions,
     run_preconditions,
 )
-from nooa.unifiedllm import Tool, ToolCall
+from nooa.unifiedllm import LLMRequirements, Tool, ToolCall
 
 if TYPE_CHECKING:
     from nooa.config.strategy_config import CodeActConfig
@@ -337,6 +337,16 @@ class CodeActStrategy(CompositeStrategy):
     def _build_sampling_kwargs(self) -> dict[str, Any]:
         """Build sampling kwargs for llm calls, excluding None values."""
         return build_sampling_kwargs(self.config)
+
+    @property
+    def llm_requirements(self) -> LLMRequirements:
+        """CodeAct requires function tools and preserves model-default reasoning."""
+        return LLMRequirements(
+            function_tools=True,
+            structured_result=True,
+            multi_turn_tools=True,
+            reasoning="preserve_model_default",
+        )
 
     @property
     def name(self) -> str:

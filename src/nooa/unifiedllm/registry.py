@@ -54,6 +54,8 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from nooa.unifiedllm.requirements import LLMRequirements
+
 if TYPE_CHECKING:
     from nooa.unifiedllm import UnifiedLLM
 
@@ -76,6 +78,17 @@ _NVIDIA_KEY_SYNONYMS = {
     "NVIDIA_INTERNAL_API_KEY": "NVIDIA_INFERENCE_API_KEY",
 }
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_OPENAI_GPT5_RE = re.compile(r"^gpt-5(?:[.\-]|$)")
+_RAW_PROVIDER_PREFIXES = (
+    "chatgpt-",
+    "claude-",
+    "gemini-",
+    "gpt-",
+    "mistral-",
+    "o1",
+    "o3",
+    "o4",
+)
 
 
 def resolve_api_key_from_config(
@@ -294,7 +307,142 @@ def get_registry_config(name: str) -> dict[str, Any]:
         return dict(MODELS.get(name, {}))
 
 
-def get_llm_client(name: str, *, client_type: str | None = None, **overrides) -> UnifiedLLM:
+def _requires_tool_transport(requirements: LLMRequirements | None) -> bool:
+    return bool(
+        requirements is not None and (requirements.function_tools or requirements.multi_turn_tools)
+    )
+
+
+def _canonical_openai_model(model: str) -> str | None:
+    if model.startswith("openai/"):
+        return model.split("/", 1)[1]
+    if "/" not in model and model.startswith(("chatgpt-", "gpt-", "o1", "o3", "o4")):
+        return model
+    return None
+
+
+def _is_openai_gpt5_model(model: str) -> bool:
+    canonical = _canonical_openai_model(model)
+    return bool(canonical and _OPENAI_GPT5_RE.match(canonical))
+
+
+def _is_ambiguous_raw_model(model: str) -> bool:
+    if "/" in model:
+        return False
+    return not model.startswith(_RAW_PROVIDER_PREFIXES)
+
+
+def _transport_error(model: str) -> ValueError:
+    return ValueError(
+        f"Cannot choose an LLM transport for model {model!r} with tool-calling "
+        "requirements. Register the model in llm_config.yaml with an explicit "
+        "client_type, pass client_type='completion' or client_type='responses' to "
+        "get_llm_client(), or use a provider-qualified model name."
+    )
+
+
+def _select_client_type(
+    *,
+    model: str,
+    configured_client_type: str,
+    client_type_source: str,
+    requirements: LLMRequirements | None,
+) -> str:
+    if configured_client_type != "completion":
+        return configured_client_type
+    if client_type_source in {"explicit", "registry"}:
+        return configured_client_type
+    if not _requires_tool_transport(requirements):
+        return configured_client_type
+    if _is_openai_gpt5_model(model):
+        return "responses"
+    if _is_ambiguous_raw_model(model):
+        raise _transport_error(model)
+    return configured_client_type
+
+
+def _record_client_selection(
+    client: UnifiedLLM,
+    *,
+    registry_name: str,
+    config: dict[str, Any],
+    client_type: str,
+    client_type_source: str,
+    requirements: LLMRequirements | None,
+) -> None:
+    client._registry_config = config  # For context_window lookup
+    client._registry_name = registry_name
+    client._client_type = client_type
+    client._client_type_source = client_type_source
+    client._llm_requirements = requirements
+
+
+def resolve_llm_client_for_requirements(
+    client: UnifiedLLM, requirements: LLMRequirements | None
+) -> UnifiedLLM:
+    """Return a client compatible with strategy requirements when auto-selection can.
+
+    Directly constructed clients and explicit registry/client_type choices are
+    treated as user-authored request plans and are left untouched. Only clients
+    built by :func:`get_llm_client` through the default completion fallback are
+    eligible for automatic transport upgrades.
+    """
+    if not _requires_tool_transport(requirements):
+        return client
+
+    from nooa.unifiedllm import CompletionClient, ResponsesClient
+
+    if isinstance(client, ResponsesClient):
+        return client
+    if not isinstance(client, CompletionClient):
+        return client
+
+    client_type_source = getattr(client, "_client_type_source", "direct")
+    if client_type_source == "direct":
+        return client
+    current_client_type = getattr(client, "_client_type", "completion")
+    selected = _select_client_type(
+        model=client.model,
+        configured_client_type=current_client_type,
+        client_type_source=client_type_source,
+        requirements=requirements,
+    )
+    if selected == current_client_type:
+        return client
+
+    cache_key = (selected, requirements)
+    cache = getattr(client, "_requirements_client_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        client._requirements_client_cache = cache
+    if cache_key in cache:
+        return cache[cache_key]
+
+    replacement = ResponsesClient(
+        model=client.model,
+        retry_config=getattr(client, "retry_config", None),
+        http_config=getattr(client, "_http_config", None),
+        cache_control_injection_points=list(getattr(client, "cache_control_injection_points", [])),
+        **dict(getattr(client, "config", {})),
+    )
+    _record_client_selection(
+        replacement,
+        registry_name=getattr(client, "_registry_name", ""),
+        config=dict(getattr(client, "_registry_config", None) or {}),
+        client_type=selected,
+        client_type_source="auto",
+        requirements=requirements,
+    )
+    cache[cache_key] = replacement
+    return replacement
+
+
+def get_llm_client(
+    name: str,
+    *,
+    client_type: str | None = None,
+    **overrides: Any,
+) -> UnifiedLLM:
     """Create an LLM client, optionally using registry config.
 
     If ``name`` is a registry key, its config (model_name, endpoint, API key,
@@ -309,11 +457,15 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
     Client class selection (first wins):
     1. Explicit ``client_type`` parameter
     2. ``client_type`` field in registry YAML
-    3. Default: ``"completion"``
+    3. Strategy ``llm_requirements`` automatic transport selection
+    4. Default: ``"completion"``
 
     Args:
         name: Registry key or a litellm-supported model string.
         client_type: ``"completion"`` or ``"responses"``. Overrides YAML config.
+        llm_requirements: Optional strategy requirements used for automatic
+            transport selection. Tool-using OpenAI GPT-5 models use the
+            Responses API unless an explicit ``client_type`` overrides it.
         **overrides: Override any parameter (max_tokens, temperature, etc.)
 
     Returns:
@@ -406,10 +558,34 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
                 type(retry_config).__name__,
             )
 
+    llm_requirements = overrides.pop("llm_requirements", None)
+    if llm_requirements is not None and not isinstance(llm_requirements, LLMRequirements):
+        raise TypeError("llm_requirements must be an LLMRequirements instance or None")
+
     params.update(overrides)
 
-    # Select client class: explicit param > YAML config > default
-    client_type = client_type or config.get("client_type", "completion")
-    client = ResponsesClient(**params) if client_type == "responses" else CompletionClient(**params)
-    client._registry_config = config  # For context_window lookup
+    # Select client class: explicit param > YAML config > requirements > default.
+    client_type_source = (
+        "explicit" if client_type is not None else "registry" if "client_type" in config else "auto"
+    )
+    configured_client_type = client_type or config.get("client_type", "completion")
+    selected_client_type = _select_client_type(
+        model=model,
+        configured_client_type=configured_client_type,
+        client_type_source=client_type_source,
+        requirements=llm_requirements,
+    )
+    client = (
+        ResponsesClient(**params)
+        if selected_client_type == "responses"
+        else CompletionClient(**params)
+    )
+    _record_client_selection(
+        client,
+        registry_name=name if config else "",
+        config=config,
+        client_type=selected_client_type,
+        client_type_source=client_type_source,
+        requirements=llm_requirements,
+    )
     return client

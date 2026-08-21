@@ -2597,6 +2597,13 @@ class ActorRuntime:
             llm_selection_source = "agent_default"
         if llm_client is None:
             raise RuntimeError(f"No LLM client available for {method_name}")
+        if isinstance(strategy, GenerationStrategyABC):
+            from nooa.unifiedllm import UnifiedLLM, resolve_llm_client_for_requirements
+
+            llm_client = resolve_llm_client_for_requirements(
+                cast(UnifiedLLM, llm_client),
+                strategy.llm_requirements,
+            )
         llm_model_name = getattr(llm_client, "model", "") or ""
 
         # Resolve truncation config: method-level @strategy(truncation=...) > agent-level
