@@ -85,12 +85,3 @@ For guided notebooks rather than standalone scripts, see the repository's
 [`assets/`](assets/) contains data and helper services used by the quickstarts,
 including the frontend-design `TextSkill` and the local wiki MCP server. It is
 supporting material, not a separate example suite.
-
-## Community examples
-
-External contributions that follow the same catalog rules. Each directory is
-standalone and states its own honest scope. These two are one architecture
-on two corpora: statute first, then a voluntary framework.
-
-- [`gspc_provision_eval/`](gspc_provision_eval/) — statute-anchored evaluator (EU AI Act / GDPR). Deterministic Python emits a signed verdict; the LLM only narrates. Contributed by [Council of AI](https://councilof.ai) (CSOAI Ltd, UK 16939677).
-- [`nist_rmf_eval/`](nist_rmf_eval/) — the same architecture on the NIST AI RMF 1.0 voluntary framework. Contributed by [Council of AI](https://councilof.ai) (CSOAI Ltd, UK 16939677).
