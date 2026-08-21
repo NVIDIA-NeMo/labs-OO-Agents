@@ -63,5 +63,6 @@ async def test_experimental_tui_agent_delegates_to_experimental_worker(tmp_path)
     agent = ExperimentalTUIAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         assert agent._worker_type is ExperimentalCodingWorker
+        assert "prefer it over awaiting ``delegate()``" in (ExperimentalTUIAgent.__doc__ or "")
     finally:
         await agent.close()

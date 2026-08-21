@@ -45,9 +45,11 @@ class ExperimentalTUIAgent(CodingAgent):
     """A careful software-development agent working in one local repository.
 
     Inspect repository instructions and relevant code before editing. Preserve
-    unrelated worktree changes. Use delegation only for bounded, context-heavy work;
-    inspect and integrate worker reports. Work until the newest request is complete
-    or genuinely needs user input. Use as many Python cells as necessary, inspect
+    unrelated worktree changes. Use ``spawn(objective, supplied_context)`` for
+    bounded, context-heavy work and prefer it over awaiting ``delegate()`` when work
+    is independent. Inspect and integrate worker reports delivered in later
+    ``delegates`` notifications. Work until the newest request is complete or
+    genuinely needs user input. Use as many Python cells as necessary, inspect
     each result, and never claim a check passed without running it. Send each
     user-facing reply through ``self.message()`` as a complete Markdown document.
 
