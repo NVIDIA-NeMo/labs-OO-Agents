@@ -1427,3 +1427,1016 @@ def test_agent_init_succeeds_with_sync_tracing_active():
         mock_hooks.before_agent_call.assert_called_once()
     finally:
         set_hooks(None)
+
+
+# ============================================================================
+# Generator methods (issue #38)
+#
+# Two distinct defects, fixed separately:
+#
+# 1. Generation is unreachable for generators. `has_ellipsis_body` is True for
+#    `async def f(): yield 1; ...`, but `iscoroutinefunction` is False, so the
+#    method never reaches `_should_generate` and comes out `_needs_generation
+#    False`. The author writes a generation stub and silently gets a plain
+#    generator. That combination is always a mistake -> hard TypeError.
+#
+# 2. Tracing spanned the wrong window. Generators were routed to the sync
+#    wrapper, which pushed the call id around generator *creation* and popped
+#    it before the body ran. Calls the body made at consumption time were
+#    parented to whoever drained the generator. The generator wrappers below
+#    push the call id around each *resumption* instead, so body calls parent to
+#    the generator and consumer calls (made between yields) do not.
+# ============================================================================
+
+
+def _record_hooks():
+    """Return (mock_hooks, hook_calls) recording every before_agent_call kwargs."""
+    from unittest.mock import MagicMock
+
+    from nooa.runtime.hooks import InstrumentationHooks
+
+    hook_calls: list[dict] = []
+
+    def before(**kwargs):
+        hook_calls.append(kwargs)
+        return {}
+
+    mock_hooks = MagicMock(spec=InstrumentationHooks)
+    mock_hooks.before_agent_call.side_effect = before
+    return mock_hooks, hook_calls
+
+
+def _one(hook_calls: list[dict], method_name: str) -> dict:
+    # Not a bare `next()`: a StopIteration escaping inside an `async def` test
+    # surfaces as "coroutine raised StopIteration" and hides the real problem.
+    matches = [c for c in hook_calls if c["method_name"] == method_name]
+    assert matches, f"no before_agent_call recorded for {method_name!r}"
+    return matches[0]
+
+
+def _all(hook_calls: list[dict], method_name: str) -> list[dict]:
+    return [c for c in hook_calls if c["method_name"] == method_name]
+
+
+# --- Defect 1: ellipsis body on a generator ---------------------------------
+
+
+def test_async_generator_with_ellipsis_body_raises_at_class_creation():
+    """`async def` with both yield and an ellipsis body can never be generated."""
+    with pytest.raises(TypeError, match="cannot be LLM-generated"):
+
+        class BadAgent(Agent, llm=_TEST_LLM):
+            async def review(self, items: list[str]):
+                yield items
+                ...
+
+
+def test_sync_generator_with_ellipsis_body_raises_at_class_creation():
+    """`def` with both yield and an ellipsis body can never be generated."""
+    with pytest.raises(TypeError, match="cannot be LLM-generated"):
+
+        class BadAgent(Agent, llm=_TEST_LLM):
+            def review(self, items: list[str]):
+                yield items
+                ...
+
+
+def test_generator_ellipsis_error_names_the_method():
+    """The TypeError must name the offending method so authors can find it."""
+    with pytest.raises(TypeError, match=r"BadAgent\.review"):
+
+        class BadAgent(Agent, llm=_TEST_LLM):
+            async def review(self, items: list[str]):
+                yield items
+                ...
+
+
+def test_generator_without_ellipsis_is_accepted():
+    """A generator with a real body is fine — only the ellipsis combination is rejected."""
+
+    class GoodAgent(Agent, llm=_TEST_LLM):
+        async def review(self, items: list[str]):
+            for item in items:
+                yield item
+
+    assert hasattr(GoodAgent.review, "_agent_decorator")
+    assert GoodAgent.review._needs_generation is False
+
+
+# --- Defect 2: span scoping across yields -----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_generator_body_calls_parent_to_the_generator():
+    """Issue #38: calls made *inside* an async generator body must parent to it."""
+    from nooa.runtime.hooks import set_hooks
+
+    mock_hooks, hook_calls = _record_hooks()
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        async def produce(self, n: int):
+            for i in range(n):
+                await self.in_body(i)
+                yield i
+
+        async def in_body(self, i: int) -> int:
+            return i
+
+        async def between_yields(self, v: int) -> int:
+            return v
+
+        async def drain(self) -> list[int]:
+            out = []
+            async for v in self.produce(2):
+                await self.between_yields(v)
+                out.append(v)
+            return out
+
+    try:
+        set_hooks(mock_hooks)
+        agent = TestAgent()
+        assert await agent.drain() == [0, 1]
+    finally:
+        set_hooks(None)
+
+    drain = _one(hook_calls, "drain")
+    produce = _one(hook_calls, "produce")
+
+    assert produce["parent_call_id"] == drain["call_id"]
+
+    # The bug: these were parented to `drain`, which never issued them.
+    in_body = _all(hook_calls, "in_body")
+    assert len(in_body) == 2
+    assert all(c["parent_call_id"] == produce["call_id"] for c in in_body)
+
+    # The mirror-image error a naive fix introduces: work the *consumer* does
+    # between yields must NOT be attributed to the generator.
+    between = _all(hook_calls, "between_yields")
+    assert len(between) == 2
+    assert all(c["parent_call_id"] == drain["call_id"] for c in between)
+
+
+@pytest.mark.asyncio
+async def test_sync_generator_body_calls_parent_to_the_generator():
+    """Same guarantee for `def` with yield."""
+    from nooa.runtime.hooks import set_hooks
+
+    mock_hooks, hook_calls = _record_hooks()
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        def produce(self, n: int):
+            for i in range(n):
+                self.in_body(i)
+                yield i
+
+        def in_body(self, i: int) -> int:
+            return i
+
+        def between_yields(self, v: int) -> int:
+            return v
+
+        def drain(self) -> list[int]:
+            out = []
+            for v in self.produce(2):
+                self.between_yields(v)
+                out.append(v)
+            return out
+
+    try:
+        set_hooks(mock_hooks)
+        agent = TestAgent()
+        assert agent.drain() == [0, 1]
+    finally:
+        set_hooks(None)
+
+    drain = _one(hook_calls, "drain")
+    produce = _one(hook_calls, "produce")
+
+    assert produce["parent_call_id"] == drain["call_id"]
+
+    in_body = _all(hook_calls, "in_body")
+    assert len(in_body) == 2
+    assert all(c["parent_call_id"] == produce["call_id"] for c in in_body)
+
+    between = _all(hook_calls, "between_yields")
+    assert len(between) == 2
+    assert all(c["parent_call_id"] == drain["call_id"] for c in between)
+
+
+@pytest.mark.asyncio
+async def test_async_generator_keeps_its_calling_convention():
+    """Wrapping must not turn an async generator into a coroutine."""
+    import inspect as _inspect
+
+    from nooa.runtime.hooks import set_hooks
+
+    mock_hooks, _ = _record_hooks()
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        async def produce(self, n: int):
+            for i in range(n):
+                yield i
+
+    assert _inspect.isasyncgenfunction(TestAgent.produce)
+
+    try:
+        set_hooks(mock_hooks)
+        agent = TestAgent()
+        assert [v async for v in agent.produce(3)] == [0, 1, 2]
+    finally:
+        set_hooks(None)
+
+
+def test_sync_generator_keeps_its_calling_convention():
+    """Wrapping must not eagerly drain a sync generator."""
+    import inspect as _inspect
+
+    from nooa.runtime.hooks import set_hooks
+
+    mock_hooks, _ = _record_hooks()
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        def produce(self, n: int):
+            yield from range(n)
+
+    assert _inspect.isgeneratorfunction(TestAgent.produce)
+
+    try:
+        set_hooks(mock_hooks)
+        agent = TestAgent()
+        gen = agent.produce(3)
+        assert _inspect.isgenerator(gen)
+        assert list(gen) == [0, 1, 2]
+    finally:
+        set_hooks(None)
+
+
+@pytest.mark.asyncio
+async def test_async_generator_span_closes_at_exhaustion_not_creation():
+    """after_agent_call must fire once, when the generator is exhausted."""
+    from nooa.runtime.hooks import set_hooks
+
+    mock_hooks, _ = _record_hooks()
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        async def produce(self, n: int):
+            for i in range(n):
+                yield i
+
+    try:
+        set_hooks(mock_hooks)
+        agent = TestAgent()
+        gen = agent.produce(2)
+        assert await gen.__anext__() == 0
+        # Body has started but is not finished — the span must still be open.
+        assert mock_hooks.after_agent_call.call_count == 0
+        assert await gen.__anext__() == 1
+        with pytest.raises(StopAsyncIteration):
+            await gen.__anext__()
+        assert mock_hooks.after_agent_call.call_count == 1
+    finally:
+        set_hooks(None)
+
+
+@pytest.mark.asyncio
+async def test_async_generator_span_closes_on_explicit_aclose():
+    """Abandoning a generator part-way closes its span exactly once, on aclose().
+
+    Closing an async generator is itself async, so the span closes at `aclose()`
+    rather than at the `break` that abandoned it. In ordinary code that is not a
+    leak: once the generator becomes unreachable, asyncio's async-generator
+    finalizer calls `aclose()` for you within a couple of event-loop ticks (see
+    test_async_generator_span_closes_when_unreachable). Only a live reference
+    that is never closed keeps the span open — which leaks the generator itself,
+    not just the span. Early close is not an error, so `exception` stays None.
+    """
+    from nooa.runtime.hooks import set_hooks
+
+    mock_hooks, _ = _record_hooks()
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        async def produce(self, n: int):
+            for i in range(n):
+                yield i
+
+    try:
+        set_hooks(mock_hooks)
+        agent = TestAgent()
+        gen = agent.produce(10)
+        assert await gen.__anext__() == 0
+        assert mock_hooks.after_agent_call.call_count == 0
+        await gen.aclose()
+        assert mock_hooks.after_agent_call.call_count == 1
+        assert mock_hooks.after_agent_call.call_args.kwargs["exception"] is None
+        # aclose() is idempotent — the span must not close twice.
+        await gen.aclose()
+        assert mock_hooks.after_agent_call.call_count == 1
+    finally:
+        set_hooks(None)
+
+
+@pytest.mark.asyncio
+async def test_async_generator_span_closes_when_break_uses_aclosing():
+    """`aclosing()` + break is the deterministic way to close an abandoned generator."""
+    import contextlib
+
+    from nooa.runtime.hooks import set_hooks
+
+    mock_hooks, _ = _record_hooks()
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        async def produce(self, n: int):
+            for i in range(n):
+                yield i
+
+    try:
+        set_hooks(mock_hooks)
+        agent = TestAgent()
+        async with contextlib.aclosing(agent.produce(10)) as gen:
+            async for _v in gen:
+                # Still inside the generator's lifetime: pre-fix, the span had
+                # already closed at creation and this assertion is what fails.
+                assert mock_hooks.after_agent_call.call_count == 0
+                break
+        assert mock_hooks.after_agent_call.call_count == 1
+    finally:
+        set_hooks(None)
+
+
+def test_sync_generator_span_closes_on_early_break():
+    """Sync generators close deterministically at `break` — close() is synchronous."""
+    from nooa.runtime.hooks import set_hooks
+
+    mock_hooks, _ = _record_hooks()
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        def produce(self, n: int):
+            yield from range(n)
+
+    try:
+        set_hooks(mock_hooks)
+        agent = TestAgent()
+        gen = agent.produce(10)
+        assert next(gen) == 0
+        assert mock_hooks.after_agent_call.call_count == 0
+        gen.close()
+        assert mock_hooks.after_agent_call.call_count == 1
+        assert mock_hooks.after_agent_call.call_args.kwargs["exception"] is None
+    finally:
+        set_hooks(None)
+
+
+@pytest.mark.asyncio
+async def test_async_generator_exception_reaches_after_hook():
+    """A raising generator body must report the exception through after_agent_call."""
+    from nooa.runtime.hooks import set_hooks
+
+    mock_hooks, _ = _record_hooks()
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        async def produce(self):
+            yield 0
+            raise RuntimeError("nope")
+
+    try:
+        set_hooks(mock_hooks)
+        agent = TestAgent()
+        with pytest.raises(RuntimeError, match="nope"):
+            async for _v in agent.produce():
+                pass
+        after = mock_hooks.after_agent_call.call_args.kwargs
+        assert isinstance(after["exception"], RuntimeError)
+    finally:
+        set_hooks(None)
+
+
+@pytest.mark.asyncio
+async def test_no_trace_generator_is_not_traced():
+    """@no_trace must suppress the generator's span and keep parent linkage intact."""
+    from nooa.runtime.hooks import set_hooks
+
+    mock_hooks, hook_calls = _record_hooks()
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        @no_trace
+        async def produce(self, n: int):
+            for i in range(n):
+                await self.in_body(i)
+                yield i
+
+        async def in_body(self, i: int) -> int:
+            return i
+
+        async def drain(self) -> list[int]:
+            return [v async for v in self.produce(2)]
+
+    try:
+        set_hooks(mock_hooks)
+        agent = TestAgent()
+        assert await agent.drain() == [0, 1]
+    finally:
+        set_hooks(None)
+
+    assert _all(hook_calls, "produce") == []
+    # Children skip the untraced generator and attach to the nearest traced ancestor.
+    drain = _one(hook_calls, "drain")
+    in_body = _all(hook_calls, "in_body")
+    assert len(in_body) == 2
+    assert all(c["parent_call_id"] == drain["call_id"] for c in in_body)
+
+
+def test_generator_on_untraced_class_is_left_alone():
+    """AgentMeta is generic; a class without _enable_tracing gets no wrapper at all."""
+    from nooa.metaclass import AgentMeta
+
+    class Plain(metaclass=AgentMeta):
+        def chunks(self, xs):
+            yield from xs
+
+        async def achunks(self, xs):
+            for x in xs:
+                yield x
+
+    assert not hasattr(Plain.chunks, "_agent_decorator")
+    assert not hasattr(Plain.achunks, "_agent_decorator")
+
+
+@pytest.mark.asyncio
+async def test_async_generator_forwards_asend_values():
+    """The wrapper must stay transparent to `asend()` — sent values reach the body."""
+    from nooa.runtime.hooks import set_hooks
+
+    mock_hooks, _ = _record_hooks()
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        async def echo(self):
+            received = []
+            while True:
+                sent = yield received
+                if sent is None:
+                    break
+                received.append(sent)
+
+    try:
+        set_hooks(mock_hooks)
+        agent = TestAgent()
+        gen = agent.echo()
+        assert await gen.asend(None) == []
+        assert await gen.asend("a") == ["a"]
+        assert await gen.asend("b") == ["a", "b"]
+        await gen.aclose()
+    finally:
+        set_hooks(None)
+
+
+@pytest.mark.asyncio
+async def test_async_generator_forwards_athrow_to_the_body():
+    """The wrapper must stay transparent to `athrow()` — the body can catch it."""
+    from nooa.runtime.hooks import set_hooks
+
+    mock_hooks, _ = _record_hooks()
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        async def resilient(self):
+            while True:
+                try:
+                    yield "ok"
+                except ValueError:
+                    yield "caught"
+
+    try:
+        set_hooks(mock_hooks)
+        agent = TestAgent()
+        gen = agent.resilient()
+        assert await gen.__anext__() == "ok"
+        assert await gen.athrow(ValueError("boom")) == "caught"
+        await gen.aclose()
+    finally:
+        set_hooks(None)
+
+
+def test_sync_generator_forwards_send_values():
+    """Same transparency guarantee for sync `send()`."""
+    from nooa.runtime.hooks import set_hooks
+
+    mock_hooks, _ = _record_hooks()
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        def echo(self):
+            received = []
+            while True:
+                sent = yield received
+                if sent is None:
+                    break
+                received.append(sent)
+
+    try:
+        set_hooks(mock_hooks)
+        agent = TestAgent()
+        gen = agent.echo()
+        assert gen.send(None) == []
+        assert gen.send("a") == ["a"]
+        gen.close()
+    finally:
+        set_hooks(None)
+
+
+def test_sync_generator_forwards_throw_to_the_body():
+    """Same transparency guarantee for sync `throw()`."""
+    from nooa.runtime.hooks import set_hooks
+
+    mock_hooks, _ = _record_hooks()
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        def resilient(self):
+            while True:
+                try:
+                    yield "ok"
+                except ValueError:
+                    yield "caught"
+
+    try:
+        set_hooks(mock_hooks)
+        agent = TestAgent()
+        gen = agent.resilient()
+        assert next(gen) == "ok"
+        assert gen.throw(ValueError("boom")) == "caught"
+        gen.close()
+    finally:
+        set_hooks(None)
+
+
+@pytest.mark.asyncio
+async def test_generator_body_finally_runs_before_span_closes():
+    """The wrapped generator's own cleanup must complete before the span closes."""
+    from nooa.runtime.hooks import set_hooks
+
+    order: list[str] = []
+
+    mock_hooks, _ = _record_hooks()
+    mock_hooks.after_agent_call.side_effect = lambda *a, **k: order.append("span_closed")
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        async def produce(self):
+            try:
+                yield 0
+                yield 1
+            finally:
+                order.append("body_cleanup")
+
+    try:
+        set_hooks(mock_hooks)
+        agent = TestAgent()
+        gen = agent.produce()
+        assert await gen.__anext__() == 0
+        await gen.aclose()
+    finally:
+        set_hooks(None)
+
+    assert order == ["body_cleanup", "span_closed"]
+
+
+@pytest.mark.asyncio
+async def test_async_generator_span_closes_when_unreachable():
+    """An abandoned generator's span closes on its own once nothing references it.
+
+    `break` does not close an async generator, but dropping the last reference
+    hands it to asyncio's async-generator finalizer, which calls `aclose()` a
+    couple of loop ticks later. Documents that abandoning a generator in
+    ordinary code does not strand an open span.
+    """
+    import asyncio
+
+    from nooa.runtime.hooks import set_hooks
+
+    mock_hooks, _ = _record_hooks()
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        async def produce(self, n: int):
+            for i in range(n):
+                yield i
+
+    try:
+        set_hooks(mock_hooks)
+        agent = TestAgent()
+
+        async def consumer():
+            # The generator is a temporary of this frame; when the frame exits
+            # it becomes unreachable and the finalizer takes over.
+            async for _v in agent.produce(1000):
+                assert mock_hooks.after_agent_call.call_count == 0
+                break
+
+        await consumer()
+
+        for _ in range(10):
+            if mock_hooks.after_agent_call.call_count:
+                break
+            await asyncio.sleep(0)
+
+        assert mock_hooks.after_agent_call.call_count == 1
+        assert mock_hooks.after_agent_call.call_args.kwargs["exception"] is None
+    finally:
+        set_hooks(None)
+
+
+# ============================================================================
+# Regressions found by review of the generator wrappers.
+#
+# Every defect below was introduced by the generator wrappers themselves and
+# would have shipped green: the original tests asserted exclusively through
+# `mock_hooks` and never once through the agent-call event stream, which is
+# where three of the four regressions showed up.
+# ============================================================================
+
+
+def _record_agent_call_events(agent) -> list[tuple]:
+    """Capture (phase, method, success, exception_type) from the event stream."""
+    seen: list[tuple] = []
+    agent.event_manager.on("BeforeAgentCall", lambda e: seen.append(("before", e.method_name)))
+    agent.event_manager.on(
+        "AfterAgentCall",
+        lambda e: seen.append(("after", e.method_name, e.success, e.exception_type)),
+    )
+    return seen
+
+
+def test_sync_generator_return_value_survives_the_wrapper():
+    """`return <value>` from a sync generator must reach `yield from` / StopIteration.value."""
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        def produce(self):
+            yield 1
+            yield 2
+            return "DONE"
+
+        def consume(self):
+            value = yield from self.produce()
+            return value
+
+    gen = TestAgent().consume()
+    items = []
+    try:
+        while True:
+            items.append(next(gen))
+    except StopIteration as stop:
+        assert items == [1, 2]
+        assert stop.value == "DONE"
+
+
+def test_generator_span_closes_even_when_body_cleanup_raises():
+    """A close() that raises must not strand the span — the after hook still fires."""
+    from nooa.runtime.hooks import set_hooks
+
+    mock_hooks, _ = _record_hooks()
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        def produce(self):
+            try:
+                yield 1
+            finally:
+                raise ValueError("cleanup failed")
+
+    try:
+        set_hooks(mock_hooks)
+        gen = TestAgent().produce()
+        assert next(gen) == 1
+        assert mock_hooks.after_agent_call.call_count == 0
+        with pytest.raises(ValueError, match="cleanup failed"):
+            gen.close()
+        assert mock_hooks.after_agent_call.call_count == 1
+    finally:
+        set_hooks(None)
+
+
+@pytest.mark.asyncio
+async def test_async_generator_span_closes_even_when_body_cleanup_raises():
+    """Async counterpart: a failing aclose() must not leak the span."""
+    from nooa.runtime.hooks import set_hooks
+
+    mock_hooks, _ = _record_hooks()
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        async def produce(self):
+            try:
+                yield 1
+            finally:
+                raise ValueError("cleanup failed")
+
+    try:
+        set_hooks(mock_hooks)
+        gen = TestAgent().produce()
+        assert await gen.__anext__() == 1
+        assert mock_hooks.after_agent_call.call_count == 0
+        with pytest.raises(ValueError, match="cleanup failed"):
+            await gen.aclose()
+        assert mock_hooks.after_agent_call.call_count == 1
+    finally:
+        set_hooks(None)
+
+
+def test_generator_signature_error_emits_no_unpaired_event():
+    """A bad call signature must not leave a BeforeAgentCall without its AfterAgentCall."""
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        def produce(self, n):
+            yield n
+
+    agent = TestAgent()
+    events = _record_agent_call_events(agent)
+
+    # Deliberately timing-agnostic: the wrapper currently defers argument
+    # binding to the first resumption, but the contract under test is only that
+    # a failed call leaves no unpaired BeforeAgentCall behind.
+    with pytest.raises(TypeError, match="missing 1 required positional argument"):
+        list(agent.produce())
+
+    assert [e for e in events if e[1] == "produce"] == []
+
+
+def test_generator_early_close_is_reported_as_success():
+    """Abandoning a generator is ordinary control flow, not a failed agent call."""
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        def produce(self, n):
+            yield from range(n)
+
+    agent = TestAgent()
+    events = _record_agent_call_events(agent)
+
+    gen = agent.produce(10)
+    assert next(gen) == 0
+    gen.close()
+
+    assert ("before", "produce") in events
+    assert ("after", "produce", True, None) in events
+
+
+def test_generator_exhaustion_and_failure_report_distinct_event_outcomes():
+    """Exhaustion is a success; a raising body is a failure. Both reach the event stream."""
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        def good(self, n):
+            yield from range(n)
+
+        def bad(self):
+            yield 0
+            raise RuntimeError("nope")
+
+    agent = TestAgent()
+    events = _record_agent_call_events(agent)
+
+    assert list(agent.good(2)) == [0, 1]
+    with pytest.raises(RuntimeError, match="nope"):
+        list(agent.bad())
+
+    assert ("after", "good", True, None) in events
+    assert ("after", "bad", False, "RuntimeError") in events
+
+
+@pytest.mark.asyncio
+async def test_cancelled_generator_is_reported_as_failure():
+    """Cancellation is a real failure — the method did not complete."""
+    import asyncio
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        async def slow(self):
+            yield 0
+            await asyncio.sleep(10)
+            yield 1
+
+    agent = TestAgent()
+    events = _record_agent_call_events(agent)
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.05):
+            async for _v in agent.slow():
+                pass
+
+    after = [e for e in events if e[0] == "after" and e[1] == "slow"]
+    assert after and after[0][2] is False
+    assert after[0][3] == "CancelledError"
+
+
+# --- guard holes: a generator hidden behind a decorator or descriptor -------
+
+
+def _identity_decorator(fn):
+    import functools
+
+    @functools.wraps(fn)
+    def inner(*args, **kwargs):
+        return fn(*args, **kwargs)
+
+    return inner
+
+
+def test_contextmanager_methods_keep_their_calling_convention():
+    """Dispatch must read the attribute's own shape, not the shape it wraps.
+
+    `@contextmanager` wraps a generator function but returns a context manager.
+    Dispatching on the unwrapped shape installs the generator wrapper, and
+    `with agent.session()` then fails with "'generator' object does not support
+    the context manager protocol".
+    """
+    import contextlib
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        @contextlib.contextmanager
+        def session(self):
+            yield "RESOURCE"
+
+    with TestAgent().session() as resource:
+        assert resource == "RESOURCE"
+
+
+@pytest.mark.asyncio
+async def test_asynccontextmanager_methods_keep_their_calling_convention():
+    """Async counterpart — `@asynccontextmanager` wraps an async generator function."""
+    import contextlib
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        @contextlib.asynccontextmanager
+        async def session(self):
+            yield "ARESOURCE"
+
+    async with TestAgent().session() as resource:
+        assert resource == "ARESOURCE"
+
+
+def test_decorator_that_consumes_a_generator_returns_its_value():
+    """A decorator draining a generator must not be re-dispatched as a generator."""
+    import functools
+
+    def collect(fn):
+        @functools.wraps(fn)
+        def inner(*args, **kwargs):
+            return list(fn(*args, **kwargs))
+
+        return inner
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        @collect
+        def produce(self, n: int):
+            yield from range(n)
+
+    assert TestAgent().produce(2) == [0, 1]
+
+
+def test_decorated_generator_with_ellipsis_body_is_rejected():
+    """A decorator must not smuggle an ellipsis generator past the guard."""
+    with pytest.raises(TypeError, match="cannot be LLM-generated"):
+
+        class BadAgent(Agent, llm=_TEST_LLM):
+            @_identity_decorator
+            def produce(self, xs):
+                yield xs
+                ...
+
+
+def test_staticmethod_generator_with_ellipsis_body_is_rejected():
+    """staticmethod hides the function from `isfunction`; the guard must still fire."""
+    with pytest.raises(TypeError, match="cannot be LLM-generated"):
+
+        class BadAgent(Agent, llm=_TEST_LLM):
+            @staticmethod
+            def produce(xs):
+                yield xs
+                ...
+
+
+def test_classmethod_generator_with_ellipsis_body_is_rejected():
+    """Same for classmethod."""
+    with pytest.raises(TypeError, match="cannot be LLM-generated"):
+
+        class BadAgent(Agent, llm=_TEST_LLM):
+            @classmethod
+            def produce(cls, xs):
+                yield xs
+                ...
+
+
+def test_sync_dunder_generator_with_ellipsis_body_is_rejected():
+    """The ellipsis guard runs before the dunder skip, so `__iter__` cannot slip past."""
+    with pytest.raises(TypeError, match="cannot be LLM-generated"):
+
+        class BadAgent(Agent, llm=_TEST_LLM):
+            def __iter__(self):
+                yield 1
+                ...
+
+
+def test_ellipsis_generator_rejected_even_when_tracing_is_disabled():
+    """The contradiction is about generation, not tracing — it must not depend on _enable_tracing."""
+    from nooa.metaclass import AgentMeta
+
+    with pytest.raises(TypeError, match="cannot be LLM-generated"):
+
+        class Plain(metaclass=AgentMeta):
+            def produce(self, xs):
+                yield xs
+                ...
+
+
+def test_generator_ellipsis_error_uses_correct_article():
+    """'is an generator' is a user-visible typo; both shapes must read correctly."""
+    with pytest.raises(TypeError, match=r"is a generator \(def with yield\)"):
+
+        class SyncBad(Agent, llm=_TEST_LLM):
+            def produce(self, xs):
+                yield xs
+                ...
+
+    with pytest.raises(TypeError, match=r"is an async generator \(async def with yield\)"):
+
+        class AsyncBad(Agent, llm=_TEST_LLM):
+            async def produce(self, xs):
+                yield xs
+                ...
+
+
+# --- linkage properties the fix depends on ---------------------------------
+
+
+@pytest.mark.asyncio
+async def test_nested_generators_link_two_levels_deep():
+    """outer(gen) -> inner(gen) -> leaf must chain, not collapse onto the drainer."""
+    from nooa.runtime.hooks import set_hooks
+
+    mock_hooks, hook_calls = _record_hooks()
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        async def inner(self, n: int):
+            for i in range(n):
+                await self.leaf(i)
+                yield i
+
+        async def outer(self, n: int):
+            async for v in self.inner(n):
+                yield v
+
+        async def leaf(self, i: int) -> int:
+            return i
+
+        async def drain(self) -> list[int]:
+            return [v async for v in self.outer(2)]
+
+    try:
+        set_hooks(mock_hooks)
+        assert await TestAgent().drain() == [0, 1]
+    finally:
+        set_hooks(None)
+
+    drain = _one(hook_calls, "drain")
+    outer = _one(hook_calls, "outer")
+    inner = _one(hook_calls, "inner")
+    assert outer["parent_call_id"] == drain["call_id"]
+    assert inner["parent_call_id"] == outer["call_id"]
+    leaf = _all(hook_calls, "leaf")
+    assert len(leaf) == 2
+    assert all(c["parent_call_id"] == inner["call_id"] for c in leaf)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_generators_do_not_share_a_call_stack():
+    """The call id stack is a ContextVar; gathered drains must stay isolated."""
+    import asyncio
+
+    from nooa.runtime.hooks import set_hooks
+
+    mock_hooks, hook_calls = _record_hooks()
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        async def produce(self, tag: str):
+            for i in range(3):
+                await self.in_body(f"{tag}{i}")
+                yield i
+                await asyncio.sleep(0)
+
+        async def in_body(self, tag: str) -> str:
+            return tag
+
+        async def drain(self, tag: str) -> list[int]:
+            return [v async for v in self.produce(tag)]
+
+    try:
+        set_hooks(mock_hooks)
+        agent = TestAgent()
+        results = await asyncio.gather(agent.drain("a"), agent.drain("b"))
+        assert results == [[0, 1, 2], [0, 1, 2]]
+    finally:
+        set_hooks(None)
+
+    produces = _all(hook_calls, "produce")
+    assert len(produces) == 2
+
+    # Set equality would pass under ANY scrambling of body calls across the two
+    # generators. Check each body call against the generator that made it, via
+    # the tag threaded through the call args.
+    id_by_tag = {c["args"][0]: c["call_id"] for c in produces}
+    assert set(id_by_tag) == {"a", "b"}
+
+    body = _all(hook_calls, "in_body")
+    assert len(body) == 6
+    for call in body:
+        assert call["parent_call_id"] == id_by_tag[call["args"][0][0]]

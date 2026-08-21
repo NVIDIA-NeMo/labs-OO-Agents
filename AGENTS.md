@@ -33,6 +33,7 @@ The framework already shows the LLM every argument: the method signature accompa
 - **Helpers beat prompts.** Deterministic logic as regular methods > telling the LLM to figure it out. Methods are visible to the LLM via `doc(self)` (auto-generated API documentation). Define helpers as class methods, not as lambda/function references assigned to `self`.
 - **Evidence before assertions.** Run tests/verification before claiming work is done. Enforce in the orchestrator.
 - **Everything visible by default.** Module-level and agent-level names are visible to the LLM (in `doc(self)` and exec_globals). Hide explicitly with `@hidden`, `Annotated[T, hidden]`, or `with hidden:`.
+- **Generator methods are hand-written, never generated.** A method containing `yield` is traced like any other, but it can't be an LLM-generation stub — generation applies only to coroutine methods. Writing both (`yield` *and* a `...` body) raises `TypeError` at class-creation time rather than silently ignoring the `...`. See [Generator methods](#generator-methods).
 
 ### Visibility
 
@@ -166,6 +167,36 @@ class MyAgent(Agent, llm=llm):
         """Public but NOT traced"""
         ...
 ```
+
+#### Generator methods
+
+Methods containing `yield` (`def` or `async def`) are traced, with the span
+covering the generator's lifetime. A generator's body runs in slices — between
+yields the *consumer* is running, not the generator — so work is attributed to
+whoever actually did it: calls the body makes nest under the generator, and
+calls the consumer makes between yields do not.
+
+```python
+class MyAgent(Agent, llm=llm):
+    async def review(self, items: list[str]):
+        """Traced; each classify() call nests under review()."""
+        for item in items:
+            yield await self.classify(item)
+```
+
+Two limits worth knowing:
+
+- **A generator can't be a generation stub.** `yield` plus a `...` body raises
+  `TypeError` at class creation. Generation applies only to coroutine methods,
+  so the `...` would otherwise be silently ignored and the method would run as
+  an ordinary generator yielding whatever its body literally contained.
+- **Decorated generators are not detected.** If you wrap a generator method in
+  your own decorator, the framework sees the decorator rather than the
+  generator and falls back to the plain method wrapper, so calls made by the
+  body get attributed to the consumer. This is not fixable in general — a
+  decorator that returns the generator and one that consumes it are
+  indistinguishable from the outside — so leave trace-sensitive generator
+  methods undecorated.
 
 ### Quality & Testing
 
