@@ -112,6 +112,15 @@ def _working_directory_project_scope(working_dir: str):
     help="Show agent Python code execution panels",
 )
 @click.option(
+    "--display-mode",
+    type=click.Choice(["native-replay", "native", "fullscreen"]),
+    default=None,
+    help=(
+        "Terminal display mode: native-replay, native, or fullscreen. "
+        "Changing modes requires a restart."
+    ),
+)
+@click.option(
     "--continue",
     "-c",
     "continue_session",
@@ -132,6 +141,7 @@ def command(
     no_trace: bool,
     vi: bool,
     python: bool,
+    display_mode: str | None,
     continue_session: str | None,
 ):
     """Launch the NVIDIA Labs Object Oriented Agents (NOOA) TUI.
@@ -167,6 +177,7 @@ def command(
             no_trace=no_trace,
             vi=vi,
             python=python,
+            display_mode=display_mode,
         )
 
         continue_last = continue_session == _RESUME_LAST

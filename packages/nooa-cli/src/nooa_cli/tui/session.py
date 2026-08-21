@@ -28,6 +28,7 @@ from rich.cells import chop_cells, set_cell_size
 from rich.console import Console as RichConsole
 from rich.text import Text
 
+from .host_services import TUIHostServices
 from .terminal_safety import (
     fallback_transcript_columns,
     normalize_transcript_block,
@@ -426,29 +427,171 @@ class Session:
         except (ImportError, OSError):
             pass
 
+        from nooa_cli.interactive import LocalAgentRunner
+
+        from .config import resolve_display_mode
+        from .tui_application import DispatcherExit
+
+        app_ref: list[TUIApplication] = []
+
+        def _emit_from_agent_runner(text: str) -> None:
+            if app_ref:
+                app_ref[0].emit_block(text)
+
+        agent_runner = LocalAgentRunner(
+            self.agent,
+            emit_text=_emit_from_agent_runner,
+            agent_id=f"local-{id(self.agent):x}",
+            # Startup below performs substantial renderer/frontend wiring.
+            # Acquire single-subscriber agent callbacks only once that work is
+            # complete and covered by the teardown finally.
+            bind_callbacks=False,
+        )
+        self._local_agent_runner = agent_runner
+        policy_ref: list[Any] = []
+
+        def _invalidate_turn_policy() -> None:
+            if policy_ref:
+                policy_ref[0].invalidate_keep_going()
+
+        async def _shutdown_turn_policy() -> None:
+            if policy_ref:
+                await policy_ref[0].shutdown()
+
+        async def _quiesce_output_producers() -> None:
+            # TUIApplication invokes this before its final queue drain. Policy
+            # and runner shutdown are idempotent, so Session's outer teardown
+            # may safely repeat them after partial startup failures.
+            try:
+                await _shutdown_turn_policy()
+            except Exception:
+                logger.debug("turn-policy pre-drain shutdown failed", exc_info=True)
+            try:
+                await agent_runner.shutdown()
+            except Exception:
+                logger.debug("agent runner pre-drain shutdown failed", exc_info=True)
+
+        async def _todo_view() -> Any:
+            from .todo_explorer import TodoExplorerView, build_todo_rows
+
+            rows = await agent_runner.run_async(
+                lambda: build_todo_rows(getattr(self.agent, "todo", None))
+            )
+            return TodoExplorerView(rows)
+
+        async def _memory_view() -> Any:
+            from .memory_explorer import (
+                MemoryExplorerView,
+                build_memory_rows,
+                last_reflection_summary,
+            )
+
+            memory_skill = getattr(self.agent, "memory", None)
+            manager = getattr(memory_skill, "_mgr", None)
+            if manager is None:
+                raise RuntimeError("Memory is not enabled for this agent (see /memory).")
+            rows, reflection_line = await agent_runner.run_async(
+                lambda: (
+                    build_memory_rows(self.agent, manager),
+                    last_reflection_summary(manager),
+                )
+            )
+            return MemoryExplorerView(
+                rows,
+                forget=lambda memory_id: agent_runner.run(lambda: manager.forget(memory_id)),
+                mark_done=lambda memory_id: agent_runner.run(
+                    lambda: manager.update(memory_id, status="done")
+                ),
+                last_reflection=reflection_line,
+            )
+
+        def _record_stray_output(content: str, disposition: str) -> None:
+            event_manager = getattr(self.agent, "event_manager", None)
+            if event_manager is None:
+                return
+            try:
+                from nooa.events import DebugTrace
+
+                event_manager.add(DebugTrace(content=f"[stray:{disposition}] {content[:200]}"))
+            except Exception:
+                logger.debug("failed to record stray output", exc_info=True)
+
+        def _replay_identity() -> tuple[set[str], list[tuple[int, int]]]:
+            event_manager = getattr(self.agent, "event_manager", None)
+            if event_manager is None or not hasattr(event_manager, "items"):
+                return set(), []
+            active_ids: set[str] = set()
+            active_ranges: list[tuple[int, int]] = []
+            try:
+                items = list(event_manager.items())
+            except Exception:
+                return active_ids, active_ranges
+            for tag, event in items:
+                tag_range = TUIApplication._tag_range(str(tag))
+                if tag_range is not None:
+                    active_ranges.append(tag_range)
+                event_id = getattr(event, "id", None)
+                if event_id is not None:
+                    active_ids.add(str(event_id))
+            return active_ids, active_ranges
+
+        reflection = getattr(self.agent, "_tui_reflection_runner", None)
+        auxiliary_status = None if reflection is None else reflection.indicator_frame
+
         self._app = TUIApplication(
-            agent=self.agent,
+            agent=agent_runner,
+            host_services=TUIHostServices(
+                open_todo_view=_todo_view,
+                open_memory_view=_memory_view,
+                record_stray_output=_record_stray_output,
+                replay_identity=_replay_identity,
+                auxiliary_status=auxiliary_status,
+                before_output_drain=_quiesce_output_producers,
+            ),
             on_command=self._on_command,
             on_cancel_command=self._cancel_active_slash_command,
             on_bang=self._on_bang,
             on_output=self._on_app_output,
+            on_agent_activity=_invalidate_turn_policy,
             completer=SlashCommandCompleter(self.registry),
             session_label=self._session_label,
             config=self.config,
-            full_screen=self.config.tui.full_screen,
+            display_mode=resolve_display_mode(self.config.tui),
             submission_guard=self._llm_submission_error,
+        )
+        app_ref.append(self._app)
+
+        from .local_turn_policy import LocalTurnPolicy
+
+        turn_policy = LocalTurnPolicy(
+            self.agent,
+            agent_runner,
+            self.config,
+            emit_output=self._on_app_output,
+            invalidate=self._app.invalidate,
+        )
+        policy_ref.append(turn_policy)
+        self._local_turn_policy = turn_policy
+        agent_runner.set_dispatch_hooks(
+            on_state_change=self._app.runtime_state_changed,
+            on_before_handle=turn_policy.before_handle,
+            on_after_handle=turn_policy.after_handle,
+            on_notification=lambda notification: (
+                turn_policy.on_notification(notification),
+                self._app.runtime_notification_received(),
+            ),
+            dispatcher_exit=DispatcherExit,
+            on_cancelled=self._app.runtime_cancelled,
         )
         bind_app = getattr(self.frontend, "bind_app", None)
         if callable(bind_app):
             bind_app(self._app)
-        # Wire agent_run into all commands so they can dispatch mutations
-        # to the agent thread via self.agent_run(fn). agent_run_async is the
-        # awaitable variant — commands running on the UI loop use it so they
-        # never block the loop (and stall message() output / spin the prompt).
-        self._handler._agent_run_async = self._app.agent_run_async
+        # The composition root—not the renderer—owns host execution. Commands
+        # receive the concrete runner dispatchers directly.
+        self._handler._agent_run_async = agent_runner.run_async
         for cmd in self.registry.commands():
-            cmd._agent_run = self._app.agent_run
-            cmd._agent_run_async = self._app.agent_run_async
+            cmd._agent_run = agent_runner.run
+            cmd._agent_run_async = agent_runner.run_async
         # Wire the user-bar render + SessionUserMessage log on the channel's
         # on_get hook so the echo fires when the dispatcher (or agent
         # code mid-turn) actually dequeues the message — symmetric across
@@ -456,8 +599,7 @@ class Session:
         # and not on the dispatcher loop. self.agent is typed as Agent;
         # the queue is on BaseTUIAgent. getattr matches the existing
         # convention in tui_application.py for the same lookup.
-        queue = getattr(self.agent, "_user_messages_in", None)
-        if queue is not None:
+        if agent_runner is not None:
 
             def _on_user_message_hook(text: str) -> None:
                 # DB writes run here on the agent loop thread (the on_get
@@ -494,7 +636,7 @@ class Session:
                         )
                     )
 
-            queue.set_on_get(_on_user_message_hook)
+            agent_runner.set_user_message_accepted_callback(_on_user_message_hook)
 
         # Swap the frontend's Rich Console for one that writes through
         # our block queue, so slash-command output (e.g. /help tables)
@@ -540,6 +682,8 @@ class Session:
         # ``app.run_async`` completion still fires ``renderer.detach``
         # in the finally.
         try:
+            agent_runner.bind()
+            agent_runner.activate(asyncio.get_running_loop())
             self._renderer.attach()
             # Event-driven activity tracking: LLMCallStart/LLMCallEnd "on"
             # hooks feed get_activity() (and /activity) without inferring
@@ -564,69 +708,92 @@ class Session:
                 TextOutput("Interrupted by the user. Exiting TUI...", "warning")
             )
         finally:
-            # Order matters:
-            # 1. Detach the renderer FIRST. Clears agent._render_message
-            #    so any post-shutdown self.message() call (e.g. from
-            #    save_snapshot) doesn't write through a dead emit_text.
-            # 2. Cancel AND AWAIT fire-and-forget tasks so they don't
-            #    trip "Task was destroyed but it is pending" warnings
-            #    when the loop closes.
-            # 3. Diagnostics, frontend close, snapshot, session close.
-            self._renderer.detach()
-            if self._unsub_activity is not None:
+            # Teardown is a sequence of independent best-effort phases. Keep the
+            # application/body exception authoritative; otherwise re-raise the
+            # first cleanup failure after every phase (especially terminal
+            # restoration) has had a chance to run.
+            body_error = sys.exception()
+            teardown_error: BaseException | None = None
+
+            async def _teardown_phase(label: str, action: Callable[[], Any]) -> None:
+                nonlocal teardown_error
                 try:
-                    self._unsub_activity()
-                except Exception:
-                    logger.debug("detach activity tracking failed", exc_info=True)
+                    result = action()
+                    if inspect.isawaitable(result):
+                        await result
+                except BaseException as exc:
+                    if teardown_error is None:
+                        teardown_error = exc
+                    logger.warning("Session teardown phase failed: %s", label, exc_info=True)
+
+            # Order matters: detach presentation before lifecycle awaits, then
+            # stop producers before releasing persistence and terminal state.
+            await _teardown_phase("renderer detach", self._renderer.detach)
+            await _teardown_phase("agent observation close", self._app.close_agent_observation)
+
+            if self._unsub_activity is not None:
+                unsubscribe = self._unsub_activity
                 self._unsub_activity = None
-            # Shut down spawned jobs before cancelling background tasks
-            # so generator finally blocks run cleanly.
-            qm = getattr(self.agent, "queue_manager", None)
-            if qm is not None:
-                app = getattr(self, "_app", None)
-                if app is not None:
-                    await app.shutdown_agent_queue_manager(agent=self.agent)
-                else:
-                    await qm.shutdown()
-            await self._cancel_background_tasks()
+                await _teardown_phase("activity tracking detach", unsubscribe)
+
+            await _teardown_phase("turn-policy shutdown", _shutdown_turn_policy)
+            # Idempotent and essential when renderer observation or runner
+            # activation failed before the application entered its own guard.
+            await _teardown_phase("agent runner shutdown", agent_runner.shutdown)
+            await _teardown_phase("background task cancellation", self._cancel_background_tasks)
+
             if self._bang_shell is not None:
-                await self._bang_shell.close()
+                bang_shell = self._bang_shell
                 self._bang_shell = None
-            self._dump_exit_diagnostics()
-            self.frontend.close()
+                await _teardown_phase("bang shell close", bang_shell.close)
+
+            await _teardown_phase("exit diagnostics", self._dump_exit_diagnostics)
+            await _teardown_phase("frontend close", self.frontend.close)
+
             if self._session_manager is not None:
                 storage = getattr(self.agent, "_storage", None)
                 if storage is not None and hasattr(storage, "save_snapshot"):
-                    try:
+
+                    async def _save_snapshot() -> None:
                         app = getattr(self, "_app", None)
                         if app is not None:
-                            await app.agent_run_async(lambda: storage.save_snapshot(self.agent))
+                            await agent_runner.run_async(lambda: storage.save_snapshot(self.agent))
                         else:
-                            # No agent loop — safe to call inline (single-threaded).
                             storage.save_snapshot(self.agent)
-                    except Exception:
-                        # A failed shutdown snapshot silently loses ALL durable
-                        # state (vars, todos, ...) on the next resume — surface
-                        # it at WARNING, not DEBUG, so it can't hide.
-                        logger.warning("save_snapshot on shutdown failed", exc_info=True)
+
+                    await _teardown_phase("session snapshot", _save_snapshot)
+
             # Coding agents own long-lived shell and LLM resources. Close them
             # after the final snapshot but before releasing session storage.
             close_agent = getattr(type(self.agent), "close", None)
             if callable(close_agent):
-                try:
-                    close_result = close_agent(self.agent)
-                    if inspect.isawaitable(close_result):
-                        await close_result
-                except Exception:
-                    logger.warning("agent shutdown failed", exc_info=True)
+                await _teardown_phase("agent close", lambda: close_agent(self.agent))
+
             if self._session_manager is not None:
-                self._session_manager.close()
-            # Restore the previous exception handler so we don't pin
-            # this Session or route unrelated failures through a torn-down TUI.
+                await _teardown_phase("session manager close", self._session_manager.close)
+
+            # These final phases must run even after every earlier failure: they
+            # release loop references and return the terminal to cooked/echoing
+            # mode before any exception escapes the session.
             if self._startup_loop is not None:
-                self._startup_loop.set_exception_handler(self._prev_exception_handler)
-            self._restore_terminal()
-            self._print_exit_message()
+                await _teardown_phase(
+                    "exception handler restore",
+                    lambda: self._startup_loop.set_exception_handler(self._prev_exception_handler),
+                )
+            await _teardown_phase("terminal restore", self._restore_terminal)
+            await _teardown_phase("exit message", self._print_exit_message)
+
+            if teardown_error is not None:
+                if body_error is None:
+                    raise teardown_error
+                logger.warning(
+                    "Session cleanup also failed while propagating the primary error",
+                    exc_info=(
+                        type(teardown_error),
+                        teardown_error,
+                        teardown_error.__traceback__,
+                    ),
+                )
 
     async def _on_app_output(self, output: Any) -> None:
         """Render structured output emitted by ``TUIApplication``.
@@ -824,6 +991,10 @@ class Session:
             force_terminal=True,
             color_system="256",
             width=max(int(width), 1),
+            # Rich ignores an explicit width on a dumb/StringIO console unless
+            # height is explicit too. Rendering is unpaged, so its value is
+            # immaterial; fixing it keeps wrapping tied to transcript width.
+            height=1,
             theme=CATPPUCCIN_THEME,
         )
         console.print(renderable)
@@ -845,10 +1016,9 @@ class Session:
         assert self._app is not None
 
         rendered = self._render_to_ansi(renderable)
-        full_screen = bool(
-            getattr(getattr(getattr(self, "config", None), "tui", None), "full_screen", False)
-            is True
-        )
+        from .config import DisplayMode
+
+        full_screen = getattr(self._app, "display_mode", None) is DisplayMode.FULLSCREEN
         replay = (lambda r=renderable: self._render_to_ansi(r)) if full_screen else None
         if replay is None:
             self._app.emit_block(rendered, event_id=event_id, tags=tags, keep=keep)
@@ -897,7 +1067,6 @@ class Session:
     async def _run_command(self, text: str) -> Callable[[], Awaitable[None]] | None:
         """Run one slash command body and return any post-done render callback."""
         assert self._app is not None
-
         result = await self._handler.handle(text, render_outputs=False)
         if result.new_session_manager is not None:
             # Suppress normal cancelled-turn UX/restart while the command runner
@@ -907,11 +1076,11 @@ class Session:
             try:
                 # Cancel the running agent turn so it doesn't keep working
                 # in the stale session after /clear or /session new.
-                await self._app.cancel_agent_turn(source="session")
+                await self._local_agent_runner.cancel_for_transition()
                 await self._swap_session_manager(result.new_session_manager)
                 post_swap = getattr(result, "post_session_swap", None)
                 if post_swap is not None:
-                    extra_outputs = await self._app.agent_run_async(post_swap)
+                    extra_outputs = await self._local_agent_runner.run_async(post_swap)
                     if extra_outputs:
                         result.outputs.extend(extra_outputs)
                 self._session_title_requested = False
@@ -965,12 +1134,8 @@ class Session:
                         await self.frontend.render(AgentMessage(_text, show_rule=False))
                     assert self._app is not None
                     _new = _swap_req.new_agent
-                    # Queue the seed prompt on the SHARED user-messages channel, then
-                    # swap+restart the dispatcher onto the new agent (on the agent loop).
-                    _q = getattr(_new, "_user_messages_in", None)
-                    if _q is not None:
-                        _q.put(_swap_req.seed_prompt)
-                    await self._app.agent_run_async(lambda: self._app.swap_agent(_new))
+                    await self._local_agent_runner.seed_and_swap(_new, _swap_req.seed_prompt)
+                    self._app.agent = _new
 
                 return _render_and_swap
 
@@ -1006,9 +1171,8 @@ class Session:
             # and drop the result rather than smuggling it through the
             # user-message path (where it would masquerade as something the
             # human typed).
-            slash_ch = getattr(self.agent, "_slash_commands_in", None)
-            if slash_ch is not None:
-                slash_ch.put(result.slash_result)
+            if self._local_agent_runner.submit_slash_result(result.slash_result):
+                pass
             else:
                 self._emit_text(
                     Text(
@@ -1103,10 +1267,9 @@ class Session:
         assert self._renderer is not None and self._app is not None
 
         bar = _build_user_bar(text, self._app, self._colors)
-        full_screen = bool(
-            getattr(getattr(getattr(self, "config", None), "tui", None), "full_screen", False)
-            is True
-        )
+        from .config import DisplayMode
+
+        full_screen = getattr(self._app, "display_mode", None) is DisplayMode.FULLSCREEN
         replay = (
             (lambda t=text: _build_user_bar(t, self._app, self._colors)) if full_screen else None
         )
@@ -1287,23 +1450,15 @@ class Session:
 
     async def _swap_session_manager(self, new_sm: "SessionManager") -> None:
         """Close the current session and switch to *new_sm*."""
-        app = getattr(self, "_app", None)
-        interrupt_reflection = getattr(app, "interrupt_reflection", None)
-        if callable(interrupt_reflection):
-            await interrupt_reflection()
+        turn_policy = getattr(self, "_local_turn_policy", None)
+        if turn_policy is not None:
+            await turn_policy.interrupt_reflection()
 
         # Shut down spawned jobs and flush all queue channels so stale
         # items from the old session don't leak into the new one.
-        qm = getattr(self.agent, "queue_manager", None)
-        if qm is not None:
-            if app is not None:
-                await app.shutdown_agent_queue_manager(agent=self.agent, flush=True)
-            else:
-                await qm.shutdown()
-                for name in qm.names():
-                    ch = qm.get_channel(name)
-                    if ch.mode == "queue":
-                        ch.flush()
+        agent_runner = getattr(self, "_local_agent_runner", None)
+        if agent_runner is not None:
+            await agent_runner.shutdown_queue_manager(flush=True)
         if self._session_manager is not None:
             # Save snapshot before closing so /clear, /session new, and
             # /session resume don't lose the current session's self.v/todo.
@@ -1312,7 +1467,7 @@ class Session:
                 try:
                     app = getattr(self, "_app", None)
                     if app is not None:
-                        await app.agent_run_async(lambda: storage.save_snapshot(self.agent))
+                        await agent_runner.run_async(lambda: storage.save_snapshot(self.agent))
                     else:
                         storage.save_snapshot(self.agent)
                 except Exception:
@@ -1343,7 +1498,7 @@ class Session:
                     logger.warning("memory reconfiguration on session swap failed", exc_info=True)
 
             if app is not None:
-                await app.agent_run_async(_do_swap)
+                await agent_runner.run_async(_do_swap)
             else:
                 _do_swap()
         # Propagate to registry and all command instances so /session export etc. use new ID.

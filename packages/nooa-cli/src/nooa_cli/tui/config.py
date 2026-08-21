@@ -18,10 +18,12 @@ Usage:
     config = Config.load()
 """
 
+import logging
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator
 
 if TYPE_CHECKING:
     from nooa.unifiedllm import CompletionClient
@@ -29,6 +31,16 @@ if TYPE_CHECKING:
 
 # Default model — direct litellm-supported name. Override via config or --model.
 DEFAULT_MODEL = "claude-opus-4-8"
+
+logger = logging.getLogger(__name__)
+
+
+class DisplayMode(StrEnum):
+    """Restart-only terminal ownership mode for the TUI."""
+
+    NATIVE_REPLAY = "native-replay"
+    NATIVE = "native"
+    FULLSCREEN = "fullscreen"
 
 
 # SummarizationConfig moved to core with the interactive-agent base;
@@ -119,14 +131,57 @@ class TUIConfig(BaseModel):
     reflection_debounce_s: float = 10.0
     reflection_grace_s: float = 0.5
 
-    # Native scrollback with debounced clear+rewrite replay on width resize.
+    # Restart-only terminal ownership mode. ``None`` preserves compatibility
+    # with an explicitly configured deprecated ``full_screen`` setting;
+    # otherwise fullscreen is the default.
+    display_mode: DisplayMode | None = None
+
+    # Deprecated compatibility setting: true means native-replay; false means
+    # native. Explicit ``display_mode`` always wins.
     full_screen: bool = True
+    _display_mode_warning_emitted: bool = PrivateAttr(default=False)
 
     # Ordered, structured toolbar providers. Third-party packages can register
     # additional providers through the ``nooa_cli.tui.toolbar_items`` group.
     toolbar_items: list[str] = Field(
         default_factory=lambda: ["time", "model", "context", "session"]
     )
+
+
+def resolve_display_mode(config: TUIConfig) -> DisplayMode:
+    """Resolve one restart-only display mode while preserving old settings.
+
+    An explicit ``display_mode`` has priority over the deprecated
+    ``full_screen`` boolean. With neither explicitly configured, the
+    application-owned alternate-screen renderer is the default.
+    """
+    explicit_mode = "display_mode" in config.model_fields_set and config.display_mode is not None
+    explicit_legacy = "full_screen" in config.model_fields_set
+
+    if explicit_mode:
+        mode = DisplayMode(config.display_mode)
+    elif explicit_legacy:
+        mode = DisplayMode.NATIVE_REPLAY if config.full_screen else DisplayMode.NATIVE
+    else:
+        mode = DisplayMode.FULLSCREEN
+
+    if explicit_legacy and not config._display_mode_warning_emitted:
+        legacy_mode = DisplayMode.NATIVE_REPLAY if config.full_screen else DisplayMode.NATIVE
+        if explicit_mode and legacy_mode is not mode:
+            logger.warning(
+                "tui.full_screen is deprecated and conflicts with tui.display_mode; "
+                "display_mode=%s wins",
+                mode.value,
+            )
+            config._display_mode_warning_emitted = True
+        else:
+            logger.warning(
+                "tui.full_screen is deprecated; use tui.display_mode=%s instead",
+                mode.value,
+            )
+            config._display_mode_warning_emitted = True
+
+    return mode
 
 
 class Config(BaseModel):
@@ -170,6 +225,7 @@ class Config(BaseModel):
         "vi": "tui.vi_mode",
         "agent": "tui.agent_spec",
         "python": "tui.show_python",
+        "display_mode": ("tui.display_mode", DisplayMode),
         "full_screen": "tui.full_screen",
         "memory": "tui.memory",
         "memory_agents": "tui.memory_agents",

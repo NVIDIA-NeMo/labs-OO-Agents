@@ -8,8 +8,8 @@ which froze the prompt_toolkit UI loop while the agent loop was busy —
 starving the block-queue consumer (``self.message()`` output stopped
 appearing) and wedging the prompt redraw (status-bar / input flicker).
 
-The fix routes the probe through the awaitable ``agent_run_async`` so the UI
-loop keeps spinning. These tests pin that behaviour at the unit level.
+The fix routes the probe through the awaitable local-runtime dispatcher so the
+UI loop keeps spinning. These tests pin that behaviour at the unit level.
 """
 
 import asyncio
@@ -41,19 +41,19 @@ def _make_busy_agent_loop():
 
 
 @pytest.mark.asyncio
-async def test_agent_run_async_does_not_block_calling_loop():
-    """``agent_run_async`` yields to the calling loop while the agent loop works.
+async def test_local_agent_runner_run_async_does_not_block_calling_loop():
+    """``LocalAgentRunner.run_async`` yields while its worker loop works.
 
     We schedule a probe that only completes after a delay, and concurrently run
     a "UI heartbeat" coroutine on the calling loop. If ``agent_run_async``
     blocked the loop (the old ``future.result`` behaviour), the heartbeat would
     not tick until the probe returned. We assert it ticks meanwhile.
     """
-    from nooa_cli.tui.tui_application import TUIApplication
+    from nooa_cli.interactive import LocalAgentRunner
 
-    app = TUIApplication.__new__(TUIApplication)  # avoid full prompt_toolkit init
+    runner = LocalAgentRunner.__new__(LocalAgentRunner)
     loop, _stop, _t = _make_busy_agent_loop()
-    app._agent_loop = loop
+    runner._loop = loop
 
     probe_done = asyncio.Event()
 
@@ -75,7 +75,7 @@ async def test_agent_run_async_does_not_block_calling_loop():
 
     hb = asyncio.ensure_future(heartbeat())
 
-    result = await app.agent_run_async(slow_probe)
+    result = await runner.run_async(slow_probe)
     probe_done.set()
     await hb
 
@@ -87,14 +87,14 @@ async def test_agent_run_async_does_not_block_calling_loop():
 
 
 @pytest.mark.asyncio
-async def test_agent_run_async_inline_without_loop():
-    """With no agent loop (tests / pre-startup) it runs inline, no await needed."""
-    from nooa_cli.tui.tui_application import TUIApplication
+async def test_local_agent_runner_run_async_inline_without_loop():
+    """With no worker loop (tests / pre-startup), dispatch runs inline."""
+    from nooa_cli.interactive import LocalAgentRunner
 
-    app = TUIApplication.__new__(TUIApplication)
-    app._agent_loop = None
+    runner = LocalAgentRunner.__new__(LocalAgentRunner)
+    runner._loop = None
 
-    assert await app.agent_run_async(lambda: 42) == 42
+    assert await runner.run_async(lambda: 42) == 42
 
 
 @pytest.mark.asyncio
@@ -211,7 +211,16 @@ async def test_session_swap_uses_async_agent_dispatch():
         used["sync"] += 1
         return fn()
 
-    session._app = SimpleNamespace(agent_run_async=async_run, agent_run=sync_run)
+    session._app = SimpleNamespace()
+
+    async def shutdown_queue_manager(*, flush):
+        assert flush is True
+
+    session._local_agent_runner = SimpleNamespace(
+        run_async=async_run,
+        run=sync_run,
+        shutdown_queue_manager=shutdown_queue_manager,
+    )
 
     await session._swap_session_manager(new_manager)
 

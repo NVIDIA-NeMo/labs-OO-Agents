@@ -140,6 +140,31 @@ def strip_safe_ansi(value: str) -> str:
     return _SAFE_ANSI_RE.sub("", value)
 
 
+def project_prompt_toolkit_ansi(value: str) -> str:
+    """Project safe transcript ANSI onto prompt_toolkit's smaller ANSI grammar.
+
+    prompt_toolkit's ``ANSI`` parser handles conventional semicolon SGR, but
+    not OSC-8 hyperlinks or colon-delimited SGR. Strip only that unsupported
+    presentation metadata so its parameter bytes can never become visible text.
+    Input is sanitized here as a defense-in-depth boundary for direct callers.
+    """
+    safe = sanitize_transcript_ansi(value)
+
+    def supported_sgr(match: re.Match[str]) -> str:
+        return "" if ":" in match.group(1) else match.group(0)
+
+    without_unsupported_sgr = re.sub(
+        r"\x1b\[([0-9:;]*)m",
+        supported_sgr,
+        safe,
+    )
+    return re.sub(
+        r"\x1b\]8;[^\x07\x1b\r\n]*;[^\x07\x1b\r\n]*(?:\x07|\x1b\\)",
+        "",
+        without_unsupported_sgr,
+    )
+
+
 def fallback_transcript_columns(default: int = 120) -> int:
     """Safe native-scrollback width when no prompt_toolkit Output exists."""
     try:

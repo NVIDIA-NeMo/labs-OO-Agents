@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,17 +17,25 @@ from .explorer_base import (
 from .subapp import SubviewKeyResult
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
+class TodoExplorerComment:
+    """Immutable presentation copy of one todo comment."""
+
+    created_at: str
+    body: str
+
+
+@dataclass(frozen=True, slots=True)
 class TodoExplorerRow:
     """One todo item in the explorer list."""
 
     id: str
     title: str
     status: str
-    deps: list[str]
+    deps: tuple[str, ...]
     created_at: str
     notes: str
-    comments: list[Any]
+    comments: tuple[TodoExplorerComment, ...]
     search_text: str
 
 
@@ -36,22 +45,29 @@ def build_todo_rows(todo_manager: Any) -> list[TodoExplorerRow]:
     if todo_manager is None:
         return rows
     for t in todo_manager.list_todos():
+        comments = tuple(
+            TodoExplorerComment(
+                created_at=str(getattr(comment, "created_at", "")),
+                body=str(getattr(comment, "body", comment)),
+            )
+            for comment in t.comments
+        )
         search_parts = [
             t.id,
             t.title,
             t.status,
             t.notes,
-            *[getattr(c, "body", str(c)) for c in t.comments],
+            *[comment.body for comment in comments],
         ]
         rows.append(
             TodoExplorerRow(
                 id=t.id,
                 title=t.title,
                 status=t.status,
-                deps=list(t.deps),
+                deps=tuple(t.deps),
                 created_at=t.created_at,
                 notes=t.notes,
-                comments=list(t.comments),
+                comments=comments,
                 search_text="\n".join(search_parts),
             )
         )
@@ -61,10 +77,8 @@ def build_todo_rows(todo_manager: Any) -> list[TodoExplorerRow]:
 class TodoExplorerView(ExplorerView):
     """In-app subview for browsing and interacting with todos."""
 
-    def __init__(self, todo_manager: Any) -> None:
-        self._todo_manager = todo_manager
-        rows = build_todo_rows(todo_manager)
-        model = ExplorerModel(rows)
+    def __init__(self, rows: Iterable[TodoExplorerRow]) -> None:
+        model = ExplorerModel(list(rows))
         config = ExplorerConfig(
             title="Todo Explorer",
             detail_pane_name="todo detail",
@@ -107,8 +121,8 @@ class TodoExplorerView(ExplorerView):
             lines.append(f"Comments ({len(row.comments)}):")
             lines.append("")
             for comment in row.comments:
-                ts = getattr(comment, "created_at", "")
-                body = getattr(comment, "body", str(comment))
+                ts = comment.created_at
+                body = comment.body
                 lines.append(f"  [{ts}]")
                 for raw in body.splitlines() or [""]:
                     lines.extend(wrap_plain_line(f"    {raw}", width))

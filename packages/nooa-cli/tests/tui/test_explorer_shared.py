@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+from nooa_cli.interactive import AgentJobState, AgentJobSummary
+from nooa_cli.interactive.runtime import JobSnapshot
 from nooa_cli.tui.event_explorer import (
     highlight_terms_with_current,
 )
@@ -258,12 +260,31 @@ class TestJobExplorer:
         ch.qsize.return_value = 3
         qm.channels.return_value = {"ci": ch}
 
-        rows = build_job_rows(qm)
+        rows = build_job_rows([JobSnapshot("ci", "ci-pipeline", "running", 3, ("line1", "line2"))])
         assert len(rows) == 1
         assert rows[0].channel == "ci"
         assert rows[0].state == "running"
         assert rows[0].delivered == 2
         assert rows[0].queued == 3
+
+    def test_build_job_rows_accepts_observation_projection(self):
+        rows = build_job_rows(
+            [
+                AgentJobSummary(
+                    "logs",
+                    "tail logs",
+                    AgentJobState.RUNNING,
+                    4,
+                    ("first", "second"),
+                )
+            ]
+        )
+
+        assert len(rows) == 1
+        assert rows[0].channel == "logs"
+        assert rows[0].state == "running"
+        assert rows[0].queued == 4
+        assert rows[0].values == ["first", "second"]
 
     def test_job_explorer_view_renders(self):
         qm = MagicMock()
@@ -276,7 +297,7 @@ class TestJobExplorer:
         qm.job.return_value = handle
         qm.channels.return_value = {}
 
-        view = JobExplorerView(qm)
+        view = JobExplorerView([JobSnapshot("monitor", "health-check", "done", 0, ("ok",))])
         output = view.render(80, 24)
         assert "Job Explorer" in output
 
@@ -291,7 +312,7 @@ class TestJobExplorer:
         qm.job.return_value = handle
         qm.channels.return_value = {}
 
-        view = JobExplorerView(qm)
+        view = JobExplorerView([JobSnapshot("test-job", "test", "running", 0, ())])
         result = view.handle_key("text", "x")
         assert result == "ignored"
 
@@ -335,7 +356,7 @@ class TestTodoExplorer:
         todo1.comments = []
         todo_mgr.list_todos.return_value = [todo1]
 
-        view = TodoExplorerView(todo_mgr)
+        view = TodoExplorerView(build_todo_rows(todo_mgr))
         output = view.render(80, 24)
         assert "Todo Explorer" in output
 
@@ -351,7 +372,7 @@ class TestTodoExplorer:
         todo1.comments = []
         todo_mgr.list_todos.return_value = [todo1]
 
-        view = TodoExplorerView(todo_mgr)
+        view = TodoExplorerView(build_todo_rows(todo_mgr))
         result = view.handle_key("text", "x")
         assert result == "ignored"
 
@@ -359,6 +380,6 @@ class TestTodoExplorer:
         todo_mgr = MagicMock()
         todo_mgr.list_todos.return_value = []
 
-        view = TodoExplorerView(todo_mgr)
+        view = TodoExplorerView(build_todo_rows(todo_mgr))
         output = view.render(80, 24)
         assert "No todos." in output

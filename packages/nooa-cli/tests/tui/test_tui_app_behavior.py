@@ -28,7 +28,13 @@ import threading
 
 import pytest
 
-from .tui_app_harness import FakeAgent, MutableRecordingOutput, ThreadGate, TUIHarness
+from .tui_app_harness import (
+    FakeAgent,
+    MutableRecordingOutput,
+    ThreadGate,
+    TUIHarness,
+    make_local_tui_app,
+)
 
 XFAIL = pytest.mark.xfail(strict=True, reason="not yet implemented in Plan-C TUIApplication")
 
@@ -58,6 +64,107 @@ async def test_baseline_prompt_visible_at_startup():
         await h.wait_for(lambda: h.app.prompt_char_visible())  # new API
 
 
+async def test_runner_activation_failure_still_restores_agent_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = FakeAgent()
+    previous_notify = agent.queue_manager._notify_callback
+    previous_on_get = agent._user_messages_in._on_get
+    app = make_local_tui_app(agent)
+    runner = app._test_agent_runner
+    assert runner is not None
+
+    def fail_activate(_loop) -> None:
+        raise RuntimeError("worker startup failed")
+
+    monkeypatch.setattr(runner, "activate", fail_activate)
+    with pytest.raises(RuntimeError, match="worker startup failed"):
+        try:
+            runner.activate(asyncio.get_running_loop())
+        finally:
+            app.close_agent_observation()
+            await runner.shutdown()
+
+    assert runner.closed
+    assert agent.queue_manager._notify_callback is previous_notify
+    assert agent._user_messages_in._on_get is previous_on_get
+
+
+async def test_output_producers_quiesce_before_final_queue_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A producer's final output is queued before the consumer is retired."""
+    from nooa_cli.tui.host_services import TUIHostServices
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    observations: list[tuple[str, bool, bool]] = []
+    app: TUIApplication
+
+    async def quiesce() -> None:
+        observations.append(
+            ("quiesce", app._block_queue is not None, app._consumer_task is not None)
+        )
+        app.emit_block("final producer output\n")
+
+    app = TUIApplication(
+        host_services=TUIHostServices(before_output_drain=quiesce),
+        display_mode="native-replay",
+    )
+
+    async def exit_immediately(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(app._app, "run_async", exit_immediately)
+    monkeypatch.setattr(
+        "nooa_cli.tui.stream_forwarder.install_stray_stream_capture",
+        lambda *_args, **_kwargs: lambda: None,
+    )
+
+    await app.run_async()
+
+    assert observations == [("quiesce", True, True)]
+    assert "final producer output" in app.output_buffer.text
+    assert app._block_queue is None
+
+
+async def test_observation_close_failure_does_not_skip_app_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nooa_cli.tui.host_services import TUIHostServices
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    phases: list[str] = []
+
+    async def quiesce() -> None:
+        phases.append("quiesce")
+
+    app = TUIApplication(
+        host_services=TUIHostServices(before_output_drain=quiesce),
+        display_mode="native-replay",
+    )
+
+    async def exit_immediately(*_args, **_kwargs) -> None:
+        return None
+
+    def fail_close() -> None:
+        phases.append("observation close")
+        raise RuntimeError("observation close failed")
+
+    monkeypatch.setattr(app._app, "run_async", exit_immediately)
+    monkeypatch.setattr(app, "close_agent_observation", fail_close)
+    monkeypatch.setattr(
+        "nooa_cli.tui.stream_forwarder.install_stray_stream_capture",
+        lambda *_args, **_kwargs: lambda: phases.append("streams restored"),
+    )
+
+    await app.run_async()
+
+    assert phases == ["streams restored", "observation close", "quiesce"]
+    assert app._block_queue is None
+    assert app._consumer_task is None
+    assert app._loop is None
+
+
 async def test_pre_run_emit_uses_the_same_normalized_block_as_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -65,7 +172,7 @@ async def test_pre_run_emit_uses_the_same_normalized_block_as_replay(
 
     capture = io.StringIO()
     monkeypatch.setattr("sys.stdout", capture)
-    app = TUIApplication()
+    app = TUIApplication(display_mode="native-replay")
 
     app.emit_block("bootstrap\x1b[2J\r\x07")
 
@@ -82,7 +189,7 @@ async def test_untagged_transcript_retention_is_bounded_before_resize(
     from nooa_cli.tui.tui_application import TUIApplication
 
     monkeypatch.setattr("sys.stdout", io.StringIO())
-    app = TUIApplication()
+    app = TUIApplication(display_mode="native-replay")
 
     for index in range(app._untagged_replay_tail + 5):
         app.emit_block(f"block {index}\n")
@@ -164,11 +271,12 @@ async def test_opening_system_housekeeping_shares_the_user_turn():
 async def test_baseline_agent_message_renders_to_output():
     agent = FakeAgent()
 
-    async def step(self: FakeAgent, msg: str):
-        self.emit_message("Hi there!")
-
-    agent.queue(step)
     async with TUIHarness(agent=agent) as h:
+
+        async def step(self: FakeAgent, msg: str):
+            h.runner._present(self.render_message("Hi there!"))
+
+        agent.queue(step)
         await h.type_keys("ping")
         await h.press("enter")
         await h.wait_output_contains("Hi there!")
@@ -302,15 +410,17 @@ async def test_oauth_modal_ctrl_y_copies_full_authorization_url(monkeypatch):
 
 async def test_status_text_separates_thinking_and_command_status():
     """Thinking and command statuses render as separated status rows."""
-    async with TUIHarness() as h:
-        h.app._in_respond = True
-        h.app._agent_task = asyncio.Future()
+    agent = FakeAgent()
+    agent.block.clear()
+    async with TUIHarness(agent=agent) as h:
+        h.app.submit_message("hold the turn")
+        await h.wait_for(h.app.is_thinking)
         h.app.set_command_status("· !find ~/dev/* | grep unified")
         status = h.app.status_text()
         assert "thinking...\n\n· !find" in status
         assert "thinking...\n· !find" not in status
         assert "thinking...   · !find" not in status
-        h.app._agent_task.cancel()
+        agent.block.set()
 
 
 async def test_llm_probe_status_is_transient_status_line():
@@ -433,7 +543,6 @@ async def test_commands_slash_dispatches_without_calling_agent():
 async def test_commands_slash_fires_on_command_callback():
     """Session wires ``on_command`` to route slash submissions into its
     CommandRegistry; this test pins the hook contract."""
-    from nooa_cli.tui.tui_application import TUIApplication
 
     received: list[str] = []
     from prompt_toolkit.application import create_app_session
@@ -444,7 +553,7 @@ async def test_commands_slash_fires_on_command_callback():
 
     agent = FakeAgent()
     with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
-        app = TUIApplication(agent=agent, on_command=received.append)
+        app = make_local_tui_app(agent, on_command=received.append)
         import asyncio as _a
 
         run_task = _a.create_task(app.run_async())
@@ -468,7 +577,6 @@ async def test_commands_slash_fires_on_command_callback():
 
 async def test_commands_bang_fires_on_bang_callback_with_stripped_body():
     """``on_bang`` receives the body without the leading ``!``."""
-    from nooa_cli.tui.tui_application import TUIApplication
 
     received: list[str] = []
     from prompt_toolkit.application import create_app_session
@@ -479,7 +587,7 @@ async def test_commands_bang_fires_on_bang_callback_with_stripped_body():
 
     agent = FakeAgent()
     with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
-        app = TUIApplication(agent=agent, on_bang=received.append)
+        app = make_local_tui_app(agent, on_bang=received.append)
         import asyncio as _a
 
         run_task = _a.create_task(app.run_async())
@@ -502,11 +610,10 @@ async def test_commands_bang_fires_on_bang_callback_with_stripped_body():
 
 async def test_plain_input_is_blocked_by_actionable_submission_guard():
     """Broken LLM configuration never enters the agent/retry loop."""
-    from nooa_cli.tui.tui_application import TUIApplication
 
     agent = FakeAgent()
-    app = TUIApplication(
-        agent=agent,
+    app = make_local_tui_app(
+        agent,
         submission_guard=lambda: (
             "Cannot send this message because the configured LLM is unavailable.\n"
             "Use /model <name> to recover."
@@ -603,19 +710,6 @@ async def test_slash_command_while_agent_working_dispatches_immediately():
         await h.wait_for(lambda: h.app.commands_dispatched() == ["/exit"])
 
 
-async def test_queue_up_arrow_pops_last_queued_item_when_buffer_empty():
-    agent = _blocking_agent()
-    async with TUIHarness(agent=agent) as h:
-        await h.submit_async("trigger")
-        await h.wait_for(lambda: h.app.is_thinking())
-        await h.type_keys("foo")
-        await h.press("enter")
-        await h.wait_for(lambda: h.capture_queued() == ["foo"])
-        await h.press("up")
-        await h.wait_input_equals("foo")
-        assert h.capture_queued() == []
-
-
 async def test_queue_delivered_as_next_turn_when_agent_finishes():
     agent = _blocking_agent()
     async with TUIHarness(agent=agent) as h:
@@ -707,7 +801,7 @@ async def test_cancelled_agent_run_async_propagates_to_agent_loop():
             raise
 
     async with TUIHarness() as h:
-        task = asyncio.create_task(h.app.agent_run_async(remote_work))
+        task = asyncio.create_task(h.runner.run_async(remote_work))
         await asyncio.wait_for(started.wait(), timeout=1.0)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -749,11 +843,13 @@ async def test_hard_agent_error_shown_in_output():
 async def test_hard_rich_ansi_preserved_in_output():
     agent = FakeAgent()
 
-    async def step(self: FakeAgent, _msg):
-        self.emit_message("**bold**")  # Rich markdown renders bold ANSI
-
-    agent.queue(step)
     async with TUIHarness(agent=agent) as h:
+
+        async def step(self: FakeAgent, _msg):
+            # Rich markdown renders bold ANSI through the explicit presentation sink.
+            h.runner._present(self.render_message("**bold**"))
+
+        agent.queue(step)
         await h.submit_async("go")
         await h.wait_for(lambda: "\x1b[" in h.capture_output_ansi())
 
@@ -864,39 +960,6 @@ async def test_hard_ctrl_c_emits_interrupted_notice_to_scrollback() -> None:
         await h.wait_output_contains("Interrupted")
 
 
-async def test_session_transition_cancel_suppresses_interrupted_and_restart() -> None:
-    """Session-command cancellations do not render Interrupted or restart old work."""
-    from unittest.mock import MagicMock
-
-    from nooa_cli.tui.tui_application import TUIApplication
-
-    app = TUIApplication.__new__(TUIApplication)
-    task = MagicMock()
-    task.cancelled.return_value = True
-    q = MagicMock()
-    q.qsize.return_value = 1
-    agent = MagicMock()
-    agent._user_messages_in = q
-    app._agent_task = task
-    app._agent_cancel_requested = True
-    app._agent_loop_task = MagicMock()
-    app._session_transitioning = True
-    app._swapping = False
-    app._app = MagicMock()
-    app._app.is_running = True
-    app.agent = agent
-    app.emit_block = MagicMock()
-    app._ensure_dispatcher_task = MagicMock()
-    app._has_pending_or_running_non_user_work = MagicMock(return_value=True)
-
-    app._on_agent_done(task)
-
-    app.emit_block.assert_not_called()
-    app._ensure_dispatcher_task.assert_not_called()
-    assert app._agent_cancel_requested is False
-    assert app._agent_loop_task is None
-
-
 async def test_hard_sync_blocking_agent_keeps_input_responsive() -> None:
     """A bad synchronous agent step must not starve prompt_toolkit.
 
@@ -935,8 +998,8 @@ async def test_hard_submit_message_re_entry_pushes_to_queue_not_stomps_task() ->
     async with TUIHarness(agent=agent) as h:
         await h.submit_async("first")
         await h.wait_for(lambda: h.app.is_thinking())
-        assert h.app._agent_task is not None
-        first_task = h.app._agent_task
+        assert h.runner.task is not None
+        first_task = h.runner.task
 
         # Programmatic submission during the blocked turn — pushes onto
         # the hidden InputQueue without replacing _agent_task. The
@@ -944,7 +1007,7 @@ async def test_hard_submit_message_re_entry_pushes_to_queue_not_stomps_task() ->
         # consumed "first" (race) — but "second" must be present in
         # whatever the queue currently holds.
         h.app.submit_message("second")
-        assert h.app._agent_task is first_task  # not replaced
+        assert h.runner.task is first_task  # not replaced
         snap = agent._user_messages_in.snapshot()
         assert any("second" in item for item in snap), (
             f"expected 'second' to be queued; snapshot={snap!r}"
@@ -1051,12 +1114,13 @@ async def test_fullscreen_mode_rewrites_scrollback_on_resize() -> None:
     """Fullscreen writes transcript once, then resize rewrites the whole scrollback."""
     agent = FakeAgent()
 
-    async def step(self: FakeAgent, msg: str):
-        self.emit_message("A long traceback-ish line in native scrollback")
-
-    agent.queue(step)
     output = MutableRecordingOutput()
     async with TUIHarness(agent=agent, full_screen=True, output=output) as h:
+
+        async def step(self: FakeAgent, msg: str):
+            h.runner._present(self.render_message("A long traceback-ish line in native scrollback"))
+
+        agent.queue(step)
         assert h.app.full_screen is True
         assert h.app._app.full_screen is False
         assert h.app._output_window is None
@@ -2044,7 +2108,7 @@ async def test_session_cancel_agent_turn_is_safe_from_ui_loop() -> None:
     async with TUIHarness(agent=agent) as h:
         await h.submit_async("first")
         await asyncio.wait_for(step_started.wait(), timeout=1.0)
-        assert await h.app.cancel_agent_turn(source="session") is True
+        assert await h.runner.cancel_for_transition() is True
         await asyncio.wait_for(cleanup_started.wait(), timeout=1.0)
         await asyncio.wait_for(cleanup_done.wait(), timeout=1.0)
         await h.wait_for(lambda: not h.app.is_thinking())
@@ -2076,7 +2140,7 @@ async def test_shutdown_agent_queue_manager_runs_spawn_cleanup_on_agent_loop() -
     async with TUIHarness(agent=agent) as h:
         await h.submit_async("first")
         await asyncio.wait_for(job_started.wait(), timeout=1.0)
-        await h.app.shutdown_agent_queue_manager(agent=agent)
+        await h.runner.shutdown_queue_manager()
         await asyncio.wait_for(cleanup_started.wait(), timeout=1.0)
         await asyncio.wait_for(cleanup_done.wait(), timeout=1.0)
         assert agent.queue_manager._handles == []
