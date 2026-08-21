@@ -15,12 +15,16 @@ from nooa_cli.coding.delegation import CodingWorker
 
 
 class ExperimentalCodingWorker(CodingWorker):
-    """Coding worker whose provider-facing tool surface is only ``python_cell``."""
+    """You are an isolated software-engineering worker.
+
+    Complete only the bounded objective supplied by the controller. Use the shared
+    working tree carefully, report concise evidence, and leave planning, integration,
+    and final verification to the controller.
+    """
 
     @strategy(
         CodeActExperimental(
             config=CodeActConfig(
-                max_iterations=120,
                 max_retries=6,
                 text_only_stop_behavior="synthetic_comment",
             )
@@ -38,29 +42,27 @@ class ExperimentalCodingWorker(CodingWorker):
 
 
 class ExperimentalTUIAgent(CodingAgent):
-    """Opt-in TUI coding agent backed by :class:`CodeActExperimental`.
+    """A careful software-development agent working in one local repository.
 
-    Select it without changing the default TUI behavior::
+    Inspect repository instructions and relevant code before editing. Preserve
+    unrelated worktree changes. Use delegation only for bounded, context-heavy work;
+    inspect and integrate worker reports. Work until the newest request is complete
+    or genuinely needs user input. Use as many Python cells as necessary, inspect
+    each result, and never claim a check passed without running it. Send each
+    user-facing reply through ``self.message()`` as a complete Markdown document.
 
-        nooa tui --agent nooa_cli.tui.experimental_agent:ExperimentalTUIAgent
+    Finish with exactly one in-cell ``return_result(RespondReason.<reason>,
+    explanation="...")``. Use ``DONE`` after completing the request,
+    ``NEED_INPUT`` only when human input is required, and ``WAIT`` only while an
+    actual background job is active. The explanation states what completed, what
+    input is needed, or which live job is still running.
     """
 
     _worker_type = ExperimentalCodingWorker
 
     @hidden
     @strategy(CodeActExperimental(config=CodeActConfig(cell_timeout=1800.0)))
-    async def handle(self, notification: dict[str, list[Any]]) -> RespondResult:
-        """Fulfill the newest coding request delivered in ``notification``.
-
-        Work until the request is complete or genuinely needs user input. Use
-        as many small execution cells as necessary and inspect each result
-        before proceeding. Never claim a check passed without running it.
-
-        End with exactly one ``return_result(RespondReason.<reason>,
-        explanation="...")``. The explanation must say what completed, what
-        input is needed, or which live job is still running.
-        """
-        ...
+    async def handle(self, notification: dict[str, list[Any]]) -> RespondResult: ...
 
 
 __all__ = ["ExperimentalCodingWorker", "ExperimentalTUIAgent"]
