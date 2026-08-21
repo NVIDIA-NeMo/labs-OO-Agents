@@ -345,6 +345,24 @@ async def test_cell_error_is_reported_not_raised():
         await ex.aclose()
 
 
+async def test_syntax_error_preserves_cell_filename_across_process():
+    """Parser diagnostics retain the generated-cell identity across IPC."""
+    from nooa.errors.formatting import format_error_for_llm
+
+    ex = _executor()
+    try:
+        code = "value = (1 + )"
+        res = await _run(ex, code, 76)
+        assert isinstance(res.error, SyntaxError)
+
+        formatted = format_error_for_llm(res.error, code, formatted_error=res.formatted_error)
+        assert "Cell In[76], line 1" in formatted
+        assert "<unknown>" not in formatted
+        assert formatted.endswith("SyntaxError: invalid syntax")
+    finally:
+        await ex.aclose()
+
+
 async def test_cell_error_preserves_source_location_across_process():
     """The sandbox transports its source-aware diagnostic, not a bare exception."""
     from nooa.errors.formatting import format_error_for_llm

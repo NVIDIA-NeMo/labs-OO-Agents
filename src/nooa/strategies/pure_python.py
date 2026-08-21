@@ -544,8 +544,22 @@ class PurePythonStrategy(CompositeStrategy):
                 f"[PURE_PYTHON] Prefill captured locals: {list(result.captured_locals.keys())}"
             )
 
-        # Emit PythonOutput for the prefill execution result (mirrors normal turn event sequence)
-        if not result.error:
+        # Emit PythonOutput for the prefill execution result (mirrors normal turn event sequence).
+        if result.error:
+            await self._send_execution_error(
+                runtime,
+                result.error,
+                code,
+                result.stdout,
+                result.stderr,
+                execution_count=0,
+                line_offset=getattr(result, "wrapper_line_offset", 0),
+                formatted_error=result.formatted_error,
+                metadata={"prefill": True, "prefill_type": "inspect_inputs"},
+            )
+            # Prefill errors are visible to the LLM but remain non-fatal.
+            logger.warning(f"[PURE_PYTHON] Prefill execution error: {result.error}")
+        else:
             runtime.event_manager.add(
                 PythonOutput(
                     tool_call_id="",
@@ -558,9 +572,6 @@ class PurePythonStrategy(CompositeStrategy):
                     metadata={"prefill": True, "prefill_type": "inspect_inputs"},
                 )
             )
-        else:
-            # Prefill error - log but don't fail (LLM can still proceed)
-            logger.warning(f"[PURE_PYTHON] Prefill execution error: {result.error}")
 
     async def _generate_code(
         self, runtime: RuntimeServices, session: GenerationSession
@@ -862,6 +873,7 @@ class PurePythonStrategy(CompositeStrategy):
         execution_count: int = 0,
         line_offset: int = 0,
         formatted_error: str = "",
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         """Emit a failed cell through the shared structured output contract."""
         error_msg = self._format_error(
@@ -878,7 +890,7 @@ class PurePythonStrategy(CompositeStrategy):
                 stderr=stderr,
                 error=error_msg,
                 execution_status=ResultStatus.ERROR,
-                metadata={"execution_error": True},
+                metadata=metadata if metadata is not None else {"execution_error": True},
             )
         )
 

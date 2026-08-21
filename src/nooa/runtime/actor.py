@@ -1559,9 +1559,13 @@ class ActorRuntime:
             if not isinstance(sys.stdin, BlockedStdinWrapper):
                 sys.stdin = BlockedStdinWrapper(sys.stdin)
 
+            # Use the execution-cell filename for parser diagnostics as well as
+            # compiled runtime tracebacks.
+            cell_filename = f"Cell In[{execution_count}]"
+
             # Parse AST to find method definitions
             try:
-                tree = ast.parse(code)
+                tree = ast.parse(code, filename=cell_filename)
             except SyntaxError as e:
                 result = ExecutionResult(stdout="", error=e, defined_methods={})
                 return result
@@ -1610,8 +1614,6 @@ class ActorRuntime:
             captured_locals: dict[str, Any] = {}
             wrapper_line_offset = 0  # Lines of wrapper before user code (for error adjustment)
 
-            # Use Jupyter-style "Cell In[N]" as filename for better error messages
-            cell_filename = f"Cell In[{execution_count}]"
             try:
                 if wrap_in_function:
                     # REPL mode: wrap entire code in async function to capture return

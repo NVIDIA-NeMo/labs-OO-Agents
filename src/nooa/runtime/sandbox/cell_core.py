@@ -115,7 +115,7 @@ async def run_cell_source(
     try:
         with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
             try:
-                tree = ast.parse(code)
+                tree = ast.parse(code, filename=cell_filename)
             except SyntaxError as exc:
                 return build_result(error=exc)
 

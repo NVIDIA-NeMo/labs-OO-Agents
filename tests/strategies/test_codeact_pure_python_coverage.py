@@ -1419,31 +1419,42 @@ class TestPurePythonRunPrefill:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_run_prefill_with_error_logs_warning(self):
-        """_run_prefill with execution error should log but not fail (line 521)."""
+    async def test_run_prefill_with_error_emits_failed_python_output(self):
+        """Prefill failures are visible to the model but remain non-fatal."""
+        from nooa.events import ExecutionResult, PythonOutput
 
         class ErrorPrefill:
             def get_code(self, call, config=None):
-                return "x = 1"
+                return "print('before failure')\nraise RuntimeError('execution failed')"
 
         strat = PurePythonStrategy(prefill=ErrorPrefill())
         rt = MagicMock()
         rt.event_manager = MagicMock()
-        rt.event_manager.add = MagicMock(return_value="evt1")
+        added_events = []
+        rt.event_manager.add = MagicMock(side_effect=lambda event, **kw: added_events.append(event))
         call = MagicMock()
         call.method_name = "test"
         builtins = {}
         session = GenerationSession(max_iterations=5, max_retries=3, target_method_name="test")
 
-        from nooa.events import ExecutionResult
-
         error_result = ExecutionResult(
-            stdout="", error=RuntimeError("execution failed"), defined_methods={}
+            stdout="before failure\n",
+            stderr="warning\n",
+            error=RuntimeError("execution failed"),
+            formatted_error="Cell In[0], line 2\nRuntimeError: execution failed",
+            defined_methods={},
+            wrapper_line_offset=3,
         )
         strat._execute_code = AsyncMock(return_value=error_result)
-        strat.continuation_prompt = AsyncMock(return_value="Continue...")
 
         await strat._run_prefill(rt, call, builtins, session)
+
+        output = next(event for event in added_events if isinstance(event, PythonOutput))
+        assert output.execution_status is ResultStatus.ERROR
+        assert output.stdout == "before failure\n"
+        assert output.stderr == "warning\n"
+        assert output.error == error_result.formatted_error
+        assert output.metadata == {"prefill": True, "prefill_type": "inspect_inputs"}
 
     @pytest.mark.asyncio
     async def test_run_prefill_success_emits_python_output_not_feedback(self):
