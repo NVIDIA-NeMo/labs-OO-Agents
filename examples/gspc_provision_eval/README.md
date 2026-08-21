@@ -1,6 +1,6 @@
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-<!-- Contributed by CSOAI (csoai.org) — Council of AI (CSOAI LTD, UK #16939677). -->
+<!-- Contributed by Council of AI (CSOAI Ltd, UK 16939677) — https://councilof.ai -->
 
 # GSPC Provision-Anchored Evaluator
 
@@ -13,9 +13,11 @@ optional generation method (`explain_verdict`) lets an LLM narrate the verdict
 in plain English, but the verdict itself is produced by ordinary Python and
 never depends on a model.
 
-Contributed by [CSOAI](https://csoai.org) (Council of AI (CSOAI LTD, UK #16939677)) to the Open Secure AI Alliance's **evaluations and
-benchmarks** lane, as a minimal reference for the deterministic-core /
-LLM-narrated split that audit-grade evaluation requires.
+Contributed by [Council of AI](https://councilof.ai) (CSOAI Ltd, UK 16939677)
+as a minimal reference for the deterministic-core / LLM-narrated split that
+audit-grade evaluation requires. The companion example
+[`nist_rmf_eval/`](../nist_rmf_eval/) applies the same architecture to a
+voluntary framework corpus.
 
 ## What it demonstrates
 
@@ -97,11 +99,11 @@ uv run pytest examples/gspc_provision_eval/test_provision_evaluator.py
 ## Honest scope note
 
 The built-in corpus is **6 provisions** chosen for demonstration (EU AI Act
-Art 5, Art 9, Art 14, Art 50, Annex III 5(a); GDPR Art 22). It is **not** the
-full 417-provision CSOAI corpus, and keyword anchoring is a demonstration
-matcher, not a legal classifier. The point of the example is the architecture
-— deterministic, signed, provision-anchored evaluation with LLM narration on
-top — which scales to a larger corpus without design changes.
+Art 5, Art 9, Art 14, Art 50, Annex III 5(a); GDPR Art 22). It is **not** a
+legal classifier, and keyword anchoring is a demonstration matcher. The point
+of the example is the architecture — deterministic, signed, provision-anchored
+evaluation with LLM narration on top — which scales to a larger corpus without
+design changes.
 
 ## Files
 
@@ -115,14 +117,24 @@ top — which scales to a larger corpus without design changes.
 
 ## Verify a real signed measurement card offline
 
- is a real Ed25519-signed measurement card from the Council
-of AI live fleet board (EU AI Act Art-5 prohibited-practice screening across
-13 open-weight models, 2026-08-16). The verifier is public-key only — zero
-network, zero secrets:
+`sample_card.json` is a real Ed25519-signed measurement card from the Council
+of AI live fleet board (EU AI Act Art-5 prohibited-practice screening,
+2026-08-16). The verifier is public-key only — zero network, zero secrets:
 
 ```bash
 uv run python examples/gspc_provision_eval/verify_offline.py --card examples/gspc_provision_eval/sample_card.json
 # VALID fleet-art5-sov6 id=af0a3e88a649ea0e...
+```
+
+To bind the card to the published Council of AI estate key without going
+online, pin the pubkey (this is `#estate-chain-1` in
+https://councilof.ai/.well-known/did.json). The verifier never fetches the
+DID; resolution is a separate, optional check a reviewer can do by hand.
+
+```bash
+uv run python examples/gspc_provision_eval/verify_offline.py \
+  --card examples/gspc_provision_eval/sample_card.json \
+  --pubkey 33472e026871db20cdbd99e76c47532ebfcf84b37abed5b260dae3589df5696d
 ```
 
 Card format: `id = SHA-256(canonical JSON of body)` (sorted keys, compact
@@ -141,10 +153,8 @@ Honesty block, kept in code-review form:
   per-axis method hashes so a reader can tell exactly which method produced
   a number. Anything not measured is disclosed as `UNMEASURED` — never
   interpolated, never averaged over.
-- The fleet-extent claim is bounded and live: the evaluator's provision bank
-  is measured nightly across 22 open models x 13 axes, with a public
-  scoreboard and signed ledger at https://csoai.org — check the numbers there
-  rather than trusting this sentence.
+- Live board counts, slots, and dates live at
+  https://councilof.ai/api/gspc — this README does not lock them.
 
 ## The containment framing
 

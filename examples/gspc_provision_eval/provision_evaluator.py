@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Contributed by CSOAI (csoai.org) — Council of AI (CSOAI LTD, UK #16939677).
+# Contributed by Council of AI (CSOAI Ltd, UK 16939677) — https://councilof.ai
 """GSPC provision-anchored evaluator — deterministic core, LLM-narrated verdicts.
 
-Demonstrates the pattern CSOAI contributes to the Open Secure AI Alliance's
-"evaluations and benchmarks" lane:
+Demonstrates the pattern Council of AI contributes to this repo's
+evaluations-and-benchmarks examples:
 
     Python decides. The LLM only narrates.
 

@@ -71,5 +71,5 @@
   "pubkey": "33472e026871db20cdbd99e76c47532ebfcf84b37abed5b260dae3589df5696d",
   "signature": "02a99743593eb23c93be21d23fe14701463d3c50e1922fb1d19e370b33be08a84d9090060dfebba3afa1687c5cf443cf5280f842736cb7bdabd5355d831ad00b",
   "status": "SIGNED",
-  "_comment": "Real signed measurement card from the Council of AI live fleet board (EU AI Act Art-5 prohibited-practice screening, 13 open-weight models, 2026-08-16). Verify: python verify_offline.py --card sample_card.json"
+  "_comment": "Real signed measurement card from the Council of AI live fleet board (EU AI Act Art-5 prohibited-practice screening, 2026-08-16). Verify: python verify_offline.py --card sample_card.json"
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Contributed by CSOAI (csoai.org) — Council of AI (CSOAI LTD, UK #16939677).
+# Contributed by Council of AI (CSOAI Ltd, UK 16939677) — https://councilof.ai
 """Offline verifier for Council of AI signed measurement cards.
 
 Zero network. Zero secrets. Public key only.
@@ -25,6 +25,7 @@ Usage:
 
 Exit code 0 = every check passed, 1 = any check failed.
 """
+
 import argparse
 import hashlib
 import json
@@ -33,8 +34,9 @@ import sys
 
 def canonical(obj) -> bytes:
     """Canonical JSON: sorted keys, compact separators, UTF-8."""
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=False).encode("utf-8")
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
 
 
 def content_id(body) -> str:
@@ -45,6 +47,7 @@ def ed25519_verify(pubkey_hex: str, sig_hex: str, message: bytes) -> bool:
     """Verify with PyNaCl if present, else cryptography, else fail loudly."""
     try:
         from nacl.signing import VerifyKey  # PyNaCl
+
         try:
             VerifyKey(bytes.fromhex(pubkey_hex)).verify(message, bytes.fromhex(sig_hex))
             return True
@@ -54,15 +57,18 @@ def ed25519_verify(pubkey_hex: str, sig_hex: str, message: bytes) -> bool:
         pass
     try:
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
         try:
             Ed25519PublicKey.from_public_bytes(bytes.fromhex(pubkey_hex)).verify(
-                bytes.fromhex(sig_hex), message)
+                bytes.fromhex(sig_hex), message
+            )
             return True
         except Exception:
             return False
     except ImportError:
         raise SystemExit(
-            "Need PyNaCl or cryptography: pip install pynacl  (still fully offline)")
+            "Need PyNaCl or cryptography: pip install pynacl  (still fully offline)"
+        ) from None
 
 
 def check_card(card: dict, pin_pubkey: str | None = None) -> list[str]:
@@ -94,7 +100,7 @@ def main() -> int:
     if args.card:
         cards = [json.load(open(args.card))]
     if args.chain:
-        cards += [json.loads(l) for l in open(args.chain) if l.strip()]
+        cards += [json.loads(line) for line in open(args.chain) if line.strip()]
 
     ok = True
     prev_id = None
