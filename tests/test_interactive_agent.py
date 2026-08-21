@@ -118,6 +118,11 @@ def test_respond_result_requires_explanation():
         RespondResult(kind=RespondReason.DONE, explanation="   ")
 
 
+def test_respond_result_rejects_removed_get_user_input_reason():
+    with pytest.raises(ValidationError):
+        RespondResult(kind="GET_USER_INPUT", explanation="legacy reason")
+
+
 def test_install_summarizer_none_policy_is_noop(agent):
     install_summarizer(SummarizationConfig(policy="none"), agent=agent)
     assert not getattr(agent, "_summarizers", [])

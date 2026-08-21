@@ -95,10 +95,9 @@ class RespondReason(StrEnum):
     DONE = "DONE"
     NEED_INPUT = "NEED_INPUT"
     WAIT = "WAIT"
-    GET_USER_INPUT = "GET_USER_INPUT"
 
 
-RespondKind = Literal["DONE", "NEED_INPUT", "WAIT", "GET_USER_INPUT"]
+RespondKind = Literal["DONE", "NEED_INPUT", "WAIT"]
 
 
 class RespondResult(BaseModel):
@@ -112,8 +111,6 @@ class RespondResult(BaseModel):
           human input before continuing the current request.
         * ``RespondReason.WAIT`` — the agent is waiting for a background job or
           non-user queue/event before it can continue.
-        * ``RespondReason.GET_USER_INPUT`` — legacy spelling for waiting on
-          human input; prefer ``DONE`` or ``NEED_INPUT``.
 
       All stop reasons use the same dispatcher wake path: race every declared
       queue/event channel and re-enter ``handle()`` with the first arrival.
