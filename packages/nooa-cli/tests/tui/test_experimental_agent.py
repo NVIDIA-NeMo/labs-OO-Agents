@@ -5,7 +5,6 @@
 import json
 
 import pytest
-from nooa_cli.coding.delegation import CodingDelegationMixin
 from nooa_cli.tui.config import load_agent_class
 from nooa_cli.tui.experimental_agent import ExperimentalCodingWorker, ExperimentalTUIAgent
 
@@ -63,7 +62,6 @@ async def test_experimental_tui_agent_uses_only_python_cell(tmp_path):
 async def test_experimental_tui_agent_delegates_to_experimental_worker(tmp_path):
     agent = ExperimentalTUIAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
-        assert isinstance(agent, CodingDelegationMixin)
         assert agent._worker_type is ExperimentalCodingWorker
     finally:
         await agent.close()

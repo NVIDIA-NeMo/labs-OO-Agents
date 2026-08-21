@@ -183,15 +183,9 @@ class BenchAgent(
         finally:
             await subagent.shell.close()
 
-    @strategy(
-        CodeActExperimental(
-            config=CodeActConfig(
-                max_iterations=300, max_retries=10, text_only_stop_behavior="synthetic_comment"
-            )
-        )
-    )
+    @strategy(CodeActExperimental(config=CodeActConfig(max_retries=10)))
     async def _solve_task(self, description: str) -> TaskResult:
-        """Solve this task completely: {description}
+        """Solve the supplied task completely.
 
         Inspect before editing. Plan with ``self.todo`` only when useful. Make the
         minimum sufficient change, preserve unrelated work, and run relevant tests.
@@ -216,15 +210,9 @@ class RLMBenchAgent(BenchAgent):
 
     _worker_init_command = _OPTIONAL_TESTBED_ACTIVATE
 
-    @strategy(
-        CodeActExperimental(
-            config=CodeActConfig(
-                max_iterations=300, max_retries=10, text_only_stop_behavior="synthetic_comment"
-            )
-        )
-    )
+    @strategy(CodeActExperimental(config=CodeActConfig(max_retries=10)))
     async def _solve_task(self, description: str) -> TaskResult:
-        """Solve this task completely: {description}
+        """Solve the supplied task completely.
 
         Inspect before editing. Use ``delegate(objective, supplied_context)`` only
         for bounded work whose isolated context is an advantage; give each worker a
