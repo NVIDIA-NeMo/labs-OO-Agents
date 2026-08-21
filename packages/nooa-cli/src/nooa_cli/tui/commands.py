@@ -765,9 +765,7 @@ class ModelCommand(Command):
             pending_secret=pending_secret,
         )
 
-    async def _persist_pending_secret(
-        self, pending: tuple[str, str]
-    ) -> "CommandResult | None":
+    async def _persist_pending_secret(self, pending: tuple[str, str]) -> "CommandResult | None":
         """Write a validated secret to project secrets.yaml; return err on failure."""
         from nooa.paths import get_project_dir
 
@@ -775,9 +773,7 @@ class ModelCommand(Command):
 
         name, value = pending
         try:
-            await asyncio.to_thread(
-                write_secret_env, get_project_dir("secrets.yaml"), name, value
-            )
+            await asyncio.to_thread(write_secret_env, get_project_dir("secrets.yaml"), name, value)
         except (ModelCatalogError, OSError, ValueError) as exc:
             return CommandResult.err(f"Could not save {name} to secrets.yaml: {exc}")
         return None
@@ -1713,7 +1709,12 @@ class EditCommand(Command):
         original = path.read_text(errors="replace") if path.exists() else ""
         language = _detect_language(path.suffix)
 
-        new_content = await self.frontend.open_editor(str(path), original, language)
+        from .frontend import ExternalEditorUnavailableError
+
+        try:
+            new_content = await self.frontend.open_editor(str(path), original, language)
+        except ExternalEditorUnavailableError as exc:
+            return CommandResult.err(str(exc))
         if new_content is None:
             return CommandResult.ok(TextOutput("Edit cancelled.", "info"))
         if new_content == original:
