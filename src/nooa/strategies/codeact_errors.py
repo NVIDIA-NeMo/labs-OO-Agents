@@ -13,7 +13,7 @@ from typing import Any
 from pydantic import ValidationError as PydanticValidationError
 from pydantic_core import ErrorDetails
 
-from nooa.agentdoc import pformat
+from nooa.agentdoc import truncating_pformat
 from nooa.agentdoc.visibility import is_hidden_field
 from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG, TruncationConfig
 from nooa.strategy_validation import InvariantError
@@ -169,8 +169,14 @@ def _format_expected_schema(return_type: Any) -> str:
 
 
 def _pformat(value: Any, tc: TruncationConfig) -> str:
-    """Format a value using the agent's value-render truncation settings."""
-    return pformat(value, **tc.event_format.model_dump())
+    """Format a value using the agent's value-render truncation settings.
+
+    Bounded by ``max_render_chars`` on top of ``event_format``'s per-value
+    limits. This path renders the offending value into an error message, so a
+    value that is expensive to render would otherwise be rendered again on the
+    failure path.
+    """
+    return truncating_pformat(value, max_chars=tc.max_render_chars, **tc.event_format.model_dump())
 
 
 def _format_value_for_error(

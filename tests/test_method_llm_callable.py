@@ -12,6 +12,7 @@ import json
 import pytest
 
 from nooa import Agent, strategy
+from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
 from nooa.method_llm import resolve_method_llm, validate_method_llm_spec
 from nooa.strategies.predict import PredictStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse
@@ -197,8 +198,15 @@ class TestStrategyHelperPath:
         class _Bare:  # no 'runtime' attribute → strategy-helper branch
             pass
 
+        # A real truncation config rather than the spec'd mock's auto-attribute:
+        # value rendering reads numeric budgets off it (max_render_chars), and a
+        # mock satisfies the attribute access with an object that then fails the
+        # comparison — masking the TypeError this test is actually asserting.
+        runtime = MagicMock(spec=RuntimeServices)
+        runtime.truncation_config = DEFAULT_TRUNCATION_CONFIG
+
         with pytest.raises(TypeError, match="unexpected keyword argument 'llm'"):
-            await wrapper(_Bare(), MagicMock(spec=RuntimeServices), 42, llm=_fake("x"))
+            await wrapper(_Bare(), runtime, 42, llm=_fake("x"))
 
 
 class TestEndToEnd:

@@ -303,9 +303,12 @@ class ReflexionStrategy(GenerationStrategy):
         # Show as much of the result as possible — the LLM must evaluate its quality.
         # event_format provides max_string/max_length/max_depth so nested strings
         # within structured results are bounded by cfg.event_format rather than
-        # pformat's hidden 150-char fallback.
+        # pformat's hidden 150-char fallback. max_chars then bounds the total:
+        # without it this already took truncating_pformat's uncapped branch, since
+        # max_chars defaults to None.
         return truncating_pformat(
             result,
+            max_chars=tc.max_render_chars,
             **tc.event_format.model_dump(),
         )
 
