@@ -1187,9 +1187,18 @@ class SkillsCommand(Command):
                 return CommandResult.err(f"Skill `{skill_id}` not found. Use /skills list.")
             try:
                 registry.activate([skill_id])
-                return CommandResult.ok(TextOutput(f"Skill `{skill_id}` activated", "success"))
             except Exception as e:
                 return CommandResult.err(f"Failed to activate `{skill_id}`: {e}")
+            active = list(dict.fromkeys([*self.config.active_skills, skill_id]))
+            self.config.active_skills = active
+            try:
+                self._persist_tui_setting("active_skills", active)
+            except Exception as exc:
+                return CommandResult.ok(
+                    TextOutput(f"Skill `{skill_id}` activated", "success"),
+                    TextOutput(f"Could not save skill activation: {exc}", "warning"),
+                )
+            return CommandResult.ok(TextOutput(f"Skill `{skill_id}` activated", "success"))
 
         # deactivate
         skill_id = subargs[0]
@@ -1197,9 +1206,18 @@ class SkillsCommand(Command):
             return CommandResult.err(f"`{skill_id}` not active. Use /skills list.")
         try:
             registry.deactivate([skill_id])
-            return CommandResult.ok(TextOutput(f"Skill `{skill_id}` deactivated", "success"))
         except Exception as e:
             return CommandResult.err(f"Failed to deactivate `{skill_id}`: {e}")
+        active = [name for name in self.config.active_skills if name != skill_id]
+        self.config.active_skills = active
+        try:
+            self._persist_tui_setting("active_skills", active)
+        except Exception as exc:
+            return CommandResult.ok(
+                TextOutput(f"Skill `{skill_id}` deactivated", "success"),
+                TextOutput(f"Could not save skill deactivation: {exc}", "warning"),
+            )
+        return CommandResult.ok(TextOutput(f"Skill `{skill_id}` deactivated", "success"))
 
 
 # ---------------------------------------------------------------------------

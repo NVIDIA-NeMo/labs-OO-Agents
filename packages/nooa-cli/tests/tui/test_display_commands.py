@@ -69,9 +69,7 @@ async def test_skills_commands_lists_extensions_without_requiring_skill_registry
     result = await command.execute(["commands"])
 
     assert result.success is True
-    assert result.outputs[0].rows == [
-        ["/project-operation", "<target>", "Operate on this project"]
-    ]
+    assert result.outputs[0].rows == [["/project-operation", "<target>", "Operate on this project"]]
 
 
 @pytest.mark.asyncio
@@ -121,3 +119,30 @@ async def test_skills_add_discovers_immediately_and_persists(tmp_path, monkeypat
     assert "review-code" in registry._user_skills
     saved = yaml.safe_load((project_dir / "settings.yaml").read_text())
     assert saved["tui"]["additional_skills_dirs"] == [str(skills_root.resolve())]
+
+
+@pytest.mark.asyncio
+async def test_skills_activate_and_deactivate_are_persisted(tmp_path, monkeypatch) -> None:
+    from nooa.skill_registry import SkillRegistry
+
+    project_dir = tmp_path / ".nooa"
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
+    agent = SimpleNamespace(context_manager=MagicMock(), cwd=tmp_path)
+    agent.skills = SkillRegistry(agent)
+    agent.skills.register("local.reconnect", SimpleNamespace())
+    config = TUIConfig(active_skills=[])
+    command = SkillsCommand(MagicMock(), config, agent, skills_dirs=[])
+
+    activated = await command.execute(["activate", "local.reconnect"])
+
+    assert activated.success is True
+    assert config.active_skills == ["local.reconnect"]
+    saved = yaml.safe_load((project_dir / "settings.yaml").read_text())
+    assert saved["tui"]["active_skills"] == ["local.reconnect"]
+
+    deactivated = await command.execute(["deactivate", "local.reconnect"])
+
+    assert deactivated.success is True
+    assert config.active_skills == []
+    saved = yaml.safe_load((project_dir / "settings.yaml").read_text())
+    assert saved["tui"]["active_skills"] == []
