@@ -355,7 +355,12 @@ async def test_cell_error_preserves_source_location_and_caret_across_process():
         res = await _run(ex, code, 75)
         assert res.error is not None
 
-        formatted = format_error_for_llm(res.error, code, line_offset=res.wrapper_line_offset)
+        formatted = format_error_for_llm(
+            res.error,
+            code,
+            line_offset=res.wrapper_line_offset,
+            formatted_error=res.formatted_error,
+        )
 
         assert "Cell In[75], line 4" in formatted
         assert "start = text.index('missing')" in formatted
