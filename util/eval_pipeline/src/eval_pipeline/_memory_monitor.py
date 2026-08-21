@@ -16,7 +16,11 @@ from __future__ import annotations
 import gc
 import logging
 import platform
-import resource
+
+try:
+    import resource
+except ImportError:
+    resource = None
 import sys
 import threading
 import time
@@ -47,6 +51,8 @@ def get_rss_mb() -> float:
     except FileNotFoundError:
         pass
     # macOS: ru_maxrss is in bytes; Linux: kB
+    if resource is None:
+        return 0.0
     usage = resource.getrusage(resource.RUSAGE_SELF)
     if platform.system() == "Darwin":
         return usage.ru_maxrss / (1024 * 1024)
@@ -84,6 +90,8 @@ def set_hard_limit(limit_mb: int) -> bool:
     """
     current_vas = _get_vas_mb()
     vas_cap_bytes = int((current_vas + limit_mb) * 1024 * 1024)
+    if resource is None:
+        return False
     try:
         _, hard = resource.getrlimit(resource.RLIMIT_AS)
         # Clamp to OS hard ceiling (macOS maps RLIMIT_AS → RLIMIT_RSS and
@@ -99,6 +107,8 @@ def set_hard_limit(limit_mb: int) -> bool:
 
 def clear_hard_limit() -> None:
     """Remove the RLIMIT_AS soft cap (reset to the hard ceiling)."""
+    if resource is None:
+        return
     try:
         _, hard = resource.getrlimit(resource.RLIMIT_AS)
         resource.setrlimit(resource.RLIMIT_AS, (hard, hard))
