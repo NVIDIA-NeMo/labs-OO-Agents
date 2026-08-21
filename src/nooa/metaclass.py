@@ -75,6 +75,22 @@ class AgentMeta(ABCMeta):
             if hasattr(attr_value, "_agent_decorator"):
                 continue
 
+            # Async generator functions (async def … yield) are mutually exclusive
+            # with coroutine functions, so this guard must come first.  The sync
+            # wrapper closes its span before the generator body runs; the async
+            # wrapper awaits the whole coroutine, which an async gen is not.
+            # Either way the span would cover no real work and misattribute every
+            # nested LLM call to the consumer rather than the generator.  Reject
+            # loudly at class-creation time instead of emitting a wrong trace.
+            if inspect.isasyncgenfunction(attr_value):
+                raise TypeError(
+                    f"{name}.{attr_name} is an async generator method "
+                    f"(async def with yield).  Generator methods are not supported "
+                    f"as agent methods — the framework cannot correctly scope a "
+                    f"tracing span across yield points.  Use a regular async def "
+                    f"with return instead."
+                )
+
             if inspect.iscoroutinefunction(attr_value):
                 # === Async method path (generation + tracing) ===
                 should_generate = mcs._should_generate(attr_name, attr_value)
@@ -102,6 +118,20 @@ class AgentMeta(ABCMeta):
                 # the runtime exists. Custom dunders have to be async to be traced.
                 if attr_name.startswith("__") and attr_name.endswith("__"):
                     continue
+
+                # Sync generator functions (def … yield) hit this branch because
+                # inspect.isfunction returns True for them.  The sync wrapper calls
+                # the original once and treats the returned generator object as the
+                # result, closing the span before any body code runs.  Same class
+                # of misattribution as the async generator case above — reject now.
+                if inspect.isgeneratorfunction(attr_value):
+                    raise TypeError(
+                        f"{name}.{attr_name} is a sync generator method "
+                        f"(def with yield).  Generator methods are not supported "
+                        f"as agent methods — the framework cannot correctly scope a "
+                        f"tracing span across yield points.  Use a regular def with "
+                        f"return instead."
+                    )
 
                 should_trace = mcs._should_trace(attr_name, attr_value, should_trace_class)
                 if should_trace:

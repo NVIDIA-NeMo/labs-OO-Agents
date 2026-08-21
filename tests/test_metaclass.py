@@ -1395,6 +1395,73 @@ def test_sync_method_calling_sync_method_chains_parent_call_id():
     assert inner_call["parent_call_id"] == outer_call["call_id"]
 
 
+# ============================================================================
+# Regression tests for generator method rejection (issue #38)
+#
+# Previously, async generator methods (async def … yield) were silently
+# mis-dispatched to create_sync_agent_method_wrapper.  That wrapper calls the
+# original once and treats the returned generator *object* as the result,
+# closing the span before any body code runs.  Every nested LLM call was then
+# parented to the consumer, not the generator — the trace asserted a call
+# sequence that never happened.
+#
+# The correct behaviour is an explicit TypeError at class-creation time so
+# the author is told clearly what is wrong, rather than receiving a
+# confidently wrong audit trail.
+# ============================================================================
+
+
+def test_async_generator_method_raises_at_class_creation():
+    """async def methods with yield must be rejected at class creation (issue #38)."""
+    with pytest.raises(TypeError, match="async generator"):
+
+        class BadAgent(Agent, llm=_TEST_LLM):
+            async def review(self, items: list[str]):
+                for item in items:
+                    yield item
+
+
+def test_sync_generator_method_raises_at_class_creation():
+    """def methods with yield must be rejected at class creation (issue #38)."""
+    with pytest.raises(TypeError, match="sync generator"):
+
+        class BadAgent(Agent, llm=_TEST_LLM):
+            def produce(self, items: list[str]):
+                yield from items
+
+
+def test_generator_error_message_names_method():
+    """TypeError must include the method name so authors can find the offender."""
+    with pytest.raises(TypeError, match="review"):
+
+        class BadAgent(Agent, llm=_TEST_LLM):
+            async def review(self, items: list[str]):
+                for item in items:
+                    yield item
+
+
+def test_regular_async_method_unaffected_by_generator_guard():
+    """Regular async def (no yield) must still be accepted after the guard."""
+
+    class GoodAgent(Agent, llm=_TEST_LLM):
+        async def review(self, items: list[str]) -> list[str]:
+            return items
+
+    assert hasattr(GoodAgent.review, "_agent_decorator")
+    assert GoodAgent.review._needs_generation is False
+
+
+def test_regular_sync_method_unaffected_by_generator_guard():
+    """Regular def (no yield) must still be wrapped for tracing after the guard."""
+
+    class GoodAgent(Agent, llm=_TEST_LLM):
+        def produce(self, items: list[str]) -> list[str]:
+            return items
+
+    assert hasattr(GoodAgent.produce, "_agent_decorator")
+    assert GoodAgent.produce._needs_generation is False
+
+
 def test_agent_init_succeeds_with_sync_tracing_active():
     """Agent.__init__ calls sync helpers BEFORE self.runtime exists; must not crash."""
     from unittest.mock import MagicMock
