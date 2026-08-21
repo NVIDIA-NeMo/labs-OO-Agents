@@ -173,7 +173,6 @@ class _GraphemeWindow(Window):
             escape_row = new_screen.zero_width_escapes[ypos + screen_y]
             for screen_x in range(xpos, xpos + width + 1):
                 escape_row.pop(screen_x, None)
-
             x = xpos
             logical_cell = 0
             for start, stop, cells in FullscreenTranscriptModel._grapheme_spans(styled_chars):
@@ -354,8 +353,12 @@ class _FullscreenTranscriptControl(FormattedTextControl):
             MouseEventType.MOUSE_UP,
         ):
             return False
+        width = max(1, self._render_width or 1)
         height = max(1, self._render_height or 1)
-        x = max(0, mouse_event.position.x)
+        # Coordinates are local to whichever chrome child received the event.
+        # Once a downward drag leaves the transcript, clamp to its true lower-
+        # right boundary instead of interpreting a right-side child's local x.
+        x = width - 1 if below else 0
         y = height - 1 if below else 0
         self._drag_moved = True
         self._drag_position = (x, y)
@@ -465,6 +468,12 @@ class _FullscreenDragBoundaryControl(FormattedTextControl):
         self._transcript_scroll_callback = transcript_scroll_callback
 
     def mouse_handler(self, mouse_event: MouseEvent):
+        if (
+            MouseModifier.ALT in mouse_event.modifiers
+            or MouseModifier.SHIFT in mouse_event.modifiers
+        ):
+            self._transcript_drag_callback(mouse_event)
+            return NotImplemented
         if self._transcript_drag_callback(mouse_event):
             return None
         delta = _fullscreen_wheel_delta(mouse_event)
@@ -493,6 +502,8 @@ class _NativeSelectionBufferControl(BufferControl):
             MouseModifier.ALT in mouse_event.modifiers
             or MouseModifier.SHIFT in mouse_event.modifiers
         ):
+            if self._transcript_drag_callback is not None:
+                self._transcript_drag_callback(mouse_event)
             return NotImplemented
         if self._transcript_drag_callback is not None and self._transcript_drag_callback(
             mouse_event
@@ -506,34 +517,99 @@ class _NativeSelectionBufferControl(BufferControl):
 
 
 class _NativeSelectionCompletionsMenuControl(CompletionsMenuControl):
-    """Completion menu that leaves native-selection modifiers unconsumed."""
+    """Completion menu that preserves native selection and transcript gestures."""
+
+    def __init__(
+        self,
+        *args: Any,
+        transcript_drag_callback: Callable[[MouseEvent], bool] | None = None,
+        transcript_scroll_callback: Callable[[int], None] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._transcript_drag_callback = transcript_drag_callback
+        self._transcript_scroll_callback = transcript_scroll_callback
 
     def mouse_handler(self, mouse_event: MouseEvent):
         if (
             MouseModifier.ALT in mouse_event.modifiers
             or MouseModifier.SHIFT in mouse_event.modifiers
         ):
+            if self._transcript_drag_callback is not None:
+                self._transcript_drag_callback(mouse_event)
             return NotImplemented
+        if self._transcript_drag_callback is not None and self._transcript_drag_callback(
+            mouse_event
+        ):
+            return None
+        delta = _fullscreen_wheel_delta(mouse_event)
+        if delta is not None and self._transcript_scroll_callback is not None:
+            self._transcript_scroll_callback(delta)
+            return None
         return super().mouse_handler(mouse_event)
+
+
+def _native_hyperlink_boundary(
+    fragments: list[tuple[str, str]], *, render_counter: int
+) -> list[tuple[str, str]]:
+    """Close transcript OSC-8 state before painting an adjacent chrome row."""
+    boundary = [("[ZeroWidthEscape]", "\x1b]8;;\x1b\\")]
+    for index, (style, text) in enumerate(fragments):
+        if not text:
+            boundary.append((style, text))
+            continue
+        # prompt_toolkit emits zero-width escapes only when their cell is
+        # repainted. Alternate one invisible class on the first chrome cell so
+        # every frame emits the close, without invalidating the whole row.
+        marker = f"class:native-hyperlink-boundary-{render_counter & 1}"
+        boundary.append((f"{style} {marker}".strip(), text[:1]))
+        if text[1:]:
+            boundary.append((style, text[1:]))
+        boundary.extend(fragments[index + 1 :])
+        break
+    return boundary
 
 
 class _ReturnToTailControl(FormattedTextControl):
     """One-row fullscreen affordance for resuming live transcript output."""
 
-    def __init__(self, callback: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        callback: Callable[[], None],
+        *,
+        transcript_drag_callback: Callable[[MouseEvent], bool] | None = None,
+        transcript_scroll_callback: Callable[[int], None] | None = None,
+        render_counter: Callable[[], int] = lambda: 0,
+    ) -> None:
         super().__init__(
-            lambda: [("class:return-to-tail", "↓ Return to bottom (Ctrl+End)")],
+            lambda: _native_hyperlink_boundary(
+                [("class:return-to-tail", " ↓ Return to bottom (Ctrl+End)")],
+                render_counter=render_counter(),
+            ),
             focusable=False,
             show_cursor=False,
         )
         self._callback = callback
+        self._transcript_drag_callback = transcript_drag_callback
+        self._transcript_scroll_callback = transcript_scroll_callback
 
     def mouse_handler(self, mouse_event: MouseEvent):
         if (
-            mouse_event.button is not MouseButton.LEFT
-            or MouseModifier.ALT in mouse_event.modifiers
+            MouseModifier.ALT in mouse_event.modifiers
             or MouseModifier.SHIFT in mouse_event.modifiers
         ):
+            if self._transcript_drag_callback is not None:
+                self._transcript_drag_callback(mouse_event)
+            return NotImplemented
+        if self._transcript_drag_callback is not None and self._transcript_drag_callback(
+            mouse_event
+        ):
+            return None
+        delta = _fullscreen_wheel_delta(mouse_event)
+        if delta is not None and self._transcript_scroll_callback is not None:
+            self._transcript_scroll_callback(delta)
+            return None
+        if mouse_event.button is not MouseButton.LEFT:
             return NotImplemented
         if mouse_event.event_type is MouseEventType.MOUSE_DOWN:
             return None
@@ -971,11 +1047,23 @@ class TUIApplication:
                     rows.append(f"│ {line}")
             if not rows:
                 return []
-            return [("class:queue", "\n".join(rows))]
+            fragments = [("class:queue", "\n".join(rows))]
+            if self._is_fullscreen:
+                return _native_hyperlink_boundary(
+                    fragments, render_counter=self._app.render_counter
+                )
+            return fragments
 
         queue_window = ConditionalContainer(
             Window(
-                FormattedTextControl(_queue_formatted, focusable=False),
+                _FullscreenDragBoundaryControl(
+                    _queue_formatted,
+                    focusable=False,
+                    transcript_drag_callback=self._handle_fullscreen_drag_over_bottom_chrome,
+                    transcript_scroll_callback=(
+                        self._scroll_fullscreen_transcript if self._is_fullscreen else None
+                    ),
+                ),
                 dont_extend_height=True,
             ),
             filter=Condition(lambda: bool(_queue_pending()) or bool(self._command_queue_texts)),
@@ -1000,11 +1088,26 @@ class TUIApplication:
         )
         self._input_window = input_window
         optional_row = Dimension(min=0, preferred=1, max=1)
+
+        def _input_padding_window() -> Window:
+            return Window(
+                _FullscreenDragBoundaryControl(
+                    lambda: [("", " ")],
+                    focusable=False,
+                    transcript_drag_callback=self._handle_fullscreen_drag_over_bottom_chrome,
+                    transcript_scroll_callback=(
+                        self._scroll_fullscreen_transcript if self._is_fullscreen else None
+                    ),
+                ),
+                height=optional_row,
+                style=input_style,
+            )
+
         self._input_container = HSplit(
             [
-                Window(height=optional_row, char=" ", style=input_style),
+                _input_padding_window(),
                 input_window,
-                Window(height=optional_row, char=" ", style=input_style),
+                _input_padding_window(),
             ],
             style=input_style,
             # The children above have a one-row aggregate minimum.  Keep a
@@ -1021,6 +1124,10 @@ class TUIApplication:
                 if index:
                     fragments.append(("class:status", "   " if self._is_fullscreen else "\n\n"))
                 fragments.extend((style, sanitize_live_text(text)) for style, text in row)
+            if self._is_fullscreen:
+                return _native_hyperlink_boundary(
+                    fragments, render_counter=self._app.render_counter
+                )
             return fragments
 
         def _status_height() -> Dimension:
@@ -1047,14 +1154,20 @@ class TUIApplication:
 
         self._transient_status_container = ConditionalContainer(
             Window(
-                FormattedTextControl(
-                    lambda: [
-                        (
-                            self._transient_status_style,
-                            sanitize_live_text(self._transient_status_text),
-                        )
-                    ],
+                _FullscreenDragBoundaryControl(
+                    lambda: _native_hyperlink_boundary(
+                        [
+                            ("class:status", " "),
+                            (
+                                self._transient_status_style,
+                                sanitize_live_text(self._transient_status_text),
+                            ),
+                        ],
+                        render_counter=self._app.render_counter,
+                    ),
                     focusable=False,
+                    transcript_drag_callback=self._handle_fullscreen_drag_over_bottom_chrome,
+                    transcript_scroll_callback=self._scroll_fullscreen_transcript,
                 ),
                 height=1,
                 dont_extend_width=True,
@@ -1062,7 +1175,12 @@ class TUIApplication:
             filter=Condition(lambda: self._is_fullscreen and bool(self._transient_status_text)),
         )
 
-        self._return_to_tail_control = _ReturnToTailControl(self._jump_fullscreen_to_tail)
+        self._return_to_tail_control = _ReturnToTailControl(
+            self._jump_fullscreen_to_tail,
+            transcript_drag_callback=self._handle_fullscreen_drag_over_bottom_chrome,
+            transcript_scroll_callback=self._scroll_fullscreen_transcript,
+            render_counter=lambda: self._app.render_counter,
+        )
         self._return_to_tail_container = ConditionalContainer(
             Window(
                 self._return_to_tail_control,
@@ -1084,10 +1202,22 @@ class TUIApplication:
             label = self._session_label_fn() if self._session_label_fn is not None else ""
             current = self._read_terminal_size()
             columns = current[0] if current is not None else terminal_cols(minimum=1)
-            return format_session_rule(columns, label)
+            fragments = format_session_rule(columns, label)
+            if self._is_fullscreen:
+                return _native_hyperlink_boundary(
+                    fragments, render_counter=self._app.render_counter
+                )
+            return fragments
 
         session_rule = Window(
-            FormattedTextControl(_session_rule_formatted, focusable=False),
+            _FullscreenDragBoundaryControl(
+                _session_rule_formatted,
+                focusable=False,
+                transcript_drag_callback=self._handle_fullscreen_drag_over_bottom_chrome,
+                transcript_scroll_callback=(
+                    self._scroll_fullscreen_transcript if self._is_fullscreen else None
+                ),
+            ),
             height=optional_row,
         )
 
@@ -1117,11 +1247,18 @@ class TUIApplication:
 
         completions_window = ConditionalContainer(
             Window(
-                content=_NativeSelectionCompletionsMenuControl(),
+                content=_NativeSelectionCompletionsMenuControl(
+                    transcript_drag_callback=self._handle_fullscreen_drag_over_bottom_chrome,
+                    transcript_scroll_callback=(
+                        self._scroll_fullscreen_transcript if self._is_fullscreen else None
+                    ),
+                ),
                 width=Dimension(min=8),
                 height=_completions_height,
                 dont_extend_height=True,
-                right_margins=[ScrollbarMargin(display_arrows=True)],
+                right_margins=(
+                    [] if self._is_fullscreen else [ScrollbarMargin(display_arrows=True)]
+                ),
             ),
             filter=Condition(
                 lambda: (
@@ -1145,7 +1282,6 @@ class TUIApplication:
                         self._transient_status_container,
                         self._return_to_tail_container,
                     ],
-                    padding=1,
                 ),
                 filter=Condition(
                     lambda: (

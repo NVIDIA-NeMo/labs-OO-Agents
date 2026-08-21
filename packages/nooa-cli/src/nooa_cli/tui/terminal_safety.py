@@ -19,6 +19,8 @@ from rich.cells import split_graphemes
 
 _ESC = "\x1b"
 
+_MAX_SAFE_HTTP_URL_LENGTH = 2_048
+
 # This expression is used only after ``sanitize_transcript_ansi`` has reduced
 # the language to SGR and OSC-8.  It deliberately recognizes both OSC
 # terminators because Rich versions differ between BEL and ST.
@@ -138,7 +140,11 @@ def sanitize_transcript_ansi(value: str) -> str:
 
 def safe_http_url(value: str | None) -> str | None:
     """Return a control-free HTTP(S) URL suitable for an explicit browser launch."""
-    if not value or any(character.isspace() for character in value):
+    if (
+        not value
+        or len(value) > _MAX_SAFE_HTTP_URL_LENGTH
+        or any(character.isspace() for character in value)
+    ):
         return None
     try:
         parsed = urlsplit(value)

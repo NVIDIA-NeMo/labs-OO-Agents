@@ -702,6 +702,7 @@ class FullscreenTranscriptModel:
             fragments.append(("", "\n"))
         selected = self._selection_bounds()
         records, record_bases = self._record_indexes()
+        has_hyperlinks = any(row.hyperlinks for row in rows)
         for index, row in enumerate(rows):
             if index:
                 fragments.append(("", "\n"))
@@ -732,7 +733,7 @@ class FullscreenTranscriptModel:
                         link_start, link_stop, target = row.hyperlinks[link_index]
                         if link_start < source_stop and link_stop > source_start:
                             link = target
-                if row.hyperlinks:
+                if has_hyperlinks:
                     sequence = f"\x1b]8;;{link}\x1b\\" if link is not None else "\x1b]8;;\x1b\\"
                     fragments.append(("[ZeroWidthEscape]", sequence))
                 for style, char in display_chars[start:stop]:

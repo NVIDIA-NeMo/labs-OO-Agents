@@ -1042,6 +1042,40 @@ def test_fullscreen_screen_preserves_native_osc8_metadata_across_wrapped_rows() 
 
 
 @pytest.mark.asyncio
+async def test_fullscreen_link_at_exact_row_end_closes_before_lower_chrome() -> None:
+    from prompt_toolkit.application.current import set_app
+
+    app = _make_fullscreen_app()
+    target = "https://example.test/docs"
+    app.emit_block(f"\x1b]8;;{target}\x1b\\12345678\x1b]8;;\x1b\\")
+    app._command_status_text = "STATUS"
+    writes: list[tuple[str, str]] = []
+    app._app.output.write_raw = lambda value: writes.append(("raw", value))  # type: ignore[method-assign]
+    app._app.output.write = lambda value: writes.append(("text", value))  # type: ignore[method-assign]
+
+    with set_app(app._app):
+        app._app.renderer.render(app._app, app._app.layout)
+
+    opening = f"\x1b]8;;{target}\x1b\\"
+    close = "\x1b]8;;\x1b\\"
+    opening_index = next(index for index, item in enumerate(writes) if item == ("raw", opening))
+    last_link_text = max(
+        index
+        for index, (kind, value) in enumerate(writes)
+        if kind == "text" and value in set("12345678")
+    )
+    close_index = next(
+        index
+        for index, item in enumerate(writes)
+        if index > last_link_text and item == ("raw", close)
+    )
+    status_index = next(
+        index for index, item in enumerate(writes) if item == ("text", "S") and index > close_index
+    )
+    assert opening_index < last_link_text < close_index < status_index
+
+
+@pytest.mark.asyncio
 async def test_fullscreen_renderer_emits_native_osc8_through_raw_output() -> None:
     from prompt_toolkit.application.current import set_app
 
@@ -1308,6 +1342,71 @@ def test_fullscreen_wheel_over_status_scrolls_transcript() -> None:
 
     assert result is None
     assert not app._fullscreen_transcript.viewport.follows_tail
+
+
+@pytest.mark.parametrize("region", ["queue", "session", "input-padding", "completions"])
+def test_fullscreen_wheel_over_bottom_chrome_scrolls_transcript(region: str) -> None:
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    app = _make_fullscreen_app()
+    app.emit_block("".join(f"line {index}\n" for index in range(20)))
+    app._transcript_viewport_size = lambda: (12, 4)
+    controls = {
+        "queue": app._main_container.children[2].content.content,
+        "session": app._main_container.children[3].content,
+        "input-padding": app._input_container.children[0].content,
+        "completions": app._main_container.children[5].content.content,
+    }
+
+    result = controls[region].mouse_handler(_mouse_event(MouseEventType.SCROLL_UP, button=None))
+
+    assert result is None
+    assert not app._fullscreen_transcript.viewport.follows_tail
+
+
+def test_fullscreen_wheel_over_transient_notice_scrolls_transcript() -> None:
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    app = _make_fullscreen_app()
+    app.emit_block("".join(f"line {index}\n" for index in range(20)))
+    app._transcript_viewport_size = lambda: (12, 4)
+    app._show_transient_status("Copied 5 characters")
+    control = app._transient_status_container.content.content
+
+    result = control.mouse_handler(_mouse_event(MouseEventType.SCROLL_UP, button=None))
+
+    assert result is None
+    assert not app._fullscreen_transcript.viewport.follows_tail
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_drag_release_over_transient_notice_finishes_copy(monkeypatch) -> None:
+    from nooa_cli.tui.tui_application import _ClipboardResult
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    app = _make_fullscreen_app()
+    app.emit_block("zero\none\ntwo")
+    app._transcript_viewport_size = lambda: (8, 3)
+    copied = []
+
+    async def copy_locally(text: str) -> _ClipboardResult:
+        copied.append(text)
+        return _ClipboardResult(True, "test")
+
+    monkeypatch.setattr(app, "_copy_to_local_clipboard_async", copy_locally)
+    app._show_transient_status("Copying...")
+    assert app._output_window is not None
+    transcript = app._output_window.content
+    transcript.create_content(8, 3)
+    transcript.mouse_handler(_mouse_event(MouseEventType.MOUSE_DOWN, x=0, y=0))
+
+    control = app._transient_status_container.content.content
+    assert control.mouse_handler(_mouse_event(MouseEventType.MOUSE_UP, x=2, y=0)) is None
+    if app._clipboard_task is not None:
+        await app._clipboard_task
+
+    assert not transcript.dragging
+    assert copied == ["zero\none\ntwo"]
 
 
 def test_transcript_control_uses_current_frame_height_before_formatting() -> None:
@@ -2181,6 +2280,24 @@ def test_fullscreen_return_to_tail_affordance_is_visible_and_clickable() -> None
     assert app._return_to_tail_control.mouse_handler(up) is None
     assert app._fullscreen_transcript.viewport.follows_tail
     assert not bool(app._return_to_tail_container.filter())
+
+
+def test_fullscreen_wheel_over_return_to_tail_scrolls_transcript() -> None:
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    app = _make_fullscreen_app()
+    app.emit_block("".join(f"line {index}\n" for index in range(20)))
+    app._transcript_viewport_size = lambda: (12, 4)
+    app._scroll_fullscreen_transcript(-4)
+    before = app._fullscreen_transcript.viewport
+
+    result = app._return_to_tail_control.mouse_handler(
+        _mouse_event(MouseEventType.SCROLL_UP, button=None)
+    )
+
+    assert result is None
+    assert app._fullscreen_transcript.viewport != before
+    assert not app._fullscreen_transcript.viewport.follows_tail
 
 
 def test_fullscreen_return_to_tail_affordance_preserves_native_mouse_escape() -> None:
