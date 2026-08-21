@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 import pytest
 from nooa_cli.coding import CodingAgent, discover_agent_instruction_files
-from nooa_cli.coding import delegation as delegation_module
 
 from nooa.agentdoc import doc
 from nooa.skill import Skill, get_slash_commands, slash_command
@@ -272,8 +271,9 @@ def test_coding_agent_prompt_exposes_bounded_delegation(tmp_path):
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         rendered = doc(agent)
-        assert "delegate" in rendered
-        assert "bounded context-heavy" in (CodingAgent.__doc__ or "")
+        assert "spawn" in rendered
+        assert "prefer it over awaiting ``delegate()``" in (CodingAgent.__doc__ or "")
+        assert "Reports arrive in later ``delegates``" in (CodingAgent.__doc__ or "")
     finally:
         # This sync test does not start shell work; close is covered elsewhere.
         pass

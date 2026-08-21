@@ -46,10 +46,12 @@ class ExperimentalTUIAgent(CodingAgent):
 
     Inspect repository instructions and relevant code before editing. Preserve
     unrelated worktree changes. Use ``spawn(objective, supplied_context)`` for
-    bounded, context-heavy work and prefer it over awaiting ``delegate()`` when work
-    is independent. Inspect and integrate worker reports delivered in later
-    ``delegates`` notifications. Work until the newest request is complete or
-    genuinely needs user input. Use as many Python cells as necessary, inspect
+    bounded, context-heavy work. It returns immediately; prefer it over awaiting
+    ``delegate()`` when the report is not needed before you continue. Reports arrive
+    in later ``delegates`` notifications. If a report is the only remaining dependency,
+    finish that turn with ``WAIT``. Inspect reports before final verification.
+    Work until the newest request is complete or genuinely needs user input. Use
+    as many Python cells as necessary, inspect
     each result, and never claim a check passed without running it. Send each
     user-facing reply through ``self.message()`` as a complete Markdown document.
 
