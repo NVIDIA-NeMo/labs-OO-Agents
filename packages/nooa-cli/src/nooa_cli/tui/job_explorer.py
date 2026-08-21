@@ -4,8 +4,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
+
+from nooa_cli.interactive.runtime import JobSnapshot
+from nooa_cli.interactive.state import AgentJobSummary
 
 from .explorer_base import (
     ExplorerConfig,
@@ -14,6 +18,8 @@ from .explorer_base import (
     wrap_plain_line,
 )
 from .subapp import SubviewKeyResult
+
+type JobProjection = JobSnapshot | AgentJobSummary
 
 
 @dataclass
@@ -29,31 +35,24 @@ class JobExplorerRow:
     search_text: str
 
 
-def build_job_rows(queue_manager: Any) -> list[JobExplorerRow]:
-    """Build explorer rows from active QueueManager jobs."""
+def build_job_rows(snapshots: Iterable[JobProjection] | None) -> list[JobExplorerRow]:
+    """Build explorer rows from immutable local-runtime projections."""
     rows: list[JobExplorerRow] = []
-    if queue_manager is None:
-        return rows
-    for channel_name, state in queue_manager.jobs().items():
-        handle = queue_manager.job(channel_name)
-        if handle is None:
-            continue
-        ch = queue_manager.channels().get(channel_name)
-        queued = ch.qsize() if ch and hasattr(ch, "qsize") else 0
-        values = handle.values
+    for snapshot in snapshots or ():
+        values = list(snapshot.values)
         search_parts = [
-            handle.name,
-            handle.label,
-            state,
-            *[str(v) for v in values[-20:]],
+            snapshot.name,
+            snapshot.label,
+            snapshot.state,
+            *[str(value) for value in values[-20:]],
         ]
         rows.append(
             JobExplorerRow(
-                channel=handle.name,
-                label=handle.label,
-                state=state,
+                channel=snapshot.name,
+                label=snapshot.label,
+                state=snapshot.state,
                 delivered=len(values),
-                queued=queued,
+                queued=snapshot.queued,
                 values=values,
                 search_text="\n".join(search_parts),
             )
@@ -64,9 +63,8 @@ def build_job_rows(queue_manager: Any) -> list[JobExplorerRow]:
 class JobExplorerView(ExplorerView):
     """In-app subview for browsing background jobs."""
 
-    def __init__(self, queue_manager: Any) -> None:
-        self._queue_manager = queue_manager
-        rows = build_job_rows(queue_manager)
+    def __init__(self, snapshots: Iterable[JobProjection]) -> None:
+        rows = build_job_rows(snapshots)
         model = ExplorerModel(rows)
         config = ExplorerConfig(
             title="Job Explorer",

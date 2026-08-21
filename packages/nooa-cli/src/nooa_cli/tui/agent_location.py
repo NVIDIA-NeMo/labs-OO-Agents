@@ -9,11 +9,11 @@ suspended.
 Why this lives here and not in the core framework:
 
 - The agent runs as a coroutine on a dedicated asyncio loop on its own thread
-  (``TUIApplication._ensure_agent_loop``). A point-in-time "where is it"
+  (owned by ``LocalAgentRunner``). A point-in-time "where is it"
   snapshot is answered by asyncio task introspection (``Task.get_stack()``),
   which must run *on the agent loop* — ``asyncio.Task`` is not safe to walk
-  from another thread. The ``ActivityCommand`` already has ``agent_run()``,
-  which executes a callable on the agent loop, so the probe runs there and
+  from another thread. ``ActivityCommand`` receives a runtime dispatcher from
+  the composition root, so the probe runs there and
   returns plain data back across the thread boundary.
 - ``sys.monitoring`` is the wrong tool for an on-demand probe: its callbacks
   fire on the *executing* thread (not the asker's), there is no per-thread
