@@ -237,25 +237,6 @@ pathological case where a valid grapheme is wider than a one-cell viewport, the
 model keeps the original text and shows a narrow ellipsis only in the screen
 projection.
 
-## Display modes
-
-Fullscreen is the default. Two restart-only escape hatches remain for terminals
-or workflows that need native scrollback.
-
-| Mode | Screen ownership | History on resize |
-| --- | --- | --- |
-| `fullscreen` | prompt_toolkit owns the alternate screen | reproject the model |
-| `native` | inline terminal output | keep terminal scrollback as-is |
-| `native-replay` | inline terminal output | clear and replay retained blocks |
-
-Choose a mode with `nooa tui --display-mode <mode>` or set
-`tui.display_mode` in `.nooa/settings.yaml`. An explicitly configured legacy
-`tui.full_screen` boolean is still interpreted, with a deprecation warning.
-
-Native modes are compatibility paths, not a second implementation of every
-fullscreen interaction. In particular, application-owned mouse selection and
-subview composition depend on fullscreen ownership.
-
 ## Startup and shutdown
 
 Terminal applications are judged as much by how they leave as by how they run.
