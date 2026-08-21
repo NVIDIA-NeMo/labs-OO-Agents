@@ -213,7 +213,7 @@ class StopReasonOutput:
             return "done"
         if str(self.kind) == "KEEP_GOING":
             return "keep going"
-        if str(self.kind) in {"NEED_INPUT", "GET_USER_INPUT"}:
+        if str(self.kind) == "NEED_INPUT":
             return "need input"
         return "paused"
 
