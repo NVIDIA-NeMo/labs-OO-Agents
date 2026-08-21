@@ -230,7 +230,7 @@ class AgentEventRenderer:
 
     def _on_tool_call(self, event: _ToolCallEvent) -> None:
         name = getattr(event, "name", "")
-        if name != "execute_python":
+        if name not in {"execute_python", "python_cell"}:
             # ``return_result`` and other tool calls have no visible
             # rendering of their own — self.message() output (if any)
             # was already emitted inline when the agent called it.
