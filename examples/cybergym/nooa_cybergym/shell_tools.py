@@ -63,11 +63,21 @@ class Match:
 
     Pass any ``Match`` to ``self.shell.replace(match, new_text)``. Print it to
     view numbered lines. Slice with ``match[start:end]`` (1-indexed inclusive
-    line numbers) to narrow the region before replacing.
+    line numbers) to narrow the region before replacing. ``resolved_path`` is
+    required so the anchor remains bound to that file if the shell cwd changes.
     """
 
-    def __init__(self, path: str, start: int, end: int, text: str):
+    def __init__(
+        self,
+        path: str,
+        start: int,
+        end: int,
+        text: str,
+        *,
+        resolved_path: str | Path,
+    ):
         self._path = path
+        self._resolved_path = str(Path(resolved_path).resolve())
         self._start = start
         self._end = end
         self._text = text
@@ -76,6 +86,11 @@ class Match:
     def path(self) -> str:
         """File path."""
         return self._path
+
+    @property
+    def resolved_path(self) -> str:
+        """Canonical file path captured when this match was created."""
+        return self._resolved_path
 
     @property
     def start(self) -> int:
@@ -120,7 +135,13 @@ class Match:
             idx_start = start - self._start
             idx_end = stop - self._start + 1
             text = "".join(lines[idx_start:idx_end])
-            return Match(self._path, start, stop, text)
+            return Match(
+                self._path,
+                start,
+                stop,
+                text,
+                resolved_path=self._resolved_path,
+            )
 
         raise TypeError(f"indices must be int or slice, not {type(key).__name__}")
 
@@ -444,7 +465,7 @@ class ShellTools(Skill):
             return None
 
         anchors: list[tuple[str, int]] = []
-        file_cache: dict[str, list[str]] = {}
+        file_cache: dict[str, tuple[Path, list[str]]] = {}
         for raw in rg_out.splitlines():
             raw = raw.strip()
             if not raw:
@@ -507,13 +528,22 @@ class ShellTools(Skill):
             if mpath not in file_cache:
                 resolved = (self.cwd / mpath).resolve()
                 try:
-                    file_cache[mpath] = resolved.read_text().splitlines(keepends=True)
+                    lines = resolved.read_text().splitlines(keepends=True)
+                    file_cache[mpath] = (resolved, lines)
                 except OSError:
                     return None
-            lines = file_cache[mpath]
+            resolved, lines = file_cache[mpath]
             if not (1 <= line_no <= len(lines)):
                 return None
-            out.append(Match(mpath, line_no, line_no, lines[line_no - 1]))
+            out.append(
+                Match(
+                    mpath,
+                    line_no,
+                    line_no,
+                    lines[line_no - 1],
+                    resolved_path=resolved,
+                )
+            )
         return out
 
     @staticmethod
@@ -640,9 +670,9 @@ class ShellTools(Skill):
             start = max(1, start)
             end = min(total, end)
             text = "".join(all_lines[start - 1 : end])
-            return Match(str(path), start, end, text)
+            return Match(str(path), start, end, text, resolved_path=resolved)
 
-        return Match(str(path), 1, total, content)
+        return Match(str(path), 1, total, content, resolved_path=resolved)
 
     async def read_binary(self, path: str, lines=None) -> str:
         """Hex + ASCII dump of a binary file.
@@ -701,7 +731,7 @@ class ShellTools(Skill):
         """
         if isinstance(target, Match):
             new_text = old_or_new
-            resolved = (self.cwd / target.path).resolve()
+            resolved = Path(target.resolved_path)
             content = resolved.read_text()
             all_lines = content.splitlines(keepends=True)
 

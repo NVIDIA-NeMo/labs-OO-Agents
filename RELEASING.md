@@ -1,76 +1,128 @@
 # Releasing
 
-`nooa`, `nooa-cli`, `nooa-memory` and `nooa-bench` release together from the
-same commit. **The version comes from the git tag** — there is no `version =`
-in any `pyproject.toml` and no bump step. On tag `v0.0.9` the wheels are
-`0.0.9`; between tags they are `0.0.9.devN`.
+`nooa`, `nooa-cli`, `nooa-memory`, and `nooa-bench` release together from one
+commit. The version comes from the Git tag: on `v0.0.10` the distributions are
+`0.0.10`; between tags they are development versions.
 
-## Cutting a release
+## Normal release path
+
+Releases are gated by a manually started pipeline on protected `main` in the
+private `interactive-agents/nooa-dev` GitLab project. Supply both:
+
+- `NOOA_RELEASE_TAG`: a new canonical `vX.Y.Z` version;
+- `NOOA_RELEASE_SHA`: the full 40-character SHA of a commit currently reachable
+  from public GitHub `main`.
+
+The controller freezes that SHA. A later push to `main` does not change the
+candidate under test. The job builds the internal NVIDIA model-alias wheel from
+the controller commit, clones this repository at the candidate, and calls
+`scripts/make_release.py --ci`. The public runner remains the implementation of
+the gate; GitLab YAML only provisions and invokes it.
+
+The strict gate performs:
+
+1. Ruff lint and formatting, SPDX checks, unit tests, and explicit OS sandbox
+   containment tests.
+2. Builds all four wheels and source distributions under a temporary local tag,
+   verifies their versions, and smoke-tests imports and `nooa --version` in a
+   clean environment.
+3. Runs the full capability suite for the candidate and previous release, fresh
+   and back-to-back: four gate models, three runs, full data, no response cache.
+4. Writes private results, traces, distributions, checksums, a JSON manifest,
+   and sanitized public notes to the GitLab job artifacts.
+5. After every hard gate passes, creates or safely updates one GitHub **draft**
+   targeting the exact tested SHA.
+
+The candidate and baseline environments receive the same explicit
+`nemo-oo-agents-nvidia` wheel. Strict CI never copies `.env`, discovers ambient
+packages, or reuses capability results from another candidate. Each sample,
+stalled run, and complete arm has a timeout; completed JSONL evidence remains
+available when a later sample fails.
+
+The stable-tier 60% floor, unusable/missing results, and an arm with more than
+50% errors are hard failures. Collapses, new errors, removed tests, and drops
+beyond the noise band are advisory: they are prominent in the draft but remain
+a human judgment when hard gates pass.
+
+## Human approval
+
+The GitLab job can create only a draft. It has no command that publishes a
+release or uploads to PyPI.
+
+- **Accept:** inspect the draft and private GitLab evidence, then click GitHub's
+  **Publish release** button.
+- **Reject:** delete the draft with its tag, or leave it unpublished until a
+  maintainer performs cleanup. A subsequent pipeline may reuse only a draft
+  whose target is the identical frozen SHA; any different target fails closed.
+
+Publishing is the single human approval. `.github/workflows/publish.yml` listens
+for `release: published` and automatically rebuilds, smoke-tests, and uploads
+all four packages to PyPI using Trusted Publishing. Despite their names, the
+current `pypi-*` GitHub Environments have no configured reviewer protection, so
+there is no second approval after **Publish release**.
+
+## Evidence and recovery
+
+GitLab retains the release evidence for 90 days. Start with `job-summary.md` and
+`release-manifest.json`; the latter indexes exact commits, lock/config hashes,
+toolchain identity, check outcomes, capability scope/results, distribution
+checksums, and draft identity. Raw `.noo-eval.jsonl` files and traces are private
+artifacts and must not be copied into the public draft.
+
+Hard-gate failure or capability-infrastructure failure before draft creation
+creates no draft. Fix the problem and start a new pipeline with the same tag
+and SHA. A failure after `gh release create` or `gh release edit` may leave a
+draft requiring reconciliation; rerun to update an exact matching draft without
+duplication. If a draft has the wrong target or a release is already published,
+the runner stops instead of mutating it.
+
+Use the controller's one-model/one-run/one-sample rehearsal mode to exercise
+setup and reporting cheaply; rehearsals can never create a draft. Before first
+production use, run the complete gate once with draft creation disabled and
+review all artifacts.
+
+Before requesting review of coordinated release-process changes, the private
+controller may run an unmerged rehearsal against a canonical GitHub
+`refs/pull/<number>/head` ref and its exact SHA. That mode may relax only the
+candidate's reachability from GitHub `main`; it remains reduced-scope, requires
+the private controller to authenticate the pull ref, runs every deterministic,
+containment, build, smoke, and evidence check, and can never create a draft.
+
+## Publication rehearsal and artifact promotion
+
+A manual run of `publish.yml` always targets TestPyPI and is the safe way to
+rehearse its build, OIDC, and upload jobs without consuming a production PyPI
+version. The production trigger remains `release: published`; do not publish a
+throwaway GitHub release to test it because that event intentionally reaches
+real PyPI.
+
+The current first increment rebuilds after publication from the exact published
+tag. The candidate artifacts and checksums are retained for review, but they are
+not yet promoted. A follow-up should attach the checked artifacts to the draft
+and make `publish.yml` download and verify those exact files while preserving
+the existing PyPI OIDC identities.
+
+## Emergency local fallback
+
+If the private controller is unavailable, a trusted maintainer may run the
+public script from a clean, current `main` checkout:
 
 ```bash
-git checkout main && git pull
-uv run python scripts/make_release.py v0.0.9
+uv run python scripts/make_release.py v0.0.10
 ```
 
-The script runs everything in order and stops at two prompts — after the
-capability report, and after the draft notes:
+This is deliberately narrower than the old workflow: it may create a draft but
+cannot publish it. It retains local compatibility for model aliases, prompts
+before drafting advisory results, and still blocks the capability floor. Use it
+only for recovery, record the evidence separately, and publish only through the
+GitHub draft UI.
 
-| Step | Fails the run? |
-|---|---|
-| Preflight — on `main`, clean, in sync with origin, tag unused | yes |
-| Lint, SPDX headers, unit tests | yes |
-| Build 4 wheels, version == tag, smoke import | yes |
-| Capability diff vs the previous release, 4 models × 3 runs | only below the floor |
-| `gh release create --draft`, capability report appended | — |
-| `gh release edit --draft=false` → triggers `publish.yml` | — |
+## Trusted Publishing setup
 
-Publishing uploads to PyPI via Trusted Publishing. Each package waits on its
-`pypi-<package>` GitHub Environment, so a reviewer approves before upload.
+Each project needs a publisher configured for owner `NVIDIA-NeMo`, repository
+`labs-OO-Agents`, workflow `publish.yml`, and its distinct environment:
+`pypi-nooa`, `pypi-nooa-cli`, `pypi-nooa-memory`, or `pypi-nooa-bench`. Repeat
+with `testpypi-*` environments on TestPyPI.
 
-### Capability gate
-
-Both arms run fresh: HEAD in the working tree, the previous tag in a temporary
-worktree. Comparing against a stored baseline cannot tell a real regression
-from the endpoint behind a model alias changing.
-
-The only hard threshold is a **floor** on the stable tier (60%) — clearing it
-requires typing `OVERRIDE`. Everything else (collapses, new error types, drops
-beyond ±5 points) is reported for a human to judge. An arm where >50% of
-samples error is rejected as infrastructure failure rather than reported as a
-result. Results cache under `tmp/release-check/`, so aborting at a prompt does
-not mean paying for another run.
-
-### Flags
-
-| Flag | Use |
-|---|---|
-| `--checks-only` | run everything, print the report, touch nothing |
-| `--dry-run` | print the `gh` commands instead of running them |
-| `--skip-capability` | docs-only releases |
-| `--models` / `--runs` / `--limit` | cheap rehearsal; requires `--checks-only` |
-
-Rehearse without spending real money:
-
-```bash
-uv run python scripts/make_release.py v0.0.9 --checks-only \
-  --models claude-haiku --runs 1 --limit 1
-```
-
-Report logic is covered by `tests/test_make_release.py`.
-
-## One-time PyPI setup
-
-Each project needs a pending publisher at
-<https://pypi.org/manage/account/publishing/> — owner `NVIDIA-NeMo`, repo
-`labs-OO-Agents`, workflow `publish.yml`, and a **distinct environment per
-package**: `pypi-nooa`, `pypi-nooa-cli`, `pypi-nooa-memory`, `pypi-nooa-bench`.
-PyPI keys a pending publisher on (owner, repo, workflow, environment), so a
-shared environment makes the second registration fail. The matching GitHub
-Environments must exist too.
-
-Repeat on <https://test.pypi.org> with `testpypi-<package>` names. Running the
-**Publish** workflow manually always targets TestPyPI.
-
-> Every `uses:` in `publish.yml` must be an `actions/*` action. This org
-> enforces an allowlist, and a disallowed action fails the whole workflow at
-> startup — that is what left CI dead for eight days (PR #50).
+Every `uses:` entry in `publish.yml` must remain compatible with the NVIDIA
+organization's GitHub Actions allowlist.

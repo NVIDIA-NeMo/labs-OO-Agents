@@ -87,6 +87,26 @@ async def test_match_replace_at_end_of_file_reports_the_unterminated_text(tmp_pa
     assert (tmp_path / "example.txt").read_text() == "one\ntwo\nchanged"
 
 
+async def test_match_replace_after_cwd_change_emits_original_path(tmp_path):
+    shell, events = _observed_shell(tmp_path)
+    original = tmp_path / "example.txt"
+    original.write_text("before\n")
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "example.txt").write_text("wrong file\n")
+    try:
+        match = await shell.read("example.txt")
+        await shell.run("cd other")
+        await shell.replace(match, "after")
+    finally:
+        await shell.close()
+
+    edit = next(event for event in events if isinstance(event, FileEdit))
+    assert edit.path == str(original)
+    assert original.read_text() == "after"
+    assert (other / "example.txt").read_text() == "wrong file\n"
+
+
 async def test_observing_an_overwrite_does_not_break_binary_file_replacement(tmp_path):
     shell, events = _observed_shell(tmp_path)
     (tmp_path / "binary.dat").write_bytes(b"\xff\xfe")
