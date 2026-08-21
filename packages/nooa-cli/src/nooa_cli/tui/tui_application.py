@@ -3,8 +3,8 @@
 """Single long-lived ``prompt_toolkit.Application`` owning the whole TUI.
 
 This is the "Plan C" rewrite: one Application that holds output
-scrollback, the type-ahead queue region, the input buffer, and the
-status line. No ``patch_stdout`` and no per-turn ``prompt_async`` —
+scrollback, queued-command status, the input buffer, and the status line.
+No ``patch_stdout`` and no per-turn ``prompt_async`` —
 so no handoff race that drops the first keystroke after the agent
 finishes.
 
@@ -1387,19 +1387,10 @@ class TUIApplication:
         def _queue_pending() -> list[str]:
             return self._pending_input_display()
 
+
         def _queue_formatted():
-            rows = []
             command_queue = list(self._command_queue_texts)
-            if command_queue:
-                noun = "command" if len(command_queue) == 1 else "commands"
-                rows.append(f"│ {len(command_queue)} {noun} queued")
-                for index, text in enumerate(command_queue):
-                    branch = "└─" if index == len(command_queue) - 1 else "├─"
-                    rows.append(f"{branch} {sanitize_live_text(text)}")
-            for text in _queue_pending():
-                for line in sanitize_live_text(str(text)).split("\n"):
-                    rows.append(f"│ {line}")
-            if not rows:
+            if not command_queue:
                 return []
             fragments = [("class:queue", "\n".join(rows))]
             if self._is_fullscreen:
@@ -1407,6 +1398,7 @@ class TUIApplication:
                     fragments, render_counter=self._app.render_counter
                 )
             return fragments
+
 
         queue_window = ConditionalContainer(
             Window(
@@ -1421,7 +1413,7 @@ class TUIApplication:
                 wrap_lines=True,
                 dont_extend_height=True,
             ),
-            filter=Condition(lambda: bool(_queue_pending()) or bool(self._command_queue_texts)),
+            filter=Condition(lambda: bool(self._command_queue_texts)),
         )
 
         input_style = "class:input-area"
@@ -1629,7 +1621,7 @@ class TUIApplication:
 
         # Active bottom region (top → bottom):
         #   status (spinner + optional badges)
-        #   queued command/type-ahead lines
+        #   queued command lines
         #   session rule — always visible while at the transcript tail
         #   input composer (one padding row above and below the input)
         #   completions (only while completing)
