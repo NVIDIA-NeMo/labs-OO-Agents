@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 from bisect import bisect_right
 from collections import OrderedDict
 from collections.abc import Sequence
@@ -22,6 +23,9 @@ from .terminal_safety import (
 )
 
 _MAX_PROJECTED_WIDTHS = 2
+_COPY_LINK_RE = re.compile(r"\x1b\]8;[^\x07\x1b\r\n]*;([^\x07\x1b\r\n]*)(?:\x07|\x1b\\)")
+_SGR_RE = re.compile(r"\x1b\[[0-9:;]*m")
+_COPY_URI_PREFIX = "nooa-copy://"
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +60,7 @@ class _Record:
     ansi: str
     plain: str
     has_separator: bool = False
+    copy_regions: tuple[tuple[int, int, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +224,59 @@ class FullscreenTranscriptModel:
             offset = record_stop
         return "".join(pieces)
 
+    def copy_action_at(self, *, x: int, y: int, width: int, height: int) -> str | None:
+        """Return the exact code payload behind a visible Copy label."""
+        hit = self._selection_hit(x=x, y=y, width=width, height=height)
+        if hit is None:
+            return None
+        records, _bases = self._record_indexes()
+        record = records.get(hit.record_id)
+        if record is None:
+            return None
+        for start, stop, payload in record.copy_regions:
+            if start <= hit.before < stop:
+                return payload
+        return None
+
+    @staticmethod
+    def _copy_regions(
+        ansi: str, copy_actions: dict[str, str] | None
+    ) -> tuple[tuple[int, int, str], ...]:
+        """Map custom OSC-8 links to ANSI-free record character offsets."""
+        if not copy_actions:
+            return ()
+        regions: list[tuple[int, int, str]] = []
+        active: tuple[int, str] | None = None
+        plain_offset = 0
+        cursor = 0
+        while cursor < len(ansi):
+            sgr = _SGR_RE.match(ansi, cursor)
+            if sgr is not None:
+                cursor = sgr.end()
+                continue
+            link = _COPY_LINK_RE.match(ansi, cursor)
+            if link is not None:
+                uri = link.group(1)
+                if uri.startswith(_COPY_URI_PREFIX):
+                    action_id = uri[len(_COPY_URI_PREFIX) :]
+                    payload = copy_actions.get(action_id)
+                    if payload is not None:
+                        active = (plain_offset, payload)
+                elif not uri and active is not None:
+                    start, payload = active
+                    if plain_offset > start:
+                        regions.append((start, plain_offset, payload))
+                    active = None
+                cursor = link.end()
+                continue
+            plain_offset += 1
+            cursor += 1
+        if active is not None:
+            start, payload = active
+            if plain_offset > start:
+                regions.append((start, plain_offset, payload))
+        return tuple(regions)
+
     def _selection_hit(self, *, x: int, y: int, width: int, height: int) -> _SelectionHit | None:
         width = max(1, width)
         height = max(1, height)
@@ -256,7 +314,13 @@ class FullscreenTranscriptModel:
         start, stop = row.source_spans[selected]
         return _SelectionHit(record.record_id, start, stop)
 
-    def append(self, source: str, *, record_id: int | None = None) -> None:
+    def append(
+        self,
+        source: str,
+        *,
+        record_id: int | None = None,
+        copy_actions: dict[str, str] | None = None,
+    ) -> None:
         safe = sanitize_transcript_ansi(source)
         plain = strip_safe_ansi(safe)
         first_record = not self._records
@@ -267,7 +331,14 @@ class FullscreenTranscriptModel:
             self._next_record_id += 1
         else:
             self._next_record_id = max(self._next_record_id, record_id + 1)
-        record = _Record(record_id, separator + safe, separator + plain, bool(separator))
+        record_ansi = separator + safe
+        record = _Record(
+            record_id,
+            record_ansi,
+            separator + plain,
+            bool(separator),
+            self._copy_regions(record_ansi, copy_actions),
+        )
         prior_ends_newline = self._ends_newline
         self._records.append(record)
         if record.plain:
@@ -316,10 +387,13 @@ class FullscreenTranscriptModel:
         sources: list[str],
         *,
         record_ids: list[int] | None = None,
+        copy_actions: list[dict[str, str]] | None = None,
     ) -> None:
         """Reproject semantic records while preserving explicit record identity."""
         if record_ids is not None and len(record_ids) != len(sources):
             raise ValueError("record_ids must have one item per source")
+        if copy_actions is not None and len(copy_actions) != len(sources):
+            raise ValueError("copy_actions must have one item per source")
         old_anchor = self._viewport.anchor
         old_records = {record.record_id: record for record in self._records}
         available: dict[str, list[int]] = {}
@@ -339,7 +413,17 @@ class FullscreenTranscriptModel:
                 if not matches and record_id == self._next_record_id:
                     self._next_record_id += 1
             self._next_record_id = max(self._next_record_id, record_id + 1)
-            rebuilt.append(_Record(record_id, separator + safe, separator + plain, bool(separator)))
+            record_ansi = separator + safe
+            actions = None if copy_actions is None else copy_actions[index]
+            rebuilt.append(
+                _Record(
+                    record_id,
+                    record_ansi,
+                    separator + plain,
+                    bool(separator),
+                    self._copy_regions(record_ansi, actions),
+                )
+            )
             accumulated_plain += separator + plain
         self._records = rebuilt
         self._projectable_record_count = sum(bool(record.plain) for record in rebuilt)
@@ -395,7 +479,17 @@ class FullscreenTranscriptModel:
         if self._records and self._records[0].has_separator:
             first = self._records[0]
             stripped_record_id = first.record_id
-            self._records[0] = _Record(first.record_id, first.ansi[1:], first.plain[1:], False)
+            self._records[0] = _Record(
+                first.record_id,
+                first.ansi[1:],
+                first.plain[1:],
+                False,
+                tuple(
+                    (max(0, start - 1), max(0, stop - 1), payload)
+                    for start, stop, payload in first.copy_regions
+                    if stop > 1
+                ),
+            )
             # Selection endpoints are record-local character offsets. Removing
             # the synthetic joining newline must not move a selection that is
             # wholly contained in the surviving record.

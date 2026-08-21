@@ -1015,15 +1015,39 @@ class Session:
         """
         assert self._app is not None
 
-        rendered = self._render_to_ansi(renderable)
         from .config import DisplayMode
+        from .copyable_markdown import CopyableMarkdown
 
         full_screen = getattr(self._app, "display_mode", None) is DisplayMode.FULLSCREEN
+        if full_screen:
+            from rich.markdown import Markdown
+
+            if type(renderable) is Markdown:
+                renderable = CopyableMarkdown(
+                    renderable.markup,
+                    code_theme=renderable.code_theme,
+                    justify=renderable.justify,
+                    style=renderable.style,
+                    hyperlinks=renderable.hyperlinks,
+                    inline_code_lexer=renderable.inline_code_lexer,
+                    inline_code_theme=renderable.inline_code_theme,
+                )
+        rendered = self._render_to_ansi(renderable)
         replay = (lambda r=renderable: self._render_to_ansi(r)) if full_screen else None
+        code_copy_actions = (
+            dict(renderable.copy_actions) if isinstance(renderable, CopyableMarkdown) else None
+        )
         if replay is None:
             self._app.emit_block(rendered, event_id=event_id, tags=tags, keep=keep)
         else:
-            self._app.emit_block(rendered, replay=replay, event_id=event_id, tags=tags, keep=keep)
+            self._app.emit_block(
+                rendered,
+                replay=replay,
+                event_id=event_id,
+                tags=tags,
+                keep=keep,
+                code_copy_actions=code_copy_actions,
+            )
 
     def _get_command_runner(self):
         """Return the TUI-local command runner, creating it lazily for tests."""
