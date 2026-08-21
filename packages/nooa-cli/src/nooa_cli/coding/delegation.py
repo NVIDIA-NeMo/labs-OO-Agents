@@ -61,8 +61,8 @@ class CodingWorker(Agent, context={"context_usage": None}):
         """Complete one bounded coding subtask and return a concise report.
 
         Read relevant files before drawing conclusions. Make edits only when the
-        objective explicitly requests implementation. Run a focused check when
-        practical. Return paths, findings or changes, and observed verification;
-        do not return a raw transcript.
+        objective explicitly requests implementation. Report modified paths. Name each
+        verification command and its observed outcome; if none ran, state why. Return
+        concise findings or changes rather than a raw transcript.
         """
         ...

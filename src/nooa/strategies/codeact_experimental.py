@@ -113,8 +113,8 @@ class CodeActExperimental(CodeActStrategy):
         exposes `spawn(...)`, prefer it for independent work: it returns immediately,
         so continue useful work while the report runs. Await `delegate(...)` only when
         its report is required before continuing. If a spawned report is your only
-        remaining dependency, finish the turn with `WAIT`; inspect the report from a
-        later notification before final completion.
+        remaining dependency and the method defines a background-wait result, use that
+        documented result; inspect the later notification before final completion.
 
         ## Restrictions (will throw)
 
