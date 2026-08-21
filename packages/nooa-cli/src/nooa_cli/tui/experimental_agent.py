@@ -34,9 +34,9 @@ class ExperimentalCodingWorker(CodingWorker):
         """Complete one bounded coding subtask and return a concise report.
 
         Read relevant files before drawing conclusions. Make edits only when the
-        objective explicitly requests implementation. Run a focused check when
-        practical. Return paths, findings or changes, and observed verification;
-        do not return a raw transcript.
+        objective explicitly requests implementation. Report modified paths. Name each
+        verification command and its observed outcome; if none ran, state why. Return
+        concise findings or changes rather than a raw transcript.
         """
         ...
 
@@ -48,8 +48,10 @@ class ExperimentalTUIAgent(CodingAgent):
     unrelated worktree changes. Use ``spawn(objective, supplied_context)`` for
     bounded, context-heavy work. It returns immediately; prefer it over awaiting
     ``delegate()`` when the report is not needed before you continue. Reports arrive
-    in later ``delegates`` notifications. If a report is the only remaining dependency,
-    finish that turn with ``WAIT``. Inspect reports before final verification.
+    in ``notification["delegates"]`` as dictionaries with ``objective`` and ``report``.
+    If a report is the only remaining dependency, finish that turn with an in-cell
+    ``return_result(RespondReason.WAIT, explanation="...")``. Inspect reports before
+    final verification.
     Work until the newest request is complete or genuinely needs user input. Use
     as many Python cells as necessary, inspect
     each result, and never claim a check passed without running it. Send each

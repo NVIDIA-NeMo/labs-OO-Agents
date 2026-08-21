@@ -564,9 +564,10 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
         End the turn with exactly one ``return_result(REASON_ENUM, explanation="...")``.
         ``explanation`` is required and must be non-empty. The host records and renders it as the
-        visible stop reason, so be specific and user-facing: if waiting on a
-        job/queue, name which job and why; if asking for input, say what input
-        is needed and why.
+        visible stop status, so keep it terse and factual. It is not the user reply:
+        send answers and questions through ``self.message()`` first. If waiting on a
+        job or queue, name which one and why. For ``NEED_INPUT``, summarize why input
+        is needed after sending the actual question through ``self.message()``.
 
         - Request complete; wait for the next user message::
 

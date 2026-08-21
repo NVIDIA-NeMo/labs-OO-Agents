@@ -159,7 +159,10 @@ async def test_coding_agent_spawns_delegation_in_background(tmp_path):
         assert agent.delegates.status() == ""
 
         release.set()
-        assert await agent.delegates.get() == "review complete"
+        assert await agent.delegates.get() == {
+            "objective": "review parser",
+            "report": "review complete",
+        }
         await asyncio.sleep(0)
         assert handle.state == "done"
     finally:

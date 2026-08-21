@@ -44,7 +44,8 @@ class CodingAgent(InteractiveAgent):
     ``spawn(objective, supplied_context)`` for bounded context-heavy work. It
     returns immediately; prefer it over awaiting ``delegate()`` when the report is
     not needed before you continue. Reports arrive in later ``delegates``
-    notifications. Inspect and integrate them before final verification.
+    notifications under ``notification["delegates"]`` as dictionaries containing
+    ``objective`` and ``report``. Inspect and integrate them before final verification.
 
     Work until the newest request is complete or genuinely needs user input. Use
     as many execution cells as necessary, inspect each result, and never claim a
@@ -148,6 +149,13 @@ class CodingAgent(InteractiveAgent):
         finally:
             await worker.close()
 
+    async def _delegation_report(self, objective: str, supplied_context: Any) -> dict[str, str]:
+        """Return a correlatable queue item for one background delegation."""
+        return {
+            "objective": objective,
+            "report": await self.delegate(objective, supplied_context),
+        }
+
     def spawn(self, objective: str, supplied_context: Any = None) -> JobHandle:
         """Start one isolated coding worker in the background and return immediately.
 
@@ -156,10 +164,11 @@ class CodingAgent(InteractiveAgent):
         ``objective``. Continue useful controller work while it runs. Its report arrives
         in a later ``delegates`` notification. If the report is the only remaining
         dependency, finish the current turn with ``WAIT``; inspect and integrate the
-        later report before final verification.
+        later report before final verification. Each notification item is
+        ``{"objective": <str>, "report": <str>}``, so concurrent jobs remain identifiable.
         """
         return self.queue_manager.spawn(
-            self.delegate(objective, supplied_context),
+            self._delegation_report(objective, supplied_context),
             channel="delegates",
             label=objective,
         )
