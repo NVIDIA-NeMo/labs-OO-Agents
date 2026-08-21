@@ -299,11 +299,14 @@ def _event_to_mapping(event: Any) -> dict[str, Any]:
     return {"repr": repr(event)}
 
 
+_PYTHON_TOOL_NAMES = frozenset({"execute_python", "python_cell"})
+
+
 def _event_summary(event: Any, event_type: str) -> str:
     if event_type == "ToolCallEvent":
         name = str(getattr(event, "name", "?"))
         args = getattr(event, "arguments", {})
-        if name == "execute_python" and isinstance(args, dict):
+        if name in _PYTHON_TOOL_NAMES and isinstance(args, dict):
             code = str(args.get("code", ""))
             for line in code.splitlines():
                 stripped = line.strip()
@@ -344,7 +347,7 @@ def _extract_fenced_code(text: str) -> tuple[str, str] | None:
 
 
 def _event_code(event: Any, event_type: str) -> tuple[str | None, str]:
-    if event_type == "ToolCallEvent" and getattr(event, "name", None) == "execute_python":
+    if event_type == "ToolCallEvent" and getattr(event, "name", None) in _PYTHON_TOOL_NAMES:
         args = getattr(event, "arguments", {})
         if isinstance(args, dict) and args.get("code"):
             return str(args["code"]), "python"
@@ -621,7 +624,7 @@ def _event_markdown(tag: str, event: Any, event_type: str) -> str | None:
         name = str(data.get("name", "tool"))
         args = data.get("arguments", {})
         _append_section(lines, "Tool", f"`{_safe_inline(name)}`")
-        if name == "execute_python" and isinstance(args, dict) and args.get("code"):
+        if name in _PYTHON_TOOL_NAMES and isinstance(args, dict) and args.get("code"):
             _append_section(lines, "Python", _markdown_code_block(str(args["code"]), "python"))
             extras = {k: v for k, v in args.items() if k != "code" and not _is_empty_event_field(v)}
             if extras:
