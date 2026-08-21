@@ -108,9 +108,13 @@ class CodeActExperimental(CodeActStrategy):
 
         For per-item language work, define a standalone async helper decorated with
         `@strategy(PredictStrategy())`, then call helpers concurrently with
-        `asyncio.gather`. If `self` exposes delegation, reserve it for bounded work
-        that benefits from an isolated context. Delegated tasks must be strictly
-        simpler than the current task.
+        `asyncio.gather`. Reserve delegation for bounded tasks that benefit from an
+        isolated context and are strictly simpler than the current task. If `self`
+        exposes `spawn(...)`, prefer it for independent work: it returns immediately,
+        so continue useful work while the report runs. Await `delegate(...)` only when
+        its report is required before continuing. If a spawned report is your only
+        remaining dependency, finish the turn with `WAIT`; inspect the report from a
+        later notification before final completion.
 
         ## Restrictions (will throw)
 
