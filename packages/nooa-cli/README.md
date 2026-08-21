@@ -13,6 +13,9 @@ uv add "nooa-cli[datascience]"
 
 `nooa-cli` automatically pulls in matching `nemo-oo-agents` (the core framework). The `[datascience]` extra adds libraries the LLM can use in REPL-generated code.
 
+New to the interactive terminal? Read [Using the NOOA terminal UI](docs/tui-user-guide.md).
+Contributors can continue with [How the TUI works](docs/tui-rendering-architecture.md).
+
 ## Usage
 
 ```bash
