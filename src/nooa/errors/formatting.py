@@ -273,8 +273,14 @@ def _byte_offset_to_character_offset(line: str, offset: int) -> int:
     return len(line.encode("utf-8")[:offset].decode("utf-8", errors="ignore"))
 
 
-def _terminal_width(text: str, *, start_column: int = 0) -> int:
-    """Return Rich-compatible terminal-cell width, including 8-column tabs."""
+def _source_display_width(text: str, *, start_column: int = 0) -> int:
+    """Measure monospace display columns for a traceback source line.
+
+    Traceback column offsets are UTF-8 byte offsets, while a caret is aligned
+    against rendered source text. Tabs, wide Unicode, and combining marks make
+    code-point counts insufficient. This is diagnostic formatting only; it does
+    not inspect or depend on terminal dimensions.
+    """
     column = start_column
     segments = text.split("\t")
     for index, segment in enumerate(segments):
@@ -310,9 +316,9 @@ def _runtime_caret(frame: traceback.FrameSummary) -> str | None:
     visible = original[removed_indent:]
     start_char = max(removed_indent, start_char)
     end_char = max(start_char + 1, end_char)
-    start = _terminal_width(original[removed_indent:start_char])
-    end = start + _terminal_width(original[start_char:end_char], start_column=start)
-    visible_width = _terminal_width(visible)
+    start = _source_display_width(original[removed_indent:start_char])
+    end = start + _source_display_width(original[start_char:end_char], start_column=start)
+    visible_width = _source_display_width(visible)
     start = min(start, visible_width)
     end = min(max(end, start + 1), max(visible_width, start + 1))
     return " " * start + "^" * max(1, end - start)

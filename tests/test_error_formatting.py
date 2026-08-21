@@ -18,8 +18,8 @@ from nooa.errors.formatting import (
     _adjust_line_numbers,
     _is_user_code_frame,
     _is_validation_error,
+    _source_display_width,
     _strip_file_prefix,
-    _terminal_width,
 )
 
 
@@ -309,8 +309,8 @@ class TestFormatRuntimeError:
             ("a界e\u0301", 4),
         ],
     )
-    def test_terminal_width_handles_tabs_wide_and_combining_text(self, text, expected):
-        assert _terminal_width(text) == expected
+    def test_source_display_width_handles_tabs_wide_and_combining_text(self, text, expected):
+        assert _source_display_width(text) == expected
 
     def test_runtime_error_with_line_offset(self):
         """Runtime error line numbers are adjusted by offset."""
@@ -956,8 +956,8 @@ class TestFormatterReviewRegressions:
         assert "Cell In[99003]" in result
         assert __file__ not in result
 
-    def test_terminal_width_handles_emoji_zwj_cluster(self):
-        assert _terminal_width("👩\u200d💻") == 2
+    def test_source_display_width_handles_emoji_zwj_cluster(self):
+        assert _source_display_width("👩\u200d💻") == 2
 
     def test_user_exception_cannot_spoof_worker_diagnostic(self):
         error = RuntimeError("real failure")
