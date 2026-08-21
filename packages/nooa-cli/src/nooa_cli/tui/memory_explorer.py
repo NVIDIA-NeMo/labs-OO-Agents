@@ -233,6 +233,10 @@ class MemoryExplorerView(ExplorerView):
                 lines.append(f"  → {target_id[:8]} {edge_type} ({weight:.2f})")
         return lines
 
+    def copy_text(self) -> str | None:
+        row = self.model.current
+        return None if row is None else row.content
+
     def handle_action(self, action: str, row: Any) -> SubviewKeyResult:
         if row is None:
             return "ignored"

@@ -132,5 +132,24 @@ class TodoExplorerView(ExplorerView):
 
         return lines
 
+    def copy_text(self) -> str | None:
+        row = self.model.current
+        if row is None:
+            return None
+        lines = [
+            f"Todo: [{row.id}] {row.title}",
+            f"Status: {row.status}",
+            f"Created: {row.created_at}",
+        ]
+        if row.deps:
+            lines.append(f"Dependencies: {', '.join(row.deps)}")
+        if row.notes:
+            lines.extend(("", "Notes:", row.notes))
+        if row.comments:
+            lines.extend(("", "Comments:"))
+            for comment in row.comments:
+                lines.extend((f"[{comment.created_at}]", comment.body))
+        return "\n".join(lines).rstrip()
+
     def handle_action(self, action: str, row: Any) -> SubviewKeyResult:
         return "ignored"

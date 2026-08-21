@@ -10,10 +10,10 @@ from dataclasses import dataclass
 from .explorer_base import (
     BAR_STYLE,
     ExplorerInteraction,
+    bar_with_action,
     display_line,
     render_markdown_lines,
     search_terms,
-    style_bar,
     style_fts_prompt,
     style_mode_label,
     wrap_plain_line,
@@ -61,6 +61,8 @@ class SessionExplorerModel:
         self.detail_tail_skip = 0
         self._last_detail_count_exact = True
         self._detail_cache: dict[tuple[str, int], list[str]] = {}
+        self._last_divider_y = 0
+        self._last_list_rows: dict[int, int] = {}
 
     @property
     def current_index(self) -> int | None:
@@ -176,6 +178,15 @@ class SessionExplorerView(ExplorerInteraction):
     def __init__(self, *, limit: int = 100) -> None:
         self.model = SessionExplorerModel(build_session_rows(limit=limit))
         self.pending_input: str | None = None
+        self.native_selection = False
+        self._copy_handler = None
+        self._copy_status = ""
+
+    def copy_text(self) -> str | None:
+        row = self.model.current
+        if row is None:
+            return None
+        return "\n".join(_detail_raw_lines(row))
 
     def render(self, width: int, height: int) -> str:
         return render_session_explorer(
@@ -184,6 +195,7 @@ class SessionExplorerView(ExplorerInteraction):
             height,
             ansi=True,
             selection_hint=self.selection_hint(),
+            copy_hint=self.copy_hint(),
         )
 
     def handle_key(self, action: str, value: str = "") -> SubviewKeyResult:
@@ -448,6 +460,7 @@ def render_session_explorer(
     *,
     ansi: bool = False,
     selection_hint: str = "F2 select/copy",
+    copy_hint: str = "Ctrl+Y copy detail",
 ) -> str:
     """Render the current session explorer state as text/ANSI."""
     width = max(int(width), 40)
@@ -463,10 +476,9 @@ def render_session_explorer(
         if model.session_query and model.search_scope == "sessions" and match_count
         else ""
     )
-    header = style_bar(
-        f" Session Explorer{pos} of {total}{match_label}{query} ".ljust(width, "─")[:width],
-        ansi=ansi,
-    )
+    header_label = f" Session Explorer{pos} of {total}{match_label}{query} "
+    model._copy_action_start = max(width - len(f" {copy_hint} "), 0)
+    header = bar_with_action(header_label, copy_hint, width, ansi=ansi)
     pane_label = "sessions" if model.focus == "list" else "session dialog"
     if model.search_active:
         mode_text = "FTS MODE"
@@ -499,6 +511,7 @@ def render_session_explorer(
 
     body_height = max(height - 2, 0)
     model._last_divider_y = 0
+    model._last_list_rows = {}
     if not total:
         body = ["No sessions found."]
     elif row is None:
@@ -515,6 +528,7 @@ def render_session_explorer(
         )
         body = []
         for visible_i in range(start, end):
+            model._last_list_rows[1 + len(body)] = visible_i
             row_i = model.matches[visible_i]
             item = model.rows[row_i]
             marker = (

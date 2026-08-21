@@ -467,6 +467,7 @@ class _NativeSelectionBufferControl(BufferControl):
             MouseModifier.ALT in mouse_event.modifiers
             or MouseModifier.SHIFT in mouse_event.modifiers
         ):
+            self._mouse_down_position = None
             return NotImplemented
         if self._transcript_drag_callback is not None and self._transcript_drag_callback(
             mouse_event
@@ -487,6 +488,7 @@ class _NativeSelectionCompletionsMenuControl(CompletionsMenuControl):
             MouseModifier.ALT in mouse_event.modifiers
             or MouseModifier.SHIFT in mouse_event.modifiers
         ):
+            self._mouse_down_position = None
             return NotImplemented
         return super().mouse_handler(mouse_event)
 
@@ -528,20 +530,34 @@ class _SubviewControl(FormattedTextControl):
     ) -> None:
         super().__init__(*args, **kwargs)
         self._mouse_callback = mouse_callback
+        self._mouse_down_position: tuple[int, int] | None = None
 
     def mouse_handler(self, mouse_event: MouseEvent):
         if (
             MouseModifier.ALT in mouse_event.modifiers
             or MouseModifier.SHIFT in mouse_event.modifiers
         ):
+            self._mouse_down_position = None
             return NotImplemented
-        action = {
-            MouseEventType.SCROLL_UP: "scroll_up",
-            MouseEventType.SCROLL_DOWN: "scroll_down",
-        }.get(mouse_event.event_type)
-        if action is not None and self._mouse_callback(
-            action, mouse_event.position.x, mouse_event.position.y
-        ):
+        point = (mouse_event.position.x, mouse_event.position.y)
+        if mouse_event.event_type is MouseEventType.MOUSE_DOWN:
+            self._mouse_down_position = point if mouse_event.button is MouseButton.LEFT else None
+            return None
+        if mouse_event.event_type is MouseEventType.MOUSE_MOVE:
+            if self._mouse_down_position != point:
+                self._mouse_down_position = None
+            return None
+        if mouse_event.event_type is MouseEventType.MOUSE_UP:
+            is_click = mouse_event.button is MouseButton.LEFT and self._mouse_down_position == point
+            self._mouse_down_position = None
+            action = "click" if is_click else None
+        else:
+            self._mouse_down_position = None
+            action = {
+                MouseEventType.SCROLL_UP: "scroll_up",
+                MouseEventType.SCROLL_DOWN: "scroll_down",
+            }.get(mouse_event.event_type)
+        if action is not None and self._mouse_callback(action, *point):
             return None
         return super().mouse_handler(mouse_event)
 
@@ -1377,6 +1393,9 @@ class TUIApplication:
         if self._active_subview_done is not None and not self._active_subview_done.done():
             return
         self._cancel_fullscreen_drag()
+        set_copy_handler = getattr(view, "set_copy_handler", None)
+        if callable(set_copy_handler):
+            set_copy_handler(self._copy_to_clipboard)
         self._active_subview = view
         loop = asyncio.get_running_loop()
         self._active_subview_done = loop.create_future()

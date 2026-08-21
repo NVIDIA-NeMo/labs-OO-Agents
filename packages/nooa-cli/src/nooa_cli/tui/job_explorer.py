@@ -110,5 +110,11 @@ class JobExplorerView(ExplorerView):
                     lines.extend(wrap_plain_line(raw, width))
         return lines
 
+    def copy_text(self) -> str | None:
+        row = self.model.current
+        if row is None or not row.values:
+            return None
+        return "\n".join(str(value) for value in row.values)
+
     def handle_action(self, action: str, row: Any) -> SubviewKeyResult:
         return "ignored"

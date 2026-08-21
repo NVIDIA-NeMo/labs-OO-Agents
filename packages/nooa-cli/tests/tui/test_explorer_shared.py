@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 from nooa_cli.interactive import AgentJobState, AgentJobSummary
 from nooa_cli.interactive.runtime import JobSnapshot
+from nooa_cli.tui.activity_overlay import ActivityOverlayView
 from nooa_cli.tui.event_explorer import (
     highlight_terms_with_current,
 )
@@ -26,6 +27,7 @@ from nooa_cli.tui.job_explorer import (
     JobExplorerView,
     build_job_rows,
 )
+from nooa_cli.tui.output import CodeExecution, TableOutput, TextOutput
 from nooa_cli.tui.todo_explorer import (
     TodoExplorerView,
     build_todo_rows,
@@ -212,6 +214,63 @@ class TestExplorerView:
         assert view.model.focus == "detail"
         assert view.model.detail_offset == 3
 
+    def test_mouse_click_selects_visible_row_and_focuses_list(self):
+        view = self._make_view(8)
+        view.render(80, 18)
+
+        assert view.handle_mouse("click", 12, 3) == "handled"
+        assert view.model.cursor == 2
+        assert view.model.focus == "list"
+
+    def test_ctrl_y_copies_current_detail_through_host_callback(self):
+        class CopyView(ExplorerView):
+            def detail_lines(self, row, width):
+                return ["rendered", "detail"]
+
+            def copy_text(self):
+                return "exact\ndetail"
+
+        view = CopyView(
+            ExplorerModel([MagicMock(search_text="copy me")]),
+            ExplorerConfig(title="Copy Explorer"),
+        )
+        copied = []
+        view.set_copy_handler(lambda text: copied.append(text) or True)
+
+        assert view.handle_key("copy") == "handled"
+        assert copied == ["exact\ndetail"]
+        assert "Copied item" in view.render(80, 12).splitlines()[0]
+
+    def test_header_copy_action_is_clickable(self):
+        class CopyView(ExplorerView):
+            def detail_lines(self, row, width):
+                return ["rendered detail"]
+
+            def copy_text(self):
+                return "clicked detail"
+
+        view = CopyView(
+            ExplorerModel([MagicMock(search_text="copy me")]),
+            ExplorerConfig(title="Copy Explorer"),
+        )
+        copied = []
+        view.set_copy_handler(lambda text: copied.append(text) or True)
+        view.render(80, 12)
+
+        assert view.handle_mouse("click", 79, 0) == "handled"
+        assert copied == ["clicked detail"]
+
+    def test_copy_failure_is_visible_without_closing_explorer(self):
+        class CopyView(ExplorerView):
+            def copy_text(self):
+                return "copy me"
+
+        view = CopyView(self._make_view().model, ExplorerConfig(title="Test Explorer"))
+        view.set_copy_handler(lambda _text: False)
+
+        assert view.handle_key("copy") == "handled"
+        assert "Copy unavailable" in view.render(80, 12).splitlines()[0]
+
     def test_render_empty(self):
         rows = []
         model = ExplorerModel(rows)
@@ -236,6 +295,65 @@ def test_subview_control_preserves_vt_mouse_position_for_wheel_dispatch():
 
     assert control.mouse_handler(event) is None
     assert calls == [("scroll_down", 12, 7)]
+
+
+def test_subview_control_dispatches_left_click_with_coordinates():
+    calls = []
+    control = _SubviewControl(
+        "explorer",
+        mouse_callback=lambda action, x, y: calls.append((action, x, y)) or True,
+    )
+    down = MouseEvent(
+        position=Point(x=9, y=4),
+        event_type=MouseEventType.MOUSE_DOWN,
+        button=MouseButton.LEFT,
+        modifiers=frozenset(),
+    )
+    up = MouseEvent(
+        position=Point(x=9, y=4),
+        event_type=MouseEventType.MOUSE_UP,
+        button=MouseButton.LEFT,
+        modifiers=frozenset(),
+    )
+
+    assert control.mouse_handler(down) is None
+    assert control.mouse_handler(up) is None
+    assert calls == [("click", 9, 4)]
+
+
+def test_subview_control_ignores_release_without_matching_press() -> None:
+    calls = []
+    control = _SubviewControl(
+        "explorer",
+        mouse_callback=lambda action, x, y: calls.append((action, x, y)) or True,
+    )
+    release = MouseEvent(
+        position=Point(x=9, y=4),
+        event_type=MouseEventType.MOUSE_UP,
+        button=MouseButton.LEFT,
+        modifiers=frozenset(),
+    )
+
+    assert control.mouse_handler(release) is NotImplemented
+    assert calls == []
+
+
+def test_subview_control_does_not_turn_drag_into_click() -> None:
+    calls = []
+    control = _SubviewControl(
+        "explorer",
+        mouse_callback=lambda action, x, y: calls.append((action, x, y)) or True,
+    )
+    events = [
+        MouseEvent(Point(x=9, y=4), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset()),
+        MouseEvent(Point(x=10, y=4), MouseEventType.MOUSE_MOVE, MouseButton.LEFT, frozenset()),
+        MouseEvent(Point(x=9, y=4), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset()),
+    ]
+
+    assert control.mouse_handler(events[0]) is None
+    assert control.mouse_handler(events[1]) is None
+    assert control.mouse_handler(events[2]) is NotImplemented
+    assert calls == []
 
 
 # ─── Job explorer tests ──────────────────────────────────────────────────────
@@ -383,3 +501,41 @@ class TestTodoExplorer:
         view = TodoExplorerView(build_todo_rows(todo_mgr))
         output = view.render(80, 24)
         assert "No todos." in output
+
+
+def test_activity_overlay_copies_full_semantic_snapshot() -> None:
+    view = ActivityOverlayView([TextOutput("first line\nsecond line", "info")])
+    copied: list[str] = []
+    view.set_copy_handler(lambda text: copied.append(text) or True)
+
+    assert view.handle_key("copy") == "handled"
+    assert copied == ["first line\nsecond line"]
+    assert "Copied item" in view.render(80, 10).splitlines()[0]
+
+
+def test_activity_overlay_copy_is_width_independent_and_preserves_code() -> None:
+    code = "value = '" + "x" * 140 + "'\nprint(value)"
+    view = ActivityOverlayView(
+        [
+            TableOutput(
+                columns=["Field", "Value"],
+                rows=[["phase", "executing_python"]],
+                footer="Still running.",
+            ),
+            CodeExecution(tool_call_id="call-1", code=code, stdout="done\n"),
+        ]
+    )
+
+    before = view.copy_text()
+    view.render(40, 8)
+    narrow = view.copy_text()
+    view.render(160, 20)
+
+    assert (
+        narrow
+        == before
+        == (
+            "Field\tValue\nphase\texecuting_python\n\nStill running."
+            f"\n\n```python\n{code}\n```\n\nstdout:\ndone\n"
+        )
+    )

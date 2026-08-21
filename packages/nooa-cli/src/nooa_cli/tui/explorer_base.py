@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 import textwrap
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -54,6 +55,18 @@ def style_fts_prompt(text: str, *, active: bool, ansi: bool) -> str:
     if not ansi or not active:
         return text
     return f"{FTS_ACTIVE_STYLE}{text}\x1b[0m"
+
+
+def bar_with_action(label: str, action: str, width: int, *, ansi: bool) -> str:
+    """Render a bar with a stable right-aligned action or status."""
+    width = max(int(width), 1)
+    action_text = f" {action} " if action else ""
+    if len(action_text) >= width:
+        plain = action_text[-width:]
+    else:
+        left = label[: max(width - len(action_text) - 1, 0)]
+        plain = left + "─" * max(width - len(left) - len(action_text), 0) + action_text
+    return style_bar(plain[:width], ansi=ansi)
 
 
 # ─── Text utilities ──────────────────────────────────────────────────────────
@@ -159,6 +172,7 @@ class ExplorerModel:
         self._last_detail_visible_lines = 0
         self._last_detail_match_lines: list[int] = []
         self._last_divider_y = 0
+        self._last_list_rows: dict[int, int] = {}
 
     @property
     def current_index(self) -> int | None:
@@ -272,7 +286,7 @@ class ExplorerConfig:
 
 
 class ExplorerInteraction:
-    """Shared mouse and native-selection behavior for explorer subviews."""
+    """Shared mouse, clipboard, and native-selection behavior for explorers."""
 
     detail_focus = "detail"
     native_selection = False
@@ -282,16 +296,60 @@ class ExplorerInteraction:
         """Disable terminal mouse reporting while native selection is active."""
         return not self.native_selection
 
-    def handle_interaction_action(self, action: str) -> SubviewKeyResult:
-        if action != "native_selection":
-            return "ignored"
-        self.native_selection = not self.native_selection
-        return "handled"
+    def set_copy_handler(self, handler: Callable[[str], bool]) -> None:
+        """Install the host-owned clipboard writer.
 
-    def handle_mouse(self, action: str, _x: int, y: int) -> SubviewKeyResult:
-        """Route wheel input to the pane under the pointer."""
+        Explorer models never write to the terminal or invoke platform tools
+        themselves. The surrounding ``TUIApplication`` owns that boundary.
+        """
+        self._copy_handler = handler
+
+    def copy_text(self) -> str | None:
+        """Return the source-backed payload for the selected item, if any."""
+        return None
+
+    def handle_interaction_action(self, action: str) -> SubviewKeyResult:
+        if action != "copy":
+            self._copy_status = ""
+        if action == "native_selection":
+            self.native_selection = not self.native_selection
+            return "handled"
+        if action == "copy":
+            text = self.copy_text()
+            if not text:
+                self._copy_status = "Nothing to copy"
+            else:
+                handler = getattr(self, "_copy_handler", None)
+                try:
+                    copied = bool(handler(text)) if handler is not None else False
+                except Exception:
+                    copied = False
+                self._copy_status = "Copied item" if copied else "Copy unavailable"
+            return "handled"
+        return "ignored"
+
+    def handle_mouse(self, action: str, x: int, y: int) -> SubviewKeyResult:
+        """Select rows, activate Copy, or route wheel input by pointer position."""
+        if action == "click":
+            copy_start = getattr(
+                self, "_copy_action_start", getattr(self.model, "_copy_action_start", None)
+            )
+            if y == 0 and copy_start is not None and x >= copy_start:
+                return self.handle_interaction_action("copy")
+            visible_index = getattr(self.model, "_last_list_rows", {}).get(y)
+            if visible_index is not None and getattr(self.model, "matches", None):
+                self._copy_status = ""
+                self.model.move(visible_index - self.model.cursor)
+                self.model.focus = "list"
+                return "handled"
+            if y > getattr(self.model, "_last_divider_y", 0):
+                self._copy_status = ""
+                self.model.focus = self.detail_focus
+                return "handled"
+            return "ignored"
         if action not in {"scroll_up", "scroll_down"}:
             return "ignored"
+        self._copy_status = ""
         delta = -3 if action == "scroll_up" else 3
         if y <= getattr(self.model, "_last_divider_y", 0):
             self.model.focus = "list"
@@ -303,6 +361,10 @@ class ExplorerInteraction:
 
     def selection_hint(self) -> str:
         return "F2 mouse/wheel" if self.native_selection else "F2 select/copy"
+
+    def copy_hint(self) -> str:
+        status = getattr(self, "_copy_status", "")
+        return status or "Copy item · Ctrl+Y"
 
 
 class ExplorerView(ExplorerInteraction):
@@ -322,6 +384,10 @@ class ExplorerView(ExplorerInteraction):
         self.config = config
         self.title = config.title
         self.pending_input: str | None = None
+        self.native_selection = False
+        self._copy_handler: Callable[[str], bool] | None = None
+        self._copy_status = ""
+        self._last_render_width = 80
 
     def format_row(self, row: Any, width: int) -> str:
         """Format a single row for the list. Override in subclasses."""
@@ -334,6 +400,10 @@ class ExplorerView(ExplorerInteraction):
     def handle_action(self, action: str, row: Any) -> SubviewKeyResult:
         """Handle a custom action on the current row. Override for custom behavior."""
         return "ignored"
+
+    def copy_text(self) -> str | None:
+        """Return source text only when a concrete explorer defines it."""
+        return None
 
     def render(self, width: int, height: int) -> str:
         return render_explorer(self, width, height, ansi=True)
@@ -432,6 +502,7 @@ def render_explorer(view: ExplorerView, width: int, height: int, *, ansi: bool =
     """
     width = max(int(width), 40)
     height = max(int(height), 1)
+    view._last_render_width = width
     model = view.model
     config = view.config
 
@@ -443,12 +514,10 @@ def render_explorer(view: ExplorerView, width: int, height: int, *, ansi: bool =
     pos = f" {model.cursor + 1}/{match_count}" if match_count else " 0/0"
     match_label = f" match {model.cursor + 1}/{match_count}" if model.query and match_count else ""
     query_display = f" search={model.query!r}" if model.query else ""
-    header = style_bar(
-        f" {config.title}{pos} of {total}{match_label}{query_display} ".ljust(width, "\u2500")[
-            :width
-        ],
-        ansi=ansi,
-    )
+    header_label = f" {config.title}{pos} of {total}{match_label}{query_display} "
+    copy_hint = view.copy_hint()
+    view._copy_action_start = max(width - len(f" {copy_hint} "), 0)
+    header = bar_with_action(header_label, copy_hint, width, ansi=ansi)
 
     # ── Footer ──
     pane_label = "list" if model.focus == "list" else config.detail_pane_name
@@ -488,6 +557,7 @@ def render_explorer(view: ExplorerView, width: int, height: int, *, ansi: bool =
     # ── Body ──
     body_height = max(height - 2, 0)
     model._last_divider_y = 0
+    model._last_list_rows = {}
 
     if not total:
         body = [config.empty_message]
@@ -504,6 +574,7 @@ def render_explorer(view: ExplorerView, width: int, height: int, *, ansi: bool =
 
         body = []
         for visible_i in range(start, end):
+            model._last_list_rows[1 + len(body)] = visible_i
             row_i = model.matches[visible_i]
             item = model.rows[row_i]
             marker = (
