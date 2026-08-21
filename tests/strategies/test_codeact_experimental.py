@@ -54,6 +54,7 @@ async def test_explicit_return_completes_with_only_python_cell_tool():
     assert "`return_result(value)`" in system_prompt
     assert "prefer it for independent work" in system_prompt
     assert "Await `delegate(...)` only" in system_prompt
+    assert "method defines a background-wait result" in system_prompt
     assert "Your two tools" not in system_prompt
     assert not any(
         isinstance(event, ToolCallEvent) and event.name == "return_result"

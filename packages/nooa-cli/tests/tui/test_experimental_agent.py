@@ -64,6 +64,7 @@ async def test_experimental_tui_agent_delegates_to_experimental_worker(tmp_path)
     try:
         assert agent._worker_type is ExperimentalCodingWorker
         assert "prefer it over awaiting" in (ExperimentalTUIAgent.__doc__ or "")
-        assert "finish that turn with ``WAIT``" in (ExperimentalTUIAgent.__doc__ or "")
+        assert "RespondReason.WAIT" in (ExperimentalTUIAgent.__doc__ or "")
+        assert 'notification["delegates"]' in (ExperimentalTUIAgent.__doc__ or "")
     finally:
         await agent.close()
