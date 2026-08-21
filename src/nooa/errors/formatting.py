@@ -22,7 +22,7 @@ import linecache
 import re
 import traceback
 
-from rich.cells import cell_len
+from rich.text import Text
 
 from nooa.agentdoc import TruncatingStringIO
 from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
@@ -281,13 +281,9 @@ def _source_display_width(text: str, *, start_column: int = 0) -> int:
     code-point counts insufficient. This is diagnostic formatting only; it does
     not inspect or depend on terminal dimensions.
     """
-    column = start_column
-    segments = text.split("\t")
-    for index, segment in enumerate(segments):
-        column += cell_len(segment)
-        if index < len(segments) - 1:
-            column += 8 - column % 8
-    return column - start_column
+    source = Text(" " * start_column + text)
+    source.expand_tabs(8)
+    return source.cell_len - start_column
 
 
 def _runtime_caret(frame: traceback.FrameSummary) -> str | None:
