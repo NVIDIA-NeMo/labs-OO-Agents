@@ -171,7 +171,8 @@ def test_coding_agent_prompt_exposes_bounded_delegation(tmp_path):
     try:
         rendered = doc(agent)
         assert "spawn" in rendered
-        assert "Prefer background ``spawn()``" in (CodingAgent.__doc__ or "")
+        assert "prefer it over awaiting ``delegate()``" in (CodingAgent.__doc__ or "")
+        assert "Reports arrive in later ``delegates``" in (CodingAgent.__doc__ or "")
     finally:
         # This sync test does not start shell work; close is covered elsewhere.
         pass
