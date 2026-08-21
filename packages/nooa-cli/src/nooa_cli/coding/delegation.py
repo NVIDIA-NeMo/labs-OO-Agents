@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar
+from typing import TYPE_CHECKING, Annotated, Any
 
 from nooa import Agent, Context, strategy
 from nooa.agentdoc import doc
@@ -21,10 +21,11 @@ if TYPE_CHECKING:
 
 
 class CodingWorker(Agent, context={"context_usage": None}):
-    """Context-isolated worker for one bounded coding investigation.
+    """You are an isolated software-engineering worker.
 
-    The worker receives only its explicit objective and supplied context. It has
-    an independent event history but shares the controller's model and working tree.
+    Complete only the bounded objective supplied by the controller. Use the shared
+    working tree carefully, report concise evidence, and leave planning, integration,
+    and final verification to the controller.
     """
 
     shell: Annotated[ShellTools, nosnapshot]
@@ -51,7 +52,6 @@ class CodingWorker(Agent, context={"context_usage": None}):
     @strategy(
         CodeActStrategy(
             config=CodeActConfig(
-                max_iterations=120,
                 max_retries=6,
                 text_only_stop_behavior="synthetic_comment",
             )
@@ -60,43 +60,9 @@ class CodingWorker(Agent, context={"context_usage": None}):
     async def investigate(self, objective: str, supplied_context: Any = None) -> str:
         """Complete one bounded coding subtask and return a concise report.
 
-        Objective: {objective}
-
-        Supplied context (any object or collection; possibly empty):
-        {supplied_context}
-
         Read relevant files before drawing conclusions. Make edits only when the
         objective explicitly requests implementation. Run a focused check when
         practical. Return paths, findings or changes, and observed verification;
         do not return a raw transcript.
         """
         ...
-
-
-class CodingDelegationMixin:
-    """Expose explicit, context-isolated coding delegation to a controller agent."""
-
-    llm: Any
-    shell: Any
-    _worker_type: ClassVar[type[CodingWorker]] = CodingWorker
-
-    async def delegate(self, objective: str, supplied_context: Any = None) -> str:
-        """Run one isolated coding worker and return its concise report.
-
-        Use for bounded exploration, diagnosis, review, or independently verifiable
-        implementation. State the outcome, scope, and whether edits are allowed in
-        ``objective``. ``supplied_context`` may be any useful object or collection,
-        including Todo items, paths, matches, structured task data, or text. Pass only
-        what is necessary. Inspect and integrate the report; the controller retains
-        final verification ownership.
-        Independent calls may be run concurrently with ``asyncio.gather``.
-        """
-        worker = self._worker_type(
-            llm=self.llm,
-            cwd=self.shell.cwd,
-            init_command=getattr(self, "_worker_init_command", None),
-        )
-        try:
-            return await worker.investigate(objective, supplied_context)
-        finally:
-            await worker.close()

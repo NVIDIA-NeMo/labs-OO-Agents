@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 from nooa import Context, hidden, strategy
 from nooa.agentdoc import doc, spec
@@ -24,7 +24,7 @@ from nooa.strategies import CodeActStrategy, PredictStrategy
 from nooa.tools import SkillWriting, TodoManager
 from nooa.tools.shell_tools import ShellTools
 from nooa_cli.coding.activity import ActivityShellTools
-from nooa_cli.coding.delegation import CodingDelegationMixin
+from nooa_cli.coding.delegation import CodingWorker
 from nooa_cli.coding.instructions import render_agent_instructions
 from nooa_cli.tools.repo_tools import RepoTools
 
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 __all__ = ["CodingAgent", "RespondReason"]
 
 
-class CodingAgent(CodingDelegationMixin, InteractiveAgent):
+class CodingAgent(InteractiveAgent):
     """A careful software-development agent working in one local repository.
 
     Inspect repository instructions and relevant code before editing. Preserve
@@ -44,10 +44,16 @@ class CodingAgent(CodingDelegationMixin, InteractiveAgent):
     ``delegate(objective, supplied_context)`` for bounded context-heavy research,
     review, or independent implementation; inspect and integrate worker reports.
 
-    Complete and verify the requested work before returning ``DONE``. Send each
-    user-facing answer or question through ``self.message()`` as a complete
-    Markdown document. Return ``NEED_INPUT`` only when human input is required,
-    and ``WAIT`` only while an actual background job is active.
+    Work until the newest request is complete or genuinely needs user input. Use
+    as many execution cells as necessary, inspect each result, and never claim a
+    check passed without running it. Send each user-facing answer or question
+    through ``self.message()`` as a complete Markdown document.
+
+    Finish with exactly one ``return_result(RespondReason.<reason>,
+    explanation="...")``. Use ``DONE`` after completing the request,
+    ``NEED_INPUT`` only when human input is required, and ``WAIT`` only while an
+    actual background job is active. The explanation states what completed, what
+    input is needed, or which live job is still running.
     """
 
     # Attributes carrying this agent's own tools. SkillRegistry refuses to let
@@ -72,6 +78,7 @@ class CodingAgent(CodingDelegationMixin, InteractiveAgent):
     skills: Annotated[SkillRegistry, nosnapshot]
     _base_shell: Annotated[ShellTools, hidden, nosnapshot]
     _summarizers: Annotated[list[Any], hidden, nosnapshot]
+    _worker_type: ClassVar[type[CodingWorker]] = CodingWorker
 
     def __init__(
         self,
@@ -154,6 +161,25 @@ class CodingAgent(CodingDelegationMixin, InteractiveAgent):
             f"<opening_user_message>\n{opening}\n</opening_user_message>"
         )
 
+    async def delegate(self, objective: str, supplied_context: Any = None) -> str:
+        """Run one isolated coding worker and return its concise report.
+
+        Use for bounded exploration, diagnosis, review, or independently verifiable
+        implementation. State the outcome, scope, and whether edits are allowed in
+        ``objective``. Pass only necessary context. Inspect and integrate the report;
+        this controller retains final verification ownership. Independent calls may
+        run concurrently with ``asyncio.gather``.
+        """
+        worker = self._worker_type(
+            llm=self.llm,
+            cwd=self.shell.cwd,
+            init_command=getattr(self, "_worker_init_command", None),
+        )
+        try:
+            return await worker.investigate(objective, supplied_context)
+        finally:
+            await worker.close()
+
     def get_summarization_status(self) -> dict[str, Any]:
         """Return compact history information for host status displays."""
         tags = self.event_manager.keys()
@@ -181,18 +207,7 @@ class CodingAgent(CodingDelegationMixin, InteractiveAgent):
 
     @hidden
     @strategy(CodeActStrategy(config=CodeActConfig(cell_timeout=1800.0)))
-    async def handle(self, notification: dict[str, list[Any]]) -> RespondResult:
-        """Fulfill the newest coding request delivered in ``notification``.
-
-        Work until the request is complete or genuinely needs user input. Use
-        as many small execution cells as necessary and inspect each result
-        before proceeding. Never claim a check passed without running it.
-
-        End with exactly one ``return_result(RespondReason.<reason>,
-        explanation="...")``. The explanation must say what completed, what
-        input is needed, or which live job is still running.
-        """
-        ...
+    async def handle(self, notification: dict[str, list[Any]]) -> RespondResult: ...
 
     @hidden
     async def close(self) -> None:
