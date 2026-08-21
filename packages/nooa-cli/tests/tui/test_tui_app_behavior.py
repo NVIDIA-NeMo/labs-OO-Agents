@@ -1094,7 +1094,10 @@ async def test_large_paste_queue_uses_compact_label_and_withdraw_restores_marker
         assert h.app._pending_input_display() == []
 
 
-async def test_queue_displays_above_prompt_while_agent_working():
+async def test_queue_does_not_preview_pending_message_while_agent_working():
+    """Type-ahead remains queued without exposing its contents in live chrome."""
+    from prompt_toolkit.formatted_text import fragment_list_to_text
+
     agent = _blocking_agent()
     async with TUIHarness(agent=agent) as h:
         await h.type_keys("trigger")
@@ -1104,6 +1107,11 @@ async def test_queue_displays_above_prompt_while_agent_working():
         await h.type_keys("queued-msg")
         await h.press("enter")
         await h.wait_for(lambda: h.capture_queued() == ["queued-msg"])
+
+        root = h.app._app.layout.container.get_container()
+        queue_container = root.children[1].content
+        queue_control = queue_container.content
+        assert fragment_list_to_text(queue_control.text()) == ""
 
 
 async def test_admitted_input_stays_visible_until_accepted_echo_commits():
