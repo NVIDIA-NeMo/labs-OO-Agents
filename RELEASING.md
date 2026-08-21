@@ -57,7 +57,7 @@ release or uploads to PyPI.
 
 Publishing is the single human approval. `.github/workflows/publish.yml` listens
 for `release: published` and automatically rebuilds, smoke-tests, and uploads
-all four packages to PyPI using Trusted Publishing. Despite their names, the
+all five packages to PyPI using Trusted Publishing. Despite their names, the
 current `pypi-*` GitHub Environments have no configured reviewer protection, so
 there is no second approval after **Publish release**.
 

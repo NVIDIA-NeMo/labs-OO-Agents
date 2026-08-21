@@ -136,9 +136,12 @@ one-process-per-agent boundary is the safe kill mechanism for that case.
 
 Each ACP session has an independent live agent and allows one foreground prompt
 at a time. Sessions are stored in `<workspace>/.nooa/sessions`, where the TUI
-and ACP adapter can share list and replay metadata. The adapter advertises ACP
-session list, load, and close capabilities; closing a live session preserves
-its durable history.
+and ACP adapter can share list and replay metadata. These files are inside the
+workspace trust boundary: a repository can supply session records that appear
+in `session/list` and are replayed as conversation history by `session/load`.
+Open only repositories whose code and conversation history you trust. The
+adapter also advertises session close; closing a live session preserves its
+durable history.
 
 The current stdio adapter hosts those live agents in its own process. That is
 an adapter-private implementation detail rather than part of the durable

@@ -37,7 +37,7 @@ class _BackgroundWorkflowSkill(Skill):
 
 
 async def test_registry_discovers_metadata_and_dispatches_typed_arguments(tmp_path):
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
     agent.skills.register("test.workflow", _WorkflowSkill())
     registry = CodingSlashCommandRegistry(agent)
     try:
@@ -57,7 +57,7 @@ async def test_registry_discovers_metadata_and_dispatches_typed_arguments(tmp_pa
 
 
 async def test_registry_reports_typed_argument_errors(tmp_path):
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
     agent.skills.register("test.workflow", _WorkflowSkill())
     registry = CodingSlashCommandRegistry(agent)
     try:
@@ -69,7 +69,7 @@ async def test_registry_reports_typed_argument_errors(tmp_path):
 
 
 async def test_registry_refresh_callback_observes_new_skill_commands(tmp_path):
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
     registry = CodingSlashCommandRegistry(agent)
     updates: list[tuple[str, ...]] = []
     registry.set_on_change(
@@ -87,7 +87,7 @@ async def test_registry_refresh_callback_observes_new_skill_commands(tmp_path):
 
 
 async def test_sync_command_runs_on_agent_loop_and_can_spawn_background_job(tmp_path):
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
     agent.skills.register("test.background", _BackgroundWorkflowSkill())
     registry = CodingSlashCommandRegistry(agent)
     try:
@@ -116,7 +116,7 @@ async def test_async_command_is_cooperatively_cancellable_on_agent_loop(tmp_path
             return "never"
 
     host_loop = asyncio.get_running_loop()
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
     agent.skills.register("test.async", AsyncWorkflowSkill())
     registry = CodingSlashCommandRegistry(agent)
     try:
@@ -159,7 +159,7 @@ async def test_commands_are_sorted_deduplicated_and_case_insensitive(tmp_path):
             """Duplicate."""
             return "duplicate"
 
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
     # Registered out of order, and with a colliding name.
     # Registry names sort opposite to the command names they provide, so
     # _commands is built in [beta, alpha] order and sorting is observable.

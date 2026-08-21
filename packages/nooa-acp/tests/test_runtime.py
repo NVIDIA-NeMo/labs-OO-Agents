@@ -188,21 +188,32 @@ async def test_remove_unregisters_even_when_teardown_fails():
         await pool.get("one")
 
 
-async def test_remove_unregisters_even_when_teardown_is_cancelled():
-    """Cancelling the close request must not strand the session id either."""
+async def test_cancelled_remove_keeps_id_reserved_until_teardown_finishes():
+    """Cancellation must not expose the id while its old runtime is still live."""
+    started = asyncio.Event()
     release = asyncio.Event()
 
     class _Slow:
         async def close(self) -> None:
+            started.set()
             await release.wait()
 
     pool: SessionRuntimePool[_Slow] = SessionRuntimePool()
     await pool.add("one", _Slow())
 
     remover = asyncio.create_task(pool.remove("one"))
-    await asyncio.sleep(0)
+    await asyncio.wait_for(started.wait(), timeout=_HANG_TIMEOUT)
     remover.cancel()
     with pytest.raises(asyncio.CancelledError):
         await remover
 
+    assert await pool.ids() == ("one",)
+    with pytest.raises(ValueError, match="already registered"):
+        await pool.add("one", _Slow())
+
+    release.set()
+    for _ in range(20):
+        if await pool.ids() == ():
+            break
+        await asyncio.sleep(0)
     assert await pool.ids() == ()

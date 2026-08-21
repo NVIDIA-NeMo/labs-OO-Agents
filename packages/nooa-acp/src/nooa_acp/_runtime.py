@@ -127,6 +127,8 @@ class SessionRuntimePool[T]:
 
     def __init__(self) -> None:
         self._runtimes: dict[str, SessionRuntime[T]] = {}
+        self._available: set[str] = set()
+        self._remove_tasks: dict[str, asyncio.Task[T]] = {}
         self._lock = asyncio.Lock()
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
@@ -137,6 +139,7 @@ class SessionRuntimePool[T]:
         value: T,
         *,
         close: CloseCallback[T] | None = None,
+        available: bool = True,
     ) -> SessionRuntime[T]:
         async with self._lock:
             if self._closed:
@@ -145,32 +148,65 @@ class SessionRuntimePool[T]:
                 raise ValueError(f"Session {session_id!r} is already registered")
             runtime = SessionRuntime(session_id, value, close=close)
             self._runtimes[session_id] = runtime
+            if available:
+                self._available.add(session_id)
             return runtime
+
+    async def publish(self, session_id: str) -> None:
+        """Make a fully initialized runtime available to protocol requests."""
+        async with self._lock:
+            if session_id not in self._runtimes:
+                raise KeyError(f"Unknown live ACP session {session_id!r}")
+            self._available.add(session_id)
 
     async def get(self, session_id: str) -> SessionRuntime[T]:
         async with self._lock:
-            try:
-                return self._runtimes[session_id]
-            except KeyError:
-                raise KeyError(f"Unknown live ACP session {session_id!r}") from None
+            if session_id not in self._available:
+                raise KeyError(f"Unknown live ACP session {session_id!r}")
+            return self._runtimes[session_id]
 
     async def ids(self) -> tuple[str, ...]:
         async with self._lock:
-            return tuple(self._runtimes)
+            return tuple(
+                session_id for session_id in self._runtimes if session_id in self._available
+            )
 
-    async def remove(self, session_id: str) -> T:
+    async def remove(self, session_id: str, *, include_unavailable: bool = False) -> T:
         """Close and unregister one runtime, returning its adapter value."""
-        runtime = await self.get(session_id)
+        async with self._lock:
+            if session_id not in self._runtimes or (
+                not include_unavailable and session_id not in self._available
+            ):
+                raise KeyError(f"Unknown live ACP session {session_id!r}")
+            runtime = self._runtimes[session_id]
+            remove_task = self._remove_tasks.get(session_id)
+            if remove_task is None:
+                remove_task = asyncio.create_task(
+                    self._remove_once(session_id, runtime),
+                    name=f"nooa-acp-remove-{session_id}",
+                )
+                self._remove_tasks[session_id] = remove_task
+
+                def _finished(done: asyncio.Task[T]) -> None:
+                    if not done.cancelled():
+                        done.exception()
+
+                remove_task.add_done_callback(_finished)
+
+        # Teardown and unregistration belong to the adapter, not to the request
+        # that happened to initiate them. Cancellation must not make the id
+        # reusable while its old runtime is still active.
+        return await asyncio.shield(remove_task)
+
+    async def _remove_once(self, session_id: str, runtime: SessionRuntime[T]) -> T:
         try:
             await runtime.close()
         finally:
-            # Unregister even when teardown raises or the caller is cancelled.
-            # close() is shielded, so the runtime is going away either way;
-            # keeping the entry would strand the id forever, because the failed
-            # close task is cached and re-raised on every later attempt.
             async with self._lock:
+                self._remove_tasks.pop(session_id, None)
                 if self._runtimes.get(session_id) is runtime:
                     del self._runtimes[session_id]
+                    self._available.discard(session_id)
         return runtime.value
 
     async def close(self) -> None:
@@ -194,6 +230,7 @@ class SessionRuntimePool[T]:
         )
         async with self._lock:
             self._runtimes.clear()
+            self._available.clear()
 
         failures = [result for result in results if isinstance(result, BaseException)]
         if failures:

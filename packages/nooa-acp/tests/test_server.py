@@ -1144,6 +1144,38 @@ async def test_adapter_lists_closes_loads_and_replays_durable_session(tmp_path):
     await replay_adapter.close()
 
 
+async def test_loading_session_is_not_available_until_replay_finishes(tmp_path):
+    create_adapter = CodingACPAdapter(_completed_llm)
+    create_adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await create_adapter.new_session(str(tmp_path))
+    await create_adapter.close()
+
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    replay_started = asyncio.Event()
+    release_replay = asyncio.Event()
+
+    async def blocked_replay(_handle):
+        replay_started.set()
+        await release_replay.wait()
+
+    with patch.object(adapter, "_replay_session", side_effect=blocked_replay):
+        loading = asyncio.create_task(adapter.load_session(str(tmp_path), created.session_id))
+        await asyncio.wait_for(replay_started.wait(), timeout=1)
+        with pytest.raises(RequestError) as exc_info:
+            await adapter.prompt(created.session_id, [text_block("too soon")])
+        assert exc_info.value.code == _RESOURCE_NOT_FOUND
+        with pytest.raises(RequestError) as exc_info:
+            await adapter.close_session(created.session_id)
+        assert exc_info.value.code == _RESOURCE_NOT_FOUND
+        release_replay.set()
+        await loading
+
+    response = await adapter.prompt(created.session_id, [text_block("now ready")])
+    assert response.stop_reason == "end_turn"
+    await adapter.close()
+
+
 async def test_adapter_loads_durable_session_when_forwarded_mcp_is_unavailable(tmp_path):
     create_adapter = CodingACPAdapter(_completed_llm)
     create_adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]

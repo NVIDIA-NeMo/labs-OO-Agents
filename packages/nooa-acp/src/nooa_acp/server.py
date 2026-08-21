@@ -205,17 +205,18 @@ class CodingACPAdapter:
             raise RequestError.resource_not_found(session_id) from None
         runtime: SessionRuntime[_ACPSession] | None = None
         try:
-            runtime = await self._create_runtime(handle, root, mcp_servers)
+            runtime = await self._create_runtime(handle, root, mcp_servers, available=False)
             # After the replay, never during it: replay writes straight to the
             # client while the bridge pump drains bootstrap updates, so every
             # await here would otherwise let a commands update or an MCP warning
             # land in the middle of the restored conversation.
             await self._replay_session(handle)
+            await self._sessions.publish(session_id)
             self._defer_bootstrap_updates(runtime.value)
         except BaseException:
             if runtime is not None:
                 with suppress(KeyError):
-                    await self._sessions.remove(session_id)
+                    await self._sessions.remove(session_id, include_unavailable=True)
             else:
                 handle.close()
             raise
@@ -385,6 +386,7 @@ class CodingACPAdapter:
         mcp_servers: list[Any] | None,
         *,
         llm: UnifiedLLM | None = None,
+        available: bool = True,
     ) -> SessionRuntime[_ACPSession]:
         llm = llm or self._llm_factory()
         if self._client is None:
@@ -433,7 +435,7 @@ class CodingACPAdapter:
                 lambda available: bridge.publish(_available_commands_update(available)),
             )
             try:
-                runtime = await self._sessions.add(handle.id, value)
+                runtime = await self._sessions.add(handle.id, value, available=available)
                 return runtime
             except ValueError:
                 raise RequestError.invalid_request(
