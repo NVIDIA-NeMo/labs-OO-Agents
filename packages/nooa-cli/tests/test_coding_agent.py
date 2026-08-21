@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 from nooa_cli.coding import CodingAgent, discover_agent_instruction_files
+from nooa_cli.tui.bootstrap import _instantiate_custom_agent
 
 from nooa.agentdoc import doc
 from nooa.skill import Skill, get_slash_commands, slash_command
@@ -337,7 +338,10 @@ async def test_coding_agent_spawns_delegation_in_background(tmp_path):
         assert agent.delegates.status() == ""
 
         release.set()
-        assert await agent.delegates.get() == "review complete"
+        assert await agent.delegates.get() == {
+            "objective": "review parser",
+            "report": "review complete",
+        }
         await asyncio.sleep(0)
         assert handle.state == "done"
     finally:
