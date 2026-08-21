@@ -43,7 +43,7 @@ def test_match_requires_resolved_path():
 
 
 def test_shell_result_timeout_flag_preserves_positional_matches_argument():
-    match = Match("example.py", 1, 1, "value\n", resolved_path="example.py")
+    match = Match("example.py", 1, 1, "value\n", resolved_path="/tmp/example.py")
     result = ShellResult("value", "", 0, [match], timed_out=True)
 
     assert result.matches == [match]
@@ -139,3 +139,24 @@ async def test_close_terminates_underlying_bash_session(sh):
     assert r2.success
     assert "restarted" in r2.stdout
     await sh.close()
+
+
+def test_match_rejects_a_relative_resolved_path(tmp_path, monkeypatch):
+    """The anchor must be absolute, or it silently binds to the process cwd.
+
+    Path.resolve() on a relative path resolves against os.getcwd(), which is
+    not the shell cwd — so a caller passing a relative path would produce a
+    Match pointing at a different file, with no error. Every caller passes an
+    absolute path today; this keeps that a rule rather than a convention.
+    """
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match="absolute"):
+        Match("f.txt", 1, 1, "hello\n", resolved_path="f.txt")
+
+
+def test_match_keeps_an_absolute_resolved_path(tmp_path):
+    """The supported form is unaffected."""
+    target = tmp_path / "f.txt"
+    target.write_text("hello\n")
+    match = Match("f.txt", 1, 1, "hello\n", resolved_path=target)
+    assert match.resolved_path == str(target.resolve())

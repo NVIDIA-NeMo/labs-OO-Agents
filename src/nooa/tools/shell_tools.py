@@ -86,7 +86,13 @@ class Match:
         resolved_path: str | Path,
     ):
         self._path = path
-        self._resolved_path = str(Path(resolved_path).resolve())
+        anchor = Path(resolved_path)
+        if not anchor.is_absolute():
+            # resolve() on a relative path resolves against the *process* cwd,
+            # which is not the shell cwd — so a relative anchor would silently
+            # point at a different file. Fail loudly instead.
+            raise ValueError(f"Match.resolved_path must be absolute, got {str(resolved_path)!r}")
+        self._resolved_path = str(anchor.resolve())
         self._start = start
         self._end = end
         self._text = text
