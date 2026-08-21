@@ -87,11 +87,16 @@ def _fire_reasoning(em: _FakeEventManager, content: str) -> None:
     em.fire("Reasoning", SimpleNamespace(content=content))
 
 
-def _fire_tool_call(em: _FakeEventManager, code: str, tool_call_id: str = "t1") -> None:
+def _fire_tool_call(
+    em: _FakeEventManager,
+    code: str,
+    tool_call_id: str = "t1",
+    tool_name: str = "execute_python",
+) -> None:
     em.fire(
         "ToolCallEvent",
         SimpleNamespace(
-            name="execute_python",
+            name=tool_name,
             tool_call_id=tool_call_id,
             arguments={"code": code},
         ),
@@ -264,6 +269,28 @@ def test_show_python_true_renders_full_cell() -> None:
     titles = [str(r.title) if r.title is not None else "" for r in rules]
     assert any("python" in t for t in titles)
     assert any("stdout" in t for t in titles)
+
+
+@pytest.mark.parametrize("show_python", [False, True])
+def test_python_cell_is_rendered_like_execute_python(show_python: bool) -> None:
+    """The experimental tool name uses the same preview/full-cell rendering."""
+    agent, emitted, renderer = _mk(show_python=show_python)
+    renderer.attach()
+
+    _fire_tool_call(
+        agent.event_manager,
+        "print('ok')",
+        tool_name="python_cell",
+    )
+    _fire_python_output(agent.event_manager, stdout="ok\n")
+
+    if show_python:
+        assert any(isinstance(item, Syntax) and "print('ok')" in str(item.code) for item in emitted)
+        titles = [str(item.title) for item in emitted if isinstance(item, Rule)]
+        assert any("python" in title for title in titles)
+        assert any("stdout" in title for title in titles)
+    else:
+        assert any(isinstance(item, Text) and "print('ok')" in str(item) for item in emitted)
 
 
 def test_detach_restores_prior_render_message_hook() -> None:
