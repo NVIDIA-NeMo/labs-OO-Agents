@@ -18,6 +18,7 @@ from nooa.interactive import (
     install_summarizer,
 )
 from nooa.paths import get_project_dir
+from nooa.runtime.channels import JobHandle, _ChannelReader
 from nooa.skill_registry import SkillRegistry
 from nooa.storage.markers import nosnapshot
 from nooa.strategies import CodeActStrategy
@@ -40,8 +41,9 @@ class CodingAgent(InteractiveAgent):
     Inspect repository instructions and relevant code before editing. Preserve
     unrelated worktree changes. Use the shell for files and commands, the repo
     tools for definitions and references, and todos for multi-step work. Use
-    ``delegate(objective, supplied_context)`` for bounded context-heavy research,
+    ``spawn(objective, supplied_context)`` for bounded context-heavy research,
     review, or independent implementation; inspect and integrate worker reports.
+    Prefer background ``spawn()`` over awaiting ``delegate()`` when work is independent.
 
     Work until the newest request is complete or genuinely needs user input. Use
     as many execution cells as necessary, inspect each result, and never claim a
@@ -63,6 +65,8 @@ class CodingAgent(InteractiveAgent):
     skills: Annotated[SkillRegistry, nosnapshot]
     _base_shell: Annotated[ShellTools, hidden, nosnapshot]
     _summarizers: Annotated[list[Any], hidden, nosnapshot]
+    _delegates_in: Annotated[Any, hidden, nosnapshot]
+    delegates: Annotated[_ChannelReader, nosnapshot]
     _worker_type: ClassVar[type[CodingWorker]] = CodingWorker
 
     def __init__(
@@ -79,6 +83,8 @@ class CodingAgent(InteractiveAgent):
         self._base_shell = ShellTools(cwd=str(self.cwd))
         self.shell = ActivityShellTools(self._base_shell, self.event_manager)
         self.repo = RepoTools(root=self.cwd, session=self.shell.session)
+        self._delegates_in = self.queue_manager.queue("delegates")
+        self.delegates = self._delegates_in.reader
         self.todo = TodoManager()
         self.libs = SkillWriting(self, path=get_project_dir("libs"))
 
@@ -140,6 +146,20 @@ class CodingAgent(InteractiveAgent):
             return await worker.investigate(objective, supplied_context)
         finally:
             await worker.close()
+
+    def spawn(self, objective: str, supplied_context: Any = None) -> JobHandle:
+        """Start one isolated coding worker in the background and return immediately.
+
+        Prefer this over awaiting ``delegate()`` when the bounded work is independent.
+        State the outcome, scope, and whether edits are allowed in ``objective``. The
+        worker report arrives in a later ``delegates`` notification; inspect and
+        integrate it, because this controller retains final verification ownership.
+        """
+        return self.queue_manager.spawn(
+            self.delegate(objective, supplied_context),
+            channel="delegates",
+            label=objective,
+        )
 
     def get_summarization_status(self) -> dict[str, Any]:
         """Return compact history information for host status displays."""

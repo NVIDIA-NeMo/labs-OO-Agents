@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shared coding-agent construction and repository instructions."""
 
+import asyncio
 from types import SimpleNamespace
 
 from nooa_cli.coding import CodingAgent, discover_agent_instruction_files
@@ -136,12 +137,41 @@ async def test_coding_agent_delegates_with_same_model_and_workspace(tmp_path, mo
         await agent.close()
 
 
+async def test_coding_agent_spawns_delegation_in_background(tmp_path):
+    """Background delegation is the preferred path and reports through a queue."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class TestAgent(CodingAgent):
+        async def delegate(self, objective: str, supplied_context=None) -> str:
+            assert objective == "review parser"
+            assert supplied_context == {"path": "parser.py"}
+            started.set()
+            await release.wait()
+            return "review complete"
+
+    agent = TestAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        handle = agent.spawn("review parser", {"path": "parser.py"})
+        assert handle.label == "review parser"
+        assert handle.state == "running"
+        await started.wait()
+        assert agent.delegates.status() == ""
+
+        release.set()
+        assert await agent.delegates.get() == "review complete"
+        await asyncio.sleep(0)
+        assert handle.state == "done"
+    finally:
+        await agent.close()
+
+
 def test_coding_agent_prompt_exposes_bounded_delegation(tmp_path):
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         rendered = doc(agent)
-        assert "delegate" in rendered
-        assert "bounded context-heavy" in (CodingAgent.__doc__ or "")
+        assert "spawn" in rendered
+        assert "Prefer background ``spawn()``" in (CodingAgent.__doc__ or "")
     finally:
         # This sync test does not start shell work; close is covered elsewhere.
         pass
