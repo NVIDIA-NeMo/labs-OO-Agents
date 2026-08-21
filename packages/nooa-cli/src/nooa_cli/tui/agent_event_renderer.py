@@ -37,12 +37,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, Protocol
 
+from rich.markdown import Markdown
 from rich.rule import Rule
 from rich.syntax import Syntax
 from rich.text import Text
 
 from .code_preview import _code_preview
-from .console import TranscriptMarkdown
 
 
 class _ReasoningEvent(Protocol):
@@ -203,7 +203,7 @@ class AgentEventRenderer:
                 Rule(Text("OO ", style=self._colors["mauve"]), style="dim", align="left"),
                 **emit_kwargs,
             )
-        self._emit_text(TranscriptMarkdown(str(text)), **emit_kwargs)
+        self._emit_text(Markdown(str(text)), **emit_kwargs)
 
     # ── agent event handlers ───────────────────────────────────────────
 

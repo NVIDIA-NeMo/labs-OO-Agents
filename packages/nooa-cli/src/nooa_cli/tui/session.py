@@ -121,8 +121,10 @@ class _EmitStream:
         replay_width: Callable[[], int] | None = None,
         layout_width: Callable[[], int] | None = None,
         clear: Callable[[], None] | None = None,
+        supports_code_copy_actions: bool = False,
     ) -> None:
         self.supports_semantic_replay = True
+        self.supports_code_copy_actions = supports_code_copy_actions
         self._emit = emit
         self._replay_width = replay_width
         self._layout_width = layout_width
@@ -169,14 +171,23 @@ class _EmitStream:
         except Exception:
             return default
 
-    def emit_with_replay(self, text: str, replay: Callable[[], str]) -> None:
+    def emit_with_replay(
+        self,
+        text: str,
+        replay: Callable[[], str],
+        *,
+        code_copy_actions: dict[str, str] | None = None,
+    ) -> None:
         if self._buf:
             chunk = "".join(self._buf)
             self._buf.clear()
             if chunk:
                 self._emit(chunk)
         if text:
-            self._emit(text, replay=replay)
+            kwargs: dict[str, Any] = {"replay": replay}
+            if code_copy_actions:
+                kwargs["code_copy_actions"] = code_copy_actions
+            self._emit(text, **kwargs)
 
     @contextmanager
     def hold(self):
@@ -392,7 +403,7 @@ class Session:
 
         from nooa_cli.interactive import LocalAgentRunner
 
-        from .config import resolve_display_mode
+        from .config import DisplayMode, resolve_display_mode
         from .tui_application import DispatcherExit
 
         app_ref: list[TUIApplication] = []
@@ -625,6 +636,9 @@ class Session:
                         replay_width=lambda app=self._app: app.transcript_columns(),
                         layout_width=lambda app=self._app: app.output_columns(minimum=1),
                         clear=self._app.clear_transcript,
+                        supports_code_copy_actions=(
+                            self._app.display_mode is DisplayMode.FULLSCREEN
+                        ),
                     ),  # type: ignore[arg-type]
                     force_terminal=True,
                     color_system="256",
@@ -999,15 +1013,39 @@ class Session:
         """
         assert self._app is not None
 
-        rendered = self._render_to_ansi(renderable)
         from .config import DisplayMode
+        from .copyable_markdown import CopyableMarkdown
 
         full_screen = getattr(self._app, "display_mode", None) is DisplayMode.FULLSCREEN
+        if full_screen:
+            from rich.markdown import Markdown
+
+            if type(renderable) is Markdown:
+                renderable = CopyableMarkdown(
+                    renderable.markup,
+                    code_theme=renderable.code_theme,
+                    justify=renderable.justify,
+                    style=renderable.style,
+                    hyperlinks=renderable.hyperlinks,
+                    inline_code_lexer=renderable.inline_code_lexer,
+                    inline_code_theme=renderable.inline_code_theme,
+                )
+        rendered = self._render_to_ansi(renderable)
         replay = (lambda r=renderable: self._render_to_ansi(r)) if full_screen else None
+        code_copy_actions = (
+            dict(renderable.copy_actions) if isinstance(renderable, CopyableMarkdown) else None
+        )
         if replay is None:
             self._app.emit_block(rendered, event_id=event_id, tags=tags, keep=keep)
         else:
-            self._app.emit_block(rendered, replay=replay, event_id=event_id, tags=tags, keep=keep)
+            self._app.emit_block(
+                rendered,
+                replay=replay,
+                event_id=event_id,
+                tags=tags,
+                keep=keep,
+                code_copy_actions=code_copy_actions,
+            )
 
     def _get_command_runner(self):
         """Return the TUI-local command runner, creating it lazily for tests."""

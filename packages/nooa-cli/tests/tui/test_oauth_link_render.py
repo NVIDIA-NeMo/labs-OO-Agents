@@ -27,7 +27,7 @@ def test_agent_message_defaults_to_terminal_managed_wrapping():
     assert stream.getvalue() == f"{message}\n"
 
 
-def test_agent_code_block_omits_copy_visible_decoration_but_keeps_highlighting():
+def test_agent_code_block_retains_visual_highlight_and_indent():
     stream = StringIO()
     console = TUIConsole()
     console.replace_console(
@@ -41,8 +41,11 @@ def test_agent_code_block_omits_copy_visible_decoration_but_keeps_highlighting()
     )
 
     rendered = stream.getvalue()
+    plain = strip_safe_ansi(rendered)
     assert "\x1b[" in rendered
-    assert strip_safe_ansi(rendered) == 'Before\n\nif ready:\n    print("one")\n\nAfter\n'
+    assert " " * 40 in plain
+    assert " if ready:" in plain
+    assert '     print("one")' in plain
 
 
 def test_agent_message_soft_wrap_preserves_long_url_as_one_logical_line():
