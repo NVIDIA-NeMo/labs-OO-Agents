@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import ast
+import builtins
 import hashlib
 import json
 import keyword
@@ -12,12 +13,23 @@ import re
 import shutil
 import textwrap
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from nooa.skill import Skill, _find_skill_md, _parse_frontmatter
+
+_RESERVED_METHOD_NAMES = {
+    "run_resource_script",
+    "read_resource",
+    "list_resources",
+    "_resource_root",
+    "_list_resources",
+    "_read_resource",
+    *(name for name in dir(Skill) if not name.startswith("_")),
+}
 
 
 class TextSkillFile(BaseModel):
@@ -135,13 +147,23 @@ class ValidationReport(BaseModel):
         return "\n".join(details)
 
 
+@dataclass(frozen=True)
+class NativeArgparseExecution:
+    """Native method rendering plan for one argparse-backed script."""
+
+    args_name: str
+    statements: list[ast.stmt]
+    import_lines: list[str]
+    needs_module: bool
+    implementation_body: list[ast.stmt] | None = None
+
+
 class TextSkillTranslator(Skill):
     """Translate traditional SKILL.md TextSkills into package-backed Skill libraries.
 
-    The translator preserves TextSkill content first, then opportunistically
-    exposes package-style APIs around bundled resources and scripts. The
-    generated package should therefore keep TextSkill behavior available even
-    when no richer API can be inferred.
+    The translator builds a package-style library from TextSkill content. It
+    preserves non-script resources and only bundles scripts that back inferred
+    public package APIs.
 
     Typical flow:
 
@@ -153,11 +175,12 @@ class TextSkillTranslator(Skill):
     The generated package contains:
     - pyproject.toml with a nooa.skills entry point
     - src/<package_name>/__init__.py exporting a Skill subclass
-    - copied resources under src/<package_name>/resources/
+    - copied non-script resources under src/<package_name>/resources/
     - baseline pytest tests under tests/
 
     Conversion is intentionally conservative. Script files are copied unchanged
-    and wrapped with async methods instead of being rewritten.
+    only when they are needed as private implementation details for inferred
+    argparse-backed or import-safe function APIs.
     """
 
     def inspect_text_skill(self, path: str | Path) -> TextSkillInventory:
@@ -228,12 +251,15 @@ class TextSkillTranslator(Skill):
                 continue
             script_path = inventory.source_dir / file.path
 
-            # Every supported script gets a raw runner. The inferred methods
-            # below are additive package APIs: typed script-backed methods from
-            # argparse declarations and direct methods for import-safe functions.
             arguments = _infer_script_arguments(script_path)
-            api_method_name = _api_method_name(file.path, used_api_names) if arguments else None
+            api_method_name = (
+                _api_method_name(file.path, used_api_names)
+                if arguments and _can_render_native_argparse_api(script_path)
+                else None
+            )
             function_methods = _infer_script_functions(script_path, used_api_names)
+            if not api_method_name and not function_methods:
+                continue
             script_methods.append(
                 ScriptMethodPlan(
                     script_path=file.path,
@@ -285,6 +311,17 @@ class TextSkillTranslator(Skill):
 
         _write(package_dir / "pyproject.toml", _render_pyproject(plan), package_dir, written)
         _write(package_dir / "README.md", _render_readme(plan), package_dir, written)
+        implementation_modules = _implementation_modules(plan)
+        if implementation_modules:
+            (package_src / "_impl").mkdir(parents=True, exist_ok=True)
+            _write(package_src / "_impl" / "__init__.py", "", package_dir, written)
+            for method in implementation_modules:
+                _write(
+                    package_src / "_impl" / f"{_implementation_module_name(method.script_path)}.py",
+                    _render_implementation_module(plan.source_dir, method.script_path),
+                    package_dir,
+                    written,
+                )
         _write(package_src / "__init__.py", _render_init(plan), package_dir, written)
         _write(
             tests_dir / f"test_{plan.package_name}.py",
@@ -293,7 +330,7 @@ class TextSkillTranslator(Skill):
             written,
         )
 
-        for source_file in _iter_skill_files(plan.source_dir):
+        for source_file in _iter_package_resource_files(plan):
             rel = source_file.relative_to(plan.source_dir)
             dest = resources_dir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -386,6 +423,14 @@ def _iter_skill_files(root: Path) -> list[Path]:
     )
 
 
+def _iter_package_resource_files(plan: ConversionPlan) -> list[Path]:
+    return [
+        path
+        for path in _iter_skill_files(plan.source_dir)
+        if not path.relative_to(plan.source_dir).as_posix().startswith("scripts/")
+    ]
+
+
 def _is_executable(path: Path) -> bool:
     return bool(path.stat().st_mode & 0o111)
 
@@ -461,7 +506,7 @@ def _script_method_name(script_path: str, used_names: set[str]) -> str:
 
 def _api_method_name(script_path: str, used_names: set[str]) -> str:
     name = _normalize_identifier(Path(script_path).stem)
-    if name in {"run_resource_script", "read_resource", "list_resources", "_resource_root"}:
+    if name in _RESERVED_METHOD_NAMES:
         name = f"{name}_api"
     base = name
     index = 2
@@ -492,16 +537,21 @@ def _infer_script_arguments(path: Path) -> list[ScriptArgumentPlan]:
     except (OSError, SyntaxError, UnicodeDecodeError):
         return []
 
+    constants = _literal_module_constants(tree)
     arguments: list[ScriptArgumentPlan] = []
     used_names: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "add_subparsers":
+            return []
         if not isinstance(node.func, ast.Attribute) or node.func.attr != "add_argument":
             continue
-        argument = _argument_from_add_argument(node, used_names)
+        argument = _argument_from_add_argument(node, used_names, constants)
         if argument is not None:
             arguments.append(argument)
+        else:
+            return []
     return arguments
 
 
@@ -626,7 +676,7 @@ def _function_parameters(node: ast.FunctionDef) -> list[FunctionParameterPlan] |
 
 def _function_method_name(function_name: str, used_names: set[str]) -> str:
     name = _normalize_identifier(function_name)
-    if name in {"run_resource_script", "read_resource", "list_resources", "_resource_root"}:
+    if name in _RESERVED_METHOD_NAMES:
         name = f"{name}_function"
     base = name
     index = 2
@@ -677,7 +727,7 @@ def _annotation_name(node: ast.AST) -> str | None:
 
 
 def _argument_from_add_argument(
-    node: ast.Call, used_names: set[str]
+    node: ast.Call, used_names: set[str], constants: dict[str, str | int | float | bool | None]
 ) -> ScriptArgumentPlan | None:
     raw_names = [_literal_string(arg) for arg in node.args]
     names = [name for name in raw_names if name]
@@ -711,10 +761,17 @@ def _argument_from_add_argument(
         return None
     else:
         annotation = _annotation_from_type(kwargs.get("type"))
-        default = _literal_default(kwargs.get("default"))
+        if annotation is None:
+            return None
+        default, _default_supported = _literal_argument_value(kwargs.get("default"), constants)
         normalized_action = "store"
 
-    required = positional or bool(_literal_default(kwargs.get("required")))
+    required = positional
+    if "required" in kwargs:
+        required_value, required_supported = _literal_argument_value(kwargs["required"], constants)
+        if not required_supported or not isinstance(required_value, bool):
+            return None
+        required = positional or required_value
     return ScriptArgumentPlan(
         param_name=param_name,
         cli_name=cli_name,
@@ -733,12 +790,39 @@ def _literal_string(node: ast.AST | None) -> str | None:
 
 
 def _literal_default(node: ast.AST | None) -> str | int | float | bool | None:
-    if isinstance(node, ast.Constant) and isinstance(node.value, (str, int, float, bool)):
-        return node.value
+    value, supported = _literal_argument_value(node, {})
+    if not supported or not isinstance(value, (str, int, float, bool)):
+        return None
+    return value
+
+
+def _literal_argument_value(
+    node: ast.AST | None, constants: dict[str, str | int | float | bool | None]
+) -> tuple[str | int | float | bool | None, bool]:
+    if node is None:
+        return None, True
+    if isinstance(node, ast.Name) and node.id in constants:
+        return constants[node.id], True
+    if isinstance(node, ast.Constant) and isinstance(node.value, (str, int, float, bool, type(None))):
+        return node.value, True
     number = _literal_number(node)
     if number is not None:
-        return number
-    return None
+        return number, True
+    return None, False
+
+
+def _literal_module_constants(tree: ast.Module) -> dict[str, str | int | float | bool | None]:
+    constants: dict[str, str | int | float | bool | None] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            value, supported = _literal_argument_value(node.value, constants)
+            if supported:
+                constants[node.targets[0].id] = value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            value, supported = _literal_argument_value(node.value, constants)
+            if supported:
+                constants[node.target.id] = value
+    return constants
 
 
 def _function_default(node: ast.AST | None) -> tuple[str | int | float | bool | None, bool]:
@@ -766,10 +850,12 @@ def _choose_cli_name(names: list[str]) -> str | None:
     return option_names[0] if option_names else None
 
 
-def _annotation_from_type(node: ast.AST | None) -> Literal["str", "int", "float", "bool"]:
+def _annotation_from_type(node: ast.AST | None) -> Literal["str", "int", "float", "bool"] | None:
+    if node is None:
+        return "str"
     if isinstance(node, ast.Name) and node.id in {"str", "int", "float"}:
         return node.id  # type: ignore[return-value]
-    return "str"
+    return None
 
 
 def _build_docstring(inventory: TextSkillInventory) -> str:
@@ -820,20 +906,163 @@ def _render_readme(plan: ConversionPlan) -> str:
 
         Registry name: `{plan.registry_name}`
 
-        The original TextSkill files are bundled under package resources.
+        Non-script TextSkill resources are bundled under package resources.
+        Scripts are bundled only when needed as private Python implementation
+        modules for generated package APIs.
     """)
 
 
+def _implementation_modules(plan: ConversionPlan) -> list[ScriptMethodPlan]:
+    methods: list[ScriptMethodPlan] = []
+    for method in plan.script_methods:
+        execution = _native_argparse_execution(plan.source_dir / method.script_path)
+        if method.function_methods or (execution is not None and execution.needs_module):
+            methods.append(method)
+    return methods
+
+
+def _implementation_module_name(script_path: str) -> str:
+    return f"_{_normalize_identifier(Path(script_path).with_suffix('').as_posix())}"
+
+
+def _render_implementation_module(source_dir: Path, script_path: str) -> str:
+    path = source_dir / script_path
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, UnicodeDecodeError) as exc:
+        raise ValueError(f"Cannot render implementation module for {path}: {exc}") from exc
+    execution = _native_argparse_execution(path)
+    if execution is not None and execution.needs_module and execution.implementation_body is not None:
+        body = execution.implementation_body
+        extra_used_names = _loaded_names(execution.statements)
+    else:
+        body = [
+            node
+            for node in tree.body
+            if not (isinstance(node, ast.FunctionDef) and node.name == "main")
+            and not _is_main_guard(node)
+            and not _is_argparse_setup_statement(node)
+            and _parse_args_target(node) is None
+        ]
+        extra_used_names = set()
+    module = ast.Module(body=body, type_ignores=[])
+    module = _rewrite_sibling_script_imports(module, source_dir, script_path)
+    module = _prune_unused_imports(module, extra_used_names=extra_used_names)
+    ast.fix_missing_locations(module)
+    return ast.unparse(module) + "\n"
+
+
+def _rewrite_sibling_script_imports(module: ast.Module, source_dir: Path, script_path: str) -> ast.Module:
+    script_rel = Path(script_path)
+    script_dir = script_rel.parent
+    body: list[ast.stmt] = []
+    for statement in module.body:
+        replacement = _rewrite_sibling_import(statement, source_dir, script_dir)
+        if replacement is None:
+            body.append(statement)
+        else:
+            body.extend(replacement)
+    module.body = body
+    return module
+
+
+def _rewrite_sibling_import(statement: ast.stmt, source_dir: Path, script_dir: Path) -> list[ast.stmt] | None:
+    if isinstance(statement, ast.Import):
+        rewritten: list[ast.stmt] = []
+        unchanged: list[ast.alias] = []
+        for alias in statement.names:
+            module_name = _sibling_impl_module(source_dir, script_dir, alias.name)
+            if module_name is None:
+                unchanged.append(alias)
+            else:
+                rewritten.append(
+                    ast.ImportFrom(
+                        module="",
+                        names=[ast.alias(name=module_name, asname=alias.asname or alias.name)],
+                        level=1,
+                    )
+                )
+        if unchanged:
+            rewritten.insert(0, ast.Import(names=unchanged))
+        return rewritten if rewritten else None
+    if isinstance(statement, ast.ImportFrom) and statement.level == 0 and statement.module:
+        module_name = _sibling_impl_module(source_dir, script_dir, statement.module)
+        if module_name is not None:
+            return [
+                ast.ImportFrom(
+                    module=module_name,
+                    names=statement.names,
+                    level=1,
+                )
+            ]
+    return None
+
+
+def _sibling_impl_module(source_dir: Path, script_dir: Path, import_name: str) -> str | None:
+    if "." in import_name:
+        return None
+    sibling = script_dir / f"{import_name}.py"
+    if not (source_dir / sibling).is_file():
+        return None
+    return _implementation_module_name(sibling.as_posix())
+
+
+def _prune_unused_imports(module: ast.Module, *, extra_used_names: set[str] | None = None) -> ast.Module:
+    used_names = {
+        node.id
+        for statement in module.body
+        if not isinstance(statement, (ast.Import, ast.ImportFrom))
+        for node in ast.walk(statement)
+        if isinstance(node, ast.Name)
+    }
+    if extra_used_names:
+        used_names.update(extra_used_names)
+    body: list[ast.stmt] = []
+    for statement in module.body:
+        if isinstance(statement, ast.ImportFrom):
+            if statement.module == "__future__":
+                body.append(statement)
+                continue
+            names = [
+                alias
+                for alias in statement.names
+                if (alias.asname or alias.name) in used_names or alias.name == "*"
+            ]
+            if names:
+                statement.names = names
+                body.append(statement)
+        elif isinstance(statement, ast.Import):
+            names = [
+                alias
+                for alias in statement.names
+                if (alias.asname or alias.name.split(".", 1)[0]) in used_names
+            ]
+            if names:
+                statement.names = names
+                body.append(statement)
+        else:
+            body.append(statement)
+    module.body = body
+    return module
+
+
+def _loaded_names(statements: list[ast.stmt]) -> set[str]:
+    return {
+        node.id
+        for statement in statements
+        for node in ast.walk(statement)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    }
+
+
 def _render_init(plan: ConversionPlan) -> str:
-    # Generated skills have three API layers: resource access, raw script
-    # runners that preserve TextSkill behavior, and any inferred ergonomic
-    # package methods planned from argparse declarations or import-safe functions.
+    # Generated skills expose inferred package-style APIs; original scripts are
+    # either omitted or rewritten into private implementation modules.
     methods = "\n".join(
         rendered
         for method in plan.script_methods
         for rendered in (
-            _render_script_method(method),
-            _render_api_method(method),
+            _render_api_method(plan, method),
             *(_render_function_method(method, function) for function in method.function_methods),
         )
         if rendered
@@ -844,13 +1073,10 @@ def _render_init(plan: ConversionPlan) -> str:
     template = textwrap.dedent(f'''\
         from __future__ import annotations
 
-        import importlib.util
-        import sys
         from importlib import resources
         from pathlib import Path
 
         from nooa.skill import Skill
-        from nooa.tools._bash_session import BashSession
 
 
         class {plan.class_name}(Skill):
@@ -859,29 +1085,7 @@ def _render_init(plan: ConversionPlan) -> str:
             def _resource_root(self):
                 return resources.files(__package__) / "{plan.resource_prefix}"
 
-            def _load_resource_module(self, path: str):
-                root = Path(self._resource_root()).resolve()
-                module_path = (root / path).resolve()
-                if not module_path.is_relative_to(root):
-                    raise ValueError(f"Path {{path!r}} escapes package resources")
-                if not module_path.is_file():
-                    raise FileNotFoundError(path)
-                cache = getattr(self, "_module_cache", None)
-                if cache is None:
-                    cache = {{}}
-                    self._module_cache = cache
-                if path in cache:
-                    return cache[path]
-                module_name = f"{{__package__}}._resource_{{abs(hash(path))}}"
-                spec = importlib.util.spec_from_file_location(module_name, module_path)
-                if spec is None or spec.loader is None:
-                    raise ImportError(f"Cannot import resource module {{path!r}}")
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-                cache[path] = module
-                return module
-
-            def list_resources(self) -> list[str]:
+            def _list_resources(self) -> list[str]:
                 """Return all bundled resource paths."""
                 root = self._resource_root()
                 return sorted(
@@ -890,7 +1094,7 @@ def _render_init(plan: ConversionPlan) -> str:
                     if path.is_file()
                 )
 
-            def read_resource(self, path: str) -> str:
+            def _read_resource(self, path: str) -> str:
                 """Read a bundled resource as text."""
                 root = Path(self._resource_root()).resolve()
                 resolved = (root / path).resolve()
@@ -900,77 +1104,14 @@ def _render_init(plan: ConversionPlan) -> str:
                     raise FileNotFoundError(path)
                 return resolved.read_text()
 
-            async def run_resource_script(
-                self,
-                path: str,
-                *args: str,
-                interpreter: str | None = None,
-                timeout: float = 30.0,
-            ) -> str:
-                """Run a bundled script resource."""
-                root = Path(self._resource_root()).resolve()
-                script = (root / path).resolve()
-                if not script.is_relative_to(root):
-                    raise ValueError(f"Path {{path!r}} escapes package resources")
-                if not script.is_file():
-                    raise FileNotFoundError(path)
-                quoted_script = _quote(str(script))
-                quoted_args = " ".join(_quote(arg) for arg in args)
-                if interpreter:
-                    command = f"{{interpreter}} {{quoted_script}} {{quoted_args}}".strip()
-                else:
-                    command = f"{{quoted_script}} {{quoted_args}}".strip()
-                session = BashSession(cwd=root)
-                try:
-                    await session.start()
-                    stdout, stderr, exit_code = await session.run(command, timeout=timeout)
-                finally:
-                    await session.close()
-                output = stdout
-                if stderr:
-                    output += f"\\n[stderr]\\n{{stderr}}"
-                if exit_code != 0:
-                    output += f"\\n[exit code: {{exit_code}}]"
-                return output
         __METHODS__
-
-
-        def _quote(value: str) -> str:
-            import shlex
-
-            return shlex.quote(value)
     ''')
     return template.replace("__DOCSTRING__", docstring).replace("__METHODS__", methods)
 
 
-def _render_script_method(method: ScriptMethodPlan) -> str:
-    if method.interpreter is None:
-        interpreter_arg = "None"
-    else:
-        interpreter_arg = method.interpreter
-    return textwrap.indent(
-        textwrap.dedent(f'''\
-            async def {method.method_name}(self, *args: str, timeout: float = 30.0) -> str:
-                """Run bundled script `{method.script_path}`."""
-                return await self.run_resource_script(
-                    {method.script_path!r},
-                    *args,
-                    interpreter={interpreter_arg},
-                    timeout=timeout,
-                )
-        '''),
-        "    ",
-    )
-
-
-def _render_api_method(method: ScriptMethodPlan) -> str:
+def _render_api_method(plan: ConversionPlan, method: ScriptMethodPlan) -> str:
     if not method.api_method_name or not method.arguments:
         return ""
-
-    timeout_name = "timeout"
-    arg_names = {argument.param_name for argument in method.arguments}
-    if timeout_name in arg_names:
-        timeout_name = "execution_timeout"
 
     required_args = [
         argument for argument in method.arguments if argument.required and argument.action == "store"
@@ -978,22 +1119,18 @@ def _render_api_method(method: ScriptMethodPlan) -> str:
     optional_args = [argument for argument in method.arguments if argument not in required_args]
     signature_parts = [_render_api_parameter(argument, required=True) for argument in required_args]
     signature_parts.extend(_render_api_parameter(argument, required=False) for argument in optional_args)
-    signature_parts.append(f"{timeout_name}: float = 30.0")
     signature = ", ".join(signature_parts)
+    signature_suffix = f", {signature}" if signature else ""
+    native_body = _render_native_argparse_body(plan.source_dir / method.script_path, method)
+    if native_body is None:
+        return ""
 
     lines: list[str] = [
-        f"async def {method.api_method_name}(self, {signature}) -> str:",
-        f'    """Execute `{method.script_path}` through a typed package API."""',
-        "    args: list[str] = []",
+        f"def {method.api_method_name}(self{signature_suffix}) -> str:",
+        f'    """Run the translated `{method.script_path}` logic as a native Python method."""',
     ]
-    for argument in method.arguments:
-        lines.extend(_render_argument_append(argument))
-    lines.extend(
-        [
-            f"    return await self.{method.method_name}(*args, timeout={timeout_name})",
-            "",
-        ]
-    )
+    lines.extend(f"    {line}" if line else "" for line in native_body)
+    lines.append("")
     return textwrap.indent("\n".join(lines), "    ")
 
 
@@ -1007,11 +1144,353 @@ def _render_function_method(method: ScriptMethodPlan, function: ScriptFunctionPl
     lines = [
         f"def {function.method_name}(self{signature}) -> {function.return_annotation}:",
         f"    {_triple_quoted(docstring)}",
-        f"    module = self._load_resource_module({method.script_path!r})",
+        f"    from ._impl import {_implementation_module_name(method.script_path)} as module",
         f"    return module.{function.function_name}({call_args})",
         "",
     ]
     return textwrap.indent("\n".join(lines), "    ")
+
+
+def _can_render_native_argparse_api(path: Path) -> bool:
+    return _native_argparse_execution(path) is not None
+
+
+def _render_native_argparse_body(path: Path, method: ScriptMethodPlan) -> list[str] | None:
+    execution = _native_argparse_execution(path)
+    if execution is None:
+        return None
+    args_name = execution.args_name
+    statements = execution.statements
+    param_names = {argument.param_name for argument in method.arguments}
+    rewritten = _ArgparseMethodRewriter(
+        args_name=args_name,
+        param_names=param_names,
+        prefix_globals=execution.needs_module,
+        local_names=param_names | {args_name} | _assigned_names(statements),
+    ).visit_statements(statements)
+    if not rewritten:
+        return None
+
+    lines: list[str] = []
+    if execution.needs_module:
+        lines.append(f"from ._impl import {_implementation_module_name(method.script_path)} as module")
+    else:
+        lines.extend(execution.import_lines)
+    lines.extend(
+        [
+            "import contextlib",
+            "import io",
+            "import os",
+            "import types",
+            f"{args_name} = types.SimpleNamespace({_namespace_kwargs(method.arguments)})",
+            "buffer = io.StringIO()",
+            "cwd = os.getcwd()",
+            "try:",
+            "    os.chdir(self._resource_root())",
+            "    with contextlib.redirect_stdout(buffer):",
+        ]
+    )
+    for statement in rewritten:
+        rendered = ast.unparse(statement).splitlines()
+        lines.extend(f"        {line}" if line else "" for line in rendered)
+    lines.extend(
+        [
+            "finally:",
+            "    os.chdir(cwd)",
+        ]
+    )
+    lines.append("return buffer.getvalue().rstrip('\\n')")
+    return lines
+
+
+def _namespace_kwargs(arguments: list[ScriptArgumentPlan]) -> str:
+    return ", ".join(f"{argument.param_name}={argument.param_name}" for argument in arguments)
+
+
+def _native_argparse_execution(path: Path) -> NativeArgparseExecution | None:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return None
+    if _has_sibling_script_imports(path, tree):
+        return None
+
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "main":
+            if not _can_render_implementation_module(tree):
+                return None
+            parsed = _body_after_parse_args(node.body)
+            if parsed is not None:
+                args_name, statements, previous_statements = parsed
+                implementation_body = _main_implementation_body(tree, previous_statements)
+                if implementation_body is None:
+                    return None
+                return NativeArgparseExecution(
+                    args_name=args_name,
+                    statements=statements,
+                    import_lines=[],
+                    needs_module=bool(implementation_body),
+                    implementation_body=implementation_body or None,
+                )
+
+    return _top_level_body_after_parse_args(tree.body)
+
+
+def _has_sibling_script_imports(path: Path, tree: ast.Module) -> bool:
+    script_dir = path.parent
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top_level = alias.name.split(".", 1)[0]
+                if _sibling_module_exists(script_dir, top_level):
+                    return True
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            top_level = node.module.split(".", 1)[0]
+            if _sibling_module_exists(script_dir, top_level):
+                return True
+    return False
+
+
+def _sibling_module_exists(script_dir: Path, module_name: str) -> bool:
+    return (script_dir / f"{module_name}.py").exists() or (script_dir / module_name / "__init__.py").exists()
+
+
+def _can_render_implementation_module(tree: ast.Module) -> bool:
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+    }
+    for node in tree.body:
+        if _is_module_docstring(node) or _is_main_guard(node):
+            continue
+        if isinstance(node, ast.FunctionDef) and node.name == "main":
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(node, ast.Assign) and _safe_module_assignment_value(node.value, functions):
+            continue
+        if isinstance(node, ast.AnnAssign) and _safe_module_assignment_value(node.value, functions):
+            continue
+        return False
+    return True
+
+
+def _main_implementation_body(tree: ast.Module, previous_statements: list[ast.stmt]) -> list[ast.stmt] | None:
+    local_body = [
+        statement
+        for statement in previous_statements
+        if not _is_module_docstring(statement) and not _is_argparse_setup_statement(statement)
+    ]
+    if not all(_is_safe_implementation_statement(statement) for statement in local_body):
+        return None
+    module_body = [
+        node
+        for node in tree.body
+        if not (isinstance(node, ast.FunctionDef) and node.name == "main")
+        and not _is_main_guard(node)
+        and not _is_argparse_setup_statement(node)
+        and _parse_args_target(node) is None
+    ]
+    return module_body + local_body
+
+
+def _top_level_body_after_parse_args(statements: list[ast.stmt]) -> NativeArgparseExecution | None:
+    for index, statement in enumerate(statements):
+        args_name = _parse_args_target(statement)
+        if args_name is not None:
+            previous_statements = [
+                previous for previous in statements[:index] if not _is_module_docstring(previous)
+            ]
+            import_lines = [ast.unparse(node) for node in previous_statements if isinstance(node, (ast.Import, ast.ImportFrom))]
+            implementation_body = [
+                previous
+                for previous in previous_statements
+                if not _is_argparse_setup_statement(previous)
+            ]
+            needs_module = any(
+                not isinstance(previous, (ast.Import, ast.ImportFrom))
+                and not _is_argparse_setup_statement(previous)
+                for previous in previous_statements
+            )
+            if needs_module and not all(_is_safe_implementation_statement(previous) for previous in implementation_body):
+                return None
+            if not needs_module and not all(
+                isinstance(previous, (ast.Import, ast.ImportFrom)) or _is_argparse_setup_statement(previous)
+                for previous in previous_statements
+            ):
+                return None
+            tail = statements[index + 1 :]
+            if not tail:
+                return None
+            return NativeArgparseExecution(
+                args_name=args_name,
+                statements=tail,
+                import_lines=import_lines,
+                needs_module=needs_module,
+                implementation_body=implementation_body if needs_module else None,
+            )
+    return None
+
+
+def _is_safe_implementation_statement(statement: ast.stmt) -> bool:
+    if isinstance(statement, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef)):
+        return True
+    if isinstance(statement, ast.Assign):
+        return _literal_container(statement.value)
+    if isinstance(statement, ast.AnnAssign):
+        return _literal_container(statement.value)
+    return False
+
+
+def _safe_module_assignment_value(value: ast.AST | None, functions: dict[str, ast.FunctionDef]) -> bool:
+    if _literal_container(value):
+        return True
+    if not isinstance(value, ast.Call) or value.args or value.keywords:
+        return False
+    if not isinstance(value.func, ast.Name):
+        return False
+    function = functions.get(value.func.id)
+    return function is not None and _is_safe_path_resolver_function(function)
+
+
+def _is_safe_path_resolver_function(function: ast.FunctionDef) -> bool:
+    if function.args.args or function.args.posonlyargs or function.args.kwonlyargs:
+        return False
+    for node in ast.walk(function):
+        if isinstance(
+            node,
+            (
+                ast.AsyncFunctionDef,
+                ast.Await,
+                ast.Delete,
+                ast.For,
+                ast.Global,
+                ast.Import,
+                ast.ImportFrom,
+                ast.Lambda,
+                ast.Nonlocal,
+                ast.Raise,
+                ast.Try,
+                ast.While,
+                ast.With,
+                ast.Yield,
+                ast.YieldFrom,
+            ),
+        ):
+            return False
+        if isinstance(node, ast.Call) and not _is_safe_path_resolver_call(node):
+            return False
+    return True
+
+
+def _is_safe_path_resolver_call(node: ast.Call) -> bool:
+    if isinstance(node.func, ast.Name) and node.func.id == "Path":
+        return True
+    return isinstance(node.func, ast.Attribute) and node.func.attr in {"exists", "resolve"}
+
+
+def _body_after_parse_args(statements: list[ast.stmt]) -> tuple[str, list[ast.stmt], list[ast.stmt]] | None:
+    for index, statement in enumerate(statements):
+        args_name = _parse_args_target(statement)
+        if args_name is not None:
+            tail = statements[index + 1 :]
+            return (args_name, tail, statements[:index]) if tail else None
+    return None
+
+
+def _parse_args_target(statement: ast.stmt) -> str | None:
+    if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+        return None
+    target = statement.targets[0]
+    if not isinstance(target, ast.Name):
+        return None
+    value = statement.value
+    if (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Attribute)
+        and value.func.attr == "parse_args"
+    ):
+        return target.id
+    return None
+
+
+def _is_argparse_setup_statement(statement: ast.stmt) -> bool:
+    if isinstance(statement, ast.Assign):
+        return _is_argparse_parser_assignment(statement)
+    if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
+        return False
+    call = statement.value
+    return isinstance(call.func, ast.Attribute) and call.func.attr == "add_argument"
+
+
+def _is_argparse_parser_assignment(statement: ast.Assign) -> bool:
+    if len(statement.targets) != 1 or not isinstance(statement.targets[0], ast.Name):
+        return False
+    value = statement.value
+    return (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Attribute)
+        and value.func.attr == "ArgumentParser"
+        and isinstance(value.func.value, ast.Name)
+        and value.func.value.id == "argparse"
+    )
+
+
+def _assigned_names(statements: list[ast.stmt]) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(ast.Module(body=statements, type_ignores=[])):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names.add(node.id)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".", 1)[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                names.add(alias.asname or alias.name)
+    return names
+
+
+class _ArgparseMethodRewriter(ast.NodeTransformer):
+    def __init__(
+        self,
+        *,
+        args_name: str,
+        param_names: set[str],
+        prefix_globals: bool,
+        local_names: set[str],
+    ) -> None:
+        self.args_name = args_name
+        self.param_names = param_names
+        self.prefix_globals = prefix_globals
+        self.local_names = local_names | {"module"}
+        self.builtin_names = set(dir(builtins))
+
+    def visit_statements(self, statements: list[ast.stmt]) -> list[ast.stmt]:
+        rewritten = [self.visit(statement) for statement in statements]
+        ast.fix_missing_locations(ast.Module(body=rewritten, type_ignores=[]))
+        return rewritten
+
+    def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+        if isinstance(node.value, ast.Name) and node.value.id == self.args_name and node.attr in self.param_names:
+            return ast.copy_location(ast.Name(id=node.attr, ctx=node.ctx), node)
+        node = self.generic_visit(node)
+        return node
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        if (
+            self.prefix_globals
+            and isinstance(node.ctx, ast.Load)
+            and node.id not in self.local_names
+            and node.id not in self.builtin_names
+        ):
+            return ast.copy_location(
+                ast.Attribute(value=ast.Name(id="module", ctx=ast.Load()), attr=node.id, ctx=node.ctx),
+                node,
+            )
+        return node
 
 
 def _render_function_parameter(parameter: FunctionParameterPlan) -> str:
@@ -1058,26 +1537,64 @@ def _render_argument_append(argument: ScriptArgumentPlan) -> list[str]:
 
 def _render_tests(plan: ConversionPlan) -> str:
     lines = [
+        "from pathlib import Path",
+        "",
+        "from nooa.agentdoc import doc",
+        "from nooa.skill_registry import SkillRegistry",
         f"from {plan.package_name} import {plan.class_name}",
         "",
         "",
         "def test_skill_instantiates_and_lists_resources():",
         f"    skill = {plan.class_name}()",
+        "    visible_doc = doc(skill)",
+        "    assert 'list_resources' not in visible_doc",
+        "    assert 'read_resource' not in visible_doc",
+        "    assert 'run_resource_script' not in visible_doc",
     ]
     if plan.script_methods:
         for method in plan.script_methods:
             lines.extend(_test_assertions(method))
     else:
-        lines.append("    assert isinstance(skill.list_resources(), list)")
+        lines.append("    assert isinstance(skill._list_resources(), list)")
+    lines.extend(
+        [
+            "",
+            "",
+            "def test_skill_registry_loads_package():",
+            "    class Agent:",
+            "        pass",
+            "",
+            "    package_dir = Path(__file__).resolve().parents[1]",
+            "    registry = SkillRegistry(Agent())",
+            "    try:",
+            "        registry.discover_libs(package_dir.parent)",
+            f"        assert {plan.registry_name!r} in registry.loaded()",
+            "    finally:",
+            "        registry.close()",
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
 def _test_assertions(method: ScriptMethodPlan) -> list[str]:
-    assertions = [f"    assert {method.script_path!r} in skill.list_resources()"]
+    assertions = [
+        f"    assert {method.script_path!r} not in skill._list_resources()",
+        f"    assert {method.method_name!r} not in visible_doc",
+    ]
     if method.api_method_name:
-        assertions.append(f"    assert hasattr(skill, {method.api_method_name!r})")
+        assertions.extend(
+            [
+                f"    assert hasattr(skill, {method.api_method_name!r})",
+                f"    assert {method.api_method_name!r} in visible_doc",
+            ]
+        )
     for function in method.function_methods:
-        assertions.append(f"    assert hasattr(skill, {function.method_name!r})")
+        assertions.extend(
+            [
+                f"    assert hasattr(skill, {function.method_name!r})",
+                f"    assert {function.method_name!r} in visible_doc",
+            ]
+        )
     return assertions
 
 
