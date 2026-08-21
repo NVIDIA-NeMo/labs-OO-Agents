@@ -81,6 +81,7 @@ class GenerationSession:
     target_method_name: str
     event_manager: "EventManager | None" = None  # Optional event manager for Out[n]
     iteration: int = 0
+    execution_count: int = 0
     error_count: int = 0
     session_locals: dict[str, Any] = field(default_factory=dict)
     task_event_id: str = ""
@@ -386,6 +387,7 @@ class PurePythonStrategy(CompositeStrategy):
                     await self._send_empty_response_error(runtime, call.method_name)
                     continue
 
+                session.execution_count += 1
                 result = await self._execute_code(
                     runtime, code, builtins, session, call.method_name
                 )
@@ -400,7 +402,14 @@ class PurePythonStrategy(CompositeStrategy):
                 if result.error:
                     session.record_error()
                     await self._send_execution_error(
-                        runtime, result.error, code, result.stdout, result.stderr
+                        runtime,
+                        result.error,
+                        code,
+                        result.stdout,
+                        result.stderr,
+                        execution_count=session.execution_count,
+                        line_offset=getattr(result, "wrapper_line_offset", 0),
+                        formatted_error=result.formatted_error,
                     )
                     turn_exception = type(result.error).__name__
                     continue
@@ -412,7 +421,7 @@ class PurePythonStrategy(CompositeStrategy):
                 runtime.event_manager.add(
                     PythonOutput(
                         tool_call_id="",  # No tool call in PURE_PYTHON mode
-                        execution_count=session.iteration,
+                        execution_count=session.execution_count,
                         stdout=result.stdout,
                         stderr=result.stderr,
                         value=result.returned_value if result.has_return else None,
@@ -776,14 +785,13 @@ class PurePythonStrategy(CompositeStrategy):
         # the agent is currently running a code cell (vs blocked on an LLM call).
         from nooa.runtime.debug_handler import code_exec_context
 
-        # Use iteration+1 for 1-indexed execution count (matches event emission after record_iteration)
         with code_exec_context(code):
             return await runtime.execute_code(
                 code,
                 builtins=execution_builtins,
                 validate=True,
                 wrap_in_function=True,
-                execution_count=session.iteration + 1,
+                execution_count=session.execution_count,
             )
 
     def _is_task_complete(self, result: Any, runtime: RuntimeServices, call: "CurrentCall") -> bool:
@@ -850,34 +858,27 @@ class PurePythonStrategy(CompositeStrategy):
         code: str | None = None,
         stdout: str = "",
         stderr: str = "",
+        *,
+        execution_count: int = 0,
+        line_offset: int = 0,
+        formatted_error: str = "",
     ) -> None:
-        """Send an execution error to the LLM with clean formatting.
-
-        Args:
-            runtime: RuntimeServices for event management
-            error: The exception that occurred
-            code: The code that was executed (for better error context)
-            stdout: Partial stdout captured before the error (debugging aid)
-            stderr: Partial stderr captured before the error (debugging aid)
-        """
-        error_msg = self._format_error(error, code)
-        guidance = ""
-
+        """Emit a failed cell through the shared structured output contract."""
+        error_msg = self._format_error(
+            error, code, line_offset=line_offset, formatted_error=formatted_error
+        )
         if isinstance(error, SyntaxError):
-            guidance = "\n\n" + await self.error_syntax(runtime)
-
-        # Include partial stdout/stderr if any (debugging aid)
-        # Build output section from the raw strings (not from result, since we have separate args)
-        output_parts = []
-        if stdout:
-            output_parts.append(f"Stdout:\n```\n{stdout}\n```")
-        if stderr:
-            output_parts.append(f"Stderr:\n```\n{stderr}\n```")
-        output_section = "\n\n" + "\n\n".join(output_parts) if output_parts else ""
+            error_msg = f"{error_msg}\n\n{await self.error_syntax(runtime)}"
 
         runtime.event_manager.add(
-            Error(
-                content=f"Execution error:\n```\n{error_msg}\n```{output_section}{guidance}\nFix and try again."
+            PythonOutput(
+                tool_call_id="",
+                execution_count=execution_count,
+                stdout=stdout,
+                stderr=stderr,
+                error=error_msg,
+                execution_status=ResultStatus.ERROR,
+                metadata={"execution_error": True},
             )
         )
 
@@ -1042,19 +1043,17 @@ class PurePythonStrategy(CompositeStrategy):
 
         return inner_content
 
-    def _format_error(self, error: Exception, code: str | None = None) -> str:
-        """Format an error for LLM feedback.
-
-        Uses the error formatting module to produce high-signal, low-noise
-        error messages that hide framework internals.
-
-        Args:
-            error: The exception to format
-            code: Optional source code for better context
-
-        Returns:
-            Formatted error string
-        """
+    def _format_error(
+        self,
+        error: Exception,
+        code: str | None = None,
+        *,
+        line_offset: int = 0,
+        formatted_error: str = "",
+    ) -> str:
+        """Format an error for LLM feedback with user-source line numbers."""
         from nooa.errors.formatting import format_error_for_llm
 
-        return format_error_for_llm(error, code)
+        return format_error_for_llm(
+            error, code, line_offset=line_offset, formatted_error=formatted_error
+        )

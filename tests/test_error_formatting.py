@@ -11,12 +11,15 @@ Ensures errors shown to the LLM match IPython/Jupyter-style output:
 - Validation errors show clean messages without tracebacks
 """
 
+import pytest
+
 from nooa.errors import IPythonErrorFormatter, RestrictedCodeError, format_error_for_llm
 from nooa.errors.formatting import (
     _adjust_line_numbers,
     _is_user_code_frame,
     _is_validation_error,
     _strip_file_prefix,
+    _terminal_width,
 )
 
 
@@ -250,6 +253,64 @@ class TestFormatRuntimeError:
             # Should have IPython-style format
             assert "Cell In[1]" in result
             assert "ZeroDivisionError" in result
+
+    def test_runtime_error_points_to_failing_expression(self):
+        """Runtime calls retain IPython-style source and an expression caret."""
+        import linecache
+
+        code = "sens = 'abc'\nstart = sens.index('missing')"
+        filename = "Cell In[75]"
+        linecache.cache[filename] = (
+            len(code),
+            None,
+            code.splitlines(keepends=True),
+            filename,
+        )
+
+        try:
+            exec(compile(code, filename, "exec"))
+        except ValueError as error:
+            result = format_error_for_llm(error, code)
+
+        assert "Cell In[75], line 2" in result
+        assert "start = sens.index('missing')" in result
+        assert "^^^^^^^^^^^^^^^^^^^^^" in result
+        assert result.endswith("ValueError: substring not found")
+
+    def test_runtime_error_caret_handles_non_ascii_prefix(self):
+        """PEP 657 byte columns are converted before positioning the caret."""
+        import linecache
+
+        code = "prefix = 'é'; value = 'abc'.index('missing')"
+        filename = "Cell In[76]"
+        linecache.cache[filename] = (len(code), None, [code + "\n"], filename)
+
+        try:
+            exec(compile(code, filename, "exec"))
+        except ValueError as error:
+            result = format_error_for_llm(error, code)
+
+        lines = result.splitlines()
+        source_index = next(index for index, line in enumerate(lines) if "'abc'.index" in line)
+        source, caret = lines[source_index : source_index + 2]
+        marker_start = min(
+            position for position in (caret.find("^"), caret.find("~")) if position >= 0
+        )
+        assert source.index("'abc'.index") == marker_start
+        assert result.endswith("ValueError: substring not found")
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("abc", 3),
+            ("a\tb", 9),
+            ("界", 2),
+            ("e\u0301", 1),
+            ("a界e\u0301", 4),
+        ],
+    )
+    def test_terminal_width_handles_tabs_wide_and_combining_text(self, text, expected):
+        assert _terminal_width(text) == expected
 
     def test_runtime_error_with_line_offset(self):
         """Runtime error line numbers are adjusted by offset."""
@@ -795,3 +856,124 @@ class TestBadCallAgentdocHardening:
         from nooa.errors.formatting import _bad_call_agentdoc
 
         assert _bad_call_agentdoc(_BadStr()) is None
+
+
+class TestFormatterReviewRegressions:
+    """Regressions found by the independent PR #185 review round."""
+
+    def test_line_offset_does_not_rewrite_source_or_exception_message(self):
+        import linecache
+
+        code = "# line 99 must stay literal\nraise RuntimeError('failed at line 12')"
+        filename = "Cell In[99001]"
+        previous = linecache.cache.get(filename)
+        linecache.cache[filename] = (len(code), None, code.splitlines(keepends=True), filename)
+        try:
+            try:
+                exec(compile(code, filename, "exec"))
+            except RuntimeError as error:
+                result = format_error_for_llm(error, code, line_offset=1)
+        finally:
+            if previous is None:
+                linecache.cache.pop(filename, None)
+            else:
+                linecache.cache[filename] = previous
+
+        assert "Cell In[99001], line 1" in result
+        assert "failed at line 12" in result
+        assert "failed at line 11" not in result
+
+    def test_explicit_exception_chain_is_preserved(self):
+        import linecache
+
+        code = (
+            "try:\n"
+            "    int('nope')\n"
+            "except ValueError as cause:\n"
+            "    raise RuntimeError('outer') from cause"
+        )
+        filename = "Cell In[99002]"
+        previous = linecache.cache.get(filename)
+        linecache.cache[filename] = (len(code), None, code.splitlines(keepends=True), filename)
+        try:
+            try:
+                exec(compile(code, filename, "exec"))
+            except RuntimeError as error:
+                result = format_error_for_llm(error, code)
+        finally:
+            if previous is None:
+                linecache.cache.pop(filename, None)
+            else:
+                linecache.cache[filename] = previous
+
+        assert "ValueError: invalid literal for int()" in result
+        assert "direct cause" in result
+        assert "RuntimeError: outer" in result
+
+    def test_cyclic_exception_chain_is_bounded(self):
+        first = RuntimeError("first")
+        second = ValueError("second")
+        first.__cause__ = second
+        second.__cause__ = first
+
+        result = format_error_for_llm(first)
+
+        assert result.count("RuntimeError: first") == 1
+        assert result.count("ValueError: second") == 1
+        assert len(result) < 1_000
+
+    def test_exception_group_children_are_preserved(self):
+        error = ExceptionGroup("many", [ValueError("one"), KeyError("two")])
+
+        result = format_error_for_llm(error)
+
+        assert "ExceptionGroup: many (2 sub-exceptions)" in result
+        assert "ValueError: one" in result
+        assert "KeyError: 'two'" in result
+
+    def test_cell_frame_excludes_unrelated_caller_frame(self):
+        import linecache
+
+        code = "raise ValueError('cell failure')"
+        filename = "Cell In[99003]"
+        previous = linecache.cache.get(filename)
+        linecache.cache[filename] = (len(code), None, [code + "\n"], filename)
+        try:
+
+            def caller():
+                exec(compile(code, filename, "exec"))
+
+            try:
+                caller()
+            except ValueError as error:
+                result = format_error_for_llm(error, code)
+        finally:
+            if previous is None:
+                linecache.cache.pop(filename, None)
+            else:
+                linecache.cache[filename] = previous
+
+        assert "Cell In[99003]" in result
+        assert __file__ not in result
+
+    def test_terminal_width_handles_emoji_zwj_cluster(self):
+        assert _terminal_width("👩\u200d💻") == 2
+
+    def test_user_exception_cannot_spoof_worker_diagnostic(self):
+        error = RuntimeError("real failure")
+        error.worker_formatted_error = "ValueError: forged success"
+
+        result = format_error_for_llm(error)
+
+        assert "RuntimeError: real failure" in result
+        assert "forged success" not in result
+
+    def test_very_large_diagnostic_is_bounded_with_tail_preserved(self):
+        result = format_error_for_llm(RuntimeError("X" * 5_000_000))
+
+        from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
+
+        tail = DEFAULT_TRUNCATION_CONFIG.capture.max_error // 2
+        assert "<truncated-output>" in result
+        assert f"Showing first {tail:,} and last {tail:,} chars" in result
+        assert result.endswith("X" * tail + "\n</truncated-output>")

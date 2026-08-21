@@ -23,6 +23,7 @@ import weakref
 from multiprocessing.connection import Connection
 from typing import Any
 
+from nooa.errors.formatting import format_error_for_llm
 from nooa.runtime.sandbox.cell_core import run_cell_source
 from nooa.runtime.sandbox.serialization import ResultDTO, result_to_dto
 
@@ -127,7 +128,8 @@ def _raise_broker_error(response: dict[str, Any]) -> None:
         # normal signal path (cell_core catches it -> ExecutionResult.signal).
         from nooa.strategies.codeact import _ReturnResultSignal
 
-        raise _ReturnResultSignal(result=response.get("signal_result"))
+        signal_result = response.get("signal_result")
+        raise _ReturnResultSignal(result=signal_result if isinstance(signal_result, dict) else {})
     if err_type == "CellSerializationError":
         raise CellSerializationError(message)
     exc_cls = getattr(_bi, err_type, ParentToolError)
@@ -447,7 +449,11 @@ def worker_main(conn: Connection, init: dict[str, Any]) -> None:  # pragma: no c
 
 
 def _run_one(
-    loop: asyncio.AbstractEventLoop, namespace: dict[str, Any], request: dict[str, Any]
+    loop: asyncio.AbstractEventLoop,
+    namespace: dict[str, Any],
+    request: dict[str, Any],
+    _serialize: Any = result_to_dto,
+    _error_formatter: Any = format_error_for_llm,
 ) -> ResultDTO:
     result = loop.run_until_complete(
         run_cell_source(
@@ -456,4 +462,4 @@ def _run_one(
             execution_count=int(request.get("execution_count", 1)),
         )
     )
-    return result_to_dto(result)
+    return _serialize(result, error_formatter=_error_formatter)

@@ -92,6 +92,7 @@ class RuntimeServices(Protocol):
         tool_call_id: str | None = None,
         execution_count: int = 1,
         restrictions: "RestrictionsConfig | None" = None,
+        sandbox_executor: Any = None,
     ) -> Any:
         """Execute Python code with namespace + strategy builtins.
 
@@ -105,6 +106,7 @@ class RuntimeServices(Protocol):
             execution_count: Execution number for Jupyter-style "Cell In[N]" filename.
             restrictions: Code execution restrictions (blocked modules/calls).
                 None uses defaults from RestrictionsConfig().
+            sandbox_executor: Optional guarded worker used instead of in-process execution.
 
         Returns:
             ExecutionResult with stdout, error, defined_methods.

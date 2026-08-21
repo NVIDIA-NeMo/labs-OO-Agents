@@ -18,6 +18,7 @@ into a picklable :class:`ResultDTO` and reconstructs a faithful
 from __future__ import annotations
 
 import pickle
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,7 +39,7 @@ class ErrorDTO:
 
     type_name: str
     message: str
-    traceback: str
+    formatted_error: str = ""
 
 
 @dataclass
@@ -74,13 +75,16 @@ class _SurrogateCellError(Exception):
     def __init__(self, dto: ErrorDTO):
         super().__init__(dto.message)
         self.original_type = dto.type_name
-        self.worker_traceback = dto.traceback
 
     def __str__(self) -> str:
         return self.args[0] if self.args else self.original_type
 
 
-def result_to_dto(result: Any) -> ResultDTO:
+def result_to_dto(
+    result: Any,
+    *,
+    error_formatter: Callable[..., str] | None = None,
+) -> ResultDTO:
     """Convert a worker-side ``ExecutionResult`` into a picklable DTO.
 
     The presence of a control-flow signal is keyed off ``result.signal`` (not a
@@ -88,8 +92,6 @@ def result_to_dto(result: Any) -> ResultDTO:
     like ``returned_value`` so a non-picklable ``return_result(...)`` yields a
     clean error instead of crashing the worker on ``conn.send``.
     """
-    import traceback as tb
-
     from nooa.events import _NO_RETURN
 
     dto = ResultDTO(
@@ -102,13 +104,30 @@ def result_to_dto(result: Any) -> ResultDTO:
 
     if result.error is not None:
         err = result.error
-        # Some exceptions (e.g. MemoryError) carry no message; fall back to the
-        # type name so the agent-facing error is never blank.
-        message = str(err) or type(err).__name__
+        # User-defined exception formatting must not break the worker send path.
+        error_type = type(err).__name__
+        try:
+            message = str(err) or error_type
+        except Exception:
+            message = error_type
+
+        if error_formatter is None:
+            from nooa.errors.formatting import format_error_for_llm
+
+            error_formatter = format_error_for_llm
+
+        try:
+            formatted_error = error_formatter(
+                err,
+                line_offset=getattr(result, "wrapper_line_offset", 0),
+            )
+        except Exception:
+            formatted_error = f"{error_type}: {message}"
+
         dto.error = ErrorDTO(
-            type_name=type(err).__name__,
+            type_name=error_type,
             message=message,
-            traceback="".join(tb.format_exception(type(err), err, err.__traceback__)),
+            formatted_error=formatted_error,
         )
         return dto
 
@@ -124,7 +143,6 @@ def result_to_dto(result: Any) -> ResultDTO:
                     "cannot cross the sandbox boundary. Return a JSON/pickle-safe value "
                     "(numbers, str, list, dict, ndarray) instead."
                 ),
-                traceback="",
             )
         return dto
 
@@ -142,7 +160,6 @@ def result_to_dto(result: Any) -> ResultDTO:
                     "cannot cross the sandbox boundary. Keep it in the namespace and "
                     "return a JSON/pickle-safe summary instead."
                 ),
-                traceback="",
             )
     return dto
 
@@ -182,8 +199,6 @@ def _reconstruct_error(err: ErrorDTO) -> Exception:
                 exc = _SurrogateCellError(err)
         else:
             exc = _SurrogateCellError(err)
-    if err.traceback:
-        exc.worker_traceback = err.traceback  # type: ignore[attr-defined]
     return exc
 
 
@@ -208,6 +223,7 @@ def dto_to_result(dto: ResultDTO, *, signal_factory: Any = None) -> Any:
         stdout=dto.stdout,
         stderr=dto.stderr,
         error=error,
+        formatted_error=dto.error.formatted_error if dto.error is not None else "",
         signal=signal,
         defined_methods={},
         returned_value=dto.returned_value if dto.has_return else _NO_RETURN,

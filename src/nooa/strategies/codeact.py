@@ -1580,14 +1580,13 @@ Standard Python builtins and agent instance (`self`) are available."""
             error_text = ""
             if result.error:
                 line_offset = getattr(result, "wrapper_line_offset", 0)
-                error_text = self._format_error(result.error, line_offset=line_offset)
-            stderr = result.stderr
-            if error_text:
-                stderr = (
-                    f"{stderr}\nExecution error:\n{error_text}"
-                    if stderr
-                    else f"Execution error:\n{error_text}"
+                error_text = self._format_error(
+                    result.error,
+                    code,
+                    line_offset=line_offset,
+                    formatted_error=result.formatted_error,
                 )
+            stderr = result.stderr
             if validation_error:
                 stderr = (
                     f"{stderr}\nreturn_result validation error: {validation_error}"
@@ -1601,6 +1600,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     execution_count=session.iteration,
                     stdout=result.stdout,
                     stderr=stderr,
+                    error=error_text,
                     value=result.returned_value if result.has_return else None,
                     explicit_return=result.explicit_return,
                     execution_status=ResultStatus.ERROR if validation_error else final_status,
@@ -1677,7 +1677,12 @@ Standard Python builtins and agent instance (`self`) are available."""
                     result.error, return_type, result.returned_value, runtime.truncation_config
                 )
             else:
-                error_text = self._format_error(result.error, line_offset=line_offset)
+                error_text = self._format_error(
+                    result.error,
+                    code,
+                    line_offset=line_offset,
+                    formatted_error=result.formatted_error,
+                )
 
         # Add PythonOutput with actual output and value
         runtime.event_manager.add(
@@ -2628,7 +2633,12 @@ Standard Python builtins and agent instance (`self`) are available."""
         error_text = ""
         if result.error:
             line_offset = getattr(result, "wrapper_line_offset", 0)
-            error_text = self._format_error(result.error, line_offset=line_offset)
+            error_text = self._format_error(
+                result.error,
+                code,
+                line_offset=line_offset,
+                formatted_error=result.formatted_error,
+            )
 
         # Add execution output as user message (execution_count=0 since before main loop)
         runtime.event_manager.add(
@@ -2642,7 +2652,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 explicit_return=result.explicit_return if result.has_return else False,
                 execution_status=final_status,
                 images=result.images,
-                metadata={"prefill": True, "prefill_type": prefill_type},
+                metadata={"prefill": True, "prefill_type": "inspect_inputs"},
             )
         )
 
@@ -2753,7 +2763,12 @@ Standard Python builtins and agent instance (`self`) are available."""
             )
 
     def _format_error(
-        self, error: Exception, code: str | None = None, *, line_offset: int = 0
+        self,
+        error: Exception,
+        code: str | None = None,
+        *,
+        line_offset: int = 0,
+        formatted_error: str = "",
     ) -> str:
         """Format an error for display using the configured formatter."""
         if self.error_formatter is not None:
@@ -2766,7 +2781,9 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         from nooa.errors.formatting import format_error_for_llm
 
-        return format_error_for_llm(error, code, line_offset=line_offset)
+        return format_error_for_llm(
+            error, code, line_offset=line_offset, formatted_error=formatted_error
+        )
 
     def _extract_module_context(
         self, agent_module: types.ModuleType, agent: Any | None = None

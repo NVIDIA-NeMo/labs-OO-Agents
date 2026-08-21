@@ -556,8 +556,8 @@ class TestPlainEventContent:
         result = plain_event_content(po)
         assert result == "(no output)"
 
-    def test_python_output_stderr_with_error_not_shown(self):
-        """When both error and stderr are set, only error is shown."""
+    def test_python_output_stderr_and_error_are_both_shown(self):
+        """Partial stderr remains visible when execution also has a structured error."""
         po = PythonOutput(
             tool_call_id="tc1",
             execution_status=ResultStatus.ERROR,
@@ -567,8 +567,17 @@ class TestPlainEventContent:
         )
         result = plain_event_content(po)
         assert "Error: MainError" in result
-        # stderr should not appear when error is set
-        assert "Stderr:" not in result
+        assert "Stderr: stderr stuff" in result
+
+    def test_python_output_identical_stderr_and_error_is_deduplicated(self):
+        po = PythonOutput(
+            tool_call_id="tc1",
+            execution_status=ResultStatus.ERROR,
+            execution_count=1,
+            error="same diagnostic",
+            stderr="same diagnostic",
+        )
+        assert plain_event_content(po).count("same diagnostic") == 1
 
     def test_error_event_returns_content(self):
         result = plain_event_content(Error(content="something failed"))

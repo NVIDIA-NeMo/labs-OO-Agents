@@ -135,13 +135,58 @@ async def test_sandbox_path_still_enforces_restrictions():
     assert result == 1
 
 
-async def test_sandboxed_codeact_reports_cell_error_and_continues():
+async def test_sandboxed_codeact_reports_rich_cell_error_and_continues():
+    from nooa.events import PythonOutput
+
     llm = FakeLLMClient(
         scripted_responses=[
-            _resp("", tool_calls=[_exec("raise ValueError('deliberate')")]),
+            _resp(
+                "",
+                tool_calls=[
+                    _exec(
+                        "import sys\n"
+                        "print('before failure')\n"
+                        "print('warning', file=sys.stderr)\n"
+                        "text = 'abc'\n"
+                        "start = text.index('missing')"
+                    )
+                ],
+            ),
             _resp("", tool_calls=[_ret(result=7)]),
         ]
     )
     agent = _SumAgent(llm=llm)
     result = await agent.compute()
+
     assert result == 7
+    output = next(
+        event
+        for event in agent.event_manager.values()
+        if isinstance(event, PythonOutput) and event.execution_status.value == "error"
+    )
+    assert output.stdout == "before failure\n"
+    assert output.stderr == "warning\n"
+    assert "Cell In[1], line 5" in output.error
+    assert "start = text.index('missing')" in output.error
+    assert "^^^^^^^^^^^^^^^^^^^^^" in output.error
+    assert "ValueError: substring not found" in output.error
+
+
+async def test_sandboxed_codeact_converts_indirect_system_exit():
+    from nooa.events import PythonOutput
+
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _resp("", tool_calls=[_exec("exit_type = SystemExit\nraise exit_type")]),
+            _resp("", tool_calls=[_ret(result=8)]),
+        ]
+    )
+    agent = _SumAgent(llm=llm)
+
+    assert await agent.compute() == 8
+    output = next(
+        event
+        for event in agent.event_manager.values()
+        if isinstance(event, PythonOutput) and event.execution_status.value == "error"
+    )
+    assert "RuntimeError: SystemExit raised inside generated code" in output.error

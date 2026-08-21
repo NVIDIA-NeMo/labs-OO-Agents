@@ -345,6 +345,26 @@ async def test_cell_error_is_reported_not_raised():
         await ex.aclose()
 
 
+async def test_cell_error_preserves_source_location_and_caret_across_process():
+    """The sandbox transports its source-aware diagnostic, not a bare exception."""
+    from nooa.errors.formatting import format_error_for_llm
+
+    ex = _executor()
+    try:
+        code = "first = 'ok'\nsecond = 'still ok'\ntext = 'abc'\nstart = text.index('missing')"
+        res = await _run(ex, code, 75)
+        assert res.error is not None
+
+        formatted = format_error_for_llm(res.error, code, line_offset=res.wrapper_line_offset)
+
+        assert "Cell In[75], line 4" in formatted
+        assert "start = text.index('missing')" in formatted
+        assert "^^^^^^^^^^^^^^^^^^^^^" in formatted
+        assert formatted.endswith("ValueError: substring not found")
+    finally:
+        await ex.aclose()
+
+
 async def test_nested_proxy_container_protocol():
     """self.bag["k"] = v / self.bag["k"] on a non-picklable dict-like brokers to parent."""
     agent = _ToolAgent()
