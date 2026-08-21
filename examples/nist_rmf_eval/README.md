@@ -1,6 +1,6 @@
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-<!-- Contributed by CSOAI (csoai.org) — Council for the Safety of Artificial Intelligence. -->
+<!-- Contributed by Council of AI (CSOAI Ltd, UK 16939677) — https://councilof.ai -->
 
 # NIST AI RMF Evaluator
 
@@ -14,11 +14,10 @@ deterministically. An optional generation method (`explain_verdict`) lets an
 LLM narrate the verdict in plain English, but the verdict itself is produced
 by ordinary Python and never depends on a model.
 
-Contributed by [CSOAI](https://csoai.org) (Council for the Safety of Artificial
-Intelligence, UK) to the Open Secure AI Alliance's **evaluations and
-benchmarks** lane. This is the voluntary-framework companion to the
-statute-anchored [`gspc_provision_eval/`](../gspc_provision_eval/) evaluator
-(PR #75) and follows the same architecture exactly.
+Contributed by [Council of AI](https://councilof.ai) (CSOAI Ltd, UK 16939677).
+This is the voluntary-framework companion to the statute-anchored
+[`gspc_provision_eval/`](../gspc_provision_eval/) evaluator (PR #75) and
+follows the same architecture exactly.
 
 ## What it demonstrates
 

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Contributed by CSOAI (csoai.org) — Council for the Safety of Artificial Intelligence.
+# Contributed by Council of AI (CSOAI Ltd, UK 16939677) — https://councilof.ai
 """Deterministic-core tests for the NIST AI RMF evaluator.
 
 All tests run hermetically: the agent is constructed with FakeLLMClient, so

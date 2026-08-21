@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Contributed by CSOAI (csoai.org) — Council for the Safety of Artificial Intelligence.
+# Contributed by Council of AI (CSOAI Ltd, UK 16939677) — https://councilof.ai
 """NIST AI RMF evaluator — deterministic core, LLM-narrated verdicts.
 
 Companion to the GSPC provision-anchored evaluator (PR #75), applying the same
-pattern CSOAI contributes to the Open Secure AI Alliance's "evaluations and
-benchmarks" lane to a voluntary framework instead of statute:
+Council of AI pattern to a voluntary framework instead of statute:
 
     Python decides. The LLM only narrates.
 
