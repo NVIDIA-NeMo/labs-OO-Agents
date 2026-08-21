@@ -13,6 +13,9 @@ uv add "nooa-cli[datascience]"
 
 `nooa-cli` automatically pulls in matching `nemo-oo-agents` (the core framework). The `[datascience]` extra adds libraries the LLM can use in REPL-generated code.
 
+New to the interactive terminal? Read [Using the NOOA terminal UI](docs/tui-user-guide.md).
+Contributors can continue with [How the TUI works](docs/tui-rendering-architecture.md).
+
 ## Usage
 
 ```bash
@@ -37,6 +40,7 @@ nooa tui
 ```text
 /connect https://api.anthropic.com          # Anthropic (Claude)
 /connect https://api.openai.com/v1           # OpenAI
+/connect https://build.nvidia.com            # NVIDIA API catalog
 /connect http://localhost:11434              # Local Ollama
 /connect http://localhost:8000/v1            # Local vLLM
 /connect https://inference-api.nvidia.com/v1 # NVIDIA inference API
