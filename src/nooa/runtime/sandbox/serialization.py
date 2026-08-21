@@ -9,8 +9,8 @@ into a picklable :class:`ResultDTO` and reconstructs a faithful
 
 * ``defined_methods`` / ``captured_locals`` stay in the worker (empty on parent).
 * ``returned_value`` crosses only if picklable, else becomes a serialization error.
-* ``error`` is reduced to (type, message, traceback) and re-raised as a
-  lightweight surrogate so ``_format_error`` still works.
+* ``error`` is reduced to type/message plus a worker-formatted diagnostic and
+  reconstructed as a lightweight parent-side exception.
 * ``signal`` (``return_result``) is marshaled as a picklable record.
 * ``images`` are already dicts.
 """

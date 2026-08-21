@@ -11,14 +11,11 @@ Ensures errors shown to the LLM match IPython/Jupyter-style output:
 - Validation errors show clean messages without tracebacks
 """
 
-import pytest
-
 from nooa.errors import IPythonErrorFormatter, RestrictedCodeError, format_error_for_llm
 from nooa.errors.formatting import (
     _adjust_line_numbers,
     _is_user_code_frame,
     _is_validation_error,
-    _source_display_width,
     _strip_file_prefix,
 )
 
@@ -274,43 +271,23 @@ class TestFormatRuntimeError:
 
         assert "Cell In[75], line 2" in result
         assert "start = sens.index('missing')" in result
-        assert "^^^^^^^^^^^^^^^^^^^^^" in result
         assert result.endswith("ValueError: substring not found")
 
-    def test_runtime_error_caret_handles_non_ascii_prefix(self):
-        """PEP 657 byte columns are converted before positioning the caret."""
+    def test_runtime_error_preserves_non_ascii_source(self):
+        """Runtime diagnostics retain non-ASCII source across Python versions."""
         import linecache
 
         code = "prefix = 'é'; value = 'abc'.index('missing')"
         filename = "Cell In[76]"
         linecache.cache[filename] = (len(code), None, [code + "\n"], filename)
-
         try:
             exec(compile(code, filename, "exec"))
         except ValueError as error:
             result = format_error_for_llm(error, code)
 
-        lines = result.splitlines()
-        source_index = next(index for index, line in enumerate(lines) if "'abc'.index" in line)
-        source, caret = lines[source_index : source_index + 2]
-        marker_start = min(
-            position for position in (caret.find("^"), caret.find("~")) if position >= 0
-        )
-        assert source.index("'abc'.index") == marker_start
+        assert "Cell In[76], line 1" in result
+        assert code in result
         assert result.endswith("ValueError: substring not found")
-
-    @pytest.mark.parametrize(
-        ("text", "expected"),
-        [
-            ("abc", 3),
-            ("a\tb", 9),
-            ("界", 2),
-            ("e\u0301", 1),
-            ("a界e\u0301", 4),
-        ],
-    )
-    def test_source_display_width_handles_tabs_wide_and_combining_text(self, text, expected):
-        assert _source_display_width(text) == expected
 
     def test_runtime_error_with_line_offset(self):
         """Runtime error line numbers are adjusted by offset."""
@@ -922,6 +899,55 @@ class TestFormatterReviewRegressions:
         assert result.count("ValueError: second") == 1
         assert len(result) < 1_000
 
+    def test_malformed_exception_string_cannot_break_error_reporting(self):
+        class BrokenStringError(Exception):
+            def __str__(self):
+                raise RuntimeError("broken __str__")
+
+        result = format_error_for_llm(BrokenStringError())
+
+        assert "BrokenStringError" in result
+        assert "broken __str__" not in result
+
+    def test_malformed_exception_string_with_traceback_is_still_rendered(self):
+        class BrokenStringError(Exception):
+            def __str__(self):
+                raise RuntimeError("broken __str__")
+
+        try:
+            raise BrokenStringError()
+        except BrokenStringError as error:
+            result = format_error_for_llm(error)
+
+        assert "BrokenStringError" in result
+        assert "<exception str() failed>" in result
+
+    def test_exception_group_with_malformed_child_is_still_rendered(self):
+        class BrokenStringError(Exception):
+            def __str__(self):
+                raise RuntimeError("broken __str__")
+
+        result = format_error_for_llm(
+            ExceptionGroup("many", [ValueError("one"), BrokenStringError()])
+        )
+
+        assert "ExceptionGroup: many (2 sub-exceptions)" in result
+        assert "ValueError: one" in result
+        assert "BrokenStringError" in result
+
+    def test_exception_group_shared_cause_is_bounded_by_stdlib(self):
+        shared = OSError("shared cause")
+        first = ValueError("first child")
+        second = TypeError("second child")
+        first.__cause__ = shared
+        second.__cause__ = shared
+
+        result = format_error_for_llm(ExceptionGroup("many", [first, second]))
+
+        assert "ValueError: first child" in result
+        assert "TypeError: second child" in result
+        assert result.count("OSError: shared cause") == 1
+
     def test_exception_group_children_are_preserved(self):
         error = ExceptionGroup("many", [ValueError("one"), KeyError("two")])
 
@@ -955,9 +981,6 @@ class TestFormatterReviewRegressions:
 
         assert "Cell In[99003]" in result
         assert __file__ not in result
-
-    def test_source_display_width_handles_emoji_zwj_cluster(self):
-        assert _source_display_width("👩\u200d💻") == 2
 
     def test_user_exception_cannot_spoof_worker_diagnostic(self):
         error = RuntimeError("real failure")

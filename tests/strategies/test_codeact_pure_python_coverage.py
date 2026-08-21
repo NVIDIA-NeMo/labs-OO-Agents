@@ -1953,7 +1953,6 @@ class TestPurePythonSendExecutionError:
         assert event.stderr == "warning before failure"
         assert "Cell In[23001], line 2" in event.error
         assert "start = text.index('missing')" in event.error
-        assert "^^^^^^^^^^^^^^^^^^^^^" in event.error
         assert "ValueError: substring not found" in event.error
 
     @pytest.mark.asyncio

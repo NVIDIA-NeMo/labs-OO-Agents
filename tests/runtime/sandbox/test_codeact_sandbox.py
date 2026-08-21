@@ -168,7 +168,6 @@ async def test_sandboxed_codeact_reports_rich_cell_error_and_continues():
     assert output.stderr == "warning\n"
     assert "Cell In[1], line 5" in output.error
     assert "start = text.index('missing')" in output.error
-    assert "^^^^^^^^^^^^^^^^^^^^^" in output.error
     assert "ValueError: substring not found" in output.error
 
 

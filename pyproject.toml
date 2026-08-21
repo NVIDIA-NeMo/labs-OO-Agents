@@ -31,8 +31,6 @@ dependencies = [
     # from mcp-nemo-oo-agents (now internal)
     "httpx>=0.27.0",
     "openinference-instrumentation-litellm>=0.1.30",
-    # Unicode display-column measurement for source-aware traceback carets.
-    "wcwidth>=0.2.13",
 ]
 
 [project.urls]

@@ -18,11 +18,8 @@ Usage:
     result = formatter.format(error, code, line_offset=2)
 """
 
-import linecache
 import re
 import traceback
-
-from wcwidth import wcswidth
 
 from nooa.agentdoc import TruncatingStringIO
 from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
@@ -268,84 +265,69 @@ def _maybe_heredoc_hint(error: SyntaxError) -> str | None:
     return None
 
 
-def _byte_offset_to_character_offset(line: str, offset: int) -> int:
-    """Translate traceback UTF-8 byte columns to Python string columns."""
-    return len(line.encode("utf-8")[:offset].decode("utf-8", errors="ignore"))
+def _filter_traceback_tree(
+    diagnostic: traceback.TracebackException,
+    seen: set[int] | None = None,
+) -> None:
+    """Apply the user-frame policy to every traceback in a stdlib tree."""
+    if seen is None:
+        seen = set()
+    if id(diagnostic) in seen:
+        return
+    seen.add(id(diagnostic))
+
+    eligible = [frame for frame in diagnostic.stack if _is_user_code_frame(frame.filename)]
+    cell_frames = [frame for frame in eligible if _CELL_PATTERN.match(frame.filename)]
+    # Once a generated-cell frame exists, unrelated callers are noise.
+    diagnostic.stack = traceback.StackSummary.from_list(cell_frames or eligible)
+
+    if diagnostic.__cause__ is not None:
+        _filter_traceback_tree(diagnostic.__cause__, seen)
+    if diagnostic.__context__ is not None:
+        _filter_traceback_tree(diagnostic.__context__, seen)
+    if diagnostic.exceptions is not None:
+        for child in diagnostic.exceptions:
+            _filter_traceback_tree(child, seen)
 
 
-def _source_display_width(text: str, *, start_column: int = 0) -> int:
-    """Measure monospace display columns for a traceback source line.
-
-    Traceback column offsets are UTF-8 byte offsets, while a caret is aligned
-    against rendered source text. Tabs, wide Unicode, and combining marks make
-    code-point counts insufficient. This is diagnostic formatting only; it does
-    not inspect or depend on terminal dimensions.
-    """
-    column = start_column
-    segments = text.split("\t")
-    for index, segment in enumerate(segments):
-        column += max(0, wcswidth(segment))
-        if index < len(segments) - 1:
-            column += 8 - column % 8
-    return column - start_column
+def _concise_exception(error: BaseException) -> str:
+    """Return a safe type-and-message fallback for traceback-less errors."""
+    name = type(error).__name__
+    try:
+        message = str(error)
+    except Exception:
+        message = name
+    return f"{name}: {message}" if message else name
 
 
-def _runtime_caret(frame: traceback.FrameSummary) -> str | None:
-    """Return an expression-level caret for a single-line runtime frame.
-
-    CPython intentionally suppresses PEP 657 carets for common assignment-call
-    shapes (``value = text.index(...)``), which are exactly the failures where
-    a pointer is most useful in generated cells.  The traceback still carries
-    byte-precise columns; render those columns ourselves after accounting for
-    the indentation removed by ``FrameSummary.line``.
-    """
+def _format_runtime_error(error: BaseException) -> str:
+    """Render a filtered runtime diagnostic with Python's traceback formatter."""
     if (
-        not frame.line
-        or frame.lineno is None
-        or frame.colno is None
-        or frame.end_colno is None
-        or frame.end_lineno not in (None, frame.lineno)
+        error.__traceback__ is None
+        and error.__cause__ is None
+        and error.__context__ is None
+        and not isinstance(error, BaseExceptionGroup)
     ):
-        return None
-    original = linecache.getline(frame.filename, frame.lineno).rstrip("\n")
-    if not original:
-        return None
-    start_char = _byte_offset_to_character_offset(original, frame.colno)
-    end_char = _byte_offset_to_character_offset(original, frame.end_colno)
-    removed_indent = len(original) - len(original.lstrip())
-    visible = original[removed_indent:]
-    start_char = max(removed_indent, start_char)
-    end_char = max(start_char + 1, end_char)
-    start = _source_display_width(original[removed_indent:start_char])
-    end = start + _source_display_width(original[start_char:end_char], start_column=start)
-    visible_width = _source_display_width(visible)
-    start = min(start, visible_width)
-    end = min(max(end, start + 1), max(visible_width, start + 1))
-    return " " * start + "^" * max(1, end - start)
+        return _concise_exception(error)
+    diagnostic = traceback.TracebackException.from_exception(
+        error,
+        compact=True,
+        capture_locals=False,
+    )
+    _filter_traceback_tree(diagnostic)
+    return "".join(diagnostic.format(chain=True))
 
 
-def _format_runtime_frame(frame: traceback.FrameSummary) -> str:
-    """Format one runtime frame, adding a caret when stdlib omits it."""
-    formatted = "".join(traceback.format_list([frame]))
-    caret = _runtime_caret(frame)
-    if caret is None:
-        return formatted
-    lines = formatted.rstrip("\n").splitlines()
-    # Python 3.11+ may already have emitted a PEP 657 marker.
-    if lines and set(lines[-1].strip()) <= {"^", "~"}:
-        return formatted
-    return formatted + f"    {caret}\n"
-
-
-def _adjust_line_numbers(text: str, offset: int) -> str:
+def _adjust_line_numbers(text: str, offset: int, *, cell_only: bool = False) -> str:
     """Adjust traceback-header line numbers without rewriting source/messages."""
     if offset <= 0:
         return text
 
     # Headers are the only lines that should change. In particular, source such
     # as ``# line 99`` and messages such as ``failed at line 12`` are verbatim.
+    prefix = r" *Cell In\[\d+\], " if cell_only else r'(?: *File "[^"]+", | *Cell In\[\d+\], |)'
     header = re.compile(
-        r'(?m)^(?P<prefix>(?: *File "[^"]+", | *Cell In\[\d+\], |)line )'
+        rf"(?m)^(?P<prefix>{prefix}line )"
         r"(?P<number>\d+)(?P<suffix>(?:, in .*)?)$"
     )
 
@@ -364,7 +346,7 @@ class IPythonErrorFormatter:
     - Adjusts line numbers to account for wrapper code offset
     - Replaces internal wrapper names with <module>
     - Filters out framework tracebacks, showing only user code
-    - Shows syntax errors with caret pointing to error location
+    - Preserves Python's native syntax/runtime source markers
     - Source lines shown automatically (via linecache registration in actor.py)
     """
 
@@ -424,66 +406,10 @@ class IPythonErrorFormatter:
 
         return formatted
 
-    def _format_runtime_error(
-        self,
-        error: BaseException,
-        line_offset: int,
-        seen: set[int] | None = None,
-    ) -> str:
-        """Format runtime errors while preserving chains and breaking cycles."""
-        if seen is None:
-            seen = set()
-        seen.add(id(error))
-        if error.__cause__ is not None and id(error.__cause__) not in seen:
-            cause = self._format_runtime_error(error.__cause__, line_offset, seen)
-            current = self._format_single_runtime_error(error, line_offset, seen)
-            return (
-                f"{cause}\n\nThe above exception was the direct cause of the "
-                f"following exception:\n\n{current}"
-            )
-        if (
-            error.__context__ is not None
-            and not error.__suppress_context__
-            and id(error.__context__) not in seen
-        ):
-            context = self._format_runtime_error(error.__context__, line_offset, seen)
-            current = self._format_single_runtime_error(error, line_offset, seen)
-            return (
-                f"{context}\n\nDuring handling of the above exception, another "
-                f"exception occurred:\n\n{current}"
-            )
-        return self._format_single_runtime_error(error, line_offset, seen)
-
-    def _format_single_runtime_error(
-        self, error: BaseException, line_offset: int, seen: set[int]
-    ) -> str:
-        if error.__traceback__ is None and not isinstance(error, BaseExceptionGroup):
-            message = str(error)
-            return f"{type(error).__name__}: {message}" if message else type(error).__name__
-
-        extracted = traceback.extract_tb(error.__traceback__) if error.__traceback__ else []
-        eligible = [frame for frame in extracted if _is_user_code_frame(frame.filename)]
-        cell_frames = [frame for frame in eligible if _CELL_PATTERN.match(frame.filename)]
-        # Once a generated-cell frame exists, unrelated callers are noise.
-        user_frames = cell_frames or eligible
-
-        formatted_frames = []
-        for frame in user_frames:
-            formatted = _format_runtime_frame(frame)
-            frame_offset = line_offset if _CELL_PATTERN.match(frame.filename) else 0
-            formatted_frames.append(_adjust_line_numbers(formatted, frame_offset))
-
-        exception_text = "".join(traceback.format_exception_only(type(error), error)).rstrip()
-        if isinstance(error, BaseExceptionGroup):
-            children = []
-            for index, child in enumerate(error.exceptions, start=1):
-                rendered = self._format_runtime_error(child, line_offset, seen)
-                indented = "\n".join(f"    {line}" for line in rendered.splitlines())
-                children.append(f"  [{index}]\n{indented}")
-            exception_text = f"{exception_text}\n" + "\n".join(children)
-
-        formatted = "".join(formatted_frames) + exception_text
-        formatted = _strip_file_prefix(formatted)
+    def _format_runtime_error(self, error: BaseException, line_offset: int) -> str:
+        """Format runtime errors using the stdlib traceback implementation."""
+        formatted = _strip_file_prefix(_format_runtime_error(error))
+        formatted = _adjust_line_numbers(formatted, line_offset, cell_only=True)
         return _replace_wrapper_names(formatted).rstrip()
 
 
@@ -501,7 +427,7 @@ def format_error_for_llm(
     """Format an error for LLM feedback.
 
     Uses IPython-style formatting:
-    - Syntax errors show caret pointing to error location
+    - Syntax errors retain Python's source marker when available
     - Validation errors show clean messages without tracebacks
     - Runtime errors filter to user code frames only
     - Line numbers are adjusted to account for wrapper code
@@ -518,9 +444,13 @@ def format_error_for_llm(
     Returns:
         Formatted error string suitable for LLM consumption.
     """
-    formatted = formatted_error.rstrip() or _default_formatter.format(
-        error, code, line_offset=line_offset
-    )
+    if formatted_error:
+        formatted = formatted_error.rstrip()
+    else:
+        try:
+            formatted = _default_formatter.format(error, code, line_offset=line_offset)
+        except Exception:
+            formatted = _concise_exception(error)
     stream = TruncatingStringIO(limit=DEFAULT_TRUNCATION_CONFIG.capture.max_error)
     stream.write(formatted)
     return stream.getvalue()
