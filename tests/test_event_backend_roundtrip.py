@@ -393,6 +393,9 @@ def test_python_output_rich_diagnostic_roundtrip_preserves_every_channel(backend
     retrieved = backend.get("diagnostic")
 
     assert isinstance(retrieved, PythonOutput)
+    assert retrieved.tool_call_id == "tc-diagnostic"
+    assert retrieved.execution_count == 75
+    assert retrieved.execution_status == ResultStatus.ERROR
     assert retrieved.stdout == "partial result\n"
     assert retrieved.stderr == "warning before failure\n"
     assert retrieved.error == diagnostic

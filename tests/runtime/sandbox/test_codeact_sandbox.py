@@ -130,9 +130,20 @@ async def test_sandbox_path_still_enforces_restrictions():
     )
     agent = _SumAgent(llm=llm)
     result = await agent.compute()
-    # The blocked-import cell errors and the agent recovers to return_result(1);
-    # the run completing at all proves the validation error was surfaced, not raised.
     assert result == 1
+
+    from nooa.events import PythonOutput
+
+    output = next(
+        event
+        for event in agent.event_manager.values()
+        if isinstance(event, PythonOutput) and event.execution_status.value == "error"
+    )
+    assert output.stdout == ""
+    assert output.stderr == ""
+    assert "subprocess" in output.error
+    assert "not allowed" in output.error.lower() or "restricted" in output.error.lower()
+    assert "Traceback" not in output.error
 
 
 async def test_sandboxed_codeact_reports_rich_cell_error_and_continues():
@@ -189,3 +200,47 @@ async def test_sandboxed_codeact_converts_indirect_system_exit():
         if isinstance(event, PythonOutput) and event.execution_status.value == "error"
     )
     assert "RuntimeError: SystemExit raised inside generated code" in output.error
+
+
+async def test_custom_formatter_receives_worker_rendered_diagnostic():
+    """Custom formatters run parent-side and can consume the worker traceback."""
+    from nooa.events import PythonOutput
+
+    class TransportFormatter:
+        def format(self, error, code=None, *, line_offset=0, formatted_error=""):
+            assert isinstance(error, ValueError)
+            assert line_offset > 0
+            return "CUSTOM\n" + formatted_error
+
+    class CustomAgent(Agent, llm=FakeLLMClient()):
+        @strategy(
+            CodeActStrategy(
+                config=CodeActConfig(
+                    execution_backend="sandbox", cell_timeout=15.0, sandbox=_SANDBOX
+                ),
+                error_formatter=TransportFormatter(),
+            )
+        )
+        async def compute(self) -> int:
+            """Recover after a failed sandbox cell."""
+            ...
+
+    code = "text = 'abc'\ntext.index('missing')"
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _resp("", tool_calls=[_exec(code, call_id="custom-failure")]),
+            _resp("", tool_calls=[_ret(result=9)]),
+        ]
+    )
+    agent = CustomAgent(llm=llm)
+
+    assert await agent.compute() == 9
+    output = next(
+        event
+        for event in agent.event_manager.values()
+        if isinstance(event, PythonOutput) and event.tool_call_id == "custom-failure"
+    )
+    assert output.error.startswith("CUSTOM\nTraceback (most recent call last):")
+    assert "Cell In[1], line 2" in output.error
+    assert "text.index('missing')" in output.error
+    assert output.error.endswith("ValueError: substring not found")

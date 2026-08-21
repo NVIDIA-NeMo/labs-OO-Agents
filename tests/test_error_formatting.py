@@ -11,6 +11,8 @@ Ensures errors shown to the LLM match IPython/Jupyter-style output:
 - Validation errors show clean messages without tracebacks
 """
 
+import pytest
+
 from nooa.errors import IPythonErrorFormatter, RestrictedCodeError, format_error_for_llm
 from nooa.errors.formatting import (
     _adjust_line_numbers,
@@ -922,6 +924,16 @@ class TestFormatterReviewRegressions:
         assert "BrokenStringError" in result
         assert "<exception str() failed>" in result
 
+    @pytest.mark.parametrize("raised", [KeyboardInterrupt("interrupt"), SystemExit("exit")])
+    def test_exception_string_raising_base_exception_is_contained(self, raised):
+        class BrokenStringError(Exception):
+            def __str__(self):
+                raise raised
+
+        result = format_error_for_llm(BrokenStringError())
+
+        assert result == "BrokenStringError: BrokenStringError"
+
     def test_exception_group_with_malformed_child_is_still_rendered(self):
         class BrokenStringError(Exception):
             def __str__(self):
@@ -981,6 +993,32 @@ class TestFormatterReviewRegressions:
 
         assert "Cell In[99003]" in result
         assert __file__ not in result
+
+    def test_cell_frame_keeps_downstream_user_helper_frame(self):
+        import linecache
+
+        code = "helper()"
+        filename = "Cell In[99004]"
+        previous = linecache.cache.get(filename)
+        linecache.cache[filename] = (len(code), None, [code + "\n"], filename)
+
+        def helper():
+            raise ValueError("helper failure")
+
+        try:
+            try:
+                exec(compile(code, filename, "exec"), {"helper": helper})
+            except ValueError as error:
+                result = format_error_for_llm(error, code)
+        finally:
+            if previous is None:
+                linecache.cache.pop(filename, None)
+            else:
+                linecache.cache[filename] = previous
+
+        assert "Cell In[99004]" in result
+        assert "in helper" in result
+        assert "raise ValueError" in result
 
     def test_user_exception_cannot_spoof_worker_diagnostic(self):
         error = RuntimeError("real failure")

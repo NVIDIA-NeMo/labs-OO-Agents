@@ -662,6 +662,50 @@ class TestCodeActLiteStrategyExecution:
         assert result == 6
 
     @pytest.mark.asyncio
+    async def test_execution_error_is_rendered_and_next_turn_recovers(self):
+        """A real failing cell emits separate streams and source-aware error."""
+
+        class TestAgent(Agent, llm=_TEST_LLM):
+            @strategy(CodeActLiteStrategy(config=CodeActConfig(max_retries=3)))
+            async def compute(self) -> int:
+                """Compute a value after inspecting a failed attempt."""
+                ...
+
+        fake_llm = FakeLLMClient(
+            scripted_responses=[
+                _resp(
+                    "",
+                    tool_calls=[
+                        _tool_call(
+                            "import sys\n"
+                            "print('before failure')\n"
+                            "print('warning', file=sys.stderr)\n"
+                            "text = 'abc'\n"
+                            "text.index('missing')",
+                            call_id="failed",
+                        )
+                    ],
+                ),
+                _resp("", tool_calls=[_return_result(result=17)]),
+            ]
+        )
+
+        agent = TestAgent(llm=fake_llm)
+        assert await agent.compute() == 17
+
+        output = next(
+            event
+            for event in agent.event_manager.values()
+            if isinstance(event, PythonOutput) and event.tool_call_id == "failed"
+        )
+        assert output.execution_status is ResultStatus.ERROR
+        assert output.stdout == "before failure\n"
+        assert output.stderr == "warning\n"
+        assert "Cell In[1], line 5" in output.error
+        assert "text.index('missing')" in output.error
+        assert output.error.endswith("ValueError: substring not found")
+
+    @pytest.mark.asyncio
     async def test_returns_string(self):
         """CodeActLiteStrategy handles string return type."""
 

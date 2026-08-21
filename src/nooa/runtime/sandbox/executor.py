@@ -19,6 +19,7 @@ import os
 import signal
 import time
 from multiprocessing.connection import Connection
+from multiprocessing.process import BaseProcess
 from typing import Any
 
 from nooa.events import ExecutionResult
@@ -35,6 +36,21 @@ from nooa.runtime.sandbox.serialization import ResultDTO, dto_to_result, is_pick
 from nooa.runtime.sandbox.worker import worker_main
 
 logger = logging.getLogger(__name__)
+
+# Broker responses cross a pickle pipe. Keep all parent-generated diagnostics
+# primitive and bounded before sending them to an untrusted worker.
+_MAX_BROKER_DIAGNOSTIC = 10_000
+
+
+def _bounded_text(value: object, fallback: str) -> str:
+    try:
+        text = str(value)
+    except BaseException:
+        text = fallback
+    if len(text) <= _MAX_BROKER_DIAGNOSTIC:
+        return text
+    return text[: _MAX_BROKER_DIAGNOSTIC - 16] + "...<truncated>"
+
 
 _CAPS_CACHE: Capabilities | None = None
 
@@ -101,7 +117,7 @@ class SandboxedExecutor:
             )
 
         self._ctx = mp.get_context(config.start_method)
-        self._proc: mp.process.BaseProcess | None = None
+        self._proc: BaseProcess | None = None
         self._conn: Connection | None = None
         self._lock = asyncio.Lock()
         self._req_id = 0
@@ -218,7 +234,12 @@ class SandboxedExecutor:
 
     # --- running a cell ----------------------------------------------------
     async def run_cell(self, code: str, *, execution_count: int = 1) -> ExecutionResult:
-        """Execute one cell in the worker and return an ``ExecutionResult``."""
+        """Execute one cell in the worker and return an ``ExecutionResult``.
+
+        Output is buffered in the worker and transferred with the final result.
+        If the process is hard-killed (timeout, resource limit, or crash), output
+        written by that cell before death cannot be recovered.
+        """
         if self._closed:
             raise WorkerDiedError("sandbox executor is closed")
         async with self._lock:
@@ -345,6 +366,7 @@ class SandboxedExecutor:
         path = msg.get("path") or []
         display = ".".join(path)
         kind = msg.get("kind")
+        target: Any = None
         try:
             if kind == "setattr":
                 # self.<path> = value on the parent's live agent.
@@ -397,13 +419,31 @@ class SandboxedExecutor:
             return {
                 "ok": False,
                 "error_type": "ExecutionSignal",
-                "error": str(sig),
+                "error": _bounded_text(sig, "ExecutionSignal"),
                 "signal_result": payload if is_picklable(payload) else None,
             }
         except CellSerializationError as exc:
-            return {"ok": False, "error_type": "CellSerializationError", "error": str(exc)}
+            return {
+                "ok": False,
+                "error_type": "CellSerializationError",
+                "error": _bounded_text(exc, "CellSerializationError"),
+            }
         except Exception as exc:  # noqa: BLE001 - surface tool errors to the cell
-            return {"ok": False, "error_type": type(exc).__name__, "error": str(exc)}
+            # The parent still has the resolved target and can safely derive its
+            # agentdoc. The child cannot: it only has a proxy and a traceback-local
+            # surrogate exception. Transport a bounded string hint, never the
+            # callable or traceback itself.
+            from nooa.errors.formatting import _bad_call_agentdoc
+
+            call_hint = _bad_call_agentdoc(exc, target=target)
+            response = {
+                "ok": False,
+                "error_type": _bounded_text(type(exc).__name__, "Exception"),
+                "error": _bounded_text(exc, type(exc).__name__),
+            }
+            if call_hint:
+                response["call_hint"] = _bounded_text(call_hint, "")
+            return response
 
     # --- error synthesis ---------------------------------------------------
     def _classify_worker_death(self, exc: WorkerDiedError) -> Exception:

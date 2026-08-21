@@ -323,8 +323,12 @@ class CodeActStrategy(CompositeStrategy):
         Args:
             config: CodeActConfig with iteration limits, timeouts, and sampling params.
                     Defaults to CodeActConfig() with standard defaults.
-            error_formatter: Custom error formatter for LLM feedback. Defaults to IPythonErrorFormatter.
-                Any object with a `format(error, code) -> str` method works.
+            error_formatter: Custom error formatter for LLM feedback. The preferred
+                signature is ``format(error, code=None, *, line_offset=0,
+                formatted_error="")``. Older ``format(error, code, *,
+                line_offset=0)`` and ``format(error, code)`` implementations remain
+                supported, but only the preferred form receives a traceback rendered
+                inside a sandbox worker.
 
         Note:
             Prefill is always enabled and uses InspectInputsPrefill internally.
@@ -1471,7 +1475,8 @@ Standard Python builtins and agent instance (`self`) are available."""
                     tool_call_id=tool_call.id,
                     execution_count=session.iteration,
                     stdout="",
-                    stderr="Execution error: empty code provided.",
+                    stderr="",
+                    error="Execution error: empty code provided.",
                     value=None,
                     explicit_return=False,
                     execution_status=ResultStatus.ERROR,
@@ -2591,7 +2596,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 name="execute_python",
                 arguments={"code": code},
                 result=None,  # Will be updated after execution
-                metadata={"prefill": True, "prefill_type": "inspect_inputs"},
+                metadata={"prefill": True, "prefill_type": prefill_type},
             )
         )
 
@@ -2652,7 +2657,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 explicit_return=result.explicit_return if result.has_return else False,
                 execution_status=final_status,
                 images=result.images,
-                metadata={"prefill": True, "prefill_type": "inspect_inputs"},
+                metadata={"prefill": True, "prefill_type": prefill_type},
             )
         )
 
@@ -2772,12 +2777,33 @@ Standard Python builtins and agent instance (`self`) are available."""
     ) -> str:
         """Format an error for display using the configured formatter."""
         if self.error_formatter is not None:
-            # Custom formatters may or may not support line_offset
+            # Select a compatible call shape without invoking the formatter. A
+            # TypeError raised *inside* a custom formatter is its real failure and
+            # must not be mistaken for an older method signature.
+            formatter = self.error_formatter.format
             try:
-                return self.error_formatter.format(error, code, line_offset=line_offset)
-            except TypeError:
-                # Formatter doesn't accept line_offset
-                return self.error_formatter.format(error, code)
+                signature = inspect.signature(formatter)
+            except (TypeError, ValueError):
+                # Some extension/builtin callables expose no signature metadata.
+                # The original formatter contract was exactly two positional
+                # arguments, so invoke that shape once rather than speculatively
+                # executing and retrying after a body-level TypeError.
+                return formatter(error, code)
+            candidates = (
+                ((error, code), {"line_offset": line_offset, "formatted_error": formatted_error}),
+                ((error, code), {"line_offset": line_offset}),
+                ((error, code), {}),
+            )
+            for args, kwargs in candidates:
+                try:
+                    signature.bind(*args, **kwargs)
+                except TypeError:
+                    continue
+                return formatter(*args, **kwargs)
+            raise TypeError(
+                "Custom error formatter must accept format(error, code), optionally "
+                "with keyword-only line_offset and formatted_error"
+            )
 
         from nooa.errors.formatting import format_error_for_llm
 

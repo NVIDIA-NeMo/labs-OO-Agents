@@ -22,14 +22,31 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from nooa.agentdoc import TruncatingStringIO
+from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
 from nooa.runtime.sandbox.errors import CellSerializationError
+
+# ``TruncatingStringIO`` adds a human-readable envelope around its retained
+# head/tail windows. Reserve a small fixed allowance for that envelope while
+# still enforcing a hard upper bound on every error string sent over the pipe.
+_MAX_ERROR_TRANSPORT = DEFAULT_TRUNCATION_CONFIG.capture.max_error + 1_024
+
+
+def _bounded_error_text(value: str) -> str:
+    """Bound text before it is copied into an IPC DTO."""
+    if len(value) <= _MAX_ERROR_TRANSPORT:
+        return value
+    stream = TruncatingStringIO(limit=DEFAULT_TRUNCATION_CONFIG.capture.max_error)
+    stream.write(value)
+    rendered = stream.getvalue()
+    return rendered[:_MAX_ERROR_TRANSPORT]
 
 
 def is_picklable(value: Any) -> bool:
     try:
         pickle.dumps(value)
         return True
-    except Exception:
+    except BaseException:
         return False
 
 
@@ -108,7 +125,7 @@ def result_to_dto(
         error_type = type(err).__name__
         try:
             message = str(err) or error_type
-        except Exception:
+        except BaseException:
             message = error_type
 
         if error_formatter is None:
@@ -121,13 +138,13 @@ def result_to_dto(
                 err,
                 line_offset=getattr(result, "wrapper_line_offset", 0),
             )
-        except Exception:
+        except BaseException:
             formatted_error = f"{error_type}: {message}"
 
         dto.error = ErrorDTO(
             type_name=error_type,
-            message=message,
-            formatted_error=formatted_error,
+            message=_bounded_error_text(message),
+            formatted_error=_bounded_error_text(formatted_error),
         )
         return dto
 

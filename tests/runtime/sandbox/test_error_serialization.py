@@ -147,6 +147,29 @@ def test_broken_exception_string_still_crosses_worker_boundary() -> None:
     assert dto.error.formatted_error == "BrokenStringError: BrokenStringError"
 
 
+def test_error_dto_text_is_bounded_before_ipc() -> None:
+    dto = result_to_dto(_result_with_error(RuntimeError("x" * 100_000)))
+
+    assert dto.error is not None
+    assert len(dto.error.message) <= 11_024
+    assert len(dto.error.formatted_error) <= 11_024
+    assert "<truncated-output>" in dto.error.message
+    assert dto.error.message.endswith("x" * 5_000 + "\n</truncated-output>")
+
+
+@pytest.mark.parametrize("raised", [KeyboardInterrupt("interrupt"), SystemExit("exit")])
+def test_base_exception_from_exception_string_does_not_escape_serialization(raised) -> None:
+    class BrokenStringError(Exception):
+        def __str__(self) -> str:
+            raise raised
+
+    dto = result_to_dto(_result_with_error(BrokenStringError()))
+
+    assert dto.error is not None
+    assert dto.error.message == "BrokenStringError"
+    assert dto.error.formatted_error == "BrokenStringError: BrokenStringError"
+
+
 @pytest.mark.parametrize(
     ("returned_value", "expected"),
     [
@@ -177,6 +200,61 @@ def test_unpicklable_return_result_payload_becomes_serialization_error() -> None
     assert "return_result(...)" in str(result.error)
     assert "JSON/pickle-safe value" in str(result.error)
     assert result.signal is None
+
+
+@pytest.mark.asyncio
+async def test_broker_error_with_hostile_string_is_safe_and_bounded() -> None:
+    class HostileError(Exception):
+        def __str__(self) -> str:
+            raise KeyboardInterrupt("hostile string")
+
+    class Target:
+        def explode(self) -> None:
+            raise HostileError()
+
+    executor = object.__new__(SandboxedExecutor)
+    executor._agent = Target()
+
+    response = await executor._dispatch_tool_call(
+        {"kind": "call", "path": ["explode"], "args": (), "kwargs": {}}
+    )
+
+    assert response == {"ok": False, "error_type": "HostileError", "error": "HostileError"}
+
+
+@pytest.mark.asyncio
+async def test_broker_error_text_is_bounded_before_ipc() -> None:
+    class Target:
+        def explode(self) -> None:
+            raise RuntimeError("x" * 100_000)
+
+    executor = object.__new__(SandboxedExecutor)
+    executor._agent = Target()
+
+    response = await executor._dispatch_tool_call(
+        {"kind": "call", "path": ["explode"], "args": (), "kwargs": {}}
+    )
+
+    assert response["ok"] is False
+    assert len(response["error"]) <= 10_000
+    assert response["error"].endswith("...<truncated>")
+
+
+def test_broker_error_with_multi_argument_builtin_uses_surrogate() -> None:
+    from nooa.runtime.sandbox.worker import ParentToolError, _raise_broker_error
+
+    with pytest.raises(ParentToolError) as caught:
+        _raise_broker_error(
+            {
+                "error_type": "UnicodeDecodeError",
+                "error": "codec failed",
+                "call_hint": "decode(data: bytes)",
+            }
+        )
+
+    assert str(caught.value) == "codec failed"
+    assert caught.value.original_type == "UnicodeDecodeError"  # type: ignore[attr-defined]
+    assert caught.value._nooa_call_hint == "decode(data: bytes)"  # type: ignore[attr-defined]
 
 
 def test_sandbox_state_error_reconstructs_concrete_type_without_duplicate_prefix() -> None:

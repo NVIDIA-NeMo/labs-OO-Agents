@@ -135,7 +135,18 @@ def _raise_broker_error(response: dict[str, Any]) -> None:
     exc_cls = getattr(_bi, err_type, ParentToolError)
     if not isinstance(exc_cls, type) or not issubclass(exc_cls, BaseException):
         exc_cls = ParentToolError
-    raise exc_cls(message)
+    try:
+        error = exc_cls(message)
+    except Exception:
+        # Some builtin exceptions (for example UnicodeDecodeError) require a
+        # structured constructor. Preserve the remote type name rather than
+        # replacing the actual failure with that constructor's TypeError.
+        error = ParentToolError(message)
+        error.original_type = err_type  # type: ignore[attr-defined]
+    call_hint = response.get("call_hint")
+    if isinstance(call_hint, str) and call_hint:
+        error._nooa_call_hint = call_hint  # type: ignore[attr-defined]
+    raise error
 
 
 def _is_async_callable(obj: Any) -> bool:

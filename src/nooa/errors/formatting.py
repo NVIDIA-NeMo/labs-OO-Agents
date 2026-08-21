@@ -160,24 +160,36 @@ def _resolve_called_callable(qual: str, error: Exception) -> object | None:
     return candidates[0] if len(candidates) == 1 else None
 
 
-def _bad_call_agentdoc(error: Exception) -> str | None:
-    """If ``error`` is a call-shape TypeError to a resolvable callable, return
-    its concise agentdoc to append to the feedback. Best-effort; ``None`` on any
-    miss so the caller falls back to the raw error (no regression)."""
+def _bad_call_agentdoc(error: BaseException, target: object | None = None) -> str | None:
+    """Return concise agentdoc for a recognized bad call, when safely resolvable.
+
+    ``target`` lets a broker that already resolved the called object preserve the
+    hint across a process boundary. Without it, the target is resolved from the
+    exception traceback. This is best-effort and never lets hostile ``__str__``
+    or documentation hooks replace the original error.
+    """
     if not isinstance(error, TypeError):
         return None
     try:
-        m = _BAD_CALL_RE.match(str(error))
-        if not m:
+        match = _BAD_CALL_RE.match(str(error))
+        if not match:
             return None
-        target = _resolve_called_callable(m.group("qual"), error)
-        if target is None:
+        resolved = (
+            target if target is not None else _resolve_called_callable(match.group("qual"), error)
+        )
+        if resolved is None:
+            return None
+        resolved_qualname = _callable_qualname(resolved)
+        if match.group("qual") not in {
+            resolved_qualname,
+            f"{resolved_qualname}.__init__",
+        }:
             return None
         from nooa.agentdoc import doc
 
-        rendered = doc(target, concise=True)
+        rendered = doc(resolved, concise=True)
         return str(rendered).strip() or None
-    except Exception:
+    except BaseException:
         return None
 
 
@@ -277,9 +289,15 @@ def _filter_traceback_tree(
     seen.add(id(diagnostic))
 
     eligible = [frame for frame in diagnostic.stack if _is_user_code_frame(frame.filename)]
-    cell_frames = [frame for frame in eligible if _CELL_PATTERN.match(frame.filename)]
-    # Once a generated-cell frame exists, unrelated callers are noise.
-    diagnostic.stack = traceback.StackSummary.from_list(cell_frames or eligible)
+    # Once generated-cell execution begins, omit outer callers but retain later
+    # user helpers: those downstream frames often contain the actual failing line.
+    first_cell = next(
+        (index for index, frame in enumerate(eligible) if _CELL_PATTERN.match(frame.filename)),
+        None,
+    )
+    if first_cell is not None:
+        eligible = eligible[first_cell:]
+    diagnostic.stack = traceback.StackSummary.from_list(eligible)
 
     if diagnostic.__cause__ is not None:
         _filter_traceback_tree(diagnostic.__cause__, seen)
@@ -295,7 +313,7 @@ def _concise_exception(error: BaseException) -> str:
     name = type(error).__name__
     try:
         message = str(error)
-    except Exception:
+    except BaseException:
         message = name
     return f"{name}: {message}" if message else name
 
@@ -371,7 +389,10 @@ class IPythonErrorFormatter:
         # Issue #245: append the called callable's concise signature on a
         # call-shape TypeError (see _bad_call_agentdoc). Best-effort — unchanged
         # output on any miss.
-        agentdoc = _bad_call_agentdoc(error)
+        transported_hint = getattr(error, "_nooa_call_hint", None)
+        agentdoc = (
+            transported_hint if isinstance(transported_hint, str) else _bad_call_agentdoc(error)
+        )
         if agentdoc:
             formatted = f"{formatted}\n\nThe callable you called has this signature:\n{agentdoc}"
         return formatted
@@ -449,7 +470,7 @@ def format_error_for_llm(
     else:
         try:
             formatted = _default_formatter.format(error, code, line_offset=line_offset)
-        except Exception:
+        except BaseException:
             formatted = _concise_exception(error)
     stream = TruncatingStringIO(limit=DEFAULT_TRUNCATION_CONFIG.capture.max_error)
     stream.write(formatted)

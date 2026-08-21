@@ -11,6 +11,7 @@ the serialization boundary, and each guardrail enforced *inside a real cell*
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 from typing import Any
 
@@ -165,6 +166,27 @@ async def test_sync_tool_brokering_hits_live_agent():
     try:
         res = await _run(ex, "self.add_one(41)")
         assert res.returned_value == 42
+    finally:
+        await ex.aclose()
+
+
+async def test_brokered_bad_call_preserves_parent_signature_hint():
+    """A proxy TypeError keeps source context plus the real parent callable API."""
+    from nooa.errors.formatting import format_error_for_llm
+
+    ex = _executor()
+    try:
+        code = "self.add_one(value=41)"
+        res = await _run(ex, code, 88)
+        assert isinstance(res.error, TypeError)
+
+        diagnostic = format_error_for_llm(res.error, code, formatted_error=res.formatted_error)
+        assert "Cell In[88], line 1" in diagnostic
+        assert code in diagnostic
+        assert "unexpected keyword argument 'value'" in diagnostic
+        assert "The callable you called has this signature:" in diagnostic
+        assert "_ToolAgent.add_one" in diagnostic
+        assert "n: int" in diagnostic
     finally:
         await ex.aclose()
 
@@ -345,6 +367,63 @@ async def test_cell_error_is_reported_not_raised():
         await ex.aclose()
 
 
+async def test_broken_exception_string_crosses_real_worker_and_worker_recovers():
+    ex = _executor()
+    try:
+        res = await _run(
+            ex,
+            "class BrokenStringError(Exception):\n"
+            "    def __str__(self):\n"
+            "        raise KeyboardInterrupt('hostile')\n"
+            "raise BrokenStringError()",
+            73,
+        )
+        assert not res.success
+        assert res.formatted_error.endswith("BrokenStringError: <exception str() failed>")
+
+        recovered = await _run(ex, "40 + 2", 74)
+        assert recovered.success
+        assert recovered.returned_value == 42
+    finally:
+        await ex.aclose()
+
+
+async def test_explicit_exception_chain_crosses_real_worker():
+    ex = _executor()
+    try:
+        code = (
+            "try:\n"
+            "    raise KeyError('inner')\n"
+            "except KeyError as exc:\n"
+            "    raise RuntimeError('outer') from exc"
+        )
+        res = await _run(ex, code, 74)
+
+        assert not res.success
+        assert "KeyError: 'inner'" in res.formatted_error
+        assert "The above exception was the direct cause" in res.formatted_error
+        assert res.formatted_error.endswith("RuntimeError: outer")
+    finally:
+        await ex.aclose()
+
+
+async def test_exception_group_crosses_real_worker():
+    ex = _executor()
+    try:
+        res = await _run(
+            ex,
+            "raise ExceptionGroup('many', [ValueError('one'), TypeError('two')])",
+            75,
+        )
+
+        assert not res.success
+        assert "ExceptionGroup: many (2 sub-exceptions)" in res.formatted_error
+        assert "ValueError: one" in res.formatted_error
+        assert "TypeError: two" in res.formatted_error
+    finally:
+        await ex.aclose()
+
+
 async def test_syntax_error_preserves_cell_filename_across_process():
     """Parser diagnostics retain the generated-cell identity across IPC."""
     from nooa.errors.formatting import format_error_for_llm
@@ -445,7 +524,9 @@ async def test_workspace_is_created_if_missing():
 
 
 # --- guardrails enforced inside a real cell ---------------------------------
-@pytest.mark.skipif(not CAPS.rlimit, reason="RLIMIT unavailable")
+@pytest.mark.skipif(
+    sys.platform != "linux" or not CAPS.rlimit, reason="Linux RLIMIT_AS unavailable"
+)
 async def test_memory_guard_inside_cell():
     ex = _executor(SandboxConfig(require=False, network=True, filesystem=False, max_memory_mb=128))
     try:

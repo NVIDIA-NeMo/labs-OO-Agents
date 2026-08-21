@@ -14,6 +14,7 @@ pure_python.py missing: 59-61, 105-106, 147, 236-238, 243, 274-288, 304-340, 467
   896-897, 995-1000, 1023-1026, 1068-1088
 """
 
+import inspect
 import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -317,6 +318,17 @@ class TestCodeActEmptyCode:
         agent = TestAgent(llm=fake_llm)
         result = await agent.compute()
         assert result == 99
+
+        from nooa.events import PythonOutput
+
+        output = next(
+            event
+            for event in agent.event_manager.values()
+            if isinstance(event, PythonOutput) and event.tool_call_id == "c1"
+        )
+        assert output.execution_status is ResultStatus.ERROR
+        assert output.error == "Execution error: empty code provided."
+        assert output.stderr == ""
 
 
 # ---------------------------------------------------------------------------
@@ -911,6 +923,58 @@ class TestFormatErrorCustomFormatter:
         result = strat._format_error(ValueError("test"), "code", line_offset=5)
         assert "old" in result
         assert "test" in result
+
+    def test_custom_formatter_receives_worker_diagnostic(self):
+        class CurrentFormatter:
+            def format(self, error, code=None, *, line_offset=0, formatted_error=""):
+                return f"current[{line_offset}]: {formatted_error}"
+
+        strat = CodeActStrategy(error_formatter=CurrentFormatter())
+        result = strat._format_error(
+            ValueError("surrogate"),
+            "bad()",
+            line_offset=4,
+            formatted_error="Cell In[7], line 1\nValueError: original",
+        )
+
+        assert result == "current[4]: Cell In[7], line 1\nValueError: original"
+
+    def test_custom_formatter_without_inspectable_signature_uses_legacy_shape(self, monkeypatch):
+        class OpaqueFormatter:
+            calls = 0
+
+            def format(self, error, code):
+                self.calls += 1
+                return f"opaque: {error}: {code}"
+
+        formatter = OpaqueFormatter()
+        real_signature = inspect.signature
+
+        def opaque_signature(value):
+            if value == formatter.format:
+                raise ValueError("no signature metadata")
+            return real_signature(value)
+
+        monkeypatch.setattr(inspect, "signature", opaque_signature)
+        strat = CodeActStrategy(error_formatter=formatter)
+
+        assert strat._format_error(ValueError("test"), "code") == "opaque: test: code"
+        assert formatter.calls == 1
+
+    def test_custom_formatter_body_typeerror_is_not_retried(self):
+        class BrokenFormatter:
+            calls = 0
+
+            def format(self, error, code, line_offset=0):
+                self.calls += 1
+                raise TypeError("formatter body failed")
+
+        formatter = BrokenFormatter()
+        strat = CodeActStrategy(error_formatter=formatter)
+
+        with pytest.raises(TypeError, match="formatter body failed"):
+            strat._format_error(ValueError("test"), "code", line_offset=5)
+        assert formatter.calls == 1
 
     def test_default_formatter_used_when_no_custom(self):
         """Default formatter should be used when no custom formatter configured."""
@@ -2674,12 +2738,15 @@ class TestCodeActExecutePrefillStep:
             {},
             session,
             "compute",
-            "inspect_inputs",
+            "pre_ellipsis",
         )
 
-        # Captured locals should be in session
+        # Captured locals should be in session, and both synthetic events retain
+        # the actual prefill kind rather than being mislabeled as input inspection.
         assert "x" in session.session_locals
         assert session.session_locals["x"] == 42
+        emitted = [call.args[0] for call in em.add.call_args_list]
+        assert all(event.metadata["prefill_type"] == "pre_ellipsis" for event in emitted)
 
     @pytest.mark.asyncio
     async def test_execute_prefill_step_with_error_logs_warning(self):
@@ -2850,7 +2917,13 @@ class TestPurePythonExecutionError:
 
         fake_llm = FakeLLMClient(
             scripted_responses=[
-                _resp("raise ValueError('oops')"),
+                _resp(
+                    "import sys\n"
+                    "print('before failure')\n"
+                    "print('warning', file=sys.stderr)\n"
+                    "text = 'abc'\n"
+                    "text.index('missing')"
+                ),
                 _resp("return 42"),
             ]
         )
@@ -2868,7 +2941,11 @@ class TestPurePythonExecutionError:
             event for event in outputs if event.execution_status == ResultStatus.COMPLETE
         )
         assert failed.execution_count == 1
-        assert "Cell In[1]" in failed.error
+        assert failed.stdout == "before failure\n"
+        assert failed.stderr == "warning\n"
+        assert "Cell In[1], line 5" in failed.error
+        assert "text.index('missing')" in failed.error
+        assert failed.error.endswith("ValueError: substring not found")
         assert succeeded.execution_count == 2
 
 
@@ -4191,62 +4268,6 @@ class TestCodeActInlineReturnResultWithError:
         assert "x = 1/0" in failed_output.error
         assert "ZeroDivisionError: division by zero" in failed_output.error
         assert "Execution error" not in failed_output.stderr
-
-    @pytest.mark.asyncio
-    async def test_inline_signal_branch_keeps_stderr_and_structured_error_separate(self):
-        """The signal branch must not downgrade an execution error to stderr."""
-        from types import SimpleNamespace
-
-        from nooa.events import ExecutionResult, PythonOutput
-
-        strat = CodeActStrategy()
-        emitted = []
-        em = MagicMock()
-        em.add = MagicMock(side_effect=lambda event, **kwargs: emitted.append(event) or "evt")
-        em.update = MagicMock()
-        rt = MagicMock()
-        rt.event_manager = em
-        call = SimpleNamespace(method_name="compute")
-        session = CodeActSession(
-            max_iterations=5, max_retries=3, target_method_name="compute", event_manager=em
-        )
-        error = ValueError("substring not found")
-        diagnostic = (
-            "Cell In[4], line 1, in <module>\n"
-            "    start = text.index('missing')\n"
-            "            ^^^^^^^^^^^^^^^^^^^^^^\n"
-            "ValueError: substring not found"
-        )
-        strat._execute_code = AsyncMock(
-            return_value=ExecutionResult(
-                stdout="partial output",
-                stderr="warning before failure",
-                error=error,
-                formatted_error=diagnostic,
-                signal=_ReturnResultSignal(result={"result": 42}),
-                defined_methods={},
-            )
-        )
-
-        outcome = await strat._handle_execute_python(
-            rt,
-            _tool_call("return_result(42)", call_id="inline"),
-            {"code": "return_result(42)"},
-            {},
-            session,
-            call,
-            int,
-            "tool-event",
-        )
-
-        assert outcome == ("TASK_COMPLETE", 42)
-        output = next(event for event in emitted if isinstance(event, PythonOutput))
-        assert output.stderr == "warning before failure"
-        assert "Cell In[4], line 1" in output.error
-        assert "start = text.index('missing')" in output.error
-        assert "^^^^^^^^^^^^^^^^^^^^^^" in output.error
-        assert "ValueError: substring not found" in output.error
-        assert "ValueError" not in output.stderr
 
 
 # ---------------------------------------------------------------------------
