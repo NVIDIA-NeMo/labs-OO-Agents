@@ -32,6 +32,104 @@ def test_fullscreen_shell_owns_alternate_screen_and_transcript_window() -> None:
     assert app._output_window is not None
 
 
+def test_fullscreen_copy_and_return_actions_share_status_region() -> None:
+    from prompt_toolkit.layout import VSplit
+
+    app = _make_fullscreen_app()
+    app.emit_block("".join(f"line {index}\n" for index in range(30)))
+    app._transcript_viewport_size = lambda: (20, 4)
+    app._show_transient_status("Copied 5 characters", style="class:return-to-tail")
+    app._scroll_fullscreen_transcript(-4)
+
+    status_container = app._status_region_container
+    assert status_container is not None
+    status_region = status_container.content
+    assert isinstance(status_region, VSplit)
+    assert app._transient_status_container in status_region.children
+    assert app._return_to_tail_container in status_region.children
+    assert bool(status_container.filter())
+    assert bool(app._transient_status_container.filter())
+    assert bool(app._return_to_tail_container.filter())
+
+
+def test_fullscreen_status_removes_visual_transcript_gap() -> None:
+    from prompt_toolkit.formatted_text import fragment_list_to_text, to_formatted_text
+
+    app = _make_fullscreen_app()
+    app.emit_block("answer\n")
+
+    assert not bool(app._status_region_container.filter())
+    assert (
+        fragment_list_to_text(
+            to_formatted_text(app._fullscreen_transcript.formatted_text(width=20, height=2))
+        )
+        == "answer\n"
+    )
+
+    app._command_status_text = "thinking..."
+    app._before_render(app._app)
+
+    assert bool(app._status_region_container.filter())
+    assert app._fullscreen_transcript.text == "answer\n"
+    assert (
+        fragment_list_to_text(
+            to_formatted_text(app._fullscreen_transcript.formatted_text(width=20, height=1))
+        )
+        == "answer"
+    )
+
+
+def test_native_hyperlink_marker_vocabulary_is_bounded() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+    model = FullscreenTranscriptModel()
+    model.append(
+        " ".join(
+            f"\x1b]8;;https://example.test/{index}\x1b\\x\x1b]8;;\x1b\\" for index in range(64)
+        )
+    )
+
+    def marker_classes(render_counter: int) -> set[str]:
+        return {
+            token
+            for style, _text, *_ in model.formatted_text(
+                width=4_096,
+                height=1,
+                render_counter=render_counter,
+            )
+            for token in style.split()
+            if token.startswith("class:native-hyperlink-")
+        }
+
+    assert marker_classes(0) == {"class:native-hyperlink-0"}
+    assert marker_classes(1) == {"class:native-hyperlink-1"}
+    model._formatted_cache.clear()
+    assert marker_classes(2) == {"class:native-hyperlink-0"}
+
+
+def test_fullscreen_status_occupancy_is_sampled_once_per_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _make_fullscreen_app()
+    app.emit_block("answer\n")
+    calls = 0
+
+    def status_rows(*, include_transient: bool = True):
+        del include_transient
+        nonlocal calls
+        calls += 1
+        return [[("class:status", "busy")]]
+
+    monkeypatch.setattr(app, "_status_rows", status_rows)
+    app._before_render(app._app)
+
+    assert calls == 1
+    app._fullscreen_transcript.formatted_text(width=20, height=2)
+    app._fullscreen_transcript.cursor_position(width=20, height=2)
+    assert bool(app._status_region_container.filter())
+    assert calls == 1
+
+
 def test_fullscreen_bootstrap_output_only_mutates_renderer_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -207,18 +305,58 @@ def test_fullscreen_sanitizes_terminal_commands_without_native_width_wrapping(
     assert app._fullscreen_transcript.text == r"abcdef\x1b[2J" + "\n"
 
 
-def test_fullscreen_projection_does_not_leak_osc8_control_payload() -> None:
+def test_fullscreen_hyperlink_hit_testing_survives_projection_and_wrapping() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+    model = FullscreenTranscriptModel()
+    model.append(
+        "prefix \x1b]8;id=42;https://example.test/docs\x1b\\linked text\x1b]8;;\x1b\\ suffix"
+    )
+
+    assert model.hyperlink_at(x=0, y=0, width=8, height=3) == "https://example.test/docs"
+    assert model.hyperlink_at(x=1, y=1, width=8, height=3) == "https://example.test/docs"
+    assert model.hyperlink_at(x=2, y=1, width=8, height=3) is None
+
+    blank = FullscreenTranscriptModel()
+    blank.append("\x1b]8;;https://example.test/docs\x1b\\foo\n\nbar\x1b]8;;\x1b\\")
+    assert blank.hyperlink_at(x=0, y=1, width=20, height=3) is None
+    assert blank.hyperlink_at(x=19, y=1, width=20, height=3) is None
+
+
+def test_fullscreen_hyperlink_hit_testing_matches_combining_grapheme_rendering() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+    model = FullscreenTranscriptModel()
+    # The OSC-8 boundary lies inside one displayed grapheme (e + combining acute).
+    model.append("e\x1b]8;;https://example.test\x1b\\́\x1b]8;;\x1b\\")
+
+    assert model.hyperlink_at(x=0, y=0, width=20, height=1) == "https://example.test"
+
+
+def test_fullscreen_projection_keeps_osc8_only_as_zero_width_metadata() -> None:
     from prompt_toolkit.formatted_text import to_formatted_text
 
     app = _make_fullscreen_app()
     app.emit_block("\x1b]8;;https://example.test\x1b\\label\x1b]8;;\x1b\\\n")
 
-    rendered = "".join(
-        fragment[1] for fragment in to_formatted_text(app._fullscreen_transcript.formatted_text())
-    )
+    fragments = to_formatted_text(app._fullscreen_transcript.formatted_text())
+    rendered = "".join(text for style, text, *_ in fragments if "[ZeroWidthEscape]" not in style)
+    raw = "".join(text for style, text, *_ in fragments if "[ZeroWidthEscape]" in style)
+
     assert rendered == "label\n"
-    assert "example.test" not in rendered
-    assert "8;;" not in rendered
+    assert raw == "\x1b]8;;https://example.test\x1b\\" * len("label")
+
+
+def test_fullscreen_does_not_emit_native_metadata_for_unsafe_link_target() -> None:
+    from prompt_toolkit.formatted_text import to_formatted_text
+
+    app = _make_fullscreen_app()
+    app.emit_block("\x1b]8;;file:///tmp/secret\x1b\\label\x1b]8;;\x1b\\")
+
+    fragments = to_formatted_text(app._fullscreen_transcript.formatted_text())
+
+    assert "".join(text for _style, text, *_ in fragments) == "label\n"
+    assert all("[ZeroWidthEscape]" not in style for style, _text, *_ in fragments)
 
 
 def test_fullscreen_projection_drops_unsupported_colon_sgr_without_leaking_parameters() -> None:
@@ -532,7 +670,7 @@ def test_projection_caches_are_bounded_and_cleared() -> None:
         model.formatted_text(width=width)
 
     assert len(model._projection_cache) <= 2
-    assert len(model._formatted_cache) <= 2
+    assert len(model._formatted_cache) <= 2 * 2  # two marker variants per retained geometry
 
     model.clear()
     assert not model._projection_cache
@@ -931,6 +1069,123 @@ def _fullscreen_window_cells(app, *, width: int, height: int) -> list[str]:
     ]
 
 
+def test_fullscreen_screen_preserves_native_osc8_metadata_across_wrapped_rows() -> None:
+    from prompt_toolkit.application.current import set_app
+    from prompt_toolkit.layout.mouse_handlers import MouseHandlers
+    from prompt_toolkit.layout.screen import Screen, WritePosition
+
+    app = _make_fullscreen_app()
+    app.emit_block(
+        "plain \x1b]8;id=docs;https://example.test/docs\x1b\\linked text\x1b]8;;\x1b\\ tail"
+    )
+    app._transcript_viewport_size = lambda: (8, 3)
+    assert app._output_window is not None
+    app._app.render_counter += 1
+    screen = Screen()
+    with set_app(app._app):
+        app._output_window.write_to_screen(
+            screen,
+            MouseHandlers(),
+            WritePosition(xpos=0, ypos=0, width=8, height=3),
+            parent_style="",
+            erase_bg=False,
+            z_index=None,
+        )
+
+    target = "\x1b]8;;https://example.test/docs\x1b\\"
+    close = "\x1b]8;;\x1b\\"
+    assert screen.zero_width_escapes[0][6] == target
+    assert screen.zero_width_escapes[1][0] == target
+    assert screen.zero_width_escapes[1][3] == close
+    assert all(
+        "id=docs" not in sequence
+        for row in screen.zero_width_escapes.values()
+        for sequence in row.values()
+    )
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_link_at_exact_row_end_closes_before_lower_chrome() -> None:
+    from prompt_toolkit.application.current import set_app
+
+    app = _make_fullscreen_app()
+    target = "https://example.test/docs"
+    app.emit_block(f"\x1b]8;;{target}\x1b\\12345678\x1b]8;;\x1b\\")
+    app._command_status_text = "STATUS"
+    app._before_render(app._app)
+    writes: list[tuple[str, str]] = []
+    app._app.output.write_raw = lambda value: writes.append(("raw", value))  # type: ignore[method-assign]
+    app._app.output.write = lambda value: writes.append(("text", value))  # type: ignore[method-assign]
+
+    with set_app(app._app):
+        app._app.renderer.render(app._app, app._app.layout)
+
+    opening = f"\x1b]8;;{target}\x1b\\"
+    close = "\x1b]8;;\x1b\\"
+    opening_index = next(index for index, item in enumerate(writes) if item == ("raw", opening))
+    last_link_text = max(
+        index
+        for index, (kind, value) in enumerate(writes)
+        if kind == "text" and value in set("12345678")
+    )
+    close_index = next(
+        index
+        for index, item in enumerate(writes)
+        if index > last_link_text and item == ("raw", close)
+    )
+    status_index = next(
+        index for index, item in enumerate(writes) if item == ("text", "S") and index > close_index
+    )
+    assert opening_index < last_link_text < close_index < status_index
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_renderer_emits_native_osc8_through_raw_output() -> None:
+    from prompt_toolkit.application.current import set_app
+
+    app = _make_fullscreen_app()
+    app.emit_block("\x1b]8;;https://example.test/docs\x1b\\link\x1b]8;;\x1b\\")
+    raw_writes: list[str] = []
+    plain_writes: list[str] = []
+    app._app.output.write_raw = raw_writes.append  # type: ignore[method-assign]
+    app._app.output.write = plain_writes.append  # type: ignore[method-assign]
+
+    with set_app(app._app):
+        app._app.renderer.render(app._app, app._app.layout)
+
+    opening = "\x1b]8;;https://example.test/docs\x1b\\"
+    assert opening in "".join(raw_writes)
+    assert opening not in "".join(plain_writes)
+
+
+def test_fullscreen_after_render_closes_native_hyperlink_state() -> None:
+    app = _make_fullscreen_app()
+    writes: list[str] = []
+    flushes: list[None] = []
+    app._app.output.write_raw = writes.append  # type: ignore[method-assign]
+    app._app.output.flush = lambda: flushes.append(None)  # type: ignore[method-assign]
+
+    app._after_render(app._app)
+
+    assert writes == ["\x1b]8;;\x1b\\"]
+    assert flushes == [None]
+
+
+@pytest.mark.parametrize("failure", ["write", "flush"])
+def test_fullscreen_after_render_tolerates_broken_output(failure: str) -> None:
+    app = _make_fullscreen_app()
+
+    def fail() -> None:
+        raise OSError("closed output")
+
+    if failure == "write":
+        app._app.output.write_raw = lambda _text: fail()  # type: ignore[method-assign]
+    else:
+        app._app.output.flush = fail  # type: ignore[method-assign]
+
+    app._after_render(app._app)
+
+
 def test_short_fullscreen_transcript_is_bottom_aligned_in_viewport() -> None:
     from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
     from prompt_toolkit.formatted_text import to_formatted_text
@@ -1107,6 +1362,17 @@ def test_fullscreen_semantic_replay_cache_avoids_duplicate_width_work() -> None:
     assert app._fullscreen_transcript.text == "semantic\n"
 
 
+def test_fullscreen_queue_window_measures_wrapped_multiline_message() -> None:
+    from nooa_cli.tui.tui_application import _PendingInputHandoff
+
+    app = _make_fullscreen_app()
+    app._pending_input_handoff = [_PendingInputHandoff("first line\n" + "wrapped " * 12)]
+    queue_window = app._main_container.children[2].content
+
+    assert bool(queue_window.wrap_lines()) is True
+    assert queue_window.preferred_height(20, 100).preferred > 2
+
+
 def test_fullscreen_wheel_is_guarded_by_explicit_mouse_navigation_policy() -> None:
     from prompt_toolkit.data_structures import Point
     from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
@@ -1166,6 +1432,114 @@ def test_fullscreen_wheel_over_status_scrolls_transcript() -> None:
 
     assert result is None
     assert not app._fullscreen_transcript.viewport.follows_tail
+
+
+@pytest.mark.parametrize("region", ["queue", "session", "input-padding", "completions"])
+def test_fullscreen_wheel_over_bottom_chrome_scrolls_transcript(region: str) -> None:
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    app = _make_fullscreen_app()
+    app.emit_block("".join(f"line {index}\n" for index in range(20)))
+    app._transcript_viewport_size = lambda: (12, 4)
+    controls = {
+        "queue": app._main_container.children[2].content.content,
+        "session": app._main_container.children[3].content,
+        "input-padding": app._input_container.children[0].content,
+        "completions": app._main_container.children[5].content.content,
+    }
+
+    result = controls[region].mouse_handler(_mouse_event(MouseEventType.SCROLL_UP, button=None))
+
+    assert result is None
+    assert not app._fullscreen_transcript.viewport.follows_tail
+
+
+def test_fullscreen_wheel_over_transient_notice_scrolls_transcript() -> None:
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    app = _make_fullscreen_app()
+    app.emit_block("".join(f"line {index}\n" for index in range(20)))
+    app._transcript_viewport_size = lambda: (12, 4)
+    app._show_transient_status("Copied 5 characters")
+    control = app._transient_status_container.content.content
+
+    result = control.mouse_handler(_mouse_event(MouseEventType.SCROLL_UP, button=None))
+
+    assert result is None
+    assert not app._fullscreen_transcript.viewport.follows_tail
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_drag_release_over_transient_notice_finishes_copy(monkeypatch) -> None:
+    from nooa_cli.tui.tui_application import _ClipboardResult
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    app = _make_fullscreen_app()
+    app.emit_block("zero\none\ntwo")
+    app._transcript_viewport_size = lambda: (8, 3)
+    copied = []
+
+    async def copy_locally(text: str) -> _ClipboardResult:
+        copied.append(text)
+        return _ClipboardResult(True, "test")
+
+    monkeypatch.setattr(app, "_copy_to_local_clipboard_async", copy_locally)
+    app._show_transient_status("Copying...")
+    app._before_render(app._app)
+    assert app._output_window is not None
+    transcript = app._output_window.content
+    transcript.create_content(8, 3)
+    transcript.mouse_handler(_mouse_event(MouseEventType.MOUSE_DOWN, x=0, y=0))
+
+    control = app._transient_status_container.content.content
+    assert control.mouse_handler(_mouse_event(MouseEventType.MOUSE_UP, x=2, y=0)) is None
+    if app._clipboard_task is not None:
+        await app._clipboard_task
+
+    assert not transcript.dragging
+    assert copied == ["zero\none\ntwo"]
+
+
+def test_transcript_control_reformats_when_frame_height_changes_after_measurement() -> None:
+    from prompt_toolkit.application.current import set_app
+
+    app = _make_fullscreen_app()
+    app.emit_block("one\ntwo\n")
+    assert app._output_window is not None
+    control = app._output_window.content
+
+    def lines(content) -> list[str]:
+        return [
+            "".join(text for _style, text in content.get_line(index))
+            for index in range(content.line_count)
+        ]
+
+    with set_app(app._app):
+        app._app.render_counter += 1
+        assert lines(control.create_content(20, 3)) == ["one", "two", " "]
+
+        # A newly occupied status row shrinks the transcript in the same frame.
+        # prompt_toolkit measures with height=None before painting at height=2.
+        app._status_region_occupied = True
+        app._app.render_counter += 1
+        control.preferred_height(20, 3, False, None)
+        assert lines(control.create_content(20, 2)) == ["one", "two"]
+
+        # Expanding the multiline composer shrinks the transcript once more;
+        # typing on that line keeps the same geometry on the following frame.
+        app._app.render_counter += 1
+        control.preferred_height(20, 2, False, None)
+        assert lines(control.create_content(20, 1)) == ["two"]
+        app._app.render_counter += 1
+        control.preferred_height(20, 1, False, None)
+        assert lines(control.create_content(20, 1)) == ["two"]
+
+        # When status chrome disappears, the synthetic trailing row returns in
+        # the same frame rather than one repaint later.
+        app._status_region_occupied = False
+        app._app.render_counter += 1
+        control.preferred_height(20, 1, False, None)
+        assert lines(control.create_content(20, 2)) == ["two", " "]
 
 
 def test_transcript_control_uses_current_frame_height_before_formatting() -> None:
@@ -1597,6 +1971,166 @@ def test_fullscreen_selection_is_visibly_styled() -> None:
     assert selected == "bcd"
 
 
+def test_fullscreen_click_without_drag_activates_link_but_drag_does_not() -> None:
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    app = _make_fullscreen_app()
+    app.emit_block("\x1b]8;;https://example.test/docs\x1b\\link\x1b]8;;\x1b\\ plain")
+    app._transcript_viewport_size = lambda: (20, 1)
+    opened: list[tuple[int, int]] = []
+    app._open_fullscreen_link_at = lambda x, y: opened.append((x, y)) or True
+    assert app._output_window is not None
+    control = app._output_window.content
+    control._link_callback = app._open_fullscreen_link_at
+    control.create_content(20, 1)
+
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_DOWN, x=1, y=0))
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_UP, x=1, y=0))
+    assert opened == [(1, 0)]
+
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_DOWN, x=1, y=0))
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_MOVE, x=2, y=0))
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_UP, x=2, y=0))
+    assert opened == [(1, 0)]
+
+    # A terminal may omit an intermediate motion report; a changed release
+    # coordinate still belongs to drag selection, never link activation.
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_DOWN, x=1, y=0))
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_UP, x=2, y=0))
+    assert opened == [(1, 0)]
+
+
+@pytest.mark.asyncio
+async def test_local_browser_timeout_counts_as_dispatched_without_termination(monkeypatch) -> None:
+    app = _make_fullscreen_app()
+
+    class Process:
+        returncode = None
+
+        async def wait(self) -> None:
+            return None
+
+    process = Process()
+    terminated: list[object] = []
+
+    async def create_process(*_args, **_kwargs):
+        return process
+
+    async def time_out(awaitable, *, timeout):
+        assert timeout == 5
+        awaitable.close()
+        raise TimeoutError
+
+    async def terminate(candidate) -> None:
+        terminated.append(candidate)
+
+    monkeypatch.setattr(app, "_browser_open_command", lambda _url: ("open", "url"))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(asyncio, "wait_for", time_out)
+    monkeypatch.setattr(app, "_terminate_clipboard_process", terminate)
+
+    assert await app._open_local_url("https://example.test/docs") is True
+    assert terminated == []
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_link_click_opens_safe_http_url(monkeypatch) -> None:
+    app = _make_fullscreen_app()
+    app.emit_block("\x1b]8;;https://example.test/docs\x1b\\link\x1b]8;;\x1b\\")
+    app._transcript_viewport_size = lambda: (20, 2)
+    calls: list[str] = []
+
+    async def open_browser(url: str) -> bool:
+        calls.append(url)
+        return True
+
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    monkeypatch.setattr(app, "_open_local_url", open_browser)
+
+    assert app._open_fullscreen_link_at(1, 0) is True
+    assert app._link_task is not None
+    await app._link_task
+    assert calls == ["https://example.test/docs"]
+    assert app._open_fullscreen_link_at(8, 0) is False
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_link_open_failure_copies_url(monkeypatch) -> None:
+    app = _make_fullscreen_app()
+    url = "https://example.test/docs"
+    app.emit_block(f"\x1b]8;;{url}\x1b\\link\x1b]8;;\x1b\\")
+    app._transcript_viewport_size = lambda: (20, 2)
+    copied: list[str] = []
+
+    async def fail_to_open(_url: str) -> bool:
+        return False
+
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    monkeypatch.setattr(app, "_open_local_url", fail_to_open)
+    monkeypatch.setattr(app, "_start_fullscreen_selection_copy", copied.append)
+
+    assert app._open_fullscreen_link_at(1, 0) is True
+    task = app._link_task
+    assert task is not None
+    await task
+    assert copied == [url]
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_remote_link_click_copies_without_launching(monkeypatch) -> None:
+    app = _make_fullscreen_app()
+    app.emit_block("\x1b]8;;https://example.test/docs\x1b\\link\x1b]8;;\x1b\\")
+    app._transcript_viewport_size = lambda: (20, 2)
+    copied: list[str] = []
+
+    monkeypatch.setenv("SSH_CONNECTION", "client 1 server 2")
+    monkeypatch.setattr(
+        app,
+        "_start_fullscreen_selection_copy",
+        lambda text: copied.append(text),
+    )
+
+    async def forbidden_open(_url: str) -> bool:
+        raise AssertionError("remote clicks must not launch a host browser")
+
+    monkeypatch.setattr(app, "_open_local_url", forbidden_open)
+
+    assert app._open_fullscreen_link_at(1, 0) is True
+    assert copied == ["https://example.test/docs"]
+    assert app._link_task is None
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_rapid_link_clicks_do_not_duplicate_launch(monkeypatch) -> None:
+    app = _make_fullscreen_app()
+    app.emit_block("\x1b]8;;https://example.test/docs\x1b\\link\x1b]8;;\x1b\\")
+    app._transcript_viewport_size = lambda: (20, 2)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls: list[str] = []
+
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+
+    async def blocked_open(url: str) -> bool:
+        calls.append(url)
+        started.set()
+        await release.wait()
+        return True
+
+    monkeypatch.setattr(app, "_open_local_url", blocked_open)
+
+    assert app._open_fullscreen_link_at(1, 0) is True
+    await started.wait()
+    assert app._open_fullscreen_link_at(1, 0) is True
+    assert calls == ["https://example.test/docs"]
+    release.set()
+    assert app._link_task is not None
+    await app._link_task
+
+
 def test_fullscreen_click_without_drag_clears_selection_without_copy(monkeypatch) -> None:
     from nooa_cli.tui.tui_application import _ClipboardResult
     from prompt_toolkit.mouse_events import MouseEventType
@@ -1689,18 +2223,11 @@ async def test_fullscreen_copy_notice_expires_without_touching_command_status() 
         style="class:return-to-tail",
     )
     assert app._transient_status_text == "Copied 5 characters"
-    status_controls = [
-        child.content
-        for child in app._main_container.children
-        if hasattr(child, "content")
-        and hasattr(child.content, "text")
-        and "Copied 5 characters" in str(child.content.text())
-    ]
-    assert len(status_controls) == 1
+    assert bool(app._transient_status_container.filter())
     assert (
         "class:return-to-tail",
         "Copied 5 characters",
-    ) in status_controls[0].text()
+    ) in app._transient_status_container.content.content.text()
     await asyncio.sleep(0.03)
 
     assert app._transient_status_text == ""
@@ -1944,6 +2471,24 @@ def test_fullscreen_return_to_tail_affordance_is_visible_and_clickable() -> None
     assert not bool(app._return_to_tail_container.filter())
 
 
+def test_fullscreen_wheel_over_return_to_tail_scrolls_transcript() -> None:
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    app = _make_fullscreen_app()
+    app.emit_block("".join(f"line {index}\n" for index in range(20)))
+    app._transcript_viewport_size = lambda: (12, 4)
+    app._scroll_fullscreen_transcript(-4)
+    before = app._fullscreen_transcript.viewport
+
+    result = app._return_to_tail_control.mouse_handler(
+        _mouse_event(MouseEventType.SCROLL_UP, button=None)
+    )
+
+    assert result is None
+    assert app._fullscreen_transcript.viewport != before
+    assert not app._fullscreen_transcript.viewport.follows_tail
+
+
 def test_fullscreen_return_to_tail_affordance_preserves_native_mouse_escape() -> None:
     from prompt_toolkit.data_structures import Point
     from prompt_toolkit.mouse_events import (
@@ -2056,6 +2601,8 @@ async def test_fullscreen_input_mouse_click_moves_cursor_and_drag_selects() -> N
         assert app.input_buffer.selection_state is None
 
     drag_app = _make_fullscreen_app()
+    copied: list[str] = []
+    drag_app._start_fullscreen_selection_copy = copied.append
     drag_app.input_buffer.text = "alpha beta"
     drag_control = drag_app._input_window.content
     drag_control.create_content(20, 1)
@@ -2067,6 +2614,8 @@ async def test_fullscreen_input_mouse_click_moves_cursor_and_drag_selects() -> N
 
     assert drag_app.input_buffer.document.selection_range() == (1, 5)
     assert drag_app.input_buffer.copy_selection().text == "lpha"
+    assert copied == ["lpha"]
+    assert drag_app._app.clipboard.get_data().text == "lpha"
 
 
 @pytest.mark.asyncio
@@ -2102,6 +2651,32 @@ async def test_fullscreen_input_shift_up_selects_and_typing_replaces() -> None:
 
         assert app.input_buffer.selection_state is None
         assert app.input_buffer.cursor_position == len("abcde!")
+
+
+def test_fullscreen_composer_mouse_selection_is_mirrored_non_destructively(monkeypatch) -> None:
+    from nooa_cli.tui.tui_application import _NativeSelectionBufferControl
+    from prompt_toolkit.application.current import set_app
+    from prompt_toolkit.layout.controls import BufferControl
+    from prompt_toolkit.mouse_events import MouseEventType
+    from prompt_toolkit.selection import SelectionState
+
+    app = _make_fullscreen_app()
+    copied: list[str] = []
+    app._start_fullscreen_selection_copy = copied.append
+    app.input_buffer.text = "copy this"
+    app.input_buffer.cursor_position = 4
+    app.input_buffer.selection_state = SelectionState(original_cursor_position=0)
+    control = app._input_window.content
+    assert isinstance(control, _NativeSelectionBufferControl)
+
+    monkeypatch.setattr(BufferControl, "mouse_handler", lambda _self, _event: None)
+    with set_app(app._app):
+        control.mouse_handler(_mouse_event(MouseEventType.MOUSE_UP, x=4))
+
+    assert copied == ["copy"]
+    assert app._app.clipboard.get_data().text == "copy"
+    assert app.input_buffer.text == "copy this"
+    assert app.input_buffer.selection_state is not None
 
 
 @pytest.mark.asyncio

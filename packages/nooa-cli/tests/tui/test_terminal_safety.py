@@ -5,7 +5,10 @@ from __future__ import annotations
 
 from nooa_cli.tui.session import _build_user_bar
 from nooa_cli.tui.terminal_safety import (
+    hyperlink_at_plain_offset,
     normalize_transcript_block,
+    safe_http_url,
+    safe_hyperlink_spans,
     sanitize_transcript_ansi,
     strip_safe_ansi,
 )
@@ -80,8 +83,43 @@ def test_user_bar_is_control_safe_cell_aware_and_reserves_final_column() -> None
 
     colors = {"text": "#cdd6f4", "surface2": "#585b70"}
     bar = _build_user_bar("wide 界\x1b[2J\r", _App(), colors)  # type: ignore[arg-type]
+    assert bar.startswith("\x1b[38;5;189;48;5;59m")
 
     assert "\x1b[2J" not in bar
     visible_lines = strip_safe_ansi(sanitize_transcript_ansi(bar)).splitlines()
     assert visible_lines
     assert all(cell_len(line) == 9 for line in visible_lines)
+
+
+def test_hyperlink_target_length_is_bounded() -> None:
+    prefix = "https://example.test/"
+    exact = prefix + "a" * (2_048 - len(prefix))
+
+    assert safe_http_url(exact) == exact
+    assert safe_http_url(exact + "a") is None
+
+
+def test_safe_http_url_rejects_terminal_controls() -> None:
+    for codepoint in (*range(0x20), 0x7F, *range(0x80, 0xA0)):
+        url = f"https://example.test/a{chr(codepoint)}b"
+        assert safe_http_url(url) is None, f"accepted U+{codepoint:04X}"
+
+
+def test_safe_hyperlink_spans_reports_safe_label_bounds() -> None:
+    linked = "before \x1b]8;id=7;https://example.test/path\x1b\\label\x1b]8;;\x1b\\ after"
+    unsafe = "\x1b]8;;file:///tmp/secret\x1b\\local\x1b]8;;\x1b\\"
+
+    assert safe_hyperlink_spans(linked) == ((7, 12, "https://example.test/path"),)
+    assert safe_hyperlink_spans(unsafe) == ()
+
+
+def test_hyperlink_hit_testing_accepts_only_http_targets() -> None:
+    linked = "before \x1b]8;id=7;https://example.test/path\x1b\\label\x1b]8;;\x1b\\ after"
+
+    assert hyperlink_at_plain_offset(linked, 7) == "https://example.test/path"
+    assert hyperlink_at_plain_offset(linked, 11) == "https://example.test/path"
+    assert hyperlink_at_plain_offset(linked, 6) is None
+    assert hyperlink_at_plain_offset(linked, 12) is None
+
+    unsafe = "\x1b]8;;file:///tmp/secret\x1b\\local\x1b]8;;\x1b\\"
+    assert hyperlink_at_plain_offset(unsafe, 0) is None

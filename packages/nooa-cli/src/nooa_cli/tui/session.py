@@ -24,7 +24,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from rich.cells import chop_cells, set_cell_size
 from rich.console import Console as RichConsole
 from rich.text import Text
 
@@ -34,6 +33,7 @@ from .terminal_safety import (
     normalize_transcript_block,
     sanitize_live_text,
 )
+from .user_message import render_user_bar
 
 logger = logging.getLogger(__name__)
 
@@ -52,28 +52,6 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _hex_to_ansi256(hex_color: str) -> int:
-    """Convert a ``#rrggbb`` hex string to the nearest xterm-256 index.
-
-    Used when we render ANSI directly (e.g. the user-message bar) and
-    can't rely on Rich's width/wrap logic to emit correctly-padded
-    terminal output.
-    """
-    h = hex_color.lstrip("#")
-    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-
-    # 6x6x6 color cube starting at index 16.
-    def _q(v: int) -> int:
-        # 0,95,135,175,215,255 — standard xterm cube steps.
-        if v < 48:
-            return 0
-        if v < 115:
-            return 1
-        return (v - 35) // 40
-
-    return 16 + 36 * _q(r) + 6 * _q(g) + _q(b)
 
 
 def _effective_slash_output_to_agent(agent: Any, slash_result: Any) -> bool:
@@ -106,22 +84,7 @@ def _effective_slash_output_to_agent(agent: Any, slash_result: Any) -> bool:
 
 
 def _build_user_bar(text: str, app: "TUIApplication", colors: dict) -> str:
-    """Build a highlighted user-message bar as safe raw ANSI.
-
-    Bypasses Rich because reconciling Rich's wrap/crop/overflow logic
-    with manual ``ljust`` padding is brittle across Rich versions and
-    terminal emulators — direct CSI emission always renders the full
-    width-spanning highlighted row the spec asks for.
-
-    Each input line becomes one bar row (or more when it wraps):
-      ``ESC[fg;bg m{prefix}{line}{padding}{ ESC[0m}\\n``
-    where the first row carries the ``❯`` prompt glyph and
-    continuation rows start flush-left.
-    """
-    # Prefer prompt_toolkit's live width — ``run_in_terminal`` will use
-    # this number when writing above the prompt. Falls back to the
-    # terminal_cols helper if the app output can't report.
-    cols: int
+    """Build a live highlighted user-message bar at the transcript width."""
     try:
         cols = app.transcript_columns()
     except Exception:
@@ -131,21 +94,7 @@ def _build_user_bar(text: str, app: "TUIApplication", colors: dict) -> str:
             from .tui_application import terminal_cols
 
             cols = max(terminal_cols(minimum=1) - 1, 1)
-
-    fg = _hex_to_ansi256(colors["text"])
-    bg = _hex_to_ansi256(colors["surface2"])
-    on = f"\x1b[38;5;{fg};48;5;{bg}m"
-    off = "\x1b[0m"
-
-    rows: list[str] = []
-    for i, line in enumerate(sanitize_live_text(text).split("\n")):
-        shown = f" ❯ {line} " if i == 0 else f" {line} "
-        # Rich's cell helpers preserve grapheme clusters and measure wide
-        # glyphs correctly.  Every row is exactly the safe content width,
-        # which is one cell narrower than the physical terminal.
-        chunks = chop_cells(shown, cols) or [""]
-        rows.extend(f"{on}{set_cell_size(chunk, cols)}{off}" for chunk in chunks)
-    return "\n".join(rows) + "\n"
+    return render_user_bar(text, cols, colors)
 
 
 class _EmitStream:
@@ -169,11 +118,13 @@ class _EmitStream:
         self,
         emit: Callable[..., None],
         replay_width: Callable[[], int] | None = None,
+        layout_width: Callable[[], int] | None = None,
         clear: Callable[[], None] | None = None,
     ) -> None:
         self.supports_semantic_replay = True
         self._emit = emit
         self._replay_width = replay_width
+        self._layout_width = layout_width
         self._clear = clear
         self._buf: list[str] = []
         self._held = 0
@@ -205,6 +156,15 @@ class _EmitStream:
             return default
         try:
             return int(self._replay_width())
+        except Exception:
+            return default
+
+    def layout_width(self, default: int = 80) -> int:
+        """Return the full application viewport width for renderer-owned UI."""
+        if self._layout_width is None:
+            return self.replay_width(default)
+        try:
+            return int(self._layout_width())
         except Exception:
             return default
 
@@ -289,6 +249,8 @@ class Session:
         self._toolbar = ToolbarRegistry()
         self._initial_outputs = list(initial_outputs or [])
         self._session_title_requested = False
+        # Invalidates user-message UI callbacks queued before a session swap.
+        self._session_generation = 0
 
         # Streaming state shared with the AgentEventRenderer: the
         # tool_call_id → code map that pairs a preview with its matching
@@ -602,6 +564,7 @@ class Session:
         if agent_runner is not None:
 
             def _on_user_message_hook(text: str) -> None:
+                generation = self._session_generation
                 # DB writes run here on the agent loop thread (the on_get
                 # caller), keeping all sqlite access on one thread.
                 user_event_id = None
@@ -619,20 +582,31 @@ class Session:
                 app = self._app
                 loop = getattr(app, "_loop", None) if app is not None else None
                 if loop is None:
-                    self._on_user_message_ui(text, event_id=user_event_id, tags=user_tags)
+                    self._on_user_message_ui(
+                        text,
+                        event_id=user_event_id,
+                        tags=user_tags,
+                        session_generation=generation,
+                    )
                     return
                 try:
                     on_ui_loop = asyncio.get_running_loop() is loop
                 except RuntimeError:
                     on_ui_loop = False
                 if on_ui_loop:
-                    self._on_user_message_ui(text, event_id=user_event_id, tags=user_tags)
+                    self._on_user_message_ui(
+                        text,
+                        event_id=user_event_id,
+                        tags=user_tags,
+                        session_generation=generation,
+                    )
                 else:
                     loop.call_soon_threadsafe(
                         lambda: self._on_user_message_ui(
                             text,
                             event_id=user_event_id,
                             tags=user_tags,
+                            session_generation=generation,
                         )
                     )
 
@@ -648,6 +622,7 @@ class Session:
                     file=_EmitStream(
                         self._app.emit_block,
                         replay_width=lambda app=self._app: app.transcript_columns(),
+                        layout_width=lambda app=self._app: app.output_columns(minimum=1),
                         clear=self._app.clear_transcript,
                     ),  # type: ignore[arg-type]
                     force_terminal=True,
@@ -1257,6 +1232,7 @@ class Session:
         *,
         event_id: str | None = None,
         tags: set[str] | frozenset[str] | None = None,
+        session_generation: int | None = None,
     ) -> None:
         """Render the user's submitted text as a full-width grey bar and
         reset per-turn renderer state.
@@ -1264,6 +1240,8 @@ class Session:
         DB bookkeeping (record_user) is handled by the on_get hook on
         the agent loop thread; this method only does UI work.
         """
+        if session_generation is not None and session_generation != self._session_generation:
+            return
         assert self._renderer is not None and self._app is not None
 
         bar = _build_user_bar(text, self._app, self._colors)
@@ -1282,6 +1260,9 @@ class Session:
             self._app.emit_block(bar, **emit_kwargs)
         else:
             self._app.emit_block(bar, replay=replay, **emit_kwargs)
+        # This runs on the UI owner; emit_block has committed the transcript
+        # source, so queue fallback can now disappear without a blank frame.
+        self._app.complete_pending_input_handoff(text)
         self._renderer.reset_turn()
 
     def _loud_handler(self, _loop: asyncio.AbstractEventLoop, context: dict) -> None:
@@ -1459,13 +1440,19 @@ class Session:
         agent_runner = getattr(self, "_local_agent_runner", None)
         if agent_runner is not None:
             await agent_runner.shutdown_queue_manager(flush=True)
+        # Queue shutdown above lets old-session dequeue hooks finish. Invalidate
+        # only their already-scheduled UI work before changing session state.
+        self._session_generation = getattr(self, "_session_generation", 0) + 1
+        app = getattr(self, "_app", None)
+        clear_handoffs = getattr(app, "clear_pending_input_handoffs", None)
+        if callable(clear_handoffs):
+            clear_handoffs()
         if self._session_manager is not None:
             # Save snapshot before closing so /clear, /session new, and
             # /session resume don't lose the current session's self.v/todo.
             storage = getattr(self.agent, "_storage", None)
             if storage is not None and hasattr(storage, "save_snapshot"):
                 try:
-                    app = getattr(self, "_app", None)
                     if app is not None:
                         await agent_runner.run_async(lambda: storage.save_snapshot(self.agent))
                     else:
