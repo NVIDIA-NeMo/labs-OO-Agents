@@ -168,11 +168,15 @@ def hyperlink_at_plain_offset(value: str, offset: int) -> str | None:
     return None
 
 
-def safe_hyperlink_spans(
-    value: str, *, already_sanitized: bool = False
-) -> tuple[tuple[int, int, str], ...]:
+def safe_hyperlink_spans(value: str) -> tuple[tuple[int, int, str], ...]:
     """Return safe OSC-8 targets as spans in ANSI-stripped character offsets."""
-    safe = value if already_sanitized else sanitize_transcript_ansi(value)
+    return _hyperlink_spans_from_safe_ansi(sanitize_transcript_ansi(value))
+
+
+def _hyperlink_spans_from_safe_ansi(
+    safe: str,
+) -> tuple[tuple[int, int, str], ...]:
+    """Extract hyperlink spans from text already normalized by this module."""
     spans: list[tuple[int, int, str]] = []
     active: tuple[int, str] | None = None
     plain_offset = 0

@@ -16,8 +16,8 @@ from rich.cells import split_graphemes
 from wcwidth import wcswidth
 
 from .terminal_safety import (
+    _hyperlink_spans_from_safe_ansi,
     project_prompt_toolkit_ansi,
-    safe_hyperlink_spans,
     sanitize_transcript_ansi,
     strip_safe_ansi,
 )
@@ -321,7 +321,7 @@ class FullscreenTranscriptModel:
             record_ansi,
             separator + plain,
             bool(separator),
-            safe_hyperlink_spans(record_ansi, already_sanitized=True),
+            _hyperlink_spans_from_safe_ansi(record_ansi),
         )
         prior_ends_newline = self._ends_newline
         self._records.append(record)
@@ -401,7 +401,7 @@ class FullscreenTranscriptModel:
                     record_ansi,
                     separator + plain,
                     bool(separator),
-                    safe_hyperlink_spans(record_ansi, already_sanitized=True),
+                    _hyperlink_spans_from_safe_ansi(record_ansi),
                 )
             )
             accumulated_plain += separator + plain
@@ -465,7 +465,7 @@ class FullscreenTranscriptModel:
                 record_ansi,
                 first.plain[1:],
                 False,
-                safe_hyperlink_spans(record_ansi, already_sanitized=True),
+                _hyperlink_spans_from_safe_ansi(record_ansi),
             )
             # Selection endpoints are record-local character offsets. Removing
             # the synthetic joining newline must not move a selection that is
