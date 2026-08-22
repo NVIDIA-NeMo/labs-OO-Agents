@@ -2814,6 +2814,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # executing and retrying after a body-level TypeError.
                 return formatter(error, code)
             optional_values = {
+                "code": code,
                 "line_offset": line_offset,
                 "formatted_error": formatted_error,
                 "max_error": max_error,

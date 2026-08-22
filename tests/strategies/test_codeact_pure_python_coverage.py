@@ -905,12 +905,13 @@ class TestFormatErrorCustomFormatter:
 
         class MyFormatter:
             def format(self, error, code, line_offset=0):
-                return f"custom[{line_offset}]: {error}"
+                return f"custom[{line_offset}]: {error}: {code}"
 
         strat = CodeActStrategy(error_formatter=MyFormatter())
         result = strat._format_error(ValueError("test"), "code", line_offset=5)
         assert "custom[5]" in result
         assert "test" in result
+        assert result.endswith(": code")
 
     def test_custom_formatter_without_line_offset(self):
         """Custom formatter not supporting line_offset should fall back (lines 1902-1904)."""
