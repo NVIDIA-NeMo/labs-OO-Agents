@@ -967,6 +967,22 @@ class TestFormatErrorCustomFormatter:
 
         assert result == "current[4/321]: Cell In[7], line 1\nValueError: original"
 
+    def test_custom_formatter_without_line_offset_receives_worker_diagnostic(self):
+        class TransportFormatter:
+            def format(self, error, code=None, *, formatted_error=""):
+                return f"transported: {formatted_error}"
+
+        strat = CodeActStrategy(error_formatter=TransportFormatter())
+        result = strat._format_error(
+            ValueError("surrogate"),
+            "bad()",
+            line_offset=4,
+            formatted_error="Cell In[7], line 1\nValueError: original",
+            max_error=321,
+        )
+
+        assert result == "transported: Cell In[7], line 1\nValueError: original"
+
     def test_custom_formatter_without_inspectable_signature_uses_legacy_shape(self, monkeypatch):
         class OpaqueFormatter:
             calls = 0

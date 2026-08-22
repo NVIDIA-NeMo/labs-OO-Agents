@@ -2832,6 +2832,19 @@ Standard Python builtins and agent instance (`self`) are available."""
                     },
                 ),
                 ((error, code), {"line_offset": line_offset, "formatted_error": formatted_error}),
+                (
+                    (error, code),
+                    {
+                        "formatted_error": formatted_error,
+                        "max_error": max_error,
+                        "tail_chars": tail_chars,
+                    },
+                ),
+                (
+                    (error, code),
+                    {"formatted_error": formatted_error, "max_error": max_error},
+                ),
+                ((error, code), {"formatted_error": formatted_error}),
                 ((error, code), {"line_offset": line_offset}),
                 ((error, code), {}),
             )
