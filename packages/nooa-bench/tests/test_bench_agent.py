@@ -211,8 +211,15 @@ def test_bench_agent_python_tools_follow_agent_attribute_order():
     assert "class RepoTools" in python_tools_doc
     assert "def symbols(" in python_tools_doc
     assert "class TodoManager" in python_tools_doc
+    assert "class MethodWriting" in python_tools_doc
+    assert "@strategy(PredictStrategy())" in python_tools_doc
+    assert "asyncio.gather" in python_tools_doc
+    assert agent.methodwriting._agent is agent
     assert python_tools_doc.index("class ShellTools") < python_tools_doc.index("class RepoTools")
     assert python_tools_doc.index("class RepoTools") < python_tools_doc.index("class TodoManager")
+    assert python_tools_doc.index("class TodoManager") < python_tools_doc.index(
+        "class MethodWriting"
+    )
 
 
 def test_bench_agent_wires_repo_to_shell_session():
@@ -278,11 +285,12 @@ async def test_run_evaluation_clears_stale_todos(monkeypatch, tmp_path):
     assert result["success"] is True
 
 
-def test_bounded_worker_has_no_duplicate_plan_or_persistent_vars():
-    """Worker isolation excludes controller plan and durable session state."""
+def test_bounded_worker_has_only_task_local_todos_and_no_persistent_vars(tmp_path):
+    """Workers can annotate delegated tasks without inheriting the controller backlog."""
     from nooa_cli.coding.delegation import CodingWorker
 
-    assert not hasattr(CodingWorker, "todo")
+    worker = CodingWorker(llm=FakeLLMClient(), cwd=tmp_path)
+    assert worker.todo.list_todos() == []
     assert not hasattr(CodingWorker, "v")
 
 
@@ -338,6 +346,68 @@ async def test_delegate_launches_isolated_subagent_of_same_type(agent_type, monk
     assert observed["cwd"] == str(tmp_path)
     assert observed["depth"] == 1
     assert observed["closed"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
+async def test_delegate_todo_merges_worker_notes(agent_type, monkeypatch, tmp_path):
+    expected = TaskResult(
+        solution_description="Inspected parser.",
+        evidence="Focused check passed.",
+        command_to_verify="pytest -q tests/test_parser.py",
+    )
+
+    async def fake_solve(self, description: str):
+        delegated = self.todo.list_todos()[0]
+        assert delegated is not task
+        assert description.startswith(f"{task.title}\n\nWork on todo {task.id}.")
+        self.todo.comment(delegated, "worker finding")
+        self.todo.set_var(delegated, "path", "parser.py")
+        return expected
+
+    async def fake_close(self):
+        pass
+
+    monkeypatch.setattr(bench_agent_module, "ShellTools", _FakeShell)
+    monkeypatch.setattr(bench_agent_module, "RepoTools", _FakeRepo)
+    monkeypatch.setattr(agent_type, "_solve_task", fake_solve)
+    monkeypatch.setattr(_FakeShell, "close", fake_close, raising=False)
+    agent = agent_type(llm=FakeLLMClient(), working_dir=str(tmp_path))
+    task = agent.todo.add("Inspect parser", notes="focus on errors")
+
+    result = await agent.delegate(task)
+
+    assert result == expected
+    assert [comment.body for comment in task.comments] == ["worker finding"]
+    assert task.v.path == "parser.py"
+
+
+@pytest.mark.asyncio
+async def test_delegate_todo_does_not_merge_when_close_fails(monkeypatch, tmp_path):
+    expected = TaskResult(
+        solution_description="Inspected parser.",
+        evidence="Focused check passed.",
+        command_to_verify="pytest -q tests/test_parser.py",
+    )
+
+    async def fake_solve(self, description: str):
+        self.todo.comment(self.todo.list_todos()[0], "worker finding")
+        return expected
+
+    async def fake_close(self):
+        raise RuntimeError("close failed")
+
+    monkeypatch.setattr(bench_agent_module, "ShellTools", _FakeShell)
+    monkeypatch.setattr(bench_agent_module, "RepoTools", _FakeRepo)
+    monkeypatch.setattr(BenchAgent, "_solve_task", fake_solve)
+    monkeypatch.setattr(_FakeShell, "close", fake_close, raising=False)
+    agent = BenchAgent(llm=FakeLLMClient(), working_dir=str(tmp_path))
+    task = agent.todo.add("Inspect parser")
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        await agent.delegate(task)
+
+    assert task.comments == []
 
 
 @pytest.mark.asyncio

@@ -22,7 +22,7 @@ from nooa.runtime.channels import JobHandle, _ChannelReader
 from nooa.skill_registry import SkillRegistry
 from nooa.storage.markers import nosnapshot
 from nooa.strategies import CodeActStrategy, PredictStrategy
-from nooa.tools import SkillWriting, TodoManager
+from nooa.tools import MethodWriting, SkillWriting, Todo, TodoManager
 from nooa.tools.shell_tools import ShellTools
 from nooa_cli.coding.activity import ActivityShellTools
 from nooa_cli.coding.delegation import CodingWorker
@@ -37,7 +37,7 @@ __all__ = ["CodingAgent", "RespondReason"]
 
 
 class CodingAgent(InteractiveAgent):
-    """A careful software-development agent working in one local repository.
+    """You are a careful software-development agent working in one local repository.
 
     Inspect repository instructions and relevant code before editing. Preserve
     unrelated worktree changes. Use the shell for files and commands, the repo
@@ -121,7 +121,10 @@ class CodingAgent(InteractiveAgent):
         self.skills.register("nemo.repo", self.repo)
         self.skills.register("nemo.todo", self.todo)
         self.skills.register("nemo.libwriting", self.libs)
-        self.skills.activate(["nemo.shell", "nemo.repo", "nemo.todo", "nemo.libwriting"])
+        self.skills.register("nemo.methodwriting", MethodWriting())
+        self.skills.activate(
+            ["nemo.shell", "nemo.repo", "nemo.todo", "nemo.libwriting", "nemo.methodwriting"]
+        )
         # Installed ``nooa.skills`` entry points are part of the shared host
         # surface. Load them so hosts can expose ``@slash_command`` methods,
         # but leave them inactive until the user opts in with ``/skills``.
@@ -169,31 +172,54 @@ class CodingAgent(InteractiveAgent):
             f"<opening_user_message>\n{opening}\n</opening_user_message>"
         )
 
-    async def delegate(self, objective: str, supplied_context: Any = None) -> str:
+    async def delegate(self, objective: str | Todo, supplied_context: Any = None) -> str:
         """Run one isolated coding worker and return its concise report.
 
-        Use for bounded exploration, diagnosis, review, or independently verifiable
-        implementation. State the outcome, scope, and whether edits are allowed in
-        ``objective``. Pass only necessary context. Await this only when its report is
-        required before continuing; otherwise prefer ``spawn()``. Inspect and integrate
-        the report because this controller retains final verification ownership.
+        Pass a :class:`Todo` to make it the worker's task. The worker receives an
+        independent task copy and can record comments or variables with ``self.todo``;
+        those changes are merged into this agent's Todo before this method returns.
+        String objectives retain the existing behavior.
+
+        Use delegation for bounded exploration, diagnosis, review, or independently
+        verifiable implementation. Await this only when its report is required before
+        continuing; otherwise prefer ``spawn()``. Inspect and integrate the report
+        because this controller retains final verification ownership.
         """
+        todo_base = self.todo._copy_todo(objective) if isinstance(objective, Todo) else None
+        worker_todos = TodoManager._with_todo(todo_base) if todo_base is not None else None
         worker = self._worker_type(
             llm=self.llm,
             cwd=self.shell.cwd,
             init_command=getattr(self, "_worker_init_command", None),
+            **({"todo": worker_todos} if worker_todos is not None else {}),
         )
+        worker_objective = todo_base.title if todo_base is not None else objective
+        worker_context = worker_todos.get(todo_base) if todo_base is not None else supplied_context
+        if todo_base is not None and supplied_context is not None:
+            worker_context = {"todo": worker_context, "context": supplied_context}
         try:
-            return await worker.investigate(objective, supplied_context)
+            report = await worker.investigate(worker_objective, worker_context)
+            updated = worker_todos.get(todo_base) if todo_base is not None else None
+            if todo_base is not None and updated is None:
+                raise RuntimeError(f"delegated todo {todo_base.id!r} disappeared")
         finally:
             await worker.close()
+        if todo_base is not None:
+            self.todo._merge_todo(updated, base=todo_base)
+        return report
 
-    async def _delegation_report(self, objective: str, supplied_context: Any) -> dict[str, str]:
-        """Return a correlatable queue item for one background delegation."""
-        return {
-            "objective": objective,
+    async def _delegation_report(
+        self, objective: str | Todo, supplied_context: Any
+    ) -> dict[str, str]:
+        """Return a correlatable queue item after delegation and Todo merging."""
+        objective_text = objective.title if isinstance(objective, Todo) else objective
+        result = {
+            "objective": objective_text,
             "report": await self.delegate(objective, supplied_context),
         }
+        if isinstance(objective, Todo):
+            result["todo_id"] = objective.id
+        return result
 
     @staticmethod
     def _delegation_label(objective: str, label: str | None = None, max_length: int = 80) -> str:
@@ -209,7 +235,7 @@ class CodingAgent(InteractiveAgent):
 
     def spawn(
         self,
-        objective: str,
+        objective: str | Todo,
         supplied_context: Any = None,
         *,
         label: str | None = None,
@@ -227,10 +253,11 @@ class CodingAgent(InteractiveAgent):
         notification retain the complete text. Pass ``label`` to override the display
         text without changing the worker objective.
         """
+        objective_text = objective.title if isinstance(objective, Todo) else objective
         return self.queue_manager.spawn(
             self._delegation_report(objective, supplied_context),
             channel="delegates",
-            label=self._delegation_label(objective, label),
+            label=self._delegation_label(objective_text, label),
         )
 
     def get_summarization_status(self) -> dict[str, Any]:

@@ -140,12 +140,10 @@ async def test_execution_context_lists_initial_locals():
     agent = TestAgent()
     session_locals = {"prior_value": 7}
     assert await agent.answer("hello", _session_locals=session_locals) == "hello"
-    system_prompt = "\n".join(
-        str(message.get("content", ""))
-        for message in fake_llm.last_messages
-        if message.get("role") == "system"
+    rendered_context = "\n".join(
+        str(message.get("content", "")) for message in fake_llm.last_messages
     )
-    locals_block = system_prompt.split("## Locals", 1)[1]
+    locals_block = rendered_context.split("## Locals", 1)[1]
     assert "Available in the next cell:" in locals_block
     assert "- `_call`" not in locals_block
     assert "- `Out`" in locals_block
@@ -170,11 +168,9 @@ async def test_execution_context_lists_locals_created_by_previous_cells():
 
     agent = TestAgent()
     assert await agent.answer("hello") == "HELLO"
-    system_prompt = "\n".join(
-        str(message.get("content", ""))
-        for message in fake_llm.last_messages
-        if message.get("role") == "system"
+    rendered_context = "\n".join(
+        str(message.get("content", "")) for message in fake_llm.last_messages
     )
-    locals_block = system_prompt.split("## Locals", 1)[1]
+    locals_block = rendered_context.split("## Locals", 1)[1]
     assert "- `question`" in locals_block
     assert "- `working_value`" in locals_block
