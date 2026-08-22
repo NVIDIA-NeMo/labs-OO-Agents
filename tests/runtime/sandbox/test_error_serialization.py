@@ -168,6 +168,17 @@ def test_broken_exception_string_still_crosses_worker_boundary() -> None:
     assert dto.error.formatted_error == "BrokenStringError: BrokenStringError"
 
 
+@pytest.mark.parametrize("invalid_limit", [0, -1, True])
+def test_invalid_error_limit_falls_back_to_default(invalid_limit: object) -> None:
+    dto = result_to_dto(
+        _result_with_error(RuntimeError("x" * 20_000)),
+        max_error=invalid_limit,  # type: ignore[arg-type]
+    )
+
+    assert dto.error is not None
+    assert "Showing first 5,000 and last 5,000 chars" in dto.error.message
+
+
 def test_error_dto_text_respects_configured_capture_limit_before_transport_limit() -> None:
     """Text above a custom content budget is truncated even if the DTO could carry it."""
     max_error = 100
@@ -275,20 +286,15 @@ def test_base_exception_from_exception_string_does_not_escape_serialization(rais
     assert dto.error.formatted_error == "BrokenStringError: BrokenStringError"
 
 
-@pytest.mark.parametrize(
-    ("returned_value", "expected"),
-    [
-        (lambda: None, "Return value of type 'function' is not picklable"),
-    ],
-)
-def test_unpicklable_ordinary_return_becomes_serialization_error(
-    returned_value: object, expected: str
-) -> None:
+def test_unpicklable_ordinary_return_becomes_serialization_error() -> None:
+    def returned_value() -> None:
+        pass
+
     dto = result_to_dto(ExecutionResult(returned_value=returned_value))
     result = dto_to_result(dto)
 
     assert isinstance(result.error, CellSerializationError)
-    assert expected in str(result.error)
+    assert "Return value of type 'function' is not picklable" in str(result.error)
     assert "sandbox boundary" in str(result.error)
     assert result.returned_value is _NO_RETURN
 

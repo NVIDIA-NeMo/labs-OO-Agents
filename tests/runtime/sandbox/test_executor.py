@@ -82,6 +82,12 @@ class _ToolAgent(Agent, llm=FakeLLMClient()):
 
         raise _ReturnResultSignal(result={"result": lambda: None})
 
+    def finish_none(self) -> None:
+        """Raise a completion signal carrying a legitimate ``None`` payload."""
+        from nooa.strategies.codeact import _ReturnResultSignal
+
+        raise _ReturnResultSignal(result=None)  # type: ignore[arg-type]
+
 
 def _return_result_builtins() -> dict:
     from nooa.strategies.codeact import _ReturnResultSignal
@@ -295,6 +301,17 @@ async def test_brokered_tool_raising_signal_flows_as_signal():
         assert res.error is None
         assert isinstance(res.signal, _ReturnResultSignal)
         assert res.signal.result == {"result": 99}
+    finally:
+        await ex.aclose()
+
+
+async def test_brokered_signal_with_none_payload_is_preserved():
+    ex = _executor()
+    try:
+        res = await _run(ex, "self.finish_none()")
+        assert res.error is None
+        assert res.signal is not None
+        assert res.signal.result is None
     finally:
         await ex.aclose()
 
@@ -632,6 +649,22 @@ async def test_wallclock_timeout_kills_cpu_bound_cell():
         assert res2.returned_value == 42
     finally:
         await ex.aclose()
+
+
+@pytest.mark.parametrize("invalid_limit", [0, -1, True])
+def test_executor_invalid_error_budget_uses_default(invalid_limit):
+    ex = SandboxedExecutor(
+        _ToolAgent(),
+        SandboxConfig(require=False),
+        cell_timeout=10.0,
+        max_error=invalid_limit,
+    )
+    try:
+        from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
+
+        assert ex._max_error == DEFAULT_TRUNCATION_CONFIG.capture.max_error
+    finally:
+        ex.close_sync()
 
 
 async def test_worker_error_uses_executor_error_budget():

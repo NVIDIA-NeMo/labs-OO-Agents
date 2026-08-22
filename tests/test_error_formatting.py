@@ -1034,7 +1034,7 @@ class TestFormatterReviewRegressions:
         assert "in helper" in result
         assert "raise ValueError" in result
 
-    def test_user_exception_cannot_spoof_worker_diagnostic(self):
+    def test_non_string_call_hint_is_ignored(self):
         error = RuntimeError("real failure")
         error._nooa_call_hint = {"forged": "ValueError: forged success"}
 
@@ -1102,12 +1102,37 @@ class TestFormatterReviewRegressions:
         assert "Showing first 50 and last 50 chars" in result
         assert result.endswith("X" * 50 + "\n</truncated-output>")
 
+    def test_pretruncated_error_with_large_metadata_is_hard_bounded(self):
+        dropped = 10**1_000
+        total = dropped + 102
+        envelope = (
+            "<truncated-output>\n"
+            f"Output too large ({total} chars). Showing first 51 and last 51 chars.\n"
+            f"The {dropped} chars in the middle are not recoverable.\n\n"
+            f"{'H' * 51}\n\n"
+            f"... {dropped} chars not shown ...\n\n"
+            f"{'T' * 51}\n"
+            "</truncated-output>"
+        )
+
+        result = format_error_for_llm(
+            RuntimeError("surrogate"),
+            formatted_error=envelope,
+            max_error=100,
+        )
+
+        assert len(result) <= 1_124
+        assert result.endswith("\n</truncated-output>")
+
     def test_very_large_diagnostic_is_bounded_with_tail_preserved(self):
         result = format_error_for_llm(RuntimeError("X" * 5_000_000))
 
         from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
 
-        tail = DEFAULT_TRUNCATION_CONFIG.capture.max_error // 2
+        max_error = DEFAULT_TRUNCATION_CONFIG.capture.max_error
+        configured_tail = DEFAULT_TRUNCATION_CONFIG.capture.tail
+        tail = max_error // 2 if configured_tail is None else configured_tail
+        head = max_error - tail
         assert "<truncated-output>" in result
-        assert f"Showing first {tail:,} and last {tail:,} chars" in result
+        assert f"Showing first {head:,} and last {tail:,} chars" in result
         assert result.endswith("X" * tail + "\n</truncated-output>")

@@ -2020,6 +2020,26 @@ class TestPurePythonSendExecutionError:
         assert "Fix your syntax." in event.error
 
     @pytest.mark.asyncio
+    async def test_syntax_guidance_is_included_inside_error_budget(self):
+        """The final diagnostic stays bounded after appending syntax guidance."""
+        from nooa.config.truncation_config import CaptureConfig, TruncationConfig
+
+        strat = PurePythonStrategy()
+        rt = MagicMock()
+        rt.event_manager = MagicMock()
+        rt.truncation_config = TruncationConfig(
+            capture=CaptureConfig(max_stdout=100, max_stderr=100, max_error=100)
+        )
+        strat.error_syntax = AsyncMock(return_value="G" * 1_000)
+
+        await strat._send_execution_error(rt, SyntaxError("invalid syntax"), "bad code")
+
+        event = rt.event_manager.add.call_args.args[0]
+        assert event.error.count("<truncated-output>") == 1
+        assert "Showing first 50 and last 50 chars" in event.error
+        assert event.error.endswith("G" * 50 + "\n</truncated-output>")
+
+    @pytest.mark.asyncio
     async def test_send_execution_error_preserves_source_caret_offset_and_both_streams(self):
         """PurePython uses the same structured, source-aware contract as CodeAct."""
         import linecache

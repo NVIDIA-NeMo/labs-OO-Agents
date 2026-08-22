@@ -23,6 +23,7 @@ from multiprocessing.process import BaseProcess
 from typing import Any
 
 from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
+from nooa.errors.formatting import _hard_bound_text
 from nooa.events import ExecutionResult
 from nooa.runtime.sandbox.config import ResolvedSpec, SandboxConfig, resolve_spec
 from nooa.runtime.sandbox.errors import (
@@ -50,12 +51,7 @@ def _bounded_text(value: object, fallback: str, *, limit: int) -> str:
         text = str(value)
     except BaseException:
         text = fallback
-    if len(text) <= limit:
-        return text
-    marker = "...<truncated>"
-    if limit <= len(marker):
-        return marker[:limit]
-    return text[: limit - len(marker)] + marker
+    return _hard_bound_text(text, limit)
 
 
 _CAPS_CACHE: Capabilities | None = None
@@ -103,7 +99,9 @@ class SandboxedExecutor:
         self._framework_builtins = framework_builtins or {}
         self._restrictions = restrictions
         requested_max_error = (
-            DEFAULT_TRUNCATION_CONFIG.capture.max_error if max_error is None else max_error
+            max_error
+            if isinstance(max_error, int) and not isinstance(max_error, bool) and max_error > 0
+            else DEFAULT_TRUNCATION_CONFIG.capture.max_error
         )
         self._max_error = min(requested_max_error, _MAX_BROKER_DIAGNOSTIC)
         self._error_tail = error_tail
@@ -431,11 +429,13 @@ class SandboxedExecutor:
             # ARC submit_actions -> return_result). Marshal it back to the cell so
             # it re-raises there and flows through the normal signal path.
             payload = getattr(sig, "result", None)
+            payload_is_picklable = is_picklable(payload)
             return {
                 "ok": False,
                 "error_type": "ExecutionSignal",
                 "error": _bounded_text(sig, "ExecutionSignal", limit=self._max_error),
-                "signal_result": payload if is_picklable(payload) else None,
+                "signal_result": payload if payload_is_picklable else None,
+                "signal_result_dropped": not payload_is_picklable,
             }
         except CellSerializationError as exc:
             return {

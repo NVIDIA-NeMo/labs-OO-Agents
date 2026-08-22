@@ -437,6 +437,18 @@ def _bound_diagnostic(
     return stream.getvalue()
 
 
+def _hard_bound_text(text: str, limit: int, *, closing: str = "") -> str:
+    """Cap text at ``limit``, optionally preserving a structural closing marker."""
+    if len(text) <= limit:
+        return text
+    marker = "...<truncated>"
+    suffix = closing if closing and text.endswith(closing) else ""
+    keep = limit - len(marker) - len(suffix)
+    if keep > 0:
+        return text[:keep] + marker + suffix
+    return marker[:limit]
+
+
 def _bound_preformatted_diagnostic(
     text: str,
     max_error: int | None,
@@ -455,11 +467,14 @@ def _bound_preformatted_diagnostic(
     total_text, old_head_text, old_tail_text, dropped_text, head, repeated_text, tail_text = (
         match.groups()
     )
-    total = int(total_text.replace(",", ""))
-    old_head_chars = int(old_head_text.replace(",", ""))
-    old_tail_chars = int(old_tail_text.replace(",", ""))
-    dropped = int(dropped_text.replace(",", ""))
-    repeated_dropped = int(repeated_text.replace(",", ""))
+    try:
+        total = int(total_text.replace(",", ""))
+        old_head_chars = int(old_head_text.replace(",", ""))
+        old_tail_chars = int(old_tail_text.replace(",", ""))
+        dropped = int(dropped_text.replace(",", ""))
+        repeated_dropped = int(repeated_text.replace(",", ""))
+    except ValueError:
+        return _bound_diagnostic(text, max_error, tail_chars)
     if (
         old_head_chars != len(head)
         or old_tail_chars != len(tail_text)
@@ -471,14 +486,18 @@ def _bound_preformatted_diagnostic(
     desired_tail = limit // 2 if tail is None else tail
     desired_head = limit - desired_tail
     if old_head_chars <= desired_head and old_tail_chars <= desired_tail:
-        return text
+        return _hard_bound_text(
+            text,
+            limit + 1_024,
+            closing="\n</truncated-output>",
+        )
 
     # The original middle is already gone, so retain as much of each requested
     # window as remains available and accurately describe the larger omission.
     bounded_head = head[:desired_head]
     bounded_tail = tail_text[-desired_tail:] if desired_tail else ""
     new_dropped = total - len(bounded_head) - len(bounded_tail)
-    return (
+    rebuilt = (
         "<truncated-output>\n"
         f"Output too large ({total:,} chars). "
         f"Showing first {len(bounded_head):,} and last {len(bounded_tail):,} chars.\n"
@@ -487,6 +506,11 @@ def _bound_preformatted_diagnostic(
         f"... {new_dropped:,} chars not shown ...\n\n"
         f"{bounded_tail}\n"
         "</truncated-output>"
+    )
+    return _hard_bound_text(
+        rebuilt,
+        limit + 1_024,
+        closing="\n</truncated-output>",
     )
 
 

@@ -25,7 +25,7 @@ from typing import Any
 
 from nooa.agentdoc import TruncatingStringIO
 from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
-from nooa.errors.formatting import _bound_preformatted_diagnostic
+from nooa.errors.formatting import _bound_preformatted_diagnostic, _hard_bound_text
 from nooa.runtime.sandbox.errors import CellSerializationError
 
 # ``TruncatingStringIO`` adds a human-readable envelope around retained
@@ -37,18 +37,12 @@ _MAX_ERROR_TRANSPORT = _MAX_ERROR_CONTENT + 1_024
 
 def _effective_error_limit(max_error: int | None) -> int:
     """Return the configured content budget clamped to the IPC safety ceiling."""
-    requested = _MAX_ERROR_CONTENT if max_error is None else max_error
+    requested = (
+        max_error
+        if isinstance(max_error, int) and not isinstance(max_error, bool) and max_error > 0
+        else _MAX_ERROR_CONTENT
+    )
     return min(requested, _MAX_ERROR_CONTENT)
-
-
-def _hard_bound_text(value: str, limit: int) -> str:
-    """Cap arbitrary text without ever exceeding ``limit`` characters."""
-    if len(value) <= limit:
-        return value
-    marker = "...<truncated>"
-    if limit <= len(marker):
-        return marker[:limit]
-    return value[: limit - len(marker)] + marker
 
 
 def _bounded_error_message(

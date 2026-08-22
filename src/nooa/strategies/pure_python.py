@@ -885,7 +885,13 @@ class PurePythonStrategy(CompositeStrategy):
             tail_chars=runtime.truncation_config.capture.tail,
         )
         if isinstance(error, SyntaxError):
-            error_msg = f"{error_msg}\n\n{await self.error_syntax(runtime)}"
+            from nooa.errors.formatting import _bound_diagnostic
+
+            error_msg = _bound_diagnostic(
+                f"{error_msg}\n\n{await self.error_syntax(runtime)}",
+                runtime.truncation_config.capture.max_error,
+                runtime.truncation_config.capture.tail,
+            )
 
         runtime.event_manager.add(
             PythonOutput(

@@ -21,7 +21,7 @@ import pickle
 import threading
 import weakref
 from multiprocessing.connection import Connection
-from typing import Any
+from typing import Any, cast
 
 from nooa.errors.formatting import IPythonErrorFormatter
 from nooa.runtime.sandbox.cell_core import run_cell_source
@@ -133,12 +133,12 @@ def _raise_broker_error(response: dict[str, Any]) -> None:
         from nooa.strategies.codeact import _ReturnResultSignal
 
         signal_result = response.get("signal_result")
-        if signal_result is None:
+        if response.get("signal_result_dropped", False):
             raise CellSerializationError(
                 "A control-flow signal carried a value that could not cross the "
                 "sandbox boundary. Return a JSON/pickle-safe value instead."
             )
-        raise _ReturnResultSignal(result=signal_result)
+        raise _ReturnResultSignal(result=cast(Any, signal_result))
     if err_type == "CellSerializationError":
         raise CellSerializationError(message)
     exc_cls = getattr(_bi, err_type, ParentToolError)
