@@ -2813,42 +2813,41 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # arguments, so invoke that shape once rather than speculatively
                 # executing and retrying after a body-level TypeError.
                 return formatter(error, code)
-            candidates: tuple[tuple[tuple[Any, ...], dict[str, Any]], ...] = (
-                (
-                    (error, code),
-                    {
-                        "line_offset": line_offset,
-                        "formatted_error": formatted_error,
-                        "max_error": max_error,
-                        "tail_chars": tail_chars,
-                    },
-                ),
-                (
-                    (error, code),
-                    {
-                        "line_offset": line_offset,
-                        "formatted_error": formatted_error,
-                        "max_error": max_error,
-                    },
-                ),
-                ((error, code), {"line_offset": line_offset, "formatted_error": formatted_error}),
-                (
-                    (error, code),
-                    {
-                        "formatted_error": formatted_error,
-                        "max_error": max_error,
-                        "tail_chars": tail_chars,
-                    },
-                ),
-                (
-                    (error, code),
-                    {"formatted_error": formatted_error, "max_error": max_error},
-                ),
-                ((error, code), {"formatted_error": formatted_error}),
-                ((error, code), {"line_offset": line_offset}),
-                ((error, code), {}),
+            optional_values = {
+                "line_offset": line_offset,
+                "formatted_error": formatted_error,
+                "max_error": max_error,
+                "tail_chars": tail_chars,
+            }
+            accepts_kwargs = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in signature.parameters.values()
             )
-            for args, kwargs in candidates:
+            # Prefer named dispatch so a valid second parameter such as
+            # ``formatted_error`` is not mistaken for the legacy positional
+            # ``code`` argument. Fall back to two positional arguments only for
+            # positional-only or differently named legacy signatures.
+            for args in ((error,), (error, code)):
+                try:
+                    positional = signature.bind_partial(*args)
+                except TypeError:
+                    continue
+                kwargs = {
+                    name: value
+                    for name, value in optional_values.items()
+                    if name not in positional.arguments
+                    and (
+                        accepts_kwargs
+                        or (
+                            name in signature.parameters
+                            and signature.parameters[name].kind
+                            in (
+                                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                inspect.Parameter.KEYWORD_ONLY,
+                            )
+                        )
+                    )
+                }
                 try:
                     signature.bind(*args, **kwargs)
                 except TypeError:

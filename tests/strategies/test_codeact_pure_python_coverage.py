@@ -983,6 +983,46 @@ class TestFormatErrorCustomFormatter:
 
         assert result == "transported: Cell In[7], line 1\nValueError: original"
 
+    def test_custom_formatter_positional_formatted_error_is_not_mistaken_for_code(self):
+        class TransportFormatter:
+            def format(self, error, formatted_error=""):
+                return formatted_error
+
+        strat = CodeActStrategy(error_formatter=TransportFormatter())
+        result = strat._format_error(
+            ValueError("surrogate"),
+            "source code",
+            formatted_error="Cell In[7], line 1\nValueError: original",
+        )
+
+        assert result == "Cell In[7], line 1\nValueError: original"
+
+    def test_custom_formatter_positional_tail_is_not_mistaken_for_code(self):
+        class TailFormatter:
+            def format(self, error, tail_chars=None):
+                return f"tail={tail_chars}"
+
+        strat = CodeActStrategy(error_formatter=TailFormatter())
+
+        assert strat._format_error(ValueError("x"), "source code", tail_chars=17) == "tail=17"
+
+    def test_custom_formatter_receives_supported_optional_keyword_subset(self):
+        class PartialFormatter:
+            def format(self, error, code=None, *, formatted_error="", tail_chars=None):
+                return f"partial[{tail_chars}]: {formatted_error}"
+
+        strat = CodeActStrategy(error_formatter=PartialFormatter())
+        result = strat._format_error(
+            ValueError("surrogate"),
+            "bad()",
+            line_offset=4,
+            formatted_error="Cell In[7], line 1\nValueError: original",
+            max_error=321,
+            tail_chars=17,
+        )
+
+        assert result == "partial[17]: Cell In[7], line 1\nValueError: original"
+
     def test_custom_formatter_without_inspectable_signature_uses_legacy_shape(self, monkeypatch):
         class OpaqueFormatter:
             calls = 0

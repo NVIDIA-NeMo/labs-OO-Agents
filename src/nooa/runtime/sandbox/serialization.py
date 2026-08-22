@@ -180,25 +180,26 @@ def result_to_dto(
             except (TypeError, ValueError):
                 signature = None
             if signature is not None:
-                candidates = (
-                    {
-                        "line_offset": line_offset,
-                        "max_error": effective_max_error,
-                        "tail_chars": tail_chars,
-                    },
-                    {"line_offset": line_offset, "max_error": effective_max_error},
-                    {"line_offset": line_offset},
-                    {"max_error": effective_max_error, "tail_chars": tail_chars},
-                    {"max_error": effective_max_error},
-                    {},
+                optional_values = {
+                    "line_offset": line_offset,
+                    "max_error": effective_max_error,
+                    "tail_chars": tail_chars,
+                }
+                accepts_kwargs = any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in signature.parameters.values()
                 )
-                for candidate in candidates:
-                    try:
-                        signature.bind(err, **candidate)
-                    except TypeError:
-                        continue
-                    formatter_kwargs = candidate
-                    break
+                formatter_kwargs = {
+                    name: value
+                    for name, value in optional_values.items()
+                    if accepts_kwargs
+                    or (
+                        name in signature.parameters
+                        and signature.parameters[name].kind
+                        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+                    )
+                }
+                signature.bind(err, **formatter_kwargs)
             formatted_error = error_formatter(err, **formatter_kwargs)
         except BaseException:
             formatted_error = f"{error_type}: {message}"

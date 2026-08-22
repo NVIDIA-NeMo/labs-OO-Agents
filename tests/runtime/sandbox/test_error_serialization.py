@@ -107,6 +107,27 @@ def test_error_only_worker_formatter_remains_supported() -> None:
     assert str(calls[0]) == "failure"
 
 
+def test_worker_formatter_receives_supported_optional_keyword_subset() -> None:
+    calls = []
+
+    def partial_formatter(error: Exception, *, tail_chars: int | None = None) -> str:
+        calls.append((error, tail_chars))
+        return f"partial worker diagnostic with tail {tail_chars}"
+
+    dto = result_to_dto(
+        _result_with_error(ValueError("failure"), line_offset=3),
+        error_formatter=partial_formatter,
+        max_error=100,
+        tail_chars=17,
+    )
+
+    assert dto.error is not None
+    assert dto.error.formatted_error == "partial worker diagnostic with tail 17"
+    assert len(calls) == 1
+    assert isinstance(calls[0][0], ValueError)
+    assert calls[0][1] == 17
+
+
 def test_legacy_worker_formatter_remains_supported_with_configured_limit() -> None:
     calls = []
 
