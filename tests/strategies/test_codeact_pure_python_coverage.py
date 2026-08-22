@@ -2750,6 +2750,7 @@ class TestCodeActExecutePrefillStep:
         assert "x" in session.session_locals
         assert session.session_locals["x"] == 42
         emitted = [call.args[0] for call in em.add.call_args_list]
+        assert emitted
         assert all(event.metadata["prefill_type"] == "pre_ellipsis" for event in emitted)
 
     @pytest.mark.asyncio
