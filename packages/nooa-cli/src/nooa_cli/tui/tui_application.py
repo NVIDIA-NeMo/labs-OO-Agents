@@ -2409,7 +2409,7 @@ class TUIApplication:
                 break
 
     def complete_pending_input_handoff(self, text: str) -> None:
-        """Retire the FIFO submissions represented by one consumed queue item."""
+        """Retire the submissions represented by one consumed queue item."""
         combined = ""
         consumed = 0
         for handoff in self._pending_input_handoff:
@@ -2418,6 +2418,13 @@ class TUIApplication:
             if combined == text or text.endswith(f"\n{combined}"):
                 del self._pending_input_handoff[:consumed]
                 break
+        else:
+            # A callback can arrive after another consumer has advanced the
+            # queue. Retire the matching admission without dropping older rows.
+            for index, handoff in enumerate(self._pending_input_handoff):
+                if handoff.text == text or text.endswith(f"\n{handoff.text}"):
+                    del self._pending_input_handoff[index]
+                    break
         if self._app.is_running:
             self._app.invalidate()
 

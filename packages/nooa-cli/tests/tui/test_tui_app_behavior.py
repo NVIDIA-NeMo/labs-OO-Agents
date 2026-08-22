@@ -803,6 +803,22 @@ async def test_coalesced_accepted_echo_retires_all_submission_handoffs():
         assert h.app._pending_input_handoff == []
 
 
+@pytest.mark.parametrize("echo", ["two", "runtime-prefix\ntwo"])
+async def test_out_of_order_echo_retires_only_matching_handoff(echo: str) -> None:
+    from nooa_cli.tui.tui_application import TUIApplication, _PendingInputHandoff
+
+    app = TUIApplication(display_mode="fullscreen")
+    app._pending_input_handoff = [
+        _PendingInputHandoff("one"),
+        _PendingInputHandoff("two"),
+        _PendingInputHandoff("three"),
+    ]
+
+    app.complete_pending_input_handoff(echo)
+
+    assert [item.text for item in app._pending_input_handoff] == ["one", "three"]
+
+
 async def test_coalesced_echo_with_runtime_prefix_retires_tui_handoffs():
     agent = _blocking_agent()
     async with TUIHarness(agent=agent) as h:
