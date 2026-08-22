@@ -1462,6 +1462,48 @@ async def test_fullscreen_drag_release_over_transient_notice_finishes_copy(monke
     assert copied == ["zero\none\ntwo"]
 
 
+def test_transcript_control_reformats_when_frame_height_changes_after_measurement() -> None:
+    from prompt_toolkit.application.current import set_app
+
+    app = _make_fullscreen_app()
+    app.emit_block("one\ntwo\n")
+    assert app._output_window is not None
+    control = app._output_window.content
+
+    def lines(content) -> list[str]:
+        return [
+            "".join(text for _style, text in content.get_line(index))
+            for index in range(content.line_count)
+        ]
+
+    with set_app(app._app):
+        app._app.render_counter += 1
+        assert lines(control.create_content(20, 3)) == ["one", "two", " "]
+
+        # A newly occupied status row shrinks the transcript in the same frame.
+        # prompt_toolkit measures with height=None before painting at height=2.
+        app._status_region_occupied = True
+        app._app.render_counter += 1
+        control.preferred_height(20, 3, False, None)
+        assert lines(control.create_content(20, 2)) == ["one", "two"]
+
+        # Expanding the multiline composer shrinks the transcript once more;
+        # typing on that line keeps the same geometry on the following frame.
+        app._app.render_counter += 1
+        control.preferred_height(20, 2, False, None)
+        assert lines(control.create_content(20, 1)) == ["two"]
+        app._app.render_counter += 1
+        control.preferred_height(20, 1, False, None)
+        assert lines(control.create_content(20, 1)) == ["two"]
+
+        # When status chrome disappears, the synthetic trailing row returns in
+        # the same frame rather than one repaint later.
+        app._status_region_occupied = False
+        app._app.render_counter += 1
+        control.preferred_height(20, 1, False, None)
+        assert lines(control.create_content(20, 2)) == ["two", " "]
+
+
 def test_transcript_control_uses_current_frame_height_before_formatting() -> None:
     from prompt_toolkit.application.current import set_app
 

@@ -227,6 +227,7 @@ class _FullscreenTranscriptControl(FormattedTextControl):
         self._link_callback = link_callback
         self._render_width: int | None = None
         self._render_height: int | None = None
+        self._formatted_geometry: tuple[int, int | None] | None = None
         self._dragging = False
         self._drag_moved = False
         self._drag_position = (0, 0)
@@ -240,12 +241,17 @@ class _FullscreenTranscriptControl(FormattedTextControl):
         return self._render_width, self._render_height
 
     def create_content(self, width: int, height: int | None):
-        # Window supplies current-frame geometry before requesting fragments.
-        # This avoids reusing Window.render_info from the previous frame on
-        # height-only resize and on the first frame after closing a subview.
+        # ``preferred_height`` asks for content with ``height=None`` before the
+        # concrete window height is allocated. Keep that measurement useful,
+        # but do not let its render-counter cache poison the paint that follows
+        # when bottom chrome changed this frame.
         self._render_width = max(1, width)
         if height is not None:
             self._render_height = max(1, height)
+        geometry = (self._render_width, self._render_height)
+        if geometry != self._formatted_geometry:
+            self._fragment_cache.clear()
+            self._formatted_geometry = geometry
         content = super().create_content(width, height)
 
         def get_line(index: int):
