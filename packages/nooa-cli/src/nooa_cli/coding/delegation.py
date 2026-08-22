@@ -13,6 +13,7 @@ from nooa.config import CodeActConfig
 from nooa.interactive import SummarizationConfig, install_summarizer
 from nooa.storage.markers import nosnapshot
 from nooa.strategies import CodeActStrategy
+from nooa.tools import TodoManager
 from nooa.tools.shell_tools import ShellTools
 from nooa_cli.tools.repo_tools import RepoTools
 
@@ -20,7 +21,10 @@ if TYPE_CHECKING:
     from nooa.unifiedllm import UnifiedLLM
 
 
-class CodingWorker(Agent, context={"context_usage": None}):
+class CodingWorker(
+    Agent,
+    context={"context_usage": None, "todo_status": Context(expr="self.todo.status()")},
+):
     """You are an isolated software-engineering worker.
 
     Complete only the bounded objective supplied by the controller. Use the shared
@@ -30,6 +34,7 @@ class CodingWorker(Agent, context={"context_usage": None}):
 
     shell: Annotated[ShellTools, nosnapshot]
     repo: Annotated[RepoTools, nosnapshot]
+    todo: TodoManager
 
     def __init__(
         self,
@@ -38,11 +43,15 @@ class CodingWorker(Agent, context={"context_usage": None}):
         cwd: str | Path,
         summarization: SummarizationConfig | None = None,
         init_command: str | None = None,
+        todo: TodoManager | None = None,
     ) -> None:
         super().__init__(llm=llm)
         self.shell = ShellTools(cwd=str(cwd), init_command=init_command)
         self.repo = RepoTools(root=str(cwd), session=self.shell.session)
-        self.context_manager["python_tools"] = Context(doc(RepoTools, ShellTools), prefix=True)
+        self.todo = todo or TodoManager()
+        self.context_manager["python_tools"] = Context(
+            doc(RepoTools, ShellTools, TodoManager), prefix=True
+        )
         install_summarizer(summarization or SummarizationConfig(), self)
 
     async def close(self) -> None:
@@ -62,7 +71,10 @@ class CodingWorker(Agent, context={"context_usage": None}):
 
         Read relevant files before drawing conclusions. Make edits only when the
         objective explicitly requests implementation. Report modified paths. Name each
-        verification command and its observed outcome; if none ran, state why. Return
-        concise findings or changes rather than a raw transcript.
+        verification command and its observed outcome; if none ran, state why. When a
+        Todo is supplied as ``supplied_context``, record useful findings with
+        ``self.todo.comment(supplied_context, ...)`` and task-scoped values with
+        ``self.todo.set_var(supplied_context, key, value)``. Return a
+        concise report rather than a raw transcript.
         """
         ...
