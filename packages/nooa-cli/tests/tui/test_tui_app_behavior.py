@@ -705,6 +705,26 @@ async def test_admitted_input_stays_visible_until_accepted_echo_commits():
         assert h.app._pending_input_display() == []
 
 
+async def test_pending_display_preserves_runtime_queue_during_handoff(monkeypatch):
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("trigger")
+        await h.wait_for(lambda: h.app.is_thinking())
+        h.app.complete_pending_input_handoff("trigger")
+
+        h.app.submit_message("already-pending")
+        h.app.complete_pending_input_handoff("already-pending")
+        assert h.runner.state.pending_inputs == ("already-pending",)
+
+        monkeypatch.setattr(h.app._agent_controller, "submit", lambda _text: True)
+        h.app.submit_message("newly-admitted")
+
+        assert h.app._pending_input_display() == [
+            "already-pending",
+            "newly-admitted",
+        ]
+
+
 async def test_submission_exception_retires_only_new_handoff(monkeypatch):
     agent = _blocking_agent()
     async with TUIHarness(agent=agent) as h:
@@ -738,6 +758,23 @@ async def test_coalesced_accepted_echo_retires_all_submission_handoffs():
         h.app.complete_pending_input_handoff("one\ntwo")
         assert [item.text for item in h.app._pending_input_handoff] == ["one\ntwo"]
         h.app.complete_pending_input_handoff("one\ntwo")
+        assert h.app._pending_input_handoff == []
+
+
+async def test_coalesced_echo_with_runtime_prefix_retires_tui_handoffs():
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("trigger")
+        await h.wait_for(lambda: h.app.is_thinking())
+        h.app.complete_pending_input_handoff("trigger")
+
+        h.runner._user_messages.put("runtime-prefix")
+        h.app.submit_message("one")
+        h.app.submit_message("two")
+
+        assert h.runner._user_messages.snapshot() == ["runtime-prefix\none\ntwo"]
+        assert h.app._pending_input_display() == ["runtime-prefix", "one", "two"]
+        h.app.complete_pending_input_handoff("runtime-prefix\none\ntwo")
         assert h.app._pending_input_handoff == []
 
 

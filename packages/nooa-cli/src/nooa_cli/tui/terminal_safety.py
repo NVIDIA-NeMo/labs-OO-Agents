@@ -143,7 +143,10 @@ def safe_http_url(value: str | None) -> str | None:
     if (
         not value
         or len(value) > _MAX_SAFE_HTTP_URL_LENGTH
-        or any(character.isspace() for character in value)
+        or any(
+            character.isspace() or ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F
+            for character in value
+        )
     ):
         return None
     try:
@@ -157,25 +160,12 @@ def safe_http_url(value: str | None) -> str | None:
 
 def hyperlink_at_plain_offset(value: str, offset: int) -> str | None:
     """Return the active safe OSC-8 target at one ANSI-stripped character offset."""
-    safe = sanitize_transcript_ansi(value)
-    active: str | None = None
-    plain_offset = 0
-    index = 0
-    while index < len(safe):
-        match = _SAFE_ANSI_RE.match(safe, index)
-        if match is not None:
-            sequence = match.group(0)
-            if sequence.startswith(f"{_ESC}]8;"):
-                payload = sequence[4:-1] if sequence.endswith("\x07") else sequence[4:-2]
-                _parameters, _separator, target = payload.partition(";")
-                active = safe_http_url(target)
-            index = match.end()
-            continue
-        if plain_offset == offset:
-            return active
-        plain_offset += 1
-        index += 1
-    return active if plain_offset == offset else None
+    for start, stop, target in safe_hyperlink_spans(value):
+        if start <= offset < stop:
+            return target
+        if start > offset:
+            break
+    return None
 
 
 def safe_hyperlink_spans(value: str) -> tuple[tuple[int, int, str], ...]:

@@ -66,6 +66,7 @@ def test_fullscreen_status_removes_visual_transcript_gap() -> None:
     )
 
     app._command_status_text = "thinking..."
+    app._before_render(app._app)
 
     assert bool(app._status_region_container.filter())
     assert app._fullscreen_transcript.text == "answer\n"
@@ -75,6 +76,56 @@ def test_fullscreen_status_removes_visual_transcript_gap() -> None:
         )
         == "answer"
     )
+
+
+def test_native_hyperlink_marker_vocabulary_is_bounded() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+    model = FullscreenTranscriptModel()
+    model.append(
+        " ".join(
+            f"\x1b]8;;https://example.test/{index}\x1b\\x\x1b]8;;\x1b\\" for index in range(64)
+        )
+    )
+
+    def marker_classes(render_counter: int) -> set[str]:
+        return {
+            token
+            for style, _text, *_ in model.formatted_text(
+                width=4_096,
+                height=1,
+                render_counter=render_counter,
+            )
+            for token in style.split()
+            if token.startswith("class:native-hyperlink-")
+        }
+
+    assert marker_classes(0) == {"class:native-hyperlink-0"}
+    assert marker_classes(1) == {"class:native-hyperlink-1"}
+    assert marker_classes(2) == {"class:native-hyperlink-0"}
+
+
+def test_fullscreen_status_occupancy_is_sampled_once_per_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _make_fullscreen_app()
+    app.emit_block("answer\n")
+    calls = 0
+
+    def status_rows(*, include_transient: bool = True):
+        del include_transient
+        nonlocal calls
+        calls += 1
+        return [[("class:status", "busy")]]
+
+    monkeypatch.setattr(app, "_status_rows", status_rows)
+    app._before_render(app._app)
+
+    assert calls == 1
+    app._fullscreen_transcript.formatted_text(width=20, height=2)
+    app._fullscreen_transcript.cursor_position(width=20, height=2)
+    assert bool(app._status_region_container.filter())
+    assert calls == 1
 
 
 def test_fullscreen_bootstrap_output_only_mutates_renderer_model(
@@ -1049,6 +1100,7 @@ async def test_fullscreen_link_at_exact_row_end_closes_before_lower_chrome() -> 
     target = "https://example.test/docs"
     app.emit_block(f"\x1b]8;;{target}\x1b\\12345678\x1b]8;;\x1b\\")
     app._command_status_text = "STATUS"
+    app._before_render(app._app)
     writes: list[tuple[str, str]] = []
     app._app.output.write_raw = lambda value: writes.append(("raw", value))  # type: ignore[method-assign]
     app._app.output.write = lambda value: writes.append(("text", value))  # type: ignore[method-assign]
@@ -1395,6 +1447,7 @@ async def test_fullscreen_drag_release_over_transient_notice_finishes_copy(monke
 
     monkeypatch.setattr(app, "_copy_to_local_clipboard_async", copy_locally)
     app._show_transient_status("Copying...")
+    app._before_render(app._app)
     assert app._output_window is not None
     transcript = app._output_window.content
     transcript.create_content(8, 3)

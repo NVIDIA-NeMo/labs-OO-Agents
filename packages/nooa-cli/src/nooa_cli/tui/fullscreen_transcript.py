@@ -8,7 +8,6 @@ from bisect import bisect_right
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from hashlib import sha256
 from unicodedata import normalize
 
 from prompt_toolkit.data_structures import Point
@@ -17,7 +16,6 @@ from rich.cells import split_graphemes
 from wcwidth import wcswidth
 
 from .terminal_safety import (
-    hyperlink_at_plain_offset,
     project_prompt_toolkit_ansi,
     safe_hyperlink_spans,
     sanitize_transcript_ansi,
@@ -87,7 +85,9 @@ class FullscreenTranscriptModel:
         self._projection_index_cache: OrderedDict[int, dict[int, tuple[list[int], list[int]]]] = (
             OrderedDict()
         )
-        self._formatted_cache: OrderedDict[tuple[int, int, int, int], FormattedText] = OrderedDict()
+        self._formatted_cache: OrderedDict[tuple[int, int, int, int, int], FormattedText] = (
+            OrderedDict()
+        )
         self._ends_newline = False
         self._selection_anchor: _SelectionHit | None = None
         self._selection_active: _SelectionHit | None = None
@@ -107,6 +107,7 @@ class FullscreenTranscriptModel:
         *,
         width: int | None = None,
         height: int | None = None,
+        render_counter: int = 0,
     ) -> FormattedText:
         """Return safe rows, optionally virtualized to the visible viewport."""
         if width is None:
@@ -124,12 +125,17 @@ class FullscreenTranscriptModel:
                 # Short histories belong next to the bottom chrome regardless
                 # of whether navigation has explicitly anchored their sole page.
                 top_padding = height - len(rows)
-        key = (width, top, len(rows), top_padding)
+        hyperlink_marker = render_counter & 1
+        key = (width, top, len(rows), top_padding, hyperlink_marker)
         cached = self._formatted_cache.get(key)
         if cached is not None:
             self._formatted_cache.move_to_end(key)
             return cached
-        result = self._format_rows(rows, top_padding=top_padding)
+        result = self._format_rows(
+            rows,
+            top_padding=top_padding,
+            hyperlink_marker=hyperlink_marker,
+        )
         self._formatted_cache[key] = result
         while len(self._formatted_cache) > _MAX_PROJECTED_WIDTHS:
             self._formatted_cache.popitem(last=False)
@@ -211,7 +217,12 @@ class FullscreenTranscriptModel:
         record = records.get(hit.record_id)
         if record is None:
             return None
-        return hyperlink_at_plain_offset(record.ansi, hit.before)
+        for start, stop, target in record.hyperlinks:
+            if start <= hit.before < stop:
+                return target
+            if start > hit.before:
+                break
+        return None
 
     def clear_selection(self) -> None:
         """Discard renderer-owned selection without changing the viewport."""
@@ -696,7 +707,13 @@ class FullscreenTranscriptModel:
             (("", ""),),
         )
 
-    def _format_rows(self, rows: Sequence[_ProjectedRow], *, top_padding: int = 0) -> FormattedText:
+    def _format_rows(
+        self,
+        rows: Sequence[_ProjectedRow],
+        *,
+        top_padding: int = 0,
+        hyperlink_marker: int = 0,
+    ) -> FormattedText:
         fragments: list[tuple[str, str]] = []
         for _ in range(top_padding):
             fragments.append(("", "\n"))
@@ -714,7 +731,6 @@ class FullscreenTranscriptModel:
             display_spans = self._grapheme_spans(display_chars)
             base = record_bases[record.record_id]
             link_index = 0
-            link_markers: dict[str, str] = {}
             for offset, (start, stop, _cells) in enumerate(display_spans):
                 highlighted = False
                 link: str | None = None
@@ -738,10 +754,9 @@ class FullscreenTranscriptModel:
                     fragments.append(("[ZeroWidthEscape]", sequence))
                 for style, char in display_chars[start:stop]:
                     if link is not None:
-                        marker = link_markers.setdefault(
-                            link, sha256(link.encode()).hexdigest()[:12]
-                        )
-                        style = f"{style} class:native-hyperlink-{marker}".strip()
+                        # Alternating the bounded marker each frame forces OSC-8
+                        # cells to repaint when only their target changes.
+                        style = (f"{style} class:native-hyperlink-{hyperlink_marker}").strip()
                     if highlighted:
                         style = f"{style} class:selected".strip()
                     fragments.append((style, char))

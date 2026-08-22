@@ -893,8 +893,9 @@ class TUIApplication:
         # tests and printable-transcript callers. Source-bearing blocks below
         # are the single retained representation used for terminal replay.
         self.output_buffer = Buffer(read_only=False)
+        self._status_region_occupied = False
         self._fullscreen_transcript = FullscreenTranscriptModel(
-            show_trailing_blank=lambda: not bool(self._status_rows())
+            show_trailing_blank=lambda: not self._status_region_occupied
         )
         # Fullscreen requests mouse reporting immediately so ordinary drag and
         # wheel gestures reach prompt_toolkit rather than terminal scrollback.
@@ -1009,6 +1010,7 @@ class TUIApplication:
                     lambda: self._fullscreen_transcript.formatted_text(
                         width=self._transcript_viewport_size()[0],
                         height=self._transcript_viewport_size()[1],
+                        render_counter=self._app.render_counter,
                     ),
                     focusable=False,
                     show_cursor=False,
@@ -1285,7 +1287,7 @@ class TUIApplication:
                 ),
                 filter=Condition(
                     lambda: (
-                        bool(self._status_rows())
+                        self._status_region_occupied
                         or not self._fullscreen_transcript.viewport.follows_tail
                     )
                 ),
@@ -2316,11 +2318,27 @@ class TUIApplication:
         self.input_buffer.cursor_position = len(self.input_buffer.text)
 
     def _pending_input_display(self) -> list[str]:
-        """Return text that queue chrome must show in the current frame."""
+        """Return runtime queue text plus admissions not yet reflected by it."""
         state = self._agent_controller.state
         pending = [] if state is None else list(state.pending_inputs)
         handoff = [item.text for item in self._pending_input_handoff]
-        return handoff or pending
+        if not handoff:
+            return pending
+        if not pending:
+            return handoff
+
+        # Runtime coalesces new admissions into its final queue item. Replace
+        # the represented suffix with the individual handoff rows, while
+        # retaining any runtime-owned prefix and every earlier queue item.
+        tail = pending[-1]
+        for represented in range(len(handoff), 0, -1):
+            combined = "\n".join(handoff[:represented])
+            if tail == combined:
+                return pending[:-1] + handoff
+            suffix = f"\n{combined}"
+            if tail.endswith(suffix):
+                return pending[:-1] + [tail[: -len(suffix)]] + handoff
+        return pending + handoff
 
     def submit_message(self, user_message: str) -> None:
         """Submit text through the current interactive agent."""
@@ -2367,10 +2385,8 @@ class TUIApplication:
         for handoff in self._pending_input_handoff:
             combined = f"{combined}\n{handoff.text}" if consumed else handoff.text
             consumed += 1
-            if combined == text:
+            if combined == text or text.endswith(f"\n{combined}"):
                 del self._pending_input_handoff[:consumed]
-                break
-            if not text.startswith(f"{combined}\n"):
                 break
         if self._app.is_running:
             self._app.invalidate()
@@ -2989,7 +3005,9 @@ class TUIApplication:
         return normalize_transcript_block(source, columns=self.transcript_columns())
 
     def _before_render(self, _app) -> None:
-        """Observe terminal geometry before prompt_toolkit renders a frame."""
+        """Observe frame-local status and terminal geometry before rendering."""
+        if self._is_fullscreen:
+            self._status_region_occupied = bool(self._status_rows())
         current = self._read_terminal_size()
         if current is None:
             return
