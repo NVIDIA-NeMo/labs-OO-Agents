@@ -2595,6 +2595,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         """
         get_harness_metrics().prefill(prefill_type)
         logger.debug(f"[CODEACT] Running prefill ({prefill_type}) for {method_name}")
+        execution_count = session.record_execution()
 
         # Create synthetic tool call
         prefill_id = f"prefill_{uuid4().hex[:8]}"
@@ -2653,11 +2654,11 @@ Standard Python builtins and agent instance (`self`) are available."""
                 formatted_error=result.formatted_error,
             )
 
-        # Add execution output as user message (execution_count=0 since before main loop)
+        # Add execution output as a user message with this cell's unique count.
         runtime.event_manager.add(
             PythonOutput(
                 tool_call_id=prefill_id,
-                execution_count=0,  # Prefill is before main loop
+                execution_count=execution_count,
                 stdout=result.stdout,
                 stderr=result.stderr,
                 error=error_text,

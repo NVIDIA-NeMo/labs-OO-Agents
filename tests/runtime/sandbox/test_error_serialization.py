@@ -8,6 +8,7 @@ import asyncio
 
 import pytest
 
+from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
 from nooa.errors.formatting import format_error_for_llm
 from nooa.events import _NO_RETURN, ExecutionResult, ExecutionSignal
 from nooa.runtime.sandbox.errors import (
@@ -148,8 +149,6 @@ def test_broken_exception_string_still_crosses_worker_boundary() -> None:
 
 
 def test_error_dto_text_is_bounded_before_ipc() -> None:
-    from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
-
     max_error = DEFAULT_TRUNCATION_CONFIG.capture.max_error
     configured_tail = DEFAULT_TRUNCATION_CONFIG.capture.tail
     tail = max_error // 2 if configured_tail is None else configured_tail
@@ -242,7 +241,7 @@ async def test_broker_error_text_is_bounded_before_ipc() -> None:
     )
 
     assert response["ok"] is False
-    assert len(response["error"]) <= 10_000
+    assert len(response["error"]) <= DEFAULT_TRUNCATION_CONFIG.capture.max_error
     assert response["error"].endswith("...<truncated>")
 
 

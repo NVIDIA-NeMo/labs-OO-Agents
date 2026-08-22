@@ -22,6 +22,7 @@ from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from typing import Any
 
+from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
 from nooa.events import ExecutionResult
 from nooa.runtime.sandbox.config import ResolvedSpec, SandboxConfig, resolve_spec
 from nooa.runtime.sandbox.errors import (
@@ -39,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 # Broker responses cross a pickle pipe. Keep all parent-generated diagnostics
 # primitive and bounded before sending them to an untrusted worker.
-_MAX_BROKER_DIAGNOSTIC = 10_000
+_MAX_BROKER_DIAGNOSTIC = DEFAULT_TRUNCATION_CONFIG.capture.max_error
 
 
 def _bounded_text(value: object, fallback: str) -> str:

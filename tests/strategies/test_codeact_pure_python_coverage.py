@@ -2714,7 +2714,7 @@ class TestCodeActExecutePrefillStep:
     @pytest.mark.asyncio
     async def test_execute_prefill_step_merges_captured_locals(self):
         """Captured locals from prefill should be merged into session (lines 1773-1774)."""
-        from nooa.events import ExecutionResult
+        from nooa.events import ExecutionResult, PythonOutput
 
         strat = CodeActStrategy()
         em = MagicMock()
@@ -2753,6 +2753,52 @@ class TestCodeActExecutePrefillStep:
         assert emitted
         assert all(event.metadata["prefill_type"] == "pre_ellipsis" for event in emitted)
         assert all("execution_error" not in event.metadata for event in emitted)
+        output = next(event for event in emitted if isinstance(event, PythonOutput))
+        assert output.execution_count == 1
+
+    @pytest.mark.asyncio
+    async def test_execute_prefill_steps_use_distinct_execution_counts(self):
+        """Prefill execution, diagnostics, and output events share unique cell numbers."""
+        from nooa.events import ExecutionResult, PythonOutput
+
+        strat = CodeActStrategy()
+        em = MagicMock()
+        em.add = MagicMock(side_effect=["evt1", None, "evt2", None])
+        em.update = MagicMock()
+        rt = MagicMock()
+        rt.event_manager = em
+        session = CodeActSession(
+            max_iterations=5,
+            max_retries=3,
+            target_method_name="compute",
+            event_manager=em,
+        )
+        executed_counts = []
+
+        async def execute_prefill(*args, **kwargs):
+            executed_counts.append(session.execution_count)
+            count = session.execution_count
+            return ExecutionResult(
+                stdout=f"cell {count}",
+                error=RuntimeError("failure") if count == 2 else None,
+                formatted_error=f"Cell In[{count}]\nRuntimeError: failure" if count == 2 else "",
+                defined_methods={},
+            )
+
+        strat._execute_code = AsyncMock(side_effect=execute_prefill)
+
+        await strat._execute_prefill_step(rt, "first = 1", {}, session, "compute", "inspect_inputs")
+        await strat._execute_prefill_step(
+            rt, "raise RuntimeError('failure')", {}, session, "compute", "pre_ellipsis"
+        )
+
+        outputs = [
+            call.args[0] for call in em.add.call_args_list if isinstance(call.args[0], PythonOutput)
+        ]
+        assert executed_counts == [1, 2]
+        assert [output.execution_count for output in outputs] == [1, 2]
+        assert outputs[1].error == "Cell In[2]\nRuntimeError: failure"
+        assert session.record_execution() == 3
 
     @pytest.mark.asyncio
     async def test_execute_prefill_step_with_error_logs_warning(self):
@@ -2793,6 +2839,7 @@ class TestCodeActExecutePrefillStep:
             call.args[0] for call in em.add.call_args_list if isinstance(call.args[0], PythonOutput)
         )
         assert output.execution_status is ResultStatus.ERROR
+        assert output.execution_count == 1
         assert output.metadata == {
             "prefill": True,
             "prefill_type": "inspect_inputs",
