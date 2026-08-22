@@ -25,7 +25,11 @@ from typing import Any
 
 from nooa.agentdoc import TruncatingStringIO
 from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
-from nooa.errors.formatting import _bound_preformatted_diagnostic, _hard_bound_text
+from nooa.errors.formatting import (
+    _bound_preformatted_diagnostic,
+    _diagnostic_budget,
+    _hard_bound_text,
+)
 from nooa.runtime.sandbox.errors import CellSerializationError
 
 # ``TruncatingStringIO`` adds a human-readable envelope around retained
@@ -53,7 +57,7 @@ def _bounded_error_message(
 ) -> str:
     """Apply the effective capture policy once to a raw message before IPC."""
     content_limit = _effective_error_limit(max_error)
-    effective_tail = tail_chars if tail_chars is None or tail_chars < content_limit else None
+    _, effective_tail = _diagnostic_budget(content_limit, tail_chars)
     if len(value) <= content_limit:
         return value
     stream = TruncatingStringIO(limit=content_limit, tail_chars=effective_tail)

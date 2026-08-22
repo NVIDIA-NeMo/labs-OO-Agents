@@ -199,6 +199,19 @@ def test_invalid_error_limit_falls_back_to_default(invalid_limit: object) -> Non
     assert "Showing first 5,000 and last 5,000 chars" in dto.error.message
 
 
+@pytest.mark.parametrize("invalid_tail", [-1, True])
+def test_invalid_error_tail_falls_back_to_valid_split(invalid_tail: object) -> None:
+    dto = result_to_dto(
+        _result_with_error(RuntimeError("x" * 1_000)),
+        max_error=100,
+        tail_chars=invalid_tail,  # type: ignore[arg-type]
+    )
+
+    assert dto.error is not None
+    assert "Showing first 50 and last 50 chars" in dto.error.message
+    assert dto.error.message.endswith("x" * 50 + "\n</truncated-output>")
+
+
 def test_error_dto_text_respects_configured_capture_limit_before_transport_limit() -> None:
     """Text above a custom content budget is truncated even if the DTO could carry it."""
     max_error = 100
