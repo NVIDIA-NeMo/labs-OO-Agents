@@ -174,6 +174,28 @@ class TestBatchRendering:
         assert "world" in written
         assert "bye" in written
 
+    def test_resumed_user_message_highlight_spans_every_wrapped_row(self):
+        from nooa_cli.tui.frontend import render_history_replay_to_ansi
+        from nooa_cli.tui.terminal_safety import strip_safe_ansi
+        from prompt_toolkit.formatted_text import ANSI, to_formatted_text
+        from rich.cells import cell_len
+
+        replay = HistoryReplay(
+            turns=[HistoryTurn(role="user", content="first line\nhello wide 世界 this wraps")],
+            session_id="highlight",
+            show_header=False,
+            show_footer=False,
+        )
+
+        rendered = render_history_replay_to_ansi(replay, 20)
+        message_rows = [line for line in strip_safe_ansi(rendered).splitlines() if line]
+
+        assert len(message_rows) > 2
+        assert all(cell_len(line) == 20 for line in message_rows)
+        assert all(
+            "bg:" in style for style, text, *_ in to_formatted_text(ANSI(rendered)) if text != "\n"
+        )
+
     def test_history_renderer_honors_pathologically_narrow_width(self):
         from nooa_cli.tui.frontend import render_history_replay_to_ansi
         from nooa_cli.tui.terminal_safety import strip_safe_ansi

@@ -74,7 +74,14 @@ def render_history_replay_to_ansi(output: HistoryReplay, width: int) -> str:
         )
     for turn in output.turns:
         if turn.role == "user":
-            bc.print(Text(f" You: {turn.content}", style=f"{user_color} on {COLORS['surface0']}"))
+            # Apply the style at the print boundary so Rich extends the
+            # background through padding on every explicit or wrapped row.
+            bc.print(
+                Text(f" You: {turn.content}"),
+                style=f"{user_color} on {COLORS['surface0']}",
+                justify="left",
+                overflow="fold",
+            )
         else:
             bc.print(Text("OO:", style=f"bold {dim}"))
             bc.print(Markdown(turn.content), style=dim)
