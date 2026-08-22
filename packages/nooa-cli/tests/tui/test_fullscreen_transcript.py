@@ -103,6 +103,7 @@ def test_native_hyperlink_marker_vocabulary_is_bounded() -> None:
 
     assert marker_classes(0) == {"class:native-hyperlink-0"}
     assert marker_classes(1) == {"class:native-hyperlink-1"}
+    model._formatted_cache.clear()
     assert marker_classes(2) == {"class:native-hyperlink-0"}
 
 
@@ -669,7 +670,7 @@ def test_projection_caches_are_bounded_and_cleared() -> None:
         model.formatted_text(width=width)
 
     assert len(model._projection_cache) <= 2
-    assert len(model._formatted_cache) <= 2
+    assert len(model._formatted_cache) <= 2 * 2  # two marker variants per retained geometry
 
     model.clear()
     assert not model._projection_cache

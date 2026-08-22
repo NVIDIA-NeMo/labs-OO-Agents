@@ -165,6 +165,48 @@ async def test_observation_close_failure_does_not_skip_app_teardown(
     assert app._loop is None
 
 
+@pytest.mark.parametrize("task_name", ["_clipboard_task", "_link_task"])
+async def test_failed_auxiliary_task_does_not_skip_app_teardown(
+    monkeypatch: pytest.MonkeyPatch, task_name: str
+) -> None:
+    from nooa_cli.tui.host_services import TUIHostServices
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    phases: list[str] = []
+
+    async def quiesce() -> None:
+        phases.append("quiesce")
+
+    async def fail_after_cancellation() -> None:
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError as exc:
+            raise RuntimeError("task teardown failed") from exc
+
+    app = TUIApplication(
+        host_services=TUIHostServices(before_output_drain=quiesce),
+        display_mode="native-replay",
+    )
+
+    async def exit_immediately(*_args, **_kwargs) -> None:
+        setattr(app, task_name, asyncio.create_task(fail_after_cancellation()))
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(app._app, "run_async", exit_immediately)
+    monkeypatch.setattr(
+        "nooa_cli.tui.stream_forwarder.install_stray_stream_capture",
+        lambda *_args, **_kwargs: lambda: phases.append("streams restored"),
+    )
+
+    await app.run_async()
+
+    assert phases == ["streams restored", "quiesce"]
+    assert getattr(app, task_name) is None
+    assert app._block_queue is None
+    assert app._consumer_task is None
+    assert app._loop is None
+
+
 async def test_pre_run_emit_uses_the_same_normalized_block_as_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -2852,6 +2852,8 @@ class TUIApplication:
                     await clipboard_task
                 except asyncio.CancelledError:
                     pass
+                except Exception:
+                    logger.debug("clipboard task failed during teardown", exc_info=True)
                 if self._clipboard_task is clipboard_task:
                     self._clipboard_task = None
             link_task = self._link_task
@@ -2861,6 +2863,8 @@ class TUIApplication:
                     await link_task
                 except asyncio.CancelledError:
                     pass
+                except Exception:
+                    logger.debug("link task failed during teardown", exc_info=True)
                 if self._link_task is link_task:
                     self._link_task = None
             self._cancel_fullscreen_drag()

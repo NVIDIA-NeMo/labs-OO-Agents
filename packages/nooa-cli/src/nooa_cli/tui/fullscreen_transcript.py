@@ -137,7 +137,8 @@ class FullscreenTranscriptModel:
             hyperlink_marker=hyperlink_marker,
         )
         self._formatted_cache[key] = result
-        while len(self._formatted_cache) > _MAX_PROJECTED_WIDTHS:
+        # Each geometry has two alternating hyperlink-marker variants.
+        while len(self._formatted_cache) > 2 * _MAX_PROJECTED_WIDTHS:
             self._formatted_cache.popitem(last=False)
         return result
 

@@ -249,6 +249,8 @@ class Session:
         self._toolbar = ToolbarRegistry()
         self._initial_outputs = list(initial_outputs or [])
         self._session_title_requested = False
+        # Invalidates user-message UI callbacks queued before a session swap.
+        self._session_generation = 0
 
         # Streaming state shared with the AgentEventRenderer: the
         # tool_call_id → code map that pairs a preview with its matching
@@ -562,6 +564,7 @@ class Session:
         if agent_runner is not None:
 
             def _on_user_message_hook(text: str) -> None:
+                generation = self._session_generation
                 # DB writes run here on the agent loop thread (the on_get
                 # caller), keeping all sqlite access on one thread.
                 user_event_id = None
@@ -579,20 +582,31 @@ class Session:
                 app = self._app
                 loop = getattr(app, "_loop", None) if app is not None else None
                 if loop is None:
-                    self._on_user_message_ui(text, event_id=user_event_id, tags=user_tags)
+                    self._on_user_message_ui(
+                        text,
+                        event_id=user_event_id,
+                        tags=user_tags,
+                        session_generation=generation,
+                    )
                     return
                 try:
                     on_ui_loop = asyncio.get_running_loop() is loop
                 except RuntimeError:
                     on_ui_loop = False
                 if on_ui_loop:
-                    self._on_user_message_ui(text, event_id=user_event_id, tags=user_tags)
+                    self._on_user_message_ui(
+                        text,
+                        event_id=user_event_id,
+                        tags=user_tags,
+                        session_generation=generation,
+                    )
                 else:
                     loop.call_soon_threadsafe(
                         lambda: self._on_user_message_ui(
                             text,
                             event_id=user_event_id,
                             tags=user_tags,
+                            session_generation=generation,
                         )
                     )
 
@@ -1218,6 +1232,7 @@ class Session:
         *,
         event_id: str | None = None,
         tags: set[str] | frozenset[str] | None = None,
+        session_generation: int | None = None,
     ) -> None:
         """Render the user's submitted text as a full-width grey bar and
         reset per-turn renderer state.
@@ -1225,6 +1240,8 @@ class Session:
         DB bookkeeping (record_user) is handled by the on_get hook on
         the agent loop thread; this method only does UI work.
         """
+        if session_generation is not None and session_generation != self._session_generation:
+            return
         assert self._renderer is not None and self._app is not None
 
         bar = _build_user_bar(text, self._app, self._colors)
@@ -1423,6 +1440,9 @@ class Session:
         agent_runner = getattr(self, "_local_agent_runner", None)
         if agent_runner is not None:
             await agent_runner.shutdown_queue_manager(flush=True)
+        # Queue shutdown above lets old-session dequeue hooks finish. Invalidate
+        # only their already-scheduled UI work before changing session state.
+        self._session_generation = getattr(self, "_session_generation", 0) + 1
         app = getattr(self, "_app", None)
         clear_handoffs = getattr(app, "clear_pending_input_handoffs", None)
         if callable(clear_handoffs):
