@@ -1,28 +1,45 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Error formatting for LLM feedback.
+"""Build concise, source-aware Python diagnostics for language-model feedback.
 
-Formats errors to match IPython/Jupyter-style output:
-- Uses "Cell In[N], line X" format (stripping File "..." wrapper)
-- Adjusts line numbers to account for wrapper code offset
-- Filters out framework tracebacks, showing only user code
-- Source code lines are shown automatically via linecache registration
+This module is the presentation boundary between Python exceptions and the text
+shown to an agent.  It is intentionally responsible for one complete pipeline:
 
-Usage:
-    from nooa.errors.formatting import format_error_for_llm
-    result = format_error_for_llm(error, code, line_offset=2)
+1. Classify syntax, static-validation, and runtime failures.
+2. Render runtime failures with the standard-library ``traceback`` machinery,
+   recursively filtering framework frames from causes, contexts, and exception
+   groups while preserving generated-cell and downstream user-helper frames.
+3. Normalize the result to an IPython-like form (``Cell In[N]`` locations,
+   wrapper-line offsets, and hidden internal wrapper names).
+4. Add narrowly targeted, best-effort guidance for mistakes that models often
+   repeat, such as malformed heredocs and calls with the wrong signature.
+5. Bound the final diagnostic before it enters model context.
 
-    # Or use the formatter class directly
-    from nooa.errors.formatting import IPythonErrorFormatter
-    formatter = IPythonErrorFormatter()
-    result = formatter.format(error, code, line_offset=2)
+The module does *not* execute code, register generated source with ``linecache``,
+or serialize exceptions across process boundaries.  Those jobs belong to the
+runtime and sandbox layers.  A trusted backend may pass its already-rendered
+text to :func:`format_error_for_llm`; that preserves worker-side source context
+but still applies the final size bound.
+
+Formatting must never replace the original failure with a formatter failure.
+Resolution of optional hints is therefore defensive, and the public entry point
+falls back to a safe ``TypeName: message`` rendering when necessary.
+
+Typical callers should use :func:`format_error_for_llm`.  The
+:class:`IPythonErrorFormatter` class remains available for strategy-specific
+formatter injection.
 """
 
 import re
 import traceback
+from typing import Protocol
 
 from nooa.agentdoc import TruncatingStringIO
 from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
+
+# ---------------------------------------------------------------------------
+# Traceback selection and IPython normalization policy
+# ---------------------------------------------------------------------------
 
 # Framework path markers - frames containing these are filtered out
 _FRAMEWORK_MARKERS = ("nooa/", "site-packages/", "lib/python", "<frozen")
@@ -32,6 +49,10 @@ _CELL_PATTERN = re.compile(r"^Cell In\[\d+\]$")
 
 # Internal wrapper function names to replace with <module>
 _WRAPPER_NAMES = ("__repl_wrapper__", "__wrapper__")
+
+# ---------------------------------------------------------------------------
+# Targeted model-recovery hints
+# ---------------------------------------------------------------------------
 
 # SyntaxError messages that LLMs frequently hit when they embed a bash heredoc
 # inside a single/double-quoted Python string. See issue 199.
@@ -193,6 +214,11 @@ def _bad_call_agentdoc(error: BaseException, target: object | None = None) -> st
         return None
 
 
+# ---------------------------------------------------------------------------
+# Traceback rendering and normalization helpers
+# ---------------------------------------------------------------------------
+
+
 def _is_user_code_frame(filename: str) -> bool:
     """Check if a traceback frame is from user code (not framework internals).
 
@@ -281,7 +307,16 @@ def _filter_traceback_tree(
     diagnostic: traceback.TracebackException,
     seen: set[int] | None = None,
 ) -> None:
-    """Apply the user-frame policy to every traceback in a stdlib tree."""
+    """Filter framework frames from an entire chained-exception tree in place.
+
+    ``TracebackException`` stores a tree rather than one linear traceback: a
+    diagnostic can include explicit causes, implicit contexts, and nested
+    exception-group children.  Filtering only the root would therefore leak
+    internal framework frames from one of those branches.  Walk every branch
+    and apply the same user-frame policy, starting at the first generated cell
+    while retaining user helper frames reached from that cell.  ``seen`` makes
+    the recursive walk safe when traceback nodes are shared or cyclic.
+    """
     if seen is None:
         seen = set()
     if id(diagnostic) in seen:
@@ -356,6 +391,85 @@ def _adjust_line_numbers(text: str, offset: int, *, cell_only: bool = False) -> 
     return header.sub(adjust_match, text)
 
 
+# ---------------------------------------------------------------------------
+# Formatter and public entry point
+# ---------------------------------------------------------------------------
+
+
+def _diagnostic_budget(
+    max_error: int | None,
+    tail_chars: int | None,
+) -> tuple[int, int | None]:
+    """Normalize an optional diagnostic budget defensively."""
+    if isinstance(max_error, int) and not isinstance(max_error, bool) and max_error > 0:
+        limit = max_error
+    else:
+        limit = DEFAULT_TRUNCATION_CONFIG.capture.max_error
+    if tail_chars is None:
+        tail: int | None = None
+    elif (
+        isinstance(tail_chars, int) and not isinstance(tail_chars, bool) and 0 <= tail_chars < limit
+    ):
+        tail = tail_chars
+    else:
+        tail = DEFAULT_TRUNCATION_CONFIG.capture.tail
+    return limit, tail
+
+
+def _bound_diagnostic(
+    text: str,
+    max_error: int | None,
+    tail_chars: int | None,
+) -> str:
+    """Apply the caller's error budget, falling back to framework defaults."""
+    limit, tail = _diagnostic_budget(max_error, tail_chars)
+    stream = TruncatingStringIO(limit=limit, tail_chars=tail)
+    stream.write(text)
+    return stream.getvalue()
+
+
+def _bound_preformatted_diagnostic(
+    text: str,
+    max_error: int | None,
+    tail_chars: int | None,
+) -> str:
+    """Bound trusted backend text without nesting an existing truncation envelope."""
+    text = text.rstrip()
+    limit, _ = _diagnostic_budget(max_error, tail_chars)
+    if len(text) <= limit:
+        return text
+    if text.startswith("<truncated-output>\n") and text.endswith("\n</truncated-output>"):
+        # A worker-rendered envelope is necessarily longer than its retained
+        # content budget. Preserve that single envelope, but still impose a hard
+        # allowance for its metadata before the text reaches model context.
+        transport_limit = limit + 1_024
+        if len(text) <= transport_limit:
+            return text
+        marker = "...<truncated>"
+        return text[: transport_limit - len(marker)] + marker
+    return _bound_diagnostic(text, max_error, tail_chars)
+
+
+class ErrorFormatter(Protocol):
+    """Preferred strategy formatter contract.
+
+    Implementations receive trusted backend-rendered diagnostics and the resolved
+    per-call error budget. Strategies retain compatibility with older formatters,
+    but new implementations should accept the complete keyword-only contract.
+    """
+
+    def format(
+        self,
+        error: Exception,
+        code: str | None = None,
+        *,
+        line_offset: int = 0,
+        formatted_error: str = "",
+        max_error: int | None = None,
+        tail_chars: int | None = None,
+    ) -> str: ...
+
+
 class IPythonErrorFormatter:
     """IPython/Jupyter-style error formatter.
 
@@ -368,34 +482,57 @@ class IPythonErrorFormatter:
     - Source lines shown automatically (via linecache registration in actor.py)
     """
 
-    def format(self, error: Exception, code: str | None = None, *, line_offset: int = 0) -> str:
-        """Format an error for LLM feedback.
+    def format(
+        self,
+        error: Exception,
+        code: str | None = None,
+        *,
+        line_offset: int = 0,
+        formatted_error: str = "",
+        max_error: int | None = None,
+        tail_chars: int | None = None,
+    ) -> str:
+        """Format and bound an error for LLM feedback.
 
         Args:
             error: The exception to format.
             code: Optional source code (used for syntax errors if text is missing).
             line_offset: Number of wrapper lines to subtract from line numbers.
+            formatted_error: Trusted diagnostic already rendered by an execution
+                backend. It bypasses local rendering so worker-local traceback
+                and source context are preserved.
+            max_error: Maximum retained diagnostic characters. ``None`` uses the
+                framework default.
+            tail_chars: Characters reserved for the retained tail. ``None`` uses
+                the standard half-head/half-tail split.
 
         Returns:
             Formatted error string with adjusted line numbers.
         """
+        if formatted_error:
+            # Worker-generated truncation envelopes have already applied the
+            # resolved policy; preserve one envelope while retaining a hard cap.
+            return _bound_preformatted_diagnostic(formatted_error, max_error, tail_chars)
+
         if isinstance(error, SyntaxError):
-            return self._format_syntax_error(error, code, line_offset)
+            formatted = self._format_syntax_error(error, code, line_offset)
+        elif _is_validation_error(error):
+            formatted = f"{type(error).__name__}: {error}"
+        else:
+            formatted = self._format_runtime_error(error, line_offset)
+            # Issue #245: append the called callable's concise signature on a
+            # call-shape TypeError (see _bad_call_agentdoc). Best-effort — unchanged
+            # output on any miss.
+            transported_hint = getattr(error, "_nooa_call_hint", None)
+            agentdoc = (
+                transported_hint if isinstance(transported_hint, str) else _bad_call_agentdoc(error)
+            )
+            if agentdoc:
+                formatted = (
+                    f"{formatted}\n\nThe callable you called has this signature:\n{agentdoc}"
+                )
 
-        if _is_validation_error(error):
-            return f"{type(error).__name__}: {error}"
-
-        formatted = self._format_runtime_error(error, line_offset)
-        # Issue #245: append the called callable's concise signature on a
-        # call-shape TypeError (see _bad_call_agentdoc). Best-effort — unchanged
-        # output on any miss.
-        transported_hint = getattr(error, "_nooa_call_hint", None)
-        agentdoc = (
-            transported_hint if isinstance(transported_hint, str) else _bad_call_agentdoc(error)
-        )
-        if agentdoc:
-            formatted = f"{formatted}\n\nThe callable you called has this signature:\n{agentdoc}"
-        return formatted
+        return _bound_diagnostic(formatted, max_error, tail_chars)
 
     def _format_syntax_error(self, error: SyntaxError, code: str | None, line_offset: int) -> str:
         """Format SyntaxError using Python's traceback module, IPython-style.
@@ -444,6 +581,8 @@ def format_error_for_llm(
     *,
     line_offset: int = 0,
     formatted_error: str = "",
+    max_error: int | None = None,
+    tail_chars: int | None = None,
 ) -> str:
     """Format an error for LLM feedback.
 
@@ -464,19 +603,24 @@ def format_error_for_llm(
         formatted_error: Optional preformatted diagnostic produced by a trusted
             execution backend such as the sandbox worker. When non-empty, it
             bypasses local formatting (including ``code``, ``line_offset``, and
-            bad-call hint handling) and is only bounded to the capture limit. The
-            producer is responsible for applying any required line adjustment.
+            bad-call hint handling). The producer is responsible for applying any
+            required line adjustment.
+        max_error: Maximum retained diagnostic characters. ``None`` uses the
+            framework default.
+        tail_chars: Characters reserved for the retained tail. ``None`` uses
+            the standard half-head/half-tail split.
 
     Returns:
         Formatted error string suitable for LLM consumption.
     """
-    if formatted_error:
-        formatted = formatted_error.rstrip()
-    else:
-        try:
-            formatted = _default_formatter.format(error, code, line_offset=line_offset)
-        except BaseException:
-            formatted = _concise_exception(error)
-    stream = TruncatingStringIO(limit=DEFAULT_TRUNCATION_CONFIG.capture.max_error)
-    stream.write(formatted)
-    return stream.getvalue()
+    try:
+        return _default_formatter.format(
+            error,
+            code,
+            line_offset=line_offset,
+            formatted_error=formatted_error,
+            max_error=max_error,
+            tail_chars=tail_chars,
+        )
+    except BaseException:
+        return _bound_diagnostic(_concise_exception(error), max_error, tail_chars)

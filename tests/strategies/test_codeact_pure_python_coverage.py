@@ -924,10 +924,37 @@ class TestFormatErrorCustomFormatter:
         assert "old" in result
         assert "test" in result
 
+    def test_builtin_formatter_receives_worker_diagnostic_and_error_budget(self):
+        from nooa.errors import IPythonErrorFormatter
+
+        strat = CodeActStrategy(error_formatter=IPythonErrorFormatter())
+        transported = "Cell In[7], line 1\nValueError: " + "x" * 500
+
+        result = strat._format_error(
+            ValueError("surrogate"),
+            "bad()",
+            line_offset=4,
+            formatted_error=transported,
+            max_error=100,
+        )
+
+        assert result.count("<truncated-output>") == 1
+        assert "Showing first 50 and last 50 chars" in result
+        assert result.endswith("x" * 50 + "\n</truncated-output>")
+        assert "surrogate" not in result
+
     def test_custom_formatter_receives_worker_diagnostic(self):
         class CurrentFormatter:
-            def format(self, error, code=None, *, line_offset=0, formatted_error=""):
-                return f"current[{line_offset}]: {formatted_error}"
+            def format(
+                self,
+                error,
+                code=None,
+                *,
+                line_offset=0,
+                formatted_error="",
+                max_error=None,
+            ):
+                return f"current[{line_offset}/{max_error}]: {formatted_error}"
 
         strat = CodeActStrategy(error_formatter=CurrentFormatter())
         result = strat._format_error(
@@ -935,9 +962,10 @@ class TestFormatErrorCustomFormatter:
             "bad()",
             line_offset=4,
             formatted_error="Cell In[7], line 1\nValueError: original",
+            max_error=321,
         )
 
-        assert result == "current[4]: Cell In[7], line 1\nValueError: original"
+        assert result == "current[4/321]: Cell In[7], line 1\nValueError: original"
 
     def test_custom_formatter_without_inspectable_signature_uses_legacy_shape(self, monkeypatch):
         class OpaqueFormatter:

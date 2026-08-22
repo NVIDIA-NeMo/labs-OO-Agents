@@ -17,6 +17,7 @@ into a picklable :class:`ResultDTO` and reconstructs a faithful
 
 from __future__ import annotations
 
+import inspect
 import pickle
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -26,20 +27,60 @@ from nooa.agentdoc import TruncatingStringIO
 from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
 from nooa.runtime.sandbox.errors import CellSerializationError
 
-# ``TruncatingStringIO`` adds a human-readable envelope around its retained
-# head/tail windows. Reserve a small fixed allowance for that envelope while
-# still enforcing a hard upper bound on every error string sent over the pipe.
-_MAX_ERROR_TRANSPORT = DEFAULT_TRUNCATION_CONFIG.capture.max_error + 1_024
+# ``TruncatingStringIO`` adds a human-readable envelope around retained
+# head/tail content. Sandbox IPC has a fixed safety ceiling independent of a
+# caller's configured capture budget.
+_MAX_ERROR_CONTENT = DEFAULT_TRUNCATION_CONFIG.capture.max_error
+_MAX_ERROR_TRANSPORT = _MAX_ERROR_CONTENT + 1_024
 
 
-def _bounded_error_text(value: str) -> str:
-    """Bound text before it is copied into an IPC DTO."""
-    if len(value) <= _MAX_ERROR_TRANSPORT:
+def _effective_error_limit(max_error: int | None) -> int:
+    """Return the configured content budget clamped to the IPC safety ceiling."""
+    requested = _MAX_ERROR_CONTENT if max_error is None else max_error
+    return min(requested, _MAX_ERROR_CONTENT)
+
+
+def _hard_bound_text(value: str, limit: int) -> str:
+    """Cap arbitrary text without ever exceeding ``limit`` characters."""
+    if len(value) <= limit:
         return value
-    stream = TruncatingStringIO(limit=DEFAULT_TRUNCATION_CONFIG.capture.max_error)
+    marker = "...<truncated>"
+    if limit <= len(marker):
+        return marker[:limit]
+    return value[: limit - len(marker)] + marker
+
+
+def _bounded_error_message(
+    value: str,
+    *,
+    max_error: int | None = None,
+    tail_chars: int | None = None,
+) -> str:
+    """Apply the effective capture policy once to a raw message before IPC."""
+    content_limit = _effective_error_limit(max_error)
+    effective_tail = tail_chars if tail_chars is None or tail_chars < content_limit else None
+    if len(value) <= content_limit:
+        return value
+    stream = TruncatingStringIO(limit=content_limit, tail_chars=effective_tail)
     stream.write(value)
-    rendered = stream.getvalue()
-    return rendered[:_MAX_ERROR_TRANSPORT]
+    return _hard_bound_text(stream.getvalue(), _MAX_ERROR_TRANSPORT)
+
+
+def _bounded_formatted_error(
+    value: str,
+    *,
+    max_error: int | None = None,
+    tail_chars: int | None = None,
+) -> str:
+    """Apply capture policy once and enforce a fixed IPC ceiling."""
+    content_limit = _effective_error_limit(max_error)
+    if len(value) <= content_limit:
+        return value
+    if value.startswith("<truncated-output>\n") and value.endswith("\n</truncated-output>"):
+        # A budget-aware formatter has already retained the configured head and
+        # tail. Avoid nesting its envelope, while bounding metadata overhead.
+        return _hard_bound_text(value, min(_MAX_ERROR_TRANSPORT, content_limit + 1_024))
+    return _bounded_error_message(value, max_error=content_limit, tail_chars=tail_chars)
 
 
 def is_picklable(value: Any) -> bool:
@@ -102,6 +143,8 @@ def result_to_dto(
     result: Any,
     *,
     error_formatter: Callable[..., str] | None = None,
+    max_error: int | None = None,
+    tail_chars: int | None = None,
 ) -> ResultDTO:
     """Convert a worker-side ``ExecutionResult`` into a picklable DTO.
 
@@ -134,18 +177,43 @@ def result_to_dto(
 
             error_formatter = format_error_for_llm
 
+        effective_max_error = _effective_error_limit(max_error)
         try:
-            formatted_error = error_formatter(
-                err,
-                line_offset=getattr(result, "wrapper_line_offset", 0),
-            )
+            formatter_kwargs: dict[str, Any] = {
+                "line_offset": getattr(result, "wrapper_line_offset", 0),
+            }
+            try:
+                signature = inspect.signature(error_formatter)
+            except (TypeError, ValueError):
+                signature = None
+            if signature is not None:
+                for optional_kwargs in (
+                    {"max_error": effective_max_error, "tail_chars": tail_chars},
+                    {"max_error": effective_max_error},
+                    {},
+                ):
+                    try:
+                        signature.bind(err, **formatter_kwargs, **optional_kwargs)
+                    except TypeError:
+                        continue
+                    formatter_kwargs.update(optional_kwargs)
+                    break
+            formatted_error = error_formatter(err, **formatter_kwargs)
         except BaseException:
             formatted_error = f"{error_type}: {message}"
 
         dto.error = ErrorDTO(
             type_name=error_type,
-            message=_bounded_error_text(message),
-            formatted_error=_bounded_error_text(formatted_error),
+            message=_bounded_error_message(
+                message,
+                max_error=effective_max_error,
+                tail_chars=tail_chars,
+            ),
+            formatted_error=_bounded_formatted_error(
+                formatted_error,
+                max_error=effective_max_error,
+                tail_chars=tail_chars,
+            ),
         )
         return dto
 

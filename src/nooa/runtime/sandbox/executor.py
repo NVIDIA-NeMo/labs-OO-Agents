@@ -38,19 +38,24 @@ from nooa.runtime.sandbox.worker import worker_main
 
 logger = logging.getLogger(__name__)
 
+
 # Broker responses cross a pickle pipe. Keep all parent-generated diagnostics
-# primitive and bounded before sending them to an untrusted worker.
+# primitive and bounded before sending them to an untrusted worker. Runtime
+# configuration may lower this ceiling but may not raise the IPC safety cap.
 _MAX_BROKER_DIAGNOSTIC = DEFAULT_TRUNCATION_CONFIG.capture.max_error
 
 
-def _bounded_text(value: object, fallback: str) -> str:
+def _bounded_text(value: object, fallback: str, *, limit: int) -> str:
     try:
         text = str(value)
     except BaseException:
         text = fallback
-    if len(text) <= _MAX_BROKER_DIAGNOSTIC:
+    if len(text) <= limit:
         return text
-    return text[: _MAX_BROKER_DIAGNOSTIC - 16] + "...<truncated>"
+    marker = "...<truncated>"
+    if limit <= len(marker):
+        return marker[:limit]
+    return text[: limit - len(marker)] + marker
 
 
 _CAPS_CACHE: Capabilities | None = None
@@ -89,12 +94,19 @@ class SandboxedExecutor:
         cell_timeout: float | None,
         framework_builtins: dict[str, Any] | None = None,
         restrictions: Any = None,
+        max_error: int | None = None,
+        error_tail: int | None = None,
     ):
         self._agent = agent
         self._config = config
         self._cell_timeout = cell_timeout
         self._framework_builtins = framework_builtins or {}
         self._restrictions = restrictions
+        requested_max_error = (
+            DEFAULT_TRUNCATION_CONFIG.capture.max_error if max_error is None else max_error
+        )
+        self._max_error = min(requested_max_error, _MAX_BROKER_DIAGNOSTIC)
+        self._error_tail = error_tail
         self._spec: ResolvedSpec = resolve_spec(config)
 
         caps = _capabilities()
@@ -162,6 +174,8 @@ class SandboxedExecutor:
             "framework_builtins": self._framework_builtins,
             "restrictions": self._restrictions,
             "spec": self._spec,
+            "max_error": self._max_error,
+            "error_tail": self._error_tail,
         }
         proc = self._ctx.Process(
             target=worker_main, args=(child_conn, init), daemon=True, name="nooa-sandbox-worker"
@@ -420,14 +434,14 @@ class SandboxedExecutor:
             return {
                 "ok": False,
                 "error_type": "ExecutionSignal",
-                "error": _bounded_text(sig, "ExecutionSignal"),
+                "error": _bounded_text(sig, "ExecutionSignal", limit=self._max_error),
                 "signal_result": payload if is_picklable(payload) else None,
             }
         except CellSerializationError as exc:
             return {
                 "ok": False,
                 "error_type": "CellSerializationError",
-                "error": _bounded_text(exc, "CellSerializationError"),
+                "error": _bounded_text(exc, "CellSerializationError", limit=self._max_error),
             }
         except Exception as exc:  # noqa: BLE001 - surface tool errors to the cell
             # The parent still has the resolved target and can safely derive its
@@ -439,11 +453,11 @@ class SandboxedExecutor:
             call_hint = _bad_call_agentdoc(exc, target=target)
             response = {
                 "ok": False,
-                "error_type": _bounded_text(type(exc).__name__, "Exception"),
-                "error": _bounded_text(exc, type(exc).__name__),
+                "error_type": _bounded_text(type(exc).__name__, "Exception", limit=self._max_error),
+                "error": _bounded_text(exc, type(exc).__name__, limit=self._max_error),
             }
             if call_hint:
-                response["call_hint"] = _bounded_text(call_hint, "")
+                response["call_hint"] = _bounded_text(call_hint, "", limit=self._max_error)
             return response
 
     # --- error synthesis ---------------------------------------------------

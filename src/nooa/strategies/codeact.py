@@ -71,7 +71,7 @@ from nooa.unifiedllm import Tool, ToolCall
 
 if TYPE_CHECKING:
     from nooa.config.strategy_config import CodeActConfig
-    from nooa.errors.formatting import IPythonErrorFormatter
+    from nooa.errors.formatting import ErrorFormatter
     from nooa.strategies.current_call import CurrentCall
 
 logger = logging.getLogger(__name__)
@@ -322,7 +322,7 @@ class CodeActStrategy(CompositeStrategy):
         self,
         config: "CodeActConfig | None" = None,
         *,
-        error_formatter: "IPythonErrorFormatter | None" = None,
+        error_formatter: "ErrorFormatter | None" = None,
     ):
         """Initialize CodeAct strategy.
 
@@ -331,10 +331,11 @@ class CodeActStrategy(CompositeStrategy):
                     Defaults to CodeActConfig() with standard defaults.
             error_formatter: Custom error formatter for LLM feedback. The preferred
                 signature is ``format(error, code=None, *, line_offset=0,
-                formatted_error="")``. Older ``format(error, code, *,
+                formatted_error="", max_error=None, tail_chars=None)``. Older ``format(error, code, *,
                 line_offset=0)`` and ``format(error, code)`` implementations remain
-                supported, but only the preferred form receives a traceback rendered
-                inside a sandbox worker.
+                supported. Formatters accepting ``formatted_error`` receive a
+                traceback rendered inside a sandbox worker; only the preferred
+                form also receives the resolved error budget.
 
         Note:
             Prefill is always enabled and uses InspectInputsPrefill internally.
@@ -715,6 +716,8 @@ Standard Python builtins and agent instance (`self`) are available."""
             cell_timeout=self.config.cell_timeout,
             framework_builtins=framework_builtins,
             restrictions=self.config.restrictions,
+            max_error=runtime.truncation_config.capture.max_error,
+            error_tail=runtime.truncation_config.capture.tail,
         )
 
     async def _close_sandbox(self, session: "CodeActSession") -> None:
@@ -1598,6 +1601,8 @@ Standard Python builtins and agent instance (`self`) are available."""
                     code,
                     line_offset=line_offset,
                     formatted_error=result.formatted_error,
+                    max_error=runtime.truncation_config.capture.max_error,
+                    tail_chars=runtime.truncation_config.capture.tail,
                 )
             stderr = result.stderr
             if validation_error:
@@ -1695,6 +1700,8 @@ Standard Python builtins and agent instance (`self`) are available."""
                     code,
                     line_offset=line_offset,
                     formatted_error=result.formatted_error,
+                    max_error=runtime.truncation_config.capture.max_error,
+                    tail_chars=runtime.truncation_config.capture.tail,
                 )
 
         # Add PythonOutput with actual output and value
@@ -2652,6 +2659,8 @@ Standard Python builtins and agent instance (`self`) are available."""
                 code,
                 line_offset=line_offset,
                 formatted_error=result.formatted_error,
+                max_error=runtime.truncation_config.capture.max_error,
+                tail_chars=runtime.truncation_config.capture.tail,
             )
 
         # Add execution output as a user message with this cell's unique count.
@@ -2787,13 +2796,15 @@ Standard Python builtins and agent instance (`self`) are available."""
         *,
         line_offset: int = 0,
         formatted_error: str = "",
+        max_error: int | None = None,
+        tail_chars: int | None = None,
     ) -> str:
         """Format an error for display using the configured formatter."""
         if self.error_formatter is not None:
             # Select a compatible call shape without invoking the formatter. A
             # TypeError raised *inside* a custom formatter is its real failure and
             # must not be mistaken for an older method signature.
-            formatter = self.error_formatter.format
+            formatter: Any = self.error_formatter.format
             try:
                 signature = inspect.signature(formatter)
             except (TypeError, ValueError):
@@ -2802,7 +2813,24 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # arguments, so invoke that shape once rather than speculatively
                 # executing and retrying after a body-level TypeError.
                 return formatter(error, code)
-            candidates = (
+            candidates: tuple[tuple[tuple[Any, ...], dict[str, Any]], ...] = (
+                (
+                    (error, code),
+                    {
+                        "line_offset": line_offset,
+                        "formatted_error": formatted_error,
+                        "max_error": max_error,
+                        "tail_chars": tail_chars,
+                    },
+                ),
+                (
+                    (error, code),
+                    {
+                        "line_offset": line_offset,
+                        "formatted_error": formatted_error,
+                        "max_error": max_error,
+                    },
+                ),
                 ((error, code), {"line_offset": line_offset, "formatted_error": formatted_error}),
                 ((error, code), {"line_offset": line_offset}),
                 ((error, code), {}),
@@ -2815,13 +2843,18 @@ Standard Python builtins and agent instance (`self`) are available."""
                 return formatter(*args, **kwargs)
             raise TypeError(
                 "Custom error formatter must accept format(error, code), optionally "
-                "with keyword-only line_offset and formatted_error"
+                "with keyword-only line_offset, formatted_error, max_error, and tail_chars"
             )
 
         from nooa.errors.formatting import format_error_for_llm
 
         return format_error_for_llm(
-            error, code, line_offset=line_offset, formatted_error=formatted_error
+            error,
+            code,
+            line_offset=line_offset,
+            formatted_error=formatted_error,
+            max_error=max_error,
+            tail_chars=tail_chars,
         )
 
     def _extract_module_context(

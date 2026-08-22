@@ -634,6 +634,23 @@ async def test_wallclock_timeout_kills_cpu_bound_cell():
         await ex.aclose()
 
 
+async def test_worker_error_uses_executor_error_budget():
+    ex = SandboxedExecutor(
+        _ToolAgent(),
+        SandboxConfig(require=False),
+        cell_timeout=10.0,
+        framework_builtins=_return_result_builtins(),
+        max_error=100,
+    )
+    try:
+        result = await _run(ex, "raise RuntimeError('x' * 1_000)")
+
+        assert result.error is not None
+        assert "Showing first 50 and last 50 chars" in result.formatted_error
+    finally:
+        await ex.aclose()
+
+
 async def test_require_true_raises_when_unavailable(monkeypatch):
     from nooa.runtime.sandbox import executor as ex_mod
     from nooa.runtime.sandbox.guards import Capabilities

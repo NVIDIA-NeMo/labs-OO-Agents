@@ -877,7 +877,12 @@ class PurePythonStrategy(CompositeStrategy):
     ) -> None:
         """Emit a failed cell through the shared structured output contract."""
         error_msg = self._format_error(
-            error, code, line_offset=line_offset, formatted_error=formatted_error
+            error,
+            code,
+            line_offset=line_offset,
+            formatted_error=formatted_error,
+            max_error=runtime.truncation_config.capture.max_error,
+            tail_chars=runtime.truncation_config.capture.tail,
         )
         if isinstance(error, SyntaxError):
             error_msg = f"{error_msg}\n\n{await self.error_syntax(runtime)}"
@@ -1062,10 +1067,17 @@ class PurePythonStrategy(CompositeStrategy):
         *,
         line_offset: int = 0,
         formatted_error: str = "",
+        max_error: int | None = None,
+        tail_chars: int | None = None,
     ) -> str:
         """Format an error for LLM feedback with user-source line numbers."""
         from nooa.errors.formatting import format_error_for_llm
 
         return format_error_for_llm(
-            error, code, line_offset=line_offset, formatted_error=formatted_error
+            error,
+            code,
+            line_offset=line_offset,
+            formatted_error=formatted_error,
+            max_error=max_error,
+            tail_chars=tail_chars,
         )

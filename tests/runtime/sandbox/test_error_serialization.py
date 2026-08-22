@@ -87,6 +87,26 @@ def test_syntax_error_keeps_formatted_source_and_caret() -> None:
     assert diagnostic.endswith("SyntaxError: invalid syntax")
 
 
+def test_legacy_worker_formatter_remains_supported_with_configured_limit() -> None:
+    calls = []
+
+    def legacy_formatter(error: Exception, *, line_offset: int = 0) -> str:
+        calls.append((error, line_offset))
+        return "legacy worker diagnostic"
+
+    dto = result_to_dto(
+        _result_with_error(ValueError("failure"), line_offset=3),
+        error_formatter=legacy_formatter,
+        max_error=100,
+    )
+
+    assert dto.error is not None
+    assert dto.error.formatted_error == "legacy worker diagnostic"
+    assert len(calls) == 1
+    assert isinstance(calls[0][0], ValueError)
+    assert calls[0][1] == 3
+
+
 def test_formatter_failure_does_not_destroy_worker_error(monkeypatch: pytest.MonkeyPatch) -> None:
     import nooa.errors.formatting as formatting
 
@@ -146,6 +166,69 @@ def test_broken_exception_string_still_crosses_worker_boundary() -> None:
     assert dto.error.type_name == "BrokenStringError"
     assert dto.error.message == "BrokenStringError"
     assert dto.error.formatted_error == "BrokenStringError: BrokenStringError"
+
+
+def test_error_dto_text_respects_configured_capture_limit_before_transport_limit() -> None:
+    """Text above a custom content budget is truncated even if the DTO could carry it."""
+    max_error = 100
+    dto = result_to_dto(
+        _result_with_error(RuntimeError("x" * (max_error + 1))),
+        max_error=max_error,
+    )
+
+    assert dto.error is not None
+    assert "Showing first 50 and last 50 chars" in dto.error.message
+    assert len(dto.error.message) <= max_error + 1_024
+
+
+def test_legacy_formatter_output_respects_configured_capture_limit() -> None:
+    dto = result_to_dto(
+        _result_with_error(RuntimeError("failure")),
+        error_formatter=lambda error, *, line_offset=0: "L" * 1_000,
+        max_error=100,
+    )
+
+    assert dto.error is not None
+    assert "Showing first 50 and last 50 chars" in dto.error.formatted_error
+    assert dto.error.formatted_error.endswith("L" * 50 + "\n</truncated-output>")
+
+
+def test_formatter_failure_fallback_respects_configured_capture_limit() -> None:
+    def broken_formatter(error: Exception, *, line_offset: int = 0) -> str:
+        raise RuntimeError("formatter failed")
+
+    dto = result_to_dto(
+        _result_with_error(RuntimeError("F" * 1_000)),
+        error_formatter=broken_formatter,
+        max_error=100,
+    )
+
+    assert dto.error is not None
+    assert "Showing first 50 and last 50 chars" in dto.error.formatted_error
+    assert dto.error.formatted_error.endswith("F" * 50 + "\n</truncated-output>")
+
+
+def test_worker_formatted_envelope_is_not_nested() -> None:
+    dto = result_to_dto(
+        _result_with_error(RuntimeError("X" * 1_000)),
+        max_error=100,
+    )
+
+    assert dto.error is not None
+    assert dto.error.formatted_error.count("<truncated-output>") == 1
+    assert dto.error.formatted_error.count("</truncated-output>") == 1
+
+
+def test_error_dto_text_never_exceeds_transport_cap() -> None:
+    max_transport = DEFAULT_TRUNCATION_CONFIG.capture.max_error + 1_024
+    dto = result_to_dto(
+        _result_with_error(RuntimeError("x" * 100_000)),
+        max_error=max_transport * 2,
+    )
+
+    assert dto.error is not None
+    assert len(dto.error.message) <= max_transport
+    assert len(dto.error.formatted_error) <= max_transport
 
 
 def test_error_dto_text_is_bounded_before_ipc() -> None:
@@ -219,6 +302,7 @@ async def test_broker_error_with_hostile_string_is_safe_and_bounded() -> None:
 
     executor = object.__new__(SandboxedExecutor)
     executor._agent = Target()
+    executor._max_error = DEFAULT_TRUNCATION_CONFIG.capture.max_error
 
     response = await executor._dispatch_tool_call(
         {"kind": "call", "path": ["explode"], "args": (), "kwargs": {}}
@@ -235,6 +319,7 @@ async def test_broker_error_text_is_bounded_before_ipc() -> None:
 
     executor = object.__new__(SandboxedExecutor)
     executor._agent = Target()
+    executor._max_error = DEFAULT_TRUNCATION_CONFIG.capture.max_error
 
     response = await executor._dispatch_tool_call(
         {"kind": "call", "path": ["explode"], "args": (), "kwargs": {}}

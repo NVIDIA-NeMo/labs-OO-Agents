@@ -23,7 +23,7 @@ import weakref
 from multiprocessing.connection import Connection
 from typing import Any
 
-from nooa.errors.formatting import format_error_for_llm
+from nooa.errors.formatting import IPythonErrorFormatter
 from nooa.runtime.sandbox.cell_core import run_cell_source
 from nooa.runtime.sandbox.serialization import ResultDTO, result_to_dto
 
@@ -39,6 +39,10 @@ from nooa.runtime.sandbox.serialization import ResultDTO, result_to_dto
 # the OS-layer (separate uid/namespace) sandbox's job; this layer's contract is
 # OS-enforced action containment.
 _PROXY_STATE: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+# Capture a dedicated formatter before untrusted cell code runs. In particular,
+# mutating the module-level default formatter cannot forge worker diagnostics.
+_WORKER_ERROR_FORMATTER = IPythonErrorFormatter().format
 
 
 class ParentToolError(RuntimeError):
@@ -454,7 +458,13 @@ def worker_main(conn: Connection, init: dict[str, Any]) -> None:  # pragma: no c
                 conn.send({"type": "response", "id": req_id, "ok": True})
                 continue
             if op == "run":
-                dto = _run_one(loop, namespace, request)
+                dto = _run_one(
+                    loop,
+                    namespace,
+                    request,
+                    max_error=init.get("max_error"),
+                    tail_chars=init.get("error_tail"),
+                )
                 conn.send({"type": "response", "id": req_id, "ok": True, "result": dto})
                 continue
             conn.send(
@@ -469,7 +479,10 @@ def _run_one(
     namespace: dict[str, Any],
     request: dict[str, Any],
     _serialize: Any = result_to_dto,
-    _error_formatter: Any = format_error_for_llm,
+    _error_formatter: Any = _WORKER_ERROR_FORMATTER,
+    *,
+    max_error: int | None = None,
+    tail_chars: int | None = None,
 ) -> ResultDTO:
     result = loop.run_until_complete(
         run_cell_source(
@@ -478,4 +491,9 @@ def _run_one(
             execution_count=int(request.get("execution_count", 1)),
         )
     )
-    return _serialize(result, error_formatter=_error_formatter)
+    return _serialize(
+        result,
+        error_formatter=_error_formatter,
+        max_error=max_error,
+        tail_chars=tail_chars,
+    )

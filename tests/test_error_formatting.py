@@ -1058,6 +1058,36 @@ class TestFormatterReviewRegressions:
         assert result == transported
         assert "forged success" not in result
 
+    def test_explicit_error_budget_overrides_default(self):
+        result = format_error_for_llm(RuntimeError("X" * 1_000), max_error=100)
+
+        assert "<truncated-output>" in result
+        assert "Showing first 50 and last 50 chars" in result
+        assert result.endswith("X" * 50 + "\n</truncated-output>")
+
+    def test_preformatted_error_still_respects_explicit_budget(self):
+        result = format_error_for_llm(
+            RuntimeError("surrogate"),
+            formatted_error="Z" * 1_000,
+            max_error=100,
+        )
+
+        assert result.count("<truncated-output>") == 1
+        assert "Showing first 50 and last 50 chars" in result
+        assert result.endswith("Z" * 50 + "\n</truncated-output>")
+
+    def test_pretruncated_error_preserves_single_envelope(self):
+        original = format_error_for_llm(RuntimeError("X" * 1_000), max_error=100)
+
+        result = format_error_for_llm(
+            RuntimeError("surrogate"),
+            formatted_error=original,
+            max_error=100,
+        )
+
+        assert result == original
+        assert result.count("<truncated-output>") == 1
+
     def test_very_large_diagnostic_is_bounded_with_tail_preserved(self):
         result = format_error_for_llm(RuntimeError("X" * 5_000_000))
 
