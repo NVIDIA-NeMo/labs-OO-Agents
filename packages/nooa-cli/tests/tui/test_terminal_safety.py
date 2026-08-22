@@ -83,6 +83,7 @@ def test_user_bar_is_control_safe_cell_aware_and_reserves_final_column() -> None
 
     colors = {"text": "#cdd6f4", "surface2": "#585b70"}
     bar = _build_user_bar("wide 界\x1b[2J\r", _App(), colors)  # type: ignore[arg-type]
+    assert bar.startswith("\x1b[38;5;189;48;5;59m")
 
     assert "\x1b[2J" not in bar
     visible_lines = strip_safe_ansi(sanitize_transcript_ansi(bar)).splitlines()

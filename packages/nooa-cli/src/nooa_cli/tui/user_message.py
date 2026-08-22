@@ -8,10 +8,18 @@ from .terminal_safety import sanitize_live_text
 
 
 def _hex_to_ansi256(hex_color: str) -> int:
-    """Map an RGB hex color to the 6×6×6 ANSI-256 color cube."""
+    """Map an RGB hex color to the nearest xterm-256 color-cube entry."""
     value = hex_color.lstrip("#")
     red, green, blue = (int(value[index : index + 2], 16) for index in (0, 2, 4))
-    return 16 + 36 * round(red / 255 * 5) + 6 * round(green / 255 * 5) + round(blue / 255 * 5)
+
+    def quantize(channel: int) -> int:
+        if channel < 48:
+            return 0
+        if channel < 115:
+            return 1
+        return (channel - 35) // 40
+
+    return 16 + 36 * quantize(red) + 6 * quantize(green) + quantize(blue)
 
 
 def render_user_bar(text: str, cols: int, colors: dict[str, str]) -> str:

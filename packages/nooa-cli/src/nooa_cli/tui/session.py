@@ -54,28 +54,6 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-def _hex_to_ansi256(hex_color: str) -> int:
-    """Convert a ``#rrggbb`` hex string to the nearest xterm-256 index.
-
-    Used when we render ANSI directly (e.g. the user-message bar) and
-    can't rely on Rich's width/wrap logic to emit correctly-padded
-    terminal output.
-    """
-    h = hex_color.lstrip("#")
-    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-
-    # 6x6x6 color cube starting at index 16.
-    def _q(v: int) -> int:
-        # 0,95,135,175,215,255 — standard xterm cube steps.
-        if v < 48:
-            return 0
-        if v < 115:
-            return 1
-        return (v - 35) // 40
-
-    return 16 + 36 * _q(r) + 6 * _q(g) + _q(b)
-
-
 def _effective_slash_output_to_agent(agent: Any, slash_result: Any) -> bool:
     """Return fresh output routing for a slash result.
 
