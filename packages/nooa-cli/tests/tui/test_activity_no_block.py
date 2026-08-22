@@ -211,7 +211,8 @@ async def test_session_swap_uses_async_agent_dispatch():
         used["sync"] += 1
         return fn()
 
-    session._app = SimpleNamespace()
+    clear_handoffs = MagicMock()
+    session._app = SimpleNamespace(clear_pending_input_handoffs=clear_handoffs)
 
     async def shutdown_queue_manager(*, flush):
         assert flush is True
@@ -226,6 +227,7 @@ async def test_session_swap_uses_async_agent_dispatch():
 
     assert used["async"] == 2
     assert used["sync"] == 0
+    clear_handoffs.assert_called_once_with()
 
 
 @pytest.mark.asyncio
