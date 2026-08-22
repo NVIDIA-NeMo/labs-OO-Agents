@@ -321,7 +321,7 @@ class FullscreenTranscriptModel:
             record_ansi,
             separator + plain,
             bool(separator),
-            safe_hyperlink_spans(record_ansi),
+            safe_hyperlink_spans(record_ansi, already_sanitized=True),
         )
         prior_ends_newline = self._ends_newline
         self._records.append(record)
@@ -401,7 +401,7 @@ class FullscreenTranscriptModel:
                     record_ansi,
                     separator + plain,
                     bool(separator),
-                    safe_hyperlink_spans(record_ansi),
+                    safe_hyperlink_spans(record_ansi, already_sanitized=True),
                 )
             )
             accumulated_plain += separator + plain
@@ -465,7 +465,7 @@ class FullscreenTranscriptModel:
                 record_ansi,
                 first.plain[1:],
                 False,
-                safe_hyperlink_spans(record_ansi),
+                safe_hyperlink_spans(record_ansi, already_sanitized=True),
             )
             # Selection endpoints are record-local character offsets. Removing
             # the synthetic joining newline must not move a selection that is

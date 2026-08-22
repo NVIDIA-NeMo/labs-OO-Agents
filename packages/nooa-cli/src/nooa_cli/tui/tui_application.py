@@ -3059,8 +3059,11 @@ class TUIApplication:
     def _after_render(self, app) -> None:
         """Never leave terminal-native OSC-8 state open beyond one rendered frame."""
         if self._is_fullscreen:
-            app.output.write_raw("\x1b]8;;\x1b\\")
-            app.output.flush()
+            try:
+                app.output.write_raw("\x1b]8;;\x1b\\")
+                app.output.flush()
+            except Exception:
+                logger.debug("failed to close native hyperlink state", exc_info=True)
 
     def _read_terminal_size(self) -> tuple[int, int] | None:
         try:

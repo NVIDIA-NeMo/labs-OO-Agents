@@ -41,7 +41,8 @@ def test_fullscreen_copy_and_return_actions_share_status_region() -> None:
     app._show_transient_status("Copied 5 characters", style="class:return-to-tail")
     app._scroll_fullscreen_transcript(-4)
 
-    status_container = app._main_container.children[1]
+    status_container = app._status_region_container
+    assert status_container is not None
     status_region = status_container.content
     assert isinstance(status_region, VSplit)
     assert app._transient_status_container in status_region.children
@@ -1169,6 +1170,21 @@ def test_fullscreen_after_render_closes_native_hyperlink_state() -> None:
     assert flushes == [None]
 
 
+@pytest.mark.parametrize("failure", ["write", "flush"])
+def test_fullscreen_after_render_tolerates_broken_output(failure: str) -> None:
+    app = _make_fullscreen_app()
+
+    def fail() -> None:
+        raise OSError("closed output")
+
+    if failure == "write":
+        app._app.output.write_raw = lambda _text: fail()  # type: ignore[method-assign]
+    else:
+        app._app.output.flush = fail  # type: ignore[method-assign]
+
+    app._after_render(app._app)
+
+
 def test_short_fullscreen_transcript_is_bottom_aligned_in_viewport() -> None:
     from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
     from prompt_toolkit.formatted_text import to_formatted_text
@@ -2003,6 +2019,29 @@ async def test_fullscreen_link_click_opens_safe_http_url(monkeypatch) -> None:
     await app._link_task
     assert calls == ["https://example.test/docs"]
     assert app._open_fullscreen_link_at(8, 0) is False
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_link_open_failure_copies_url(monkeypatch) -> None:
+    app = _make_fullscreen_app()
+    url = "https://example.test/docs"
+    app.emit_block(f"\x1b]8;;{url}\x1b\\link\x1b]8;;\x1b\\")
+    app._transcript_viewport_size = lambda: (20, 2)
+    copied: list[str] = []
+
+    async def fail_to_open(_url: str) -> bool:
+        return False
+
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    monkeypatch.setattr(app, "_open_local_url", fail_to_open)
+    monkeypatch.setattr(app, "_start_fullscreen_selection_copy", copied.append)
+
+    assert app._open_fullscreen_link_at(1, 0) is True
+    task = app._link_task
+    assert task is not None
+    await task
+    assert copied == [url]
 
 
 @pytest.mark.asyncio
