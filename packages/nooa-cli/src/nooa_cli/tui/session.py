@@ -24,7 +24,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from rich.cells import chop_cells, set_cell_size
 from rich.console import Console as RichConsole
 from rich.text import Text
 
@@ -34,6 +33,7 @@ from .terminal_safety import (
     normalize_transcript_block,
     sanitize_live_text,
 )
+from .user_message import render_user_bar
 
 logger = logging.getLogger(__name__)
 
@@ -106,22 +106,7 @@ def _effective_slash_output_to_agent(agent: Any, slash_result: Any) -> bool:
 
 
 def _build_user_bar(text: str, app: "TUIApplication", colors: dict) -> str:
-    """Build a highlighted user-message bar as safe raw ANSI.
-
-    Bypasses Rich because reconciling Rich's wrap/crop/overflow logic
-    with manual ``ljust`` padding is brittle across Rich versions and
-    terminal emulators — direct CSI emission always renders the full
-    width-spanning highlighted row the spec asks for.
-
-    Each input line becomes one bar row (or more when it wraps):
-      ``ESC[fg;bg m{prefix}{line}{padding}{ ESC[0m}\\n``
-    where the first row carries the ``❯`` prompt glyph and
-    continuation rows start flush-left.
-    """
-    # Prefer prompt_toolkit's live width — ``run_in_terminal`` will use
-    # this number when writing above the prompt. Falls back to the
-    # terminal_cols helper if the app output can't report.
-    cols: int
+    """Build a live highlighted user-message bar at the transcript width."""
     try:
         cols = app.transcript_columns()
     except Exception:
@@ -131,21 +116,7 @@ def _build_user_bar(text: str, app: "TUIApplication", colors: dict) -> str:
             from .tui_application import terminal_cols
 
             cols = max(terminal_cols(minimum=1) - 1, 1)
-
-    fg = _hex_to_ansi256(colors["text"])
-    bg = _hex_to_ansi256(colors["surface2"])
-    on = f"\x1b[38;5;{fg};48;5;{bg}m"
-    off = "\x1b[0m"
-
-    rows: list[str] = []
-    for i, line in enumerate(sanitize_live_text(text).split("\n")):
-        shown = f" ❯ {line} " if i == 0 else f" {line} "
-        # Rich's cell helpers preserve grapheme clusters and measure wide
-        # glyphs correctly.  Every row is exactly the safe content width,
-        # which is one cell narrower than the physical terminal.
-        chunks = chop_cells(shown, cols) or [""]
-        rows.extend(f"{on}{set_cell_size(chunk, cols)}{off}" for chunk in chunks)
-    return "\n".join(rows) + "\n"
+    return render_user_bar(text, cols, colors)
 
 
 class _EmitStream:

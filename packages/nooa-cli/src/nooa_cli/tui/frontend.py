@@ -48,7 +48,6 @@ def render_history_replay_to_ansi(output: HistoryReplay, width: int) -> str:
     from rich.text import Text
 
     dim = COLORS["overlay1"]
-    user_color = COLORS["subtext1"]
 
     render_width = max(int(width), 1)
     buf = io.StringIO()
@@ -74,14 +73,11 @@ def render_history_replay_to_ansi(output: HistoryReplay, width: int) -> str:
         )
     for turn in output.turns:
         if turn.role == "user":
-            # Apply the style at the print boundary so Rich extends the
-            # background through padding on every explicit or wrapped row.
-            bc.print(
-                Text(f" You: {turn.content}"),
-                style=f"{user_color} on {COLORS['surface0']}",
-                justify="left",
-                overflow="fold",
-            )
+            # Reuse the live renderer so resumed and newly submitted messages
+            # have identical prompt glyphs, colors, padding, and wrapping.
+            from .user_message import render_user_bar
+
+            buf.write(render_user_bar(turn.content, render_width, COLORS))
         else:
             bc.print(Text("OO:", style=f"bold {dim}"))
             bc.print(Markdown(turn.content), style=dim)

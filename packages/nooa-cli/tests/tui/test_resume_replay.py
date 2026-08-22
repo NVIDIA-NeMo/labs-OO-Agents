@@ -190,6 +190,10 @@ class TestBatchRendering:
         rendered = render_history_replay_to_ansi(replay, 20)
         message_rows = [line for line in strip_safe_ansi(rendered).splitlines() if line]
 
+        from nooa_cli.tui.theme import COLORS
+        from nooa_cli.tui.user_message import render_user_bar
+
+        assert rendered.startswith(render_user_bar(replay.turns[0].content, 20, COLORS))
         assert len(message_rows) > 2
         assert all(cell_len(line) == 20 for line in message_rows)
         assert all(
