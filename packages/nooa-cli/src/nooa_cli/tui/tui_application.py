@@ -454,18 +454,13 @@ def _fullscreen_wheel_delta(mouse_event: MouseEvent) -> int | None:
     }.get(mouse_event.event_type)
 
 
-class _FullscreenDragBoundaryControl(FormattedTextControl):
-    """Chrome control that hands pointer gestures back to the transcript.
-
-    prompt_toolkit routes mouse events to the window under the pointer. Without
-    this handoff, releasing over bottom chrome strands the transcript control's
-    drag lease, and wheel gestures over chrome never reach transcript scrolling.
-    """
+class _TranscriptGestureControlMixin:
+    """Forward transcript-wide pointer gestures received by adjacent controls."""
 
     def __init__(
         self,
         *args: Any,
-        transcript_drag_callback: Callable[[MouseEvent], bool],
+        transcript_drag_callback: Callable[[MouseEvent], bool] | None = None,
         transcript_scroll_callback: Callable[[int], None] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -473,23 +468,42 @@ class _FullscreenDragBoundaryControl(FormattedTextControl):
         self._transcript_drag_callback = transcript_drag_callback
         self._transcript_scroll_callback = transcript_scroll_callback
 
-    def mouse_handler(self, mouse_event: MouseEvent):
+    def _forward_transcript_gesture(self, mouse_event: MouseEvent) -> tuple[bool, Any]:
+        """Return whether the shared policy handled the event and its result."""
         if (
             MouseModifier.ALT in mouse_event.modifiers
             or MouseModifier.SHIFT in mouse_event.modifiers
         ):
-            self._transcript_drag_callback(mouse_event)
-            return NotImplemented
-        if self._transcript_drag_callback(mouse_event):
-            return None
+            if self._transcript_drag_callback is not None:
+                self._transcript_drag_callback(mouse_event)
+            return True, NotImplemented
+        if self._transcript_drag_callback is not None and self._transcript_drag_callback(
+            mouse_event
+        ):
+            return True, None
         delta = _fullscreen_wheel_delta(mouse_event)
         if delta is not None and self._transcript_scroll_callback is not None:
             self._transcript_scroll_callback(delta)
-            return None
+            return True, None
+        return False, None
+
+
+class _FullscreenDragBoundaryControl(_TranscriptGestureControlMixin, FormattedTextControl):
+    """Chrome control that hands pointer gestures back to the transcript.
+
+    prompt_toolkit routes mouse events to the window under the pointer. Without
+    this handoff, releasing over bottom chrome strands the transcript control's
+    drag lease, and wheel gestures over chrome never reach transcript scrolling.
+    """
+
+    def mouse_handler(self, mouse_event: MouseEvent):
+        handled, result = self._forward_transcript_gesture(mouse_event)
+        if handled:
+            return result
         return super().mouse_handler(mouse_event)
 
 
-class _NativeSelectionBufferControl(BufferControl):
+class _NativeSelectionBufferControl(_TranscriptGestureControlMixin, BufferControl):
     """Composer control that hands transcript-wide pointer gestures to their owner."""
 
     def __init__(
@@ -500,27 +514,18 @@ class _NativeSelectionBufferControl(BufferControl):
         selection_copy_callback: Callable[[str], None] | None = None,
         **kwargs: Any,
     ) -> None:
-        super().__init__(*args, **kwargs)
-        self._transcript_drag_callback = transcript_drag_callback
-        self._transcript_scroll_callback = transcript_scroll_callback
+        super().__init__(
+            *args,
+            transcript_drag_callback=transcript_drag_callback,
+            transcript_scroll_callback=transcript_scroll_callback,
+            **kwargs,
+        )
         self._selection_copy_callback = selection_copy_callback
 
     def mouse_handler(self, mouse_event: MouseEvent):
-        if (
-            MouseModifier.ALT in mouse_event.modifiers
-            or MouseModifier.SHIFT in mouse_event.modifiers
-        ):
-            if self._transcript_drag_callback is not None:
-                self._transcript_drag_callback(mouse_event)
-            return NotImplemented
-        if self._transcript_drag_callback is not None and self._transcript_drag_callback(
-            mouse_event
-        ):
-            return None
-        delta = _fullscreen_wheel_delta(mouse_event)
-        if delta is not None and self._transcript_scroll_callback is not None:
-            self._transcript_scroll_callback(delta)
-            return None
+        handled, result = self._forward_transcript_gesture(mouse_event)
+        if handled:
+            return result
         result = super().mouse_handler(mouse_event)
         if (
             mouse_event.event_type is MouseEventType.MOUSE_UP
@@ -537,36 +542,15 @@ class _NativeSelectionBufferControl(BufferControl):
         return result
 
 
-class _NativeSelectionCompletionsMenuControl(CompletionsMenuControl):
+class _NativeSelectionCompletionsMenuControl(
+    _TranscriptGestureControlMixin, CompletionsMenuControl
+):
     """Completion menu that preserves native selection and transcript gestures."""
 
-    def __init__(
-        self,
-        *args: Any,
-        transcript_drag_callback: Callable[[MouseEvent], bool] | None = None,
-        transcript_scroll_callback: Callable[[int], None] | None = None,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(*args, **kwargs)
-        self._transcript_drag_callback = transcript_drag_callback
-        self._transcript_scroll_callback = transcript_scroll_callback
-
     def mouse_handler(self, mouse_event: MouseEvent):
-        if (
-            MouseModifier.ALT in mouse_event.modifiers
-            or MouseModifier.SHIFT in mouse_event.modifiers
-        ):
-            if self._transcript_drag_callback is not None:
-                self._transcript_drag_callback(mouse_event)
-            return NotImplemented
-        if self._transcript_drag_callback is not None and self._transcript_drag_callback(
-            mouse_event
-        ):
-            return None
-        delta = _fullscreen_wheel_delta(mouse_event)
-        if delta is not None and self._transcript_scroll_callback is not None:
-            self._transcript_scroll_callback(delta)
-            return None
+        handled, result = self._forward_transcript_gesture(mouse_event)
+        if handled:
+            return result
         return super().mouse_handler(mouse_event)
 
 
@@ -591,7 +575,7 @@ def _native_hyperlink_boundary(
     return boundary
 
 
-class _ReturnToTailControl(FormattedTextControl):
+class _ReturnToTailControl(_TranscriptGestureControlMixin, FormattedTextControl):
     """One-row fullscreen affordance for resuming live transcript output."""
 
     def __init__(
@@ -609,27 +593,15 @@ class _ReturnToTailControl(FormattedTextControl):
             ),
             focusable=False,
             show_cursor=False,
+            transcript_drag_callback=transcript_drag_callback,
+            transcript_scroll_callback=transcript_scroll_callback,
         )
         self._callback = callback
-        self._transcript_drag_callback = transcript_drag_callback
-        self._transcript_scroll_callback = transcript_scroll_callback
 
     def mouse_handler(self, mouse_event: MouseEvent):
-        if (
-            MouseModifier.ALT in mouse_event.modifiers
-            or MouseModifier.SHIFT in mouse_event.modifiers
-        ):
-            if self._transcript_drag_callback is not None:
-                self._transcript_drag_callback(mouse_event)
-            return NotImplemented
-        if self._transcript_drag_callback is not None and self._transcript_drag_callback(
-            mouse_event
-        ):
-            return None
-        delta = _fullscreen_wheel_delta(mouse_event)
-        if delta is not None and self._transcript_scroll_callback is not None:
-            self._transcript_scroll_callback(delta)
-            return None
+        handled, result = self._forward_transcript_gesture(mouse_event)
+        if handled:
+            return result
         if mouse_event.button is not MouseButton.LEFT:
             return NotImplemented
         if mouse_event.event_type is MouseEventType.MOUSE_DOWN:
