@@ -26,6 +26,7 @@ from .output import (
     HistoryReplay,
     Output,
     RichOutput,
+    SplashScreen,
     StartupInfo,
     StopReasonOutput,
     TableOutput,
@@ -305,6 +306,7 @@ class TerminalFrontend:
             HelpOutput: self._render_help,
             AgentMessage: self._render_agent_message,
             CodeExecution: self._render_code_execution,
+            SplashScreen: self._render_splash,
             StartupInfo: self._render_startup,
             ClearScreen: self._render_clear,
             Thinking: self._render_thinking,
@@ -556,6 +558,32 @@ class TerminalFrontend:
             return
 
         # Single write to the real terminal
+        stream.write(rendered)
+        stream.flush()
+
+    def _render_splash(self, _output: SplashScreen) -> None:
+        """Render the logo through the app-owned transcript in fullscreen mode."""
+        from .splash import render_splash_to_ansi
+
+        stream = self._console.console.file
+        replay_width = getattr(stream, "replay_width", None)
+        width = (
+            replay_width(self._console.console.width or 80)
+            if callable(replay_width)
+            else self._console.console.width or 80
+        )
+        rendered = render_splash_to_ansi(width)
+        emit_with_replay = getattr(stream, "emit_with_replay", None)
+        if getattr(stream, "supports_semantic_replay", False) is True and callable(
+            emit_with_replay
+        ):
+            emit_with_replay(
+                rendered,
+                lambda s=stream, w=width: render_splash_to_ansi(
+                    s.replay_width(w) if callable(getattr(s, "replay_width", None)) else w
+                ),
+            )
+            return
         stream.write(rendered)
         stream.flush()
 
