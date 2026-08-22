@@ -165,6 +165,48 @@ async def test_observation_close_failure_does_not_skip_app_teardown(
     assert app._loop is None
 
 
+@pytest.mark.parametrize("task_name", ["_clipboard_task", "_link_task"])
+async def test_failed_auxiliary_task_does_not_skip_app_teardown(
+    monkeypatch: pytest.MonkeyPatch, task_name: str
+) -> None:
+    from nooa_cli.tui.host_services import TUIHostServices
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    phases: list[str] = []
+
+    async def quiesce() -> None:
+        phases.append("quiesce")
+
+    async def fail_after_cancellation() -> None:
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError as exc:
+            raise RuntimeError("task teardown failed") from exc
+
+    app = TUIApplication(
+        host_services=TUIHostServices(before_output_drain=quiesce),
+        display_mode="native-replay",
+    )
+
+    async def exit_immediately(*_args, **_kwargs) -> None:
+        setattr(app, task_name, asyncio.create_task(fail_after_cancellation()))
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(app._app, "run_async", exit_immediately)
+    monkeypatch.setattr(
+        "nooa_cli.tui.stream_forwarder.install_stray_stream_capture",
+        lambda *_args, **_kwargs: lambda: phases.append("streams restored"),
+    )
+
+    await app.run_async()
+
+    assert phases == ["streams restored", "quiesce"]
+    assert getattr(app, task_name) is None
+    assert app._block_queue is None
+    assert app._consumer_task is None
+    assert app._loop is None
+
+
 async def test_pre_run_emit_uses_the_same_normalized_block_as_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -672,6 +714,156 @@ async def test_queue_displays_above_prompt_while_agent_working():
         await h.type_keys("queued-msg")
         await h.press("enter")
         await h.wait_for(lambda: h.capture_queued() == ["queued-msg"])
+
+
+async def test_admitted_input_stays_visible_until_accepted_echo_commits():
+    """A fast dequeue cannot create a blank composer→queue→transcript frame."""
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("trigger")
+        await h.wait_for(lambda: h.app.is_thinking())
+
+        # Harness submission bypasses Session's accepted-message UI callback;
+        # retire that setup-only handoff before testing the next admission.
+        h.app.complete_pending_input_handoff("trigger")
+
+        # Simulate the worker consuming immediately, before Session commits its
+        # accepted-message transcript block on the UI owner loop.
+        h.app.submit_message("queued-msg")
+        assert h.app._pending_input_display() == ["queued-msg"]
+
+        # Dequeue publication may already be empty before the Session callback
+        # runs; optimistic queue chrome must still bridge that frame.
+        h.runner._on_user_message_get(
+            "queued-msg",
+            generation=h.runner._binding_generation,
+            user_messages=h.runner._user_messages,
+            previous=None,
+        )
+        assert h.runner.state.pending_inputs == ()
+        assert h.app._pending_input_display() == ["queued-msg"]
+
+        h.app.complete_pending_input_handoff("queued-msg")
+        assert h.app._pending_input_display() == []
+
+
+async def test_pending_display_preserves_runtime_queue_during_handoff(monkeypatch):
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("trigger")
+        await h.wait_for(lambda: h.app.is_thinking())
+        h.app.complete_pending_input_handoff("trigger")
+
+        h.app.submit_message("already-pending")
+        h.app.complete_pending_input_handoff("already-pending")
+        assert h.runner.state.pending_inputs == ("already-pending",)
+
+        monkeypatch.setattr(h.app._agent_controller, "submit", lambda _text: True)
+        h.app.submit_message("newly-admitted")
+
+        assert h.app._pending_input_display() == [
+            "already-pending",
+            "newly-admitted",
+        ]
+
+
+async def test_submission_exception_retires_only_new_handoff(monkeypatch):
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("trigger")
+        await h.wait_for(lambda: h.app.is_thinking())
+        assert [item.text for item in h.app._pending_input_handoff] == ["trigger"]
+
+        def fail_submit(_text: str) -> bool:
+            raise RuntimeError("agent transition")
+
+        monkeypatch.setattr(h.app._agent_controller, "submit", fail_submit)
+        h.app.submit_message("rejected")
+
+        assert [item.text for item in h.app._pending_input_handoff] == ["trigger"]
+        await h.wait_output_contains("Message rejected.")
+
+
+async def test_coalesced_accepted_echo_retires_all_submission_handoffs():
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("trigger")
+        await h.wait_for(lambda: h.app.is_thinking())
+
+        h.app.complete_pending_input_handoff("trigger")
+        h.app.submit_message("one")
+        h.app.submit_message("two")
+        h.app.submit_message("one\ntwo")
+
+        # FIFO completion must retire the first two submissions, not the later
+        # literal multiline duplicate.
+        h.app.complete_pending_input_handoff("one\ntwo")
+        assert [item.text for item in h.app._pending_input_handoff] == ["one\ntwo"]
+        h.app.complete_pending_input_handoff("one\ntwo")
+        assert h.app._pending_input_handoff == []
+
+
+@pytest.mark.parametrize("echo", ["two", "runtime-prefix\ntwo"])
+async def test_out_of_order_echo_retires_only_matching_handoff(echo: str) -> None:
+    from nooa_cli.tui.tui_application import TUIApplication, _PendingInputHandoff
+
+    app = TUIApplication(display_mode="fullscreen")
+    app._pending_input_handoff = [
+        _PendingInputHandoff("one"),
+        _PendingInputHandoff("two"),
+        _PendingInputHandoff("three"),
+    ]
+
+    app.complete_pending_input_handoff(echo)
+
+    assert [item.text for item in app._pending_input_handoff] == ["one", "three"]
+
+
+async def test_coalesced_echo_with_runtime_prefix_retires_tui_handoffs():
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("trigger")
+        await h.wait_for(lambda: h.app.is_thinking())
+        h.app.complete_pending_input_handoff("trigger")
+
+        h.runner._user_messages.put("runtime-prefix")
+        h.app.submit_message("one")
+        h.app.submit_message("two")
+
+        assert h.runner._user_messages.snapshot() == ["runtime-prefix\none\ntwo"]
+        assert h.app._pending_input_display() == ["runtime-prefix", "one", "two"]
+        h.app.complete_pending_input_handoff("runtime-prefix\none\ntwo")
+        assert h.app._pending_input_handoff == []
+
+
+async def test_withdrawing_coalesced_input_retires_queue_handoff():
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("trigger")
+        await h.wait_for(lambda: h.app.is_thinking())
+        h.app.complete_pending_input_handoff("trigger")
+        await h.submit_async("one")
+        await h.submit_async("two")
+        await h.wait_for(lambda: h.app._pending_input_display() == ["one", "two"])
+
+        await h.press("up")
+        await h.wait_input_equals("one\ntwo")
+        assert h.app._pending_input_display() == []
+
+
+async def test_clearing_pending_handoffs_removes_old_session_queue_rows() -> None:
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("trigger")
+        await h.wait_for(lambda: h.app.is_thinking())
+        h.app.complete_pending_input_handoff("trigger")
+
+        h.app.submit_message("old-session")
+        assert h.app._pending_input_handoff
+
+        h.app.clear_pending_input_handoffs()
+
+        assert h.app._pending_input_handoff == []
 
 
 async def test_queue_multiple_enters_merge_into_one_item():
