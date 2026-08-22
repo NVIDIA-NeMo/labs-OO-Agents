@@ -117,7 +117,11 @@ def test_fullscreen_splash_is_semantically_reflowable() -> None:
     def emit(text: str, replay=None) -> None:
         emitted.append((text, replay))
 
-    stream = _EmitStream(emit, replay_width=lambda: current_width)
+    stream = _EmitStream(
+        emit,
+        replay_width=lambda: current_width - 1,
+        layout_width=lambda: current_width,
+    )
     mock_console = MagicMock()
     mock_console.console.width = 120
     mock_console.console.file = stream
@@ -130,6 +134,12 @@ def test_fullscreen_splash_is_semantically_reflowable() -> None:
     rendered, replay = emitted[0]
     assert "NVIDIA LABS" in rendered
     assert callable(replay)
+    # The 80-column boundary must keep the wide variant rather than using
+    # the native-scrollback width (79), which deliberately reserves a column.
+    current_width = 80
+    wide = replay()
+    assert wide.count("\n") == 11
+
     current_width = 40
     compact = replay()
     assert "NVIDIA LABS" in compact

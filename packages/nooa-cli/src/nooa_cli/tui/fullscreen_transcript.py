@@ -218,9 +218,12 @@ class FullscreenTranscriptModel:
         if record is None:
             return None
         for start, stop, target in record.hyperlinks:
-            if start <= hit.before < stop:
+            # Rendering promotes any hyperlink overlap to the whole displayed
+            # grapheme. Use the same rule for hit-testing when an OSC-8
+            # boundary falls between a base character and combining mark.
+            if start < hit.after and stop > hit.before:
                 return target
-            if start > hit.before:
+            if start >= hit.after:
                 break
         return None
 

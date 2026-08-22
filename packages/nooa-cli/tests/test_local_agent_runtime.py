@@ -633,6 +633,45 @@ def test_submit_state_publication_is_serialized_before_dequeue() -> None:
     runner.close()
 
 
+def test_withdraw_state_publication_is_serialized_before_submit() -> None:
+    agent = AgentStub()
+    runner = LocalAgentRunner(agent, emit_text=lambda _text: None, agent_id="local-1")
+    runner._task = SimpleNamespace(done=lambda: False)  # type: ignore[assignment]
+    agent._user_messages_in.put("old")
+
+    withdraw_publishing = threading.Event()
+    release_withdraw = threading.Event()
+    submit_finished = threading.Event()
+    original_update = runner._update_pending_inputs
+
+    def blocking_update(pending_inputs: tuple[str, ...]) -> None:
+        if pending_inputs == () and not withdraw_publishing.is_set():
+            withdraw_publishing.set()
+            assert release_withdraw.wait(timeout=1)
+        original_update(pending_inputs)
+
+    runner._update_pending_inputs = blocking_update  # type: ignore[method-assign]
+    withdraw_thread = threading.Thread(target=runner.withdraw_pending_input)
+    withdraw_thread.start()
+    assert withdraw_publishing.wait(timeout=1)
+
+    def submit() -> None:
+        runner.submit("new")
+        submit_finished.set()
+
+    submit_thread = threading.Thread(target=submit)
+    submit_thread.start()
+    assert not submit_finished.wait(timeout=0.05)
+
+    release_withdraw.set()
+    withdraw_thread.join(timeout=1)
+    submit_thread.join(timeout=1)
+    assert not withdraw_thread.is_alive()
+    assert not submit_thread.is_alive()
+    assert runner.state.pending_inputs == runner.pending_user_messages() == ("new",)
+    runner.close()
+
+
 def test_withdraw_pending_input_returns_text_and_publishes_state() -> None:
     agent = AgentStub()
     runner = LocalAgentRunner(agent, emit_text=lambda _text: None, agent_id="local-1")

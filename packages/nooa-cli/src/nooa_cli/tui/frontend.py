@@ -566,10 +566,10 @@ class TerminalFrontend:
         from .splash import render_splash_to_ansi
 
         stream = self._console.console.file
-        replay_width = getattr(stream, "replay_width", None)
+        layout_width = getattr(stream, "layout_width", None)
         width = (
-            replay_width(self._console.console.width or 80)
-            if callable(replay_width)
+            layout_width(self._console.console.width or 80)
+            if callable(layout_width)
             else self._console.console.width or 80
         )
         rendered = render_splash_to_ansi(width)
@@ -580,7 +580,7 @@ class TerminalFrontend:
             emit_with_replay(
                 rendered,
                 lambda s=stream, w=width: render_splash_to_ansi(
-                    s.replay_width(w) if callable(getattr(s, "replay_width", None)) else w
+                    s.layout_width(w) if callable(getattr(s, "layout_width", None)) else w
                 ),
             )
             return

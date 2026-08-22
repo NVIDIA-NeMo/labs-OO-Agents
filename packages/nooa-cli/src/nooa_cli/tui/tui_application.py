@@ -2397,6 +2397,12 @@ class TUIApplication:
         if self._app.is_running:
             self._app.invalidate()
 
+    def clear_pending_input_handoffs(self) -> None:
+        """Discard optimistic queue rows after the runtime queue is flushed."""
+        self._pending_input_handoff.clear()
+        if self._app.is_running:
+            self._app.invalidate()
+
     def _schedule_agent_callback(self, callback: Callable[[], None]) -> None:
         """Marshal agent observation delivery onto the prompt-toolkit owner loop."""
         loop = self._loop

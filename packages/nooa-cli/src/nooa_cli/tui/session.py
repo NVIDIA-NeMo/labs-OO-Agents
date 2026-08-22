@@ -118,11 +118,13 @@ class _EmitStream:
         self,
         emit: Callable[..., None],
         replay_width: Callable[[], int] | None = None,
+        layout_width: Callable[[], int] | None = None,
         clear: Callable[[], None] | None = None,
     ) -> None:
         self.supports_semantic_replay = True
         self._emit = emit
         self._replay_width = replay_width
+        self._layout_width = layout_width
         self._clear = clear
         self._buf: list[str] = []
         self._held = 0
@@ -154,6 +156,15 @@ class _EmitStream:
             return default
         try:
             return int(self._replay_width())
+        except Exception:
+            return default
+
+    def layout_width(self, default: int = 80) -> int:
+        """Return the full application viewport width for renderer-owned UI."""
+        if self._layout_width is None:
+            return self.replay_width(default)
+        try:
+            return int(self._layout_width())
         except Exception:
             return default
 
@@ -597,6 +608,7 @@ class Session:
                     file=_EmitStream(
                         self._app.emit_block,
                         replay_width=lambda app=self._app: app.transcript_columns(),
+                        layout_width=lambda app=self._app: app.output_columns(minimum=1),
                         clear=self._app.clear_transcript,
                     ),  # type: ignore[arg-type]
                     force_terminal=True,
@@ -1411,13 +1423,16 @@ class Session:
         agent_runner = getattr(self, "_local_agent_runner", None)
         if agent_runner is not None:
             await agent_runner.shutdown_queue_manager(flush=True)
+        app = getattr(self, "_app", None)
+        clear_handoffs = getattr(app, "clear_pending_input_handoffs", None)
+        if callable(clear_handoffs):
+            clear_handoffs()
         if self._session_manager is not None:
             # Save snapshot before closing so /clear, /session new, and
             # /session resume don't lose the current session's self.v/todo.
             storage = getattr(self.agent, "_storage", None)
             if storage is not None and hasattr(storage, "save_snapshot"):
                 try:
-                    app = getattr(self, "_app", None)
                     if app is not None:
                         await agent_runner.run_async(lambda: storage.save_snapshot(self.agent))
                     else:

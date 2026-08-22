@@ -321,6 +321,16 @@ def test_fullscreen_hyperlink_hit_testing_survives_projection_and_wrapping() -> 
     assert blank.hyperlink_at(x=19, y=1, width=20, height=3) is None
 
 
+def test_fullscreen_hyperlink_hit_testing_matches_combining_grapheme_rendering() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+    model = FullscreenTranscriptModel()
+    # The OSC-8 boundary lies inside one displayed grapheme (e + combining acute).
+    model.append("e\x1b]8;;https://example.test\x1b\\́\x1b]8;;\x1b\\")
+
+    assert model.hyperlink_at(x=0, y=0, width=20, height=1) == "https://example.test"
+
+
 def test_fullscreen_projection_keeps_osc8_only_as_zero_width_metadata() -> None:
     from prompt_toolkit.formatted_text import to_formatted_text
 

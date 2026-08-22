@@ -793,6 +793,21 @@ async def test_withdrawing_coalesced_input_retires_queue_handoff():
         assert h.app._pending_input_display() == []
 
 
+async def test_clearing_pending_handoffs_removes_old_session_queue_rows() -> None:
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("trigger")
+        await h.wait_for(lambda: h.app.is_thinking())
+        h.app.complete_pending_input_handoff("trigger")
+
+        h.app.submit_message("old-session")
+        assert h.app._pending_input_handoff
+
+        h.app.clear_pending_input_handoffs()
+
+        assert h.app._pending_input_handoff == []
+
+
 async def test_queue_multiple_enters_merge_into_one_item():
     """Successive Enters typed while the agent is working compose one
     queued message joined with newlines so the agent isn't asked to
