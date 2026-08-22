@@ -2001,6 +2001,39 @@ def test_fullscreen_click_without_drag_activates_link_but_drag_does_not() -> Non
 
 
 @pytest.mark.asyncio
+async def test_local_browser_timeout_counts_as_dispatched_without_termination(monkeypatch) -> None:
+    app = _make_fullscreen_app()
+
+    class Process:
+        returncode = None
+
+        async def wait(self) -> None:
+            return None
+
+    process = Process()
+    terminated: list[object] = []
+
+    async def create_process(*_args, **_kwargs):
+        return process
+
+    async def time_out(awaitable, *, timeout):
+        assert timeout == 5
+        awaitable.close()
+        raise TimeoutError
+
+    async def terminate(candidate) -> None:
+        terminated.append(candidate)
+
+    monkeypatch.setattr(app, "_browser_open_command", lambda _url: ("open", "url"))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(asyncio, "wait_for", time_out)
+    monkeypatch.setattr(app, "_terminate_clipboard_process", terminate)
+
+    assert await app._open_local_url("https://example.test/docs") is True
+    assert terminated == []
+
+
+@pytest.mark.asyncio
 async def test_fullscreen_link_click_opens_safe_http_url(monkeypatch) -> None:
     app = _make_fullscreen_app()
     app.emit_block("\x1b]8;;https://example.test/docs\x1b\\link\x1b]8;;\x1b\\")

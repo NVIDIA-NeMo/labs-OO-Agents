@@ -1839,8 +1839,9 @@ class TUIApplication:
             await self._terminate_clipboard_process(process)
             raise
         except TimeoutError:
-            await self._terminate_clipboard_process(process)
-            return False
+            # Browser launchers can remain attached after successfully handing
+            # the URL off. Do not kill the helper or report a false failure.
+            return True
         return process.returncode == 0
 
     def _handle_fullscreen_selection(self, action: str, x: int, y: int) -> None:
