@@ -21,8 +21,9 @@ import pickle
 import threading
 import weakref
 from multiprocessing.connection import Connection
-from typing import Any
+from typing import Any, cast
 
+from nooa.errors.formatting import IPythonErrorFormatter
 from nooa.runtime.sandbox.cell_core import run_cell_source
 from nooa.runtime.sandbox.serialization import ResultDTO, result_to_dto
 
@@ -38,6 +39,10 @@ from nooa.runtime.sandbox.serialization import ResultDTO, result_to_dto
 # the OS-layer (separate uid/namespace) sandbox's job; this layer's contract is
 # OS-enforced action containment.
 _PROXY_STATE: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+# Capture a dedicated formatter before untrusted cell code runs. In particular,
+# mutating the module-level default formatter cannot forge worker diagnostics.
+_WORKER_ERROR_FORMATTER = IPythonErrorFormatter().format
 
 
 class ParentToolError(RuntimeError):
@@ -127,13 +132,30 @@ def _raise_broker_error(response: dict[str, Any]) -> None:
         # normal signal path (cell_core catches it -> ExecutionResult.signal).
         from nooa.strategies.codeact import _ReturnResultSignal
 
-        raise _ReturnResultSignal(result=response.get("signal_result"))
+        signal_result = response.get("signal_result")
+        if response.get("signal_result_dropped", False):
+            raise CellSerializationError(
+                "A control-flow signal carried a value that could not cross the "
+                "sandbox boundary. Return a JSON/pickle-safe value instead."
+            )
+        raise _ReturnResultSignal(result=cast(Any, signal_result))
     if err_type == "CellSerializationError":
         raise CellSerializationError(message)
     exc_cls = getattr(_bi, err_type, ParentToolError)
     if not isinstance(exc_cls, type) or not issubclass(exc_cls, BaseException):
         exc_cls = ParentToolError
-    raise exc_cls(message)
+    try:
+        error = exc_cls(message)
+    except Exception:
+        # Some builtin exceptions (for example UnicodeDecodeError) require a
+        # structured constructor. Preserve the remote type name rather than
+        # replacing the actual failure with that constructor's TypeError.
+        error = ParentToolError(message)
+        error.original_type = err_type  # type: ignore[attr-defined]
+    call_hint = response.get("call_hint")
+    if isinstance(call_hint, str) and call_hint:
+        error._nooa_call_hint = call_hint  # type: ignore[attr-defined]
+    raise error
 
 
 def _is_async_callable(obj: Any) -> bool:
@@ -436,7 +458,13 @@ def worker_main(conn: Connection, init: dict[str, Any]) -> None:  # pragma: no c
                 conn.send({"type": "response", "id": req_id, "ok": True})
                 continue
             if op == "run":
-                dto = _run_one(loop, namespace, request)
+                dto = _run_one(
+                    loop,
+                    namespace,
+                    request,
+                    max_error=init.get("max_error"),
+                    tail_chars=init.get("error_tail"),
+                )
                 conn.send({"type": "response", "id": req_id, "ok": True, "result": dto})
                 continue
             conn.send(
@@ -447,7 +475,14 @@ def worker_main(conn: Connection, init: dict[str, Any]) -> None:  # pragma: no c
 
 
 def _run_one(
-    loop: asyncio.AbstractEventLoop, namespace: dict[str, Any], request: dict[str, Any]
+    loop: asyncio.AbstractEventLoop,
+    namespace: dict[str, Any],
+    request: dict[str, Any],
+    _serialize: Any = result_to_dto,
+    _error_formatter: Any = _WORKER_ERROR_FORMATTER,
+    *,
+    max_error: int | None = None,
+    tail_chars: int | None = None,
 ) -> ResultDTO:
     result = loop.run_until_complete(
         run_cell_source(
@@ -456,4 +491,9 @@ def _run_one(
             execution_count=int(request.get("execution_count", 1)),
         )
     )
-    return result_to_dto(result)
+    return _serialize(
+        result,
+        error_formatter=_error_formatter,
+        max_error=max_error,
+        tail_chars=tail_chars,
+    )

@@ -19,8 +19,11 @@ import os
 import signal
 import time
 from multiprocessing.connection import Connection
+from multiprocessing.process import BaseProcess
 from typing import Any
 
+from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
+from nooa.errors.formatting import _hard_bound_text
 from nooa.events import ExecutionResult
 from nooa.runtime.sandbox.config import ResolvedSpec, SandboxConfig, resolve_spec
 from nooa.runtime.sandbox.errors import (
@@ -35,6 +38,21 @@ from nooa.runtime.sandbox.serialization import ResultDTO, dto_to_result, is_pick
 from nooa.runtime.sandbox.worker import worker_main
 
 logger = logging.getLogger(__name__)
+
+
+# Broker responses cross a pickle pipe. Keep all parent-generated diagnostics
+# primitive and bounded before sending them to an untrusted worker. Runtime
+# configuration may lower this ceiling but may not raise the IPC safety cap.
+_MAX_BROKER_DIAGNOSTIC = DEFAULT_TRUNCATION_CONFIG.capture.max_error
+
+
+def _bounded_text(value: object, fallback: str, *, limit: int) -> str:
+    try:
+        text = str(value)
+    except BaseException:
+        text = fallback
+    return _hard_bound_text(text, limit)
+
 
 _CAPS_CACHE: Capabilities | None = None
 
@@ -72,12 +90,21 @@ class SandboxedExecutor:
         cell_timeout: float | None,
         framework_builtins: dict[str, Any] | None = None,
         restrictions: Any = None,
+        max_error: int | None = None,
+        error_tail: int | None = None,
     ):
         self._agent = agent
         self._config = config
         self._cell_timeout = cell_timeout
         self._framework_builtins = framework_builtins or {}
         self._restrictions = restrictions
+        requested_max_error = (
+            max_error
+            if isinstance(max_error, int) and not isinstance(max_error, bool) and max_error > 0
+            else DEFAULT_TRUNCATION_CONFIG.capture.max_error
+        )
+        self._max_error = min(requested_max_error, _MAX_BROKER_DIAGNOSTIC)
+        self._error_tail = error_tail
         self._spec: ResolvedSpec = resolve_spec(config)
 
         caps = _capabilities()
@@ -101,7 +128,7 @@ class SandboxedExecutor:
             )
 
         self._ctx = mp.get_context(config.start_method)
-        self._proc: mp.process.BaseProcess | None = None
+        self._proc: BaseProcess | None = None
         self._conn: Connection | None = None
         self._lock = asyncio.Lock()
         self._req_id = 0
@@ -145,6 +172,8 @@ class SandboxedExecutor:
             "framework_builtins": self._framework_builtins,
             "restrictions": self._restrictions,
             "spec": self._spec,
+            "max_error": self._max_error,
+            "error_tail": self._error_tail,
         }
         proc = self._ctx.Process(
             target=worker_main, args=(child_conn, init), daemon=True, name="nooa-sandbox-worker"
@@ -218,7 +247,12 @@ class SandboxedExecutor:
 
     # --- running a cell ----------------------------------------------------
     async def run_cell(self, code: str, *, execution_count: int = 1) -> ExecutionResult:
-        """Execute one cell in the worker and return an ``ExecutionResult``."""
+        """Execute one cell in the worker and return an ``ExecutionResult``.
+
+        Output is buffered in the worker and transferred with the final result.
+        If the process is hard-killed (timeout, resource limit, or crash), output
+        written by that cell before death cannot be recovered.
+        """
         if self._closed:
             raise WorkerDiedError("sandbox executor is closed")
         async with self._lock:
@@ -345,6 +379,7 @@ class SandboxedExecutor:
         path = msg.get("path") or []
         display = ".".join(path)
         kind = msg.get("kind")
+        target: Any = None
         try:
             if kind == "setattr":
                 # self.<path> = value on the parent's live agent.
@@ -394,16 +429,36 @@ class SandboxedExecutor:
             # ARC submit_actions -> return_result). Marshal it back to the cell so
             # it re-raises there and flows through the normal signal path.
             payload = getattr(sig, "result", None)
+            payload_is_picklable = is_picklable(payload)
             return {
                 "ok": False,
                 "error_type": "ExecutionSignal",
-                "error": str(sig),
-                "signal_result": payload if is_picklable(payload) else None,
+                "error": _bounded_text(sig, "ExecutionSignal", limit=self._max_error),
+                "signal_result": payload if payload_is_picklable else None,
+                "signal_result_dropped": not payload_is_picklable,
             }
         except CellSerializationError as exc:
-            return {"ok": False, "error_type": "CellSerializationError", "error": str(exc)}
+            return {
+                "ok": False,
+                "error_type": "CellSerializationError",
+                "error": _bounded_text(exc, "CellSerializationError", limit=self._max_error),
+            }
         except Exception as exc:  # noqa: BLE001 - surface tool errors to the cell
-            return {"ok": False, "error_type": type(exc).__name__, "error": str(exc)}
+            # The parent still has the resolved target and can safely derive its
+            # agentdoc. The child cannot: it only has a proxy and a traceback-local
+            # surrogate exception. Transport a bounded string hint, never the
+            # callable or traceback itself.
+            from nooa.errors.formatting import _bad_call_agentdoc
+
+            call_hint = _bad_call_agentdoc(exc, target=target)
+            response = {
+                "ok": False,
+                "error_type": _bounded_text(type(exc).__name__, "Exception", limit=self._max_error),
+                "error": _bounded_text(exc, type(exc).__name__, limit=self._max_error),
+            }
+            if call_hint:
+                response["call_hint"] = _bounded_text(call_hint, "", limit=self._max_error)
+            return response
 
     # --- error synthesis ---------------------------------------------------
     def _classify_worker_death(self, exc: WorkerDiedError) -> Exception:

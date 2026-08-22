@@ -50,6 +50,57 @@ jobs:
       - name: Sandbox containment tests
         run: uv run pytest -q -m sandbox
 
+  python-313-error-compat:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: Sync
+        run: uv sync --all-extras --no-extra sandbox
+      # Traceback source markers differ between supported CPython releases.
+      # Keep the formatter, delivery strategies, and DTO boundary compatible
+      # without duplicating the entire Python 3.12 suite.
+      - name: Python 3.13 error-context compatibility
+        run: |
+          uv run pytest -q \
+            tests/test_error_formatting.py \
+            tests/test_error_line_numbers.py \
+            tests/edge_cases/test_builtin_shadowing.py \
+            tests/runtime/sandbox/test_error_serialization.py \
+            tests/strategies/test_codeact_pure_python_coverage.py \
+            tests/strategies/test_strategies_coverage.py \
+            tests/test_event_backend_roundtrip.py
+
+  macos-sandbox-ipc:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Sync
+        run: uv sync --all-extras --no-extra sandbox
+      # macOS cannot enforce Linux Landlock/seccomp guardrails, but the process
+      # boundary, broker, serialization, and CodeAct recovery paths are portable.
+      # Capability-marked containment checks skip individually.
+      - name: macOS sandbox process and error transport
+        run: |
+          uv run pytest -q -m sandbox \
+            tests/runtime/sandbox/test_executor.py \
+            tests/runtime/sandbox/test_codeact_sandbox.py
+
   build:
     runs-on: ubuntu-latest
     steps:

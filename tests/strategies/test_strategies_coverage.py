@@ -556,8 +556,8 @@ class TestPlainEventContent:
         result = plain_event_content(po)
         assert result == "(no output)"
 
-    def test_python_output_stderr_with_error_not_shown(self):
-        """When both error and stderr are set, only error is shown."""
+    def test_python_output_stderr_and_error_are_both_shown(self):
+        """Partial stderr remains visible when execution also has a structured error."""
         po = PythonOutput(
             tool_call_id="tc1",
             execution_status=ResultStatus.ERROR,
@@ -567,8 +567,17 @@ class TestPlainEventContent:
         )
         result = plain_event_content(po)
         assert "Error: MainError" in result
-        # stderr should not appear when error is set
-        assert "Stderr:" not in result
+        assert "Stderr: stderr stuff" in result
+
+    def test_python_output_identical_stderr_and_error_is_deduplicated(self):
+        po = PythonOutput(
+            tool_call_id="tc1",
+            execution_status=ResultStatus.ERROR,
+            execution_count=1,
+            error="same diagnostic",
+            stderr="same diagnostic",
+        )
+        assert plain_event_content(po).count("same diagnostic") == 1
 
     def test_error_event_returns_content(self):
         result = plain_event_content(Error(content="something failed"))
@@ -651,6 +660,51 @@ class TestCodeActLiteStrategyExecution:
         agent = TestAgent(llm=fake_llm)
         result = await agent.compute_sum()
         assert result == 6
+
+    @pytest.mark.asyncio
+    async def test_execution_error_is_rendered_and_next_turn_recovers(self):
+        """A real failing cell emits separate streams and source-aware error."""
+
+        class TestAgent(Agent, llm=_TEST_LLM):
+            @strategy(CodeActLiteStrategy(config=CodeActConfig(max_retries=3)))
+            async def compute(self) -> int:
+                """Compute a value after inspecting a failed attempt."""
+                ...
+
+        fake_llm = FakeLLMClient(
+            scripted_responses=[
+                _resp(
+                    "",
+                    tool_calls=[
+                        _tool_call(
+                            "import sys\n"
+                            "print('before failure')\n"
+                            "print('warning', file=sys.stderr)\n"
+                            "text = 'abc'\n"
+                            "text.index('missing')",
+                            call_id="failed",
+                        )
+                    ],
+                ),
+                _resp("", tool_calls=[_return_result(result=17)]),
+            ]
+        )
+
+        agent = TestAgent(llm=fake_llm)
+        assert await agent.compute() == 17
+
+        output = next(
+            event
+            for event in agent.event_manager.values()
+            if isinstance(event, PythonOutput) and event.tool_call_id == "failed"
+        )
+        assert output.execution_status is ResultStatus.ERROR
+        assert output.execution_count == 1
+        assert output.stdout == "before failure\n"
+        assert output.stderr == "warning\n"
+        assert "Cell In[1], line 5" in output.error
+        assert "text.index('missing')" in output.error
+        assert output.error.endswith("ValueError: substring not found")
 
     @pytest.mark.asyncio
     async def test_returns_string(self):

@@ -144,6 +144,24 @@ e = c.get("foo")
         print(f"wrapper_line_offset = {result.wrapper_line_offset}")
 
     @pytest.mark.asyncio
+    async def test_unvalidated_syntax_error_uses_cell_filename(self, test_agent):
+        """Parser failures identify the execution cell, not ``<unknown>``."""
+        code = "value = (1 + )"
+
+        result = await test_agent.runtime.execute_code(
+            code,
+            execution_count=17,
+            validate=False,
+            wrap_in_function=True,
+        )
+
+        assert isinstance(result.error, SyntaxError)
+        assert result.error.filename == "Cell In[17]"
+        formatted = format_error_for_llm(result.error, code)
+        assert "Cell In[17], line 1" in formatted
+        assert "<unknown>" not in formatted
+
+    @pytest.mark.asyncio
     async def test_syntax_error_line_number(self, test_agent):
         """Syntax errors should also have correct line numbers."""
         code = """\

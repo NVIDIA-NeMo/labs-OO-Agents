@@ -9,26 +9,79 @@ into a picklable :class:`ResultDTO` and reconstructs a faithful
 
 * ``defined_methods`` / ``captured_locals`` stay in the worker (empty on parent).
 * ``returned_value`` crosses only if picklable, else becomes a serialization error.
-* ``error`` is reduced to (type, message, traceback) and re-raised as a
-  lightweight surrogate so ``_format_error`` still works.
+* ``error`` is reduced to type/message plus a worker-formatted diagnostic and
+  reconstructed as a lightweight parent-side exception.
 * ``signal`` (``return_result``) is marshaled as a picklable record.
 * ``images`` are already dicts.
 """
 
 from __future__ import annotations
 
+import inspect
 import pickle
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from nooa.agentdoc import TruncatingStringIO
+from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
+from nooa.errors.formatting import (
+    _bound_preformatted_diagnostic,
+    _diagnostic_budget,
+    _hard_bound_text,
+)
 from nooa.runtime.sandbox.errors import CellSerializationError
+
+# ``TruncatingStringIO`` adds a human-readable envelope around retained
+# head/tail content. Sandbox IPC has a fixed safety ceiling independent of a
+# caller's configured capture budget.
+_MAX_ERROR_CONTENT = DEFAULT_TRUNCATION_CONFIG.capture.max_error
+_MAX_ERROR_TRANSPORT = _MAX_ERROR_CONTENT + 1_024
+
+
+def _effective_error_limit(max_error: int | None) -> int:
+    """Return the configured content budget clamped to the IPC safety ceiling."""
+    requested = (
+        max_error
+        if isinstance(max_error, int) and not isinstance(max_error, bool) and max_error > 0
+        else _MAX_ERROR_CONTENT
+    )
+    return min(requested, _MAX_ERROR_CONTENT)
+
+
+def _bounded_error_message(
+    value: str,
+    *,
+    max_error: int | None = None,
+    tail_chars: int | None = None,
+) -> str:
+    """Apply the effective capture policy once to a raw message before IPC."""
+    content_limit = _effective_error_limit(max_error)
+    _, effective_tail = _diagnostic_budget(content_limit, tail_chars)
+    if len(value) <= content_limit:
+        return value
+    stream = TruncatingStringIO(limit=content_limit, tail_chars=effective_tail)
+    stream.write(value)
+    return _hard_bound_text(stream.getvalue(), _MAX_ERROR_TRANSPORT)
+
+
+def _bounded_formatted_error(
+    value: str,
+    *,
+    max_error: int | None = None,
+    tail_chars: int | None = None,
+) -> str:
+    """Apply capture policy once and enforce a fixed IPC ceiling."""
+    content_limit = _effective_error_limit(max_error)
+    bounded = _bound_preformatted_diagnostic(value, content_limit, tail_chars)
+    return _hard_bound_text(bounded, min(_MAX_ERROR_TRANSPORT, content_limit + 1_024))
 
 
 def is_picklable(value: Any) -> bool:
     try:
         pickle.dumps(value)
         return True
-    except Exception:
+    except BaseException:
         return False
 
 
@@ -38,7 +91,7 @@ class ErrorDTO:
 
     type_name: str
     message: str
-    traceback: str
+    formatted_error: str = ""
 
 
 @dataclass
@@ -67,20 +120,26 @@ class ResultDTO:
 class _SurrogateCellError(Exception):
     """Parent-side reconstruction of a worker exception.
 
-    Preserves the original type name and formatted traceback so the CodeAct
-    error formatter renders the same guidance the in-process path would.
+    Preserves the original type name. The worker-rendered diagnostic remains
+    separate in :attr:`ErrorDTO.formatted_error` and is copied to the parent
+    ``ExecutionResult.formatted_error`` by :func:`dto_to_result`.
     """
 
     def __init__(self, dto: ErrorDTO):
         super().__init__(dto.message)
         self.original_type = dto.type_name
-        self.worker_traceback = dto.traceback
 
     def __str__(self) -> str:
         return self.args[0] if self.args else self.original_type
 
 
-def result_to_dto(result: Any) -> ResultDTO:
+def result_to_dto(
+    result: Any,
+    *,
+    error_formatter: Callable[..., str] | None = None,
+    max_error: int | None = None,
+    tail_chars: int | None = None,
+) -> ResultDTO:
     """Convert a worker-side ``ExecutionResult`` into a picklable DTO.
 
     The presence of a control-flow signal is keyed off ``result.signal`` (not a
@@ -88,8 +147,6 @@ def result_to_dto(result: Any) -> ResultDTO:
     like ``returned_value`` so a non-picklable ``return_result(...)`` yields a
     clean error instead of crashing the worker on ``conn.send``.
     """
-    import traceback as tb
-
     from nooa.events import _NO_RETURN
 
     dto = ResultDTO(
@@ -102,13 +159,63 @@ def result_to_dto(result: Any) -> ResultDTO:
 
     if result.error is not None:
         err = result.error
-        # Some exceptions (e.g. MemoryError) carry no message; fall back to the
-        # type name so the agent-facing error is never blank.
-        message = str(err) or type(err).__name__
+        # User-defined exception formatting must not break the worker send path.
+        error_type = type(err).__name__
+        try:
+            message = str(err) or error_type
+        except BaseException:
+            message = error_type
+
+        if error_formatter is None:
+            from nooa.errors.formatting import format_error_for_llm
+
+            error_formatter = format_error_for_llm
+
+        effective_max_error = _effective_error_limit(max_error)
+        try:
+            line_offset = getattr(result, "wrapper_line_offset", 0)
+            formatter_kwargs: dict[str, Any] = {"line_offset": line_offset}
+            try:
+                signature = inspect.signature(error_formatter)
+            except (TypeError, ValueError):
+                signature = None
+            if signature is not None:
+                optional_values = {
+                    "line_offset": line_offset,
+                    "max_error": effective_max_error,
+                    "tail_chars": tail_chars,
+                }
+                accepts_kwargs = any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in signature.parameters.values()
+                )
+                formatter_kwargs = {
+                    name: value
+                    for name, value in optional_values.items()
+                    if accepts_kwargs
+                    or (
+                        name in signature.parameters
+                        and signature.parameters[name].kind
+                        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+                    )
+                }
+                signature.bind(err, **formatter_kwargs)
+            formatted_error = error_formatter(err, **formatter_kwargs)
+        except BaseException:
+            formatted_error = f"{error_type}: {message}"
+
         dto.error = ErrorDTO(
-            type_name=type(err).__name__,
-            message=message,
-            traceback="".join(tb.format_exception(type(err), err, err.__traceback__)),
+            type_name=error_type,
+            message=_bounded_error_message(
+                message,
+                max_error=effective_max_error,
+                tail_chars=tail_chars,
+            ),
+            formatted_error=_bounded_formatted_error(
+                formatted_error,
+                max_error=effective_max_error,
+                tail_chars=tail_chars,
+            ),
         )
         return dto
 
@@ -124,7 +231,6 @@ def result_to_dto(result: Any) -> ResultDTO:
                     "cannot cross the sandbox boundary. Return a JSON/pickle-safe value "
                     "(numbers, str, list, dict, ndarray) instead."
                 ),
-                traceback="",
             )
         return dto
 
@@ -142,7 +248,6 @@ def result_to_dto(result: Any) -> ResultDTO:
                     "cannot cross the sandbox boundary. Keep it in the namespace and "
                     "return a JSON/pickle-safe summary instead."
                 ),
-                traceback="",
             )
     return dto
 
@@ -152,9 +257,9 @@ def _reconstruct_error(err: ErrorDTO) -> Exception:
 
     Common builtin exceptions (ValueError, KeyError, MemoryError, ...) are
     re-instantiated as their real type so ``_format_error`` and the IPython
-    formatter render the faithful ``<Type>: <message>``; the formatted worker
-    traceback is preserved on the exception for callers that surface it. Anything
-    else falls back to :class:`_SurrogateCellError`.
+    formatter render the faithful ``<Type>: <message>``. The worker-rendered
+    diagnostic remains in :attr:`ErrorDTO.formatted_error`; it is not attached to
+    the exception. Anything else falls back to :class:`_SurrogateCellError`.
     """
     import builtins as _bi
 
@@ -182,8 +287,6 @@ def _reconstruct_error(err: ErrorDTO) -> Exception:
                 exc = _SurrogateCellError(err)
         else:
             exc = _SurrogateCellError(err)
-    if err.traceback:
-        exc.worker_traceback = err.traceback  # type: ignore[attr-defined]
     return exc
 
 
@@ -208,6 +311,7 @@ def dto_to_result(dto: ResultDTO, *, signal_factory: Any = None) -> Any:
         stdout=dto.stdout,
         stderr=dto.stderr,
         error=error,
+        formatted_error=dto.error.formatted_error if dto.error is not None else "",
         signal=signal,
         defined_methods={},
         returned_value=dto.returned_value if dto.has_return else _NO_RETURN,

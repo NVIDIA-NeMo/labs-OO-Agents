@@ -663,6 +663,11 @@ class ExecutionResult(BaseModel):
     stdout: str = Field(default="", description="Captured stdout from execution")
     stderr: str = Field(default="", description="Captured stderr from execution")
     error: Exception | None = Field(default=None, description="Exception if execution failed")
+    formatted_error: str = Field(
+        default="",
+        description="Parent-side formatted diagnostic reconstructed from a sandbox worker",
+        exclude=True,
+    )
     signal: ExecutionSignal | None = Field(
         default=None, description="Control flow signal (not an error), e.g. return_result()"
     )

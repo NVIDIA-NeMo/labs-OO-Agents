@@ -16,6 +16,7 @@ import pytest
 from nooa import Agent, strategy
 from nooa.config import CodeActConfig
 from nooa.errors import GenerationError
+from nooa.events import PythonOutput
 from nooa.strategies.codeact import CodeActStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
@@ -186,3 +187,45 @@ async def test_route_b_does_not_add_contradictory_correction():
     assert not [e for e in _errors(agent) if "no tool call" in e.content], (
         "Route B must not add a corrective Error (it has its own synthetic result)"
     )
+
+
+@pytest.mark.asyncio
+async def test_route_b_synthetic_comment_does_not_reuse_next_cell_number():
+    """A synthetic comment and the next real cell have distinct execution counts."""
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        @strategy(
+            CodeActStrategy(
+                config=CodeActConfig(
+                    max_retries=8,
+                    max_iterations=12,
+                    text_only_stop_behavior="synthetic_comment",
+                )
+            )
+        )
+        async def my_task(self) -> str:
+            """Return a string."""
+            ...
+
+    fake_llm = FakeLLMClient(
+        scripted_responses=[
+            _resp("some prose, no tool call"),
+            _resp(
+                tool_calls=[
+                    ToolCall(
+                        id="real_cell",
+                        name="execute_python",
+                        arguments=json.dumps({"code": "'computed'"}),
+                    )
+                ]
+            ),
+            _resp(tool_calls=[_ret("done")]),
+        ]
+    )
+    agent = TestAgent(llm=fake_llm)
+
+    assert await agent.my_task() == "done"
+    outputs = [event for event in agent.event_manager.values() if isinstance(event, PythonOutput)]
+    assert [event.execution_count for event in outputs] == [1, 2]
+    assert outputs[1].tool_call_id == "real_cell"
+    assert outputs[1].value == "computed"

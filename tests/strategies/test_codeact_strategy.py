@@ -2839,9 +2839,16 @@ class TestCodeActMultiToolCallsPerResponse:
         agent_instance = TestAgent(llm=fake_llm)
         result = await agent_instance.compute()
 
-        # All 3 cells should have been executed in order
+        # All 3 cells should have been executed in order and assigned distinct
+        # cell numbers even though they came from one model response.
         assert agent_instance.trace == ["cell1", "cell2", "cell3"]
         assert result == 42
+        outputs = [
+            event
+            for event in agent_instance.event_manager.values()
+            if isinstance(event, PythonOutput)
+        ]
+        assert [event.execution_count for event in outputs] == [1, 2, 3]
 
     @pytest.mark.asyncio
     async def test_multi_tool_calls_stop_on_first_error(self):
@@ -2877,9 +2884,17 @@ class TestCodeActMultiToolCallsPerResponse:
         agent_instance = TestAgent(llm=fake_llm)
         result = await agent_instance.compute()
 
-        # Cell1 ran, cell2 failed, cell3 should NOT have run
+        # Cell1 ran, cell2 failed, cell3 should NOT have run. Each attempted
+        # cell keeps its own count even though both came from one LLM response.
         assert agent_instance.trace == ["cell1"]
         assert result == "done"
+        outputs = [
+            event
+            for event in agent_instance.event_manager.values()
+            if isinstance(event, PythonOutput)
+        ]
+        assert [event.execution_count for event in outputs] == [1, 2]
+        assert "Cell In[2]" in outputs[1].error
 
     @pytest.mark.asyncio
     async def test_multi_tool_calls_with_return_result_at_end(self):

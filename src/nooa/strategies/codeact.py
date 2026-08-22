@@ -71,7 +71,7 @@ from nooa.unifiedllm import Tool, ToolCall
 
 if TYPE_CHECKING:
     from nooa.config.strategy_config import CodeActConfig
-    from nooa.errors.formatting import IPythonErrorFormatter
+    from nooa.errors.formatting import ErrorFormatter
     from nooa.strategies.current_call import CurrentCall
 
 logger = logging.getLogger(__name__)
@@ -173,6 +173,7 @@ class CodeActSession:
     session_locals: dict[str, Any] = field(default_factory=dict)
     out_accessor: Any = field(default=None)  # OutAccessor instance, created lazily
     sandbox_executor: Any = field(default=None)  # SandboxedExecutor when backend="sandbox"
+    execution_count: int = 0
 
     def __post_init__(self) -> None:
         """Initialize OutAccessor for Jupyter-style Out[n] access."""
@@ -189,6 +190,11 @@ class CodeActSession:
 
     def record_iteration(self) -> None:
         self.iteration += 1
+
+    def record_execution(self) -> int:
+        """Advance and return the per-cell execution counter."""
+        self.execution_count += 1
+        return self.execution_count
 
     def record_error(self) -> None:
         self.error_count += 1
@@ -316,15 +322,20 @@ class CodeActStrategy(CompositeStrategy):
         self,
         config: "CodeActConfig | None" = None,
         *,
-        error_formatter: "IPythonErrorFormatter | None" = None,
+        error_formatter: "ErrorFormatter | None" = None,
     ):
         """Initialize CodeAct strategy.
 
         Args:
             config: CodeActConfig with iteration limits, timeouts, and sampling params.
                     Defaults to CodeActConfig() with standard defaults.
-            error_formatter: Custom error formatter for LLM feedback. Defaults to IPythonErrorFormatter.
-                Any object with a `format(error, code) -> str` method works.
+            error_formatter: Custom error formatter for LLM feedback. The preferred
+                signature is ``format(error, code=None, *, line_offset=0,
+                formatted_error="", max_error=None, tail_chars=None)``. Older ``format(error, code, *,
+                line_offset=0)`` and ``format(error, code)`` implementations remain
+                supported. Formatters accepting ``formatted_error`` receive a
+                traceback rendered inside a sandbox worker; only the preferred
+                form also receives the resolved error budget.
 
         Note:
             Prefill is always enabled and uses InspectInputsPrefill internally.
@@ -705,6 +716,8 @@ Standard Python builtins and agent instance (`self`) are available."""
             cell_timeout=self.config.cell_timeout,
             framework_builtins=framework_builtins,
             restrictions=self.config.restrictions,
+            max_error=runtime.truncation_config.capture.max_error,
+            error_tail=runtime.truncation_config.capture.tail,
         )
 
     async def _close_sandbox(self, session: "CodeActSession") -> None:
@@ -1027,6 +1040,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # execute_python comment that preserves content in traces.
                 elif _has_text:
                     session.record_iteration()
+                    execution_count = session.record_execution()
                     # Capture the drift faithfully for /bug + replay (recorded but
                     # Role.METADATA, never shown to the model). Replaces the old
                     # lossy DebugTrace.
@@ -1056,7 +1070,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     runtime.event_manager.add(
                         PythonOutput(
                             tool_call_id=synthetic_id,
-                            execution_count=session.iteration or 1,
+                            execution_count=execution_count,
                             execution_status=ResultStatus.COMPLETE,
                             metadata={"synthetic": True, "synthetic_type": "text_response"},
                         )
@@ -1445,6 +1459,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         """
         method_name = call.method_name
         code = args.get("code", "")
+        execution_count = session.record_execution()
 
         # Strip markdown fences early — validator and helper binding below
         # run ast.parse() which fails on fenced input. (runtime.execute_code
@@ -1469,9 +1484,10 @@ Standard Python builtins and agent instance (`self`) are available."""
             runtime.event_manager.add(
                 PythonOutput(
                     tool_call_id=tool_call.id,
-                    execution_count=session.iteration,
+                    execution_count=execution_count,
                     stdout="",
-                    stderr="Execution error: empty code provided.",
+                    stderr="",
+                    error="Execution error: empty code provided.",
                     value=None,
                     explicit_return=False,
                     execution_status=ResultStatus.ERROR,
@@ -1580,14 +1596,15 @@ Standard Python builtins and agent instance (`self`) are available."""
             error_text = ""
             if result.error:
                 line_offset = getattr(result, "wrapper_line_offset", 0)
-                error_text = self._format_error(result.error, line_offset=line_offset)
-            stderr = result.stderr
-            if error_text:
-                stderr = (
-                    f"{stderr}\nExecution error:\n{error_text}"
-                    if stderr
-                    else f"Execution error:\n{error_text}"
+                error_text = self._format_error(
+                    result.error,
+                    code,
+                    line_offset=line_offset,
+                    formatted_error=result.formatted_error,
+                    max_error=runtime.truncation_config.capture.max_error,
+                    tail_chars=runtime.truncation_config.capture.tail,
                 )
+            stderr = result.stderr
             if validation_error:
                 stderr = (
                     f"{stderr}\nreturn_result validation error: {validation_error}"
@@ -1598,9 +1615,10 @@ Standard Python builtins and agent instance (`self`) are available."""
             runtime.event_manager.add(
                 PythonOutput(
                     tool_call_id=tool_call.id,
-                    execution_count=session.iteration,
+                    execution_count=execution_count,
                     stdout=result.stdout,
                     stderr=stderr,
+                    error=error_text,
                     value=result.returned_value if result.has_return else None,
                     explicit_return=result.explicit_return,
                     execution_status=ResultStatus.ERROR if validation_error else final_status,
@@ -1639,7 +1657,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     runtime.event_manager.add(
                         PythonOutput(
                             tool_call_id=tool_call.id,
-                            execution_count=session.iteration,
+                            execution_count=execution_count,
                             stdout=result.stdout,
                             stderr=result.stderr,
                             value=result.returned_value,
@@ -1677,13 +1695,20 @@ Standard Python builtins and agent instance (`self`) are available."""
                     result.error, return_type, result.returned_value, runtime.truncation_config
                 )
             else:
-                error_text = self._format_error(result.error, line_offset=line_offset)
+                error_text = self._format_error(
+                    result.error,
+                    code,
+                    line_offset=line_offset,
+                    formatted_error=result.formatted_error,
+                    max_error=runtime.truncation_config.capture.max_error,
+                    tail_chars=runtime.truncation_config.capture.tail,
+                )
 
         # Add PythonOutput with actual output and value
         runtime.event_manager.add(
             PythonOutput(
                 tool_call_id=tool_call.id,
-                execution_count=session.iteration,
+                execution_count=execution_count,
                 stdout=result.stdout,
                 stderr=result.stderr,
                 error=error_text,
@@ -2577,6 +2602,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         """
         get_harness_metrics().prefill(prefill_type)
         logger.debug(f"[CODEACT] Running prefill ({prefill_type}) for {method_name}")
+        execution_count = session.record_execution()
 
         # Create synthetic tool call
         prefill_id = f"prefill_{uuid4().hex[:8]}"
@@ -2586,7 +2612,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 name="execute_python",
                 arguments={"code": code},
                 result=None,  # Will be updated after execution
-                metadata={"prefill": True, "prefill_type": "inspect_inputs"},
+                metadata={"prefill": True, "prefill_type": prefill_type},
             )
         )
 
@@ -2628,13 +2654,20 @@ Standard Python builtins and agent instance (`self`) are available."""
         error_text = ""
         if result.error:
             line_offset = getattr(result, "wrapper_line_offset", 0)
-            error_text = self._format_error(result.error, line_offset=line_offset)
+            error_text = self._format_error(
+                result.error,
+                code,
+                line_offset=line_offset,
+                formatted_error=result.formatted_error,
+                max_error=runtime.truncation_config.capture.max_error,
+                tail_chars=runtime.truncation_config.capture.tail,
+            )
 
-        # Add execution output as user message (execution_count=0 since before main loop)
+        # Add execution output as a user message with this cell's unique count.
         runtime.event_manager.add(
             PythonOutput(
                 tool_call_id=prefill_id,
-                execution_count=0,  # Prefill is before main loop
+                execution_count=execution_count,
                 stdout=result.stdout,
                 stderr=result.stderr,
                 error=error_text,
@@ -2642,7 +2675,11 @@ Standard Python builtins and agent instance (`self`) are available."""
                 explicit_return=result.explicit_return if result.has_return else False,
                 execution_status=final_status,
                 images=result.images,
-                metadata={"prefill": True, "prefill_type": prefill_type},
+                metadata={
+                    "prefill": True,
+                    "prefill_type": prefill_type,
+                    **({"execution_error": True} if result.error else {}),
+                },
             )
         )
 
@@ -2693,7 +2730,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     wrap_in_function=True,
                     timeout=self.config.cell_timeout,
                     tool_call_id=tool_call_id,
-                    execution_count=session.iteration,
+                    execution_count=session.execution_count,
                     restrictions=self.config.restrictions,
                     sandbox_executor=session.sandbox_executor,
                 )
@@ -2748,25 +2785,90 @@ Standard Python builtins and agent instance (`self`) are available."""
                 wrap_in_function=True,
                 timeout=self.config.cell_timeout,
                 tool_call_id=tool_call_id,
-                execution_count=session.iteration,
+                execution_count=session.execution_count,
                 restrictions=self.config.restrictions,
             )
 
     def _format_error(
-        self, error: Exception, code: str | None = None, *, line_offset: int = 0
+        self,
+        error: Exception,
+        code: str | None = None,
+        *,
+        line_offset: int = 0,
+        formatted_error: str = "",
+        max_error: int | None = None,
+        tail_chars: int | None = None,
     ) -> str:
         """Format an error for display using the configured formatter."""
         if self.error_formatter is not None:
-            # Custom formatters may or may not support line_offset
+            # Select a compatible call shape without invoking the formatter. A
+            # TypeError raised *inside* a custom formatter is its real failure and
+            # must not be mistaken for an older method signature.
+            formatter: Any = self.error_formatter.format
             try:
-                return self.error_formatter.format(error, code, line_offset=line_offset)
-            except TypeError:
-                # Formatter doesn't accept line_offset
-                return self.error_formatter.format(error, code)
+                signature = inspect.signature(formatter)
+            except (TypeError, ValueError):
+                # Some extension/builtin callables expose no signature metadata.
+                # The original formatter contract was exactly two positional
+                # arguments, so invoke that shape once rather than speculatively
+                # executing and retrying after a body-level TypeError.
+                return formatter(error, code)
+            optional_values = {
+                "code": code,
+                "line_offset": line_offset,
+                "formatted_error": formatted_error,
+                "max_error": max_error,
+                "tail_chars": tail_chars,
+            }
+            accepts_kwargs = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in signature.parameters.values()
+            )
+            # Prefer named dispatch so a valid second parameter such as
+            # ``formatted_error`` is not mistaken for the legacy positional
+            # ``code`` argument. Fall back to two positional arguments only for
+            # positional-only or differently named legacy signatures.
+            for args in ((error,), (error, code)):
+                try:
+                    positional = signature.bind_partial(*args)
+                except TypeError:
+                    continue
+                kwargs = {
+                    name: value
+                    for name, value in optional_values.items()
+                    if name not in positional.arguments
+                    and (
+                        accepts_kwargs
+                        or (
+                            name in signature.parameters
+                            and signature.parameters[name].kind
+                            in (
+                                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                inspect.Parameter.KEYWORD_ONLY,
+                            )
+                        )
+                    )
+                }
+                try:
+                    signature.bind(*args, **kwargs)
+                except TypeError:
+                    continue
+                return formatter(*args, **kwargs)
+            raise TypeError(
+                "Custom error formatter must accept format(error, code), optionally "
+                "with keyword-only line_offset, formatted_error, max_error, and tail_chars"
+            )
 
         from nooa.errors.formatting import format_error_for_llm
 
-        return format_error_for_llm(error, code, line_offset=line_offset)
+        return format_error_for_llm(
+            error,
+            code,
+            line_offset=line_offset,
+            formatted_error=formatted_error,
+            max_error=max_error,
+            tail_chars=tail_chars,
+        )
 
     def _extract_module_context(
         self, agent_module: types.ModuleType, agent: Any | None = None

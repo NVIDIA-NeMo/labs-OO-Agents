@@ -45,8 +45,15 @@ class EventsApi(Skill):
         children = events[summary.children_tags]
 
     Examples:
-        # Find the last error
+        # Find the last standalone Error event
         errors = events.query(type="Error", limit=1)
+
+        # Execution failures are PythonOutput events, not Error events
+        failed_outputs = [
+            output
+            for output in events.query(type="PythonOutput")
+            if output.execution_status.value == "error"
+        ]
 
         # Get all outputs from current call
         outputs = events.query(type="PythonOutput", call_id=call_id)
