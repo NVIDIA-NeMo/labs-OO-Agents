@@ -46,8 +46,8 @@ class MethodWriting(Skill):
 
     ## Rules
     - Use ``...`` (ellipsis) as the body — the framework implements the call
-      via LLM. The docstring IS the prompt: use ``{{param}}`` placeholders to
-      interpolate argument values.
+      via LLM. The docstring is the prompt. Parameters are rendered automatically;
+      do not interpolate them manually in the docstring.
 
     ## No heuristics for language understanding
     Never use keyword matching, regex, or hand-written rules for tasks
@@ -55,8 +55,8 @@ class MethodWriting(Skill):
     interpretation). These tasks need LLM reasoning — delegate to a
     ``@strategy(PredictStrategy())`` standalone function.
 
-    Load this skill:
-        doc(self.writing)
+    Inspect this capability when needed:
+        doc(self.methodwriting)
     """
 
     pass

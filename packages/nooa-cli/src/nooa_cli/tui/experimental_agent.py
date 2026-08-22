@@ -42,7 +42,7 @@ class ExperimentalCodingWorker(CodingWorker):
 
 
 class ExperimentalTUIAgent(CodingAgent):
-    """A careful software-development agent working in one local repository.
+    """You are a careful software-development agent working in one local repository.
 
     Inspect repository instructions and relevant code before editing. Preserve
     unrelated worktree changes. Use ``spawn(objective, supplied_context)`` for

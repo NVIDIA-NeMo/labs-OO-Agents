@@ -26,6 +26,11 @@ def test_events_api_has_library_docstring():
 
 def test_method_writing_lib_has_library_docstring():
     _check_library_docstring(MethodWriting)
+    docstring = MethodWriting.__doc__ or ""
+    assert "@strategy(PredictStrategy())" in docstring
+    assert "asyncio.gather" in docstring
+    assert "doc(self.methodwriting)" in docstring
+    assert "{{param}}" not in docstring
 
 
 def test_method_writing_lib_is_instantiable():
@@ -41,9 +46,14 @@ def test_builtin_libs_are_skills():
 
 def test_codeact_strategy_instructions_no_longer_has_decomposition():
     from nooa.strategies.codeact import CodeActStrategy
+    from nooa.strategies.codeact_experimental import CodeActExperimental
 
     src = inspect.getsource(CodeActStrategy.strategy_instructions)
     assert "Task decomposition" not in src
+    experimental_src = inspect.getsource(CodeActExperimental.strategy_instructions)
+    assert "@strategy(PredictStrategy())" not in experimental_src
+    assert "asyncio.gather" not in experimental_src
+    assert "Reserve delegation for bounded tasks" in experimental_src
 
 
 def test_context_api_not_in_protected_blocks():

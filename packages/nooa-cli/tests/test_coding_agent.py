@@ -39,6 +39,8 @@ async def test_coding_agent_uses_observed_shell_and_instruction_context(tmp_path
         assert "run the focused tests" in str(agent.context["repository_instructions"])
         assert "nemo.shell" in agent.skills.activated()
         assert "nemo.repo" in agent.skills.activated()
+        assert "nemo.methodwriting" in agent.skills.activated()
+        assert "asyncio.gather" in doc(agent.methodwriting)
     finally:
         await agent.close()
 
@@ -268,10 +270,193 @@ async def test_coding_agent_delegates_with_same_model_and_workspace(tmp_path, mo
         await agent.close()
 
 
+@pytest.mark.asyncio
+async def test_coding_agent_delegate_merges_todo_notes_and_vars(tmp_path, monkeypatch):
+    """A Todo delegation is isolated while running and merged before return."""
+    observed = {}
+
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            observed.update(kwargs)
+            self.todo = kwargs["todo"]
+
+        async def investigate(self, objective: str, supplied_context=None) -> str:
+            delegated = self.todo.list_todos()[0]
+            observed.update(
+                objective=objective, supplied_context=supplied_context, delegated=delegated
+            )
+            self.todo.comment(delegated, "worker finding")
+            self.todo.set_var(delegated, "path", "parser.py")
+            return "review complete"
+
+        async def close(self) -> None:
+            observed["closed"] = True
+
+    monkeypatch.setattr(CodingAgent, "_worker_type", FakeWorker)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        task = agent.todo.add("review parser", notes="focus on errors")
+        original_identity = id(task)
+
+        report = await agent.delegate(task)
+
+        assert report == "review complete"
+        assert observed["objective"] == task.title
+        assert observed["supplied_context"] is observed["delegated"]
+        assert observed["delegated"] is not task
+        assert id(agent.todo.get(task)) == original_identity
+        assert [comment.body for comment in task.comments] == ["worker finding"]
+        assert task.v.path == "parser.py"
+        assert observed["closed"] is True
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_coding_agent_delegate_does_not_merge_failed_todo(tmp_path, monkeypatch):
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            self.todo = kwargs["todo"]
+
+        async def investigate(self, objective: str, supplied_context=None) -> str:
+            delegated = self.todo.list_todos()[0]
+            self.todo.comment(delegated, "partial finding")
+            raise RuntimeError("worker failed")
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(CodingAgent, "_worker_type", FakeWorker)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        task = agent.todo.add("review parser")
+        with pytest.raises(RuntimeError, match="worker failed"):
+            await agent.delegate(task)
+        assert task.comments == []
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_coding_agent_delegate_does_not_merge_when_close_fails(tmp_path, monkeypatch):
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            self.todo = kwargs["todo"]
+
+        async def investigate(self, objective: str, supplied_context=None) -> str:
+            self.todo.comment(self.todo.list_todos()[0], "worker finding")
+            return "review complete"
+
+        async def close(self) -> None:
+            raise RuntimeError("close failed")
+
+    monkeypatch.setattr(CodingAgent, "_worker_type", FakeWorker)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        task = agent.todo.add("review parser")
+        with pytest.raises(RuntimeError, match="close failed"):
+            await agent.delegate(task)
+        assert task.comments == []
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_coding_agent_spawn_merges_todo_before_notification(tmp_path, monkeypatch):
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            self.todo = kwargs["todo"]
+
+        async def investigate(self, objective: str, supplied_context=None) -> str:
+            self.todo.comment(self.todo.list_todos()[0], "background finding")
+            return "done"
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(CodingAgent, "_worker_type", FakeWorker)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        task = agent.todo.add("review parser. Inspect errors")
+        handle = agent.spawn(task)
+        notification = await agent.delegates.get()
+
+        assert notification == {
+            "objective": "review parser. Inspect errors",
+            "report": "done",
+            "todo_id": task.id,
+        }
+        assert [comment.body for comment in task.comments] == ["background finding"]
+        assert handle.label == "review parser."
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_coding_agent_rejects_unmanaged_todo(tmp_path):
+    from nooa.tools import Todo
+
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        with pytest.raises(ValueError, match="not managed"):
+            await agent.delegate(Todo(title="foreign"))
+    finally:
+        await agent.close()
+
+
+def test_coding_agent_delegation_labels_are_concise() -> None:
+    objective = (
+        "Architecture/simplicity review of PR #189. Do not edit. "
+        "Review every abstraction and report exact file and line references."
+    )
+
+    assert CodingAgent._delegation_label(objective) == "Architecture/simplicity review of PR #189."
+    assert CodingAgent._delegation_label("first line\nsecond line") == "first line"
+    assert CodingAgent._delegation_label(objective, "  API   review  ") == "API review"
+    assert CodingAgent._delegation_label("x" * 100) == f"{'x' * 79}…"
+    assert CodingAgent._delegation_label("   ") == "Delegated task"
+
+
+async def test_coding_agent_spawns_delegation_in_background(tmp_path):
+    """Background delegation keeps its full objective but displays a short label."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+    objective = "review parser. Do not edit. Report every finding with exact lines."
+
+    class TestAgent(CodingAgent):
+        async def delegate(self, received_objective: str, supplied_context=None) -> str:
+            assert received_objective == objective
+            assert supplied_context == {"path": "parser.py"}
+            started.set()
+            await release.wait()
+            return "review complete"
+
+    agent = TestAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        handle = agent.spawn(objective, {"path": "parser.py"})
+        assert handle.label == "review parser."
+        assert handle.state == "running"
+        await started.wait()
+        assert agent.delegates.status() == ""
+
+        release.set()
+        assert await agent.delegates.get() == {
+            "objective": objective,
+            "report": "review complete",
+        }
+        await asyncio.sleep(0)
+        assert handle.state == "done"
+    finally:
+        await agent.close()
+
+
 def test_coding_agent_prompt_exposes_bounded_delegation(tmp_path):
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         rendered = doc(agent)
+        assert (CodingAgent.__doc__ or "").startswith(
+            "You are a careful software-development agent working in one local repository."
+        )
         assert "spawn" in rendered
         assert "prefer it over awaiting ``delegate()``" in (CodingAgent.__doc__ or "")
         assert "Reports arrive in later ``delegates``" in (CodingAgent.__doc__ or "")

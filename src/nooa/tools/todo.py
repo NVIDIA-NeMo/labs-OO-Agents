@@ -17,6 +17,8 @@ from nooa import Skill
 from nooa.storage.markers import snapshotable
 from nooa.storage.snapshot_vars import SnapshotVars
 
+_MISSING = object()
+
 
 class TodoComment(BaseModel):
     """An append-only note on a todo — use for progress journalling.
@@ -27,6 +29,7 @@ class TodoComment(BaseModel):
     changed.
     """
 
+    id: str = Field(default_factory=lambda: _uuid.uuid4().hex[:8])
     body: str
     created_at: str = Field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M"))
 
@@ -122,11 +125,11 @@ class TodoManager(Skill):
 
     Example workflow:
         t1 = self.todo.add("Explore repo structure")
-        t2 = self.todo.add("Reproduce the failing test", deps=[t1.id])
-        t3 = self.todo.add("Implement fix", deps=[t2.id])
-        t4 = self.todo.add("Verify tests pass", deps=[t3.id])
+        t2 = self.todo.add("Reproduce the failing test", deps=[t1])
+        t3 = self.todo.add("Implement fix", deps=[t2])
+        t4 = self.todo.add("Verify tests pass", deps=[t3])
 
-        self.todo.done(t1.id)
+        self.todo.done(t1)
         print(self.todo.status())
     """
 
@@ -160,33 +163,123 @@ class TodoManager(Skill):
 
     # ── CRUD ──────────────────────────────────────
 
-    def add(self, title: str, deps: list[str] | None = None, notes: str = "", **vars: Any) -> Todo:
+    @staticmethod
+    def _todo_id(todo: Todo | str) -> str:
+        """Return an id from either a Todo object or an id string."""
+        if isinstance(todo, Todo):
+            return todo.id
+        if isinstance(todo, str):
+            return todo
+        raise TypeError(f"expected Todo or str, got {type(todo).__name__}")
+
+    def _copy_todo(self, todo: Todo | str) -> Todo:
+        """Return an independent copy of a manager-owned todo."""
+        todo_id = self._todo_id(todo)
+        current = self._todos.get(todo_id)
+        if current is None:
+            raise ValueError(f"todo {todo_id!r} is not managed by this TodoManager")
+        return current.model_copy(deep=True)
+
+    @classmethod
+    def _with_todo(cls, todo: Todo) -> "TodoManager":
+        """Create a manager containing an independent copy of one todo."""
+        manager = cls()
+        copied = todo.model_copy(deep=True)
+        manager._todos[copied.id] = copied
+        manager._order.append(copied.id)
+        return manager
+
+    def _merge_todo(self, updated: Todo, *, base: Todo) -> Todo:
+        """Atomically merge delegated changes without overwriting concurrent edits."""
+        updated = updated.model_copy(deep=True)
+        if updated.id != base.id:
+            raise ValueError("updated and base todos must have the same id")
+        current = self._todos.get(updated.id)
+        if current is None:
+            raise ValueError(f"todo {updated.id!r} is not managed by this TodoManager")
+
+        candidate = current.model_copy(deep=True)
+        for field in ("title", "status", "deps", "notes"):
+            before = getattr(base, field)
+            after = getattr(updated, field)
+            existing = getattr(current, field)
+            if after == before:
+                continue
+            if existing != before and existing != after:
+                raise ValueError(f"todo {updated.id!r} has conflicting {field!r} changes")
+            setattr(candidate, field, after.copy() if isinstance(after, list) else after)
+
+        base_vars = dict(base.vars)
+        updated_vars = dict(updated.vars)
+        current_vars = dict(current.vars)
+        for key in base_vars.keys() | updated_vars.keys():
+            before = base_vars.get(key, _MISSING)
+            after = updated_vars.get(key, _MISSING)
+            if after == before:
+                continue
+            existing = current_vars.get(key, _MISSING)
+            if existing != before and existing != after:
+                raise ValueError(f"todo {updated.id!r} has conflicting variable {key!r}")
+            if after is _MISSING:
+                candidate.vars.pop(key, None)
+            else:
+                candidate.vars[key] = after
+
+        if updated.comments[: len(base.comments)] != base.comments:
+            raise ValueError(f"todo {updated.id!r} modified existing comments")
+        if current.comments[: len(base.comments)] != base.comments:
+            raise ValueError(f"todo {updated.id!r} has conflicting comment changes")
+        existing_comment_ids = {comment.id for comment in candidate.comments}
+        for comment in updated.comments[len(base.comments) :]:
+            if comment.id not in existing_comment_ids:
+                candidate.comments.append(comment.model_copy(deep=True))
+                existing_comment_ids.add(comment.id)
+
+        # Commit only after every conflict check has succeeded, preserving the
+        # authoritative Todo object's identity for existing callers.
+        for field in ("title", "status", "deps", "notes", "vars", "comments"):
+            setattr(current, field, getattr(candidate, field))
+        return current
+
+    def add(
+        self,
+        title: str,
+        deps: list[Todo | str] | None = None,
+        notes: str = "",
+        **vars: Any,
+    ) -> Todo:
         """Add a new todo item. Returns the created Todo."""
-        t = Todo(title=title, deps=list(deps or []), notes=notes, vars=dict(vars))
+        t = Todo(
+            title=title,
+            deps=[self._todo_id(dep) for dep in deps or []],
+            notes=notes,
+            vars=dict(vars),
+        )
         self._todos[t.id] = t
         self._order.append(t.id)
         return t
 
-    def get(self, todo_id: str) -> Todo | None:
-        """Get a todo by id."""
-        return self._todos.get(todo_id)
+    def get(self, todo_id: Todo | str) -> Todo | None:
+        """Get a todo by object or id."""
+        return self._todos.get(self._todo_id(todo_id))
 
-    def done(self, todo_id: str) -> Todo | None:
+    def done(self, todo_id: Todo | str) -> Todo | None:
         """Mark a todo as done. Returns the updated Todo or None if not found."""
-        t = self._todos.get(todo_id)
+        t = self.get(todo_id)
         if t:
             t.status = "done"
         return t
 
-    def reopen(self, todo_id: str) -> Todo | None:
+    def reopen(self, todo_id: Todo | str) -> Todo | None:
         """Re-open a done or blocked todo. Returns the updated Todo or None."""
-        t = self._todos.get(todo_id)
+        t = self.get(todo_id)
         if t:
             t.status = "open"
         return t
 
-    def remove(self, todo_id: str) -> bool:
+    def remove(self, todo_id: Todo | str) -> bool:
         """Remove a todo. Returns True if it existed."""
+        todo_id = self._todo_id(todo_id)
         if todo_id in self._todos:
             del self._todos[todo_id]
             self._order = [i for i in self._order if i != todo_id]
@@ -201,9 +294,9 @@ class TodoManager(Skill):
         self._todos.clear()
         self._order.clear()
 
-    def update(self, todo_id: str, **kwargs: Any) -> Todo | None:
+    def update(self, todo_id: Todo | str, **kwargs: Any) -> Todo | None:
         """Update todo fields (title, status, notes). Returns the updated Todo or None."""
-        t = self._todos.get(todo_id)
+        t = self.get(todo_id)
         if t is None:
             return None
         allowed = {"title", "status", "notes"}
@@ -214,44 +307,46 @@ class TodoManager(Skill):
 
     # ── DEPENDENCIES ──────────────────────────────
 
-    def add_dep(self, todo_id: str, dep_id: str) -> Todo | None:
+    def add_dep(self, todo_id: Todo | str, dep_id: Todo | str) -> Todo | None:
         """Add a dependency to a todo. Returns the updated Todo or None."""
-        t = self._todos.get(todo_id)
+        t = self.get(todo_id)
+        dep_id = self._todo_id(dep_id)
         if t and dep_id not in t.deps:
             t.deps.append(dep_id)
         return t
 
-    def remove_dep(self, todo_id: str, dep_id: str) -> Todo | None:
+    def remove_dep(self, todo_id: Todo | str, dep_id: Todo | str) -> Todo | None:
         """Remove a dependency from a todo. Returns the updated Todo or None."""
-        t = self._todos.get(todo_id)
+        t = self.get(todo_id)
+        dep_id = self._todo_id(dep_id)
         if t and dep_id in t.deps:
             t.deps.remove(dep_id)
         return t
 
     # ── VARIABLES ─────────────────────────────────
 
-    def set_var(self, todo_id: str, key: str, value: Any) -> Todo | None:
+    def set_var(self, todo_id: Todo | str, key: str, value: Any) -> Todo | None:
         """Set a variable on a todo (arbitrary metadata). Returns the updated Todo or None."""
-        t = self._todos.get(todo_id)
+        t = self.get(todo_id)
         if t:
             t.vars[key] = value
         return t
 
-    def del_var(self, todo_id: str, key: str) -> Todo | None:
+    def del_var(self, todo_id: Todo | str, key: str) -> Todo | None:
         """Delete a variable from a todo. Returns the updated Todo or None."""
-        t = self._todos.get(todo_id)
+        t = self.get(todo_id)
         if t:
             t.vars.pop(key, None)
         return t
 
-    def get_var(self, todo_id: str, key: str) -> Any | None:
+    def get_var(self, todo_id: Todo | str, key: str) -> Any | None:
         """Get a variable from a todo. Returns the value or None."""
-        t = self._todos.get(todo_id)
+        t = self.get(todo_id)
         return t.vars.get(key) if t else None
 
     # ── COMMENTS ──────────────────────────────────
 
-    def comment(self, todo_id: str, body: str) -> TodoComment | None:
+    def comment(self, todo_id: Todo | str, body: str) -> TodoComment | None:
         """Append a comment to a todo.
 
         Use for progress journalling — what you did, what you found, why
@@ -264,21 +359,21 @@ class TodoManager(Skill):
         Example::
 
             t = self.todo.add("Solve auth bug")
-            self.todo.comment(t.id, "🔍 root cause: session.py:42 races on refresh")
+            self.todo.comment(t, "🔍 root cause: session.py:42 races on refresh")
             # ... next turn ...
-            for c in self.todo.comments(t.id):
+            for c in self.todo.comments(t):
                 print(c.created_at, c.body)
         """
-        t = self._todos.get(todo_id)
+        t = self.get(todo_id)
         if t is None:
             return None
         c = TodoComment(body=body)
         t.comments.append(c)
         return c
 
-    def comments(self, todo_id: str) -> list[TodoComment]:
+    def comments(self, todo_id: Todo | str) -> list[TodoComment]:
         """Return all comments on a todo in chronological order (empty if none)."""
-        t = self._todos.get(todo_id)
+        t = self.get(todo_id)
         return list(t.comments) if t else []
 
     # ── QUERIES ───────────────────────────────────
