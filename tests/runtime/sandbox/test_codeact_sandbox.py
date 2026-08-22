@@ -17,6 +17,7 @@ import pytest
 
 from nooa import Agent, strategy
 from nooa.config import CodeActConfig
+from nooa.events import PythonOutput, ResultStatus
 from nooa.runtime.sandbox.config import SandboxConfig
 from nooa.runtime.sandbox.guards import probe_capabilities
 from nooa.strategies.codeact import CodeActStrategy
@@ -43,6 +44,17 @@ def _exec(code: str, call_id: str = "c1") -> ToolCall:
 
 def _ret(result: Any = None, call_id: str = "cret") -> ToolCall:
     return ToolCall(id=call_id, name="return_result", arguments=json.dumps({"result": result}))
+
+
+def _failed_output(agent: Agent, call_id: str | None = None) -> PythonOutput:
+    """Return the first failed Python output, optionally for one tool call."""
+    return next(
+        event
+        for event in agent.event_manager.values()
+        if isinstance(event, PythonOutput)
+        and event.execution_status is ResultStatus.ERROR
+        and (call_id is None or event.tool_call_id == call_id)
+    )
 
 
 # A sandbox that keeps network on (so FakeLLM's parent-side calls are irrelevant
@@ -132,13 +144,7 @@ async def test_sandbox_path_still_enforces_restrictions():
     result = await agent.compute()
     assert result == 1
 
-    from nooa.events import PythonOutput
-
-    output = next(
-        event
-        for event in agent.event_manager.values()
-        if isinstance(event, PythonOutput) and event.execution_status.value == "error"
-    )
+    output = _failed_output(agent)
     assert output.stdout == ""
     assert output.stderr == ""
     assert "subprocess" in output.error
@@ -147,8 +153,6 @@ async def test_sandbox_path_still_enforces_restrictions():
 
 
 async def test_sandboxed_codeact_reports_rich_cell_error_and_continues():
-    from nooa.events import PythonOutput
-
     llm = FakeLLMClient(
         scripted_responses=[
             _resp(
@@ -170,11 +174,7 @@ async def test_sandboxed_codeact_reports_rich_cell_error_and_continues():
     result = await agent.compute()
 
     assert result == 7
-    output = next(
-        event
-        for event in agent.event_manager.values()
-        if isinstance(event, PythonOutput) and event.execution_status.value == "error"
-    )
+    output = _failed_output(agent)
     assert output.stdout == "before failure\n"
     assert output.stderr == "warning\n"
     assert "Cell In[1], line 5" in output.error
@@ -183,8 +183,6 @@ async def test_sandboxed_codeact_reports_rich_cell_error_and_continues():
 
 
 async def test_sandboxed_codeact_converts_indirect_system_exit():
-    from nooa.events import PythonOutput
-
     llm = FakeLLMClient(
         scripted_responses=[
             _resp("", tool_calls=[_exec("exit_type = SystemExit\nraise exit_type")]),
@@ -194,17 +192,12 @@ async def test_sandboxed_codeact_converts_indirect_system_exit():
     agent = _SumAgent(llm=llm)
 
     assert await agent.compute() == 8
-    output = next(
-        event
-        for event in agent.event_manager.values()
-        if isinstance(event, PythonOutput) and event.execution_status.value == "error"
-    )
+    output = _failed_output(agent)
     assert "RuntimeError: SystemExit raised inside generated code" in output.error
 
 
 async def test_custom_formatter_receives_worker_rendered_diagnostic():
     """Custom formatters run parent-side and can consume the worker traceback."""
-    from nooa.events import PythonOutput
 
     class TransportFormatter:
         def format(self, error, code=None, *, line_offset=0, formatted_error=""):
@@ -235,11 +228,7 @@ async def test_custom_formatter_receives_worker_rendered_diagnostic():
     agent = CustomAgent(llm=llm)
 
     assert await agent.compute() == 9
-    output = next(
-        event
-        for event in agent.event_manager.values()
-        if isinstance(event, PythonOutput) and event.tool_call_id == "custom-failure"
-    )
+    output = _failed_output(agent, "custom-failure")
     assert output.error.startswith("CUSTOM\nTraceback (most recent call last):")
     assert "Cell In[1], line 2" in output.error
     assert "text.index('missing')" in output.error
