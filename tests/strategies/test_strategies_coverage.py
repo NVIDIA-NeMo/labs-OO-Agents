@@ -699,6 +699,7 @@ class TestCodeActLiteStrategyExecution:
             if isinstance(event, PythonOutput) and event.tool_call_id == "failed"
         )
         assert output.execution_status is ResultStatus.ERROR
+        assert output.execution_count == 1
         assert output.stdout == "before failure\n"
         assert output.stderr == "warning\n"
         assert "Cell In[1], line 5" in output.error

@@ -148,13 +148,19 @@ def test_broken_exception_string_still_crosses_worker_boundary() -> None:
 
 
 def test_error_dto_text_is_bounded_before_ipc() -> None:
+    from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
+
+    max_error = DEFAULT_TRUNCATION_CONFIG.capture.max_error
+    configured_tail = DEFAULT_TRUNCATION_CONFIG.capture.tail
+    tail = max_error // 2 if configured_tail is None else configured_tail
     dto = result_to_dto(_result_with_error(RuntimeError("x" * 100_000)))
 
     assert dto.error is not None
-    assert len(dto.error.message) <= 11_024
-    assert len(dto.error.formatted_error) <= 11_024
+    max_transport = max_error + 1_024
+    assert len(dto.error.message) <= max_transport
+    assert len(dto.error.formatted_error) <= max_transport
     assert "<truncated-output>" in dto.error.message
-    assert dto.error.message.endswith("x" * 5_000 + "\n</truncated-output>")
+    assert dto.error.message.endswith("x" * tail + "\n</truncated-output>")
 
 
 @pytest.mark.parametrize("raised", [KeyboardInterrupt("interrupt"), SystemExit("exit")])

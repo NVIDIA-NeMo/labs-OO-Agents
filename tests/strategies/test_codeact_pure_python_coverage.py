@@ -2752,11 +2752,12 @@ class TestCodeActExecutePrefillStep:
         emitted = [call.args[0] for call in em.add.call_args_list]
         assert emitted
         assert all(event.metadata["prefill_type"] == "pre_ellipsis" for event in emitted)
+        assert all("execution_error" not in event.metadata for event in emitted)
 
     @pytest.mark.asyncio
     async def test_execute_prefill_step_with_error_logs_warning(self):
         """Prefill step with error should log but not raise (line 1806)."""
-        from nooa.events import ExecutionResult
+        from nooa.events import ExecutionResult, PythonOutput
 
         strat = CodeActStrategy()
         em = MagicMock()
@@ -2787,6 +2788,16 @@ class TestCodeActExecutePrefillStep:
             "compute",
             "inspect_inputs",
         )
+
+        output = next(
+            call.args[0] for call in em.add.call_args_list if isinstance(call.args[0], PythonOutput)
+        )
+        assert output.execution_status is ResultStatus.ERROR
+        assert output.metadata == {
+            "prefill": True,
+            "prefill_type": "inspect_inputs",
+            "execution_error": True,
+        }
 
 
 # ---------------------------------------------------------------------------
