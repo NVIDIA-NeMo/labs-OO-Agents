@@ -1345,6 +1345,17 @@ def test_fullscreen_semantic_replay_cache_avoids_duplicate_width_work() -> None:
     assert app._fullscreen_transcript.text == "semantic\n"
 
 
+def test_fullscreen_queue_window_measures_wrapped_multiline_message() -> None:
+    from nooa_cli.tui.tui_application import _PendingInputHandoff
+
+    app = _make_fullscreen_app()
+    app._pending_input_handoff = [_PendingInputHandoff("first line\n" + "wrapped " * 12)]
+    queue_window = app._main_container.children[2].content
+
+    assert bool(queue_window.wrap_lines()) is True
+    assert queue_window.preferred_height(20, 100).preferred > 2
+
+
 def test_fullscreen_wheel_is_guarded_by_explicit_mouse_navigation_policy() -> None:
     from prompt_toolkit.data_structures import Point
     from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType

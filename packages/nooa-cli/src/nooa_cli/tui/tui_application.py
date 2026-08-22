@@ -1072,6 +1072,7 @@ class TUIApplication:
                         self._scroll_fullscreen_transcript if self._is_fullscreen else None
                     ),
                 ),
+                wrap_lines=True,
                 dont_extend_height=True,
             ),
             filter=Condition(lambda: bool(_queue_pending()) or bool(self._command_queue_texts)),
