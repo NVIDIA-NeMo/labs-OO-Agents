@@ -704,16 +704,18 @@ def _blocking_agent() -> FakeAgent:
     return agent
 
 
-async def test_queue_does_not_preview_pending_message_while_agent_working():
-    """Type-ahead remains queued without exposing its contents in live chrome."""
+async def test_queue_displays_pending_message_while_agent_working():
+    """Type-ahead remains visibly queued until it enters the transcript."""
     from prompt_toolkit.formatted_text import fragment_list_to_text
 
     agent = _blocking_agent()
     async with TUIHarness(agent=agent) as h:
         await h.type_keys("trigger")
         await h.press("enter")
-        # Agent is now blocked. User type-aheads a message.
+        # Agent is now blocked. Retire the accepted trigger's handoff, then the
+        # user type-aheads another message that should remain visible.
         await h.wait_for(lambda: h.app.is_thinking())
+        h.app.complete_pending_input_handoff("trigger")
         await h.type_keys("queued-msg")
         await h.press("enter")
         await h.wait_for(lambda: h.capture_queued() == ["queued-msg"])
@@ -721,7 +723,7 @@ async def test_queue_does_not_preview_pending_message_while_agent_working():
         root = h.app._app.layout.container.get_container()
         queue_container = root.children[1].content
         queue_control = queue_container.content
-        assert fragment_list_to_text(queue_control.text()) == ""
+        assert fragment_list_to_text(queue_control.text()) == "│ queued-msg"
 
 
 async def test_admitted_input_stays_visible_until_accepted_echo_commits():

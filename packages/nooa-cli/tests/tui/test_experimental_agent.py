@@ -63,6 +63,9 @@ async def test_experimental_tui_agent_delegates_to_experimental_worker(tmp_path)
     agent = ExperimentalTUIAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         assert agent._worker_type is ExperimentalCodingWorker
+        assert (ExperimentalTUIAgent.__doc__ or "").startswith(
+            "You are a careful software-development agent working in one local repository."
+        )
         assert "prefer it over awaiting" in (ExperimentalTUIAgent.__doc__ or "")
         assert "RespondReason.WAIT" in (ExperimentalTUIAgent.__doc__ or "")
         assert 'notification["delegates"]' in (ExperimentalTUIAgent.__doc__ or "")
