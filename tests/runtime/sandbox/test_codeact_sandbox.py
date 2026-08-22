@@ -144,7 +144,7 @@ async def test_sandbox_path_still_enforces_restrictions():
     result = await agent.compute()
     assert result == 1
 
-    output = _failed_output(agent)
+    output = _failed_output(agent, "c1")
     assert output.stdout == ""
     assert output.stderr == ""
     assert "subprocess" in output.error
@@ -174,7 +174,7 @@ async def test_sandboxed_codeact_reports_rich_cell_error_and_continues():
     result = await agent.compute()
 
     assert result == 7
-    output = _failed_output(agent)
+    output = _failed_output(agent, "c1")
     assert output.stdout == "before failure\n"
     assert output.stderr == "warning\n"
     assert "Cell In[1], line 5" in output.error
@@ -192,7 +192,7 @@ async def test_sandboxed_codeact_converts_indirect_system_exit():
     agent = _SumAgent(llm=llm)
 
     assert await agent.compute() == 8
-    output = _failed_output(agent)
+    output = _failed_output(agent, "c1")
     assert "RuntimeError: SystemExit raised inside generated code" in output.error
 
 

@@ -76,6 +76,12 @@ class _ToolAgent(Agent, llm=FakeLLMClient()):
 
         raise _ReturnResultSignal(result={"result": payload})
 
+    def finish_unpicklable(self) -> None:
+        """Raise a completion signal whose result cannot cross the process boundary."""
+        from nooa.strategies.codeact import _ReturnResultSignal
+
+        raise _ReturnResultSignal(result={"result": lambda: None})
+
 
 def _return_result_builtins() -> dict:
     from nooa.strategies.codeact import _ReturnResultSignal
@@ -289,6 +295,22 @@ async def test_brokered_tool_raising_signal_flows_as_signal():
         assert res.error is None
         assert isinstance(res.signal, _ReturnResultSignal)
         assert res.signal.result == {"result": 99}
+    finally:
+        await ex.aclose()
+
+
+async def test_brokered_signal_with_unpicklable_payload_is_clear_error():
+    ex = _executor()
+    try:
+        res = await _run(ex, "self.finish_unpicklable()")
+        assert res.signal is None
+        assert not res.success
+        assert "could not cross the sandbox boundary" in str(res.error)
+        assert "JSON/pickle-safe value" in str(res.error)
+
+        recovered = await _run(ex, "40 + 2", 2)
+        assert recovered.success
+        assert recovered.returned_value == 42
     finally:
         await ex.aclose()
 

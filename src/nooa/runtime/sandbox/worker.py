@@ -129,7 +129,12 @@ def _raise_broker_error(response: dict[str, Any]) -> None:
         from nooa.strategies.codeact import _ReturnResultSignal
 
         signal_result = response.get("signal_result")
-        raise _ReturnResultSignal(result=signal_result if isinstance(signal_result, dict) else {})
+        if signal_result is None:
+            raise CellSerializationError(
+                "A control-flow signal carried a value that could not cross the "
+                "sandbox boundary. Return a JSON/pickle-safe value instead."
+            )
+        raise _ReturnResultSignal(result=signal_result)
     if err_type == "CellSerializationError":
         raise CellSerializationError(message)
     exc_cls = getattr(_bi, err_type, ParentToolError)
