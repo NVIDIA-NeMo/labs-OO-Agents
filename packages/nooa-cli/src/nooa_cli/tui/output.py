@@ -133,6 +133,14 @@ class CodeExecution:
         }
 
 
+@dataclass(frozen=True)
+class SplashScreen:
+    """Responsive NOOA splash rendered by the active frontend."""
+
+    def to_json(self) -> dict:
+        return {"type": "splash"}
+
+
 @dataclass
 class StartupInfo:
     """Structured startup banner data."""
@@ -395,6 +403,7 @@ Output = (
     | HelpOutput
     | AgentMessage
     | CodeExecution
+    | SplashScreen
     | StartupInfo
     | ClearScreen
     | Thinking

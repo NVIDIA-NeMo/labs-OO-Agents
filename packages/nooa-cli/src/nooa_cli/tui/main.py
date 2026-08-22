@@ -19,6 +19,21 @@ if TYPE_CHECKING:
     from .config import Config
 
 
+def _prepare_splash(config, frontend) -> list:
+    """Route fullscreen splash output through the app; print native splash now."""
+    if config.no_splash:
+        return []
+
+    from .config import DisplayMode, resolve_display_mode
+    from .output import SplashScreen
+    from .splash import show_splash
+
+    if resolve_display_mode(config.tui) is DisplayMode.FULLSCREEN:
+        return [SplashScreen()]
+    show_splash(frontend.raw_console)
+    return []
+
+
 async def main(
     config: "Config | None" = None,
     agent: "Agent | None" = None,
@@ -39,15 +54,13 @@ async def main(
     from .frontend import TerminalFrontend
     from .output import TextOutput, _RichReplayPayload
     from .session_manager import SESSIONS_DIR, build_resume_outputs
-    from .splash import show_splash
 
     if config is None:
         config = Config.load()
 
     # Terminal-specific: create frontend and splash screen
     frontend = TerminalFrontend(config)
-    if not config.no_splash:
-        show_splash(frontend.raw_console)
+    _splash_outputs = _prepare_splash(config, frontend)
 
     # Shared bootstrap: tracing, LLM, storage, agent, session manager
     result = await bootstrap(
@@ -58,7 +71,7 @@ async def main(
     )
 
     _startup_info = build_startup_info(result)
-    _initial_outputs = [*result.messages, _startup_info]
+    _initial_outputs = [*_splash_outputs, *result.messages, _startup_info]
 
     # Show resumed session history (interleaved with any rich content). Terminal
     # text/markdown outputs are deferred until Session.run(), after the frontend

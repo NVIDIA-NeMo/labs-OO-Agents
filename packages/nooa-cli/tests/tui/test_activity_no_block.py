@@ -198,6 +198,7 @@ async def test_session_swap_uses_async_agent_dispatch():
     old_manager = MagicMock()
     old_manager.close = MagicMock()
     session._session_manager = old_manager
+    session._session_generation = 4
     new_manager = MagicMock()
     new_manager._storage = SimpleNamespace(event_backend=object())
 
@@ -211,7 +212,8 @@ async def test_session_swap_uses_async_agent_dispatch():
         used["sync"] += 1
         return fn()
 
-    session._app = SimpleNamespace()
+    clear_handoffs = MagicMock()
+    session._app = SimpleNamespace(clear_pending_input_handoffs=clear_handoffs)
 
     async def shutdown_queue_manager(*, flush):
         assert flush is True
@@ -226,6 +228,8 @@ async def test_session_swap_uses_async_agent_dispatch():
 
     assert used["async"] == 2
     assert used["sync"] == 0
+    clear_handoffs.assert_called_once_with()
+    assert session._session_generation == 5
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import io
 import time
 from typing import Literal
 
@@ -88,6 +89,21 @@ def build_splash(width: int) -> Group:
     return Group(blank, Align.center(lab), Align.center(wordmark), Align.center(subtitle), blank)
 
 
+def render_splash_to_ansi(width: int) -> str:
+    """Render the responsive splash as ANSI for application-owned output."""
+    render_width = max(int(width), 1)
+    stream = io.StringIO()
+    console = Console(
+        file=stream,
+        width=render_width,
+        color_system="256",
+        force_terminal=True,
+        _environ={"COLUMNS": str(render_width), "LINES": "25"},
+    )
+    console.print(build_splash(render_width))
+    return stream.getvalue()
+
+
 def show_splash(console: Console, delay: float = 0.0) -> None:
     """Print the responsive NOOA splash without delaying normal startup."""
     console.print(build_splash(console.width))
@@ -95,4 +111,10 @@ def show_splash(console: Console, delay: float = 0.0) -> None:
         time.sleep(delay)
 
 
-__all__ = ["NOOA_ASCII", "build_splash", "show_splash", "splash_variant"]
+__all__ = [
+    "NOOA_ASCII",
+    "build_splash",
+    "render_splash_to_ansi",
+    "show_splash",
+    "splash_variant",
+]

@@ -35,7 +35,14 @@ from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI, AnyFormattedText
 from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.keys import Keys
-from prompt_toolkit.layout import ConditionalContainer, DynamicContainer, HSplit, Layout, Window
+from prompt_toolkit.layout import (
+    ConditionalContainer,
+    DynamicContainer,
+    HSplit,
+    Layout,
+    VSplit,
+    Window,
+)
 from prompt_toolkit.layout.containers import WindowAlign
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl, UIContent
 from prompt_toolkit.layout.dimension import Dimension
@@ -150,12 +157,22 @@ class _GraphemeWindow(Window):
             for x in range(xpos, xpos + width):
                 row[x] = Char()
             fragments = ui_content.get_line(line_number)
-            styled_chars = [
-                (style, char)
-                for style, text, *_rest in fragments
-                if "[ZeroWidthEscape]" not in style
-                for char in text
-            ]
+            styled_chars: list[tuple[str, str]] = []
+            raw_at_offset: dict[int, str] = {}
+            for style, text, *_rest in fragments:
+                if "[ZeroWidthEscape]" in style:
+                    raw_at_offset[len(styled_chars)] = raw_at_offset.get(
+                        len(styled_chars), ""
+                    ) + str(text)
+                else:
+                    styled_chars.extend((style, char) for char in text)
+
+            # The superclass positions raw escapes using code-point widths. We
+            # replace its coordinates because this window projects extended
+            # graphemes atomically and can therefore use different cell widths.
+            escape_row = new_screen.zero_width_escapes[ypos + screen_y]
+            for screen_x in range(xpos, xpos + width + 1):
+                escape_row.pop(screen_x, None)
             x = xpos
             logical_cell = 0
             for start, stop, cells in FullscreenTranscriptModel._grapheme_spans(styled_chars):
@@ -175,6 +192,8 @@ class _GraphemeWindow(Window):
                 atom = Char(cluster, styled_chars[start][0] if start < stop else "")
                 atom.width = cells
                 if x < xpos + width:
+                    if sequence := raw_at_offset.get(start):
+                        escape_row[x] += sequence
                     row[x] = atom
                     for continuation in range(cells):
                         grapheme_coordinates[line_number, logical_cell + continuation] = (
@@ -185,6 +204,7 @@ class _GraphemeWindow(Window):
                         row[x + continuation] = Char("")
                 x += cells
                 logical_cell += cells
+
         return visible_lines, grapheme_coordinates
 
 
@@ -197,14 +217,17 @@ class _FullscreenTranscriptControl(FormattedTextControl):
         scroll_callback: Callable[[int], None],
         mouse_navigation_enabled: Callable[[], bool],
         selection_callback: Callable[[str, int, int], None],
+        link_callback: Callable[[int, int], bool],
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._scroll_callback = scroll_callback
         self._mouse_navigation_enabled = mouse_navigation_enabled
         self._selection_callback = selection_callback
+        self._link_callback = link_callback
         self._render_width: int | None = None
         self._render_height: int | None = None
+        self._formatted_geometry: tuple[int, int | None] | None = None
         self._dragging = False
         self._drag_moved = False
         self._drag_position = (0, 0)
@@ -218,12 +241,17 @@ class _FullscreenTranscriptControl(FormattedTextControl):
         return self._render_width, self._render_height
 
     def create_content(self, width: int, height: int | None):
-        # Window supplies current-frame geometry before requesting fragments.
-        # This avoids reusing Window.render_info from the previous frame on
-        # height-only resize and on the first frame after closing a subview.
+        # ``preferred_height`` asks for content with ``height=None`` before the
+        # concrete window height is allocated. Keep that measurement useful,
+        # but do not let its render-counter cache poison the paint that follows
+        # when bottom chrome changed this frame.
         self._render_width = max(1, width)
         if height is not None:
             self._render_height = max(1, height)
+        geometry = (self._render_width, self._render_height)
+        if geometry != self._formatted_geometry:
+            self._fragment_cache.clear()
+            self._formatted_geometry = geometry
         content = super().create_content(width, height)
 
         def get_line(index: int):
@@ -304,7 +332,10 @@ class _FullscreenTranscriptControl(FormattedTextControl):
             self._selection_callback("extend", x, y)
             return None
         if mouse_event.event_type is MouseEventType.MOUSE_UP and self._dragging:
-            self._finish_drag(x, y, moved=self._drag_moved)
+            moved = self._drag_moved or self._drag_position != (x, y)
+            self._finish_drag(x, y, moved=moved)
+            if not moved:
+                self._link_callback(x, y)
             return None
         return super().mouse_handler(mouse_event)
 
@@ -328,8 +359,12 @@ class _FullscreenTranscriptControl(FormattedTextControl):
             MouseEventType.MOUSE_UP,
         ):
             return False
+        width = max(1, self._render_width or 1)
         height = max(1, self._render_height or 1)
-        x = max(0, mouse_event.position.x)
+        # Coordinates are local to whichever chrome child received the event.
+        # Once a downward drag leaves the transcript, clamp to its true lower-
+        # right boundary instead of interpreting a right-side child's local x.
+        x = width - 1 if below else 0
         y = height - 1 if below else 0
         self._drag_moved = True
         self._drag_position = (x, y)
@@ -419,37 +454,8 @@ def _fullscreen_wheel_delta(mouse_event: MouseEvent) -> int | None:
     }.get(mouse_event.event_type)
 
 
-class _FullscreenDragBoundaryControl(FormattedTextControl):
-    """Chrome control that hands pointer gestures back to the transcript.
-
-    prompt_toolkit routes mouse events to the window under the pointer. Without
-    this handoff, releasing over bottom chrome strands the transcript control's
-    drag lease, and wheel gestures over chrome never reach transcript scrolling.
-    """
-
-    def __init__(
-        self,
-        *args: Any,
-        transcript_drag_callback: Callable[[MouseEvent], bool],
-        transcript_scroll_callback: Callable[[int], None] | None = None,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(*args, **kwargs)
-        self._transcript_drag_callback = transcript_drag_callback
-        self._transcript_scroll_callback = transcript_scroll_callback
-
-    def mouse_handler(self, mouse_event: MouseEvent):
-        if self._transcript_drag_callback(mouse_event):
-            return None
-        delta = _fullscreen_wheel_delta(mouse_event)
-        if delta is not None and self._transcript_scroll_callback is not None:
-            self._transcript_scroll_callback(delta)
-            return None
-        return super().mouse_handler(mouse_event)
-
-
-class _NativeSelectionBufferControl(BufferControl):
-    """Composer control that hands transcript-wide pointer gestures to their owner."""
+class _TranscriptGestureControlMixin:
+    """Forward transcript-wide pointer gestures received by adjacent controls."""
 
     def __init__(
         self,
@@ -462,52 +468,141 @@ class _NativeSelectionBufferControl(BufferControl):
         self._transcript_drag_callback = transcript_drag_callback
         self._transcript_scroll_callback = transcript_scroll_callback
 
-    def mouse_handler(self, mouse_event: MouseEvent):
+    def _forward_transcript_gesture(self, mouse_event: MouseEvent) -> tuple[bool, Any]:
+        """Return whether the shared policy handled the event and its result."""
         if (
             MouseModifier.ALT in mouse_event.modifiers
             or MouseModifier.SHIFT in mouse_event.modifiers
         ):
-            return NotImplemented
+            if self._transcript_drag_callback is not None:
+                self._transcript_drag_callback(mouse_event)
+            return True, NotImplemented
         if self._transcript_drag_callback is not None and self._transcript_drag_callback(
             mouse_event
         ):
-            return None
+            return True, None
         delta = _fullscreen_wheel_delta(mouse_event)
         if delta is not None and self._transcript_scroll_callback is not None:
             self._transcript_scroll_callback(delta)
-            return None
-        return super().mouse_handler(mouse_event)
+            return True, None
+        return False, None
 
 
-class _NativeSelectionCompletionsMenuControl(CompletionsMenuControl):
-    """Completion menu that leaves native-selection modifiers unconsumed."""
+class _FullscreenDragBoundaryControl(_TranscriptGestureControlMixin, FormattedTextControl):
+    """Chrome control that hands pointer gestures back to the transcript.
+
+    prompt_toolkit routes mouse events to the window under the pointer. Without
+    this handoff, releasing over bottom chrome strands the transcript control's
+    drag lease, and wheel gestures over chrome never reach transcript scrolling.
+    """
 
     def mouse_handler(self, mouse_event: MouseEvent):
-        if (
-            MouseModifier.ALT in mouse_event.modifiers
-            or MouseModifier.SHIFT in mouse_event.modifiers
-        ):
-            return NotImplemented
+        handled, result = self._forward_transcript_gesture(mouse_event)
+        if handled:
+            return result
         return super().mouse_handler(mouse_event)
 
 
-class _ReturnToTailControl(FormattedTextControl):
+class _NativeSelectionBufferControl(_TranscriptGestureControlMixin, BufferControl):
+    """Composer control that hands transcript-wide pointer gestures to their owner."""
+
+    def __init__(
+        self,
+        *args: Any,
+        transcript_drag_callback: Callable[[MouseEvent], bool] | None = None,
+        transcript_scroll_callback: Callable[[int], None] | None = None,
+        selection_copy_callback: Callable[[str], None] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            *args,
+            transcript_drag_callback=transcript_drag_callback,
+            transcript_scroll_callback=transcript_scroll_callback,
+            **kwargs,
+        )
+        self._selection_copy_callback = selection_copy_callback
+
+    def mouse_handler(self, mouse_event: MouseEvent):
+        handled, result = self._forward_transcript_gesture(mouse_event)
+        if handled:
+            return result
+        result = super().mouse_handler(mouse_event)
+        if (
+            mouse_event.event_type is MouseEventType.MOUSE_UP
+            and self.buffer.selection_state is not None
+            and self._selection_copy_callback is not None
+        ):
+            # macOS terminals consume Command-C themselves, but cannot see a
+            # prompt_toolkit-owned selection. Mirror a completed mouse
+            # selection to the system clipboard so Command-C has the expected
+            # result without deleting or hiding the selected composer text.
+            _document, clipboard_data = self.buffer.document.cut_selection()
+            if clipboard_data.text:
+                self._selection_copy_callback(clipboard_data.text)
+        return result
+
+
+class _NativeSelectionCompletionsMenuControl(
+    _TranscriptGestureControlMixin, CompletionsMenuControl
+):
+    """Completion menu that preserves native selection and transcript gestures."""
+
+    def mouse_handler(self, mouse_event: MouseEvent):
+        handled, result = self._forward_transcript_gesture(mouse_event)
+        if handled:
+            return result
+        return super().mouse_handler(mouse_event)
+
+
+def _native_hyperlink_boundary(
+    fragments: list[tuple[str, str]], *, render_counter: int
+) -> list[tuple[str, str]]:
+    """Close transcript OSC-8 state before painting an adjacent chrome row."""
+    boundary = [("[ZeroWidthEscape]", "\x1b]8;;\x1b\\")]
+    for index, (style, text) in enumerate(fragments):
+        if not text:
+            boundary.append((style, text))
+            continue
+        # prompt_toolkit emits zero-width escapes only when their cell is
+        # repainted. Alternate one invisible class on the first chrome cell so
+        # every frame emits the close, without invalidating the whole row.
+        marker = f"class:native-hyperlink-boundary-{render_counter & 1}"
+        boundary.append((f"{style} {marker}".strip(), text[:1]))
+        if text[1:]:
+            boundary.append((style, text[1:]))
+        boundary.extend(fragments[index + 1 :])
+        break
+    return boundary
+
+
+class _ReturnToTailControl(_TranscriptGestureControlMixin, FormattedTextControl):
     """One-row fullscreen affordance for resuming live transcript output."""
 
-    def __init__(self, callback: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        callback: Callable[[], None],
+        *,
+        transcript_drag_callback: Callable[[MouseEvent], bool] | None = None,
+        transcript_scroll_callback: Callable[[int], None] | None = None,
+        render_counter: Callable[[], int] = lambda: 0,
+    ) -> None:
         super().__init__(
-            lambda: [("class:return-to-tail", "↓ Return to bottom (Ctrl+End)")],
+            lambda: _native_hyperlink_boundary(
+                [("class:return-to-tail", " ↓ Return to bottom (Ctrl+End)")],
+                render_counter=render_counter(),
+            ),
             focusable=False,
             show_cursor=False,
+            transcript_drag_callback=transcript_drag_callback,
+            transcript_scroll_callback=transcript_scroll_callback,
         )
         self._callback = callback
 
     def mouse_handler(self, mouse_event: MouseEvent):
-        if (
-            mouse_event.button is not MouseButton.LEFT
-            or MouseModifier.ALT in mouse_event.modifiers
-            or MouseModifier.SHIFT in mouse_event.modifiers
-        ):
+        handled, result = self._forward_transcript_gesture(mouse_event)
+        if handled:
+            return result
+        if mouse_event.button is not MouseButton.LEFT:
             return NotImplemented
         if mouse_event.event_type is MouseEventType.MOUSE_DOWN:
             return None
@@ -629,6 +724,13 @@ class _ResizeReplayQueueItem:
     request: ResizeReplayRequest
     transcript_blocks: tuple[TranscriptBlock, ...]
     transcript_epoch: int
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _PendingInputHandoff:
+    """One admitted submission awaiting transcript commit or withdrawal."""
+
+    text: str
 
 
 @dataclass(frozen=True)
@@ -770,6 +872,7 @@ class TUIApplication:
         self._transient_status_style = "class:status"
         self._transient_status_timer: asyncio.TimerHandle | None = None
         self._clipboard_task: asyncio.Task[None] | None = None
+        self._link_task: asyncio.Task[None] | None = None
 
         self._agent_controller = AgentController(
             _CallbackScheduler(self._schedule_agent_callback),
@@ -783,7 +886,10 @@ class TUIApplication:
         # tests and printable-transcript callers. Source-bearing blocks below
         # are the single retained representation used for terminal replay.
         self.output_buffer = Buffer(read_only=False)
-        self._fullscreen_transcript = FullscreenTranscriptModel()
+        self._status_region_occupied = False
+        self._fullscreen_transcript = FullscreenTranscriptModel(
+            show_trailing_blank=lambda: not self._status_region_occupied
+        )
         # Fullscreen requests mouse reporting immediately so ordinary drag and
         # wheel gestures reach prompt_toolkit rather than terminal scrollback.
         # Option/Alt-drag can bypass reporting in supporting terminals; F6 is
@@ -843,6 +949,9 @@ class TUIApplication:
         self._spinner_task: asyncio.Task | None = None
         self._command_status_text: str = ""
         self._command_queue_texts: list[str] = []
+        # Admitted text remains visible here until its accepted transcript
+        # block is committed. A worker may dequeue before the next paint.
+        self._pending_input_handoff: list[_PendingInputHandoff] = []
         self._llm_probe_status_text: str = ""
 
         self._prompt_processor = BeforeInput(PROMPT_MARKER, style="class:prompt")
@@ -894,12 +1003,14 @@ class TUIApplication:
                     lambda: self._fullscreen_transcript.formatted_text(
                         width=self._transcript_viewport_size()[0],
                         height=self._transcript_viewport_size()[1],
+                        render_counter=self._app.render_counter,
                     ),
                     focusable=False,
                     show_cursor=False,
                     scroll_callback=self._scroll_fullscreen_transcript,
                     mouse_navigation_enabled=lambda: self._fullscreen_mouse_navigation,
                     selection_callback=self._handle_fullscreen_selection,
+                    link_callback=self._open_fullscreen_link_at,
                 ),
                 wrap_lines=False,
                 # The model virtualizes formatted content to exactly the visible
@@ -912,10 +1023,10 @@ class TUIApplication:
             else None
         )
 
-        # Queue chrome is a pure projection of the current agent state.
+        # Queue chrome is a pure projection of runtime state plus the short
+        # admission→transcript visibility handoff.
         def _queue_pending() -> list[str]:
-            state = self._agent_controller.state
-            return [] if state is None else list(state.pending_inputs)
+            return self._pending_input_display()
 
         def _queue_formatted():
             rows = []
@@ -931,11 +1042,24 @@ class TUIApplication:
                     rows.append(f"│ {line}")
             if not rows:
                 return []
-            return [("class:queue", "\n".join(rows))]
+            fragments = [("class:queue", "\n".join(rows))]
+            if self._is_fullscreen:
+                return _native_hyperlink_boundary(
+                    fragments, render_counter=self._app.render_counter
+                )
+            return fragments
 
         queue_window = ConditionalContainer(
             Window(
-                FormattedTextControl(_queue_formatted, focusable=False),
+                _FullscreenDragBoundaryControl(
+                    _queue_formatted,
+                    focusable=False,
+                    transcript_drag_callback=self._handle_fullscreen_drag_over_bottom_chrome,
+                    transcript_scroll_callback=(
+                        self._scroll_fullscreen_transcript if self._is_fullscreen else None
+                    ),
+                ),
+                wrap_lines=True,
                 dont_extend_height=True,
             ),
             filter=Condition(lambda: bool(_queue_pending()) or bool(self._command_queue_texts)),
@@ -952,6 +1076,9 @@ class TUIApplication:
                 transcript_scroll_callback=(
                     self._scroll_fullscreen_transcript if self._is_fullscreen else None
                 ),
+                selection_copy_callback=(
+                    self._copy_input_selection if self._is_fullscreen else None
+                ),
             ),
             wrap_lines=True,
             height=Dimension(min=1),
@@ -960,11 +1087,26 @@ class TUIApplication:
         )
         self._input_window = input_window
         optional_row = Dimension(min=0, preferred=1, max=1)
+
+        def _input_padding_window() -> Window:
+            return Window(
+                _FullscreenDragBoundaryControl(
+                    lambda: [("", " ")],
+                    focusable=False,
+                    transcript_drag_callback=self._handle_fullscreen_drag_over_bottom_chrome,
+                    transcript_scroll_callback=(
+                        self._scroll_fullscreen_transcript if self._is_fullscreen else None
+                    ),
+                ),
+                height=optional_row,
+                style=input_style,
+            )
+
         self._input_container = HSplit(
             [
-                Window(height=optional_row, char=" ", style=input_style),
+                _input_padding_window(),
                 input_window,
-                Window(height=optional_row, char=" ", style=input_style),
+                _input_padding_window(),
             ],
             style=input_style,
             # The children above have a one-row aggregate minimum.  Keep a
@@ -976,13 +1118,20 @@ class TUIApplication:
         # Status line at the bottom — shows spinner + session label.
         def _status_formatted():
             fragments: list[tuple[str, str]] = []
-            for index, row in enumerate(self._status_rows()):
+            rows = self._status_rows(include_transient=not self._is_fullscreen)
+            for index, row in enumerate(rows):
                 if index:
-                    fragments.append(("class:status", "\n\n"))
+                    fragments.append(("class:status", "   " if self._is_fullscreen else "\n\n"))
                 fragments.extend((style, sanitize_live_text(text)) for style, text in row)
+            if self._is_fullscreen:
+                return _native_hyperlink_boundary(
+                    fragments, render_counter=self._app.render_counter
+                )
             return fragments
 
         def _status_height() -> Dimension:
+            if self._is_fullscreen:
+                return Dimension(min=0, max=1, preferred=1)
             lines = self.status_text().splitlines()
             height = max(1, len(lines))
             # Status is useful chrome, not a reason to replace the entire UI
@@ -1002,7 +1151,35 @@ class TUIApplication:
             height=_status_height,
         )
 
-        self._return_to_tail_control = _ReturnToTailControl(self._jump_fullscreen_to_tail)
+        self._transient_status_container = ConditionalContainer(
+            Window(
+                _FullscreenDragBoundaryControl(
+                    lambda: _native_hyperlink_boundary(
+                        [
+                            ("class:status", " "),
+                            (
+                                self._transient_status_style,
+                                sanitize_live_text(self._transient_status_text),
+                            ),
+                        ],
+                        render_counter=self._app.render_counter,
+                    ),
+                    focusable=False,
+                    transcript_drag_callback=self._handle_fullscreen_drag_over_bottom_chrome,
+                    transcript_scroll_callback=self._scroll_fullscreen_transcript,
+                ),
+                height=1,
+                dont_extend_width=True,
+            ),
+            filter=Condition(lambda: self._is_fullscreen and bool(self._transient_status_text)),
+        )
+
+        self._return_to_tail_control = _ReturnToTailControl(
+            self._jump_fullscreen_to_tail,
+            transcript_drag_callback=self._handle_fullscreen_drag_over_bottom_chrome,
+            transcript_scroll_callback=self._scroll_fullscreen_transcript,
+            render_counter=lambda: self._app.render_counter,
+        )
         self._return_to_tail_container = ConditionalContainer(
             Window(
                 self._return_to_tail_control,
@@ -1024,10 +1201,22 @@ class TUIApplication:
             label = self._session_label_fn() if self._session_label_fn is not None else ""
             current = self._read_terminal_size()
             columns = current[0] if current is not None else terminal_cols(minimum=1)
-            return format_session_rule(columns, label)
+            fragments = format_session_rule(columns, label)
+            if self._is_fullscreen:
+                return _native_hyperlink_boundary(
+                    fragments, render_counter=self._app.render_counter
+                )
+            return fragments
 
         session_rule = Window(
-            FormattedTextControl(_session_rule_formatted, focusable=False),
+            _FullscreenDragBoundaryControl(
+                _session_rule_formatted,
+                focusable=False,
+                transcript_drag_callback=self._handle_fullscreen_drag_over_bottom_chrome,
+                transcript_scroll_callback=(
+                    self._scroll_fullscreen_transcript if self._is_fullscreen else None
+                ),
+            ),
             height=optional_row,
         )
 
@@ -1057,11 +1246,18 @@ class TUIApplication:
 
         completions_window = ConditionalContainer(
             Window(
-                content=_NativeSelectionCompletionsMenuControl(),
+                content=_NativeSelectionCompletionsMenuControl(
+                    transcript_drag_callback=self._handle_fullscreen_drag_over_bottom_chrome,
+                    transcript_scroll_callback=(
+                        self._scroll_fullscreen_transcript if self._is_fullscreen else None
+                    ),
+                ),
                 width=Dimension(min=8),
                 height=_completions_height,
                 dont_extend_height=True,
-                right_margins=[ScrollbarMargin(display_arrows=True)],
+                right_margins=(
+                    [] if self._is_fullscreen else [ScrollbarMargin(display_arrows=True)]
+                ),
             ),
             filter=Condition(
                 lambda: (
@@ -1077,15 +1273,34 @@ class TUIApplication:
         #   session rule — always visible while at the transcript tail
         #   input composer (one padding row above and below the input)
         #   completions (only while completing)
+        if self._is_fullscreen:
+            self._status_region_container = ConditionalContainer(
+                VSplit(
+                    [
+                        status_window,
+                        self._transient_status_container,
+                        self._return_to_tail_container,
+                    ],
+                ),
+                filter=Condition(
+                    lambda: (
+                        self._status_region_occupied
+                        or not self._fullscreen_transcript.viewport.follows_tail
+                    )
+                ),
+            )
+            status_region = self._status_region_container
+        else:
+            self._status_region_container = None
+            status_region = status_window
         main_children = [
-            status_window,
+            status_region,
             queue_window,
             session_rule,
             self._input_container,
             completions_window,
         ]
         if self._output_window is not None:
-            main_children.insert(0, self._return_to_tail_container)
             main_children.insert(0, self._output_window)
         main_container = HSplit(main_children, window_too_small=Window())
         self._main_container = main_container
@@ -1142,6 +1357,7 @@ class TUIApplication:
             style=create_prompt_style(),
             full_screen=self._is_fullscreen,
             before_render=self._before_render,
+            after_render=self._after_render,
             # When the Application exits (e.g. /exit), erase the live
             # region so the final screen is just the committed
             # scrollback. Otherwise the empty ❯ from the input line
@@ -1517,6 +1733,89 @@ class TUIApplication:
             return False
         return control.handle_external_mouse(mouse_event, below=True)
 
+    def _open_fullscreen_link_at(self, x: int, y: int) -> bool:
+        """Open the safe HTTP(S) hyperlink under a click without affecting drag-copy."""
+        if not self._is_fullscreen:
+            return False
+        width, height = self._transcript_viewport_size()
+        url = self._fullscreen_transcript.hyperlink_at(x=x, y=y, width=width, height=height)
+        if url is None:
+            return False
+
+        # A browser on an SSH host is not the user's browser. Reuse the
+        # remote-aware clipboard path (OSC 52 fallback) so the URL reaches the
+        # terminal that received the click without launching anything remotely.
+        if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
+            self._start_fullscreen_selection_copy(url)
+            return True
+
+        # Opening a URL is irreversible. Ignore duplicate clicks while one
+        # launch is in flight rather than cancelling an await whose subprocess
+        # may already have accepted the request.
+        if self._link_task is not None and not self._link_task.done():
+            return True
+
+        async def open_link() -> None:
+            task = asyncio.current_task()
+            try:
+                opened = await self._open_local_url(url)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("failed to open transcript hyperlink", exc_info=True)
+                opened = False
+            finally:
+                if self._link_task is task:
+                    self._link_task = None
+            if not opened:
+                # A local machine without a browser helper still gets a useful,
+                # explicit result instead of a swallowed click.
+                self._start_fullscreen_selection_copy(url)
+
+        self._link_task = asyncio.create_task(open_link())
+        return True
+
+    @staticmethod
+    def _browser_open_command(url: str) -> tuple[str, ...] | None:
+        """Return a direct-argv browser opener, avoiding shell interpretation."""
+        candidates = (
+            ("open", (url,)),
+            ("xdg-open", (url,)),
+            ("wslview", (url,)),
+            ("gio", ("open", url)),
+            ("rundll32.exe", ("url.dll,FileProtocolHandler", url)),
+        )
+        for executable, arguments in candidates:
+            path = shutil.which(executable)
+            if path is not None:
+                return (path, *arguments)
+        return None
+
+    async def _open_local_url(self, url: str) -> bool:
+        """Launch a validated URL with a cancellable local helper process."""
+        command = self._browser_open_command(url)
+        if command is None:
+            return False
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except OSError:
+            return False
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except asyncio.CancelledError:
+            await self._terminate_clipboard_process(process)
+            raise
+        except TimeoutError:
+            # Browser launchers can remain attached after successfully handing
+            # the URL off. Do not kill the helper or report a false failure.
+            return True
+        return process.returncode == 0
+
     def _handle_fullscreen_selection(self, action: str, x: int, y: int) -> None:
         """Apply one mouse-selection transition and copy on button release."""
         width, height = self._transcript_viewport_size()
@@ -1536,6 +1835,11 @@ class TUIApplication:
                 self._start_fullscreen_selection_copy(text)
         if self._app.is_running:
             self._app.invalidate()
+
+    def _copy_input_selection(self, text: str) -> None:
+        """Mirror a prompt_toolkit composer selection to app and system clipboards."""
+        self._app.clipboard.set_text(text)
+        self._start_fullscreen_selection_copy(text)
 
     def _start_fullscreen_selection_copy(self, text: str) -> None:
         """Copy without blocking prompt_toolkit's event loop on local helpers."""
@@ -1864,6 +2168,7 @@ class TUIApplication:
         def _(event):
             popped = _pop_last_queued()
             if popped is not None:
+                self.complete_pending_input_handoff(popped)
                 self.input_buffer.text = popped
                 self.input_buffer.cursor_position = len(popped)
                 return
@@ -2015,6 +2320,29 @@ class TUIApplication:
         self.input_buffer.text = self._history[self._history_cursor]
         self.input_buffer.cursor_position = len(self.input_buffer.text)
 
+    def _pending_input_display(self) -> list[str]:
+        """Return runtime queue text plus admissions not yet reflected by it."""
+        state = self._agent_controller.state
+        pending = [] if state is None else list(state.pending_inputs)
+        handoff = [item.text for item in self._pending_input_handoff]
+        if not handoff:
+            return pending
+        if not pending:
+            return handoff
+
+        # Runtime coalesces new admissions into its final queue item. Replace
+        # the represented suffix with the individual handoff rows, while
+        # retaining any runtime-owned prefix and every earlier queue item.
+        tail = pending[-1]
+        for represented in range(len(handoff), 0, -1):
+            combined = "\n".join(handoff[:represented])
+            if tail == combined:
+                return pending[:-1] + handoff
+            suffix = f"\n{combined}"
+            if tail.endswith(suffix):
+                return pending[:-1] + [tail[: -len(suffix)]] + handoff
+        return pending + handoff
+
     def submit_message(self, user_message: str) -> None:
         """Submit text through the current interactive agent."""
         if self._agent_controller.state is None:
@@ -2028,9 +2356,56 @@ class TUIApplication:
             if problem:
                 self.emit_block(f"\x1b[31m{problem}\x1b[0m\n")
                 return
-        accepted = self._agent_controller.submit(user_message)
-        if not accepted:
+        # Register visibility before admission: another loop may consume and
+        # queue the accepted transcript echo before ``submit`` returns.
+        handoff = _PendingInputHandoff(user_message)
+        self._pending_input_handoff.append(handoff)
+        try:
+            accepted = self._agent_controller.submit(user_message)
+        except Exception:
+            self._discard_pending_input_handoff(handoff)
+            logger.debug("TUI message submission failed", exc_info=True)
             self.emit_block("\x1b[31mMessage rejected.\x1b[0m\n")
+            return
+        if not accepted:
+            self._discard_pending_input_handoff(handoff)
+            self.emit_block("\x1b[31mMessage rejected.\x1b[0m\n")
+            return
+        if self._app.is_running:
+            self._app.invalidate()
+
+    def _discard_pending_input_handoff(self, handoff: _PendingInputHandoff) -> None:
+        """Discard one exact optimistic admission without disturbing duplicates."""
+        for index, candidate in enumerate(self._pending_input_handoff):
+            if candidate is handoff:
+                self._pending_input_handoff.pop(index)
+                break
+
+    def complete_pending_input_handoff(self, text: str) -> None:
+        """Retire the submissions represented by one consumed queue item."""
+        combined = ""
+        consumed = 0
+        for handoff in self._pending_input_handoff:
+            combined = f"{combined}\n{handoff.text}" if consumed else handoff.text
+            consumed += 1
+            if combined == text or text.endswith(f"\n{combined}"):
+                del self._pending_input_handoff[:consumed]
+                break
+        else:
+            # A callback can arrive after another consumer has advanced the
+            # queue. Retire the matching admission without dropping older rows.
+            for index, handoff in enumerate(self._pending_input_handoff):
+                if handoff.text == text or text.endswith(f"\n{handoff.text}"):
+                    del self._pending_input_handoff[index]
+                    break
+        if self._app.is_running:
+            self._app.invalidate()
+
+    def clear_pending_input_handoffs(self) -> None:
+        """Discard optimistic queue rows after the runtime queue is flushed."""
+        self._pending_input_handoff.clear()
+        if self._app.is_running:
+            self._app.invalidate()
 
     def _schedule_agent_callback(self, callback: Callable[[], None]) -> None:
         """Marshal agent observation delivery onto the prompt-toolkit owner loop."""
@@ -2457,8 +2832,21 @@ class TUIApplication:
                     await clipboard_task
                 except asyncio.CancelledError:
                     pass
+                except Exception:
+                    logger.debug("clipboard task failed during teardown", exc_info=True)
                 if self._clipboard_task is clipboard_task:
                     self._clipboard_task = None
+            link_task = self._link_task
+            if link_task is not None:
+                link_task.cancel()
+                try:
+                    await link_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.debug("link task failed during teardown", exc_info=True)
+                if self._link_task is link_task:
+                    self._link_task = None
             self._cancel_fullscreen_drag()
             # Restore sys.stdout / sys.stderr FIRST so any post-exit
             # prints from teardown code (spinner cleanup, snapshot save,
@@ -2637,7 +3025,9 @@ class TUIApplication:
         return normalize_transcript_block(source, columns=self.transcript_columns())
 
     def _before_render(self, _app) -> None:
-        """Observe terminal geometry before prompt_toolkit renders a frame."""
+        """Observe frame-local status and terminal geometry before rendering."""
+        if self._is_fullscreen:
+            self._status_region_occupied = bool(self._status_rows())
         current = self._read_terminal_size()
         if current is None:
             return
@@ -2649,6 +3039,15 @@ class TUIApplication:
             return
         if self.full_screen:
             self._observe_terminal_size(current)
+
+    def _after_render(self, app) -> None:
+        """Never leave terminal-native OSC-8 state open beyond one rendered frame."""
+        if self._is_fullscreen:
+            try:
+                app.output.write_raw("\x1b]8;;\x1b\\")
+                app.output.flush()
+            except Exception:
+                logger.debug("failed to close native hyperlink state", exc_info=True)
 
     def _read_terminal_size(self) -> tuple[int, int] | None:
         try:
@@ -3127,7 +3526,7 @@ class TUIApplication:
             self._ensure_spinner_task()
         self.invalidate()
 
-    def _status_rows(self) -> list[list[tuple[str, str]]]:
+    def _status_rows(self, *, include_transient: bool = True) -> list[list[tuple[str, str]]]:
         """Return dynamic status rows as independently styled fragments."""
         rows: list[list[tuple[str, str]]] = []
         state = self._agent_controller.state
@@ -3147,7 +3546,7 @@ class TUIApplication:
                 logger.debug("auxiliary status callback failed", exc_info=True)
         if auxiliary_status:
             rows.append([("class:status", auxiliary_status)])
-        if self._transient_status_text:
+        if include_transient and self._transient_status_text:
             rows.append([(self._transient_status_style, self._transient_status_text)])
         if self._command_status_text:
             rows.append([("class:status", self._command_status_text)])

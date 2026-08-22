@@ -473,7 +473,10 @@ class LocalAgentRunner:
                 )
                 return False
             self._pending_user_messages = pending_inputs
-        self._update_pending_inputs(pending_inputs)
+            # Publish while dequeue is still excluded by the lifecycle lock.
+            # Otherwise a newer empty dequeue snapshot can be overwritten by
+            # this older submit snapshot after the lock is released.
+            self._update_pending_inputs(pending_inputs)
         return True
 
     def ensure_dispatcher(self, *, start_with_race: bool = False) -> None:
@@ -724,7 +727,10 @@ class LocalAgentRunner:
                 value for value in self._user_messages.snapshot() if isinstance(value, str)
             )
             pending_inputs = self._pending_user_messages
-        self._update_pending_inputs(pending_inputs)
+            # Publish before releasing the lifecycle transaction. Otherwise a
+            # concurrent submit can publish a newer snapshot first and then be
+            # overwritten by this stale withdrawal snapshot.
+            self._update_pending_inputs(pending_inputs)
         return True, None if item is None else str(item)
 
     def cancel_tasks(self, tasks: list[asyncio.Task[Any]]) -> None:
