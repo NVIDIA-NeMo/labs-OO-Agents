@@ -1088,6 +1088,20 @@ class TestFormatterReviewRegressions:
         assert result == original
         assert result.count("<truncated-output>") == 1
 
+    def test_pretruncated_error_is_rebounded_for_smaller_active_budget(self):
+        original = format_error_for_llm(RuntimeError("X" * 2_000), max_error=400)
+
+        result = format_error_for_llm(
+            RuntimeError("surrogate"),
+            formatted_error=original,
+            max_error=100,
+        )
+
+        assert result.count("<truncated-output>") == 1
+        assert result.count("</truncated-output>") == 1
+        assert "Showing first 50 and last 50 chars" in result
+        assert result.endswith("X" * 50 + "\n</truncated-output>")
+
     def test_very_large_diagnostic_is_bounded_with_tail_preserved(self):
         result = format_error_for_llm(RuntimeError("X" * 5_000_000))
 

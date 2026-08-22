@@ -25,6 +25,7 @@ from typing import Any
 
 from nooa.agentdoc import TruncatingStringIO
 from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
+from nooa.errors.formatting import _bound_preformatted_diagnostic
 from nooa.runtime.sandbox.errors import CellSerializationError
 
 # ``TruncatingStringIO`` adds a human-readable envelope around retained
@@ -74,13 +75,8 @@ def _bounded_formatted_error(
 ) -> str:
     """Apply capture policy once and enforce a fixed IPC ceiling."""
     content_limit = _effective_error_limit(max_error)
-    if len(value) <= content_limit:
-        return value
-    if value.startswith("<truncated-output>\n") and value.endswith("\n</truncated-output>"):
-        # A budget-aware formatter has already retained the configured head and
-        # tail. Avoid nesting its envelope, while bounding metadata overhead.
-        return _hard_bound_text(value, min(_MAX_ERROR_TRANSPORT, content_limit + 1_024))
-    return _bounded_error_message(value, max_error=content_limit, tail_chars=tail_chars)
+    bounded = _bound_preformatted_diagnostic(value, content_limit, tail_chars)
+    return _hard_bound_text(bounded, min(_MAX_ERROR_TRANSPORT, content_limit + 1_024))
 
 
 def is_picklable(value: Any) -> bool:

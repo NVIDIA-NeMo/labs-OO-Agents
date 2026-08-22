@@ -219,6 +219,23 @@ def test_worker_formatted_envelope_is_not_nested() -> None:
     assert dto.error.formatted_error.count("</truncated-output>") == 1
 
 
+def test_larger_preformatted_envelope_is_rebounded_for_active_budget() -> None:
+    from nooa.errors.formatting import format_error_for_llm
+
+    larger = format_error_for_llm(RuntimeError("X" * 2_000), max_error=400)
+    dto = result_to_dto(
+        _result_with_error(RuntimeError("surrogate")),
+        error_formatter=lambda error, *, line_offset=0: larger,
+        max_error=100,
+    )
+
+    assert dto.error is not None
+    assert dto.error.formatted_error.count("<truncated-output>") == 1
+    assert dto.error.formatted_error.count("</truncated-output>") == 1
+    assert "Showing first 50 and last 50 chars" in dto.error.formatted_error
+    assert dto.error.formatted_error.endswith("X" * 50 + "\n</truncated-output>")
+
+
 def test_error_dto_text_never_exceeds_transport_cap() -> None:
     max_transport = DEFAULT_TRUNCATION_CONFIG.capture.max_error + 1_024
     dto = result_to_dto(

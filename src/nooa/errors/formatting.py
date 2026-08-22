@@ -49,6 +49,15 @@ _CELL_PATTERN = re.compile(r"^Cell In\[\d+\]$")
 
 # Internal wrapper function names to replace with <module>
 _WRAPPER_NAMES = ("__repl_wrapper__", "__wrapper__")
+_TRUNCATED_DIAGNOSTIC_PATTERN = re.compile(
+    r"\A<truncated-output>\n"
+    r"Output too large \(([\d,]+) chars\)\. "
+    r"Showing first ([\d,]+) and last ([\d,]+) chars\.\n"
+    r"The ([\d,]+) chars in the middle are not recoverable\.\n\n"
+    r"(.*?)\n\n\.\.\. ([\d,]+) chars not shown \.\.\.\n\n"
+    r"(.*)\n</truncated-output>\Z",
+    re.DOTALL,
+)
 
 # ---------------------------------------------------------------------------
 # Targeted model-recovery hints
@@ -433,21 +442,52 @@ def _bound_preformatted_diagnostic(
     max_error: int | None,
     tail_chars: int | None,
 ) -> str:
-    """Bound trusted backend text without nesting an existing truncation envelope."""
+    """Bound trusted backend text without nesting a valid truncation envelope."""
     text = text.rstrip()
-    limit, _ = _diagnostic_budget(max_error, tail_chars)
+    limit, tail = _diagnostic_budget(max_error, tail_chars)
     if len(text) <= limit:
         return text
-    if text.startswith("<truncated-output>\n") and text.endswith("\n</truncated-output>"):
-        # A worker-rendered envelope is necessarily longer than its retained
-        # content budget. Preserve that single envelope, but still impose a hard
-        # allowance for its metadata before the text reaches model context.
-        transport_limit = limit + 1_024
-        if len(text) <= transport_limit:
-            return text
-        marker = "...<truncated>"
-        return text[: transport_limit - len(marker)] + marker
-    return _bound_diagnostic(text, max_error, tail_chars)
+
+    match = _TRUNCATED_DIAGNOSTIC_PATTERN.fullmatch(text)
+    if match is None:
+        return _bound_diagnostic(text, max_error, tail_chars)
+
+    total_text, old_head_text, old_tail_text, dropped_text, head, repeated_text, tail_text = (
+        match.groups()
+    )
+    total = int(total_text.replace(",", ""))
+    old_head_chars = int(old_head_text.replace(",", ""))
+    old_tail_chars = int(old_tail_text.replace(",", ""))
+    dropped = int(dropped_text.replace(",", ""))
+    repeated_dropped = int(repeated_text.replace(",", ""))
+    if (
+        old_head_chars != len(head)
+        or old_tail_chars != len(tail_text)
+        or dropped != repeated_dropped
+        or total != old_head_chars + old_tail_chars + dropped
+    ):
+        return _bound_diagnostic(text, max_error, tail_chars)
+
+    desired_tail = limit // 2 if tail is None else tail
+    desired_head = limit - desired_tail
+    if old_head_chars <= desired_head and old_tail_chars <= desired_tail:
+        return text
+
+    # The original middle is already gone, so retain as much of each requested
+    # window as remains available and accurately describe the larger omission.
+    bounded_head = head[:desired_head]
+    bounded_tail = tail_text[-desired_tail:] if desired_tail else ""
+    new_dropped = total - len(bounded_head) - len(bounded_tail)
+    return (
+        "<truncated-output>\n"
+        f"Output too large ({total:,} chars). "
+        f"Showing first {len(bounded_head):,} and last {len(bounded_tail):,} chars.\n"
+        f"The {new_dropped:,} chars in the middle are not recoverable.\n\n"
+        f"{bounded_head}\n\n"
+        f"... {new_dropped:,} chars not shown ...\n\n"
+        f"{bounded_tail}\n"
+        "</truncated-output>"
+    )
 
 
 class ErrorFormatter(Protocol):
