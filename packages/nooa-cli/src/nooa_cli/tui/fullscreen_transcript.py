@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from unicodedata import normalize
 
@@ -16,6 +16,7 @@ from rich.cells import split_graphemes
 from wcwidth import wcswidth
 
 from .terminal_safety import (
+    _hyperlink_spans_from_safe_ansi,
     project_prompt_toolkit_ansi,
     sanitize_transcript_ansi,
     strip_safe_ansi,
@@ -56,6 +57,7 @@ class _Record:
     ansi: str
     plain: str
     has_separator: bool = False
+    hyperlinks: tuple[tuple[int, int, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,12 +65,18 @@ class _ProjectedRow:
     anchor: ViewportAnchor
     fragments: tuple[tuple[str, str], ...]
     source_spans: tuple[tuple[int, int], ...] = ()
+    hyperlinks: tuple[tuple[int, int, str], ...] = ()
 
 
 class FullscreenTranscriptModel:
     """Ordered transcript plus bounded, incremental visual-row projections."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        show_trailing_blank: bool | Callable[[], bool] = True,
+    ) -> None:
+        self._show_trailing_blank = show_trailing_blank
         self._records: list[_Record] = []
         self._projectable_record_count = 0
         self._next_record_id = 0
@@ -77,7 +85,9 @@ class FullscreenTranscriptModel:
         self._projection_index_cache: OrderedDict[int, dict[int, tuple[list[int], list[int]]]] = (
             OrderedDict()
         )
-        self._formatted_cache: OrderedDict[tuple[int, int, int, int], FormattedText] = OrderedDict()
+        self._formatted_cache: OrderedDict[tuple[int, int, int, int, int], FormattedText] = (
+            OrderedDict()
+        )
         self._ends_newline = False
         self._selection_anchor: _SelectionHit | None = None
         self._selection_active: _SelectionHit | None = None
@@ -97,12 +107,13 @@ class FullscreenTranscriptModel:
         *,
         width: int | None = None,
         height: int | None = None,
+        render_counter: int = 0,
     ) -> FormattedText:
         """Return safe rows, optionally virtualized to the visible viewport."""
         if width is None:
             width = max(1, *(max(0, wcswidth(line)) for line in self.text.split("\n")))
         width = max(1, width)
-        rows = self._projection(width)
+        rows = self._display_rows(width)
         top = 0
         top_padding = 0
         if height is not None:
@@ -114,20 +125,26 @@ class FullscreenTranscriptModel:
                 # Short histories belong next to the bottom chrome regardless
                 # of whether navigation has explicitly anchored their sole page.
                 top_padding = height - len(rows)
-        key = (width, top, len(rows), top_padding)
+        hyperlink_marker = render_counter & 1
+        key = (width, top, len(rows), top_padding, hyperlink_marker)
         cached = self._formatted_cache.get(key)
         if cached is not None:
             self._formatted_cache.move_to_end(key)
             return cached
-        result = self._format_rows(rows, top_padding=top_padding)
+        result = self._format_rows(
+            rows,
+            top_padding=top_padding,
+            hyperlink_marker=hyperlink_marker,
+        )
         self._formatted_cache[key] = result
-        while len(self._formatted_cache) > _MAX_PROJECTED_WIDTHS:
+        # Each geometry has two alternating hyperlink-marker variants.
+        while len(self._formatted_cache) > 2 * _MAX_PROJECTED_WIDTHS:
             self._formatted_cache.popitem(last=False)
         return result
 
     def cursor_position(self, *, width: int, height: int = 1) -> Point:
         """Expose a cursor within the virtualized visible transcript."""
-        rows = self._projection(width)
+        rows = self._display_rows(width)
         if not rows:
             return Point(x=0, y=0)
         top = self.top_row(width=width, height=height)
@@ -142,7 +159,7 @@ class FullscreenTranscriptModel:
 
     def top_row(self, *, width: int, height: int) -> int:
         """Return the exact first visual row for the current viewport."""
-        rows = self._projection(width)
+        rows = self._display_rows(width)
         if not rows:
             return 0
         if self._viewport.follows_tail or self._viewport.anchor is None:
@@ -155,7 +172,7 @@ class FullscreenTranscriptModel:
 
     def scroll_visual_lines(self, delta: int, *, width: int, height: int) -> None:
         """Move the top visual row; positive deltas move toward the tail."""
-        rows = self._projection(width)
+        rows = self._display_rows(width)
         if not rows:
             self.jump_to_tail()
             return
@@ -169,7 +186,7 @@ class FullscreenTranscriptModel:
         self._formatted_cache.clear()
 
     def jump_to_start(self, *, width: int) -> None:
-        rows = self._projection(width)
+        rows = self._display_rows(width)
         if rows:
             self._viewport = ViewportState(False, rows[0].anchor)
             self._formatted_cache.clear()
@@ -191,6 +208,25 @@ class FullscreenTranscriptModel:
             return
         self._selection_active = self._selection_hit(x=x, y=y, width=width, height=height)
         self._formatted_cache.clear()
+
+    def hyperlink_at(self, *, x: int, y: int, width: int, height: int) -> str | None:
+        """Return the safe OSC-8 target under one visible transcript cell."""
+        hit = self._selection_hit(x=x, y=y, width=width, height=height, clamp=False)
+        if hit is None:
+            return None
+        records, _bases = self._record_indexes()
+        record = records.get(hit.record_id)
+        if record is None:
+            return None
+        for start, stop, target in record.hyperlinks:
+            # Rendering promotes any hyperlink overlap to the whole displayed
+            # grapheme. Use the same rule for hit-testing when an OSC-8
+            # boundary falls between a base character and combining mark.
+            if start < hit.after and stop > hit.before:
+                return target
+            if start >= hit.after:
+                break
+        return None
 
     def clear_selection(self) -> None:
         """Discard renderer-owned selection without changing the viewport."""
@@ -219,10 +255,18 @@ class FullscreenTranscriptModel:
             offset = record_stop
         return "".join(pieces)
 
-    def _selection_hit(self, *, x: int, y: int, width: int, height: int) -> _SelectionHit | None:
+    def _selection_hit(
+        self,
+        *,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+        clamp: bool = True,
+    ) -> _SelectionHit | None:
         width = max(1, width)
         height = max(1, height)
-        rows = self._projection(width)
+        rows = self._display_rows(width)
         top = self.top_row(width=width, height=height)
         top_padding = max(0, height - len(rows)) if len(rows) <= height else 0
         visual_y = max(0, min(height - 1, y))
@@ -238,6 +282,8 @@ class FullscreenTranscriptModel:
         if record is None:
             return None
         if not display_spans or not row.source_spans:
+            if not clamp:
+                return None
             insertion = min(
                 len(record.plain), self._character_offset(record, row.anchor.source_offset)
             )
@@ -245,6 +291,9 @@ class FullscreenTranscriptModel:
 
         cell = max(0, x)
         occupied = 0
+        total_cells = sum(max(1, cells) for _start, _stop, cells in display_spans)
+        if not clamp and cell >= total_cells:
+            return None
         selected = len(display_spans) - 1
         for index, (_start, _stop, cells) in enumerate(display_spans):
             next_occupied = occupied + max(1, cells)
@@ -267,7 +316,14 @@ class FullscreenTranscriptModel:
             self._next_record_id += 1
         else:
             self._next_record_id = max(self._next_record_id, record_id + 1)
-        record = _Record(record_id, separator + safe, separator + plain, bool(separator))
+        record_ansi = separator + safe
+        record = _Record(
+            record_id,
+            record_ansi,
+            separator + plain,
+            bool(separator),
+            _hyperlink_spans_from_safe_ansi(record_ansi),
+        )
         prior_ends_newline = self._ends_newline
         self._records.append(record)
         if record.plain:
@@ -339,7 +395,16 @@ class FullscreenTranscriptModel:
                 if not matches and record_id == self._next_record_id:
                     self._next_record_id += 1
             self._next_record_id = max(self._next_record_id, record_id + 1)
-            rebuilt.append(_Record(record_id, separator + safe, separator + plain, bool(separator)))
+            record_ansi = separator + safe
+            rebuilt.append(
+                _Record(
+                    record_id,
+                    record_ansi,
+                    separator + plain,
+                    bool(separator),
+                    _hyperlink_spans_from_safe_ansi(record_ansi),
+                )
+            )
             accumulated_plain += separator + plain
         self._records = rebuilt
         self._projectable_record_count = sum(bool(record.plain) for record in rebuilt)
@@ -395,7 +460,14 @@ class FullscreenTranscriptModel:
         if self._records and self._records[0].has_separator:
             first = self._records[0]
             stripped_record_id = first.record_id
-            self._records[0] = _Record(first.record_id, first.ansi[1:], first.plain[1:], False)
+            record_ansi = first.ansi[1:]
+            self._records[0] = _Record(
+                first.record_id,
+                record_ansi,
+                first.plain[1:],
+                False,
+                _hyperlink_spans_from_safe_ansi(record_ansi),
+            )
             # Selection endpoints are record-local character offsets. Removing
             # the synthetic joining newline must not move a selection that is
             # wholly contained in the surviving record.
@@ -439,6 +511,22 @@ class FullscreenTranscriptModel:
         self._projection_cache.clear()
         self._projection_index_cache.clear()
         self._formatted_cache.clear()
+
+    def _display_rows(self, width: int) -> Sequence[_ProjectedRow]:
+        """Return viewport rows, optionally omitting the synthetic final blank."""
+        rows = self._projection(width)
+        show_trailing_blank = self._show_trailing_blank
+        if callable(show_trailing_blank):
+            show_trailing_blank = show_trailing_blank()
+        if (
+            not show_trailing_blank
+            and self._viewport.follows_tail
+            and self._records
+            and self._ends_newline
+            and len(rows) > 1
+        ):
+            return rows[:-1]
+        return rows
 
     def _projection(self, width: int) -> list[_ProjectedRow]:
         width = max(1, width)
@@ -500,6 +588,7 @@ class FullscreenTranscriptModel:
                         ViewportAnchor(record.record_id, row_source_offset, row_semantic_offset),
                         tuple(row),
                         tuple(row_source_spans),
+                        record.hyperlinks,
                     )
                 )
                 source_offset += 1
@@ -531,6 +620,7 @@ class FullscreenTranscriptModel:
                         ViewportAnchor(record.record_id, row_source_offset, row_semantic_offset),
                         tuple(row),
                         tuple(row_source_spans),
+                        record.hyperlinks,
                     )
                 )
                 row = []
@@ -550,6 +640,7 @@ class FullscreenTranscriptModel:
                         ViewportAnchor(record.record_id, row_source_offset, row_semantic_offset),
                         tuple(row),
                         tuple(row_source_spans),
+                        record.hyperlinks,
                     )
                 )
                 row = []
@@ -563,6 +654,7 @@ class FullscreenTranscriptModel:
                     ViewportAnchor(record.record_id, row_source_offset, row_semantic_offset),
                     tuple(row),
                     tuple(row_source_spans),
+                    record.hyperlinks,
                 )
             )
         return rows
@@ -619,38 +711,56 @@ class FullscreenTranscriptModel:
             (("", ""),),
         )
 
-    def _format_rows(self, rows: Sequence[_ProjectedRow], *, top_padding: int = 0) -> FormattedText:
+    def _format_rows(
+        self,
+        rows: Sequence[_ProjectedRow],
+        *,
+        top_padding: int = 0,
+        hyperlink_marker: int = 0,
+    ) -> FormattedText:
         fragments: list[tuple[str, str]] = []
         for _ in range(top_padding):
             fragments.append(("", "\n"))
         selected = self._selection_bounds()
-        if selected is None:
-            records: dict[int, _Record] = {}
-            record_bases: dict[int, int] = {}
-        else:
-            records, record_bases = self._record_indexes()
+        records, record_bases = self._record_indexes()
+        has_hyperlinks = any(row.hyperlinks for row in rows)
         for index, row in enumerate(rows):
             if index:
                 fragments.append(("", "\n"))
-            if selected is None:
-                fragments.extend(row.fragments)
-                continue
             record = records.get(row.anchor.record_id)
-            if record is None:
+            if record is None or not row.source_spans:
                 fragments.extend(row.fragments)
                 continue
             display_chars = [(style, char) for style, text in row.fragments for char in text]
             display_spans = self._grapheme_spans(display_chars)
             base = record_bases[record.record_id]
+            link_index = 0
             for offset, (start, stop, _cells) in enumerate(display_spans):
                 highlighted = False
+                link: str | None = None
                 if offset < len(row.source_spans):
                     source_start, source_stop = row.source_spans[offset]
-                    highlighted = (
-                        base + source_start < selected[1] and base + source_stop > selected[0]
-                    )
-                cluster = display_chars[start:stop]
-                for style, char in cluster:
+                    if selected is not None:
+                        highlighted = (
+                            base + source_start < selected[1] and base + source_stop > selected[0]
+                        )
+                    while (
+                        link_index < len(row.hyperlinks)
+                        and row.hyperlinks[link_index][1] <= source_start
+                    ):
+                        link_index += 1
+                    if link_index < len(row.hyperlinks):
+                        link_start, link_stop, target = row.hyperlinks[link_index]
+                        if link_start < source_stop and link_stop > source_start:
+                            link = target
+                if has_hyperlinks:
+                    sequence = f"\x1b]8;;{link}\x1b\\" if link is not None else "\x1b]8;;\x1b\\"
+                    fragments.append(("[ZeroWidthEscape]", sequence))
+                for style, char in display_chars[start:stop]:
+                    if link is not None:
+                        # Alternating the bounded marker each frame forces OSC-8
+                        # cells to repaint when only their target changes.
+                        style = (f"{style} class:native-hyperlink-{hyperlink_marker}").strip()
                     if highlighted:
                         style = f"{style} class:selected".strip()
                     fragments.append((style, char))

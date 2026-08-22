@@ -26,6 +26,7 @@ from .output import (
     HistoryReplay,
     Output,
     RichOutput,
+    SplashScreen,
     StartupInfo,
     StopReasonOutput,
     TableOutput,
@@ -48,7 +49,6 @@ def render_history_replay_to_ansi(output: HistoryReplay, width: int) -> str:
     from rich.text import Text
 
     dim = COLORS["overlay1"]
-    user_color = COLORS["subtext1"]
 
     render_width = max(int(width), 1)
     buf = io.StringIO()
@@ -74,7 +74,11 @@ def render_history_replay_to_ansi(output: HistoryReplay, width: int) -> str:
         )
     for turn in output.turns:
         if turn.role == "user":
-            bc.print(Text(f" You: {turn.content}", style=f"{user_color} on {COLORS['surface0']}"))
+            # Reuse the live renderer so resumed and newly submitted messages
+            # have identical prompt glyphs, colors, padding, and wrapping.
+            from .user_message import render_user_bar
+
+            buf.write(render_user_bar(turn.content, render_width, COLORS))
         else:
             bc.print(Text("OO:", style=f"bold {dim}"))
             bc.print(Markdown(turn.content), style=dim)
@@ -302,6 +306,7 @@ class TerminalFrontend:
             HelpOutput: self._render_help,
             AgentMessage: self._render_agent_message,
             CodeExecution: self._render_code_execution,
+            SplashScreen: self._render_splash,
             StartupInfo: self._render_startup,
             ClearScreen: self._render_clear,
             Thinking: self._render_thinking,
@@ -553,6 +558,32 @@ class TerminalFrontend:
             return
 
         # Single write to the real terminal
+        stream.write(rendered)
+        stream.flush()
+
+    def _render_splash(self, _output: SplashScreen) -> None:
+        """Render the logo through the app-owned transcript in fullscreen mode."""
+        from .splash import render_splash_to_ansi
+
+        stream = self._console.console.file
+        layout_width = getattr(stream, "layout_width", None)
+        width = (
+            layout_width(self._console.console.width or 80)
+            if callable(layout_width)
+            else self._console.console.width or 80
+        )
+        rendered = render_splash_to_ansi(width)
+        emit_with_replay = getattr(stream, "emit_with_replay", None)
+        if getattr(stream, "supports_semantic_replay", False) is True and callable(
+            emit_with_replay
+        ):
+            emit_with_replay(
+                rendered,
+                lambda s=stream, w=width: render_splash_to_ansi(
+                    s.layout_width(w) if callable(getattr(s, "layout_width", None)) else w
+                ),
+            )
+            return
         stream.write(rendered)
         stream.flush()
 
