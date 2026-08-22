@@ -497,11 +497,13 @@ class _NativeSelectionBufferControl(BufferControl):
         *args: Any,
         transcript_drag_callback: Callable[[MouseEvent], bool] | None = None,
         transcript_scroll_callback: Callable[[int], None] | None = None,
+        selection_copy_callback: Callable[[str], None] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._transcript_drag_callback = transcript_drag_callback
         self._transcript_scroll_callback = transcript_scroll_callback
+        self._selection_copy_callback = selection_copy_callback
 
     def mouse_handler(self, mouse_event: MouseEvent):
         if (
@@ -519,7 +521,20 @@ class _NativeSelectionBufferControl(BufferControl):
         if delta is not None and self._transcript_scroll_callback is not None:
             self._transcript_scroll_callback(delta)
             return None
-        return super().mouse_handler(mouse_event)
+        result = super().mouse_handler(mouse_event)
+        if (
+            mouse_event.event_type is MouseEventType.MOUSE_UP
+            and self.buffer.selection_state is not None
+            and self._selection_copy_callback is not None
+        ):
+            # macOS terminals consume Command-C themselves, but cannot see a
+            # prompt_toolkit-owned selection. Mirror a completed mouse
+            # selection to the system clipboard so Command-C has the expected
+            # result without deleting or hiding the selected composer text.
+            _document, clipboard_data = self.buffer.document.cut_selection()
+            if clipboard_data.text:
+                self._selection_copy_callback(clipboard_data.text)
+        return result
 
 
 class _NativeSelectionCompletionsMenuControl(CompletionsMenuControl):
@@ -1088,6 +1103,9 @@ class TUIApplication:
                 ),
                 transcript_scroll_callback=(
                     self._scroll_fullscreen_transcript if self._is_fullscreen else None
+                ),
+                selection_copy_callback=(
+                    self._copy_input_selection if self._is_fullscreen else None
                 ),
             ),
             wrap_lines=True,
@@ -1844,6 +1862,11 @@ class TUIApplication:
                 self._start_fullscreen_selection_copy(text)
         if self._app.is_running:
             self._app.invalidate()
+
+    def _copy_input_selection(self, text: str) -> None:
+        """Mirror a prompt_toolkit composer selection to app and system clipboards."""
+        self._app.clipboard.set_text(text)
+        self._start_fullscreen_selection_copy(text)
 
     def _start_fullscreen_selection_copy(self, text: str) -> None:
         """Copy without blocking prompt_toolkit's event loop on local helpers."""

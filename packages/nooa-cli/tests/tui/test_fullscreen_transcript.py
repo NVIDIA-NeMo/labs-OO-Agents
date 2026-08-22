@@ -2528,6 +2528,8 @@ async def test_fullscreen_input_mouse_click_moves_cursor_and_drag_selects() -> N
         assert app.input_buffer.selection_state is None
 
     drag_app = _make_fullscreen_app()
+    copied: list[str] = []
+    drag_app._start_fullscreen_selection_copy = copied.append
     drag_app.input_buffer.text = "alpha beta"
     drag_control = drag_app._input_window.content
     drag_control.create_content(20, 1)
@@ -2539,6 +2541,8 @@ async def test_fullscreen_input_mouse_click_moves_cursor_and_drag_selects() -> N
 
     assert drag_app.input_buffer.document.selection_range() == (1, 5)
     assert drag_app.input_buffer.copy_selection().text == "lpha"
+    assert copied == ["lpha"]
+    assert drag_app._app.clipboard.get_data().text == "lpha"
 
 
 @pytest.mark.asyncio
@@ -2574,6 +2578,32 @@ async def test_fullscreen_input_shift_up_selects_and_typing_replaces() -> None:
 
         assert app.input_buffer.selection_state is None
         assert app.input_buffer.cursor_position == len("abcde!")
+
+
+def test_fullscreen_composer_mouse_selection_is_mirrored_non_destructively(monkeypatch) -> None:
+    from nooa_cli.tui.tui_application import _NativeSelectionBufferControl
+    from prompt_toolkit.application.current import set_app
+    from prompt_toolkit.layout.controls import BufferControl
+    from prompt_toolkit.mouse_events import MouseEventType
+    from prompt_toolkit.selection import SelectionState
+
+    app = _make_fullscreen_app()
+    copied: list[str] = []
+    app._start_fullscreen_selection_copy = copied.append
+    app.input_buffer.text = "copy this"
+    app.input_buffer.cursor_position = 4
+    app.input_buffer.selection_state = SelectionState(original_cursor_position=0)
+    control = app._input_window.content
+    assert isinstance(control, _NativeSelectionBufferControl)
+
+    monkeypatch.setattr(BufferControl, "mouse_handler", lambda _self, _event: None)
+    with set_app(app._app):
+        control.mouse_handler(_mouse_event(MouseEventType.MOUSE_UP, x=4))
+
+    assert copied == ["copy"]
+    assert app._app.clipboard.get_data().text == "copy"
+    assert app.input_buffer.text == "copy this"
+    assert app.input_buffer.selection_state is not None
 
 
 @pytest.mark.asyncio
