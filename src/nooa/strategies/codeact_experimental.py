@@ -4,6 +4,7 @@
 
 from typing import TYPE_CHECKING, Any
 
+from nooa.context_blocks import DynamicContext
 from nooa.decorators import strategy
 from nooa.events import Error
 from nooa.strategies.base import RuntimeServices
@@ -41,9 +42,20 @@ class CodeActExperimental(CodeActStrategy):
     def name(self) -> str:
         return "CODEACT_EXPERIMENTAL"
 
-    async def execution_context(self, runtime: RuntimeServices) -> str:
-        """Render the base execution context plus the initial REPL locals."""
-        rendered = await super().execution_context(runtime)
+    def get_block_overrides(self) -> dict[str, Any]:
+        """Keep the stable execution contract separate from changing REPL locals."""
+        overrides = super().get_block_overrides()
+        overrides["repl_locals"] = DynamicContext("strategy.repl_locals_context(runtime)")
+        return overrides
+
+    def get_block_order(self) -> list[str] | None:
+        """Place live locals immediately after the stable execution context."""
+        order = super().get_block_order() or []
+        index = order.index("execution_context") + 1
+        return [*order[:index], "repl_locals", *order[index:]]
+
+    async def repl_locals_context(self, runtime: RuntimeServices) -> str:
+        """Render method parameters and persistent names available in the next cell."""
         call = getattr(runtime, "current_call", None)
         local_names: set[str] = set()
         if call is not None:
@@ -52,7 +64,7 @@ class CodeActExperimental(CodeActStrategy):
             if live_locals:
                 local_names.update(live_locals)
         names = "\n".join(f"- `{name}`" for name in sorted(local_names))
-        return f"{rendered}\n\n## Locals\n\nAvailable in the next cell:\n\n{names}"
+        return f"## Locals\n\nAvailable in the next cell:\n\n{names}"
 
     def _always_available_text(self) -> str:
         return (
@@ -106,10 +118,8 @@ class CodeActExperimental(CodeActStrategy):
         manually constructing large outputs. Define reusable helpers at the top of
         a cell. Existing methods on `self` may be called with `await` when async.
 
-        For per-item language work, define a standalone async helper decorated with
-        `@strategy(PredictStrategy())`, then call helpers concurrently with
-        `asyncio.gather`. Reserve delegation for bounded tasks that benefit from an
-        isolated context and are strictly simpler than the current task. If `self`
+        Reserve delegation for bounded tasks that benefit from an isolated context
+        and are strictly simpler than the current task. If `self`
         exposes `spawn(...)`, prefer it for independent work: it returns immediately,
         so continue useful work while the report runs. Await `delegate(...)` only when
         its report is required before continuing. If a spawned report is your only

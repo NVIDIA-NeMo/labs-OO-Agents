@@ -34,8 +34,9 @@ with _hidden:
     from nooa.config import CodeActConfig
     from nooa.interactive import SummarizationConfig, install_summarizer
     from nooa.strategies.codeact_experimental import CodeActExperimental
+    from nooa.tools.method_writing_lib import MethodWriting
     from nooa.tools.shell_tools import ShellTools
-    from nooa.tools.todo import TodoManager
+    from nooa.tools.todo import Todo, TodoManager
     from nooa.unifiedllm import FakeLLMClient
 
 if TYPE_CHECKING:
@@ -97,6 +98,7 @@ class BenchAgent(
     shell: ShellTools
     repo: RepoTools
     todo: TodoManager
+    methodwriting: MethodWriting
 
     def __init__(
         self,
@@ -116,8 +118,10 @@ class BenchAgent(
         self._max_delegation_depth = max_delegation_depth
         self._install_python_tools(cwd)
         self.todo = TodoManager()
+        self.methodwriting = MethodWriting()
+        self.methodwriting.attach(self)
         self.context_manager["python_tools"] = Context(
-            doc(ShellTools, RepoTools, TodoManager), prefix=True
+            doc(ShellTools, RepoTools, TodoManager, MethodWriting), prefix=True
         )
         install_summarizer(summarization or SummarizationConfig(), self)
 
@@ -158,30 +162,47 @@ class BenchAgent(
             _logger.error("BenchAgent failed: %s", e)
             return {"response": "", "success": False, "error": str(e)}
 
-    async def delegate(self, objective: str, supplied_context: Any = None) -> TaskResult:
-        """Ask an isolated subagent of your own type to complete a bounded objective.
+    async def delegate(self, objective: str | Todo, supplied_context: Any = None) -> TaskResult:
+        """Ask an isolated subagent to complete a bounded objective.
 
-        Use this when an independent context is useful for exploration, diagnosis,
-        review, or implementation. Make ``objective`` self-contained and state
-        whether edits are allowed. ``supplied_context`` may be any useful object or
-        collection. Independent calls may run concurrently with ``asyncio.gather``.
+        Pass a :class:`Todo` to make it the subagent's task. The subagent receives an
+        independent task copy and can record comments or variables with ``self.todo``;
+        those changes are merged into this agent's Todo before this method returns.
+        String objectives retain the existing behavior.
+
+        Use delegation when isolated context helps exploration, diagnosis, review, or
+        implementation. Independent calls may run concurrently with ``asyncio.gather``.
         Inspect and integrate each result; you retain final verification ownership.
         """
         if self._delegation_depth >= self._max_delegation_depth:
             raise RuntimeError(f"maximum delegation depth ({self._max_delegation_depth}) reached")
+        todo_base = self.todo._copy_todo(objective) if isinstance(objective, Todo) else None
         subagent = type(self)(
             llm=self.llm,
             working_dir=str(self.shell.cwd),
             delegation_depth=self._delegation_depth + 1,
             max_delegation_depth=self._max_delegation_depth,
         )
-        description = objective
+        if todo_base is not None:
+            subagent.todo = TodoManager._with_todo(todo_base)
+            description = (
+                f"{todo_base.title}\n\nWork on todo {todo_base.id}. Record useful findings with "
+                "self.todo.comment(...) and task-scoped values with self.todo.set_var(...)."
+            )
+        else:
+            description = objective
         if supplied_context is not None:
             description += f"\n\nSupplied context:\n{supplied_context!r}"
         try:
-            return await subagent._solve_task(description)
+            result = await subagent._solve_task(description)
+            updated = subagent.todo.get(todo_base) if todo_base is not None else None
+            if todo_base is not None and updated is None:
+                raise RuntimeError(f"delegated todo {todo_base.id!r} disappeared")
         finally:
             await subagent.shell.close()
+        if todo_base is not None:
+            self.todo._merge_todo(updated, base=todo_base)
+        return result
 
     @strategy(CodeActExperimental(config=CodeActConfig(max_retries=10)))
     async def _solve_task(self, description: str) -> TaskResult:
