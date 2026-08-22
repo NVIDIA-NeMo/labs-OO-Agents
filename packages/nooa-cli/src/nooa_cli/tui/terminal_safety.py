@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import re
 import shutil
+from urllib.parse import urlsplit
 
 from rich.cells import split_graphemes
 
 _ESC = "\x1b"
+
+_MAX_SAFE_HTTP_URL_LENGTH = 2_048
 
 # This expression is used only after ``sanitize_transcript_ansi`` has reduced
 # the language to SGR and OSC-8.  It deliberately recognizes both OSC
@@ -133,6 +136,69 @@ def sanitize_transcript_ansi(value: str) -> str:
             output.append(character)
         index += 1
     return "".join(output)
+
+
+def safe_http_url(value: str | None) -> str | None:
+    """Return a control-free HTTP(S) URL suitable for an explicit browser launch."""
+    if (
+        not value
+        or len(value) > _MAX_SAFE_HTTP_URL_LENGTH
+        or any(
+            character.isspace() or ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F
+            for character in value
+        )
+    ):
+        return None
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return value
+
+
+def hyperlink_at_plain_offset(value: str, offset: int) -> str | None:
+    """Return the active safe OSC-8 target at one ANSI-stripped character offset."""
+    for start, stop, target in safe_hyperlink_spans(value):
+        if start <= offset < stop:
+            return target
+        if start > offset:
+            break
+    return None
+
+
+def safe_hyperlink_spans(value: str) -> tuple[tuple[int, int, str], ...]:
+    """Return safe OSC-8 targets as spans in ANSI-stripped character offsets."""
+    return _hyperlink_spans_from_safe_ansi(sanitize_transcript_ansi(value))
+
+
+def _hyperlink_spans_from_safe_ansi(
+    safe: str,
+) -> tuple[tuple[int, int, str], ...]:
+    """Extract hyperlink spans from text already normalized by this module."""
+    spans: list[tuple[int, int, str]] = []
+    active: tuple[int, str] | None = None
+    plain_offset = 0
+    index = 0
+    while index < len(safe):
+        match = _SAFE_ANSI_RE.match(safe, index)
+        if match is not None:
+            sequence = match.group(0)
+            if sequence.startswith(f"{_ESC}]8;"):
+                if active is not None and active[0] < plain_offset:
+                    spans.append((active[0], plain_offset, active[1]))
+                payload = sequence[4:-1] if sequence.endswith("\x07") else sequence[4:-2]
+                _parameters, _separator, target = payload.partition(";")
+                url = safe_http_url(target)
+                active = (plain_offset, url) if url is not None else None
+            index = match.end()
+            continue
+        plain_offset += 1
+        index += 1
+    if active is not None and active[0] < plain_offset:
+        spans.append((active[0], plain_offset, active[1]))
+    return tuple(spans)
 
 
 def strip_safe_ansi(value: str) -> str:
