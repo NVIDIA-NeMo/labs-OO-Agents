@@ -169,24 +169,31 @@ def result_to_dto(
 
         effective_max_error = _effective_error_limit(max_error)
         try:
-            formatter_kwargs: dict[str, Any] = {
-                "line_offset": getattr(result, "wrapper_line_offset", 0),
-            }
+            line_offset = getattr(result, "wrapper_line_offset", 0)
+            formatter_kwargs: dict[str, Any] = {"line_offset": line_offset}
             try:
                 signature = inspect.signature(error_formatter)
             except (TypeError, ValueError):
                 signature = None
             if signature is not None:
-                for optional_kwargs in (
+                candidates = (
+                    {
+                        "line_offset": line_offset,
+                        "max_error": effective_max_error,
+                        "tail_chars": tail_chars,
+                    },
+                    {"line_offset": line_offset, "max_error": effective_max_error},
+                    {"line_offset": line_offset},
                     {"max_error": effective_max_error, "tail_chars": tail_chars},
                     {"max_error": effective_max_error},
                     {},
-                ):
+                )
+                for candidate in candidates:
                     try:
-                        signature.bind(err, **formatter_kwargs, **optional_kwargs)
+                        signature.bind(err, **candidate)
                     except TypeError:
                         continue
-                    formatter_kwargs.update(optional_kwargs)
+                    formatter_kwargs = candidate
                     break
             formatted_error = error_formatter(err, **formatter_kwargs)
         except BaseException:

@@ -16,6 +16,7 @@ import pytest
 from nooa.errors import IPythonErrorFormatter, RestrictedCodeError, format_error_for_llm
 from nooa.errors.formatting import (
     _adjust_line_numbers,
+    _diagnostic_budget,
     _is_user_code_frame,
     _is_validation_error,
     _strip_file_prefix,
@@ -1057,6 +1058,19 @@ class TestFormatterReviewRegressions:
 
         assert result == transported
         assert "forged success" not in result
+
+    def test_invalid_tail_fallback_is_clamped_to_active_budget(self, monkeypatch):
+        from types import SimpleNamespace
+
+        import nooa.errors.formatting as formatting
+
+        monkeypatch.setattr(
+            formatting,
+            "DEFAULT_TRUNCATION_CONFIG",
+            SimpleNamespace(capture=SimpleNamespace(max_error=1_000, tail=200)),
+        )
+
+        assert _diagnostic_budget(max_error=100, tail_chars=100) == (100, 99)
 
     def test_explicit_error_budget_overrides_default(self):
         result = format_error_for_llm(RuntimeError("X" * 1_000), max_error=100)

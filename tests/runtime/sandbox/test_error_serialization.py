@@ -87,6 +87,26 @@ def test_syntax_error_keeps_formatted_source_and_caret() -> None:
     assert diagnostic.endswith("SyntaxError: invalid syntax")
 
 
+def test_error_only_worker_formatter_remains_supported() -> None:
+    calls = []
+
+    def error_only_formatter(error: Exception) -> str:
+        calls.append(error)
+        return "error-only worker diagnostic"
+
+    dto = result_to_dto(
+        _result_with_error(ValueError("failure"), line_offset=3),
+        error_formatter=error_only_formatter,
+        max_error=100,
+    )
+
+    assert dto.error is not None
+    assert dto.error.formatted_error == "error-only worker diagnostic"
+    assert len(calls) == 1
+    assert isinstance(calls[0], ValueError)
+    assert str(calls[0]) == "failure"
+
+
 def test_legacy_worker_formatter_remains_supported_with_configured_limit() -> None:
     calls = []
 

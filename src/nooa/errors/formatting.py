@@ -421,7 +421,8 @@ def _diagnostic_budget(
     ):
         tail = tail_chars
     else:
-        tail = DEFAULT_TRUNCATION_CONFIG.capture.tail
+        default_tail = DEFAULT_TRUNCATION_CONFIG.capture.tail
+        tail = None if default_tail is None else min(default_tail, limit - 1)
     return limit, tail
 
 
