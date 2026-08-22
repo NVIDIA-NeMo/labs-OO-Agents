@@ -3,8 +3,8 @@
 """Single long-lived ``prompt_toolkit.Application`` owning the whole TUI.
 
 This is the "Plan C" rewrite: one Application that holds output
-scrollback, the type-ahead queue region, the input buffer, and the
-status line. No ``patch_stdout`` and no per-turn ``prompt_async`` —
+scrollback, queued-command status, the input buffer, and the status line.
+No ``patch_stdout`` and no per-turn ``prompt_async`` —
 so no handoff race that drops the first keystroke after the agent
 finishes.
 
@@ -1023,8 +1023,8 @@ class TUIApplication:
             else None
         )
 
-        # Queue chrome is a pure projection of runtime state plus the short
-        # admission→transcript visibility handoff.
+        # Queue chrome is a projection of runtime state plus the short
+        # admission-to-transcript visibility handoff.
         def _queue_pending() -> list[str]:
             return self._pending_input_display()
 
@@ -1269,7 +1269,7 @@ class TUIApplication:
 
         # Active bottom region (top → bottom):
         #   status (spinner + optional badges)
-        #   queued command/type-ahead lines
+        #   queued command lines
         #   session rule — always visible while at the transcript tail
         #   input composer (one padding row above and below the input)
         #   completions (only while completing)

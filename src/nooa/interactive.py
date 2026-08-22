@@ -95,10 +95,9 @@ class RespondReason(StrEnum):
     DONE = "DONE"
     NEED_INPUT = "NEED_INPUT"
     WAIT = "WAIT"
-    GET_USER_INPUT = "GET_USER_INPUT"
 
 
-RespondKind = Literal["DONE", "NEED_INPUT", "WAIT", "GET_USER_INPUT"]
+RespondKind = Literal["DONE", "NEED_INPUT", "WAIT"]
 
 
 class RespondResult(BaseModel):
@@ -112,8 +111,6 @@ class RespondResult(BaseModel):
           human input before continuing the current request.
         * ``RespondReason.WAIT`` — the agent is waiting for a background job or
           non-user queue/event before it can continue.
-        * ``RespondReason.GET_USER_INPUT`` — legacy spelling for waiting on
-          human input; prefer ``DONE`` or ``NEED_INPUT``.
 
       All stop reasons use the same dispatcher wake path: race every declared
       queue/event channel and re-enter ``handle()`` with the first arrival.
@@ -564,9 +561,10 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
         End the turn with exactly one ``return_result(REASON_ENUM, explanation="...")``.
         ``explanation`` is required and must be non-empty. The host records and renders it as the
-        visible stop reason, so be specific and user-facing: if waiting on a
-        job/queue, name which job and why; if asking for input, say what input
-        is needed and why.
+        visible stop status, so keep it terse and factual. It is not the user reply:
+        send answers and questions through ``self.message()`` first. If waiting on a
+        job or queue, name which one and why. For ``NEED_INPUT``, summarize why input
+        is needed after sending the actual question through ``self.message()``.
 
         - Request complete; wait for the next user message::
 

@@ -701,6 +701,35 @@ def test_event_explorer_renders_execute_python_event_as_formatted_markdown() -> 
     assert "\x1b[" in joined
 
 
+def test_event_explorer_renders_python_cell_event_as_formatted_markdown() -> None:
+    row = build_event_rows(
+        SimpleNamespace(
+            items=lambda: [
+                (
+                    "2",
+                    _FakeEvent(
+                        "ToolCallEvent",
+                        name="python_cell",
+                        arguments={"code": "print('experimental')"},
+                        result={
+                            "content": "status: complete",
+                            "result_status": "complete",
+                            "tool_call_id": "call_2",
+                        },
+                    ),
+                )
+            ]
+        )
+    )[0]
+
+    assert row.summary == "python_cell — print('experimental')"
+    assert row.code == "print('experimental')"
+    markdown = row.markdown or ""
+    assert "## Python" in markdown
+    assert "```python\nprint('experimental')\n```" in markdown
+    assert "## Arguments" not in markdown
+
+
 def test_event_explorer_renders_fenced_code_fields_as_formatted_markdown() -> None:
     row = build_event_rows(
         SimpleNamespace(
