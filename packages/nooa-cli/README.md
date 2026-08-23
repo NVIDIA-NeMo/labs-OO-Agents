@@ -4,12 +4,19 @@ CLI for [nemo-oo-agents](https://github.com/NVIDIA-NeMo/labs-OO-Agents). Ships t
 
 ## Install
 
-```bash
-uv add nooa-cli
+Install the command as an isolated tool so it is available without adding a
+dependency to the project you want to work on:
 
-# ...with numpy/pandas/plotly/scipy/sklearn pre-loaded into the LLM REPL
-uv add "nooa-cli[datascience]"
+```bash
+uv tool install nooa-cli
+
+# ...with numpy/pandas/plotly/scipy/sklearn available to the LLM REPL
+uv tool install "nooa-cli[datascience]"
 ```
+
+Use `uv tool upgrade nooa-cli` to update an existing installation. If your
+project intentionally depends on the CLI as a Python package, `uv add nooa-cli`
+is also supported.
 
 `nooa-cli` automatically pulls in matching `nemo-oo-agents` (the core framework). The `[datascience]` extra adds libraries the LLM can use in REPL-generated code.
 

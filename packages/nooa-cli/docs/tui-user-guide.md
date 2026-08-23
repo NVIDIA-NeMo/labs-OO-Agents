@@ -10,12 +10,17 @@ details, see [How the TUI works](tui-rendering-architecture.md).
 
 ## Start here
 
-Install and launch the TUI from the project you want the agent to work in:
+Install the CLI as an isolated tool, then launch it from the project you want
+the agent to work in:
 
 ```bash
-uv add nooa-cli
+uv tool install nooa-cli
+cd path/to/your/project
 nooa tui
 ```
+
+This keeps `nooa-cli` out of the target project's Python dependencies. Use
+`uv tool upgrade nooa-cli` to update an existing installation.
 
 On first use, connect a model:
 
