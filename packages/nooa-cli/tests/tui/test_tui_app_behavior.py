@@ -1171,6 +1171,29 @@ async def test_pending_display_preserves_runtime_queue_during_handoff(monkeypatc
         ]
 
 
+@pytest.mark.parametrize(
+    ("pending_tail", "expected"),
+    [
+        ("first\nsecond", ["first", "second", "third"]),
+        ("runtime-prefix\nfirst\nsecond", ["runtime-prefix", "first", "second", "third"]),
+    ],
+)
+async def test_pending_display_expands_lagging_handoff_prefix(pending_tail, expected):
+    from types import SimpleNamespace
+
+    from nooa_cli.tui.tui_application import TUIApplication, _PendingInputHandoff
+
+    app = TUIApplication(display_mode="fullscreen")
+    app._agent_controller = SimpleNamespace(state=SimpleNamespace(pending_inputs=(pending_tail,)))
+    app._pending_input_handoff = [
+        _PendingInputHandoff("first"),
+        _PendingInputHandoff("second"),
+        _PendingInputHandoff("third"),
+    ]
+
+    assert app._pending_input_display() == expected
+
+
 async def test_submission_exception_retires_only_new_handoff(monkeypatch):
     agent = _blocking_agent()
     async with TUIHarness(agent=agent) as h:
