@@ -1389,8 +1389,15 @@ class TUIApplication:
 
 
         def _queue_formatted():
+            rows = []
             command_queue = list(self._command_queue_texts)
-            if not command_queue:
+            if command_queue:
+                noun = "command" if len(command_queue) == 1 else "commands"
+                rows.append(f"│ {len(command_queue)} {noun} queued")
+                for index, text in enumerate(command_queue):
+                    branch = "└─" if index == len(command_queue) - 1 else "├─"
+                    rows.append(f"{branch} {sanitize_live_text(text)}")
+            if not rows:
                 return []
             fragments = [("class:queue", "\n".join(rows))]
             if self._is_fullscreen:
