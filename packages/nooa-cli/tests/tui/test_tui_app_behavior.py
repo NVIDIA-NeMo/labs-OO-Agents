@@ -1297,15 +1297,16 @@ async def test_native_replay_sigwinch_has_one_settled_visible_transition(
         assert physical.count("stable transcript") == 1
         assert h.app._app.render_counter == render_count + 1
         assert h.app._fullscreen_invalidate_count == 1
-        synchronized_markers = [event for event in output.events if event[0] == "write_raw"]
-        assert synchronized_markers == [
-            ("write_raw", "\x1b[?2026h"),
-            ("write_raw", "\x1b[?2026l"),
+        raw_writes = [event for event in output.events if event[0] == "write_raw"]
+        assert raw_writes == [
+            ("write_raw", "\x1b[r\x1b[0m\x1b[H\x1b[2J\x1b[3J\x1b[H"),
+            ("write_raw", "stable transcript\n"),
         ]
-        begin = output.events.index(("write_raw", "\x1b[?2026h"))
         erase = output.events.index(("erase_down",))
-        end = output.events.index(("write_raw", "\x1b[?2026l"))
-        assert begin < erase < end
+        clear = output.events.index(raw_writes[0])
+        flushes = [index for index, event in enumerate(output.events) if event == ("flush",)]
+        assert len(flushes) == 1
+        assert erase < clear < flushes[0]
         assert h.app._resize_replay_timer is None
         assert h.app._resize_reflow.has_pending_replay is False
 
@@ -2188,47 +2189,35 @@ async def test_pending_resize_is_cancelled_before_terminal_teardown(
     assert "\x1b[3J" not in capture.getvalue()
 
 
-async def test_inflight_resize_barrier_cannot_clear_after_app_exit(
+async def test_atomic_resize_replay_rechecks_shutdown_before_clear(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A shutdown discovered during semantic rendering cannot purge scrollback."""
     output = MutableRecordingOutput()
-    replay_started = asyncio.Event()
-    release_replay = asyncio.Event()
     capture = io.StringIO()
     monkeypatch.setattr("sys.__stdout__", capture)
 
-    async def gated_run_in_terminal(callback):
-        replay_started.set()
-        await release_replay.wait()
-        return callback()
-
-    monkeypatch.setattr(
-        "prompt_toolkit.application.run_in_terminal",
-        gated_run_in_terminal,
-    )
-    app = None
     async with TUIHarness(full_screen=True, output=output) as h:
-        app = h.app
-        h.app.emit_block("stable transcript\n")
-        await asyncio.wait_for(replay_started.wait(), timeout=1)
-        release_replay.set()
+
+        def replay_during_shutdown() -> str:
+            h.app._resize_replays_enabled = False
+            return "must not be written\n"
+
+        h.app.emit_block("stable transcript\n", replay=replay_during_shutdown)
         assert h.app._block_queue is not None
         await h.app._block_queue.join()
+        capture.seek(0)
+        capture.truncate()
+        output.events.clear()
 
-        replay_started.clear()
-        release_replay.clear()
         await h.resize_from_terminal(60, 36)
-        await asyncio.wait_for(replay_started.wait(), timeout=1)
-        asyncio.get_running_loop().call_later(0.05, release_replay.set)
+        await h.wait_for(lambda: h.app._queued_resize_replay_generation is None)
 
-    assert app is not None
-    assert app._fullscreen_invalidate_count == 0
-    assert "\x1b[3J" not in capture.getvalue()
-    synchronized_markers = [event for event in output.events if event[0] == "write_raw"]
-    assert synchronized_markers[-2:] == [
-        ("write_raw", "\x1b[?2026h"),
-        ("write_raw", "\x1b[?2026l"),
-    ]
+        assert h.app._fullscreen_invalidate_count == 0
+        assert "\x1b[3J" not in capture.getvalue()
+        assert not any(
+            event[0] == "write_raw" and "must not be written" in event[1] for event in output.events
+        )
 
 
 async def test_inflight_clear_cannot_purge_terminal_after_app_exit(

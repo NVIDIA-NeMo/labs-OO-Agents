@@ -114,6 +114,38 @@ class _ResizeAwareApplication(Application[Any]):
         """Run prompt_toolkit's normal erase/redraw after resize settles."""
         super()._on_resize()
 
+    def run_atomic_native_replay(self, replay: Callable[[Any], bool]) -> bool:
+        """Erase, replay, and redraw through one physical output flush.
+
+        ``run_in_terminal`` flushes its erase before invoking the callback. For
+        a semantic transcript replay that exposes an empty/intermediate frame
+        before the rebuilt transcript and live region. This transaction runs
+        synchronously on the UI loop and temporarily turns every renderer
+        flush into a no-op, then publishes the complete terminal update once.
+        """
+        output = self.output
+        physical_flush = output.flush
+
+        def defer_flush() -> None:
+            return None
+
+        output.flush = defer_flush  # type: ignore[method-assign]
+        try:
+            self.renderer.erase()
+            replayed = replay(output)
+            self.renderer.reset()
+            self._request_absolute_cursor_position()
+            # Bypass this class's deferred-redraw guard: this is the one final
+            # live-region frame belonging to the resize transaction.
+            super()._redraw()
+        finally:
+            output.flush = physical_flush  # type: ignore[method-assign]
+
+        # Vt100_Output buffers all operations above. This is the transaction's
+        # only write to the underlying terminal.
+        physical_flush()
+        return replayed
+
 
 def _is_raw_mouse_report(data: str) -> bool:
     """Return whether raw input is a supported terminal mouse report."""
@@ -730,8 +762,6 @@ def format_session_rule(cols: int, label: str = "") -> list[tuple[str, str]]:
 PROMPT_MARKER = "❯ "
 _CTRL_C_EXIT_WINDOW_SECONDS = 2.0
 _TRANSCRIPT_CLEAR_SEQUENCE = "\x1b[r\x1b[0m\x1b[H\x1b[2J\x1b[3J\x1b[H"
-_SYNCHRONIZED_OUTPUT_BEGIN = "\x1b[?2026h"
-_SYNCHRONIZED_OUTPUT_END = "\x1b[?2026l"
 _FULLSCREEN_TRANSCRIPT_MAX_RECORDS = 10_000
 _FULLSCREEN_TRANSCRIPT_MAX_BYTES = 16 * 1024 * 1024
 
@@ -3081,8 +3111,8 @@ class TUIApplication:
         prompt_toolkit normally erases and redraws immediately on SIGWINCH. In
         native-replay mode that live-region paint is followed by our debounced
         clear, semantic transcript replay, and another live-region paint. Width
-        changes can safely skip the first paint: ``run_in_terminal`` performs
-        the final redraw after the replay. Row-only changes stay immediate.
+        changes can safely skip the first paint: the atomic native replay
+        performs the final redraw. Row-only changes stay immediate.
         """
         if not self.full_screen or not self._resize_replays_enabled:
             return False
@@ -3351,22 +3381,6 @@ class TUIApplication:
         except Exception:
             return False
 
-    def _set_synchronized_output(self, *, enabled: bool) -> None:
-        """Bracket a destructive replay in one terminal-visible update.
-
-        DEC private mode 2026 is understood by current terminals and tmux.
-        Terminals that do not implement it ignore the private mode sequence,
-        preserving the existing replay behavior. The disable marker is always
-        emitted from the replay ``finally`` path so cancellation cannot leave a
-        cooperative terminal holding subsequent output.
-        """
-        marker = _SYNCHRONIZED_OUTPUT_BEGIN if enabled else _SYNCHRONIZED_OUTPUT_END
-        try:
-            self._app.output.write_raw(marker)
-            self._app.output.flush()
-        except Exception:
-            logger.debug("failed to toggle synchronized terminal output", exc_info=True)
-
     async def _consume_resize_replay(self, item: _ResizeReplayQueueItem) -> None:
         schedule_latest_pending = False
         try:
@@ -3385,35 +3399,36 @@ class TUIApplication:
                 self._finish_deferred_resize_redraw()
                 return
 
-            from prompt_toolkit.application import run_in_terminal
-
             self._replay_columns_override = item.request.width
-            self._set_synchronized_output(enabled=True)
+            transaction_completed = False
             try:
-                replayed = await run_in_terminal(lambda: self._replay_queue_item_if_current(item))
+                replayed = self._app.run_atomic_native_replay(
+                    lambda output: self._replay_queue_item_if_current(item, output=output)
+                )
+                transaction_completed = True
             except asyncio.CancelledError:
                 raise
             except Exception:
                 replayed = False
             finally:
-                # run_in_terminal flushes its final live-region redraw before
-                # returning. Reveal the erase, transcript replay, and redraw as
-                # one terminal update instead of two fast visible paints.
-                self._set_synchronized_output(enabled=False)
                 self._replay_columns_override = None
-                # If run_in_terminal failed before invoking the callback, its
-                # own final redraw was suppressed by the transaction guard.
-                self._finish_deferred_resize_redraw()
+                if transaction_completed:
+                    self._resize_redraw_deferred = False
+                else:
+                    # Recover the live region if an output implementation
+                    # failed before the transaction's final flush.
+                    self._finish_deferred_resize_redraw()
 
-            # ``run_in_terminal`` always restores prompt_toolkit's live region
-            # before returning, so no separate resize redraw remains pending.
-            self._resize_redraw_deferred = False
             if replayed:
-                # The callback committed resize state before prompt_toolkit's
-                # final redraw, so before_render sees the rebuilt width.
-                # Verify geometry once afterward. A
-                # genuinely newer width starts its own transaction immediately;
-                # an unchanged final width does not arm another debounce timer.
+                # Commit only after the single physical flush succeeds. A
+                # failed flush therefore remains eligible for the bounded
+                # retry below instead of silently accepting a missing replay.
+                self._resize_reflow.mark_replayed(item.request)
+                self._resize_replay_failure_generation = None
+                self._height_compaction_needs_replay = False
+                self._fullscreen_invalidate_count += 1
+                # Verify geometry once afterward. A genuinely newer width
+                # starts its own transaction; an unchanged width is a no-op.
                 current = self._read_terminal_size()
                 if current is not None:
                     self._observe_terminal_size(current)
@@ -3438,11 +3453,9 @@ class TUIApplication:
             ):
                 self._schedule_resize_replay()
 
-    def _replay_queue_item_if_current(self, item: _ResizeReplayQueueItem) -> bool:
-        # run_in_terminal redraws immediately after this callback. Release the
-        # guard even when the queued replay went stale, so its erased live
-        # region is always restored.
-        self._resize_redraw_deferred = False
+    def _replay_queue_item_if_current(
+        self, item: _ResizeReplayQueueItem, *, output: Any | None = None
+    ) -> bool:
         if (
             not self._resize_replays_enabled
             or self._active_subview is not None
@@ -3451,7 +3464,7 @@ class TUIApplication:
             or not self._resize_output_width_is_current(item)
         ):
             return False
-        replayed = self._replay_fullscreen_transcript(
+        return self._replay_fullscreen_transcript(
             item.transcript_blocks,
             clear_even_if_empty=item.request.required,
             still_current=lambda: (
@@ -3461,14 +3474,10 @@ class TUIApplication:
                 and self._resize_reflow.is_current(item.request)
                 and self._resize_output_width_is_current(item)
             ),
+            output=output,
+            flush=False,
+            count_invalidation=False,
         )
-        if replayed:
-            # Commit before run_in_terminal performs its final prompt redraw.
-            # This keeps that frame from observing an apparently pending replay.
-            self._resize_reflow.mark_replayed(item.request)
-            self._resize_replay_failure_generation = None
-            self._height_compaction_needs_replay = False
-        return replayed
 
     def _resize_output_width_is_current(self, item: _ResizeReplayQueueItem) -> bool:
         current = self._read_terminal_size()
@@ -3547,13 +3556,17 @@ class TUIApplication:
         *,
         clear_even_if_empty: bool = False,
         still_current: Callable[[], bool] | None = None,
+        output: Any | None = None,
+        flush: bool = True,
+        count_invalidation: bool = True,
     ) -> bool:
         if not self.full_screen:
             return False
-        import sys as _sys
+        if output is None:
+            import sys as _sys
 
-        out = _sys.__stdout__
-        if out is None:
+            output = _sys.__stdout__
+        if output is None:
             return False
         if transcript_blocks is None:
             self._prune_transcript_blocks_for_active_events()
@@ -3576,11 +3589,16 @@ class TUIApplication:
         try:
             # Reset scroll region + style state before clearing. Homing again
             # after the purge gives prompt_toolkit a stable origin for its live
-            # input/status redraw when run_in_terminal returns.
-            out.write(_TRANSCRIPT_CLEAR_SEQUENCE)
-            out.write("".join(chunks))
-            out.flush()
-            self._fullscreen_invalidate_count += 1
+            # input/status redraw at the end of the atomic transaction.
+            write = getattr(output, "write_raw", None)
+            if write is None:
+                write = output.write
+            write(_TRANSCRIPT_CLEAR_SEQUENCE)
+            write("".join(chunks))
+            if flush:
+                output.flush()
+            if count_invalidation:
+                self._fullscreen_invalidate_count += 1
             return True
         except Exception:
             return False

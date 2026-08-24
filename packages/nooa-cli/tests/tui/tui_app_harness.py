@@ -235,6 +235,7 @@ class MutableRecordingOutput(DummyOutput):
         super().__init__()
         self._size = Size(rows=int(rows), columns=int(columns))
         self.events: list[tuple[Any, ...]] = []
+        self._physical_replay_buffer: list[str] | None = None
 
     def get_size(self) -> Size:
         self.events.append(("get_size", self._size.columns, self._size.rows))
@@ -248,6 +249,10 @@ class MutableRecordingOutput(DummyOutput):
 
     def write_raw(self, data: str) -> None:
         self.events.append(("write_raw", data))
+        if "\x1b[3J" in data:
+            self._physical_replay_buffer = []
+        if self._physical_replay_buffer is not None:
+            self._physical_replay_buffer.append(data)
 
     def erase_down(self) -> None:
         self.events.append(("erase_down",))
@@ -263,6 +268,15 @@ class MutableRecordingOutput(DummyOutput):
 
     def flush(self) -> None:
         self.events.append(("flush",))
+        if self._physical_replay_buffer is None:
+            return
+        data = "".join(self._physical_replay_buffer)
+        self._physical_replay_buffer = None
+        import sys
+
+        if sys.__stdout__ is not None:
+            sys.__stdout__.write(data)
+            sys.__stdout__.flush()
 
 
 def _wire_local_turn_policy(agent: Any, runner: Any, app: Any, config: Any) -> Any:
