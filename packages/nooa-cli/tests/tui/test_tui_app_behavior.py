@@ -1264,6 +1264,128 @@ async def test_prompt_toolkit_resize_polling_disabled_to_avoid_delayed_double_re
         assert h.app._app.terminal_size_polling_interval is None
 
 
+async def test_native_replay_sigwinch_has_one_settled_visible_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A width SIGWINCH skips PTK's first paint and redraws after replay once."""
+    output = MutableRecordingOutput(columns=80, rows=40)
+    capture = io.StringIO()
+    monkeypatch.setattr("sys.__stdout__", capture)
+    async with TUIHarness(full_screen=True, output=output) as h:
+        h.app.emit_block("stable transcript\n")
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+        capture.seek(0)
+        capture.truncate()
+        render_count = h.app._app.render_counter
+
+        output.set_size(60, 30)
+        h.app._app._on_resize()
+
+        # The native-replay handler observes the new width but does not paint
+        # prompt_toolkit's live region ahead of the semantic replay. Ordinary
+        # invalidations during the quiet period are folded into it as well.
+        assert h.app._app.render_counter == render_count
+        h.app._app.invalidate()
+        await asyncio.sleep(0)
+        assert h.app._app.render_counter == render_count
+        await h.wait_for(lambda: h.app._resize_reflow.replayed_width == 60)
+
+        physical = capture.getvalue()
+        assert physical.count("\x1b[3J") == 1
+        assert physical.count("stable transcript") == 1
+        assert h.app._app.render_counter == render_count + 1
+        assert h.app._fullscreen_invalidate_count == 1
+        assert h.app._resize_replay_timer is None
+        assert h.app._resize_reflow.has_pending_replay is False
+
+
+async def test_duplicate_sigwinch_after_hidden_window_resize_does_not_reflow_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Returning to a tmux window at its settled size is a no-op."""
+    output = MutableRecordingOutput(columns=80, rows=40)
+    capture = io.StringIO()
+    monkeypatch.setattr("sys.__stdout__", capture)
+    async with TUIHarness(full_screen=True, output=output) as h:
+        h.app.emit_block("visible once\n")
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+        capture.seek(0)
+        capture.truncate()
+
+        # The first signal represents geometry observed while this tmux window
+        # is hidden. The duplicate represents exposing it at the same size.
+        output.set_size(60, 30)
+        h.app._app._on_resize()
+        await h.wait_for(lambda: h.app._fullscreen_invalidate_count == 1)
+        settled_render_count = h.app._app.render_counter
+        h.app._app._on_resize()
+        await asyncio.sleep(0)
+
+        physical = capture.getvalue()
+        assert physical.count("\x1b[3J") == 1
+        assert physical.count("visible once") == 1
+        # Exposing the pane may repaint prompt_toolkit's live region, but it
+        # must not schedule another delayed transcript transition.
+        assert h.app._app.render_counter == settled_render_count + 1
+        assert h.app._resize_replay_timer is None
+        assert h.app._queued_resize_replay_generation is None
+        assert h.app._resize_reflow.has_pending_replay is False
+
+
+async def test_sigwinch_row_only_change_keeps_prompt_toolkit_immediate_redraw() -> None:
+    output = MutableRecordingOutput(columns=80, rows=40)
+    async with TUIHarness(full_screen=True, output=output) as h:
+        h.app.emit_block("stable transcript\n")
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+        render_count = h.app._app.render_counter
+
+        output.set_size(80, 30)
+        h.app._app._on_resize()
+
+        assert h.app._app.render_counter == render_count + 1
+        assert h.app._fullscreen_invalidate_count == 0
+        assert h.app._resize_replay_timer is None
+        assert h.app._resize_reflow.has_pending_replay is False
+
+
+async def test_sigwinch_transient_widths_collapse_to_one_final_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = MutableRecordingOutput(columns=80, rows=40)
+    capture = io.StringIO()
+    monkeypatch.setattr("sys.__stdout__", capture)
+    async with TUIHarness(full_screen=True, output=output) as h:
+        widths: list[int] = []
+
+        def replay() -> str:
+            widths.append(h.app.output_columns())
+            return "settled transcript\n"
+
+        h.app.emit_block("initial transcript\n", replay=replay)
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+        capture.seek(0)
+        capture.truncate()
+        render_count = h.app._app.render_counter
+
+        output.set_size(70, 35)
+        h.app._app._on_resize()
+        output.set_size(60, 30)
+        h.app._app._on_resize()
+        # tmux can deliver the final SIGWINCH more than once while exposing a
+        # hidden pane. It belongs to the same pending width transaction.
+        h.app._app._on_resize()
+        assert h.app._app.render_counter == render_count
+        await h.wait_for(lambda: h.app._fullscreen_invalidate_count == 1)
+
+        assert widths == [60]
+        assert capture.getvalue().count("\x1b[3J") == 1
+        assert h.app._app.render_counter == render_count + 1
+
+
 async def test_row_only_resize_in_subview_needs_no_transcript_replay() -> None:
     output = MutableRecordingOutput()
     view = _DummySubview()
