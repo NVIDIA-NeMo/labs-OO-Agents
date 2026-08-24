@@ -455,6 +455,35 @@ async def test_native_modes_preserve_external_editor_handoff(
     assert handoffs == 1
 
 
+def test_fullscreen_session_markdown_keeps_copyable_source_unwrapped() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from nooa_cli.tui.session import Session
+    from nooa_cli.tui.tui_application import TUIApplication
+    from rich.markdown import Markdown
+
+    from .tui_app_harness import MutableRecordingOutput
+
+    message = (
+        "I left a brief closing note that the interaction design and implementation "
+        "need a more fundamental rethink. The local diagnostic mouse fix remains "
+        "uncommitted and was not pushed."
+    )
+    output = MutableRecordingOutput(columns=60, rows=20)
+    with create_app_session(input=DummyInput(), output=output):
+        app = TUIApplication(display_mode=DisplayMode.FULLSCREEN)
+
+    session = Session.__new__(Session)
+    session._app = app
+    session._renderer = Mock()
+    session.config = SimpleNamespace(tui=SimpleNamespace(full_screen=False))
+
+    session._emit_text(Markdown(message))
+
+    assert app._fullscreen_transcript.text == f"{message}\n"
+
+
 @pytest.mark.parametrize("producer", ["rich", "user-bar"])
 def test_fullscreen_session_production_rendering_reprojects_narrow_then_wide(
     producer: str,

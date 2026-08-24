@@ -44,9 +44,10 @@ if TYPE_CHECKING:
 def render_history_replay_to_ansi(output: HistoryReplay, width: int) -> str:
     """Render resumed conversation history to one ANSI block at *width*."""
     from rich.console import Console as RichConsole
-    from rich.markdown import Markdown
     from rich.rule import Rule
     from rich.text import Text
+
+    from .console import TranscriptMarkdown
 
     dim = COLORS["overlay1"]
 
@@ -81,7 +82,9 @@ def render_history_replay_to_ansi(output: HistoryReplay, width: int) -> str:
             buf.write(render_user_bar(turn.content, render_width, COLORS))
         else:
             bc.print(Text("OO:", style=f"bold {dim}"))
-            bc.print(Markdown(turn.content), style=dim)
+            # Preserve semantic line boundaries. The transcript owner wraps for its
+            # current viewport; Rich hard wrapping would add copied newlines and padding.
+            bc.print(TranscriptMarkdown(turn.content), style=dim, soft_wrap=True)
         bc.print()
     if output.show_footer:
         bc.print(Rule(style=COLORS["surface1"]))

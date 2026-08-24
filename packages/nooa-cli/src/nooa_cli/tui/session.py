@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from rich.console import Console as RichConsole
+from rich.markdown import Markdown
 from rich.text import Text
 
 from .host_services import TUIHostServices
@@ -972,7 +973,15 @@ class Session:
             height=1,
             theme=CATPPUCCIN_THEME,
         )
-        console.print(renderable)
+        # Markdown prose must retain semantic line boundaries. Rich's default
+        # width wrapping pads every visual row and inserts hard newlines, which
+        # terminal-native copy exposes as leading/trailing spaces and extra lines.
+        # Native modes still enforce their physical width in TUIApplication;
+        # fullscreen projects this semantic source into viewport rows itself.
+        if isinstance(renderable, Markdown):
+            console.print(renderable, soft_wrap=True)
+        else:
+            console.print(renderable)
         return buf.getvalue()
 
     def _emit_text(

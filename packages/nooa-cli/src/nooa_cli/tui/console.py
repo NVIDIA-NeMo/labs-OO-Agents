@@ -7,13 +7,38 @@ Uses Catppuccin Mocha theme from https://catppuccin.com/palette/
 
 from rich.console import Console
 from rich.live import Live
-from rich.markdown import Markdown
+from rich.markdown import CodeBlock, Markdown
 from rich.rule import Rule
 from rich.spinner import Spinner
+from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
 from .theme import CATPPUCCIN_THEME, COLORS
+
+
+class _TranscriptCodeBlock(CodeBlock):
+    """Syntax-highlighted code without copy-visible presentation padding."""
+
+    def __rich_console__(self, console: Console, options):
+        yield Syntax(
+            str(self.text).rstrip(),
+            self.lexer_name,
+            theme=self.theme,
+            word_wrap=False,
+            padding=0,
+            background_color="default",
+        )
+
+
+class TranscriptMarkdown(Markdown):
+    """Markdown whose visual decoration does not pollute terminal-native copy."""
+
+    elements = {
+        **Markdown.elements,
+        "fence": _TranscriptCodeBlock,
+        "code_block": _TranscriptCodeBlock,
+    }
 
 
 class TUIConsole:
@@ -91,7 +116,7 @@ class TUIConsole:
             self.console.print(
                 Rule(title="[agent]OO[/agent]", style=COLORS["surface2"], align="left")
             )
-        self.console.print(Markdown(cleaned), soft_wrap=soft_wrap)
+        self.console.print(TranscriptMarkdown(cleaned), soft_wrap=soft_wrap)
 
     def print_error(self, message: str) -> None:
         """Print an error message."""

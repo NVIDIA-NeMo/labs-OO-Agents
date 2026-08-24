@@ -200,10 +200,28 @@ class TestBatchRendering:
             "bg:" in style for style, text, *_ in to_formatted_text(ANSI(rendered)) if text != "\n"
         )
 
-    def test_history_renderer_honors_pathologically_narrow_width(self):
+    def test_resumed_agent_prose_has_no_render_width_whitespace(self):
         from nooa_cli.tui.frontend import render_history_replay_to_ansi
         from nooa_cli.tui.terminal_safety import strip_safe_ansi
-        from rich.cells import cell_len
+
+        message = (
+            "A long assistant response should remain one logical line without "
+            "padding spaces or renderer-inserted newlines when it is resumed."
+        )
+        replay = HistoryReplay(
+            turns=[HistoryTurn(role="agent", content=message)],
+            session_id="copy",
+            show_header=False,
+            show_footer=False,
+        )
+
+        rendered = strip_safe_ansi(render_history_replay_to_ansi(replay, 20))
+
+        assert rendered == f"OO:\n{message}\n\n"
+
+    def test_history_renderer_keeps_agent_text_semantic_at_narrow_width(self):
+        from nooa_cli.tui.frontend import render_history_replay_to_ansi
+        from nooa_cli.tui.terminal_safety import strip_safe_ansi
 
         replay = HistoryReplay(
             turns=[HistoryTurn(role="agent", content="abcdefghij")],
@@ -212,9 +230,9 @@ class TestBatchRendering:
             show_footer=False,
         )
 
-        rendered = render_history_replay_to_ansi(replay, 3)
+        rendered = strip_safe_ansi(render_history_replay_to_ansi(replay, 3))
 
-        assert all(cell_len(line) <= 3 for line in strip_safe_ansi(rendered).splitlines())
+        assert rendered == "OO:\nabcdefghij\n\n"
 
     def test_history_replay_on_emit_stream_keeps_semantic_replay_callback(self):
         """Live TUI rendering stores resumed HistoryReplay as a reflowable block."""
