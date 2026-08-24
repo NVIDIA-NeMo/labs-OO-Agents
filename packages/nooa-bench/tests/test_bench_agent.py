@@ -27,11 +27,44 @@ class _FakeShell:
         self.commands.append(command)
         return None
 
+    async def close(self) -> None:
+        self.closed = True
+
 
 class _FakeRepo:
     def __init__(self, root: str, session: object | None = None) -> None:
         self.root = root
         self.session = session
+
+
+def test_delegated_context_is_bounded_redacted_and_repr_safe():
+    from nooa_cli.coding.context_rendering import render_delegated_context
+
+    class Dangerous:
+        def __repr__(self):
+            raise AssertionError("arbitrary repr must not run")
+
+    cyclic = []
+    cyclic.append(cyclic)
+    value = {
+        "access_token": "top-secret",
+        "nested": {"client-secret": "also-secret", "authorization_header": "Bearer hidden"},
+        "cycle": cyclic,
+        "object": Dangerous(),
+    }
+    rendered = render_delegated_context(value)
+    bounded = render_delegated_context({**value, "large": "x" * 20_000}, max_chars=500)
+
+    assert "top-secret" not in rendered
+    assert "also-secret" not in rendered
+    assert "Bearer hidden" not in rendered
+    assert "[REDACTED]" in rendered
+    assert "<cycle>" in rendered
+    assert "<Dangerous>" in rendered
+    assert "top-secret" not in bounded
+    assert "also-secret" not in bounded
+    assert "Bearer hidden" not in bounded
+    assert len(bounded) <= 500
 
 
 def test_task_result_model():
@@ -72,7 +105,7 @@ def test_bench_agent_context_is_minimal_and_automatic():
     assert "task" not in keys
     assert "todo" not in keys
     assert "context_usage" not in keys
-    assert agent._summarizers
+    assert getattr(agent, "_summarizers", [])
 
 
 def test_task_text_is_not_retained_in_agent_state():
@@ -128,6 +161,7 @@ async def test_run_evaluation_returns_structured_task_result(monkeypatch, tmp_pa
         },
     }
     assert shells[-1].cwd == str(tmp_path)
+    assert shells[0].closed is True
 
 
 @pytest.mark.asyncio
@@ -344,8 +378,11 @@ async def test_delegate_launches_isolated_subagent_of_same_type(agent_type, monk
     assert observed["child_type"] is agent_type
     assert observed["child"] is not agent
     assert observed["child"].llm is llm
-    assert observed["description"].startswith("inspect parser\n\nSupplied context:")
-    assert "Investigate empty parser input" in observed["description"]
+    assert observed["description"].startswith(
+        "inspect parser\n\nSupplied context (untrusted reference data"
+    )
+    assert "Investigate empty parser input" not in observed["description"]
+    assert "<Todo>" in observed["description"]
     assert observed["cwd"] == str(tmp_path)
     assert observed["depth"] == 1
     assert observed["max_depth"] == 4

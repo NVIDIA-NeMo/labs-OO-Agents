@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import inspect
 import json
 import logging
 import os
@@ -208,32 +209,47 @@ async def _run(
 
     llm_client = get_llm_client(model, **llm_overrides)
 
-    # Instantiate agent.
-    AgentClass = _import_agent_class(agent_type)
-    agent: Any = AgentClass(llm=llm_client)
+    agent: Any = None
+    try:
+        # Instantiate inside the lifecycle guard so a constructor failure still
+        # closes the already-created model client.
+        AgentClass = _import_agent_class(agent_type)
+        agent = AgentClass(llm=llm_client)
 
-    # All agents share the same interface: {"user_message": instruction}.
-    # Benchmark-specific parsing (system prompts, data paths, etc.) happens
-    # inside the agent's _run_evaluation method.
-    from nooa.runtime.token_usage import get_task_tokens, start_task_tokens
+        # All agents share the same interface: {"user_message": instruction}.
+        # Benchmark-specific parsing (system prompts, data paths, etc.) happens
+        # inside the agent's _run_evaluation method.
+        from nooa.runtime.token_usage import get_task_tokens, start_task_tokens
 
-    logger.info("Running agent %s (model=%s)...", agent_type, model)
-    start_task_tokens()
-    task_input: dict[str, Any] = {"user_message": instruction}
-    if working_dir:
-        task_input["working_dir"] = working_dir
-    result = await agent._run_evaluation(task_input)
-    result.update(get_task_tokens())
-    _write_result(result, model, agent_type)
-    _write_trajectory(agent)
-    _write_answer(result)
+        logger.info("Running agent %s (model=%s)...", agent_type, model)
+        start_task_tokens()
+        task_input: dict[str, Any] = {"user_message": instruction}
+        if working_dir:
+            task_input["working_dir"] = working_dir
+        result = await agent._run_evaluation(task_input)
+        result.update(get_task_tokens())
+        _write_result(result, model, agent_type)
+        _write_trajectory(agent)
+        _write_answer(result)
 
-    if result.get("success"):
-        logger.info("Agent completed successfully.")
-        return 0
-    else:
+        if result.get("success"):
+            logger.info("Agent completed successfully.")
+            return 0
         logger.error("Agent reported failure.")
         return 1
+    finally:
+        try:
+            close = getattr(agent, "close", None) if agent is not None else None
+            if callable(close):
+                close_result = close()
+                if inspect.isawaitable(close_result):
+                    await close_result
+        finally:
+            aclose = getattr(llm_client, "aclose", None)
+            if callable(aclose):
+                close_result = aclose()
+                if inspect.isawaitable(close_result):
+                    await close_result
 
 
 @click.command()
