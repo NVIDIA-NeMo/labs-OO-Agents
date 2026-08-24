@@ -3,6 +3,8 @@
 """Shared utilities for OTLP trace import commands."""
 
 import json
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -11,6 +13,24 @@ import click
 JOURNAL_ENVELOPE_KEY = "nooaJournal"
 JOURNAL_FORMAT = "nooa.message_journal"
 JOURNAL_VERSION = 1
+RETRYABLE_HTTP_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+
+class OtlpRequestError(RuntimeError):
+    """An OTLP viewer request failed with details suitable for CLI output."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retryable: bool = False,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retryable = retryable
+        self.retry_after = retry_after
 
 
 def validate_endpoint(endpoint: str) -> None:
@@ -44,12 +64,29 @@ def inject_resource_attrs(body: dict, attrs: dict[str, str | bool | int]) -> dic
     return body
 
 
-def post_trace(endpoint: str, body: dict, timeout: float = 30) -> bool:
-    """POST a single OTLP trace body to the viewer endpoint.
+def _http_error_body(error: urllib.error.HTTPError) -> str:
+    """Read a bounded, printable HTTP error response body."""
+    try:
+        body = error.read(2048).decode("utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+    return body
 
-    ``timeout`` defaults to 30s so large batched bodies (see ``post_traces_batch``)
-    don't spuriously time out; per-line callers are unaffected.
-    """
+
+def _retry_after_seconds(error: urllib.error.HTTPError) -> float | None:
+    """Return a numeric Retry-After value when the server supplied one."""
+    value = error.headers.get("Retry-After") if error.headers else None
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return None
+
+
+def _post_trace_checked(endpoint: str, body: dict, timeout: float = 30) -> None:
+    """POST one OTLP body, raising a detailed error on failure."""
+
     url = f"{endpoint.rstrip('/')}/v1/traces"
     data = json.dumps(body, separators=(",", ":")).encode("utf-8")
     req = urllib.request.Request(
@@ -60,9 +97,71 @@ def post_trace(endpoint: str, body: dict, timeout: float = 30) -> bool:
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status < 300
-    except Exception:
+            if resp.status >= 300:
+                raise OtlpRequestError(
+                    f"HTTP {resp.status} from {url}",
+                    status_code=resp.status,
+                    retryable=resp.status in RETRYABLE_HTTP_STATUS_CODES,
+                )
+    except urllib.error.HTTPError as error:
+        response_body = _http_error_body(error)
+        detail = f": {response_body}" if response_body else ""
+        raise OtlpRequestError(
+            f"HTTP {error.code} {error.reason} from {url}{detail}",
+            status_code=error.code,
+            retryable=error.code in RETRYABLE_HTTP_STATUS_CODES,
+            retry_after=_retry_after_seconds(error),
+        ) from error
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        reason = getattr(error, "reason", error)
+        raise OtlpRequestError(
+            f"request to {url} failed: {reason}",
+            retryable=True,
+        ) from error
+
+
+def post_trace(endpoint: str, body: dict, timeout: float = 30) -> bool:
+    """POST a single OTLP body, preserving the legacy boolean API."""
+    try:
+        _post_trace_checked(endpoint, body, timeout=timeout)
+    except OtlpRequestError:
         return False
+    return True
+
+
+def post_trace_with_retry(
+    endpoint: str,
+    body: dict,
+    *,
+    timeout: float = 30,
+    max_retries: int = 5,
+    initial_backoff: float = 0.25,
+    max_backoff: float = 5.0,
+) -> None:
+    """POST an OTLP body, retrying transient HTTP and transport failures.
+
+    Raises :class:`OtlpRequestError` with the HTTP status and response body when
+    all attempts fail. ``max_retries`` counts retries after the initial request.
+    """
+    for retry_index in range(max_retries + 1):
+        try:
+            _post_trace_checked(endpoint, body, timeout=timeout)
+            return
+        except OtlpRequestError as error:
+            if not error.retryable or retry_index >= max_retries:
+                attempts = retry_index + 1
+                raise OtlpRequestError(
+                    f"{error} (after {attempts} attempt{'s' if attempts != 1 else ''})",
+                    status_code=error.status_code,
+                    retryable=error.retryable,
+                    retry_after=error.retry_after,
+                ) from error
+            delay = (
+                min(error.retry_after, max_backoff)
+                if error.retry_after is not None
+                else min(initial_backoff * (2**retry_index), max_backoff)
+            )
+            time.sleep(delay)
 
 
 def post_traces_batch(endpoint: str, bodies: list[dict]) -> bool:
@@ -82,6 +181,48 @@ def post_traces_batch(endpoint: str, bodies: list[dict]) -> bool:
     if not merged["resourceSpans"]:
         return True
     return post_trace(endpoint, merged)
+
+
+def post_traces_batch_with_retry(
+    endpoint: str,
+    bodies: list[dict],
+    *,
+    max_retries: int = 5,
+) -> None:
+    """Merge and reliably POST a bounded batch of OTLP envelopes."""
+    merged: dict = {"resourceSpans": []}
+    for body in bodies:
+        spans = body.get("resourceSpans")
+        if isinstance(spans, list):
+            merged["resourceSpans"].extend(spans)
+    if not merged["resourceSpans"]:
+        return
+    post_trace_with_retry(endpoint, merged, max_retries=max_retries)
+
+
+def sync_ingest(endpoint: str, timeout: float = 35) -> None:
+    """Wait until the viewer has processed every accepted OTLP request."""
+    url = f"{endpoint.rstrip('/')}/v1/sync"
+    request = urllib.request.Request(url, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if response.status >= 300:
+                raise OtlpRequestError(
+                    f"HTTP {response.status} from {url}",
+                    status_code=response.status,
+                    retryable=response.status in RETRYABLE_HTTP_STATUS_CODES,
+                )
+    except urllib.error.HTTPError as error:
+        response_body = _http_error_body(error)
+        detail = f": {response_body}" if response_body else ""
+        raise OtlpRequestError(
+            f"HTTP {error.code} {error.reason} from {url}{detail}",
+            status_code=error.code,
+            retryable=error.code in RETRYABLE_HTTP_STATUS_CODES,
+        ) from error
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        reason = getattr(error, "reason", error)
+        raise OtlpRequestError(f"request to {url} failed: {reason}") from error
 
 
 def post_annotations(endpoint: str, annotations: list[dict]) -> int:

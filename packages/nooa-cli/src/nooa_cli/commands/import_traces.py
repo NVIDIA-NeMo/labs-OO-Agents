@@ -9,6 +9,7 @@ Usage:
 """
 
 import json
+import shlex
 import urllib.parse
 from datetime import datetime
 from pathlib import Path
@@ -17,13 +18,15 @@ from uuid import uuid4
 import click
 
 from ._otlp_helpers import (
+    OtlpRequestError,
     check_endpoint_reachable,
     get_journal_record,
     inject_resource_attrs,
     post_annotations,
     post_journal_record,
-    post_trace,
+    post_traces_batch_with_retry,
     session_exists,
+    sync_ingest,
     validate_endpoint,
 )
 
@@ -68,6 +71,28 @@ def _session_id_from_filename(path: Path) -> str:
     return path.stem
 
 
+def _post_batch(
+    endpoint: str,
+    bodies: list[dict],
+    *,
+    max_retries: int,
+    file_name: str,
+    first_line: int,
+    last_line: int,
+) -> str | None:
+    """Post one trace batch and return a user-facing error, if any."""
+    line_range = str(first_line) if first_line == last_line else f"{first_line}-{last_line}"
+    try:
+        post_traces_batch_with_retry(
+            endpoint,
+            bodies,
+            max_retries=max_retries,
+        )
+    except OtlpRequestError as error:
+        return f"{file_name}:{line_range}: {error}"
+    return None
+
+
 @click.command()
 @click.argument("path", type=click.Path(exists=True))
 @click.option(
@@ -81,7 +106,35 @@ def _session_id_from_filename(path: Path) -> str:
     default=None,
     help="Batch ID for this import (default: auto-generated).",
 )
-def command(path: str, endpoint: str, batch_id: str | None):
+@click.option(
+    "--batch-lines",
+    default=1000,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Max OTLP lines combined into one request.",
+)
+@click.option(
+    "--batch-bytes",
+    default=4_000_000,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Max raw input bytes combined into one request.",
+)
+@click.option(
+    "--max-retries",
+    default=5,
+    show_default=True,
+    type=click.IntRange(min=0),
+    help="Retries for transient viewer errors such as HTTP 503.",
+)
+def command(
+    path: str,
+    endpoint: str,
+    batch_id: str | None,
+    batch_lines: int,
+    batch_bytes: int,
+    max_retries: int,
+):
     """Import OTLP and portable NOOA journal .jsonl files into the viewer."""
     target = Path(path)
     files = _find_trace_files(target)
@@ -104,9 +157,10 @@ def command(path: str, endpoint: str, batch_id: str | None):
 
     imported = 0
     skipped = 0
+    failed = 0
     already_exist = 0
     annotations_imported = 0
-    errors = []
+    errors: list[str] = []
 
     for file in files:
         session_id = _session_id_from_filename(file)
@@ -120,12 +174,17 @@ def command(path: str, endpoint: str, batch_id: str | None):
             already_exist += 1
             continue
 
-        inject_attrs = {"batch_id": batch_id}
+        inject_attrs = {"batch_id": batch_id, "session.id": session_id}
 
-        file_has_session = False
-        file_imported = False
+        file_errors: list[str] = []
+        trace_post_attempted = False
+        trace_batch_accepted = False
         is_legacy = False
         deferred_annotations: list[dict] = []
+        batch: list[dict] = []
+        batch_input_bytes = 0
+        batch_first_line = 0
+        batch_last_line = 0
 
         with open(file) as f:
             for line_num, raw_line in enumerate(f, 1):
@@ -135,13 +194,14 @@ def command(path: str, endpoint: str, batch_id: str | None):
 
                 try:
                     body = json.loads(raw_line)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as error:
+                    file_errors.append(f"{file.name}:{line_num}: invalid JSON: {error.msg}")
                     continue
 
                 journal_record = get_journal_record(body)
                 if journal_record is not None:
                     if not post_journal_record(endpoint, journal_record, session_id):
-                        errors.append(f"{file.name}:{line_num}: failed to post journal record")
+                        file_errors.append(f"{file.name}:{line_num}: failed to post journal record")
                     continue
 
                 # Handle annotation lines from exported traces
@@ -155,34 +215,90 @@ def command(path: str, endpoint: str, batch_id: str | None):
 
                 if fmt == "legacy":
                     if not is_legacy:
-                        errors.append(f"{file.name}: legacy format not supported, skipping")
+                        file_errors.append(f"{file.name}: legacy format not supported, skipping")
                         is_legacy = True
                     continue
 
                 if fmt != "otlp":
                     continue
 
-                if not file_has_session:
-                    inject_attrs["session.id"] = session_id
-                    file_has_session = True
+                resource_spans = body.get("resourceSpans")
+                if not isinstance(resource_spans, list):
+                    file_errors.append(
+                        f"{file.name}:{line_num}: resourceSpans must be a JSON array"
+                    )
+                    continue
+                if not resource_spans:
+                    continue
 
                 inject_resource_attrs(body, inject_attrs)
+                if not batch:
+                    batch_first_line = line_num
+                batch_last_line = line_num
+                batch.append(body)
+                batch_input_bytes += len(raw_line.encode("utf-8"))
 
-                if post_trace(endpoint, body):
-                    file_imported = True
-                else:
-                    errors.append(f"{file.name}:{line_num}: failed to post")
+                if len(batch) >= batch_lines or batch_input_bytes >= batch_bytes:
+                    trace_post_attempted = True
+                    batch_error = _post_batch(
+                        endpoint,
+                        batch,
+                        max_retries=max_retries,
+                        file_name=file.name,
+                        first_line=batch_first_line,
+                        last_line=batch_last_line,
+                    )
+                    batch = []
+                    batch_input_bytes = 0
+                    if batch_error:
+                        file_errors.append(batch_error)
+                        break
+                    trace_batch_accepted = True
 
-        if file_imported:
-            imported += 1
-            # Import annotations after spans so the session exists
+            else:
+                if batch:
+                    trace_post_attempted = True
+                    batch_error = _post_batch(
+                        endpoint,
+                        batch,
+                        max_retries=max_retries,
+                        file_name=file.name,
+                        first_line=batch_first_line,
+                        last_line=batch_last_line,
+                    )
+                    if batch_error:
+                        file_errors.append(batch_error)
+                    else:
+                        trace_batch_accepted = True
+
+        # A 200 from /v1/traces only means queued. Wait for durable processing
+        # before importing annotations or reporting success.
+        if trace_post_attempted:
+            try:
+                sync_ingest(endpoint)
+            except OtlpRequestError as error:
+                file_errors.append(f"{file.name}: failed to sync viewer ingest: {error}")
+
+        if not file_errors and trace_batch_accepted:
             if deferred_annotations:
                 count = post_annotations(endpoint, deferred_annotations)
                 annotations_imported += count
+                if count != len(deferred_annotations):
+                    file_errors.append(
+                        f"{file.name}: imported {count}/{len(deferred_annotations)} annotations"
+                    )
+
+        if file_errors:
+            failed += 1
+            errors.extend(file_errors)
+        elif trace_batch_accepted:
+            imported += 1
         elif not is_legacy:
             skipped += 1
 
     click.echo(f"  {imported} imported, {skipped} skipped")
+    if failed:
+        click.echo(f"  {failed} failed")
     if already_exist:
         click.echo(f"  {already_exist} skipped (already exist)")
     if annotations_imported:
@@ -194,4 +310,13 @@ def command(path: str, endpoint: str, batch_id: str | None):
             click.echo(f"  ... and {len(errors) - 10} more errors")
 
     encoded_batch = urllib.parse.quote(batch_id, safe="")
+    if errors:
+        click.echo(
+            f"\nImport incomplete. Partial data may exist in batch '{batch_id}'.\n"
+            f"Delete it before retrying:\n"
+            f"  nooa delete-traces --batch-id {shlex.quote(batch_id)} "
+            f"--endpoint {shlex.quote(endpoint)}"
+        )
+        raise SystemExit(1)
+
     click.echo(f"\nView at: {endpoint}/traces?batch_id={encoded_batch}")

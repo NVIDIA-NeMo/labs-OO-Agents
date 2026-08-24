@@ -56,6 +56,60 @@ def fresh_viewer():
         backend.stop()
 
 
+def _otlp_body(index: int) -> dict:
+    """Build one minimal OTLP envelope containing exactly one span."""
+    return {
+        "resourceSpans": [
+            {
+                "resource": {"attributes": []},
+                "scopeSpans": [
+                    {
+                        "scope": {"name": "import-backpressure-test"},
+                        "spans": [
+                            {
+                                "traceId": f"{index:032x}",
+                                "spanId": f"{index:016x}",
+                                "name": f"span-{index}",
+                                "startTimeUnixNano": str(1_000_000_000 + index),
+                                "endTimeUnixNano": str(1_000_000_001 + index),
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+
+def test_import_179_records_stores_every_span(fresh_viewer, tmp_path):
+    """A file larger than the viewer queue is batched, synced, and complete."""
+    from click.testing import CliRunner
+    from nooa_cli.commands.import_traces import command
+
+    session_id = "large-import"
+    trace_file = tmp_path / f"{session_id}.jsonl"
+    trace_file.write_text("\n".join(json.dumps(_otlp_body(index)) for index in range(179)) + "\n")
+
+    result = CliRunner().invoke(
+        command,
+        [
+            str(trace_file),
+            "--endpoint",
+            fresh_viewer,
+            "--batch-id",
+            "backpressure-regression",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    with urllib.request.urlopen(
+        f"{fresh_viewer}/api/trace-count?session_id={session_id}",
+        timeout=10,
+    ) as response:
+        trace_count = json.loads(response.read())
+    assert trace_count["event_count"] == 179
+
+
 @pytest.mark.asyncio
 async def test_save_then_import_then_download_preserves_messages(fresh_viewer):
     """A JSONL written by the file exporter, then re-imported into a fresh
