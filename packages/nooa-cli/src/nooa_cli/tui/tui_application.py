@@ -730,6 +730,8 @@ def format_session_rule(cols: int, label: str = "") -> list[tuple[str, str]]:
 PROMPT_MARKER = "❯ "
 _CTRL_C_EXIT_WINDOW_SECONDS = 2.0
 _TRANSCRIPT_CLEAR_SEQUENCE = "\x1b[r\x1b[0m\x1b[H\x1b[2J\x1b[3J\x1b[H"
+_SYNCHRONIZED_OUTPUT_BEGIN = "\x1b[?2026h"
+_SYNCHRONIZED_OUTPUT_END = "\x1b[?2026l"
 _FULLSCREEN_TRANSCRIPT_MAX_RECORDS = 10_000
 _FULLSCREEN_TRANSCRIPT_MAX_BYTES = 16 * 1024 * 1024
 
@@ -3349,6 +3351,22 @@ class TUIApplication:
         except Exception:
             return False
 
+    def _set_synchronized_output(self, *, enabled: bool) -> None:
+        """Bracket a destructive replay in one terminal-visible update.
+
+        DEC private mode 2026 is understood by current terminals and tmux.
+        Terminals that do not implement it ignore the private mode sequence,
+        preserving the existing replay behavior. The disable marker is always
+        emitted from the replay ``finally`` path so cancellation cannot leave a
+        cooperative terminal holding subsequent output.
+        """
+        marker = _SYNCHRONIZED_OUTPUT_BEGIN if enabled else _SYNCHRONIZED_OUTPUT_END
+        try:
+            self._app.output.write_raw(marker)
+            self._app.output.flush()
+        except Exception:
+            logger.debug("failed to toggle synchronized terminal output", exc_info=True)
+
     async def _consume_resize_replay(self, item: _ResizeReplayQueueItem) -> None:
         schedule_latest_pending = False
         try:
@@ -3370,6 +3388,7 @@ class TUIApplication:
             from prompt_toolkit.application import run_in_terminal
 
             self._replay_columns_override = item.request.width
+            self._set_synchronized_output(enabled=True)
             try:
                 replayed = await run_in_terminal(lambda: self._replay_queue_item_if_current(item))
             except asyncio.CancelledError:
@@ -3377,6 +3396,10 @@ class TUIApplication:
             except Exception:
                 replayed = False
             finally:
+                # run_in_terminal flushes its final live-region redraw before
+                # returning. Reveal the erase, transcript replay, and redraw as
+                # one terminal update instead of two fast visible paints.
+                self._set_synchronized_output(enabled=False)
                 self._replay_columns_override = None
                 # If run_in_terminal failed before invoking the callback, its
                 # own final redraw was suppressed by the transaction guard.

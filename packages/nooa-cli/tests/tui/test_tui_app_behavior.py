@@ -1277,6 +1277,7 @@ async def test_native_replay_sigwinch_has_one_settled_visible_transition(
         await h.app._block_queue.join()
         capture.seek(0)
         capture.truncate()
+        output.events.clear()
         render_count = h.app._app.render_counter
 
         output.set_size(60, 30)
@@ -1296,6 +1297,15 @@ async def test_native_replay_sigwinch_has_one_settled_visible_transition(
         assert physical.count("stable transcript") == 1
         assert h.app._app.render_counter == render_count + 1
         assert h.app._fullscreen_invalidate_count == 1
+        synchronized_markers = [event for event in output.events if event[0] == "write_raw"]
+        assert synchronized_markers == [
+            ("write_raw", "\x1b[?2026h"),
+            ("write_raw", "\x1b[?2026l"),
+        ]
+        begin = output.events.index(("write_raw", "\x1b[?2026h"))
+        erase = output.events.index(("erase_down",))
+        end = output.events.index(("write_raw", "\x1b[?2026l"))
+        assert begin < erase < end
         assert h.app._resize_replay_timer is None
         assert h.app._resize_reflow.has_pending_replay is False
 
@@ -2214,6 +2224,11 @@ async def test_inflight_resize_barrier_cannot_clear_after_app_exit(
     assert app is not None
     assert app._fullscreen_invalidate_count == 0
     assert "\x1b[3J" not in capture.getvalue()
+    synchronized_markers = [event for event in output.events if event[0] == "write_raw"]
+    assert synchronized_markers[-2:] == [
+        ("write_raw", "\x1b[?2026h"),
+        ("write_raw", "\x1b[?2026l"),
+    ]
 
 
 async def test_inflight_clear_cannot_purge_terminal_after_app_exit(

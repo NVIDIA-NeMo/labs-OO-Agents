@@ -246,6 +246,9 @@ class MutableRecordingOutput(DummyOutput):
     def set_size(self, columns: int, rows: int) -> None:
         self._size = Size(rows=int(rows), columns=int(columns))
 
+    def write_raw(self, data: str) -> None:
+        self.events.append(("write_raw", data))
+
     def erase_down(self) -> None:
         self.events.append(("erase_down",))
 
