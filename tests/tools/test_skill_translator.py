@@ -319,8 +319,11 @@ async def test_translate_writes_valid_package_without_archiving_raw_scripts(tmp_
     assert (result.package_dir / "pyproject.toml").exists()
     assert (result.package_dir / "src" / "hello_skill" / "__init__.py").exists()
     generated_text = _generated_text(result.package_dir)
-    assert "No import-safe public functions or supported argparse API could be inferred" not in generated_text
-    assert "Use this skill to greet people" in generated_text
+    assert "Legacy source scripts that were not safely translated" in generated_text
+    assert "scripts/hello.py" in generated_text
+    assert "Original TextSkill guidance" not in generated_text
+    assert "Use this skill to greet people" not in generated_text
+    assert "Use this LibrarySkill to greet people" in generated_text
     generated_tests = _run_generated_tests(result.package_dir)
     assert generated_tests.returncode == 0, generated_tests.stdout + generated_tests.stderr
 
@@ -345,7 +348,9 @@ async def test_translate_writes_valid_package_without_archiving_raw_scripts(tmp_
         assert "reference notes" in visible_doc
         assert "references_blob" in visible_doc
         assert "references/blob.bin" in visible_doc
-        assert "Use this skill to greet people" in visible_doc
+        assert "Original TextSkill guidance" not in visible_doc
+        assert "Use this skill to greet people" not in visible_doc
+        assert "Use this LibrarySkill to greet people" in visible_doc
         assert not hasattr(skill, "run_hello")
     finally:
         await registry.aclose()
@@ -441,11 +446,13 @@ async def test_translated_argparse_script_has_named_api_method(tmp_path):
     assert "def search(" in init_source
     assert "def run_search(" not in init_source
     assert "run_resource_script" not in init_source
-    assert "Original TextSkill guidance" in init_source
-    assert "Use this skill to search records" in init_source
+    assert "Original TextSkill guidance" not in init_source
+    assert "Use this skill to search records" not in init_source
+    assert "Use this LibrarySkill to search records" in init_source
     assert "Use these public Python methods" in init_source
     assert "search(path: str, query: str, limit: int | None = 10, dry_run: bool = False) -> str" in init_source
-    assert "Use this skill to search records" in _generated_text(result.package_dir)
+    assert "Use this skill to search records" not in _generated_text(result.package_dir)
+    assert "Use this LibrarySkill to search records" in _generated_text(result.package_dir)
 
     registry = SkillRegistry(_Agent())
     registry.discover_libs(result.package_dir.parent)

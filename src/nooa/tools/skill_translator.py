@@ -311,7 +311,7 @@ class TextSkillTranslator(Skill):
                 )
             )
         resource_methods = _resource_method_plans(inventory, used_api_names)
-        docstring = _build_docstring(inventory, script_methods, resource_methods)
+        docstring = _build_docstring(inventory, script_methods, omitted_scripts, resource_methods)
 
         return ConversionPlan(
             source_dir=inventory.source_dir,
@@ -1007,17 +1007,16 @@ def _has_argparse_api_shape(path: Path) -> bool:
 def _build_docstring(
     inventory: TextSkillInventory,
     script_methods: list[ScriptMethodPlan],
+    omitted_scripts: list[OmittedScriptPlan],
     resource_methods: list[ResourceMethodPlan],
 ) -> str:
     title = inventory.description.strip() or inventory.skill_name
     lines = [
         title,
         "",
-        "Package-native skill translated from a traditional TextSkill.",
-        "The original TextSkill guidance is preserved below. Follow it as the authoritative skill instructions.",
+        "LibrarySkill-native guidance generated from the source skill.",
+        "Use the Python APIs on this skill; do not look for or invoke the original TextSkill scripts.",
     ]
-    if inventory.body.strip():
-        lines.extend(["", "Original TextSkill guidance:", inventory.body.strip()])
     public_methods = _public_method_guidance(script_methods)
     if public_methods:
         lines.extend(
@@ -1033,7 +1032,7 @@ def _build_docstring(
         lines.extend(
             [
                 "",
-                "No public script APIs were inferred. Use the guidance above and the bundled resource APIs when relevant.",
+                "No public script APIs were inferred. Use the adapted guidance and bundled resource APIs when relevant.",
             ]
         )
     if resource_methods:
@@ -1043,7 +1042,79 @@ def _build_docstring(
                 f"- {resource.method_name}() -> {resource.return_annotation}: "
                 f"returns `{resource.resource_path}` from package data."
             )
+    adapted_guidance = _adapt_skill_guidance(inventory.body, script_methods, omitted_scripts, resource_methods)
+    if adapted_guidance:
+        lines.extend(["", "Adapted guidance:", adapted_guidance])
     return "\n".join(lines)
+
+
+def _adapt_skill_guidance(
+    body: str,
+    script_methods: list[ScriptMethodPlan],
+    omitted_scripts: list[OmittedScriptPlan],
+    resource_methods: list[ResourceMethodPlan],
+) -> str:
+    """Render source guidance as LibrarySkill-native instructions.
+
+    This is deliberately deterministic: it preserves task-specific details
+    while rewriting old script/resource references to the generated package API
+    names. The raw SKILL.md body is not copied as an "original" block.
+    """
+    guidance = body.strip()
+    if not guidance:
+        return ""
+
+    guidance = re.sub(r"\bUse this skill\b", "Use this LibrarySkill", guidance)
+    guidance = re.sub(r"\bthis skill\b", "this LibrarySkill", guidance)
+    guidance = re.sub(r"\bthe skill\b", "the LibrarySkill", guidance)
+    guidance = re.sub(r"\bSKILL\.md\b", "this LibrarySkill guidance", guidance)
+    guidance = re.sub(
+        r"\b(run|execute|invoke)\s+(?:the\s+)?(?:script\s+)?`?scripts/",
+        "call the generated LibrarySkill API for `scripts/",
+        guidance,
+        flags=re.IGNORECASE,
+    )
+
+    replacements: list[tuple[str, str]] = []
+    for method in script_methods:
+        public_names = _script_public_api_names(method)
+        if not public_names:
+            continue
+        replacement = " or ".join(f"`{name}()`" for name in public_names)
+        replacements.append((method.script_path, replacement))
+        replacements.append((Path(method.script_path).name, replacement))
+
+    for resource in resource_methods:
+        replacement = f"`{resource.method_name}()`"
+        replacements.append((resource.resource_path, replacement))
+        replacements.append((Path(resource.resource_path).name, replacement))
+
+    for old, new in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
+        guidance = _replace_reference(guidance, old, new)
+
+    notes: list[str] = []
+    if omitted_scripts:
+        notes.append(
+            "Legacy source scripts that were not safely translated into public LibrarySkill APIs are not available for direct use:"
+        )
+        for script in omitted_scripts:
+            notes.append(f"- `{script.script_path}`: {script.reason}")
+    if notes:
+        guidance = guidance + "\n\n" + "\n".join(notes)
+    return guidance
+
+
+def _script_public_api_names(method: ScriptMethodPlan) -> list[str]:
+    names: list[str] = []
+    if method.api_method_name:
+        names.append(method.api_method_name)
+    names.extend(function.method_name for function in method.function_methods)
+    return names
+
+
+def _replace_reference(text: str, old: str, new: str) -> str:
+    escaped = re.escape(old)
+    return re.sub(rf"`?{escaped}`?", new, text)
 
 
 def _public_method_guidance(script_methods: list[ScriptMethodPlan]) -> list[str]:
@@ -1120,7 +1191,7 @@ def _render_readme(plan: ConversionPlan) -> str:
         Scripts are bundled only when needed as private Python implementation
         modules for generated package APIs.
 
-        ## Original TextSkill guidance
+        ## LibrarySkill-native guidance
 
         {textwrap.indent(plan.docstring, "        ")}
     """)
@@ -1344,7 +1415,7 @@ def _render_init(plan: ConversionPlan) -> str:
 
             @hidden
             def format_guidance(self) -> str:
-                """Return the preserved TextSkill guidance and bundled resource API index."""
+                """Return the LibrarySkill-native guidance and bundled resource API index."""
                 resource_index = self._format_resource_index()
                 if resource_index:
                     return type(self).__doc__ + "\\n\\nBundled resource APIs:\\n" + resource_index
@@ -1816,7 +1887,7 @@ def _render_tests(plan: ConversionPlan) -> str:
         "    visible_doc = doc(skill)",
         "    assert 'list_resources' not in visible_doc",
         "    assert 'read_resource' not in visible_doc",
-        "    assert 'Original TextSkill guidance' in visible_doc",
+        "    assert 'LibrarySkill-native guidance' in visible_doc",
         "    assert 'run_resource_script' not in visible_doc",
         "    assert isinstance(skill.format_guidance(), str)",
     ]
