@@ -10,11 +10,12 @@ These tests cover behavior that only applies to SQLiteEventBackend:
 """
 
 import logging
+import sqlite3
 from typing import Literal
 
 from nooa.context_blocks import EventBase, Metadata
 from nooa.context_blocks.events import AssistantEvent, ToolCallEvent, UserEvent
-from nooa.storage.sqlite import _CONTEXT_BLOCKS_TYPES, SQLiteEventBackend
+from nooa.storage.sqlite import _CONTEXT_BLOCKS_TYPES, SQLiteEventBackend, _ensure_schema
 
 # ---------------------------------------------------------------------------
 # _CONTEXT_BLOCKS_TYPES sanity
@@ -151,3 +152,105 @@ def test_register_event_type_overwrite_logs_warning(sqlite_conn, caplog):
     assert any("versioned_evt" in r.message for r in caplog.records), (
         "Expected a warning when overwriting an existing event_type key in the registry"
     )
+
+
+# ---------------------------------------------------------------------------
+# Streaming iteration
+# ---------------------------------------------------------------------------
+
+
+def test_iter_events_does_not_hold_read_lock_between_yields(tmp_path):
+    database = tmp_path / "events.db"
+    first_conn = sqlite3.connect(database, timeout=0.1, check_same_thread=False)
+    second_conn = sqlite3.connect(database, timeout=0.1, check_same_thread=False)
+    try:
+        first_conn.execute("PRAGMA journal_mode=DELETE")
+        second_conn.execute("PRAGMA journal_mode=DELETE")
+        _ensure_schema(first_conn)
+        first = SQLiteEventBackend(first_conn)
+        first.store("1", UserEvent(content="old"))
+        first.store("2", UserEvent(content="current"))
+        second = SQLiteEventBackend(second_conn)
+
+        events = first.iter_events(event_type="UserEvent")
+        assert next(events).content == "old"
+        second.store("3", UserEvent(content="later"))
+
+        assert [event.content for event in events] == ["current"]
+    finally:
+        first_conn.close()
+        second_conn.close()
+
+
+def test_iter_events_handles_writes_from_preinitialized_backends(tmp_path):
+    database = tmp_path / "events.db"
+    first_conn = sqlite3.connect(database, timeout=0.1, check_same_thread=False)
+    second_conn = sqlite3.connect(database, timeout=0.1, check_same_thread=False)
+    try:
+        _ensure_schema(first_conn)
+        first = SQLiteEventBackend(first_conn)
+        second = SQLiteEventBackend(second_conn)
+
+        first.store("1", UserEvent(content="one"))
+        second.store("2", UserEvent(content="two"))
+
+        rows = first_conn.execute(
+            "SELECT insertion_order FROM events ORDER BY insertion_order"
+        ).fetchall()
+        assert rows == [(0,), (1,)]
+        assert [event.content for event in first.iter_events(event_type="UserEvent")] == [
+            "one",
+            "two",
+        ]
+    finally:
+        first_conn.close()
+        second_conn.close()
+
+
+def test_iter_events_handles_legacy_duplicate_insertion_orders(sqlite_conn):
+    first = UserEvent(content="one")
+    second = UserEvent(content="two")
+    for tag, event in (("1", first), ("2", second)):
+        sqlite_conn.execute(
+            "INSERT INTO events "
+            "(tag, event_id, event_type, status, data, insertion_order) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                tag,
+                event.id,
+                event.event_type,
+                event.status.value,
+                event.model_dump_json(),
+                0,
+            ),
+        )
+    sqlite_conn.commit()
+    backend = SQLiteEventBackend(sqlite_conn)
+
+    assert [event.content for event in backend.all_events()] == ["one", "two"]
+    assert [event.content for event in backend.iter_events(event_type="UserEvent")] == [
+        "one",
+        "two",
+    ]
+    assert [
+        event.content for event in backend.iter_events(event_type="UserEvent", newest_first=True)
+    ] == ["two", "one"]
+
+
+def test_backend_init_preserves_callers_active_transaction(tmp_path):
+    database = tmp_path / "events.db"
+    conn = sqlite3.connect(database)
+    try:
+        _ensure_schema(conn)
+        conn.execute("CREATE TABLE unrelated (value TEXT)")
+        conn.commit()
+        conn.execute("INSERT INTO unrelated VALUES ('pending')")
+        assert conn.in_transaction
+
+        SQLiteEventBackend(conn)
+
+        assert conn.in_transaction
+        conn.rollback()
+        assert conn.execute("SELECT * FROM unrelated").fetchall() == []
+    finally:
+        conn.close()

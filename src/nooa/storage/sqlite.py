@@ -121,6 +121,15 @@ CREATE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id);
 CREATE INDEX IF NOT EXISTS idx_events_insertion_order ON events(insertion_order);
 CREATE INDEX IF NOT EXISTS idx_events_type_order ON events(event_type, insertion_order);
 
+-- Database-owned monotonic ordering avoids collisions across backend instances
+-- and is intentionally not reset by clear().
+CREATE TABLE IF NOT EXISTS event_sequence (
+    singleton  INTEGER PRIMARY KEY CHECK (singleton = 1),
+    next_order INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO event_sequence (singleton, next_order)
+SELECT 1, COALESCE(MAX(insertion_order), -1) + 1 FROM events;
+
 CREATE TABLE IF NOT EXISTS active_tags (
     position INTEGER NOT NULL,
     tag      TEXT NOT NULL UNIQUE
@@ -233,7 +242,8 @@ class SQLiteEventBackend:
     def __init__(self, conn: sqlite3.Connection, lock: threading.RLock | None = None) -> None:
         self._conn = conn
         self._lock = lock or threading.RLock()
-        self._insertion_counter = self._max_insertion_order() + 1
+        self._ensure_event_sequence()
+        self._insertion_counter = self._next_insertion_order()
         self._registry: dict[str, type[EventBase]] = dict(_CORE_TYPES)
         # Tag counter — eager-init from storage so a resumed DB picks
         # up at the right number. ``store()`` keeps it coherent when a
@@ -274,6 +284,53 @@ class SQLiteEventBackend:
             )
             return -1
         return row[0] if row[0] is not None else -1
+
+    def _ensure_event_sequence(self) -> None:
+        """Install the additive sequence table without owning the caller's transaction."""
+        savepoint = "nooa_event_sequence_init"
+        with self._lock:
+            self._conn.execute(f"SAVEPOINT {savepoint}")
+            try:
+                self._conn.execute(
+                    "CREATE TABLE IF NOT EXISTS event_sequence ("
+                    "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
+                    "next_order INTEGER NOT NULL)"
+                )
+                try:
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO event_sequence (singleton, next_order) "
+                        "SELECT 1, COALESCE(MAX(insertion_order), -1) + 1 FROM events"
+                    )
+                except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
+                    if not _is_corruption_error(exc):
+                        raise
+                    logger.warning(
+                        "_ensure_event_sequence(): events unreadable, starting at 0 (%s)",
+                        type(exc).__name__,
+                    )
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO event_sequence (singleton, next_order) VALUES (1, 0)"
+                    )
+                self._conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            except Exception:
+                self._conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                self._conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                raise
+
+    def _next_insertion_order(self) -> int:
+        try:
+            row = self._conn.execute(
+                "SELECT next_order FROM event_sequence WHERE singleton = 1"
+            ).fetchone()
+        except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
+            if not _is_corruption_error(exc):
+                raise
+            logger.warning(
+                "_next_insertion_order(): sequence unreadable, starting counter at 0: %s",
+                type(exc).__name__,
+            )
+            return 0
+        return row[0] if row is not None else self._max_insertion_order() + 1
 
     def _max_position(self) -> int:
         try:
@@ -319,29 +376,31 @@ class SQLiteEventBackend:
 
         with self._lock:
             data = self._serialize(event)
-            order = self._insertion_counter
-            self._insertion_counter += 1
             try:
-                self._do_store(tag, event, data, order)
-            except sqlite3.OperationalError as e:
-                if "disk I/O error" not in str(e) or self._on_io_error is None:
+                order = self._do_store(tag, event, data)
+            except sqlite3.OperationalError as exc:
+                if "disk I/O error" not in str(exc) or self._on_io_error is None:
                     raise
                 logger.warning("store(%s): disk I/O error, attempting reconnect + retry", tag)
                 self._on_io_error()
-                # Retry once after reconnect. If the original write partially
-                # committed before the I/O error, the retry hits IntegrityError
-                # on the UNIQUE constraint — that means the data IS stored, so
-                # we treat it as success.
+                # Retry once after reconnect. If the original write committed,
+                # the tag's UNIQUE constraint confirms that it is persisted.
                 try:
-                    self._do_store(tag, event, data, order)
-                except sqlite3.IntegrityError:
+                    order = self._do_store(tag, event, data)
+                except sqlite3.IntegrityError as retry_exc:
+                    row = self._conn.execute(
+                        "SELECT event_id, data, insertion_order FROM events WHERE tag = ?",
+                        (tag,),
+                    ).fetchone()
+                    if row is None or row[0] != event.id or row[1] != data:
+                        raise retry_exc
                     logger.info("store(%s): row already persisted before I/O error", tag)
+                    order = row[2]
                 except sqlite3.DatabaseError as retry_exc:
-                    # A double failure (I/O error then corruption on the
-                    # reconnected retry) must not escape unhandled either.
                     self._raise_for_db_error(tag, retry_exc)
-            except sqlite3.DatabaseError as e:
-                self._raise_for_db_error(tag, e)
+            except sqlite3.DatabaseError as exc:
+                self._raise_for_db_error(tag, exc)
+            self._insertion_counter = max(self._insertion_counter, order + 1)
             self._next_tag_num = max(self._next_tag_num, _tag_max_num(tag) + 1)
 
     def _raise_for_db_error(self, tag: str, exc: sqlite3.DatabaseError) -> typing.NoReturn:
@@ -356,8 +415,15 @@ class SQLiteEventBackend:
         logger.error("store(%s): database is corrupt — %s", tag, exc)
         raise CorruptDatabaseError(str(exc)) from exc
 
-    def _do_store(self, tag: str, event: EventBase, data: str, order: int) -> None:
+    def _do_store(self, tag: str, event: EventBase, data: str) -> int:
         with self._conn:
+            row = self._conn.execute(
+                "UPDATE event_sequence SET next_order = next_order + 1 "
+                "WHERE singleton = 1 RETURNING next_order - 1"
+            ).fetchone()
+            if row is None:
+                raise sqlite3.DatabaseError("event sequence is not initialized")
+            order = row[0]
             self._conn.execute(
                 "INSERT INTO events (tag, event_id, event_type, status, data, insertion_order) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
@@ -368,6 +434,7 @@ class SQLiteEventBackend:
                 "INSERT INTO active_tags (position, tag) VALUES (?, ?)",
                 (pos, tag),
             )
+        return order
 
     def _retry_on_io_error(self, fn: typing.Callable[[], typing.Any]) -> typing.Any:
         """Run *fn*; on disk I/O error, reconnect and retry once."""
@@ -515,7 +582,7 @@ class SQLiteEventBackend:
         with self._lock:
             try:
                 rows = self._conn.execute(
-                    "SELECT data FROM events ORDER BY insertion_order"
+                    "SELECT data FROM events ORDER BY insertion_order, rowid"
                 ).fetchall()
             except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
                 if not _is_corruption_error(e):
@@ -525,6 +592,54 @@ class SQLiteEventBackend:
         for (data,) in rows:
             if event := self._try_deserialize(data, context="all_events()"):
                 yield event
+
+    def iter_events(
+        self,
+        *,
+        event_type: str | None = None,
+        newest_first: bool = False,
+    ) -> Iterator[EventBase]:
+        """Stream a bounded snapshot using one-row keyset queries."""
+        order = "DESC" if newest_first else "ASC"
+        comparison = "<" if newest_first else ">"
+
+        try:
+            with self._lock:
+                row = self._conn.execute("SELECT MAX(insertion_order) FROM events").fetchone()
+            if row is None or row[0] is None:
+                return
+
+            upper_bound = row[0]
+            position = (upper_bound + 1, -1) if newest_first else (-1, -1)
+            batch_size = 128
+            while True:
+                sql = (
+                    "SELECT data, insertion_order, rowid FROM events "
+                    "WHERE insertion_order <= ? "
+                    f"AND (insertion_order, rowid) {comparison} (?, ?)"
+                )
+                params: tuple[int | str, ...] = (upper_bound, *position)
+                if event_type is not None:
+                    sql += " AND event_type = ?"
+                    params += (event_type,)
+                sql += f" ORDER BY insertion_order {order}, rowid {order} LIMIT ?"
+                params += (batch_size,)
+                with self._lock:
+                    rows = self._conn.execute(sql, params).fetchall()
+                if not rows:
+                    break
+                for data, insertion_order, rowid in rows:
+                    position = (insertion_order, rowid)
+                    event = self._try_deserialize(data, context="iter_events()")
+                    if event is not None:
+                        yield event
+        except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
+            if not _is_corruption_error(exc):
+                raise
+            logger.error(
+                "iter_events(): query failed due to corruption (%s)",
+                type(exc).__name__,
+            )
 
     def find_tag(self, event: EventBase) -> str | None:
         with self._lock:
@@ -546,7 +661,6 @@ class SQLiteEventBackend:
             with self._conn:
                 self._conn.execute("DELETE FROM events")
                 self._conn.execute("DELETE FROM active_tags")
-            self._insertion_counter = 0
             self._next_tag_num = 1
 
     def allocate_next_tag(self) -> str:

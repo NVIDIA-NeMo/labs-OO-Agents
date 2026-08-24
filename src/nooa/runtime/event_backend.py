@@ -301,6 +301,15 @@ class InMemoryBackend:
     def all_events(self) -> Iterator[EventBase]:
         return iter(self._events)
 
+    def iter_events(
+        self,
+        *,
+        event_type: str | None = None,
+        newest_first: bool = False,
+    ) -> Iterator[EventBase]:
+        events = reversed(self._events) if newest_first else iter(self._events)
+        return (event for event in events if event_type is None or event.event_type == event_type)
+
     def find_tag(self, event: EventBase) -> str | None:
         for tag, e in self._tag_to_event.items():
             if e is event or e.id == event.id:

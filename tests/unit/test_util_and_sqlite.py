@@ -515,14 +515,15 @@ class TestSQLiteEventBackendClear:
         assert len(backend) == 0
         assert backend.active_tags() == []
 
-    def test_clear_resets_insertion_counter(self):
+    def test_clear_preserves_monotonic_insertion_counter(self):
         from nooa.events import Message
 
         backend, _ = _make_backend()
         backend.store("t1", Message(content="a"))
+        next_order = backend._insertion_counter
         backend.clear()
-        # After clear, insertion counter resets to 0
-        assert backend._insertion_counter == 0
+
+        assert backend._insertion_counter == next_order
 
 
 class TestSQLiteEventBackendDeserialization:

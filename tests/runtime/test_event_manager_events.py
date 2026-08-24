@@ -222,6 +222,32 @@ class TestEventManagerQuery:
         assert recent[0].prompt == "Message 2"
         assert recent[2].prompt == "Message 4"
 
+    def test_filter_nonpositive_limit_returns_no_events(self):
+        manager = EventManager()
+        manager.add(Task(prompt="one"))
+
+        assert manager.filter(limit=0) == []
+        assert manager.filter(limit=-1) == []
+
+    def test_filter_supports_backends_without_optional_iterator(self):
+        from nooa.runtime.event_backend import InMemoryBackend
+
+        class LegacyBackend:
+            def __init__(self) -> None:
+                self._delegate = InMemoryBackend()
+
+            def __getattr__(self, name):
+                if name == "iter_events":
+                    raise AttributeError(name)
+                return getattr(self._delegate, name)
+
+        manager = EventManager(backend=LegacyBackend())
+        manager.add(Task(prompt="old"))
+        manager.add(LLMOutput(content="middle"))
+        manager.add(Task(prompt="new"))
+
+        assert [event.prompt for event in manager.filter(type="Task", limit=1)] == ["new"]
+
     def test_filter_returns_all_if_less_than_limit(self):
         """filter(limit=n) should return all if fewer than n events."""
         manager = EventManager()
