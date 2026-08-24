@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the opt-in experimental TUI agent."""
+"""Tests for the single-tool TUI agent."""
 
 import json
 
@@ -35,6 +35,33 @@ def test_cli_agent_spec_loads_experimental_tui_agent():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("legacy_agent", "expected_type"),
+    [(False, ExperimentalTUIAgent), (True, None)],
+)
+async def test_bootstrap_selects_default_or_legacy_agent(
+    legacy_agent, expected_type, tmp_path, monkeypatch
+):
+    from nooa_cli.tui import session_manager as session_manager_module
+    from nooa_cli.tui.agent import TUIAgent
+    from nooa_cli.tui.bootstrap import bootstrap
+    from nooa_cli.tui.config import Config
+
+    monkeypatch.setattr(session_manager_module, "SESSIONS_DIR", tmp_path / "sessions")
+    config = Config(legacy_agent=legacy_agent)
+    config.tui.default_model = "test-model"
+    config.agent.summarization.policy = "none"
+
+    result = await bootstrap(config)
+    try:
+        expected = TUIAgent if legacy_agent else expected_type
+        assert type(result.agent) is expected
+    finally:
+        await result.agent.close()
+        result.session_manager.close()
+
+
+@pytest.mark.asyncio
 async def test_experimental_tui_agent_uses_only_python_cell(tmp_path):
     llm = FakeLLMClient(
         scripted_responses=[
@@ -50,10 +77,13 @@ async def test_experimental_tui_agent_uses_only_python_cell(tmp_path):
         assert result.kind is RespondReason.DONE
         assert result.explanation == "request completed"
         assert [tool.name for tool in llm.last_tools or []] == ["python_cell"]
-        assert not any(
-            isinstance(event, ToolCallEvent) and event.name == "return_result"
+        completion_events = [
+            event
             for event in agent.event_manager.values()
-        )
+            if isinstance(event, ToolCallEvent) and event.name == "return_result"
+        ]
+        assert len(completion_events) == 1
+        assert completion_events[0].metadata["synthetic_type"] == "codeact_inline_return"
     finally:
         await agent.close()
 
@@ -63,6 +93,8 @@ async def test_experimental_tui_agent_delegates_to_experimental_worker(tmp_path)
     agent = ExperimentalTUIAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         assert agent._worker_type is ExperimentalCodingWorker
+        assert not hasattr(ExperimentalCodingWorker, "delegate")
+        assert not hasattr(ExperimentalCodingWorker, "spawn")
         assert (ExperimentalTUIAgent.__doc__ or "").startswith(
             "You are a careful software-development agent working in one local repository."
         )

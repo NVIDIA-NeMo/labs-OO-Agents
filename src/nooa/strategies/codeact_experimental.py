@@ -92,11 +92,6 @@ class CodeActExperimental(CodeActStrategy):
             return result.returned_value
         return None
 
-    def _record_completion(self, runtime: RuntimeServices, value: Any) -> None:
-        # The python_cell event already records the explicit return. Do not
-        # invent a synthetic return_result event for a tool this strategy lacks.
-        del runtime, value
-
     @strategy(TemplateStrategy())
     async def strategy_instructions(self, runtime: RuntimeServices) -> str:
         """

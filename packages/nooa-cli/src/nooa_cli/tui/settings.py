@@ -80,7 +80,7 @@ def _coerce_theme(value: Any) -> str:
 # Fields that are computed / runtime-only and must NOT be persisted or
 # applied from file (skills_dirs is derived from discovery + CLI in
 # Config.load; the no_* flags are per-invocation).
-_SKIP_FIELDS = {"tui.skills_dirs", "no_splash", "no_trace"}
+_SKIP_FIELDS = {"tui.skills_dirs", "no_splash", "no_trace", "legacy_agent"}
 
 
 def load_settings(cfg: Config) -> Config:

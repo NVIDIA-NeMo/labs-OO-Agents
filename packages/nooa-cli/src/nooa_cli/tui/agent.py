@@ -11,7 +11,7 @@ from nooa_cli.coding.agent import CodingAgent
 
 
 class TUIAgent(CodingAgent):
-    """The default coding agent hosted by the native terminal UI."""
+    """Legacy multi-tool coding agent retained for ``--legacy-agent``."""
 
     def __init__(self, *, config: Any | None = None, **kwargs: Any) -> None:
         cwd = Path(getattr(config, "working_dir", "."))

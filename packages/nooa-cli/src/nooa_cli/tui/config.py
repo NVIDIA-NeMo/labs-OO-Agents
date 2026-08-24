@@ -208,6 +208,7 @@ class Config(BaseModel):
     # Runtime flags (not persisted)
     no_splash: bool = False
     no_trace: bool = False
+    legacy_agent: bool = False
     # Explicit registry YAMLs supplied by the host. These are appended after
     # the discovered chain, so a command-line path has highest precedence.
     llm_config_paths: list[Path] = Field(default_factory=list)
@@ -232,6 +233,7 @@ class Config(BaseModel):
         "working_dir": "agent.working_dir",
         "no_splash": "no_splash",
         "no_trace": "no_trace",
+        "legacy_agent": "legacy_agent",
         "vi": "tui.vi_mode",
         "agent": "tui.agent_spec",
         "python": "tui.show_python",
@@ -253,6 +255,7 @@ class Config(BaseModel):
     _FLAG_OVERRIDES: ClassVar[set[str]] = {
         "no_splash",
         "no_trace",
+        "legacy_agent",
         "vi",
         "python",
         "full_screen",

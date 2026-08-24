@@ -56,10 +56,13 @@ async def test_explicit_return_completes_with_only_python_cell_tool():
     assert "Await `delegate(...)` only" in system_prompt
     assert "method defines a background-wait result" in system_prompt
     assert "Your two tools" not in system_prompt
-    assert not any(
-        isinstance(event, ToolCallEvent) and event.name == "return_result"
+    completion_events = [
+        event
         for event in agent.event_manager.values()
-    )
+        if isinstance(event, ToolCallEvent) and event.name == "return_result"
+    ]
+    assert len(completion_events) == 1
+    assert completion_events[0].metadata["synthetic_type"] == "codeact_inline_return"
 
 
 @pytest.mark.asyncio
@@ -121,10 +124,13 @@ async def test_return_result_is_available_inside_python_cells():
     # explicit Python return, it is not also a cell display value.
     assert outputs[0].value is None
     assert outputs[0].error == ""
-    assert not any(
-        isinstance(event, ToolCallEvent) and event.name == "return_result"
+    completion_events = [
+        event
         for event in agent.event_manager.values()
-    )
+        if isinstance(event, ToolCallEvent) and event.name == "return_result"
+    ]
+    assert len(completion_events) == 1
+    assert completion_events[0].metadata["synthetic_type"] == "codeact_inline_return"
 
 
 @pytest.mark.asyncio
