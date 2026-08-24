@@ -77,9 +77,11 @@ def _scaffold_settings(config: Config) -> None:
 
 def tui_agent_memory_key(agent: Agent, config: Config) -> str:
     """Return the stable settings key for an agent's memory preferences."""
-    if config.tui.agent_spec:
+    if config.tui.agent_spec and not config.legacy_agent:
         return config.tui.agent_spec
-    return f"{type(agent).__module__}:{type(agent).__qualname__}"
+    # Keep the historical built-in key so existing memory/reflection preferences
+    # continue to apply when the single-tool implementation becomes the default.
+    return "nooa_cli.tui.agent:TUIAgent"
 
 
 def resolve_tui_memory_owner(agent: Agent, config: Config) -> str:
@@ -90,6 +92,8 @@ def resolve_tui_memory_owner(agent: Agent, config: Config) -> str:
         return per_agent
     if config.tui.memory_owner:
         return config.tui.memory_owner
+    if key == "nooa_cli.tui.agent:TUIAgent":
+        return "TUIAgent"
     return type(agent).__name__
 
 
@@ -398,7 +402,7 @@ async def bootstrap(
             if resume_id is not None
             else SessionManager.create(
                 model=config.tui.default_model,
-                agent_cls="TUIAgent",
+                agent_cls=("TUIAgent" if config.legacy_agent else "ExperimentalTUIAgent"),
                 working_dir=str(config.agent.working_dir),
             )
         )
@@ -412,7 +416,7 @@ async def bootstrap(
         )
         session_manager = SessionManager.create(
             model=config.tui.default_model,
-            agent_cls="TUIAgent",
+            agent_cls=("TUIAgent" if config.legacy_agent else "ExperimentalTUIAgent"),
             working_dir=str(config.agent.working_dir),
         )
         resumed = False
@@ -422,9 +426,25 @@ async def bootstrap(
         set_trace_session(_make_trace_session_name(session_id))
 
     from .agent import TUIAgent
+    from .experimental_agent import ExperimentalTUIAgent
 
-    storage_kwargs = {"storage": session_manager._storage}
-    if config.tui.agent_spec:
+    def make_built_in_agent():
+        if config.legacy_agent:
+            return TUIAgent(
+                llm=llm,
+                config=config.agent,
+                skills_dirs=config.tui.skills_dirs,
+                storage=session_manager._storage,
+            )
+        return ExperimentalTUIAgent(
+            llm=llm,
+            cwd=config.agent.working_dir,
+            summarization=config.agent.summarization,
+            skills_dirs=config.tui.skills_dirs,
+            storage=session_manager._storage,
+        )
+
+    if config.tui.agent_spec and not config.legacy_agent:
         from .config import load_agent_class
         from .theme import COLORS
 
@@ -453,19 +473,9 @@ async def bootstrap(
                     TextOutput("Falling back to default coding agent", "info"),
                 )
             )
-            agent = TUIAgent(
-                llm=llm,
-                config=config.agent,
-                skills_dirs=config.tui.skills_dirs,
-                **storage_kwargs,
-            )
+            agent = make_built_in_agent()
     else:
-        agent = TUIAgent(
-            llm=llm,
-            config=config.agent,
-            skills_dirs=config.tui.skills_dirs,
-            **storage_kwargs,
-        )
+        agent = make_built_in_agent()
 
     restored = False
     if resumed:
@@ -501,7 +511,10 @@ async def bootstrap(
 
 
 def build_startup_info(result: BootstrapResult) -> Output:
+    from nooa_cli.coding.agent import CodingAgent
+
     from .agent import TUIAgent
+    from .experimental_agent import ExperimentalTUIAgent
     from .output import StartupInfo
     from .session import _short_model_name
 
@@ -532,15 +545,19 @@ def build_startup_info(result: BootstrapResult) -> Output:
         else _short_model_name(config.tui.default_model),
         working_dir=str(config.agent.working_dir),
         vi_mode=config.tui.vi_mode,
-        history_policy=(config.agent.summarization.policy if isinstance(agent, TUIAgent) else None),
+        history_policy=(
+            config.agent.summarization.policy if isinstance(agent, CodingAgent) else None
+        ),
         history_limit=(
-            config.agent.summarization.max_tokens if isinstance(agent, TUIAgent) else None
+            config.agent.summarization.max_tokens if isinstance(agent, CodingAgent) else None
         ),
         tracing_enabled=result.tracing_enabled,
         trace_dir=trace_dir,
         custom_agent=(
             type(agent).__name__
-            if config.tui.agent_spec and not isinstance(agent, TUIAgent)
+            if config.tui.agent_spec
+            and not config.legacy_agent
+            and not isinstance(agent, (TUIAgent, ExperimentalTUIAgent))
             else None
         ),
         llm_ready=llm_status == "ready",

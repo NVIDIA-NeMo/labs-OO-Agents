@@ -44,8 +44,8 @@ async def main(
 
     Args:
         config: Optional Config instance. If None, load layered defaults.
-        agent: Optional NOOA agent. If None, a TUIAgent (or custom class
-               from ``config.tui.agent_spec``) is created from ``config``.
+        agent: Optional NOOA agent. If None, the default single-tool coding agent,
+               legacy agent, or custom class selected by ``config`` is created.
                Custom hosts must implement the InteractiveAgent queue contract.
         resume_session_id: Explicit session ID (or prefix) to resume.
     """

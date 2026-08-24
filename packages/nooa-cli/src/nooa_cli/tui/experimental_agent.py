@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Opt-in TUI agent using the experimental single-tool CodeAct strategy."""
+"""Default TUI agent using the single-tool CodeAct strategy."""
 
 from __future__ import annotations
 
@@ -35,8 +35,13 @@ class ExperimentalCodingWorker(CodingWorker):
 
         Read relevant files before drawing conclusions. Make edits only when the
         objective explicitly requests implementation. Report modified paths. Name each
-        verification command and its observed outcome; if none ran, state why. Return
-        concise findings or changes rather than a raw transcript.
+        verification command and its observed outcome; if none ran, state why. For a
+        delegated Todo, ``supplied_context`` is either that Todo or a mapping with
+        ``"todo"`` and supplemental ``"context"`` entries. In the mapping form, use
+        ``todo = supplied_context["todo"]`` for Todo operations and inspect
+        ``supplied_context["context"]`` separately. Record findings on that Todo through
+        ``self.todo``. Return concise findings or changes rather than a
+        raw transcript.
         """
         ...
 
