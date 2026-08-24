@@ -9,8 +9,9 @@ from typing import Any
 from nooa import hidden, strategy
 from nooa.config import CodeActConfig
 from nooa.interactive import RespondResult
-from nooa.strategies.codeact_experimental import CodeActExperimental
+from nooa.strategies import CodeActExperimental
 from nooa_cli.coding.agent import CodingAgent
+from nooa_cli.coding.context_rendering import SafeDelegationPrefill
 from nooa_cli.coding.delegation import CodingWorker
 
 
@@ -27,6 +28,7 @@ class ExperimentalCodingWorker(CodingWorker):
             config=CodeActConfig(
                 max_retries=6,
                 text_only_stop_behavior="synthetic_comment",
+                prefill=SafeDelegationPrefill(),
             )
         )
     )
@@ -52,8 +54,11 @@ class ExperimentalTUIAgent(CodingAgent):
     Inspect repository instructions and relevant code before editing. Preserve
     unrelated worktree changes. Use ``spawn(objective, supplied_context)`` for
     bounded, context-heavy work. It returns immediately; prefer it over awaiting
-    ``delegate()`` when the report is not needed before you continue. Reports arrive
-    in ``notification["delegates"]`` as dictionaries with ``objective`` and ``report``.
+    ``delegate()`` when the report is not needed before you continue. Run concurrent
+    delegates only for read-only work or when each mutating worker has its own isolated
+    worktree; otherwise serialize mutations because workers share the current checkout.
+    Reports arrive in ``notification["delegates"]`` as dictionaries with ``objective``
+    and ``report``.
     If a report is the only remaining dependency, finish that turn with an in-cell
     ``return_result(RespondReason.WAIT, explanation="...")``. Inspect reports before
     final verification.

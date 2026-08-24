@@ -20,7 +20,7 @@ def _response(code: str) -> LLMResponse:
         tool_calls=[
             ToolCall(
                 id="call_1",
-                name="python_cell",
+                name="execute_python",
                 arguments=json.dumps({"code": code}),
             )
         ],
@@ -62,7 +62,7 @@ async def test_bootstrap_selects_default_or_legacy_agent(
 
 
 @pytest.mark.asyncio
-async def test_experimental_tui_agent_uses_only_python_cell(tmp_path):
+async def test_experimental_tui_agent_uses_only_execute_python(tmp_path):
     llm = FakeLLMClient(
         scripted_responses=[
             _response(
@@ -76,7 +76,7 @@ async def test_experimental_tui_agent_uses_only_python_cell(tmp_path):
         result = await agent.handle({"user_messages": ["inspect the repository"]})
         assert result.kind is RespondReason.DONE
         assert result.explanation == "request completed"
-        assert [tool.name for tool in llm.last_tools or []] == ["python_cell"]
+        assert [tool.name for tool in llm.last_tools or []] == ["execute_python"]
         completion_events = [
             event
             for event in agent.event_manager.values()
@@ -101,5 +101,6 @@ async def test_experimental_tui_agent_delegates_to_experimental_worker(tmp_path)
         assert "prefer it over awaiting" in (ExperimentalTUIAgent.__doc__ or "")
         assert "RespondReason.WAIT" in (ExperimentalTUIAgent.__doc__ or "")
         assert 'notification["delegates"]' in (ExperimentalTUIAgent.__doc__ or "")
+        assert "serialize mutations" in (ExperimentalTUIAgent.__doc__ or "")
     finally:
         await agent.close()

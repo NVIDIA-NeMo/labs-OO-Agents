@@ -21,7 +21,7 @@ from nooa.paths import get_project_dir
 from nooa.runtime.channels import JobHandle, _ChannelReader
 from nooa.skill_registry import SkillRegistry
 from nooa.storage.markers import nosnapshot
-from nooa.strategies import CodeActStrategy, PredictStrategy
+from nooa.strategies import CodeActStrategy
 from nooa.tools import MethodWriting, SkillWriting, Todo, TodoManager
 from nooa.tools.shell_tools import ShellTools
 from nooa_cli.coding.activity import ActivityShellTools
@@ -44,7 +44,9 @@ class CodingAgent(InteractiveAgent):
     tools for definitions and references, and todos for multi-step work. Use
     ``spawn(objective, supplied_context)`` for bounded context-heavy work. It
     returns immediately; prefer it over awaiting ``delegate()`` when the report is
-    not needed before you continue. Reports arrive in later ``delegates``
+    not needed before you continue. Run concurrent delegates only for read-only work
+    or when each mutating worker has its own isolated worktree; otherwise serialize
+    mutations because workers share the current checkout. Reports arrive in later ``delegates``
     notifications under ``notification["delegates"]`` as dictionaries containing
     ``objective`` and ``report``. Inspect and integrate them before final verification.
 
@@ -64,6 +66,7 @@ class CodingAgent(InteractiveAgent):
     # a later skill — a workspace SKILL.md, a client-forwarded MCP server —
     # take one over, which would remove the tool while the model is still told
     # it has it.
+
     __protected_skill_attrs__ = frozenset({"shell", "repo", "todo", "libs", "skills"})
 
     cwd: Annotated[Path, nosnapshot]
@@ -114,6 +117,7 @@ class CodingAgent(InteractiveAgent):
         # project it means, or every session shares one directory — and
         # SkillWriting puts it on sys.path and activates local.*, so that
         # would expose one workspace's agent-authored code to another.
+
         self.libs = SkillWriting(self, path=libs_dir or get_project_dir("libs"))
 
         self.skills = SkillRegistry(self)
@@ -182,13 +186,14 @@ class CodingAgent(InteractiveAgent):
 
         Use delegation for bounded exploration, diagnosis, review, or independently
         verifiable implementation. Workers do not expose ``delegate()`` or ``spawn()``,
-        so coding-agent delegation is intentionally single-level. Await this only when
-        its report is required before continuing; otherwise prefer ``spawn()``. Inspect
-        and integrate the report because this controller retains final verification
-        ownership.
+        so coding-agent delegation is intentionally single-level. Concurrent workers are
+        safe for read-only work; serialize edits unless each worker has an isolated
+        worktree supplied in its task context. Await this only when its report is required
+        before continuing; otherwise prefer ``spawn()``. Inspect and integrate the report
+        because this controller retains final verification ownership.
         """
-        todo_base = self.todo._copy_todo(objective) if isinstance(objective, Todo) else None
-        worker_todos = TodoManager._with_todo(todo_base) if todo_base is not None else None
+        todo_base = self.todo.copy_todo(objective) if isinstance(objective, Todo) else None
+        worker_todos = TodoManager.with_todo(todo_base) if todo_base is not None else None
         worker = self._worker_type(
             llm=self.llm,
             cwd=self.shell.cwd,
@@ -207,7 +212,7 @@ class CodingAgent(InteractiveAgent):
         finally:
             await worker.close()
         if todo_base is not None:
-            self.todo._merge_todo(updated, base=todo_base)
+            self.todo.merge_todo(updated, base=todo_base)
         return report
 
     async def _delegation_report(
@@ -246,7 +251,8 @@ class CodingAgent(InteractiveAgent):
 
         Prefer this over awaiting ``delegate()`` when the report is not required before
         continuing. State the outcome, scope, and whether edits are allowed in
-        ``objective``. Continue useful controller work while it runs. Its report arrives
+        ``objective``. Only overlap read-only workers or workers assigned separate
+        worktrees; serialize edits in one checkout. Continue useful controller work while it runs. Its report arrives
         in a later ``delegates`` notification. If the report is the only remaining
         dependency, finish the current turn with ``WAIT``; inspect and integrate the
         later report before final verification. Each notification item is
