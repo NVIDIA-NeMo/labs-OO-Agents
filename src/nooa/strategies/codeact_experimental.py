@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 class CodeActExperimental(CodeActStrategy):
     """Single-provider-tool CodeAct variant with in-cell completion.
 
-    The model receives only ``python_cell`` as a provider tool. ``return_result``
+    The model receives only ``execute_python`` as a provider tool. ``return_result``
     remains available inside Python cells, where it completes the task. Bare
     expressions do not complete the task, and trailing strings are suppressed
     to avoid echoing prose as if it were a result.
@@ -73,7 +73,7 @@ class CodeActExperimental(CodeActStrategy):
         )
 
     def _python_tool_name(self) -> str:
-        return "python_cell"
+        return "execute_python"
 
     def _build_tools(self, return_type: Any, method_name: str) -> list[Any]:
         del return_type, method_name
@@ -83,7 +83,7 @@ class CodeActExperimental(CodeActStrategy):
         return False
 
     def _available_tool_names(self) -> str:
-        return "python_cell"
+        return "execute_python"
 
     def _python_output_value(self, result: Any) -> Any:
         if result.has_return and not result.error:
@@ -101,10 +101,10 @@ class CodeActExperimental(CodeActStrategy):
         and names defined in one cell remain available in later cells. Use `await`
         directly, `print`/`pprint` to inspect values, and `doc(obj)` for APIs.
 
-        **Your only tool is `python_cell(code)`.** You must call it each turn;
+        **Your only tool is `execute_python(code)`.** You must call it each turn;
         plain-text replies do not execute work or finish the task.
 
-        To finish, call `return_result(value)` inside `python_cell`; this immediately
+        To finish, call `return_result(value)` inside `execute_python`; this immediately
         submits a value matching the method's annotated return type. A bare final
         expression does not finish the task. In particular, a trailing string is not
         shown; use `print(text)` when you want to inspect prose before submitting it.
@@ -131,7 +131,7 @@ class CodeActExperimental(CodeActStrategy):
 
     @strategy(TemplateStrategy())
     async def _tool_use_reminder(self, runtime: RuntimeServices, reason: str) -> str:
-        """{reason} Call `python_cell(code)`. To finish, call `return_result(value)` inside the cell."""
+        """{reason} Call `execute_python(code)`. To finish, call `return_result(value)` inside the cell."""
         ...
 
     @staticmethod
@@ -140,9 +140,9 @@ class CodeActExperimental(CodeActStrategy):
             Error(
                 content=(
                     "Your last reply was plain text with no tool call, so it was dropped. "
-                    f"To finish `{call.method_name}`, call `python_cell` with "
+                    f"To finish `{call.method_name}`, call `execute_python` with "
                     "`return_result(value)` inside the cell. To continue working, "
-                    "call `python_cell` with the next computation."
+                    "call `execute_python` with the next computation."
                 )
             )
         )

@@ -10,6 +10,7 @@ from contextvars import ContextVar
 from nooa.config import CodeActConfig
 from nooa.strategies.base import GenerationStrategy, RuntimeServices
 from nooa.strategies.codeact import CodeActStrategy
+from nooa.strategies.codeact_experimental import CodeActExperimental
 from nooa.strategies.codeact_lite import CodeActLiteStrategy
 from nooa.strategies.composite import CompositeStrategy
 from nooa.strategies.current_call import CurrentCall
@@ -91,6 +92,7 @@ __all__ = [
     "CompositeStrategy",
     "TemplateStrategy",
     "CodeActStrategy",
+    "CodeActExperimental",
     "CodeActLiteStrategy",
     "ReflexionStrategy",
     "PredictStrategy",
