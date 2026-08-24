@@ -599,7 +599,11 @@ class Completer:
         if etype == "ToolCallEvent":
             name = getattr(event, "name", "?")
             args = getattr(event, "arguments", {})
-            if name == "execute_python" and isinstance(args, dict) and "code" in args:
+            if (
+                name in {"execute_python", "python_cell"}
+                and isinstance(args, dict)
+                and "code" in args
+            ):
                 for line in args["code"].split("\n"):
                     s = line.strip()
                     if s and not s.startswith("#"):

@@ -51,10 +51,15 @@ def _working_directory_project_scope(working_dir: str):
     default=None,
     metavar="MODULE:CLASS",
     help=(
-        "Custom agent class instead of TUIAgent. "
+        "Custom agent class instead of the default coding agent. "
         "Format: 'module.path:ClassName' or './file.py:ClassName'. "
         "CodingAgent subclasses receive the configured workspace and skills."
     ),
+)
+@click.option(
+    "--legacy-agent",
+    is_flag=True,
+    help="Use the legacy multi-tool TUIAgent instead of the default single-tool agent.",
 )
 @click.option(
     "--working-dir",
@@ -132,6 +137,7 @@ def _working_directory_project_scope(working_dir: str):
 def command(
     model: str | None,
     agent_spec: str | None,
+    legacy_agent: bool,
     working_dir: str,
     mcp_file: str | None,
     llm_config_paths: tuple[Path, ...],
@@ -158,8 +164,12 @@ def command(
         nooa tui --mcp-file .mcp.json
         nooa tui --llm-config .nooa/llm_config.yaml
         nooa tui --agent internal_agents:CodingAgent
+        nooa tui --legacy-agent
         nooa tui --vi
     """
+    if legacy_agent and agent_spec is not None:
+        raise click.UsageError("--legacy-agent cannot be combined with --agent")
+
     # Lazy imports preserve the fast path for every other ``nooa`` command.
     from nooa_cli.tui.config import Config
     from nooa_cli.tui.main import main as tui_main
@@ -168,6 +178,7 @@ def command(
         config = Config.load(
             model=model,
             agent=agent_spec,
+            legacy_agent=legacy_agent,
             working_dir=working_dir,
             mcp_file=Path(mcp_file) if mcp_file else None,
             llm_config=list(llm_config_paths) or None,

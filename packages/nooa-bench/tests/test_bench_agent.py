@@ -292,6 +292,8 @@ def test_bounded_worker_has_only_task_local_todos_and_no_persistent_vars(tmp_pat
     worker = CodingWorker(llm=FakeLLMClient(), cwd=tmp_path)
     assert worker.todo.list_todos() == []
     assert not hasattr(CodingWorker, "v")
+    assert not hasattr(CodingWorker, "delegate")
+    assert not hasattr(CodingWorker, "spawn")
 
 
 def test_variants_share_identity_and_document_delegation_hierarchy():
@@ -321,6 +323,7 @@ async def test_delegate_launches_isolated_subagent_of_same_type(agent_type, monk
             description=description,
             cwd=str(self.shell.cwd),
             depth=self._delegation_depth,
+            max_depth=self._max_delegation_depth,
         )
         return expected
 
@@ -345,6 +348,7 @@ async def test_delegate_launches_isolated_subagent_of_same_type(agent_type, monk
     assert "Investigate empty parser input" in observed["description"]
     assert observed["cwd"] == str(tmp_path)
     assert observed["depth"] == 1
+    assert observed["max_depth"] == 4
     assert observed["closed"] is True
 
 
@@ -411,10 +415,11 @@ async def test_delegate_todo_does_not_merge_when_close_fails(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_delegate_rejects_unbounded_recursion(monkeypatch, tmp_path):
+@pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
+async def test_delegate_rejects_unbounded_recursion(agent_type, monkeypatch, tmp_path):
     monkeypatch.setattr(bench_agent_module, "ShellTools", _FakeShell)
     monkeypatch.setattr(bench_agent_module, "RepoTools", _FakeRepo)
-    agent = BenchAgent(
+    agent = agent_type(
         llm=FakeLLMClient(),
         working_dir=str(tmp_path),
         delegation_depth=2,
