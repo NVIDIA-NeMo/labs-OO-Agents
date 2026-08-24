@@ -24,10 +24,14 @@ from nooa.skill import Skill, _find_skill_md, _parse_frontmatter
 _RESERVED_METHOD_NAMES = {
     "run_resource_script",
     "read_resource",
+    "read_resource_bytes",
     "list_resources",
+    "format_guidance",
     "_resource_root",
     "_list_resources",
     "_read_resource",
+    "_read_resource_bytes",
+    "_format_resource_index",
     *(name for name in dir(Skill) if not name.startswith("_")),
 }
 
@@ -912,18 +916,37 @@ def _build_docstring(inventory: TextSkillInventory, script_methods: list[ScriptM
         title,
         "",
         "Package-native skill translated from a traditional TextSkill.",
-        "Use the public Python methods on this skill instead of invoking scripts or subprocesses.",
+        "The original TextSkill guidance is preserved below. Follow it as the authoritative skill instructions.",
     ]
+    if inventory.body.strip():
+        lines.extend(["", "Original TextSkill guidance:", inventory.body.strip()])
     public_methods = _public_method_guidance(script_methods)
     if public_methods:
-        lines.extend(["", "Public APIs:", *public_methods])
+        lines.extend(
+            [
+                "",
+                "Generated public APIs:",
+                *public_methods,
+                "",
+                "Use these public Python methods instead of invoking bundled scripts or subprocesses.",
+            ]
+        )
     else:
         lines.extend(
             [
                 "",
-                "No public script APIs were inferred. This package only carries private bundled resources for package code.",
+                "No public script APIs were inferred. Use the guidance above and the resource helpers when bundled resources are relevant.",
             ]
         )
+    lines.extend(
+        [
+            "",
+            "Resource helpers:",
+            "- list_resources() -> list[str]: list bundled non-script resource paths.",
+            "- read_resource(path: str) -> str: read a bundled text resource.",
+            "- read_resource_bytes(path: str) -> bytes: read a bundled binary resource.",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -1000,6 +1023,10 @@ def _render_readme(plan: ConversionPlan) -> str:
         Non-script TextSkill resources are bundled under package resources.
         Scripts are bundled only when needed as private Python implementation
         modules for generated package APIs.
+
+        ## Original TextSkill guidance
+
+        {textwrap.indent(plan.docstring, "        ")}
     """)
 
 
@@ -1161,6 +1188,8 @@ def _render_init(plan: ConversionPlan) -> str:
     if methods:
         methods = "\n" + methods
     docstring = textwrap.indent(_triple_quoted(plan.docstring), "    ")
+    context_key = f"skill:{plan.registry_name}"
+    attr_name = plan.registry_name.split(".")[-1].replace("-", "_")
     template = textwrap.dedent(f'''\
         from __future__ import annotations
 
@@ -1172,6 +1201,8 @@ def _render_init(plan: ConversionPlan) -> str:
 
         class {plan.class_name}(Skill):
         __DOCSTRING__
+
+            context_block = ({context_key!r}, "self.{attr_name}.format_guidance()")
 
             def _resource_root(self):
                 return resources.files(__package__) / "{plan.resource_prefix}"
@@ -1187,13 +1218,40 @@ def _render_init(plan: ConversionPlan) -> str:
 
             def _read_resource(self, path: str) -> str:
                 """Read a bundled resource as text."""
+                return self._read_resource_bytes(path).decode()
+
+            def _read_resource_bytes(self, path: str) -> bytes:
+                """Read a bundled resource as bytes."""
                 root = Path(self._resource_root()).resolve()
                 resolved = (root / path).resolve()
                 if not resolved.is_relative_to(root):
                     raise ValueError(f"Path {{path!r}} escapes package resources")
                 if not resolved.is_file():
                     raise FileNotFoundError(path)
-                return resolved.read_text()
+                return resolved.read_bytes()
+
+            def list_resources(self) -> list[str]:
+                """List bundled non-script resource paths from the original TextSkill."""
+                return self._list_resources()
+
+            def read_resource(self, path: str) -> str:
+                """Read a bundled text resource from the original TextSkill."""
+                return self._read_resource(path)
+
+            def read_resource_bytes(self, path: str) -> bytes:
+                """Read a bundled binary resource from the original TextSkill."""
+                return self._read_resource_bytes(path)
+
+            def format_guidance(self) -> str:
+                """Return the preserved TextSkill guidance and bundled resource index."""
+                resource_index = self._format_resource_index()
+                if resource_index:
+                    return type(self).__doc__ + "\\n\\nBundled resources:\\n" + resource_index
+                return type(self).__doc__ or ""
+
+            def _format_resource_index(self) -> str:
+                resources = self._list_resources()
+                return "\\n".join(f"- {{path}}" for path in resources)
 
         __METHODS__
     ''')
@@ -1638,9 +1696,12 @@ def _render_tests(plan: ConversionPlan) -> str:
         "def test_skill_instantiates_and_lists_resources():",
         f"    skill = {plan.class_name}()",
         "    visible_doc = doc(skill)",
-        "    assert 'list_resources' not in visible_doc",
-        "    assert 'read_resource' not in visible_doc",
+        "    assert 'list_resources' in visible_doc",
+        "    assert 'read_resource' in visible_doc",
+        "    assert 'Original TextSkill guidance' in visible_doc",
         "    assert 'run_resource_script' not in visible_doc",
+        "    assert isinstance(skill.list_resources(), list)",
+        "    assert isinstance(skill.format_guidance(), str)",
     ]
     if plan.script_methods:
         for method in plan.script_methods:

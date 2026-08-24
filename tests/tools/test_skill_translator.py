@@ -317,7 +317,7 @@ async def test_translate_writes_valid_package_without_archiving_raw_scripts(tmp_
     assert (result.package_dir / "src" / "hello_skill" / "__init__.py").exists()
     generated_text = _generated_text(result.package_dir)
     assert "No import-safe public functions or supported argparse API could be inferred" not in generated_text
-    assert "Use this skill to greet people" not in generated_text
+    assert "Use this skill to greet people" in generated_text
     generated_tests = _run_generated_tests(result.package_dir)
     assert generated_tests.returncode == 0, generated_tests.stdout + generated_tests.stderr
 
@@ -328,11 +328,14 @@ async def test_translate_writes_valid_package_without_archiving_raw_scripts(tmp_
         skill = registry[result.registry_name]
         assert "references/notes.txt" in skill._list_resources()
         assert skill._read_resource("references/notes.txt") == "reference notes\n"
+        assert "references/notes.txt" in skill.list_resources()
+        assert skill.read_resource("references/notes.txt") == "reference notes\n"
         visible_doc = doc(skill)
         assert "run_resource_script" not in visible_doc
         assert "run_hello" not in visible_doc
-        assert "list_resources" not in visible_doc
-        assert "read_resource" not in visible_doc
+        assert "list_resources" in visible_doc
+        assert "read_resource" in visible_doc
+        assert "Use this skill to greet people" in visible_doc
         assert not hasattr(skill, "run_hello")
     finally:
         await registry.aclose()
@@ -361,8 +364,8 @@ async def test_translated_importable_script_has_function_api_methods(tmp_path):
         assert "def label(" in visible_doc
         assert "run_math_tools" not in visible_doc
         assert "run_resource_script" not in visible_doc
-        assert "list_resources" not in visible_doc
-        assert "read_resource" not in visible_doc
+        assert "list_resources" in visible_doc
+        assert "read_resource" in visible_doc
         assert skill.add(3, y=4) == 7
         assert skill.label("item") == "label:item"
         assert skill.neighbors(10) == [(9, 0), (11, 0)]
@@ -428,11 +431,11 @@ async def test_translated_argparse_script_has_named_api_method(tmp_path):
     assert "def search(" in init_source
     assert "def run_search(" not in init_source
     assert "run_resource_script" not in init_source
-    assert "Original SKILL.md guidance" not in init_source
-    assert "Use this skill to search records" not in init_source
-    assert "Use the public Python methods" in init_source
+    assert "Original TextSkill guidance" in init_source
+    assert "Use this skill to search records" in init_source
+    assert "Use these public Python methods" in init_source
     assert "search(path: str, query: str, limit: int | None = 10, dry_run: bool = False) -> str" in init_source
-    assert "Use this skill to search records" not in _generated_text(result.package_dir)
+    assert "Use this skill to search records" in _generated_text(result.package_dir)
 
     registry = SkillRegistry(_Agent())
     registry.discover_libs(result.package_dir.parent)
@@ -442,8 +445,8 @@ async def test_translated_argparse_script_has_named_api_method(tmp_path):
         assert "def search(" in visible_doc
         assert "run_search" not in visible_doc
         assert "run_resource_script" not in visible_doc
-        assert "list_resources" not in visible_doc
-        assert "read_resource" not in visible_doc
+        assert "list_resources" in visible_doc
+        assert "read_resource" in visible_doc
         assert not hasattr(skill, "run_search")
         output = skill.search("records.jsonl", "needle", limit=3, dry_run=True)
         assert json.loads(output) == {
