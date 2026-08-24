@@ -153,11 +153,24 @@ def test_manager_rejects_non_todo_non_string_references() -> None:
         tm.get(42)  # type: ignore[arg-type]
 
 
+def test_delegation_transfer_methods_are_public_but_hidden() -> None:
+    from nooa.agentdoc import doc
+
+    tm = TodoManager()
+    assert callable(tm.copy_todo)
+    assert callable(tm.with_todo)
+    assert callable(tm.merge_todo)
+    rendered = doc(tm)
+    assert "copy_todo" not in rendered
+    assert "with_todo" not in rendered
+    assert "merge_todo" not in rendered
+
+
 def test_delegation_copy_is_independent_and_merge_preserves_identity() -> None:
     tm = TodoManager()
     original = tm.add("review", notes="start", nested={"values": [1]})
     tm.comment(original, "controller baseline")
-    base = tm._copy_todo(original)
+    base = tm.copy_todo(original)
     worker = base.model_copy(deep=True)
 
     worker.notes = "worker notes"
@@ -165,7 +178,7 @@ def test_delegation_copy_is_independent_and_merge_preserves_identity() -> None:
     worker.v.result = {"file": "parser.py"}
     worker.comments.append(TodoComment(body="worker finding"))
 
-    merged = tm._merge_todo(worker, base=base)
+    merged = tm.merge_todo(worker, base=base)
 
     assert merged is original
     assert original.notes == "worker notes"
@@ -180,7 +193,7 @@ def test_delegation_copy_is_independent_and_merge_preserves_identity() -> None:
 def test_delegation_merge_preserves_unrelated_controller_changes() -> None:
     tm = TodoManager()
     original = tm.add("review", controller="initial")
-    base = tm._copy_todo(original)
+    base = tm.copy_todo(original)
     worker = base.model_copy(deep=True)
 
     original.v.controller = "new"
@@ -188,7 +201,7 @@ def test_delegation_merge_preserves_unrelated_controller_changes() -> None:
     tm.comment(original, "controller note")
     worker.comments.append(TodoComment(body="worker note"))
 
-    tm._merge_todo(worker, base=base)
+    tm.merge_todo(worker, base=base)
 
     assert original.v.controller == "new"
     assert original.v.worker == "finding"
@@ -201,13 +214,13 @@ def test_delegation_merge_preserves_unrelated_controller_changes() -> None:
 def test_delegation_merge_rejects_conflicting_field_changes() -> None:
     tm = TodoManager()
     original = tm.add("review")
-    base = tm._copy_todo(original)
+    base = tm.copy_todo(original)
     worker = base.model_copy(deep=True)
     original.notes = "controller notes"
     worker.notes = "worker notes"
 
     with pytest.raises(ValueError, match="conflicting 'notes' changes"):
-        tm._merge_todo(worker, base=base)
+        tm.merge_todo(worker, base=base)
 
 
 def test_manager_preserves_id_keyword_compatibility() -> None:
@@ -232,7 +245,7 @@ def test_manager_preserves_id_keyword_compatibility() -> None:
 def test_delegation_merge_conflict_is_atomic() -> None:
     tm = TodoManager()
     original = tm.add("review", notes="base")
-    base = tm._copy_todo(original)
+    base = tm.copy_todo(original)
     worker = base.model_copy(deep=True)
     worker.title = "worker title"
     worker.notes = "worker notes"
@@ -241,7 +254,7 @@ def test_delegation_merge_conflict_is_atomic() -> None:
     original.notes = "controller notes"
 
     with pytest.raises(ValueError, match="conflicting 'notes' changes"):
-        tm._merge_todo(worker, base=base)
+        tm.merge_todo(worker, base=base)
 
     assert original.title == "review"
     assert original.notes == "controller notes"
@@ -252,14 +265,14 @@ def test_delegation_merge_conflict_is_atomic() -> None:
 def test_delegation_merge_keeps_equal_concurrent_comments() -> None:
     tm = TodoManager()
     original = tm.add("review")
-    base = tm._copy_todo(original)
+    base = tm.copy_todo(original)
     worker = base.model_copy(deep=True)
     controller_comment = TodoComment(body="same", created_at="2026-01-01 00:00")
     worker_comment = TodoComment(body="same", created_at="2026-01-01 00:00")
     original.comments.append(controller_comment)
     worker.comments.append(worker_comment)
 
-    tm._merge_todo(worker, base=base)
+    tm.merge_todo(worker, base=base)
 
     assert [comment.id for comment in original.comments] == [
         controller_comment.id,
