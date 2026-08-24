@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import inspect
+import re
 
 from nooa.runtime.context import ContextApi
 from nooa.runtime.events import EventsApi
@@ -30,7 +31,7 @@ def test_method_writing_lib_has_library_docstring():
     assert "@strategy(PredictStrategy())" in docstring
     assert "asyncio.gather" in docstring
     assert "doc(self.methodwriting)" in docstring
-    assert "{{param}}" not in docstring
+    assert re.search(r"\{\{[A-Za-z_][A-Za-z0-9_]*\}\}", docstring) is None
 
 
 def test_method_writing_lib_is_instantiable():
