@@ -1,0 +1,86 @@
+{
+    "reportFormat": "CTRF",
+    "specVersion": "0.0.0",
+    "timestamp": "2026-08-22T09:35:47.232238+00:00",
+    "generatedBy": "pytest",
+    "results": {
+        "tool": {
+            "name": "pytest",
+            "version": "8.3.4"
+        },
+        "summary": {
+            "tests": 6,
+            "passed": 5,
+            "failed": 1,
+            "skipped": 0,
+            "pending": 0,
+            "other": 0,
+            "start": 1787391324492,
+            "stop": 1787391347231
+        },
+        "environment": {
+            "buildName": "Pytest JSON CTRF Report",
+            "buildNumber": "000",
+            "buildUrl": "https://ctrf.io"
+        },
+        "tests": [
+            {
+                "name": "::TestFlickerFixed::test_no_theme_flicker",
+                "status": "failed",
+                "raw_status": "call_failed",
+                "duration": 420,
+                "start": 1787391324615,
+                "stop": 1787391325035,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py",
+                "trace": "self = <test_outputs.TestFlickerFixed object at 0xffffb782b590>\n\n    def test_no_theme_flicker(self):\n        \"\"\"Theme should be applied fast enough to prevent visible flicker.\"\"\"\n        with sync_playwright() as p:\n            browser = p.chromium.launch(headless=True)\n            page = browser.new_page()\n    \n            # Check if there's an inline script that applies theme before React hydration\n            page.goto(\"http://localhost:3000\", wait_until=\"domcontentloaded\")\n    \n            # Look for inline script pattern that prevents flicker:\n            # - Should read localStorage('theme') and apply styles/class/attribute\n            # - In Next.js, this is added via dangerouslySetInnerHTML\n            has_theme_script = page.evaluate(\"\"\"\n                () => {\n                    // Check all inline scripts on the page\n                    const scripts = document.querySelectorAll('script');\n                    for (const script of scripts) {\n                        const content = script.textContent || script.innerHTML || '';\n                        // Check for pattern: reads theme from localStorage and applies it\n                        // This covers dangerouslySetInnerHTML patterns in Next.js\n                        if (content.includes('localStorage') &&\n                            content.includes('theme') &&\n                            (content.includes('classList') || content.includes('className') ||\n                             content.includes('setAttribute') || content.includes('data-theme') ||\n                             content.includes('getElementById') || content.includes('style'))) {\n                            return true;\n                        }\n                    }\n                    return false;\n                }\n            \"\"\")\n            browser.close()\n    \n>       assert has_theme_script, \\\n            \"Missing theme flicker prevention. Add inline <script> in <head> to apply theme from localStorage before React hydrates.\"\nE       AssertionError: Missing theme flicker prevention. Add inline <script> in <head> to apply theme from localStorage before React hydrates.\nE       assert False\n\n/verifier/test_outputs.py:42: AssertionError",
+                "message": "The test failed in the call phase due to an assertion error"
+            },
+            {
+                "name": "::TestPerformanceMetrics::test_cls_acceptable",
+                "status": "passed",
+                "duration": 12414,
+                "start": 1787391325035,
+                "stop": 1787391337449,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestAppFunctions::test_app_responds_200",
+                "status": "passed",
+                "duration": 10,
+                "start": 1787391337449,
+                "stop": 1787391337459,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestAppFunctions::test_products_render",
+                "status": "passed",
+                "duration": 3275,
+                "start": 1787391337459,
+                "stop": 1787391340734,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestFontLoading::test_foit_prevented",
+                "status": "passed",
+                "duration": 3235,
+                "start": 1787391340734,
+                "stop": 1787391343969,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestImageDimensions::test_images_no_cls",
+                "status": "passed",
+                "duration": 3262,
+                "start": 1787391343969,
+                "stop": 1787391347231,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            }
+        ]
+    }
+}

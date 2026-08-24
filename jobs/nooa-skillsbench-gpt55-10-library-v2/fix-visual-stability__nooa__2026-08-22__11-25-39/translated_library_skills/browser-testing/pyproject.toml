@@ -1,0 +1,18 @@
+[project]
+name = "browser-testing"
+version = "0.1.0"
+description = "VERIFY your changes work. Measure CLS, detect theme flicker, test visual stability, check performance. Use BEFORE and AFTER making changes to confirm fixes. Includes ready-to-run scripts: measure-cls.ts, detect-flicker.ts"
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+browser_testing = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.browser-testing" = "browser_testing:BrowserTesting"

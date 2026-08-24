@@ -1,0 +1,125 @@
+{
+    "results": {
+        "tool": {
+            "name": "pytest",
+            "version": "8.4.1"
+        },
+        "summary": {
+            "tests": 11,
+            "passed": 9,
+            "failed": 2,
+            "skipped": 0,
+            "pending": 0,
+            "other": 0,
+            "start": 1787392259.0432136,
+            "stop": 1787392259.6440682
+        },
+        "tests": [
+            {
+                "name": "::TestGroundTruthConsistency::test_motion_gt_covers_each_gt_mask",
+                "status": "passed",
+                "duration": 0.01753958297194913,
+                "start": 1787392259.5753424,
+                "stop": 1787392259.593089,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestOutputFilesExist::test_pred_instructions_exists",
+                "status": "passed",
+                "duration": 0.00017891600145958364,
+                "start": 1787392259.5932283,
+                "stop": 1787392259.5935206,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestOutputFilesExist::test_dyn_masks_exists",
+                "status": "passed",
+                "duration": 0.00012866599718108773,
+                "start": 1787392259.5936296,
+                "stop": 1787392259.5938447,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestInstructionsFormat::test_is_dict",
+                "status": "passed",
+                "duration": 0.00015208299737423658,
+                "start": 1787392259.5939338,
+                "stop": 1787392259.5941648,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestInstructionsFormat::test_keys_format",
+                "status": "passed",
+                "duration": 0.00014770800771657377,
+                "start": 1787392259.5942492,
+                "stop": 1787392259.594481,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestInstructionsFormat::test_valid_labels",
+                "status": "passed",
+                "duration": 0.00014320900663733482,
+                "start": 1787392259.594563,
+                "stop": 1787392259.5947857,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestDynMasksFormat::test_has_shape",
+                "status": "passed",
+                "duration": 0.0002234170096926391,
+                "start": 1787392259.5948684,
+                "stop": 1787392259.5951731,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestDynMasksFormat::test_shape_valid",
+                "status": "passed",
+                "duration": 0.0003349170001456514,
+                "start": 1787392259.595261,
+                "stop": 1787392259.595679,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestDynMasksFormat::test_frame_components",
+                "status": "passed",
+                "duration": 0.00020983300055377185,
+                "start": 1787392259.5957682,
+                "stop": 1787392259.5960586,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestMotionAccuracy::test_motion_macro_f1",
+                "status": "failed",
+                "raw_status": "call_failed",
+                "duration": 0.000375000003259629,
+                "start": 1787392259.5961452,
+                "stop": 1787392259.6062136,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py",
+                "trace": "self = <test_outputs.TestMotionAccuracy object at 0xffff90bc3890>\npred_instructions = {'0->1': ['Pan Right', 'Dolly In'], '1->2': ['Pan Right', 'Dolly In'], '10->11': ['Pan Right', 'Dolly In'], '11->12': ['Pan Right', 'Dolly In'], ...}\ngt_instructions = {'0->3': ['Stay'], '10->18': ['Dolly In', 'Pan Right'], '3->10': ['Dolly In']}\n\n    def test_motion_macro_f1(self, pred_instructions, gt_instructions):\n        \"\"\"\n        Calculate Macro-F1 to ensure accuracy across all motion classes,\n        preventing majority classes (like 'Stay') from biasing the results.\n        \"\"\"\n        p_frames = expand_instructions_to_frames(pred_instructions)\n        g_frames = expand_instructions_to_frames(gt_instructions)\n>       assert set(p_frames.keys()) == set(g_frames.keys()), (\n            f\"Motion predictions must cover exactly the sampled frames \"\n            f\"{min(g_frames)}..{max(g_frames)}; got {len(p_frames)} frames, expected {len(g_frames)}\"\n        )\nE       AssertionError: Motion predictions must cover exactly the sampled frames 0..17; got 17 frames, expected 18\nE       assert {0, 1, 2, 3, 4, 5, ...} == {0, 1, 2, 3, 4, 5, ...}\nE         \nE         Extra items in the right set:\nE         17\nE         \nE         Full diff:\nE           {\nE               0,...\nE         \nE         ...Full output truncated (18 lines hidden), use '-vv' to show\n\n/verifier/test_outputs.py:160: AssertionError",
+                "message": "The test failed in the call phase due to an assertion error"
+            },
+            {
+                "name": "::TestMaskAccuracy::test_mask_comprehensive",
+                "status": "failed",
+                "raw_status": "call_failed",
+                "duration": 0.03506458400806878,
+                "start": 1787392259.6063066,
+                "stop": 1787392259.6440141,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py",
+                "trace": "self = <test_outputs.TestMaskAccuracy object at 0xffff90bc3b30>\npred_masks = ((720, 1280), [array([[False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False,...e, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), ...])\ngt_masks = ((720, 1280), [array([[False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False,...e, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), ...])\n\n    def test_mask_comprehensive(self, pred_masks, gt_masks):\n        \"\"\"\n        Evaluate masks using Mean IoU, P10 (worst-case), Boundary IoU, and Temporal Flicker.\n        \"\"\"\n        pred_shape, pred_list = pred_masks\n        gt_shape, gt_list = gt_masks\n        assert pred_shape == gt_shape, f\"Predicted mask shape {pred_shape} does not match GT shape {gt_shape}\"\n>       assert len(pred_list) == len(gt_list), (\n            f\"Expected {len(gt_list)} predicted masks, got {len(pred_list)}\"\n        )\nE       AssertionError: Expected 18 predicted masks, got 17\nE       assert 17 == 18\nE        +  where 17 = len([array([[False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       ...,\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), array([[False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       ...,\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), array([[False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       ...,\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), array([[False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       ...,\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), array([[False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       ...,\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), array([[False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       ...,\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), ...])\nE        +  and   18 = len([array([[False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       ...,\\n       [ True,  True,  True, ..., False, False, False],\\n       [ True,  True,  True, ..., False, False, False],\\n       [ True,  True,  True, ..., False, False, False]], shape=(720, 1280)), array([[False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       ...,\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), array([[False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       ...,\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), array([[False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       ...,\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), array([[False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       ...,\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), array([[False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       ...,\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False],\\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), ...])\n\n/verifier/test_outputs.py:221: AssertionError",
+                "message": "The test failed in the call phase due to an assertion error"
+            }
+        ]
+    }
+}

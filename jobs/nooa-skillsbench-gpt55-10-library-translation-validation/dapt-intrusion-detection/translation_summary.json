@@ -1,0 +1,49 @@
+[
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/dapt-intrusion-detection/environment/skills/pcap-analysis",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-translation-validation/dapt-intrusion-detection/pcap-analysis",
+    "package_name": "pcap_analysis",
+    "registry_name": "local.pcap-analysis",
+    "class_name": "PcapAnalysis",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/pcap_analysis/__init__.py",
+      "src/pcap_analysis/resources/pcap_utils.py",
+      "tests/test_pcap_analysis.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-translation-validation/dapt-intrusion-detection/pcap-analysis",
+      "registry_name": "local.pcap-analysis",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  },
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/dapt-intrusion-detection/environment/skills/threat-detection",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-translation-validation/dapt-intrusion-detection/threat-detection",
+    "package_name": "threat_detection",
+    "registry_name": "local.threat-detection",
+    "class_name": "ThreatDetection",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/threat_detection/__init__.py",
+      "tests/test_threat_detection.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-translation-validation/dapt-intrusion-detection/threat-detection",
+      "registry_name": "local.threat-detection",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  }
+]

@@ -1,0 +1,75 @@
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+
+[notice] A new release of pip is available: 25.0.1 -> 26.2.1
+[notice] To update, run: pip install --upgrade pip
+============================= test session starts ==============================
+platform linux -- Python 3.12.14, pytest-8.4.1, pluggy-1.6.0 -- /usr/local/bin/python3.12
+rootdir: /root
+configfile: ../dev/null
+plugins: json-ctrf-0.3.5
+collecting ... collected 10 items
+
+::test_schema_and_totals PASSED                                          [ 10%]
+::test_total_hit_tokens FAILED                                           [ 20%]
+::test_overall_hit_rate FAILED                                           [ 30%]
+::test_final_cache_blocks FAILED                                         [ 40%]
+::test_per_request_sample[133] PASSED                                    [ 50%]
+::test_per_request_sample[601] PASSED                                    [ 60%]
+::test_per_request_sample[968] PASSED                                    [ 70%]
+::test_per_request_sample[1459] PASSED                                   [ 80%]
+::test_per_request_sample[1999] PASSED                                   [ 90%]
+::test_per_request_self_consistency PASSED                               [100%]
+
+=================================== FAILURES ===================================
+____________________________ test_total_hit_tokens _____________________________
+
+actual = {'final_cache_blocks': 2800, 'overall_hit_rate': 0.09017387141224907, 'per_request': [{'hit_tokens': 0, 'idx': 0, 'pro..., 'prompt_tokens': 6760}, {'hit_tokens': 512, 'idx': 5, 'prompt_tokens': 4834}, ...], 'total_hit_tokens': 2474531, ...}
+expected = {'final_cache_blocks': 2535, 'overall_hit_rate': 0.08726327241088713, 'per_request': [{'hit_tokens': 0, 'idx': 0, 'pro..., 'prompt_tokens': 6760}, {'hit_tokens': 512, 'idx': 5, 'prompt_tokens': 4834}, ...], 'total_hit_tokens': 2394659, ...}
+
+    def test_total_hit_tokens(actual, expected):
+>       assert actual["total_hit_tokens"] == expected["total_hit_tokens"], (
+            f"expected {expected['total_hit_tokens']}, got {actual['total_hit_tokens']}"
+        )
+E       AssertionError: expected 2394659, got 2474531
+E       assert 2474531 == 2394659
+
+/verifier/test_outputs.py:53: AssertionError
+____________________________ test_overall_hit_rate _____________________________
+
+actual = {'final_cache_blocks': 2800, 'overall_hit_rate': 0.09017387141224907, 'per_request': [{'hit_tokens': 0, 'idx': 0, 'pro..., 'prompt_tokens': 6760}, {'hit_tokens': 512, 'idx': 5, 'prompt_tokens': 4834}, ...], 'total_hit_tokens': 2474531, ...}
+expected = {'final_cache_blocks': 2535, 'overall_hit_rate': 0.08726327241088713, 'per_request': [{'hit_tokens': 0, 'idx': 0, 'pro..., 'prompt_tokens': 6760}, {'hit_tokens': 512, 'idx': 5, 'prompt_tokens': 4834}, ...], 'total_hit_tokens': 2394659, ...}
+
+    def test_overall_hit_rate(actual, expected):
+        diff = abs(actual["overall_hit_rate"] - expected["overall_hit_rate"])
+>       assert diff < 1e-6, f"hit_rate off by {diff}"
+E       AssertionError: hit_rate off by 0.002910599001361938
+E       assert 0.002910599001361938 < 1e-06
+
+/verifier/test_outputs.py:60: AssertionError
+___________________________ test_final_cache_blocks ____________________________
+
+actual = {'final_cache_blocks': 2800, 'overall_hit_rate': 0.09017387141224907, 'per_request': [{'hit_tokens': 0, 'idx': 0, 'pro..., 'prompt_tokens': 6760}, {'hit_tokens': 512, 'idx': 5, 'prompt_tokens': 4834}, ...], 'total_hit_tokens': 2474531, ...}
+expected = {'final_cache_blocks': 2535, 'overall_hit_rate': 0.08726327241088713, 'per_request': [{'hit_tokens': 0, 'idx': 0, 'pro..., 'prompt_tokens': 6760}, {'hit_tokens': 512, 'idx': 5, 'prompt_tokens': 4834}, ...], 'total_hit_tokens': 2394659, ...}
+
+    def test_final_cache_blocks(actual, expected):
+>       assert actual["final_cache_blocks"] == expected["final_cache_blocks"], (
+            f"expected {expected['final_cache_blocks']} resident blocks, "
+            f"got {actual['final_cache_blocks']}"
+        )
+E       AssertionError: expected 2535 resident blocks, got 2800
+E       assert 2800 == 2535
+
+/verifier/test_outputs.py:64: AssertionError
+==================================== PASSES ====================================
+=========================== short test summary info ============================
+PASSED ::test_schema_and_totals
+PASSED ::test_per_request_sample[133]
+PASSED ::test_per_request_sample[601]
+PASSED ::test_per_request_sample[968]
+PASSED ::test_per_request_sample[1459]
+PASSED ::test_per_request_sample[1999]
+PASSED ::test_per_request_self_consistency
+FAILED ::test_total_hit_tokens - AssertionError: expected 2394659, got 2474531
+FAILED ::test_overall_hit_rate - AssertionError: hit_rate off by 0.0029105990...
+FAILED ::test_final_cache_blocks - AssertionError: expected 2535 resident blo...
+========================= 3 failed, 7 passed in 0.04s ==========================

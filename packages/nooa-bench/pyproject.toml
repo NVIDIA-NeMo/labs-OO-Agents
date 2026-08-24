@@ -23,6 +23,7 @@ Issues = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/issues"
 
 [project.scripts]
 nemo-harbor = "nooa_bench.runner:main"
+nooa-skillsbench-task = "nooa_bench.skillsbench_runner:main"
 
 [tool.uv.sources]
 nooa = { workspace = true }

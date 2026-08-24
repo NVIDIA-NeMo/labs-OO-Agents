@@ -1,0 +1,18 @@
+[project]
+name = "dyn-object-masks"
+version = "0.1.0"
+description = "Generate dynamic-object binary masks after global motion compensation, output CSR sparse format."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+dyn_object_masks = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.dyn-object-masks" = "dyn_object_masks:DynObjectMasks"

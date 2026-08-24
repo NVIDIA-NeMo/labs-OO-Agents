@@ -1,0 +1,18 @@
+[project]
+name = "erlang-concurrency"
+version = "0.1.0"
+description = "Use when erlang's concurrency model including lightweight processes, message passing, process links and monitors, error handling patterns, selective receive, and building massively concurrent systems on the BEAM VM."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+erlang_concurrency = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.erlang-concurrency" = "erlang_concurrency:ErlangConcurrency"

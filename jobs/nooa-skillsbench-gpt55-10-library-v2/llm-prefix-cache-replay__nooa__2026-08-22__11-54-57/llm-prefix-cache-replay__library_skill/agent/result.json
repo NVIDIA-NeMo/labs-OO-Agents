@@ -1,0 +1,13 @@
+{
+  "model": "openai/openai/openai/gpt-5.5",
+  "agent_type": "bench",
+  "success": true,
+  "response": "python /root/replay_s3fifo.py && python - <<'PY'\nimport json, math\nconf=json.load(open('/root/config.json'))\nreport=json.load(open('/root/report.json'))\nreqs=[json.loads(l) for l in open('/root/trace.jsonl') if l.strip()]\nassert report['total_requests'] == len(reqs) == 2000\nassert len(report['per_request']) == len(reqs)\nassert report['total_prompt_tokens'] == sum(r['input_length'] for r in reqs)\nassert report['total_hit_tokens'] == sum(x['hit_tokens'] for x in report['per_request'])\nassert abs(report['overall_hit_rate'] - report['total_hit_tokens']/report['total_prompt_tokens']) < 1e-15\nassert 0 <= report['final_cache_blocks'] <= conf['cache_capacity_blocks']\nbs=conf['block_size']\nfor i, (entry, req) in enumerate(zip(report['per_request'], reqs)):\n    assert entry['idx'] == i\n    assert entry['prompt_tokens'] == req['input_length']\n    assert len(req['hash_ids']) == math.ceil(req['input_length']/bs)\n    assert 0 <= entry['hit_tokens'] <= entry['prompt_tokens']\n    assert entry['hit_tokens'] == entry['prompt_tokens'] or entry['hit_tokens'] % bs == 0\nprint('validated report.json')\nPY",
+  "error": null,
+  "n_input_tokens": 193069,
+  "n_output_tokens": 10972,
+  "activated_skills": [
+    "local.cache-policy-comparison",
+    "local.prefix-cache-replay"
+  ]
+}

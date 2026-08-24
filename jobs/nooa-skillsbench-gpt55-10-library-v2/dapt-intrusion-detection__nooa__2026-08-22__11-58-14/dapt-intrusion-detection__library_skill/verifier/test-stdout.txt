@@ -1,0 +1,116 @@
+downloading uv 0.9.7 aarch64-unknown-linux-gnu
+no checksums to verify
+installing to /root/.local/bin
+  uv
+  uvx
+everything's installed!
+=== Running Intrusion Detection Tests ===
+Downloading pygments (1.2MiB)
+ Downloading pygments
+Installed 6 packages in 8ms
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-8.4.1, pluggy-1.6.0 -- /root/.cache/uv/archive-v0/3n7XxOiV3q-Zd8dp7vpeF/bin/python
+rootdir: /root
+configfile: ../dev/null
+plugins: json-ctrf-0.3.5
+collecting ... collected 37 items
+
+::TestProtocolDistribution::test_protocol_count[protocol_tcp] PASSED     [  2%]
+::TestProtocolDistribution::test_protocol_count[protocol_icmp] PASSED    [  5%]
+::TestProtocolDistribution::test_protocol_count[protocol_arp] PASSED     [  8%]
+::TestProtocolDistribution::test_protocol_count[protocol_ip_total] PASSED [ 10%]
+::TestProtocolDistribution::test_protocol_udp FAILED                     [ 13%]
+::TestTimeSeries::test_time_series_metric[duration_seconds] PASSED       [ 16%]
+::TestTimeSeries::test_time_series_metric[packets_per_minute_avg] PASSED [ 18%]
+::TestTimeSeries::test_time_series_metric[packets_per_minute_max] PASSED [ 21%]
+::TestTimeSeries::test_time_series_metric[packets_per_minute_min] PASSED [ 24%]
+::TestSizeStats::test_size_metric[total_bytes] PASSED                    [ 27%]
+::TestSizeStats::test_size_metric[avg_packet_size] PASSED                [ 29%]
+::TestSizeStats::test_size_metric[min_packet_size] PASSED                [ 32%]
+::TestSizeStats::test_size_metric[max_packet_size] PASSED                [ 35%]
+::TestEntropyMetrics::test_entropy_metric[dst_port_entropy] PASSED       [ 37%]
+::TestEntropyMetrics::test_entropy_metric[src_port_entropy] PASSED       [ 40%]
+::TestEntropyMetrics::test_entropy_metric[src_ip_entropy] PASSED         [ 43%]
+::TestEntropyMetrics::test_entropy_metric[dst_ip_entropy] PASSED         [ 45%]
+::TestEntropyMetrics::test_entropy_metric[unique_dst_ports] PASSED       [ 48%]
+::TestEntropyMetrics::test_entropy_metric[unique_src_ports] PASSED       [ 51%]
+::TestGraphMetrics::test_graph_metric[num_nodes] PASSED                  [ 54%]
+::TestGraphMetrics::test_graph_metric[num_edges] PASSED                  [ 56%]
+::TestGraphMetrics::test_graph_metric[network_density] PASSED            [ 59%]
+::TestGraphMetrics::test_graph_metric[max_indegree] PASSED               [ 62%]
+::TestGraphMetrics::test_max_outdegree PASSED                            [ 64%]
+::TestTemporalMetrics::test_temporal_metric[iat_mean] PASSED             [ 67%]
+::TestTemporalMetrics::test_temporal_metric[iat_variance] PASSED         [ 70%]
+::TestTemporalMetrics::test_temporal_metric[iat_cv] PASSED               [ 72%]
+::TestTemporalMetrics::test_temporal_metric[num_producers] PASSED        [ 75%]
+::TestTemporalMetrics::test_temporal_metric[num_consumers] PASSED        [ 78%]
+::TestFlowMetrics::test_flow_metric[unique_flows] PASSED                 [ 81%]
+::TestFlowMetrics::test_flow_metric[tcp_flows] PASSED                    [ 83%]
+::TestFlowMetrics::test_flow_metric[udp_flows] PASSED                    [ 86%]
+::TestFlowMetrics::test_bidirectional_flows PASSED                       [ 89%]
+::TestAnalysisQuestions::test_is_traffic_benign PASSED                   [ 91%]
+::TestAnalysisQuestions::test_has_port_scan PASSED                       [ 94%]
+::TestAnalysisQuestions::test_has_dos_pattern PASSED                     [ 97%]
+::TestAnalysisQuestions::test_has_beaconing PASSED                       [100%]
+
+=================================== FAILURES ===================================
+__________________ TestProtocolDistribution.test_protocol_udp __________________
+
+self = <test_outputs.TestProtocolDistribution object at 0xffff874874d0>
+
+    def test_protocol_udp(self):
+        """Verify UDP packet count."""
+        results = load_results()
+        assert results is not None, "Results file not found"
+        metric = "protocol_udp"
+        assert metric in results, f"Missing metric: {metric}"
+>       assert approx_equal(
+            results[metric], EXPECTED_VALUES[metric], metric
+        ), f"{metric}: expected {EXPECTED_VALUES[metric]}, got {results[metric]}"
+E       AssertionError: protocol_udp: expected 26092, got 25846
+E       assert False
+E        +  where False = approx_equal(25846, 26092, 'protocol_udp')
+
+/verifier/test_outputs.py:223: AssertionError
+==================================== PASSES ====================================
+=========================== short test summary info ============================
+PASSED ::TestProtocolDistribution::test_protocol_count[protocol_tcp]
+PASSED ::TestProtocolDistribution::test_protocol_count[protocol_icmp]
+PASSED ::TestProtocolDistribution::test_protocol_count[protocol_arp]
+PASSED ::TestProtocolDistribution::test_protocol_count[protocol_ip_total]
+PASSED ::TestTimeSeries::test_time_series_metric[duration_seconds]
+PASSED ::TestTimeSeries::test_time_series_metric[packets_per_minute_avg]
+PASSED ::TestTimeSeries::test_time_series_metric[packets_per_minute_max]
+PASSED ::TestTimeSeries::test_time_series_metric[packets_per_minute_min]
+PASSED ::TestSizeStats::test_size_metric[total_bytes]
+PASSED ::TestSizeStats::test_size_metric[avg_packet_size]
+PASSED ::TestSizeStats::test_size_metric[min_packet_size]
+PASSED ::TestSizeStats::test_size_metric[max_packet_size]
+PASSED ::TestEntropyMetrics::test_entropy_metric[dst_port_entropy]
+PASSED ::TestEntropyMetrics::test_entropy_metric[src_port_entropy]
+PASSED ::TestEntropyMetrics::test_entropy_metric[src_ip_entropy]
+PASSED ::TestEntropyMetrics::test_entropy_metric[dst_ip_entropy]
+PASSED ::TestEntropyMetrics::test_entropy_metric[unique_dst_ports]
+PASSED ::TestEntropyMetrics::test_entropy_metric[unique_src_ports]
+PASSED ::TestGraphMetrics::test_graph_metric[num_nodes]
+PASSED ::TestGraphMetrics::test_graph_metric[num_edges]
+PASSED ::TestGraphMetrics::test_graph_metric[network_density]
+PASSED ::TestGraphMetrics::test_graph_metric[max_indegree]
+PASSED ::TestGraphMetrics::test_max_outdegree
+PASSED ::TestTemporalMetrics::test_temporal_metric[iat_mean]
+PASSED ::TestTemporalMetrics::test_temporal_metric[iat_variance]
+PASSED ::TestTemporalMetrics::test_temporal_metric[iat_cv]
+PASSED ::TestTemporalMetrics::test_temporal_metric[num_producers]
+PASSED ::TestTemporalMetrics::test_temporal_metric[num_consumers]
+PASSED ::TestFlowMetrics::test_flow_metric[unique_flows]
+PASSED ::TestFlowMetrics::test_flow_metric[tcp_flows]
+PASSED ::TestFlowMetrics::test_flow_metric[udp_flows]
+PASSED ::TestFlowMetrics::test_bidirectional_flows
+PASSED ::TestAnalysisQuestions::test_is_traffic_benign
+PASSED ::TestAnalysisQuestions::test_has_port_scan
+PASSED ::TestAnalysisQuestions::test_has_dos_pattern
+PASSED ::TestAnalysisQuestions::test_has_beaconing
+FAILED ::TestProtocolDistribution::test_protocol_udp - AssertionError: protoc...
+========================= 1 failed, 36 passed in 0.03s =========================
+
+❌ Some tests failed

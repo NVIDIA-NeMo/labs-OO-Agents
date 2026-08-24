@@ -1,0 +1,62 @@
+{
+    "results": {
+        "tool": {
+            "name": "pytest",
+            "version": "8.4.1"
+        },
+        "summary": {
+            "tests": 4,
+            "passed": 4,
+            "failed": 0,
+            "skipped": 0,
+            "pending": 0,
+            "other": 0,
+            "start": 1787392936.0952508,
+            "stop": 1787392936.1821904
+        },
+        "tests": [
+            {
+                "name": "::test_no_remaining_placeholders",
+                "status": "passed",
+                "duration": 0.005595376002020203,
+                "start": 1787392936.1581454,
+                "stop": 1787392936.1639307,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::test_split_placeholder_replaced",
+                "status": "passed",
+                "duration": 0.0011817490012617782,
+                "start": 1787392936.164054,
+                "stop": 1787392936.1653438,
+                "retries": 9,
+                "file_path": "../verifier/test_outputs.py",
+                "tags": [
+                    "parametrize::field::['DATE', 'CANDIDATE_FULL_NAME', 'CITY', 'STATE', 'ZIP_CODE', 'POSITION', 'DEPARTMENT', 'RESPONSE_DEADLINE', 'HR_NAME', 'PTO_DAYS']"
+                ]
+            },
+            {
+                "name": "::test_nested_table_value",
+                "status": "passed",
+                "duration": 0.000470375016448088,
+                "start": 1787392936.1772232,
+                "stop": 1787392936.177779,
+                "retries": 5,
+                "file_path": "../verifier/test_outputs.py",
+                "tags": [
+                    "parametrize::field::['POSITION', 'DEPARTMENT', 'BASE_SALARY', 'SIGNING_BONUS', 'EQUITY_SHARES', 'MANAGER_NAME']"
+                ]
+            },
+            {
+                "name": "::test_conditional_section",
+                "status": "passed",
+                "duration": 0.001166332993307151,
+                "start": 1787392936.1809082,
+                "stop": 1787392936.182154,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            }
+        ]
+    }
+}

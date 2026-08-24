@@ -1,0 +1,65 @@
+{
+    "results": {
+        "tool": {
+            "name": "pytest",
+            "version": "8.4.1"
+        },
+        "summary": {
+            "tests": 5,
+            "passed": 5,
+            "failed": 0,
+            "skipped": 0,
+            "pending": 0,
+            "other": 0,
+            "start": 1787393152.338115,
+            "stop": 1787393168.0195782
+        },
+        "tests": [
+            {
+                "name": "::TestParallelImplementation::test_parallel_solution_exists",
+                "status": "passed",
+                "duration": 0.020599042007233948,
+                "start": 1787393152.3477125,
+                "stop": 1787393152.3684464,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestCorrectnessSmall::test_idf_values_match",
+                "status": "passed",
+                "duration": 1.1526760009874124,
+                "start": 1787393152.368546,
+                "stop": 1787393153.521525,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestCorrectnessSmall::test_search_results_match",
+                "status": "passed",
+                "duration": 0.10992225000518374,
+                "start": 1787393153.5217218,
+                "stop": 1787393153.6318874,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestPerformanceIndexing::test_index_speedup",
+                "status": "passed",
+                "duration": 5.702659753005719,
+                "start": 1787393153.6378152,
+                "stop": 1787393159.3407264,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestPerformanceSearch::test_search_speedup",
+                "status": "passed",
+                "duration": 8.63639321300434,
+                "start": 1787393159.341842,
+                "stop": 1787393167.9784596,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            }
+        ]
+    }
+}

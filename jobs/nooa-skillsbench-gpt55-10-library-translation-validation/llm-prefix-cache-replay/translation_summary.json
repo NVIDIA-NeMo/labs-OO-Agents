@@ -1,0 +1,48 @@
+[
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/llm-prefix-cache-replay/environment/skills/cache-policy-comparison",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-translation-validation/llm-prefix-cache-replay/cache-policy-comparison",
+    "package_name": "cache_policy_comparison",
+    "registry_name": "local.cache-policy-comparison",
+    "class_name": "CachePolicyComparison",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/cache_policy_comparison/__init__.py",
+      "tests/test_cache_policy_comparison.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-translation-validation/llm-prefix-cache-replay/cache-policy-comparison",
+      "registry_name": "local.cache-policy-comparison",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  },
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/llm-prefix-cache-replay/environment/skills/prefix-cache-replay",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-translation-validation/llm-prefix-cache-replay/prefix-cache-replay",
+    "package_name": "prefix_cache_replay",
+    "registry_name": "local.prefix-cache-replay",
+    "class_name": "PrefixCacheReplay",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/prefix_cache_replay/__init__.py",
+      "tests/test_prefix_cache_replay.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-translation-validation/llm-prefix-cache-replay/prefix-cache-replay",
+      "registry_name": "local.prefix-cache-replay",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  }
+]

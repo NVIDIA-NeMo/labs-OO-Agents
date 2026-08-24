@@ -1,0 +1,74 @@
+{
+    "results": {
+        "tool": {
+            "name": "pytest",
+            "version": "8.4.1"
+        },
+        "summary": {
+            "tests": 5,
+            "passed": 2,
+            "failed": 3,
+            "skipped": 0,
+            "pending": 0,
+            "other": 0,
+            "start": 1787394169.4983568,
+            "stop": 1787394170.1646538
+        },
+        "tests": [
+            {
+                "name": "::test_step1_volatility_calculations",
+                "status": "failed",
+                "raw_status": "call_failed",
+                "duration": 0.11385791699285619,
+                "start": 1787394169.599281,
+                "stop": 1787394169.7223735,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py",
+                "trace": "def test_step1_volatility_calculations():\n        \"\"\"Test Step 1: Gold price volatility calculations (confidence level, 3m/12m volatility).\"\"\"\n        assert EXCEL_FILE.exists(), f\"Excel file not found at {EXCEL_FILE}\"\n    \n        wb = get_workbook()\n        ws = get_answer_sheet(wb)\n    \n        errors = []\n        for cell, (name, expected) in EXPECTED_STEP1.items():\n            actual = cell_value(ws, cell)\n            if actual is None or not isinstance(actual, (int, float)):\n                errors.append(f\"{cell} ({name}): expected {expected}, got {actual}\")\n            elif abs(actual - expected) > TOLERANCE:\n                errors.append(f\"{cell} ({name}): expected {expected}, got {actual}\")\n    \n        wb.close()\n>       assert len(errors) == 0, \"Step 1 volatility calculation errors:\\n\" + \"\\n\".join(errors)\nE       AssertionError: Step 1 volatility calculation errors:\nE         C4 (volatility_3m): expected 4.813323, got 2.75465709776871\nE         C5 (volatility_3m_annualized): expected 16.67384, got 9.54241210153128\nE         C6 (volatility_12m): expected 3.259073, got 5.99243947923063\nE       assert 3 == 0\nE        +  where 3 = len(['C4 (volatility_3m): expected 4.813323, got 2.75465709776871', 'C5 (volatility_3m_annualized): expected 16.67384, got 9.54241210153128', 'C6 (volatility_12m): expected 3.259073, got 5.99243947923063'])\n\n/verifier/test_outputs.py:232: AssertionError",
+                "message": "The test failed in the call phase due to an assertion error"
+            },
+            {
+                "name": "::test_step2_gold_reserves_and_risk",
+                "status": "failed",
+                "raw_status": "call_failed",
+                "duration": 0.1015972509921994,
+                "start": 1787394169.7225106,
+                "stop": 1787394169.8273346,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py",
+                "trace": "def test_step2_gold_reserves_and_risk():\n        \"\"\"Test Step 2: Gold reserves values and volatility risk for each country.\"\"\"\n        wb = get_workbook()\n        ws = get_answer_sheet(wb)\n    \n        errors = []\n        for i, col in enumerate(STEP2_COLS):\n            country = EXPECTED_STEP2[\"countries\"][i]\n    \n            # Check gold reserves (row 12)\n            gold_cell = f\"{col}12\"\n            gold_expected = EXPECTED_STEP2[\"gold\"][i]\n            gold_actual = cell_value(ws, gold_cell)\n            if gold_actual is None or not isinstance(gold_actual, (int, float)):\n                errors.append(f\"{country} gold ({gold_cell}): expected {gold_expected}, got {gold_actual}\")\n            elif abs(gold_actual - gold_expected) > TOLERANCE:\n                errors.append(f\"{country} gold ({gold_cell}): expected {gold_expected}, got {gold_actual}\")\n    \n            # Check risk values (row 13)\n            risk_cell = f\"{col}13\"\n            risk_expected = EXPECTED_STEP2[\"risk\"][i]\n            risk_actual = cell_value(ws, risk_cell)\n            if risk_actual is None or not isinstance(risk_actual, (int, float)):\n                errors.append(f\"{country} risk ({risk_cell}): expected {risk_expected}, got {risk_actual}\")\n            elif abs(risk_actual - risk_expected) > TOLERANCE:\n                errors.append(f\"{country} risk ({risk_cell}): expected {risk_expected}, got {risk_actual}\")\n    \n        wb.close()\n>       assert len(errors) == 0, \"Step 2 gold reserves/risk errors:\\n\" + \"\\n\".join(errors)\nE       AssertionError: Step 2 gold reserves/risk errors:\nE         Belarus risk (C13): expected 593.345542, got 1172.63853399523\nE         Georgia risk (D13): expected 79.578669, got 157.272628973795\nE         Moldova risk (E13): expected 0.850586, got 1.68102780070793\nE         Ukraine risk (F13): expected 307.961505, got 608.629378257431\nE         Uzbekistan risk (G13): expected 4375.430569, got 8647.23525940965\nE         Czech Republic risk (H13): expected 803.878772, got 1588.71881285785\nE         Latvia risk (I13): expected 73.1679, got 144.602921777423\nE         Lithuania risk (J13): expected 64.099744, got 126.681376092565\nE         Slovakia risk (K13): expected 259.200689, got 512.26257714338\nE       assert 9 == 0\nE        +  where 9 = len(['Belarus risk (C13): expected 593.345542, got 1172.63853399523', 'Georgia risk (D13): expected 79.578669, got 157.272628973795', 'Moldova risk (E13): expected 0.850586, got 1.68102780070793', 'Ukraine risk (F13): expected 307.961505, got 608.629378257431', 'Uzbekistan risk (G13): expected 4375.430569, got 8647.23525940965', 'Czech Republic risk (H13): expected 803.878772, got 1588.71881285785', ...])\n\n/verifier/test_outputs.py:263: AssertionError",
+                "message": "The test failed in the call phase due to an assertion error"
+            },
+            {
+                "name": "::test_step3_rar_percentage",
+                "status": "failed",
+                "raw_status": "call_failed",
+                "duration": 0.10033524999744259,
+                "start": 1787394169.8274531,
+                "stop": 1787394169.9312007,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py",
+                "trace": "def test_step3_rar_percentage():\n        \"\"\"Test Step 3: Gold reserves, total reserves, and RaR as percentage.\"\"\"\n        wb = get_workbook()\n        ws = get_answer_sheet(wb)\n    \n        errors = []\n        for i, col in enumerate(STEP3_COLS):\n            country = EXPECTED_STEP3[\"countries\"][i]\n    \n            # Check gold reserves (row 21)\n            gold_cell = f\"{col}21\"\n            gold_expected = EXPECTED_STEP3[\"gold\"][i]\n            gold_actual = cell_value(ws, gold_cell)\n            if gold_actual is None or not isinstance(gold_actual, (int, float)):\n                errors.append(f\"{country} gold ({gold_cell}): expected {gold_expected}, got {gold_actual}\")\n            elif abs(gold_actual - gold_expected) > TOLERANCE:\n                errors.append(f\"{country} gold ({gold_cell}): expected {gold_expected}, got {gold_actual}\")\n    \n            # Check total reserves (row 23)\n            tr_cell = f\"{col}23\"\n            tr_expected = EXPECTED_STEP3[\"total_reserves\"][i]\n            tr_actual = cell_value(ws, tr_cell)\n            if tr_actual is None or not isinstance(tr_actual, (int, float)):\n                errors.append(f\"{country} total reserves ({tr_cell}): expected {tr_expected}, got {tr_actual}\")\n            elif abs(tr_actual - tr_expected) > TOLERANCE:\n                errors.append(f\"{country} total reserves ({tr_cell}): expected {tr_expected}, got {tr_actual}\")\n    \n            # Check RaR percentage (row 24)\n            rar_cell = f\"{col}24\"\n            rar_expected = EXPECTED_STEP3[\"rar_pct\"][i]\n            rar_actual = cell_value(ws, rar_cell)\n            if rar_actual is None or not isinstance(rar_actual, (int, float)):\n                errors.append(f\"{country} RaR% ({rar_cell}): expected {rar_expected}, got {rar_actual}\")\n            elif abs(rar_actual - rar_expected) > TOLERANCE_PCT:\n                errors.append(f\"{country} RaR% ({rar_cell}): expected {rar_expected}, got {rar_actual}\")\n    \n        wb.close()\n>       assert len(errors) == 0, \"Step 3 RaR percentage errors:\\n\" + \"\\n\".join(errors)\nE       AssertionError: Step 3 RaR percentage errors:\nE         Belarus RaR% (C24): expected 4.113057, got 8.12870277760993\nE         Georgia RaR% (D24): expected 1.292134, got 2.55366601675345\nE         Moldova RaR% (E24): expected 0.014178, got 0.0280202122351446\nE         Uzbekistan RaR% (F24): expected 6.598273, got 13.0402760587824\nE         Czech Republic RaR% (G24): expected 0.45719, got 0.903551376588809\nE         Latvia RaR% (H24): expected 1.204033, got 2.37955078703653\nE         Lithuania RaR% (I24): expected 0.905018, got 1.78860287874066\nE       assert 7 == 0\nE        +  where 7 = len(['Belarus RaR% (C24): expected 4.113057, got 8.12870277760993', 'Georgia RaR% (D24): expected 1.292134, got 2.55366601675345', 'Moldova RaR% (E24): expected 0.014178, got 0.0280202122351446', 'Uzbekistan RaR% (F24): expected 6.598273, got 13.0402760587824', 'Czech Republic RaR% (G24): expected 0.45719, got 0.903551376588809', 'Latvia RaR% (H24): expected 1.204033, got 2.37955078703653', ...])\n\n/verifier/test_outputs.py:303: AssertionError",
+                "message": "The test failed in the call phase due to an assertion error"
+            },
+            {
+                "name": "::test_formulas_present",
+                "status": "passed",
+                "duration": 0.11953354101569857,
+                "start": 1787394169.9313433,
+                "stop": 1787394170.0510826,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::test_no_errors_or_macros",
+                "status": "passed",
+                "duration": 0.11275775001558941,
+                "start": 1787394170.051245,
+                "stop": 1787394170.1645606,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            }
+        ]
+    }
+}

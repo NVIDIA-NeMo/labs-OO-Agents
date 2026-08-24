@@ -1,0 +1,18 @@
+[project]
+name = "senior-security"
+version = "0.1.0"
+description = "Comprehensive security engineering skill for application security, penetration testing, security architecture, and compliance auditing. Includes security assessment tools, threat modeling, crypto implementation, and security automation. Use when designing security architecture, conducting penetration tests, implementing cryptography, or performing security audits."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+senior_security = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.senior-security" = "senior_security:SeniorSecurity"

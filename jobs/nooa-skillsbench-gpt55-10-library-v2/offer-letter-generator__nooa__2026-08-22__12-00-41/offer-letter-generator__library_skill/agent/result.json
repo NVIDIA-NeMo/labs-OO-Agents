@@ -1,0 +1,12 @@
+{
+  "model": "openai/openai/openai/gpt-5.5",
+  "agent_type": "bench",
+  "success": true,
+  "response": "python3 - <<'PY'\nimport json, zipfile, os\nfrom docx import Document\nout = '/root/offer_letter_filled.docx'\ndata_path = '/root/employee_data.json'\nwith open(data_path, encoding='utf-8') as f:\n    data = json.load(f)\nif not os.path.exists(out):\n    raise SystemExit('missing output file')\nwith zipfile.ZipFile(out) as z:\n    unresolved = []\n    for name in z.namelist():\n        if name.endswith('.xml'):\n            xml = z.read(name).decode('utf-8', errors='ignore')\n            if '{{' in xml or '}}' in xml or 'IF_RELOCATION' in xml or 'END_IF_RELOCATION' in xml:\n                unresolved.append(name)\n    if unresolved:\n        raise SystemExit('unresolved placeholders/markers in ' + ', '.join(unresolved))\ndef table_texts(table):\n    for row in table.rows:\n        for cell in row.cells:\n            for p in cell.paragraphs:\n                yield p.text\n            for nested in cell.tables:\n                yield from table_texts(nested)\ndoc = Document(out)\ntexts = []\ntexts.extend(p.text for p in doc.paragraphs)\nfor table in doc.tables:\n    texts.extend(table_texts(table))\nfor section in doc.sections:\n    texts.extend(p.text for p in section.header.paragraphs)\n    for table in section.header.tables:\n        texts.extend(table_texts(table))\n    texts.extend(p.text for p in section.footer.paragraphs)\n    for table in section.footer.tables:\n        texts.extend(table_texts(table))\nfull = '\\n'.join(texts)\nrequired = [data['DOC_ID'], data['COMPANY_NAME'], data['CANDIDATE_FULL_NAME'], data['POSITION'], data['DEPARTMENT'], data['START_DATE'], data['MANAGER_NAME'], '$' + data['BASE_SALARY'] + ' per year', '$' + data['SIGNING_BONUS'], data['EQUITY_SHARES'] + ' shares', '$' + data['RELOCATION_AMOUNT'], data['RELOCATION_DAYS'] + ' days', data['PTO_DAYS'] + ' days of PTO', data['RESPONSE_DEADLINE'], data['HR_NAME'], data['HR_TITLE']]\nmissing = [s for s in required if s not in full]\nif missing:\n    raise SystemExit('missing expected snippets: ' + repr(missing))\nprint('OK')\nPY",
+  "error": null,
+  "n_input_tokens": 84048,
+  "n_output_tokens": 4728,
+  "activated_skills": [
+    "local.docx"
+  ]
+}

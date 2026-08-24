@@ -1,0 +1,18 @@
+[project]
+name = "fjsp-baseline-repair-with-downtime-and-policy"
+version = "0.1.0"
+description = "This skill should be considered when you need to repair an infeasible or non-optimal flexible job scheduling planning schedule into a downtime-feasible, precedence-feasible one while keep no worse policy budget."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+fjsp_baseline_repair_with_downtime_and_policy = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.fjsp-baseline-repair-with-downtime-and-policy" = "fjsp_baseline_repair_with_downtime_and_policy:FjspBaselineRepairWithDowntimeAndPolicy"

@@ -1,0 +1,18 @@
+[project]
+name = "segment-combiner"
+version = "0.1.0"
+description = "Combine multiple segment detection results into a unified list. Use when you need to merge segments from different detectors, prepare removal lists for video processing, or consolidate detection outputs."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+segment_combiner = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.segment-combiner" = "segment_combiner:SegmentCombiner"

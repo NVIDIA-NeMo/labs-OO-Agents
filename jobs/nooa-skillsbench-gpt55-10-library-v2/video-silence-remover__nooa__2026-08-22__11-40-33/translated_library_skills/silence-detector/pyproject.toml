@@ -1,0 +1,18 @@
+[project]
+name = "silence-detector"
+version = "0.1.0"
+description = "Detect initial silence segments in audio/video using energy-based analysis. Use when you need to find low-energy periods at the start of recordings (title slides, setup time, pre-roll silence)."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+silence_detector = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.silence-detector" = "silence_detector:SilenceDetector"

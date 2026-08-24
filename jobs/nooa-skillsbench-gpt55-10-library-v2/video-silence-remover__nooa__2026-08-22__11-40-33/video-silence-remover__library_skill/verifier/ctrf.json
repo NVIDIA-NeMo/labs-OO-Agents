@@ -1,0 +1,113 @@
+{
+    "results": {
+        "tool": {
+            "name": "pytest",
+            "version": "9.0.2"
+        },
+        "summary": {
+            "tests": 9,
+            "passed": 5,
+            "failed": 4,
+            "skipped": 0,
+            "pending": 0,
+            "other": 0,
+            "start": 1787392087.976859,
+            "stop": 1787392091.011971
+        },
+        "tests": [
+            {
+                "name": "::test_output_files_exist",
+                "status": "passed",
+                "duration": 60.371707993908785,
+                "start": 1787392088.6273506,
+                "stop": 1787392088.688013,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::test_report_structure",
+                "status": "passed",
+                "duration": 0.22041700140107423,
+                "start": 1787392088.688162,
+                "stop": 1787392088.688499,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::test_segment_detection_recall",
+                "status": "failed",
+                "raw_status": "call_failed",
+                "duration": 0.32279199513141066,
+                "start": 1787392088.6886127,
+                "stop": 1787392088.6982183,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py",
+                "trace": "def test_segment_detection_recall():\n        \"\"\"Test that most ground truth segments are detected (recall >= 60%).\"\"\"\n        gt = load_ground_truth()\n        report = load_report()\n    \n        gt_segments = gt[\"segments_to_remove\"]\n        detected_segments = report[\"segments_removed\"]\n    \n        # Count how many ground truth segments have a matching detection (IoU > 0.3)\n        matched = 0\n        for gt_seg in gt_segments:\n            for detected in detected_segments:\n                if segment_iou(gt_seg, detected) > 0.3:\n                    matched += 1\n                    break\n    \n        recall = matched / len(gt_segments) if gt_segments else 1.0\n>       assert recall >= 0.6, f\"Segment detection recall {recall:.1%} is below 60% ({matched}/{len(gt_segments)} segments matched)\"\nE       AssertionError: Segment detection recall 22.2% is below 60% (2/9 segments matched)\nE       assert 0.2222222222222222 >= 0.6\n\n/verifier/test_outputs.py:125: AssertionError",
+                "message": "The test failed in the call phase due to an assertion error"
+            },
+            {
+                "name": "::test_segment_detection_precision",
+                "status": "failed",
+                "raw_status": "call_failed",
+                "duration": 0.2793339954223484,
+                "start": 1787392088.698321,
+                "stop": 1787392088.7005637,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py",
+                "trace": "def test_segment_detection_precision():\n        \"\"\"Test that detected segments are reasonably correct (precision >= 60%).\"\"\"\n        gt = load_ground_truth()\n        report = load_report()\n    \n        gt_segments = gt[\"segments_to_remove\"]\n        detected_segments = report[\"segments_removed\"]\n    \n        # Count how many detected segments match a ground truth segment (IoU > 0.3)\n        correct = 0\n        for detected in detected_segments:\n            for gt_seg in gt_segments:\n                if segment_iou(detected, gt_seg) > 0.3:\n                    correct += 1\n                    break\n    \n        precision = correct / len(detected_segments) if detected_segments else 1.0\n>       assert precision >= 0.6, f\"Segment detection precision {precision:.1%} is below 60% ({correct}/{len(detected_segments)} detections correct)\"\nE       AssertionError: Segment detection precision 10.5% is below 60% (2/19 detections correct)\nE       assert 0.10526315789473684 >= 0.6\n\n/verifier/test_outputs.py:145: AssertionError",
+                "message": "The test failed in the call phase due to an assertion error"
+            },
+            {
+                "name": "::test_total_removed_duration",
+                "status": "failed",
+                "raw_status": "call_failed",
+                "duration": 0.21141799516044557,
+                "start": 1787392088.7006571,
+                "stop": 1787392088.7027273,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py",
+                "trace": "def test_total_removed_duration():\n        \"\"\"Test that total removed duration is close to ground truth.\"\"\"\n        gt = load_ground_truth()\n        report = load_report()\n    \n        gt_removed = gt[\"summary\"][\"total_duration_to_remove_seconds\"]\n        detected_removed = report[\"removed_duration_seconds\"]\n    \n        # Allow 20% tolerance\n        tolerance_pct = 0.20\n        lower = gt_removed * (1 - tolerance_pct)\n        upper = gt_removed * (1 + tolerance_pct)\n    \n>       assert lower <= detected_removed <= upper, \\\n            f\"Removed duration {detected_removed}s not within 20% of ground truth {gt_removed}s (range [{lower:.0f}, {upper:.0f}])\"\nE       AssertionError: Removed duration 123.001s not within 20% of ground truth 254s (range [203, 305])\nE       assert 203.20000000000002 <= 123.001\n\n/verifier/test_outputs.py:161: AssertionError",
+                "message": "The test failed in the call phase due to an assertion error"
+            },
+            {
+                "name": "::test_compressed_duration",
+                "status": "failed",
+                "raw_status": "call_failed",
+                "duration": 42.118624987779185,
+                "start": 1787392088.702819,
+                "stop": 1787392088.7472365,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py",
+                "trace": "def test_compressed_duration():\n        \"\"\"Test that compressed video duration matches report and is reasonable.\"\"\"\n        gt = load_ground_truth()\n        report = load_report()\n    \n        # Check actual video matches report\n        actual_duration = get_video_duration(VIDEO_PATH)\n        reported_duration = report[\"compressed_duration_seconds\"]\n        assert abs(actual_duration - reported_duration) < 2.0, \\\n            f\"Actual duration {actual_duration}s doesn't match report {reported_duration}s\"\n    \n        # Check compressed duration is reasonable (within 20% of ground truth)\n        gt_compressed = gt[\"video\"][\"expected_compressed_duration_seconds\"]\n        tolerance_pct = 0.20\n        lower = gt_compressed * (1 - tolerance_pct)\n        upper = gt_compressed * (1 + tolerance_pct)\n    \n>       assert lower <= actual_duration <= upper, \\\n            f\"Compressed duration {actual_duration}s not within 20% of expected {gt_compressed}s\"\nE       AssertionError: Compressed duration 477.003991s not within 20% of expected 346s\nE       assert 477.003991 <= 415.2\n\n/verifier/test_outputs.py:182: AssertionError",
+                "message": "The test failed in the call phase due to an assertion error"
+            },
+            {
+                "name": "::test_math_consistency",
+                "status": "passed",
+                "duration": 0.18958200234919786,
+                "start": 1787392088.7473416,
+                "stop": 1787392088.7476182,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::test_no_invalid_segments",
+                "status": "passed",
+                "duration": 0.16987501294352114,
+                "start": 1787392088.7477005,
+                "stop": 1787392088.7479491,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::test_audio_matches_json_segments",
+                "status": "passed",
+                "duration": 2263.5555010056123,
+                "start": 1787392088.748029,
+                "stop": 1787392091.0118825,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            }
+        ]
+    }
+}

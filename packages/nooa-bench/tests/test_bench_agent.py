@@ -135,6 +135,7 @@ async def test_run_evaluation_returns_structured_task_result(monkeypatch, tmp_pa
             "evidence": "pytest passed",
             "command_to_verify": "pytest -q",
         },
+        "activated_skills": [],
     }
     assert shells[-1].cwd == str(tmp_path)
 
@@ -156,7 +157,7 @@ async def test_run_evaluation_returns_failure_on_exception(monkeypatch, tmp_path
         {"user_message": "fix the bug", "working_dir": str(tmp_path)}
     )
 
-    assert result == {"response": "", "success": False, "error": "boom"}
+    assert result == {"response": "", "success": False, "error": "boom", "activated_skills": []}
 
 
 @pytest.mark.asyncio
@@ -235,6 +236,120 @@ def test_bench_agent_preseeds_planning_todo():
     todos = agent.todo.list_todos()
 
     assert [t.title for t in todos] == ["Create a todo-based plan with clear dependencies"]
+
+
+def _write_text_skill(
+    skills_dir, name: str = "citation-helper", phrase: str = "use DOI-prefix validation"
+) -> None:
+    skill_dir = skills_dir / name
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "\n".join(
+            [
+                "---",
+                f"name: {name}",
+                f"description: {name} for activation tests.",
+                "---",
+                "",
+                f"# {name}",
+                "",
+                f"Unique activation phrase: {phrase}.",
+                "",
+            ]
+        )
+    )
+
+
+def _write_library_skill(skills_dir, name: str = "citation-helper") -> None:
+    package_dir = skills_dir / name
+    package_src = package_dir / "src" / "citation_helper"
+    package_src.mkdir(parents=True)
+    (package_dir / "pyproject.toml").write_text(
+        "\n".join(
+            [
+                "[project]",
+                f'name = "{name}"',
+                'version = "0.1.0"',
+                'dependencies = ["nooa"]',
+                "",
+                "[project.entry-points.\"nooa.skills\"]",
+                f'"local.{name}" = "citation_helper:CitationHelper"',
+                "",
+            ]
+        )
+    )
+    (package_src / "__init__.py").write_text(
+        "\n".join(
+            [
+                "from nooa.skill import Skill",
+                "",
+                "",
+                "class CitationHelper(Skill):",
+                "    \"\"\"Library-backed citation helper.\"\"\"",
+                "",
+                "    def normalize(self, value: str) -> str:",
+                "        \"\"\"Normalize a citation key.\"\"\"",
+                "        return value.strip().lower()",
+                "",
+            ]
+        )
+    )
+
+
+def test_bench_agent_no_skill_mode_does_not_activate_text_skill(tmp_path):
+    """no_skill leaves temporary TextSkills out of the LLM-facing agent doc."""
+
+    _write_text_skill(tmp_path)
+
+    agent = BenchAgent(llm=FakeLLMClient(), skill_mode="no_skill", skills_dir=tmp_path)
+
+    assert agent.skills.activated() == []
+    assert "text_skills" not in agent.context_manager
+
+
+def test_bench_agent_text_skill_mode_activates_temporary_skill(tmp_path):
+    """text_skill discovers and exposes a temporary SKILL.md directory as context."""
+
+    _write_text_skill(tmp_path)
+
+    agent = BenchAgent(llm=FakeLLMClient(), skill_mode="text_skill", skills_dir=tmp_path)
+
+    assert agent.skills.activated() == ["cmd.citation-helper"]
+    assert hasattr(agent, "citation_helper")
+    assert "text_skills" in agent.context_manager
+    assert "Unique activation phrase" in agent._text_skills_block()
+
+
+def test_bench_agent_library_skill_mode_activates_package_skill(tmp_path):
+    """library_skill discovers and exposes package-backed skills without text context."""
+
+    _write_library_skill(tmp_path)
+
+    agent = BenchAgent(llm=FakeLLMClient(), skill_mode="library_skill", skills_dir=tmp_path)
+
+    assert agent.skills.activated() == ["local.citation-helper"]
+    assert hasattr(agent, "citation_helper")
+    assert agent.citation_helper.normalize(" DOI ") == "doi"
+    assert "text_skills" not in agent.context_manager
+
+
+def test_bench_agent_text_skill_reconfiguration_is_scoped_to_latest_dir(tmp_path):
+    """Reusing one agent does not keep prior task TextSkills active."""
+
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    _write_text_skill(first_dir, name="first-helper", phrase="first-only guidance")
+    _write_text_skill(second_dir, name="second-helper", phrase="second-only guidance")
+    agent = BenchAgent(llm=FakeLLMClient(), skill_mode="text_skill", skills_dir=first_dir)
+
+    agent.configure_skills(skill_mode="text_skill", skills_dir=second_dir)
+
+    assert agent.skills.activated() == ["cmd.second-helper"]
+    block = agent._text_skills_block()
+    assert "second-only guidance" in block
+    assert "first-only guidance" not in block
 
 
 @pytest.mark.asyncio

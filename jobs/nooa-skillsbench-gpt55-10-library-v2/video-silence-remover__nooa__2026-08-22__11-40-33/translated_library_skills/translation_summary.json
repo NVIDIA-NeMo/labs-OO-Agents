@@ -1,0 +1,177 @@
+[
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/video-silence-remover/environment/skills/audio-extractor",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/video-silence-remover__nooa__2026-08-22__11-40-33/translated_library_skills/audio-extractor",
+    "package_name": "audio_extractor",
+    "registry_name": "local.audio-extractor",
+    "class_name": "AudioExtractor",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/audio_extractor/__init__.py",
+      "src/audio_extractor/_impl/__init__.py",
+      "src/audio_extractor/_impl/_scripts_extract_audio.py",
+      "tests/test_audio_extractor.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/video-silence-remover__nooa__2026-08-22__11-40-33/translated_library_skills/audio-extractor",
+      "registry_name": "local.audio-extractor",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  },
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/video-silence-remover/environment/skills/energy-calculator",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/video-silence-remover__nooa__2026-08-22__11-40-33/translated_library_skills/energy-calculator",
+    "package_name": "energy_calculator",
+    "registry_name": "local.energy-calculator",
+    "class_name": "EnergyCalculator",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/energy_calculator/__init__.py",
+      "src/energy_calculator/_impl/__init__.py",
+      "src/energy_calculator/_impl/_scripts_calc_energy.py",
+      "tests/test_energy_calculator.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/video-silence-remover__nooa__2026-08-22__11-40-33/translated_library_skills/energy-calculator",
+      "registry_name": "local.energy-calculator",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  },
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/video-silence-remover/environment/skills/pause-detector",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/video-silence-remover__nooa__2026-08-22__11-40-33/translated_library_skills/pause-detector",
+    "package_name": "pause_detector",
+    "registry_name": "local.pause-detector",
+    "class_name": "PauseDetector",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/pause_detector/__init__.py",
+      "src/pause_detector/_impl/__init__.py",
+      "src/pause_detector/_impl/_scripts_detect_pauses.py",
+      "tests/test_pause_detector.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/video-silence-remover__nooa__2026-08-22__11-40-33/translated_library_skills/pause-detector",
+      "registry_name": "local.pause-detector",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  },
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/video-silence-remover/environment/skills/report-generator",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/video-silence-remover__nooa__2026-08-22__11-40-33/translated_library_skills/report-generator",
+    "package_name": "report_generator",
+    "registry_name": "local.report-generator",
+    "class_name": "ReportGenerator",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/report_generator/__init__.py",
+      "src/report_generator/_impl/__init__.py",
+      "src/report_generator/_impl/_scripts_generate_report.py",
+      "tests/test_report_generator.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/video-silence-remover__nooa__2026-08-22__11-40-33/translated_library_skills/report-generator",
+      "registry_name": "local.report-generator",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  },
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/video-silence-remover/environment/skills/segment-combiner",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/video-silence-remover__nooa__2026-08-22__11-40-33/translated_library_skills/segment-combiner",
+    "package_name": "segment_combiner",
+    "registry_name": "local.segment-combiner",
+    "class_name": "SegmentCombiner",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/segment_combiner/__init__.py",
+      "src/segment_combiner/_impl/__init__.py",
+      "src/segment_combiner/_impl/_scripts_combine_segments.py",
+      "tests/test_segment_combiner.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/video-silence-remover__nooa__2026-08-22__11-40-33/translated_library_skills/segment-combiner",
+      "registry_name": "local.segment-combiner",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  },
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/video-silence-remover/environment/skills/silence-detector",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/video-silence-remover__nooa__2026-08-22__11-40-33/translated_library_skills/silence-detector",
+    "package_name": "silence_detector",
+    "registry_name": "local.silence-detector",
+    "class_name": "SilenceDetector",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/silence_detector/__init__.py",
+      "src/silence_detector/_impl/__init__.py",
+      "src/silence_detector/_impl/_scripts_detect_silence.py",
+      "tests/test_silence_detector.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/video-silence-remover__nooa__2026-08-22__11-40-33/translated_library_skills/silence-detector",
+      "registry_name": "local.silence-detector",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  },
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/video-silence-remover/environment/skills/video-processor",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/video-silence-remover__nooa__2026-08-22__11-40-33/translated_library_skills/video-processor",
+    "package_name": "video_processor",
+    "registry_name": "local.video-processor",
+    "class_name": "VideoProcessor",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/video_processor/__init__.py",
+      "src/video_processor/_impl/__init__.py",
+      "src/video_processor/_impl/_scripts_process_video.py",
+      "tests/test_video_processor.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/video-silence-remover__nooa__2026-08-22__11-40-33/translated_library_skills/video-processor",
+      "registry_name": "local.video-processor",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  }
+]

@@ -1,0 +1,147 @@
+[
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/fix-erlang-ssh-cve/environment/skills/erlang-concurrency",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/fix-erlang-ssh-cve__nooa__2026-08-22__11-35-56/translated_library_skills/erlang-concurrency",
+    "package_name": "erlang_concurrency",
+    "registry_name": "local.erlang-concurrency",
+    "class_name": "ErlangConcurrency",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/erlang_concurrency/__init__.py",
+      "tests/test_erlang_concurrency.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/fix-erlang-ssh-cve__nooa__2026-08-22__11-35-56/translated_library_skills/erlang-concurrency",
+      "registry_name": "local.erlang-concurrency",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  },
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/fix-erlang-ssh-cve/environment/skills/erlang-distribution",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/fix-erlang-ssh-cve__nooa__2026-08-22__11-35-56/translated_library_skills/erlang-distribution",
+    "package_name": "erlang_distribution",
+    "registry_name": "local.erlang-distribution",
+    "class_name": "ErlangDistribution",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/erlang_distribution/__init__.py",
+      "tests/test_erlang_distribution.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/fix-erlang-ssh-cve__nooa__2026-08-22__11-35-56/translated_library_skills/erlang-distribution",
+      "registry_name": "local.erlang-distribution",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  },
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/fix-erlang-ssh-cve/environment/skills/erlang-otp-behaviors",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/fix-erlang-ssh-cve__nooa__2026-08-22__11-35-56/translated_library_skills/erlang-otp-behaviors",
+    "package_name": "erlang_otp_behaviors",
+    "registry_name": "local.erlang-otp-behaviors",
+    "class_name": "ErlangOtpBehaviors",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/erlang_otp_behaviors/__init__.py",
+      "tests/test_erlang_otp_behaviors.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/fix-erlang-ssh-cve__nooa__2026-08-22__11-35-56/translated_library_skills/erlang-otp-behaviors",
+      "registry_name": "local.erlang-otp-behaviors",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  },
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/fix-erlang-ssh-cve/environment/skills/find-bugs",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/fix-erlang-ssh-cve__nooa__2026-08-22__11-35-56/translated_library_skills/find-bugs",
+    "package_name": "find_bugs",
+    "registry_name": "local.find-bugs",
+    "class_name": "FindBugs",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/find_bugs/__init__.py",
+      "tests/test_find_bugs.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/fix-erlang-ssh-cve__nooa__2026-08-22__11-35-56/translated_library_skills/find-bugs",
+      "registry_name": "local.find-bugs",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  },
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/fix-erlang-ssh-cve/environment/skills/senior-security",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/fix-erlang-ssh-cve__nooa__2026-08-22__11-35-56/translated_library_skills/senior-security",
+    "package_name": "senior_security",
+    "registry_name": "local.senior-security",
+    "class_name": "SeniorSecurity",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/senior_security/__init__.py",
+      "src/senior_security/_impl/__init__.py",
+      "src/senior_security/_impl/_scripts_pentest_automator.py",
+      "src/senior_security/_impl/_scripts_security_auditor.py",
+      "src/senior_security/_impl/_scripts_threat_modeler.py",
+      "src/senior_security/resources/references/cryptography_implementation.md",
+      "src/senior_security/resources/references/penetration_testing_guide.md",
+      "src/senior_security/resources/references/security_architecture_patterns.md",
+      "tests/test_senior_security.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/fix-erlang-ssh-cve__nooa__2026-08-22__11-35-56/translated_library_skills/senior-security",
+      "registry_name": "local.senior-security",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  },
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/fix-erlang-ssh-cve/environment/skills/ssh-penetration-testing",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/fix-erlang-ssh-cve__nooa__2026-08-22__11-35-56/translated_library_skills/ssh-penetration-testing",
+    "package_name": "ssh_penetration_testing",
+    "registry_name": "local.ssh-penetration-testing",
+    "class_name": "SshPenetrationTesting",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/ssh_penetration_testing/__init__.py",
+      "tests/test_ssh_penetration_testing.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/fix-erlang-ssh-cve__nooa__2026-08-22__11-35-56/translated_library_skills/ssh-penetration-testing",
+      "registry_name": "local.ssh-penetration-testing",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  }
+]

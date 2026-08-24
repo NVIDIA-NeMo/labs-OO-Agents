@@ -1,0 +1,94 @@
+[
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/dynamic-object-aware-egomotion/environment/skills/dyn-object-masks",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-translation-validation/dynamic-object-aware-egomotion/dyn-object-masks",
+    "package_name": "dyn_object_masks",
+    "registry_name": "local.dyn-object-masks",
+    "class_name": "DynObjectMasks",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/dyn_object_masks/__init__.py",
+      "tests/test_dyn_object_masks.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-translation-validation/dynamic-object-aware-egomotion/dyn-object-masks",
+      "registry_name": "local.dyn-object-masks",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  },
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/dynamic-object-aware-egomotion/environment/skills/egomotion-estimation",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-translation-validation/dynamic-object-aware-egomotion/egomotion-estimation",
+    "package_name": "egomotion_estimation",
+    "registry_name": "local.egomotion-estimation",
+    "class_name": "EgomotionEstimation",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/egomotion_estimation/__init__.py",
+      "tests/test_egomotion_estimation.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-translation-validation/dynamic-object-aware-egomotion/egomotion-estimation",
+      "registry_name": "local.egomotion-estimation",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  },
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/dynamic-object-aware-egomotion/environment/skills/output-validation",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-translation-validation/dynamic-object-aware-egomotion/output-validation",
+    "package_name": "output_validation",
+    "registry_name": "local.output-validation",
+    "class_name": "OutputValidation",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/output_validation/__init__.py",
+      "tests/test_output_validation.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-translation-validation/dynamic-object-aware-egomotion/output-validation",
+      "registry_name": "local.output-validation",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  },
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/dynamic-object-aware-egomotion/environment/skills/sampling-and-indexing",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-translation-validation/dynamic-object-aware-egomotion/sampling-and-indexing",
+    "package_name": "sampling_and_indexing",
+    "registry_name": "local.sampling-and-indexing",
+    "class_name": "SamplingAndIndexing",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/sampling_and_indexing/__init__.py",
+      "tests/test_sampling_and_indexing.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-translation-validation/dynamic-object-aware-egomotion/sampling-and-indexing",
+      "registry_name": "local.sampling-and-indexing",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  }
+]

@@ -1,0 +1,18 @@
+[project]
+name = "ssh-penetration-testing"
+version = "0.1.0"
+description = "This skill should be used when the user asks to \"pentest SSH services\", \"enumerate SSH configurations\", \"brute force SSH credentials\", \"exploit SSH vulnerabilities\", \"perform SSH tunneling\", or \"audit SSH security\". It provides comprehensive SSH penetration testing methodologies and techniques."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ssh_penetration_testing = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.ssh-penetration-testing" = "ssh_penetration_testing:SshPenetrationTesting"

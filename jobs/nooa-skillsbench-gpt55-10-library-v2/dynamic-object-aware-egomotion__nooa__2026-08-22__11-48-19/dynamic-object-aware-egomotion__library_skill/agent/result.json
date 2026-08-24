@@ -1,0 +1,15 @@
+{
+  "model": "openai/openai/openai/gpt-5.5",
+  "agent_type": "bench",
+  "success": true,
+  "response": "python3 /root/validate_outputs.py",
+  "error": null,
+  "n_input_tokens": 193786,
+  "n_output_tokens": 8519,
+  "activated_skills": [
+    "local.dyn-object-masks",
+    "local.egomotion-estimation",
+    "local.output-validation",
+    "local.sampling-and-indexing"
+  ]
+}

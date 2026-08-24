@@ -1,0 +1,18 @@
+[project]
+name = "memory-optimization"
+version = "0.1.0"
+description = "Optimize Python code for reduced memory usage and improved memory efficiency. Use when asked to reduce memory footprint, fix memory leaks, optimize data structures for memory, handle large datasets efficiently, or diagnose memory issues. Covers object sizing, generator patterns, efficient data structures, and memory profiling strategies."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+memory_optimization = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.memory-optimization" = "memory_optimization:MemoryOptimization"

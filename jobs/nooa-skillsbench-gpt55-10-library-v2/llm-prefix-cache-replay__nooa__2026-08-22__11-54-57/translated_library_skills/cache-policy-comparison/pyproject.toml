@@ -1,0 +1,18 @@
+[project]
+name = "cache-policy-comparison"
+version = "0.1.0"
+description = "Compare and implement eviction policies (LRU, LFU, FIFO, S3FIFO, ARC) for bounded-capacity caches. Use when choosing or implementing an eviction policy for a buffer pool, page cache, CDN edge, or LLM KV cache, or when writing a replay simulator that supports multiple policies. Clarifies recency vs frequency semantics, queue topology, saturating counters, ghost buffers, and the second-chance rule that distinguishes modern FIFO-family policies from classic LRU."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+cache_policy_comparison = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.cache-policy-comparison" = "cache_policy_comparison:CachePolicyComparison"

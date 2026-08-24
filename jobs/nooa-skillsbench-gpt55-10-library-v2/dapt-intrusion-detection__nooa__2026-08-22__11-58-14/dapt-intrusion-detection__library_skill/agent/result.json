@@ -1,0 +1,13 @@
+{
+  "model": "openai/openai/openai/gpt-5.5",
+  "agent_type": "bench",
+  "success": true,
+  "response": "/usr/bin/python3 - <<'PY'\nimport csv, sys\npath='/root/network_stats.csv'\nwith open(path, newline='') as f:\n    rows=list(csv.reader(f))\nmetric_rows=[r for r in rows[1:] if r and not r[0].startswith('#')]\nmissing=[r[0] for r in metric_rows if len(r)<2 or r[1]=='']\nassert rows[0] == ['metric','value']\nassert not missing, missing\nassert len(metric_rows) == 37\nprint(f'OK: {len(metric_rows)} metric rows populated; comments preserved')\nPY",
+  "error": null,
+  "n_input_tokens": 146356,
+  "n_output_tokens": 8922,
+  "activated_skills": [
+    "local.pcap-analysis",
+    "local.threat-detection"
+  ]
+}

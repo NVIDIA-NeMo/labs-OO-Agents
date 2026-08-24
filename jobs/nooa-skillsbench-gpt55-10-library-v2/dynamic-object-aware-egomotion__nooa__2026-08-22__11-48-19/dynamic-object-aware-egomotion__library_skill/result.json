@@ -1,0 +1,110 @@
+{
+  "task_name": "dynamic-object-aware-egomotion",
+  "rollout_name": "dynamic-object-aware-egomotion__library_skill",
+  "rewards": {
+    "reward": 0.0
+  },
+  "agent": "nooa-harbor",
+  "agent_name": "nooa-bench",
+  "model": "openai/openai/openai/gpt-5.5",
+  "skill_mode": "with-skill",
+  "skill_source": "custom_runtime",
+  "requested_skills_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/dynamic-object-aware-egomotion__nooa__2026-08-22__11-48-19/translated_library_skills",
+  "effective_skills_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/dynamic-object-aware-egomotion__nooa__2026-08-22__11-48-19/translated_library_skills",
+  "skills_sandbox_dir": "/skills",
+  "include_task_skills": false,
+  "n_tool_calls": 0,
+  "n_skill_invocations": 0,
+  "n_prompts": 1,
+  "agent_result": {
+    "n_tool_calls": 0,
+    "n_skill_invocations": 0,
+    "n_prompts": 1,
+    "n_input_tokens": 0,
+    "n_output_tokens": 0,
+    "n_cache_read_tokens": 0,
+    "n_cache_creation_tokens": 0,
+    "total_tokens": 0,
+    "cost_usd": null,
+    "usage_source": "unavailable",
+    "price_source": null
+  },
+  "final_metrics": {
+    "total_prompt_tokens": 0,
+    "total_completion_tokens": 0,
+    "total_cached_tokens": 0,
+    "total_cost_usd": null
+  },
+  "trajectory_summary": {
+    "steps": 1,
+    "tool_call_steps": 0,
+    "user_message_steps": 0,
+    "agent_message_steps": 0,
+    "agent_thought_steps": 0,
+    "other_steps": 1,
+    "event_type_counts": {
+      "nooa_runner": 1
+    },
+    "tool_call_status_counts": {},
+    "partial_trajectory": false,
+    "trajectory_source": null
+  },
+  "usage_tracking": {
+    "requested": "auto",
+    "status": "unavailable",
+    "environment": "docker",
+    "endpoint_kind": "host",
+    "usage_source": "unavailable"
+  },
+  "error": null,
+  "error_category": null,
+  "verifier_error": null,
+  "verifier_error_category": null,
+  "export_error": null,
+  "idle_timeout_info": null,
+  "agent_timeout_info": null,
+  "sandbox_startup_info": null,
+  "transport_error_info": null,
+  "verifier_timeout_info": null,
+  "api_error_info": null,
+  "suspected_api_error_info": null,
+  "partial_trajectory": false,
+  "trajectory_source": null,
+  "started_at": "2026-08-22 11:48:20.826080",
+  "finished_at": "2026-08-22 11:51:07.060227",
+  "timing": {
+    "environment_setup": 6.6,
+    "agent_execution": 129.5,
+    "verifier": 9.6,
+    "total": 166.2
+  },
+  "scenes": [
+    {
+      "name": "default",
+      "skills_dir": null,
+      "roles": [
+        {
+          "name": "agent",
+          "agent": "nooa-harbor",
+          "model": "openai/openai/openai/gpt-5.5",
+          "reasoning_effort": null,
+          "timeout_sec": null,
+          "idle_timeout_sec": null,
+          "skills_dir": null,
+          "capabilities": null,
+          "env_keys": []
+        }
+      ],
+      "turns": [
+        {
+          "role": "agent",
+          "has_prompt": false
+        }
+      ]
+    }
+  ],
+  "loop": {
+    "strategy": "single-shot"
+  },
+  "sandbox_id": null
+}

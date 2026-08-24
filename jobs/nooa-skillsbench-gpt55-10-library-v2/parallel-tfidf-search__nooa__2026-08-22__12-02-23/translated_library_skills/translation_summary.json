@@ -1,0 +1,74 @@
+[
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/parallel-tfidf-search/environment/skills/memory-optimization",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/parallel-tfidf-search__nooa__2026-08-22__12-02-23/translated_library_skills/memory-optimization",
+    "package_name": "memory_optimization",
+    "registry_name": "local.memory-optimization",
+    "class_name": "MemoryOptimization",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/memory_optimization/__init__.py",
+      "src/memory_optimization/resources/references/advanced_techniques.md",
+      "tests/test_memory_optimization.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/parallel-tfidf-search__nooa__2026-08-22__12-02-23/translated_library_skills/memory-optimization",
+      "registry_name": "local.memory-optimization",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  },
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/parallel-tfidf-search/environment/skills/python-parallelization",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/parallel-tfidf-search__nooa__2026-08-22__12-02-23/translated_library_skills/python-parallelization",
+    "package_name": "python_parallelization",
+    "registry_name": "local.python-parallelization",
+    "class_name": "PythonParallelization",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/python_parallelization/__init__.py",
+      "src/python_parallelization/resources/references/advanced_techniques.md",
+      "tests/test_python_parallelization.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/parallel-tfidf-search__nooa__2026-08-22__12-02-23/translated_library_skills/python-parallelization",
+      "registry_name": "local.python-parallelization",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  },
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/parallel-tfidf-search/environment/skills/workload-balancing",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/parallel-tfidf-search__nooa__2026-08-22__12-02-23/translated_library_skills/workload-balancing",
+    "package_name": "workload_balancing",
+    "registry_name": "local.workload-balancing",
+    "class_name": "WorkloadBalancing",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/workload_balancing/__init__.py",
+      "src/workload_balancing/resources/references/advanced_techniques.md",
+      "tests/test_workload_balancing.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/parallel-tfidf-search__nooa__2026-08-22__12-02-23/translated_library_skills/workload-balancing",
+      "registry_name": "local.workload-balancing",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  }
+]

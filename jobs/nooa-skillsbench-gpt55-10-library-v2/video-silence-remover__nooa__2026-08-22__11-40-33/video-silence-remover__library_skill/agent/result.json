@@ -1,0 +1,18 @@
+{
+  "model": "openai/openai/openai/gpt-5.5",
+  "agent_type": "bench",
+  "success": true,
+  "response": "python3 - <<'PY'\nimport json, os, subprocess\nfor p in ['compressed_video.mp4','compression_report.json']:\n    assert os.path.exists(p) and os.path.getsize(p) > 0, p\norig=float(subprocess.check_output(['ffprobe','-v','error','-show_entries','format=duration','-of','default=nk=1:nw=1','data/input_video.mp4'], text=True).strip())\ncomp=float(subprocess.check_output(['ffprobe','-v','error','-show_entries','format=duration','-of','default=nk=1:nw=1','compressed_video.mp4'], text=True).strip())\nstreams=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_entries','stream=codec_type,codec_name','-of','json','compressed_video.mp4'], text=True))\nassert any(s['codec_type']=='video' for s in streams['streams'])\nassert any(s['codec_type']=='audio' for s in streams['streams'])\nreport=json.load(open('compression_report.json'))\nassert abs(report['original_duration_seconds']-orig) < 0.01\nassert abs(report['compressed_duration_seconds']-comp) < 0.01\nassert abs(report['original_duration_seconds']-report['compressed_duration_seconds']-report['removed_duration_seconds']) < 0.01\nseg_sum=0\nlast=-1\nfor seg in report['segments_removed']:\n    assert 0 <= seg['start'] < seg['end'] <= report['original_duration_seconds'] + 0.01\n    assert seg['start'] >= last - 1e-6\n    assert abs((seg['end']-seg['start'])-seg['duration']) < 0.01\n    last=seg['end']; seg_sum += seg['duration']\nassert abs(report['removed_duration_seconds']-seg_sum) < 0.01\nprint('VALIDATION_OK')\nPY",
+  "error": null,
+  "n_input_tokens": 569953,
+  "n_output_tokens": 20002,
+  "activated_skills": [
+    "local.audio-extractor",
+    "local.energy-calculator",
+    "local.pause-detector",
+    "local.report-generator",
+    "local.segment-combiner",
+    "local.silence-detector",
+    "local.video-processor"
+  ]
+}

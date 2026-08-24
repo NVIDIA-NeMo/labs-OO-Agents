@@ -1,0 +1,18 @@
+[project]
+name = "workload-balancing"
+version = "0.1.0"
+description = "Optimize workload distribution across workers, processes, or nodes for efficient parallel execution. Use when asked to balance work distribution, improve parallel efficiency, reduce stragglers, implement load balancing, or optimize task scheduling. Covers static/dynamic partitioning, work stealing, and adaptive load balancing strategies."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+workload_balancing = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.workload-balancing" = "workload_balancing:WorkloadBalancing"

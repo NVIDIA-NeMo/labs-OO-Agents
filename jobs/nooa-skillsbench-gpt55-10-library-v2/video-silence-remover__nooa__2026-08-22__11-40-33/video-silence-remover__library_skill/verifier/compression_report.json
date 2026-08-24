@@ -1,0 +1,103 @@
+{
+  "original_duration_seconds": 600.005,
+  "compressed_duration_seconds": 477.004,
+  "removed_duration_seconds": 123.001,
+  "compression_percentage": 20.5,
+  "segments_removed": [
+    {
+      "start": 0.0,
+      "end": 52.0,
+      "duration": 52.0
+    },
+    {
+      "start": 83.5,
+      "end": 86.0,
+      "duration": 2.5
+    },
+    {
+      "start": 86.5,
+      "end": 97.0,
+      "duration": 10.5
+    },
+    {
+      "start": 100.0,
+      "end": 102.0,
+      "duration": 2.0
+    },
+    {
+      "start": 104.5,
+      "end": 110.5,
+      "duration": 6.0
+    },
+    {
+      "start": 114.5,
+      "end": 125.5,
+      "duration": 11.0
+    },
+    {
+      "start": 130.5,
+      "end": 134.5,
+      "duration": 4.0
+    },
+    {
+      "start": 136.0,
+      "end": 138.5,
+      "duration": 2.5
+    },
+    {
+      "start": 139.0,
+      "end": 141.5,
+      "duration": 2.5
+    },
+    {
+      "start": 143.5,
+      "end": 148.0,
+      "duration": 4.5
+    },
+    {
+      "start": 148.5,
+      "end": 150.5,
+      "duration": 2.0
+    },
+    {
+      "start": 151.5,
+      "end": 153.5,
+      "duration": 2.0
+    },
+    {
+      "start": 178.0,
+      "end": 181.5,
+      "duration": 3.5
+    },
+    {
+      "start": 182.0,
+      "end": 184.0,
+      "duration": 2.0
+    },
+    {
+      "start": 227.5,
+      "end": 229.5,
+      "duration": 2.0
+    },
+    {
+      "start": 232.0,
+      "end": 237.5,
+      "duration": 5.5
+    },
+    {
+      "start": 238.5,
+      "end": 241.0,
+      "duration": 2.5
+    },
+    {
+      "start": 326.5,
+      "end": 330.5,
+      "duration": 4.0
+    },
+    {
+      "start": 483.5,
+      "end": 485.5,
+      "duration": 2.0
+    }
+  ]
+}

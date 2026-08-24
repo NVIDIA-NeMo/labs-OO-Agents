@@ -1,0 +1,18 @@
+[project]
+name = "sampling-and-indexing"
+version = "0.1.0"
+description = "Standardize video sampling and frame indexing so interval instructions and mask frames stay aligned with a valid key/index scheme."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+sampling_and_indexing = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.sampling-and-indexing" = "sampling_and_indexing:SamplingAndIndexing"

@@ -1,0 +1,18 @@
+[project]
+name = "pcap-analysis"
+version = "0.1.0"
+description = "Guidance for analyzing network packet captures (PCAP files) and computing network statistics using Python, with tested utility functions."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+pcap_analysis = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.pcap-analysis" = "pcap_analysis:PcapAnalysis"

@@ -1,0 +1,18 @@
+[project]
+name = "report-generator"
+version = "0.1.0"
+description = "Generate compression reports for video processing. Use when you need to create structured JSON reports with duration statistics, compression ratios, and segment details after video processing."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+report_generator = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.report-generator" = "report_generator:ReportGenerator"

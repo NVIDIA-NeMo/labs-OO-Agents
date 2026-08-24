@@ -1,0 +1,47 @@
+{
+    "results": {
+        "tool": {
+            "name": "pytest",
+            "version": "8.4.1"
+        },
+        "summary": {
+            "tests": 3,
+            "passed": 3,
+            "failed": 0,
+            "skipped": 0,
+            "pending": 0,
+            "other": 0,
+            "start": 1787391574.525029,
+            "stop": 1787391625.319322
+        },
+        "tests": [
+            {
+                "name": "::test_ssh_works",
+                "status": "passed",
+                "duration": 49.08657981400029,
+                "start": 1787391574.603982,
+                "stop": 1787391623.6928735,
+                "retries": 0,
+                "file_path": "../../verifier/test_outputs.py"
+            },
+            {
+                "name": "::test_exploit",
+                "status": "passed",
+                "duration": 1.6234220009791898,
+                "start": 1787391623.6931355,
+                "stop": 1787391625.317224,
+                "retries": 0,
+                "file_path": "../../verifier/test_outputs.py"
+            },
+            {
+                "name": "::test_00_build_sh_output",
+                "status": "passed",
+                "duration": 0.0009771659970283508,
+                "start": 1787391625.317663,
+                "stop": 1787391625.3189435,
+                "retries": 0,
+                "file_path": "../../verifier/test_outputs.py"
+            }
+        ]
+    }
+}

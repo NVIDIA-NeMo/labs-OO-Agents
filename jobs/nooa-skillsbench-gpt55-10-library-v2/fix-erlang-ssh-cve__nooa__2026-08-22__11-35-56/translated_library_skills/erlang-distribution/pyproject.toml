@@ -1,0 +1,18 @@
+[project]
+name = "erlang-distribution"
+version = "0.1.0"
+description = "Use when erlang distributed systems including node connectivity, distributed processes, global name registration, distributed supervision, network partitions, and building fault-tolerant multi-node applications on the BEAM VM."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+erlang_distribution = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.erlang-distribution" = "erlang_distribution:ErlangDistribution"

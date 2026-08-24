@@ -1,0 +1,86 @@
+{
+    "results": {
+        "tool": {
+            "name": "pytest",
+            "version": "8.4.1"
+        },
+        "summary": {
+            "tests": 6,
+            "passed": 3,
+            "failed": 3,
+            "skipped": 0,
+            "pending": 0,
+            "other": 0,
+            "start": 1787392686.8413017,
+            "stop": 1787392686.8784475
+        },
+        "tests": [
+            {
+                "name": "::test_schema_and_totals",
+                "status": "passed",
+                "duration": 0.02123987600498367,
+                "start": 1787392686.8482563,
+                "stop": 1787392686.86967,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::test_total_hit_tokens",
+                "status": "failed",
+                "raw_status": "call_failed",
+                "duration": 0.00018908300262410194,
+                "start": 1787392686.8697846,
+                "stop": 1787392686.8741317,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py",
+                "trace": "actual = {'final_cache_blocks': 2800, 'overall_hit_rate': 0.09017387141224907, 'per_request': [{'hit_tokens': 0, 'idx': 0, 'pro..., 'prompt_tokens': 6760}, {'hit_tokens': 512, 'idx': 5, 'prompt_tokens': 4834}, ...], 'total_hit_tokens': 2474531, ...}\nexpected = {'final_cache_blocks': 2535, 'overall_hit_rate': 0.08726327241088713, 'per_request': [{'hit_tokens': 0, 'idx': 0, 'pro..., 'prompt_tokens': 6760}, {'hit_tokens': 512, 'idx': 5, 'prompt_tokens': 4834}, ...], 'total_hit_tokens': 2394659, ...}\n\n    def test_total_hit_tokens(actual, expected):\n>       assert actual[\"total_hit_tokens\"] == expected[\"total_hit_tokens\"], (\n            f\"expected {expected['total_hit_tokens']}, got {actual['total_hit_tokens']}\"\n        )\nE       AssertionError: expected 2394659, got 2474531\nE       assert 2474531 == 2394659\n\n/verifier/test_outputs.py:53: AssertionError",
+                "message": "The test failed in the call phase due to an assertion error"
+            },
+            {
+                "name": "::test_overall_hit_rate",
+                "status": "failed",
+                "raw_status": "call_failed",
+                "duration": 0.0001493749878136441,
+                "start": 1787392686.8742306,
+                "stop": 1787392686.8753326,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py",
+                "trace": "actual = {'final_cache_blocks': 2800, 'overall_hit_rate': 0.09017387141224907, 'per_request': [{'hit_tokens': 0, 'idx': 0, 'pro..., 'prompt_tokens': 6760}, {'hit_tokens': 512, 'idx': 5, 'prompt_tokens': 4834}, ...], 'total_hit_tokens': 2474531, ...}\nexpected = {'final_cache_blocks': 2535, 'overall_hit_rate': 0.08726327241088713, 'per_request': [{'hit_tokens': 0, 'idx': 0, 'pro..., 'prompt_tokens': 6760}, {'hit_tokens': 512, 'idx': 5, 'prompt_tokens': 4834}, ...], 'total_hit_tokens': 2394659, ...}\n\n    def test_overall_hit_rate(actual, expected):\n        diff = abs(actual[\"overall_hit_rate\"] - expected[\"overall_hit_rate\"])\n>       assert diff < 1e-6, f\"hit_rate off by {diff}\"\nE       AssertionError: hit_rate off by 0.002910599001361938\nE       assert 0.002910599001361938 < 1e-06\n\n/verifier/test_outputs.py:60: AssertionError",
+                "message": "The test failed in the call phase due to an assertion error"
+            },
+            {
+                "name": "::test_final_cache_blocks",
+                "status": "failed",
+                "raw_status": "call_failed",
+                "duration": 0.00016233399219345301,
+                "start": 1787392686.8754272,
+                "stop": 1787392686.876542,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py",
+                "trace": "actual = {'final_cache_blocks': 2800, 'overall_hit_rate': 0.09017387141224907, 'per_request': [{'hit_tokens': 0, 'idx': 0, 'pro..., 'prompt_tokens': 6760}, {'hit_tokens': 512, 'idx': 5, 'prompt_tokens': 4834}, ...], 'total_hit_tokens': 2474531, ...}\nexpected = {'final_cache_blocks': 2535, 'overall_hit_rate': 0.08726327241088713, 'per_request': [{'hit_tokens': 0, 'idx': 0, 'pro..., 'prompt_tokens': 6760}, {'hit_tokens': 512, 'idx': 5, 'prompt_tokens': 4834}, ...], 'total_hit_tokens': 2394659, ...}\n\n    def test_final_cache_blocks(actual, expected):\n>       assert actual[\"final_cache_blocks\"] == expected[\"final_cache_blocks\"], (\n            f\"expected {expected['final_cache_blocks']} resident blocks, \"\n            f\"got {actual['final_cache_blocks']}\"\n        )\nE       AssertionError: expected 2535 resident blocks, got 2800\nE       assert 2800 == 2535\n\n/verifier/test_outputs.py:64: AssertionError",
+                "message": "The test failed in the call phase due to an assertion error"
+            },
+            {
+                "name": "::test_per_request_sample",
+                "status": "passed",
+                "duration": 0.00012945900380145758,
+                "start": 1787392686.8766303,
+                "stop": 1787392686.8768432,
+                "retries": 4,
+                "file_path": "../verifier/test_outputs.py",
+                "tags": [
+                    "parametrize::idx::[133, 601, 968, 1459, 1999]"
+                ]
+            },
+            {
+                "name": "::test_per_request_self_consistency",
+                "status": "passed",
+                "duration": 0.00019904100918211043,
+                "start": 1787392686.8781347,
+                "stop": 1787392686.8784096,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            }
+        ]
+    }
+}

@@ -1,0 +1,18 @@
+[project]
+name = "web-interface-guidelines"
+version = "0.1.0"
+description = "Vercel's comprehensive UI guidelines for building accessible, performant web interfaces. Use this skill when reviewing or building UI components for compliance with best practices around accessibility, performance, animations, and visual stability."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+web_interface_guidelines = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.web-interface-guidelines" = "web_interface_guidelines:WebInterfaceGuidelines"

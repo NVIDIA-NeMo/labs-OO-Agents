@@ -1,0 +1,60 @@
+Hit:1 http://deb.debian.org/debian trixie InRelease
+Hit:2 http://deb.debian.org/debian trixie-updates InRelease
+Hit:3 http://deb.debian.org/debian-security trixie-security InRelease
+Reading package lists...
+Reading package lists...
+Building dependency tree...
+Reading state information...
+curl is already the newest version (8.14.1-2+deb13u4).
+0 upgraded, 0 newly installed, 0 to remove and 9 not upgraded.
+downloading uv 0.9.7 aarch64-unknown-linux-gnu
+no checksums to verify
+installing to /root/.local/bin
+  uv
+  uvx
+everything's installed!
+Downloading pygments (1.2MiB)
+ Downloading pygments
+Installed 6 packages in 5ms
+============================= test session starts ==============================
+platform linux -- Python 3.12.14, pytest-8.4.1, pluggy-1.6.0 -- /root/.cache/uv/archive-v0/pe8Rf9KQLmd6AL_mJs_H0/bin/python
+rootdir: /root
+configfile: ../dev/null
+plugins: json-ctrf-0.3.5
+collecting ... collected 5 items
+
+::TestParallelImplementation::test_parallel_solution_exists PASSED       [ 20%]
+::TestCorrectnessSmall::test_idf_values_match PASSED                     [ 40%]
+::TestCorrectnessSmall::test_search_results_match PASSED                 [ 60%]
+::TestPerformanceIndexing::test_index_speedup PASSED                     [ 80%]
+::TestPerformanceSearch::test_search_speedup PASSED                      [100%]
+
+==================================== PASSES ====================================
+__________________ TestCorrectnessSmall.test_idf_values_match __________________
+---------------------------- Captured stdout setup -----------------------------
+Generated 1000 documents.
+__________________ TestPerformanceIndexing.test_index_speedup __________________
+---------------------------- Captured stdout setup -----------------------------
+Generated 5000 documents.
+----------------------------- Captured stdout call -----------------------------
+
+Index Building Performance:
+  Sequential: 0.92s
+  Parallel (4 workers): 0.37s
+  Speedup: 2.51x
+__________________ TestPerformanceSearch.test_search_speedup ___________________
+---------------------------- Captured stdout setup -----------------------------
+Generated 5000 documents.
+----------------------------- Captured stdout call -----------------------------
+
+Batch Search Performance (1000 queries):
+  Sequential: 3.33s
+  Parallel (4 workers): 0.53s
+  Speedup: 6.27x
+=========================== short test summary info ============================
+PASSED ::TestParallelImplementation::test_parallel_solution_exists
+PASSED ::TestCorrectnessSmall::test_idf_values_match
+PASSED ::TestCorrectnessSmall::test_search_results_match
+PASSED ::TestPerformanceIndexing::test_index_speedup
+PASSED ::TestPerformanceSearch::test_search_speedup
+============================== 5 passed in 15.68s ==============================

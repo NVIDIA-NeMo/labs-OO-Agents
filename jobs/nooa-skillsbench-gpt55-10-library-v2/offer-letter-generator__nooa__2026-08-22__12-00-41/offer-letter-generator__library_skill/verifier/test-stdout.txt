@@ -1,0 +1,52 @@
+Downloading pygments (1.2MiB)
+Downloading lxml (4.8MiB)
+ Downloading pygments
+ Downloading lxml
+Installed 9 packages in 10ms
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-8.4.1, pluggy-1.6.0 -- /root/.cache/uv/archive-v0/f6cwbh0NStVrGQwpeTZJt/bin/python
+rootdir: /root
+configfile: ../dev/null
+plugins: json-ctrf-0.3.5
+collecting ... collected 18 items
+
+::test_no_remaining_placeholders PASSED                                  [  5%]
+::test_split_placeholder_replaced[DATE] PASSED                           [ 11%]
+::test_split_placeholder_replaced[CANDIDATE_FULL_NAME] PASSED            [ 16%]
+::test_split_placeholder_replaced[CITY] PASSED                           [ 22%]
+::test_split_placeholder_replaced[STATE] PASSED                          [ 27%]
+::test_split_placeholder_replaced[ZIP_CODE] PASSED                       [ 33%]
+::test_split_placeholder_replaced[POSITION] PASSED                       [ 38%]
+::test_split_placeholder_replaced[DEPARTMENT] PASSED                     [ 44%]
+::test_split_placeholder_replaced[RESPONSE_DEADLINE] PASSED              [ 50%]
+::test_split_placeholder_replaced[HR_NAME] PASSED                        [ 55%]
+::test_split_placeholder_replaced[PTO_DAYS] PASSED                       [ 61%]
+::test_nested_table_value[POSITION] PASSED                               [ 66%]
+::test_nested_table_value[DEPARTMENT] PASSED                             [ 72%]
+::test_nested_table_value[BASE_SALARY] PASSED                            [ 77%]
+::test_nested_table_value[SIGNING_BONUS] PASSED                          [ 83%]
+::test_nested_table_value[EQUITY_SHARES] PASSED                          [ 88%]
+::test_nested_table_value[MANAGER_NAME] PASSED                           [ 94%]
+::test_conditional_section PASSED                                        [100%]
+
+==================================== PASSES ====================================
+=========================== short test summary info ============================
+PASSED ::test_no_remaining_placeholders
+PASSED ::test_split_placeholder_replaced[DATE]
+PASSED ::test_split_placeholder_replaced[CANDIDATE_FULL_NAME]
+PASSED ::test_split_placeholder_replaced[CITY]
+PASSED ::test_split_placeholder_replaced[STATE]
+PASSED ::test_split_placeholder_replaced[ZIP_CODE]
+PASSED ::test_split_placeholder_replaced[POSITION]
+PASSED ::test_split_placeholder_replaced[DEPARTMENT]
+PASSED ::test_split_placeholder_replaced[RESPONSE_DEADLINE]
+PASSED ::test_split_placeholder_replaced[HR_NAME]
+PASSED ::test_split_placeholder_replaced[PTO_DAYS]
+PASSED ::test_nested_table_value[POSITION]
+PASSED ::test_nested_table_value[DEPARTMENT]
+PASSED ::test_nested_table_value[BASE_SALARY]
+PASSED ::test_nested_table_value[SIGNING_BONUS]
+PASSED ::test_nested_table_value[EQUITY_SHARES]
+PASSED ::test_nested_table_value[MANAGER_NAME]
+PASSED ::test_conditional_section
+============================== 18 passed in 0.09s ==============================

@@ -1,0 +1,12 @@
+{
+  "motion_macro_f1": 0.47833333333333333,
+  "mask_mean_iou": null,
+  "mask_p10_iou": null,
+  "mask_boundary_iou": null,
+  "mask_flicker": null,
+  "num_frames": 17,
+  "mask_shape": [
+    720,
+    1280
+  ]
+}

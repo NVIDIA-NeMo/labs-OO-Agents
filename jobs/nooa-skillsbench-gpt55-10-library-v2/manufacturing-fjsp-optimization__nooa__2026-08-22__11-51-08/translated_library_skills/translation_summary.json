@@ -1,0 +1,25 @@
+[
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/manufacturing-fjsp-optimization/environment/skills/fjsp-baseline-repair-with-downtime-and-policy",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/manufacturing-fjsp-optimization__nooa__2026-08-22__11-51-08/translated_library_skills/fjsp-baseline-repair-with-downtime-and-policy",
+    "package_name": "fjsp_baseline_repair_with_downtime_and_policy",
+    "registry_name": "local.fjsp-baseline-repair-with-downtime-and-policy",
+    "class_name": "FjspBaselineRepairWithDowntimeAndPolicy",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/fjsp_baseline_repair_with_downtime_and_policy/__init__.py",
+      "tests/test_fjsp_baseline_repair_with_downtime_and_policy.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-v2/manufacturing-fjsp-optimization__nooa__2026-08-22__11-51-08/translated_library_skills/fjsp-baseline-repair-with-downtime-and-policy",
+      "registry_name": "local.fjsp-baseline-repair-with-downtime-and-policy",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  }
+]

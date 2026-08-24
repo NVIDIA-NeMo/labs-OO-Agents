@@ -1,0 +1,18 @@
+[project]
+name = "video-processor"
+version = "0.1.0"
+description = "Process videos by removing segments and concatenating remaining parts. Use when you need to remove detected pauses/openings from videos, create highlight reels, or batch process segment removals using ffmpeg filter_complex."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+video_processor = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.video-processor" = "video_processor:VideoProcessor"

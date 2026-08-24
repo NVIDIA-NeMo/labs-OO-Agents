@@ -1,0 +1,18 @@
+[project]
+name = "egomotion-estimation"
+version = "0.1.0"
+description = "Estimate camera motion with optical flow + affine/homography, allow multi-label per frame."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+egomotion_estimation = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.egomotion-estimation" = "egomotion_estimation:EgomotionEstimation"

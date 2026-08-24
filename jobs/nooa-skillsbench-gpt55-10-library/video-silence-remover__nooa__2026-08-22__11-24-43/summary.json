@@ -1,0 +1,28 @@
+{
+  "job_name": "video-silence-remover__nooa__2026-08-22__11-24-43",
+  "manifest": {
+    "task": "video-silence-remover",
+    "model": "openai/openai/openai/gpt-5.5",
+    "sandbox": "docker",
+    "conditions": [
+      "library_skill"
+    ],
+    "skillsbench_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench",
+    "jobs_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library",
+    "repo_commit": "8c5a15efc8c1fc3642d9f8c792f9e3e01895f1a3",
+    "created_at": "2026-08-22T11:24:43+0200"
+  },
+  "results": [
+    {
+      "condition": "library_skill",
+      "rollout_dir": "",
+      "passed": false,
+      "reward": null,
+      "error": "No module named 'nooa'",
+      "verifier_error": null,
+      "agent_return_code": 1,
+      "activated_skills": null,
+      "skipped": false
+    }
+  ]
+}

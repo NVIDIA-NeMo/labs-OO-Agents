@@ -1,0 +1,117 @@
+Hit:1 http://ports.ubuntu.com/ubuntu-ports noble InRelease
+Hit:2 http://ports.ubuntu.com/ubuntu-ports noble-updates InRelease
+Hit:3 http://ports.ubuntu.com/ubuntu-ports noble-backports InRelease
+Hit:4 http://ports.ubuntu.com/ubuntu-ports noble-security InRelease
+Reading package lists...
+Reading package lists...
+Building dependency tree...
+Reading state information...
+curl is already the newest version (8.5.0-2ubuntu10.12).
+0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.
+downloading uv 0.9.7 aarch64-unknown-linux-gnu
+no checksums to verify
+installing to /root/.local/bin
+  uv
+  uvx
+everything's installed!
+Downloading pygments (1.2MiB)
+Downloading scipy (32.4MiB)
+Downloading numpy (14.9MiB)
+ Downloading pygments
+ Downloading numpy
+ Downloading scipy
+Installed 8 packages in 26ms
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-8.4.1, pluggy-1.6.0 -- /root/.cache/uv/archive-v0/dEokUl9gWfBq-88b3dmU7/bin/python
+rootdir: /root
+configfile: ../dev/null
+plugins: json-ctrf-0.3.5
+collecting ... collected 11 items
+
+::TestGroundTruthConsistency::test_motion_gt_covers_each_gt_mask PASSED  [  9%]
+::TestOutputFilesExist::test_pred_instructions_exists PASSED             [ 18%]
+::TestOutputFilesExist::test_dyn_masks_exists PASSED                     [ 27%]
+::TestInstructionsFormat::test_is_dict PASSED                            [ 36%]
+::TestInstructionsFormat::test_keys_format PASSED                        [ 45%]
+::TestInstructionsFormat::test_valid_labels PASSED                       [ 54%]
+::TestDynMasksFormat::test_has_shape PASSED                              [ 63%]
+::TestDynMasksFormat::test_shape_valid PASSED                            [ 72%]
+::TestDynMasksFormat::test_frame_components PASSED                       [ 81%]
+::TestMotionAccuracy::test_motion_macro_f1 FAILED                        [ 90%]
+::TestMaskAccuracy::test_mask_comprehensive FAILED                       [100%]
+
+=================================== FAILURES ===================================
+___________________ TestMotionAccuracy.test_motion_macro_f1 ____________________
+
+self = <test_outputs.TestMotionAccuracy object at 0xffff90bc3890>
+pred_instructions = {'0->1': ['Pan Right', 'Dolly In'], '1->2': ['Pan Right', 'Dolly In'], '10->11': ['Pan Right', 'Dolly In'], '11->12': ['Pan Right', 'Dolly In'], ...}
+gt_instructions = {'0->3': ['Stay'], '10->18': ['Dolly In', 'Pan Right'], '3->10': ['Dolly In']}
+
+    def test_motion_macro_f1(self, pred_instructions, gt_instructions):
+        """
+        Calculate Macro-F1 to ensure accuracy across all motion classes,
+        preventing majority classes (like 'Stay') from biasing the results.
+        """
+        p_frames = expand_instructions_to_frames(pred_instructions)
+        g_frames = expand_instructions_to_frames(gt_instructions)
+>       assert set(p_frames.keys()) == set(g_frames.keys()), (
+            f"Motion predictions must cover exactly the sampled frames "
+            f"{min(g_frames)}..{max(g_frames)}; got {len(p_frames)} frames, expected {len(g_frames)}"
+        )
+E       AssertionError: Motion predictions must cover exactly the sampled frames 0..17; got 17 frames, expected 18
+E       assert {0, 1, 2, 3, 4, 5, ...} == {0, 1, 2, 3, 4, 5, ...}
+E         
+E         Extra items in the right set:
+E         17
+E         
+E         Full diff:
+E           {
+E               0,...
+E         
+E         ...Full output truncated (18 lines hidden), use '-vv' to show
+
+/verifier/test_outputs.py:160: AssertionError
+___________________ TestMaskAccuracy.test_mask_comprehensive ___________________
+
+self = <test_outputs.TestMaskAccuracy object at 0xffff90bc3b30>
+pred_masks = ((720, 1280), [array([[False, False, False, ..., False, False, False],
+       [False, False, False, ..., False, False,...e, False, ..., False, False, False],
+       [False, False, False, ..., False, False, False]], shape=(720, 1280)), ...])
+gt_masks = ((720, 1280), [array([[False, False, False, ..., False, False, False],
+       [False, False, False, ..., False, False,...e, False, ..., False, False, False],
+       [False, False, False, ..., False, False, False]], shape=(720, 1280)), ...])
+
+    def test_mask_comprehensive(self, pred_masks, gt_masks):
+        """
+        Evaluate masks using Mean IoU, P10 (worst-case), Boundary IoU, and Temporal Flicker.
+        """
+        pred_shape, pred_list = pred_masks
+        gt_shape, gt_list = gt_masks
+        assert pred_shape == gt_shape, f"Predicted mask shape {pred_shape} does not match GT shape {gt_shape}"
+>       assert len(pred_list) == len(gt_list), (
+            f"Expected {len(gt_list)} predicted masks, got {len(pred_list)}"
+        )
+E       AssertionError: Expected 18 predicted masks, got 17
+E       assert 17 == 18
+E        +  where 17 = len([array([[False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       ...,\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), array([[False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       ...,\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), array([[False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       ...,\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), array([[False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       ...,\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), array([[False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       ...,\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), array([[False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       ...,\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), ...])
+E        +  and   18 = len([array([[False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       ...,\n       [ True,  True,  True, ..., False, False, False],\n       [ True,  True,  True, ..., False, False, False],\n       [ True,  True,  True, ..., False, False, False]], shape=(720, 1280)), array([[False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       ...,\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), array([[False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       ...,\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), array([[False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       ...,\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), array([[False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       ...,\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), array([[False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       ...,\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False],\n       [False, False, False, ..., False, False, False]], shape=(720, 1280)), ...])
+
+/verifier/test_outputs.py:221: AssertionError
+==================================== PASSES ====================================
+=========================== short test summary info ============================
+PASSED ::TestGroundTruthConsistency::test_motion_gt_covers_each_gt_mask
+PASSED ::TestOutputFilesExist::test_pred_instructions_exists
+PASSED ::TestOutputFilesExist::test_dyn_masks_exists
+PASSED ::TestInstructionsFormat::test_is_dict
+PASSED ::TestInstructionsFormat::test_keys_format
+PASSED ::TestInstructionsFormat::test_valid_labels
+PASSED ::TestDynMasksFormat::test_has_shape
+PASSED ::TestDynMasksFormat::test_shape_valid
+PASSED ::TestDynMasksFormat::test_frame_components
+FAILED ::TestMotionAccuracy::test_motion_macro_f1 - AssertionError: Motion pr...
+FAILED ::TestMaskAccuracy::test_mask_comprehensive - AssertionError: Expected...
+========================= 2 failed, 9 passed in 0.60s ==========================
+Generating score.json...
+Installed 7 packages in 18ms
+Warning: Mask shape/count mismatch: pred_shape=(720, 1280), gt_shape=(720, 1280), pred_frames=17, gt_frames=18
+Score saved to /logs/verifier/score.json

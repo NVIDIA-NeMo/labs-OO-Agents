@@ -132,6 +132,8 @@ def _write_result(result: dict[str, Any], model: str, agent_type: str) -> None:
         "n_input_tokens": result.get("n_input_tokens"),
         "n_output_tokens": result.get("n_output_tokens"),
     }
+    if "activated_skills" in result:
+        payload["activated_skills"] = result["activated_skills"]
     out = LOGS_DIR / "result.json"
     out.write_text(json.dumps(payload, indent=2))
     logger.info("Result written → %s", out)
@@ -193,6 +195,8 @@ async def _run(
     agent_type: str,
     api_base: str | None,
     working_dir: str | None = None,
+    skill_mode: str | None = None,
+    skills_dir: str | None = None,
 ) -> int:
     """Async main: instantiate, wire, run.  Returns exit code (0 = success)."""
     from nooa.unifiedllm import get_llm_client
@@ -222,6 +226,10 @@ async def _run(
     task_input: dict[str, Any] = {"user_message": instruction}
     if working_dir:
         task_input["working_dir"] = working_dir
+    if skill_mode:
+        task_input["skill_mode"] = skill_mode
+    if skills_dir:
+        task_input["skills_dir"] = skills_dir
     result = await agent._run_evaluation(task_input)
     result.update(get_task_tokens())
     _write_result(result, model, agent_type)
@@ -242,18 +250,30 @@ async def _run(
 @click.option("--agent-type", default="bench", show_default=True, help="Agent variant to run")
 @click.option("--working-dir", default=None, help="Working directory for the agent shell session")
 @click.option("--api-base", default=None, help="Override API base URL")
+@click.option(
+    "--skill-mode",
+    default="no_skill",
+    show_default=True,
+    help="Skill condition: no_skill/no-skill or text_skill/with-skill",
+)
+@click.option("--skills-dir", default=None, help="Directory containing SKILL.md skill folders")
 def main(
     instruction: str,
     model: str,
     agent_type: str,
     working_dir: str | None,
     api_base: str | None,
+    skill_mode: str,
+    skills_dir: str | None,
 ) -> None:
     """Run a NOOA agent on a task inside a Harbor container."""
     _setup_logging()
     logger.info("nooa-bench runner starting")
     logger.info("  model:      %s", model)
     logger.info("  agent_type: %s", agent_type)
+    logger.info("  skill_mode: %s", skill_mode)
+    if skills_dir:
+        logger.info("  skills_dir:  %s", skills_dir)
     if api_base:
         logger.info("  api_base:   %s", api_base)
 
@@ -269,7 +289,17 @@ def main(
     _setup_tracing(model=model, agent_type=agent_type)
 
     try:
-        exit_code = asyncio.run(_run(instruction, model, agent_type, api_base, working_dir))
+        exit_code = asyncio.run(
+            _run(
+                instruction,
+                model,
+                agent_type,
+                api_base,
+                working_dir,
+                skill_mode,
+                skills_dir,
+            )
+        )
     except Exception as e:
         logger.exception("Runner failed with unhandled exception: %s", e)
         exit_code = 1

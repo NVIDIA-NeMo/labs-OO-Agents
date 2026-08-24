@@ -1,0 +1,17 @@
+{
+  "model": "openai/openai/openai/gpt-5.5",
+  "agent_type": "bench",
+  "success": true,
+  "response": "cd /app/workspace/otp_src_27.3.2 && python3 - <<'PY'\nfrom pathlib import Path\np=Path('lib/ssh/src/ssh_connection_handler.erl')\ns=p.read_text()\nguard='handle_event(internal, {conn_msg,_Msg}, StateName, #data{ssh_params = #ssh{authenticated = false}} = D0) ->'\ngeneric='handle_event(internal, {conn_msg,Msg}, StateName, #data{connection_state = Connection0,'\nassert guard in s, 'pre-auth conn_msg guard missing'\nassert generic in s, 'generic conn_msg dispatch missing'\nassert s.index(guard) < s.index(generic), 'pre-auth guard must precede generic dispatch clause'\nfor text in ['?SSH_DISCONNECT_PROTOCOL_ERROR','Connection protocol message received before user authentication','{stop, Shutdown, D};']:\n    assert text in s[s.index(guard):s.index(generic)], f'missing in guard: {text}'\nfor rec in ['#ssh_msg_channel_open{}', '#ssh_msg_channel_request{}', '#ssh_msg_global_request{}']:\n    assert rec in s, f'{rec} decode dispatch missing'\nprint('PASS: ssh_connection_handler rejects {conn_msg,_} while #ssh.authenticated=false before generic connection dispatch')\nPY",
+  "error": null,
+  "n_input_tokens": 447725,
+  "n_output_tokens": 11268,
+  "activated_skills": [
+    "local.erlang-concurrency",
+    "local.erlang-distribution",
+    "local.erlang-otp-behaviors",
+    "local.find-bugs",
+    "local.senior-security",
+    "local.ssh-penetration-testing"
+  ]
+}

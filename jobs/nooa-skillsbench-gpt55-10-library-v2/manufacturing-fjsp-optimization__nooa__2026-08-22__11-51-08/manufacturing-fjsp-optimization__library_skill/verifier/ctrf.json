@@ -1,0 +1,161 @@
+{
+    "results": {
+        "tool": {
+            "name": "pytest",
+            "version": "8.4.1"
+        },
+        "summary": {
+            "tests": 15,
+            "passed": 13,
+            "failed": 2,
+            "skipped": 0,
+            "pending": 0,
+            "other": 0,
+            "start": 1787392487.7171323,
+            "stop": 1787392487.7514086
+        },
+        "tests": [
+            {
+                "name": "::test_L0_required_outputs_exist",
+                "status": "passed",
+                "duration": 0.0002349580026930198,
+                "start": 1787392487.735823,
+                "stop": 1787392487.7362084,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::test_L0_solution_has_minimum_fields",
+                "status": "passed",
+                "duration": 0.00018470798386260867,
+                "start": 1787392487.7362947,
+                "stop": 1787392487.7365828,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::test_L1_complete_ops_unique_and_valid_against_instance",
+                "status": "passed",
+                "duration": 0.00018458299746271223,
+                "start": 1787392487.7366636,
+                "stop": 1787392487.7369292,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::test_L1_precedence_constraints",
+                "status": "passed",
+                "duration": 0.00020487498841248453,
+                "start": 1787392487.7369845,
+                "stop": 1787392487.7372646,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::test_L1_no_machine_overlap_strict",
+                "status": "passed",
+                "duration": 0.00012991699622943997,
+                "start": 1787392487.7373273,
+                "stop": 1787392487.7375312,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::test_L1_makespan_matches_max_end",
+                "status": "passed",
+                "duration": 0.00011970801278948784,
+                "start": 1787392487.7375894,
+                "stop": 1787392487.7377748,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::test_L2_no_downtime_violations_any_window",
+                "status": "passed",
+                "duration": 0.00015520800661761314,
+                "start": 1787392487.73783,
+                "stop": 1787392487.7380545,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::test_L3_same_jobop_keys_as_baseline",
+                "status": "passed",
+                "duration": 0.00013804298941977322,
+                "start": 1787392487.7381089,
+                "stop": 1787392487.7383103,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::test_L3_policy_budget_enforced",
+                "status": "passed",
+                "duration": 0.00015445701137650758,
+                "start": 1787392487.7383645,
+                "stop": 1787392487.7385836,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::test_L3_right_shift_only_baseline_repair",
+                "status": "failed",
+                "raw_status": "call_failed",
+                "duration": 0.00019495900778565556,
+                "start": 1787392487.738638,
+                "stop": 1787392487.7462673,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py",
+                "trace": "def test_L3_right_shift_only_baseline_repair():\n        base = normalize_schedule(load_json(OLD_SOLUTION)[\"schedule\"])\n        sched = normalize_schedule(load_json(SOLUTION_JSON)[\"schedule\"])\n        bm = sched_map(base)\n        for r in sched:\n            key = (r[\"job\"], r[\"op\"])\n>           assert r[\"start\"] >= bm[key][\"start\"], f\"Right-shift violated for {key}: new={r['start']} base={bm[key]['start']}\"\nE           AssertionError: Right-shift violated for (2, 0): new=0 base=5\nE           assert 0 >= 5\n\n/verifier/test_outputs.py:276: AssertionError",
+                "message": "The test failed in the call phase due to an assertion error"
+            },
+            {
+                "name": "::test_L3_freeze_respected_if_declared",
+                "status": "passed",
+                "duration": 0.00011462501424830407,
+                "start": 1787392487.7463284,
+                "stop": 1787392487.7465172,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::test_L3_must_improve_baseline_downtime_metric",
+                "status": "passed",
+                "duration": 0.00016270799096673727,
+                "start": 1787392487.7465775,
+                "stop": 1787392487.746811,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::test_L3_local_minimal_right_shift_in_precedence_aware_order",
+                "status": "failed",
+                "raw_status": "call_failed",
+                "duration": 0.0002086240128846839,
+                "start": 1787392487.7468786,
+                "stop": 1787392487.7507732,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py",
+                "trace": "def test_L3_local_minimal_right_shift_in_precedence_aware_order():\n        dt = load_downtime()\n    \n        base_raw = load_json(OLD_SOLUTION)\n        base_list = normalize_schedule(base_raw[\"schedule\"])\n        base_map = sched_map(base_list)\n    \n        sol = load_json(SOLUTION_JSON)\n        sched = normalize_schedule(sol[\"schedule\"])\n        pm = sched_map(sched)\n    \n        # Precedence-aware order (instead of baseline list order)\n        order = precedence_aware_repair_order(base_list)\n    \n        machine_intervals: Dict[int, List[Tuple[int, int]]] = defaultdict(list)\n        job_end: Dict[int, int] = defaultdict(int)\n    \n        for key in order:\n            br = base_map[key]\n            pr = pm[key]\n    \n            j, o = key\n            m = pr[\"machine\"]\n            st = pr[\"start\"]\n            en = pr[\"end\"]\n            dur = pr[\"dur\"]\n    \n            # Anchor point: right-shift + precedence anchor\n            anchor = max(br[\"start\"], job_end[j])\n    \n>           assert st >= anchor, (\n                f\"Start earlier than anchor in precedence-aware placement for {key}: \"\n                f\"start={st} anchor={anchor}\"\n            )\nE           AssertionError: Start earlier than anchor in precedence-aware placement for (2, 0): start=0 anchor=5\nE           assert 0 >= 5\n\n/verifier/test_outputs.py:361: AssertionError",
+                "message": "The test failed in the call phase due to an assertion error"
+            },
+            {
+                "name": "::test_L4_csv_has_minimum_columns_and_parses",
+                "status": "passed",
+                "duration": 0.00015308299043681473,
+                "start": 1787392487.7508311,
+                "stop": 1787392487.7510514,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::test_L4_csv_matches_solution_on_keys_and_times_unordered",
+                "status": "passed",
+                "duration": 0.000151832980918698,
+                "start": 1787392487.7511077,
+                "stop": 1787392487.7513216,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            }
+        ]
+    }
+}

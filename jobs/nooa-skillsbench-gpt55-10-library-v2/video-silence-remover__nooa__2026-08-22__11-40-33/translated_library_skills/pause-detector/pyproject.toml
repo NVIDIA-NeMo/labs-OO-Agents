@@ -1,0 +1,18 @@
+[project]
+name = "pause-detector"
+version = "0.1.0"
+description = "Detect pauses and silence in audio using local dynamic thresholds. Use when you need to find natural pauses in lectures, board-writing silences, or breaks between sections. Uses local context comparison to avoid false positives from volume variation."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+pause_detector = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.pause-detector" = "pause_detector:PauseDetector"

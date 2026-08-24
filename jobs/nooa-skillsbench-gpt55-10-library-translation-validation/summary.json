@@ -1,0 +1,112 @@
+[
+  {
+    "task": "fix-visual-stability",
+    "skills": 3,
+    "public_api_count_estimate": 0,
+    "omitted_scripts": 0,
+    "registries": [
+      "local.browser-testing",
+      "local.react-best-practices",
+      "local.web-interface-guidelines"
+    ]
+  },
+  {
+    "task": "fix-erlang-ssh-cve",
+    "skills": 6,
+    "public_api_count_estimate": 3,
+    "omitted_scripts": 0,
+    "registries": [
+      "local.erlang-concurrency",
+      "local.erlang-distribution",
+      "local.erlang-otp-behaviors",
+      "local.find-bugs",
+      "local.senior-security",
+      "local.ssh-penetration-testing"
+    ]
+  },
+  {
+    "task": "video-silence-remover",
+    "skills": 7,
+    "public_api_count_estimate": 17,
+    "omitted_scripts": 0,
+    "registries": [
+      "local.audio-extractor",
+      "local.energy-calculator",
+      "local.pause-detector",
+      "local.report-generator",
+      "local.segment-combiner",
+      "local.silence-detector",
+      "local.video-processor"
+    ]
+  },
+  {
+    "task": "dynamic-object-aware-egomotion",
+    "skills": 4,
+    "public_api_count_estimate": 0,
+    "omitted_scripts": 0,
+    "registries": [
+      "local.dyn-object-masks",
+      "local.egomotion-estimation",
+      "local.output-validation",
+      "local.sampling-and-indexing"
+    ]
+  },
+  {
+    "task": "manufacturing-fjsp-optimization",
+    "skills": 1,
+    "public_api_count_estimate": 0,
+    "omitted_scripts": 0,
+    "registries": [
+      "local.fjsp-baseline-repair-with-downtime-and-policy"
+    ]
+  },
+  {
+    "task": "llm-prefix-cache-replay",
+    "skills": 2,
+    "public_api_count_estimate": 0,
+    "omitted_scripts": 0,
+    "registries": [
+      "local.cache-policy-comparison",
+      "local.prefix-cache-replay"
+    ]
+  },
+  {
+    "task": "dapt-intrusion-detection",
+    "skills": 2,
+    "public_api_count_estimate": 0,
+    "omitted_scripts": 0,
+    "registries": [
+      "local.pcap-analysis",
+      "local.threat-detection"
+    ]
+  },
+  {
+    "task": "offer-letter-generator",
+    "skills": 1,
+    "public_api_count_estimate": 0,
+    "omitted_scripts": 0,
+    "registries": [
+      "local.docx"
+    ]
+  },
+  {
+    "task": "parallel-tfidf-search",
+    "skills": 3,
+    "public_api_count_estimate": 0,
+    "omitted_scripts": 0,
+    "registries": [
+      "local.memory-optimization",
+      "local.python-parallelization",
+      "local.workload-balancing"
+    ]
+  },
+  {
+    "task": "reserves-at-risk-calc",
+    "skills": 1,
+    "public_api_count_estimate": 0,
+    "omitted_scripts": 0,
+    "registries": [
+      "local.xlsx"
+    ]
+  }
+]

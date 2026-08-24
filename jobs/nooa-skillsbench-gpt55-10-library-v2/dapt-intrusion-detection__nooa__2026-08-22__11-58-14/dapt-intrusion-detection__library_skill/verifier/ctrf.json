@@ -1,0 +1,170 @@
+{
+    "results": {
+        "tool": {
+            "name": "pytest",
+            "version": "8.4.1"
+        },
+        "summary": {
+            "tests": 14,
+            "passed": 13,
+            "failed": 1,
+            "skipped": 0,
+            "pending": 0,
+            "other": 0,
+            "start": 1787392833.0929072,
+            "stop": 1787392833.1224422
+        },
+        "tests": [
+            {
+                "name": "::TestProtocolDistribution::test_protocol_count",
+                "status": "passed",
+                "duration": 0.0003035839763469994,
+                "start": 1787392833.1076071,
+                "stop": 1787392833.1080737,
+                "retries": 3,
+                "file_path": "../verifier/test_outputs.py",
+                "tags": [
+                    "parametrize::metric::['protocol_tcp', 'protocol_icmp', 'protocol_arp', 'protocol_ip_total']"
+                ]
+            },
+            {
+                "name": "::TestProtocolDistribution::test_protocol_udp",
+                "status": "failed",
+                "raw_status": "call_failed",
+                "duration": 0.00018979099695570767,
+                "start": 1787392833.109092,
+                "stop": 1787392833.114483,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py",
+                "trace": "self = <test_outputs.TestProtocolDistribution object at 0xffff874874d0>\n\n    def test_protocol_udp(self):\n        \"\"\"Verify UDP packet count.\"\"\"\n        results = load_results()\n        assert results is not None, \"Results file not found\"\n        metric = \"protocol_udp\"\n        assert metric in results, f\"Missing metric: {metric}\"\n>       assert approx_equal(\n            results[metric], EXPECTED_VALUES[metric], metric\n        ), f\"{metric}: expected {EXPECTED_VALUES[metric]}, got {results[metric]}\"\nE       AssertionError: protocol_udp: expected 26092, got 25846\nE       assert False\nE        +  where False = approx_equal(25846, 26092, 'protocol_udp')\n\n/verifier/test_outputs.py:223: AssertionError",
+                "message": "The test failed in the call phase due to an assertion error"
+            },
+            {
+                "name": "::TestTimeSeries::test_time_series_metric",
+                "status": "passed",
+                "duration": 0.00012733199400827289,
+                "start": 1787392833.1145945,
+                "stop": 1787392833.1148012,
+                "retries": 3,
+                "file_path": "../verifier/test_outputs.py",
+                "tags": [
+                    "parametrize::metric::['duration_seconds', 'packets_per_minute_avg', 'packets_per_minute_max', 'packets_per_minute_min']"
+                ]
+            },
+            {
+                "name": "::TestSizeStats::test_size_metric",
+                "status": "passed",
+                "duration": 0.00010387497604824603,
+                "start": 1787392833.1156511,
+                "stop": 1787392833.1158254,
+                "retries": 3,
+                "file_path": "../verifier/test_outputs.py",
+                "tags": [
+                    "parametrize::metric::['total_bytes', 'avg_packet_size', 'min_packet_size', 'max_packet_size']"
+                ]
+            },
+            {
+                "name": "::TestEntropyMetrics::test_entropy_metric",
+                "status": "passed",
+                "duration": 0.00010191700130235404,
+                "start": 1787392833.1166496,
+                "stop": 1787392833.1168196,
+                "retries": 5,
+                "file_path": "../verifier/test_outputs.py",
+                "tags": [
+                    "parametrize::metric::['dst_port_entropy', 'src_port_entropy', 'src_ip_entropy', 'dst_ip_entropy', 'unique_dst_ports', 'unique_src_ports']"
+                ]
+            },
+            {
+                "name": "::TestGraphMetrics::test_graph_metric",
+                "status": "passed",
+                "duration": 0.00010520797513891011,
+                "start": 1787392833.1181407,
+                "stop": 1787392833.1183157,
+                "retries": 3,
+                "file_path": "../verifier/test_outputs.py",
+                "tags": [
+                    "parametrize::metric::['num_nodes', 'num_edges', 'network_density', 'max_indegree']"
+                ]
+            },
+            {
+                "name": "::TestGraphMetrics::test_max_outdegree",
+                "status": "passed",
+                "duration": 9.445800969842821e-05,
+                "start": 1787392833.1191344,
+                "stop": 1787392833.1192958,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestTemporalMetrics::test_temporal_metric",
+                "status": "passed",
+                "duration": 0.000102625010185875,
+                "start": 1787392833.1193676,
+                "stop": 1787392833.1195369,
+                "retries": 4,
+                "file_path": "../verifier/test_outputs.py",
+                "tags": [
+                    "parametrize::metric::['iat_mean', 'iat_variance', 'iat_cv', 'num_producers', 'num_consumers']"
+                ]
+            },
+            {
+                "name": "::TestFlowMetrics::test_flow_metric",
+                "status": "passed",
+                "duration": 0.00010387499060016125,
+                "start": 1787392833.1205976,
+                "stop": 1787392833.1207683,
+                "retries": 2,
+                "file_path": "../verifier/test_outputs.py",
+                "tags": [
+                    "parametrize::metric::['unique_flows', 'tcp_flows', 'udp_flows']"
+                ]
+            },
+            {
+                "name": "::TestFlowMetrics::test_bidirectional_flows",
+                "status": "passed",
+                "duration": 9.370800398755819e-05,
+                "start": 1787392833.1213238,
+                "stop": 1787392833.1214836,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestAnalysisQuestions::test_is_traffic_benign",
+                "status": "passed",
+                "duration": 9.358300303574651e-05,
+                "start": 1787392833.1215672,
+                "stop": 1787392833.1217265,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestAnalysisQuestions::test_has_port_scan",
+                "status": "passed",
+                "duration": 9.129199315793812e-05,
+                "start": 1787392833.1217973,
+                "stop": 1787392833.1219537,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestAnalysisQuestions::test_has_dos_pattern",
+                "status": "passed",
+                "duration": 8.970899216365069e-05,
+                "start": 1787392833.1220245,
+                "stop": 1787392833.1221805,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            },
+            {
+                "name": "::TestAnalysisQuestions::test_has_beaconing",
+                "status": "passed",
+                "duration": 9.083400072995573e-05,
+                "start": 1787392833.1222517,
+                "stop": 1787392833.1224096,
+                "retries": 0,
+                "file_path": "../verifier/test_outputs.py"
+            }
+        ]
+    }
+}

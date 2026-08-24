@@ -1,0 +1,18 @@
+[project]
+name = "python-parallelization"
+version = "0.1.0"
+description = "Transform sequential Python code into parallel/concurrent implementations. Use when asked to parallelize Python code, improve code performance through concurrency, convert loops to parallel execution, or identify parallelization opportunities. Handles CPU-bound (multiprocessing), I/O-bound (asyncio, threading), and data-parallel (vectorization) scenarios."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+python_parallelization = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.python-parallelization" = "python_parallelization:PythonParallelization"

@@ -1,0 +1,18 @@
+[project]
+name = "prefix-cache-replay"
+version = "0.1.0"
+description = "Replay an LLM inference request trace (Mooncake / vLLM / SGLang hash_ids format) against a block-level KV prefix cache and compute hit statistics. Use when given a request trace plus cache configuration and asked for hit rate, hit tokens, or final cache contents. Covers the longest-contiguous-prefix semantics that distinguishes KV prefix caching from full-prompt prompt caching, the policy-specific residency and eviction rules (LRU, LFU, S3FIFO), and the partial-last-block accounting rule."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+prefix_cache_replay = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.prefix-cache-replay" = "prefix_cache_replay:PrefixCacheReplay"

@@ -1,0 +1,27 @@
+[
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/reserves-at-risk-calc/environment/skills/xlsx",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-translation-validation/reserves-at-risk-calc/xlsx",
+    "package_name": "xlsx",
+    "registry_name": "local.xlsx",
+    "class_name": "Xlsx",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/xlsx/__init__.py",
+      "src/xlsx/resources/LICENSE.txt",
+      "src/xlsx/resources/recalc.py",
+      "tests/test_xlsx.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-translation-validation/reserves-at-risk-calc/xlsx",
+      "registry_name": "local.xlsx",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  }
+]

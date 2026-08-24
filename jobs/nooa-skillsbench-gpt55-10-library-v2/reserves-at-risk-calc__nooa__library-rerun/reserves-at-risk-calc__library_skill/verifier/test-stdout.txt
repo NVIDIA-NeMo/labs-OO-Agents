@@ -1,0 +1,184 @@
+Get:1 http://ports.ubuntu.com/ubuntu-ports noble InRelease [256 kB]
+Get:2 http://ports.ubuntu.com/ubuntu-ports noble-updates InRelease [126 kB]
+Get:3 http://ports.ubuntu.com/ubuntu-ports noble-backports InRelease [126 kB]
+Get:4 http://ports.ubuntu.com/ubuntu-ports noble-security InRelease [126 kB]
+Get:5 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages [19.0 MB]
+Get:6 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages [1776 kB]
+Get:7 http://ports.ubuntu.com/ubuntu-ports noble/multiverse arm64 Packages [274 kB]
+Get:8 http://ports.ubuntu.com/ubuntu-ports noble/restricted arm64 Packages [113 kB]
+Get:9 http://ports.ubuntu.com/ubuntu-ports noble-updates/multiverse arm64 Packages [92.2 kB]
+Get:10 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages [1574 kB]
+Get:11 http://ports.ubuntu.com/ubuntu-ports noble-updates/universe arm64 Packages [2190 kB]
+Get:12 http://ports.ubuntu.com/ubuntu-ports noble-updates/restricted arm64 Packages [2709 kB]
+Get:13 http://ports.ubuntu.com/ubuntu-ports noble-backports/multiverse arm64 Packages [671 B]
+Get:14 http://ports.ubuntu.com/ubuntu-ports noble-backports/universe arm64 Packages [36.3 kB]
+Get:15 http://ports.ubuntu.com/ubuntu-ports noble-backports/main arm64 Packages [48.9 kB]
+Get:16 http://ports.ubuntu.com/ubuntu-ports noble-security/universe arm64 Packages [1603 kB]
+Get:17 http://ports.ubuntu.com/ubuntu-ports noble-security/restricted arm64 Packages [2584 kB]
+Get:18 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Packages [1255 kB]
+Get:19 http://ports.ubuntu.com/ubuntu-ports noble-security/multiverse arm64 Packages [85.7 kB]
+Fetched 34.0 MB in 2s (15.0 MB/s)
+Reading package lists...
+Reading package lists...
+Building dependency tree...
+Reading state information...
+curl is already the newest version (8.5.0-2ubuntu10.12).
+gnumeric is already the newest version (1.12.56-2build5).
+0 upgraded, 0 newly installed, 0 to remove and 1 not upgraded.
+downloading uv 0.9.7 aarch64-unknown-linux-gnu
+no checksums to verify
+installing to /root/.local/bin
+  uv
+  uvx
+everything's installed!
+Evaluating Excel formulas with gnumeric...
+Formula evaluation complete.
+Downloading pygments (1.2MiB)
+ Downloading pygments
+Installed 8 packages in 11ms
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-8.4.1, pluggy-1.6.0 -- /root/.cache/uv/archive-v0/W1pFY1hoxey08Fsic7bBp/bin/python
+rootdir: /root
+configfile: ../dev/null
+plugins: json-ctrf-0.3.5
+collecting ... collected 5 items
+
+::test_step1_volatility_calculations FAILED                              [ 20%]
+::test_step2_gold_reserves_and_risk FAILED                               [ 40%]
+::test_step3_rar_percentage FAILED                                       [ 60%]
+::test_formulas_present PASSED                                           [ 80%]
+::test_no_errors_or_macros PASSED                                        [100%]
+
+=================================== FAILURES ===================================
+______________________ test_step1_volatility_calculations ______________________
+
+    def test_step1_volatility_calculations():
+        """Test Step 1: Gold price volatility calculations (confidence level, 3m/12m volatility)."""
+        assert EXCEL_FILE.exists(), f"Excel file not found at {EXCEL_FILE}"
+    
+        wb = get_workbook()
+        ws = get_answer_sheet(wb)
+    
+        errors = []
+        for cell, (name, expected) in EXPECTED_STEP1.items():
+            actual = cell_value(ws, cell)
+            if actual is None or not isinstance(actual, (int, float)):
+                errors.append(f"{cell} ({name}): expected {expected}, got {actual}")
+            elif abs(actual - expected) > TOLERANCE:
+                errors.append(f"{cell} ({name}): expected {expected}, got {actual}")
+    
+        wb.close()
+>       assert len(errors) == 0, "Step 1 volatility calculation errors:\n" + "\n".join(errors)
+E       AssertionError: Step 1 volatility calculation errors:
+E         C4 (volatility_3m): expected 4.813323, got 2.75465709776871
+E         C5 (volatility_3m_annualized): expected 16.67384, got 9.54241210153128
+E         C6 (volatility_12m): expected 3.259073, got 5.99243947923063
+E       assert 3 == 0
+E        +  where 3 = len(['C4 (volatility_3m): expected 4.813323, got 2.75465709776871', 'C5 (volatility_3m_annualized): expected 16.67384, got 9.54241210153128', 'C6 (volatility_12m): expected 3.259073, got 5.99243947923063'])
+
+/verifier/test_outputs.py:232: AssertionError
+______________________ test_step2_gold_reserves_and_risk _______________________
+
+    def test_step2_gold_reserves_and_risk():
+        """Test Step 2: Gold reserves values and volatility risk for each country."""
+        wb = get_workbook()
+        ws = get_answer_sheet(wb)
+    
+        errors = []
+        for i, col in enumerate(STEP2_COLS):
+            country = EXPECTED_STEP2["countries"][i]
+    
+            # Check gold reserves (row 12)
+            gold_cell = f"{col}12"
+            gold_expected = EXPECTED_STEP2["gold"][i]
+            gold_actual = cell_value(ws, gold_cell)
+            if gold_actual is None or not isinstance(gold_actual, (int, float)):
+                errors.append(f"{country} gold ({gold_cell}): expected {gold_expected}, got {gold_actual}")
+            elif abs(gold_actual - gold_expected) > TOLERANCE:
+                errors.append(f"{country} gold ({gold_cell}): expected {gold_expected}, got {gold_actual}")
+    
+            # Check risk values (row 13)
+            risk_cell = f"{col}13"
+            risk_expected = EXPECTED_STEP2["risk"][i]
+            risk_actual = cell_value(ws, risk_cell)
+            if risk_actual is None or not isinstance(risk_actual, (int, float)):
+                errors.append(f"{country} risk ({risk_cell}): expected {risk_expected}, got {risk_actual}")
+            elif abs(risk_actual - risk_expected) > TOLERANCE:
+                errors.append(f"{country} risk ({risk_cell}): expected {risk_expected}, got {risk_actual}")
+    
+        wb.close()
+>       assert len(errors) == 0, "Step 2 gold reserves/risk errors:\n" + "\n".join(errors)
+E       AssertionError: Step 2 gold reserves/risk errors:
+E         Belarus risk (C13): expected 593.345542, got 1172.63853399523
+E         Georgia risk (D13): expected 79.578669, got 157.272628973795
+E         Moldova risk (E13): expected 0.850586, got 1.68102780070793
+E         Ukraine risk (F13): expected 307.961505, got 608.629378257431
+E         Uzbekistan risk (G13): expected 4375.430569, got 8647.23525940965
+E         Czech Republic risk (H13): expected 803.878772, got 1588.71881285785
+E         Latvia risk (I13): expected 73.1679, got 144.602921777423
+E         Lithuania risk (J13): expected 64.099744, got 126.681376092565
+E         Slovakia risk (K13): expected 259.200689, got 512.26257714338
+E       assert 9 == 0
+E        +  where 9 = len(['Belarus risk (C13): expected 593.345542, got 1172.63853399523', 'Georgia risk (D13): expected 79.578669, got 157.272628973795', 'Moldova risk (E13): expected 0.850586, got 1.68102780070793', 'Ukraine risk (F13): expected 307.961505, got 608.629378257431', 'Uzbekistan risk (G13): expected 4375.430569, got 8647.23525940965', 'Czech Republic risk (H13): expected 803.878772, got 1588.71881285785', ...])
+
+/verifier/test_outputs.py:263: AssertionError
+__________________________ test_step3_rar_percentage ___________________________
+
+    def test_step3_rar_percentage():
+        """Test Step 3: Gold reserves, total reserves, and RaR as percentage."""
+        wb = get_workbook()
+        ws = get_answer_sheet(wb)
+    
+        errors = []
+        for i, col in enumerate(STEP3_COLS):
+            country = EXPECTED_STEP3["countries"][i]
+    
+            # Check gold reserves (row 21)
+            gold_cell = f"{col}21"
+            gold_expected = EXPECTED_STEP3["gold"][i]
+            gold_actual = cell_value(ws, gold_cell)
+            if gold_actual is None or not isinstance(gold_actual, (int, float)):
+                errors.append(f"{country} gold ({gold_cell}): expected {gold_expected}, got {gold_actual}")
+            elif abs(gold_actual - gold_expected) > TOLERANCE:
+                errors.append(f"{country} gold ({gold_cell}): expected {gold_expected}, got {gold_actual}")
+    
+            # Check total reserves (row 23)
+            tr_cell = f"{col}23"
+            tr_expected = EXPECTED_STEP3["total_reserves"][i]
+            tr_actual = cell_value(ws, tr_cell)
+            if tr_actual is None or not isinstance(tr_actual, (int, float)):
+                errors.append(f"{country} total reserves ({tr_cell}): expected {tr_expected}, got {tr_actual}")
+            elif abs(tr_actual - tr_expected) > TOLERANCE:
+                errors.append(f"{country} total reserves ({tr_cell}): expected {tr_expected}, got {tr_actual}")
+    
+            # Check RaR percentage (row 24)
+            rar_cell = f"{col}24"
+            rar_expected = EXPECTED_STEP3["rar_pct"][i]
+            rar_actual = cell_value(ws, rar_cell)
+            if rar_actual is None or not isinstance(rar_actual, (int, float)):
+                errors.append(f"{country} RaR% ({rar_cell}): expected {rar_expected}, got {rar_actual}")
+            elif abs(rar_actual - rar_expected) > TOLERANCE_PCT:
+                errors.append(f"{country} RaR% ({rar_cell}): expected {rar_expected}, got {rar_actual}")
+    
+        wb.close()
+>       assert len(errors) == 0, "Step 3 RaR percentage errors:\n" + "\n".join(errors)
+E       AssertionError: Step 3 RaR percentage errors:
+E         Belarus RaR% (C24): expected 4.113057, got 8.12870277760993
+E         Georgia RaR% (D24): expected 1.292134, got 2.55366601675345
+E         Moldova RaR% (E24): expected 0.014178, got 0.0280202122351446
+E         Uzbekistan RaR% (F24): expected 6.598273, got 13.0402760587824
+E         Czech Republic RaR% (G24): expected 0.45719, got 0.903551376588809
+E         Latvia RaR% (H24): expected 1.204033, got 2.37955078703653
+E         Lithuania RaR% (I24): expected 0.905018, got 1.78860287874066
+E       assert 7 == 0
+E        +  where 7 = len(['Belarus RaR% (C24): expected 4.113057, got 8.12870277760993', 'Georgia RaR% (D24): expected 1.292134, got 2.55366601675345', 'Moldova RaR% (E24): expected 0.014178, got 0.0280202122351446', 'Uzbekistan RaR% (F24): expected 6.598273, got 13.0402760587824', 'Czech Republic RaR% (G24): expected 0.45719, got 0.903551376588809', 'Latvia RaR% (H24): expected 1.204033, got 2.37955078703653', ...])
+
+/verifier/test_outputs.py:303: AssertionError
+==================================== PASSES ====================================
+=========================== short test summary info ============================
+PASSED ::test_formulas_present
+PASSED ::test_no_errors_or_macros
+FAILED ::test_step1_volatility_calculations - AssertionError: Step 1 volatili...
+FAILED ::test_step2_gold_reserves_and_risk - AssertionError: Step 2 gold rese...
+FAILED ::test_step3_rar_percentage - AssertionError: Step 3 RaR percentage er...
+========================= 3 failed, 2 passed in 0.67s ==========================

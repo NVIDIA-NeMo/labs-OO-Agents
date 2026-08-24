@@ -33,6 +33,7 @@ with _hidden:
     from nooa.agentdoc import doc, spec
     from nooa.config import CodeActConfig
     from nooa.context_blocks import DynamicContext
+    from nooa.skill_registry import SkillRegistry
     from nooa.tools.shell_tools import ShellTools
     from nooa.tools.todo import TodoManager
     from nooa.unifiedllm import FakeLLMClient
@@ -129,6 +130,21 @@ class BenchAgent(
     shell: ShellTools
     repo: RepoTools
 
+    @staticmethod
+    def _normalize_skill_mode(skill_mode: str | None) -> str:
+        """Normalize SkillsBench/BenchFlow skill-mode spellings."""
+        mode = (skill_mode or "no_skill").strip().lower().replace("-", "_")
+        if mode in {"no_skill", "none", "off"}:
+            return "no_skill"
+        if mode in {"text_skill", "with_skill", "with_skills"}:
+            return "text_skill"
+        if mode in {"library_skill", "library_skills"}:
+            return "library_skill"
+        raise ValueError(
+            "skill_mode must be one of: no_skill, no-skill, text_skill, "
+            "with-skill, library_skill"
+        )
+
     def _context_usage_block(self) -> str:
         """Return context-window usage plus a benchmark-agent compaction hint."""
         if not self.context_stats:
@@ -141,9 +157,14 @@ class BenchAgent(
         )
 
     def __init__(self, llm: UnifiedLLM | None = None, **kwargs: Any) -> None:
+        skill_mode = kwargs.pop("skill_mode", None)
+        skills_dir = kwargs.pop("skills_dir", None)
         super().__init__(llm=llm, **kwargs)
         cwd = next((d for d in ("/testbed", "/app") if os.path.isdir(d)), os.getcwd())
         self._install_python_tools(cwd)
+        self.skills = SkillRegistry(self)
+        spec(self, "skills", hidden=True)
+        self._text_skill_context_enabled = False
         self.todo = TodoManager()
         self._seed_todos()
         self.problem_statement = ""
@@ -155,11 +176,113 @@ class BenchAgent(
 
         self.context_manager["python_tools"] = Context(doc(RepoTools, ShellTools), prefix=True)
         self.context_manager["todo"] = Context(doc(type(self.todo)), prefix=True)
+        self.configure_skills(skill_mode=skill_mode, skills_dir=skills_dir)
 
     def _install_python_tools(self, cwd: str) -> None:
         """Install shell/repo tools rooted at the same working directory."""
         self.shell = ShellTools(cwd=cwd, init_command=_OPTIONAL_TESTBED_ACTIVATE)
         self.repo = RepoTools(root=cwd, session=self.shell.session)
+
+    def _text_skills_block(self) -> str:
+        """Render activated TextSkills into the prompt context."""
+        blocks: list[str] = []
+        for name in self.skills.activated():
+            if not name.startswith("cmd."):
+                continue
+            attr = name.split(".")[-1].replace("-", "_")
+            skill = getattr(self, attr, None)
+            if skill is None:
+                continue
+            skill_doc = type(skill).__doc__ or ""
+            blocks.append(f"## {name}\n\n{skill_doc.strip()}")
+        if not blocks:
+            return ""
+        return "Activated text skills:\n\n" + "\n\n".join(blocks)
+
+    def _loaded_text_skills_under(self, skills_dir: os.PathLike | str) -> list[str]:
+        """Return loaded TextSkills whose source directory is below skills_dir."""
+        from pathlib import Path
+
+        root = Path(skills_dir).resolve()
+        sources = getattr(self.skills, "_sources", {})
+        names: list[str] = []
+        for name in self.skills.loaded():
+            if not name.startswith("cmd."):
+                continue
+            source = sources.get(name)
+            if getattr(source, "kind", None) != "text":
+                continue
+            source_path = Path(source.path).resolve()
+            try:
+                source_path.relative_to(root)
+            except ValueError:
+                continue
+            names.append(name)
+        return sorted(names)
+
+    def _loaded_package_skills_under(self, skills_dir: os.PathLike | str) -> list[str]:
+        """Return loaded package skills whose source directory is below skills_dir."""
+        from pathlib import Path
+
+        root = Path(skills_dir).resolve()
+        sources = getattr(self.skills, "_sources", {})
+        names: list[str] = []
+        for name in self.skills.loaded():
+            source = sources.get(name)
+            if getattr(source, "kind", None) != "package":
+                continue
+            source_path = Path(source.path).resolve()
+            try:
+                source_path.relative_to(root)
+            except ValueError:
+                continue
+            names.append(name)
+        return sorted(names)
+
+    def configure_skills(
+        self, *, skill_mode: str | None, skills_dir: str | os.PathLike | None
+    ) -> None:
+        """Configure optional skill activation for SkillsBench runs."""
+        mode = self._normalize_skill_mode(skill_mode)
+        if mode == "no_skill":
+            if self.skills.activated():
+                self.skills.deactivate(["*"])
+            self.context_manager.pop("text_skills", None)
+            self._text_skill_context_enabled = False
+            return
+
+        if skills_dir is None:
+            raise ValueError(f"skills_dir is required when skill_mode is {mode}")
+
+        from pathlib import Path
+
+        path = Path(skills_dir)
+        if not path.is_dir():
+            raise ValueError(f"skills_dir does not exist: {str(path)!r}")
+        if self.skills.activated():
+            self.skills.deactivate(["*"])
+        self.context_manager.pop("text_skills", None)
+        self._text_skill_context_enabled = False
+
+        if mode == "text_skill":
+            self.skills.discover_skills_dirs([path])
+            discovered_text_skills = self._loaded_text_skills_under(path)
+            if not discovered_text_skills:
+                raise ValueError(f"no TextSkill SKILL.md directories found in {str(path)!r}")
+            self.skills.activate(discovered_text_skills)
+            self.context_manager.set_dynamic("text_skills", "self._text_skills_block()")
+            self._text_skill_context_enabled = True
+            return
+
+        if mode == "library_skill":
+            self.skills.discover_libs(path)
+            discovered_package_skills = self._loaded_package_skills_under(path)
+            if not discovered_package_skills:
+                raise ValueError(f"no package LibrarySkills found in {str(path)!r}")
+            self.skills.activate(discovered_package_skills)
+            return
+
+        raise AssertionError(f"unhandled skill_mode: {mode}")
 
     def _seed_todos(self) -> None:
         """Preload the planning todo every benchmark task should start from."""
@@ -177,6 +300,11 @@ class BenchAgent(
         if initial_obs:
             self.context["initial_observation"] = initial_obs
 
+        self.configure_skills(
+            skill_mode=task_input.get("skill_mode"),
+            skills_dir=task_input.get("skills_dir"),
+        )
+
         # Reset shell to the task working dir.
         cwd = task_input.get("working_dir")
         if cwd:
@@ -190,6 +318,7 @@ class BenchAgent(
         self.context_manager["todo"] = Context(doc(type(self.todo)), prefix=True)
         self.todo.clear()
         self._seed_todos()
+        metadata = {"activated_skills": self.skills.activated()}
 
         try:
             result = await self._solve_task(self.problem_statement)
@@ -198,13 +327,14 @@ class BenchAgent(
                     "response": result.command_to_verify,
                     "success": bool(result.solution_description),
                     "result": result.model_dump(),
+                    **metadata,
                 }
             # Fallback for non-structured returns
             result_str = str(result) if result is not None else ""
-            return {"response": result_str, "success": True, "result": result}
+            return {"response": result_str, "success": True, "result": result, **metadata}
         except Exception as e:
             _logger.error("BenchAgent failed: %s", e)
-            return {"response": "", "success": False, "error": str(e)}
+            return {"response": "", "success": False, "error": str(e), **metadata}
 
     @strategy(
         CodeActStrategy(
@@ -217,10 +347,7 @@ class BenchAgent(
         """Solve the task.
 
         You are an expert software engineer and system administrator working
-        inside a Linux container. Solve the task described below.
-
-        ## Task
-        {description}
+        inside a Linux container. Solve the task in the description argument.
 
         ## Instructions
         - Use ``await self.shell.run("command")`` to run shell commands.

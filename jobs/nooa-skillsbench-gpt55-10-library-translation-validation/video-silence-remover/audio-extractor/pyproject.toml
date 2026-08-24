@@ -1,0 +1,18 @@
+[project]
+name = "audio-extractor"
+version = "0.1.0"
+description = "Extract audio from video files to WAV format. Use when you need to analyze audio from video, prepare audio for energy calculation, or convert video audio to standard format for processing."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+audio_extractor = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.audio-extractor" = "audio_extractor:AudioExtractor"

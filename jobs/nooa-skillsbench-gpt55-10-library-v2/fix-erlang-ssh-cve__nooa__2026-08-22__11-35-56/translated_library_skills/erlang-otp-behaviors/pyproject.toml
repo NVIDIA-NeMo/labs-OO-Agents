@@ -1,0 +1,18 @@
+[project]
+name = "erlang-otp-behaviors"
+version = "0.1.0"
+description = "Use when oTP behaviors including gen_server for stateful processes, gen_statem for state machines, supervisors for fault tolerance, gen_event for event handling, and building robust, production-ready Erlang applications with proven patterns."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+erlang_otp_behaviors = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.erlang-otp-behaviors" = "erlang_otp_behaviors:ErlangOtpBehaviors"

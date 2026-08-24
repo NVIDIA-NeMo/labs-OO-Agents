@@ -1,0 +1,25 @@
+[
+  {
+    "source_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench/tasks/offer-letter-generator/environment/skills/docx",
+    "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-translation-validation/offer-letter-generator/docx",
+    "package_name": "docx",
+    "registry_name": "local.docx",
+    "class_name": "Docx",
+    "files_written": [
+      "README.md",
+      "pyproject.toml",
+      "src/docx/__init__.py",
+      "tests/test_docx.py"
+    ],
+    "omitted_scripts": [],
+    "validation": {
+      "ok": true,
+      "package_dir": "/Users/adevoto/.herdr/worktrees/nemo_oo_agents/monster-skill-translate-skillsbench/jobs/nooa-skillsbench-gpt55-10-library-translation-validation/offer-letter-generator/docx",
+      "registry_name": "local.docx",
+      "loaded": true,
+      "importable": true,
+      "errors": [],
+      "warnings": []
+    }
+  }
+]

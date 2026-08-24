@@ -1,0 +1,18 @@
+[project]
+name = "energy-calculator"
+version = "0.1.0"
+description = "Calculate per-second RMS energy from audio files. Use when you need to analyze audio volume patterns, prepare data for silence/pause detection, or create an energy profile for audio analysis tasks."
+dependencies = ["nooa"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+energy_calculator = ["resources/**"]
+
+[project.entry-points."nooa.skills"]
+"local.energy-calculator" = "energy_calculator:EnergyCalculator"
