@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 from bisect import bisect_right
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
@@ -23,6 +24,10 @@ from .terminal_safety import (
 )
 
 _MAX_PROJECTED_WIDTHS = 2
+_COPY_LINK_RE = re.compile(r"\x1b\]8;[^\x07\x1b\r\n]*;([^\x07\x1b\r\n]*)(?:\x07|\x1b\\)")
+_SGR_RE = re.compile(r"\x1b\[[0-9:;]*m")
+_COPY_URI_PREFIX = "nooa-copy://"
+_CODE_SOURCE_URI_PREFIX = "nooa-code-source://"
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,12 +57,30 @@ class _SelectionHit:
 
 
 @dataclass(frozen=True, slots=True)
+class _CodeSourceMap:
+    display_start: int
+    display_stop: int
+    source_start: int
+    source_stop: int
+
+
+@dataclass(frozen=True, slots=True)
+class _CodeSelectionRegion:
+    display_start: int
+    display_stop: int
+    source: str
+    mappings: tuple[_CodeSourceMap, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _Record:
     record_id: int
     ansi: str
     plain: str
     has_separator: bool = False
     hyperlinks: tuple[tuple[int, int, str], ...] = ()
+    copy_regions: tuple[tuple[int, int, str], ...] = ()
+    code_selection_regions: tuple[_CodeSelectionRegion, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,12 +271,245 @@ class FullscreenTranscriptModel:
             record_stop = offset + len(record.plain)
             if record_stop > start and offset < stop:
                 pieces.append(
-                    record.plain[max(0, start - offset) : min(len(record.plain), stop - offset)]
+                    self._selected_record_text(
+                        record,
+                        max(0, start - offset),
+                        min(len(record.plain), stop - offset),
+                    )
                 )
             if record_stop >= stop:
                 break
             offset = record_stop
         return "".join(pieces)
+
+    @staticmethod
+    def _selected_record_text(record: _Record, start: int, stop: int) -> str:
+        """Project a visual selection back to semantic Markdown source."""
+        pieces: list[str] = []
+        cursor = start
+        for region in record.code_selection_regions:
+            if region.display_stop <= start:
+                continue
+            if region.display_start >= stop:
+                break
+            plain_stop = min(stop, region.display_start)
+            if cursor < plain_stop:
+                pieces.append(record.plain[cursor:plain_stop])
+            overlap_start = max(start, region.display_start)
+            overlap_stop = min(stop, region.display_stop)
+            mappings = [
+                mapping
+                for mapping in region.mappings
+                if mapping.display_start < overlap_stop and mapping.display_stop > overlap_start
+            ]
+            if mappings:
+                source_start = (
+                    0
+                    if overlap_start <= region.mappings[0].display_start
+                    else mappings[0].source_start
+                )
+                source_stop = mappings[-1].source_stop
+                pieces.append(region.source[source_start:source_stop])
+                if (
+                    overlap_stop >= region.display_stop
+                    and stop > region.display_stop
+                    and not region.source.endswith("\n")
+                    and record.plain[region.display_stop :].startswith("\n")
+                ):
+                    pieces.append("\n")
+            cursor = max(cursor, region.display_stop)
+        if cursor < stop:
+            pieces.append(record.plain[cursor:stop])
+        return "".join(pieces)
+
+    def copy_action_at(self, *, x: int, y: int, width: int, height: int) -> str | None:
+        """Return the exact code payload behind a visible Copy label."""
+        hit = self._selection_hit(x=x, y=y, width=width, height=height, clamp=False)
+        if hit is None:
+            return None
+        records, _bases = self._record_indexes()
+        record = records.get(hit.record_id)
+        if record is None:
+            return None
+        for start, stop, payload in record.copy_regions:
+            if start <= hit.before < stop:
+                return payload
+        return None
+
+    @staticmethod
+    def _copy_regions(
+        ansi: str, copy_actions: dict[str, str] | None
+    ) -> tuple[tuple[int, int, str], ...]:
+        """Map authorized custom OSC-8 links to ANSI-free record offsets."""
+        if not copy_actions:
+            return ()
+        regions: list[tuple[int, int, str]] = []
+        active: tuple[int, str] | None = None
+        plain_offset = 0
+        cursor = 0
+        while cursor < len(ansi):
+            sgr = _SGR_RE.match(ansi, cursor)
+            if sgr is not None:
+                cursor = sgr.end()
+                continue
+            link = _COPY_LINK_RE.match(ansi, cursor)
+            if link is not None:
+                uri = link.group(1)
+                if uri.startswith(_COPY_URI_PREFIX):
+                    action_id = uri[len(_COPY_URI_PREFIX) :]
+                    payload = copy_actions.get(action_id)
+                    if payload is not None:
+                        active = (plain_offset, payload)
+                elif not uri and active is not None:
+                    start, payload = active
+                    if plain_offset > start:
+                        regions.append((start, plain_offset, payload))
+                    active = None
+                cursor = link.end()
+                continue
+            plain_offset += 1
+            cursor += 1
+        if active is not None:
+            start, payload = active
+            if plain_offset > start:
+                regions.append((start, plain_offset, payload))
+        return tuple(regions)
+
+    @classmethod
+    def _code_selection_regions(
+        cls, ansi: str, plain: str, copy_actions: dict[str, str] | None
+    ) -> tuple[_CodeSelectionRegion, ...]:
+        """Map decorated code cells back to their exact Markdown source."""
+        if not copy_actions:
+            return ()
+        linked: dict[str, list[tuple[int, int, int]]] = {}
+        labels: dict[str, list[tuple[int, int]]] = {}
+        active: tuple[str, int | None, int] | None = None
+        plain_offset = 0
+        cursor = 0
+        while cursor < len(ansi):
+            sgr = _SGR_RE.match(ansi, cursor)
+            if sgr is not None:
+                cursor = sgr.end()
+                continue
+            link = _COPY_LINK_RE.match(ansi, cursor)
+            if link is not None:
+                if active is not None:
+                    action_id, line_number, start = active
+                    if plain_offset > start:
+                        if line_number is None:
+                            labels.setdefault(action_id, []).append((start, plain_offset))
+                        else:
+                            linked.setdefault(action_id, []).append(
+                                (start, plain_offset, line_number)
+                            )
+                uri = link.group(1)
+                active = None
+                if uri.startswith(_COPY_URI_PREFIX):
+                    action_id = uri[len(_COPY_URI_PREFIX) :]
+                    if action_id in copy_actions:
+                        active = (action_id, None, plain_offset)
+                elif uri.startswith(_CODE_SOURCE_URI_PREFIX):
+                    target = uri[len(_CODE_SOURCE_URI_PREFIX) :]
+                    action_id, separator, line = target.rpartition("/")
+                    if separator and action_id in copy_actions:
+                        try:
+                            active = (action_id, int(line), plain_offset)
+                        except ValueError:
+                            pass
+                cursor = link.end()
+                continue
+            plain_offset += 1
+            cursor += 1
+
+        regions: list[_CodeSelectionRegion] = []
+        for action_id, payload in copy_actions.items():
+            source_ranges = linked.get(action_id, [])
+            label_ranges = labels.get(action_id, [])
+            if not source_ranges or not label_ranges:
+                continue
+            payload_lines = payload.split("\n")
+            line_offsets: list[int] = []
+            source_offset = 0
+            for line_number, line in enumerate(payload_lines):
+                line_offsets.append(source_offset)
+                source_offset += len(line)
+                if line_number + 1 < len(payload_lines):
+                    source_offset += 1
+
+            mappings: list[_CodeSourceMap] = []
+            rendered_offsets: dict[int, int] = {}
+            for display_start, display_stop, line_number in source_ranges:
+                if line_number >= len(payload_lines):
+                    continue
+                source_line = payload_lines[line_number]
+                expanded_to_source: list[tuple[int, int]] = []
+                column = 0
+                source_index = 0
+                source_parts = source_line.split("\t")
+                for part_index, part in enumerate(source_parts):
+                    grapheme_spans, _ = split_graphemes(part)
+                    for start, stop, _cells in grapheme_spans:
+                        source_start = source_index + start
+                        source_stop = source_index + stop
+                        # Syntax expands tabs by Python string columns before
+                        # rendering. Map each rendered code point back to the
+                        # complete source grapheme; projection handles cell width.
+                        expanded_to_source.extend(
+                            (source_start, source_stop) for _ in range(stop - start)
+                        )
+                        column += stop - start
+                    source_index += len(part)
+                    if part_index + 1 < len(source_parts):
+                        width = 4 - (column % 4)
+                        expanded_to_source.extend(
+                            (source_index, source_index + 1) for _ in range(width)
+                        )
+                        source_index += 1
+                        column += width
+                if not source_line:
+                    # CopyableMarkdown paints one linked placeholder cell for
+                    # an otherwise unstyleable empty source row. It represents
+                    # that row's newline, or the preceding newline for the
+                    # terminal empty component of a newline-terminated payload.
+                    newline_offset = (
+                        line_offsets[line_number]
+                        if line_number + 1 < len(payload_lines)
+                        else max(0, line_offsets[line_number] - 1)
+                    )
+                    expanded_to_source.append((newline_offset, newline_offset + 1))
+                    line_base = 0
+                else:
+                    line_base = line_offsets[line_number]
+                rendered_offset = rendered_offsets.get(line_number, 0)
+                for display_offset in range(display_start, display_stop):
+                    if rendered_offset >= len(expanded_to_source):
+                        break
+                    before, after = expanded_to_source[rendered_offset]
+                    mappings.append(
+                        _CodeSourceMap(
+                            display_offset,
+                            display_offset + 1,
+                            line_base + before,
+                            line_base + after,
+                        )
+                    )
+                    rendered_offset += 1
+                rendered_offsets[line_number] = rendered_offset
+            if not mappings:
+                continue
+
+            header_start = plain.rfind("\n", 0, label_ranges[0][0]) + 1
+            last_line_end = plain.find("\n", mappings[-1].display_stop)
+            if last_line_end < 0:
+                display_stop = len(plain)
+            else:
+                bottom_end = plain.find("\n", last_line_end + 1)
+                display_stop = len(plain) if bottom_end < 0 else bottom_end + 1
+            regions.append(
+                _CodeSelectionRegion(header_start, display_stop, payload, tuple(mappings))
+            )
+        return tuple(sorted(regions, key=lambda region: region.display_start))
 
     def _selection_hit(
         self,
@@ -305,7 +561,13 @@ class FullscreenTranscriptModel:
         start, stop = row.source_spans[selected]
         return _SelectionHit(record.record_id, start, stop)
 
-    def append(self, source: str, *, record_id: int | None = None) -> None:
+    def append(
+        self,
+        source: str,
+        *,
+        record_id: int | None = None,
+        copy_actions: dict[str, str] | None = None,
+    ) -> None:
         safe = sanitize_transcript_ansi(source)
         plain = strip_safe_ansi(safe)
         first_record = not self._records
@@ -323,6 +585,8 @@ class FullscreenTranscriptModel:
             separator + plain,
             bool(separator),
             _hyperlink_spans_from_safe_ansi(record_ansi),
+            self._copy_regions(record_ansi, copy_actions),
+            self._code_selection_regions(record_ansi, separator + plain, copy_actions),
         )
         prior_ends_newline = self._ends_newline
         self._records.append(record)
@@ -372,10 +636,13 @@ class FullscreenTranscriptModel:
         sources: list[str],
         *,
         record_ids: list[int] | None = None,
+        copy_actions: list[dict[str, str]] | None = None,
     ) -> None:
         """Reproject semantic records while preserving explicit record identity."""
         if record_ids is not None and len(record_ids) != len(sources):
             raise ValueError("record_ids must have one item per source")
+        if copy_actions is not None and len(copy_actions) != len(sources):
+            raise ValueError("copy_actions must have one item per source")
         old_anchor = self._viewport.anchor
         old_records = {record.record_id: record for record in self._records}
         available: dict[str, list[int]] = {}
@@ -396,6 +663,7 @@ class FullscreenTranscriptModel:
                     self._next_record_id += 1
             self._next_record_id = max(self._next_record_id, record_id + 1)
             record_ansi = separator + safe
+            actions = None if copy_actions is None else copy_actions[index]
             rebuilt.append(
                 _Record(
                     record_id,
@@ -403,6 +671,8 @@ class FullscreenTranscriptModel:
                     separator + plain,
                     bool(separator),
                     _hyperlink_spans_from_safe_ansi(record_ansi),
+                    self._copy_regions(record_ansi, actions),
+                    self._code_selection_regions(record_ansi, separator + plain, actions),
                 )
             )
             accumulated_plain += separator + plain
@@ -467,6 +737,30 @@ class FullscreenTranscriptModel:
                 first.plain[1:],
                 False,
                 _hyperlink_spans_from_safe_ansi(record_ansi),
+                tuple(
+                    (max(0, start - 1), max(0, stop - 1), payload)
+                    for start, stop, payload in first.copy_regions
+                    if stop > 1
+                ),
+                tuple(
+                    _CodeSelectionRegion(
+                        max(0, region.display_start - 1),
+                        max(0, region.display_stop - 1),
+                        region.source,
+                        tuple(
+                            _CodeSourceMap(
+                                max(0, mapping.display_start - 1),
+                                max(0, mapping.display_stop - 1),
+                                mapping.source_start,
+                                mapping.source_stop,
+                            )
+                            for mapping in region.mappings
+                            if mapping.display_stop > 1
+                        ),
+                    )
+                    for region in first.code_selection_regions
+                    if region.display_stop > 1
+                ),
             )
             # Selection endpoints are record-local character offsets. Removing
             # the synthetic joining newline must not move a selection that is

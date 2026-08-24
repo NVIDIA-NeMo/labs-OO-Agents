@@ -3,6 +3,7 @@
 """Tests for session resume replay truncation and batch rendering."""
 
 import json
+import re
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -200,10 +201,28 @@ class TestBatchRendering:
             "bg:" in style for style, text, *_ in to_formatted_text(ANSI(rendered)) if text != "\n"
         )
 
-    def test_history_renderer_honors_pathologically_narrow_width(self):
+    def test_resumed_agent_prose_has_no_render_width_whitespace(self):
         from nooa_cli.tui.frontend import render_history_replay_to_ansi
         from nooa_cli.tui.terminal_safety import strip_safe_ansi
-        from rich.cells import cell_len
+
+        message = (
+            "A long assistant response should remain one logical line without "
+            "padding spaces or renderer-inserted newlines when it is resumed."
+        )
+        replay = HistoryReplay(
+            turns=[HistoryTurn(role="agent", content=message)],
+            session_id="copy",
+            show_header=False,
+            show_footer=False,
+        )
+
+        rendered = strip_safe_ansi(render_history_replay_to_ansi(replay, 20))
+
+        assert rendered == f"OO:\n{message}\n\n"
+
+    def test_history_renderer_keeps_agent_text_semantic_at_narrow_width(self):
+        from nooa_cli.tui.frontend import render_history_replay_to_ansi
+        from nooa_cli.tui.terminal_safety import strip_safe_ansi
 
         replay = HistoryReplay(
             turns=[HistoryTurn(role="agent", content="abcdefghij")],
@@ -212,9 +231,9 @@ class TestBatchRendering:
             show_footer=False,
         )
 
-        rendered = render_history_replay_to_ansi(replay, 3)
+        rendered = strip_safe_ansi(render_history_replay_to_ansi(replay, 3))
 
-        assert all(cell_len(line) <= 3 for line in strip_safe_ansi(rendered).splitlines())
+        assert rendered == "OO:\nabcdefghij\n\n"
 
     def test_history_replay_on_emit_stream_keeps_semantic_replay_callback(self):
         """Live TUI rendering stores resumed HistoryReplay as a reflowable block."""
@@ -258,6 +277,108 @@ class TestBatchRendering:
         assert rerendered != rendered
         assert "abc123" in rerendered
         assert len(rerendered.splitlines()[0]) < len(rendered.splitlines()[0])
+
+    def test_fullscreen_resumed_code_retains_copy_metadata(self):
+        from nooa_cli.tui.frontend import TerminalFrontend
+        from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+        from nooa_cli.tui.session import _EmitStream
+
+        emitted = []
+        current_width = 60
+
+        def emit(text: str, **kwargs):
+            emitted.append((text, kwargs))
+
+        stream = _EmitStream(
+            emit,
+            replay_width=lambda: current_width,
+            supports_code_copy_actions=True,
+        )
+        mock_console = MagicMock()
+        mock_console.console.width = 120
+        mock_console.console.file = stream
+        frontend = TerminalFrontend.__new__(TerminalFrontend)
+        frontend._console = mock_console
+        source = "\tif ready:\n\t\tprint('resumed')  "
+        replay = HistoryReplay(
+            turns=[
+                HistoryTurn(
+                    role="agent",
+                    content=f"Before\n\n```python\n{source}\n```\n\nAfter",
+                )
+            ],
+            session_id="resumed-copy",
+            show_header=False,
+            show_footer=False,
+        )
+
+        frontend._render_history_replay(replay)
+
+        assert len(emitted) == 1
+        rendered, kwargs = emitted[0]
+        assert "Copy" in rendered
+        assert list(kwargs["code_copy_actions"].values()) == [source]
+        assert callable(kwargs["replay"])
+
+        model = FullscreenTranscriptModel()
+        model.append(rendered, copy_actions=kwargs["code_copy_actions"])
+        lines = "".join(
+            fragment[1] for fragment in model.formatted_text(width=60, height=30)
+        ).splitlines()
+        header_y = next(index for index, line in enumerate(lines) if "Copy" in line)
+        after_y = next(index for index, line in enumerate(lines) if "After" in line)
+        model.begin_selection(x=0, y=header_y, width=60, height=30)
+        model.update_selection(x=59, y=after_y - 1, width=60, height=30)
+        assert model.selected_text() == source
+
+        current_width = 42
+        rerendered = kwargs["replay"]()
+        resized = FullscreenTranscriptModel()
+        resized.append(rerendered, copy_actions=kwargs["code_copy_actions"])
+        lines = "".join(
+            fragment[1] for fragment in resized.formatted_text(width=42, height=30)
+        ).splitlines()
+        header_y = next(index for index, line in enumerate(lines) if "Copy" in line)
+        after_y = next(index for index, line in enumerate(lines) if "After" in line)
+        resized.begin_selection(x=0, y=header_y, width=42, height=30)
+        resized.update_selection(x=41, y=after_y - 1, width=42, height=30)
+        assert resized.selected_text() == source
+
+    def test_fullscreen_resumed_code_uses_live_syntax_theme(self):
+        from nooa_cli.tui.config import DisplayMode
+        from nooa_cli.tui.copyable_markdown import CopyableMarkdown
+        from nooa_cli.tui.frontend import _HistoryReplayRenderer
+        from nooa_cli.tui.session import Session
+
+        markup = "```python\ndef greet(name: str) -> str:\n    return name\n```"
+        replay = HistoryReplay(
+            turns=[HistoryTurn(role="agent", content=markup)],
+            session_id="resumed-theme",
+            show_header=False,
+            show_footer=False,
+        )
+        resumed = _HistoryReplayRenderer(replay, copyable=True).render(80)
+
+        class FakeApp:
+            display_mode = DisplayMode.FULLSCREEN
+
+            @staticmethod
+            def transcript_columns() -> int:
+                return 80
+
+        session = Session.__new__(Session)
+        session._app = FakeApp()
+        live = session._render_to_ansi(CopyableMarkdown(markup))
+
+        def syntax_style(rendered: str, token: str) -> str:
+            match = re.search(rf"\x1b\[([0-9;]+)m{token}", rendered)
+            assert match is not None
+            return match.group(1)
+
+        # Replay must use the same color system/theme as live output rather
+        # than Rich's basic-color fallback for a StringIO-backed console.
+        assert syntax_style(resumed, "def") == syntax_style(live, "def")
+        assert syntax_style(resumed, "greet") == syntax_style(live, "greet")
 
     def test_emit_stream_preserves_order_when_semantic_block_appears_inside_hold(self):
         """A semantic HistoryReplay inside batch_render must not jump ahead of buffered text."""
