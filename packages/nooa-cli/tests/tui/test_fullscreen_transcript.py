@@ -23,6 +23,33 @@ def _make_fullscreen_app():
         return TUIApplication(display_mode=DisplayMode.FULLSCREEN)
 
 
+def test_resize_application_prompt_toolkit_private_api_contract() -> None:
+    """Fail clearly if a prompt-toolkit upgrade changes private resize hooks."""
+    import inspect
+
+    from nooa_cli.tui.tui_application import _ResizeAwareApplication
+    from prompt_toolkit.application import Application
+
+    on_resize = inspect.signature(Application._on_resize)
+    assert tuple(on_resize.parameters) == ("self",)
+
+    redraw = inspect.signature(Application._redraw)
+    assert tuple(redraw.parameters) == ("self", "render_as_done")
+    assert redraw.parameters["render_as_done"].default is False
+
+    request_cursor = inspect.signature(Application._request_absolute_cursor_position)
+    assert tuple(request_cursor.parameters) == ("self",)
+
+    assert tuple(inspect.signature(_ResizeAwareApplication._on_resize).parameters) == ("self",)
+    assert tuple(inspect.signature(_ResizeAwareApplication._redraw).parameters) == (
+        "self",
+        "render_as_done",
+    )
+
+    app = _make_fullscreen_app()
+    assert isinstance(app._app._running_in_terminal, bool)
+
+
 def test_fullscreen_shell_owns_alternate_screen_and_transcript_window() -> None:
     app = _make_fullscreen_app()
 

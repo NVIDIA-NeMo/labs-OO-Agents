@@ -2255,8 +2255,11 @@ async def test_atomic_resize_replay_rechecks_shutdown_before_clear(
     monkeypatch.setattr("sys.__stdout__", capture)
 
     async with TUIHarness(full_screen=True, output=output) as h:
+        callback_ran = False
 
         def replay_during_shutdown() -> str:
+            nonlocal callback_ran
+            callback_ran = True
             h.app._resize_replays_enabled = False
             return "must not be written\n"
 
@@ -2268,7 +2271,8 @@ async def test_atomic_resize_replay_rechecks_shutdown_before_clear(
         output.events.clear()
 
         await h.resize_from_terminal(60, 36)
-        await h.wait_for(lambda: h.app._queued_resize_replay_generation is None)
+        await h.wait_for(lambda: callback_ran and h.app._queued_resize_replay_generation is None)
+        await h.app._block_queue.join()
 
         assert h.app._fullscreen_invalidate_count == 0
         assert "\x1b[3J" not in capture.getvalue()
