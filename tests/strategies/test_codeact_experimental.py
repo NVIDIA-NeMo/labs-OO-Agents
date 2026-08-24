@@ -3,6 +3,7 @@
 """Tests for the experimental single-tool CodeAct strategy."""
 
 import json
+from typing import Any, cast
 
 import pytest
 
@@ -14,10 +15,10 @@ from nooa.strategies.codeact_experimental import CodeActExperimental
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
 
-def _python_cell(code: str, call_id: str = "call_1") -> ToolCall:
+def _execute_python(code: str, call_id: str = "call_1") -> ToolCall:
     return ToolCall(
         id=call_id,
-        name="python_cell",
+        name="execute_python",
         arguments=json.dumps({"code": code}),
     )
 
@@ -26,14 +27,14 @@ def _response(code: str, call_id: str = "call_1") -> LLMResponse:
     return LLMResponse(
         raw_response=None,
         content="",
-        tool_calls=[_python_cell(code, call_id)],
+        tool_calls=[_execute_python(code, call_id)],
         finish_reason="tool_calls",
         assistant_message={"role": "assistant", "content": ""},
     )
 
 
 @pytest.mark.asyncio
-async def test_explicit_return_completes_with_only_python_cell_tool():
+async def test_explicit_return_completes_with_only_execute_python_tool():
     fake_llm = FakeLLMClient(scripted_responses=[_response("return 42")])
 
     class TestAgent(Agent, llm=fake_llm):
@@ -44,7 +45,7 @@ async def test_explicit_return_completes_with_only_python_cell_tool():
 
     agent = TestAgent()
     assert await agent.answer() == 42
-    assert [tool.name for tool in fake_llm.last_tools or []] == ["python_cell"]
+    assert [tool.name for tool in fake_llm.last_tools or []] == ["execute_python"]
     system_prompt = "\n".join(
         str(message.get("content", ""))
         for message in fake_llm.last_messages
@@ -95,19 +96,19 @@ def test_prompt_and_execution_context_advertise_inline_return_result():
     assert "return_result" in strategy_instance._always_available_text()
     sentinel = object()
     assert strategy_instance._strategy_builtins(sentinel) == {"return_result": sentinel}
-    assert strategy_instance._available_tool_names() == "python_cell"
+    assert strategy_instance._available_tool_names() == "execute_python"
 
 
-def test_canonical_experimental_export_warns():
+def test_compatibility_factory_returns_supported_strategy_without_warning():
     from nooa.experimental import CodeActExperimental as factory
+    from nooa.strategies import CodeActExperimental as supported
 
-    with pytest.warns(FutureWarning, match="CodeActExperimental"):
-        instance = factory(config=CodeActConfig(prefill=None))
-    assert isinstance(instance, CodeActExperimental)
+    instance = factory(config=CodeActConfig(prefill=None))
+    assert isinstance(instance, supported)
 
 
 @pytest.mark.asyncio
-async def test_return_result_is_available_inside_python_cells():
+async def test_return_result_is_available_inside_execute_python_cells():
     fake_llm = FakeLLMClient(scripted_responses=[_response("return_result(41)", "call_1")])
 
     class TestAgent(Agent, llm=fake_llm):
@@ -145,7 +146,8 @@ async def test_execution_context_lists_initial_locals():
 
     agent = TestAgent()
     session_locals = {"prior_value": 7}
-    assert await agent.answer("hello", _session_locals=session_locals) == "hello"
+    answer = cast(Any, agent.answer)
+    assert await answer("hello", _session_locals=session_locals) == "hello"
     rendered_context = "\n".join(
         str(message.get("content", "")) for message in fake_llm.last_messages
     )
