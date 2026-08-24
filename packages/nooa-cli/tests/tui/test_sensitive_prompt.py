@@ -218,6 +218,9 @@ def test_local_clipboard_prefers_platform_command_over_osc52(monkeypatch):
     app._app = SimpleNamespace(output=output)
     monkeypatch.delenv("SSH_CONNECTION", raising=False)
     monkeypatch.delenv("SSH_TTY", raising=False)
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("SBX_NO_DISPLAY", raising=False)
     monkeypatch.setattr(
         "nooa_cli.tui.tui_application.shutil.which",
         lambda name: "/usr/bin/wl-copy" if name == "wl-copy" else None,
@@ -233,3 +236,43 @@ def test_local_clipboard_prefers_platform_command_over_osc52(monkeypatch):
     assert run.call_args.args[0] == ["/usr/bin/wl-copy"]
     assert run.call_args.kwargs["input"] == b"local text"
     output.write_raw.assert_not_called()
+
+
+def test_displayless_sandbox_ignores_xclip_shim_and_uses_osc52(monkeypatch):
+    output = MagicMock()
+    app = TUIApplication.__new__(TUIApplication)
+    app._app = SimpleNamespace(output=output)
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setenv("SBX_NO_DISPLAY", "1")
+    monkeypatch.setattr(
+        "nooa_cli.tui.tui_application.shutil.which",
+        lambda name: f"/usr/local/bin/{name}" if name in {"wl-copy", "xclip"} else None,
+    )
+    run = MagicMock()
+    monkeypatch.setattr("nooa_cli.tui.tui_application.subprocess.run", run)
+
+    result = app._copy_to_clipboard_result("sandbox text")
+
+    assert result.success is True
+    assert result.transport == "osc52"
+    run.assert_not_called()
+    assert "\x1b]52;c;" in output.write_raw.call_args.args[0]
+
+
+def test_xclip_is_available_with_x_display(monkeypatch):
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.delenv("SBX_NO_DISPLAY", raising=False)
+    monkeypatch.setattr(
+        "nooa_cli.tui.tui_application.shutil.which",
+        lambda name: "/usr/bin/xclip" if name == "xclip" else None,
+    )
+
+    assert TUIApplication._local_clipboard_command() == (
+        "/usr/bin/xclip",
+        "-selection",
+        "clipboard",
+    )
