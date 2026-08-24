@@ -392,8 +392,8 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         self._user_messages_in = self.queue_manager.queue("user_messages")
         self.user_messages = self._user_messages_in.reader
         self.producers = ProducersSkill()
-        # Surface pending-queue counts (and a short preview of each item)
-        # to the LLM every turn — the agent reads queue depth straight
+        # Surface payload-free pending-queue counts to the LLM every turn —
+        # the agent reads queue depth straight
         # from the ``queues`` context block. Composed via
         # ``QueueManager.status()`` so adding new channels Just Works.
         from nooa import Context
