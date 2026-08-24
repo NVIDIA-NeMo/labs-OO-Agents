@@ -55,12 +55,12 @@ class TestReconnect:
         call_count = 0
         original_do_store = storage._backend._do_store
 
-        def failing_store(tag, event, data, order):
+        def failing_store(tag, event, data):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
                 raise sqlite3.OperationalError("disk I/O error")
-            return original_do_store(tag, event, data, order)
+            return original_do_store(tag, event, data)
 
         storage._backend._do_store = failing_store
         event = _make_event("2")
@@ -74,7 +74,7 @@ class TestReconnect:
     def test_store_raises_on_non_io_error(self, storage):
         """store() should NOT retry on non-I/O OperationalErrors."""
 
-        def always_fail(tag, event, data, order):
+        def always_fail(tag, event, data):
             raise sqlite3.OperationalError("database is locked")
 
         storage._backend._do_store = always_fail
@@ -85,7 +85,7 @@ class TestReconnect:
     def test_store_raises_if_retry_also_fails(self, storage):
         """If reconnect doesn't help, the second failure should propagate."""
 
-        def always_fail(tag, event, data, order):
+        def always_fail(tag, event, data):
             raise sqlite3.OperationalError("disk I/O error")
 
         storage._backend._do_store = always_fail
@@ -98,13 +98,13 @@ class TestReconnect:
         call_count = [0]
         original_do_store = storage._backend._do_store
 
-        def commit_then_ioerr(tag, event, data, order):
+        def commit_then_ioerr(tag, event, data):
             call_count[0] += 1
             if call_count[0] == 1:
                 # Data commits, then I/O error on return path
-                original_do_store(tag, event, data, order)
+                original_do_store(tag, event, data)
                 raise sqlite3.OperationalError("disk I/O error")
-            return original_do_store(tag, event, data, order)
+            return original_do_store(tag, event, data)
 
         storage._backend._do_store = commit_then_ioerr
         event = _make_event("integrity")
@@ -118,7 +118,7 @@ class TestReconnect:
         sm = SQLiteStorageManager(tmp_db)
         sm._backend._on_io_error = None  # Explicitly clear
 
-        def always_fail(tag, event, data, order):
+        def always_fail(tag, event, data):
             raise sqlite3.OperationalError("disk I/O error")
 
         sm._backend._do_store = always_fail
@@ -126,6 +126,26 @@ class TestReconnect:
         with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
             sm._backend.store("5", event)
         sm.close()
+
+    def test_store_retry_does_not_mask_unrelated_integrity_error(self, storage):
+        """A retry collision is success only when the same event was persisted."""
+        call_count = 0
+        original_do_store = storage._backend._do_store
+        existing = _make_event("duplicate")
+        storage._backend.store("duplicate", existing)
+
+        def io_then_collision(tag, event, data):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise sqlite3.OperationalError("disk I/O error")
+            return original_do_store(tag, event, data)
+
+        storage._backend._do_store = io_then_collision
+        storage._backend._on_io_error = lambda: None
+
+        with pytest.raises(sqlite3.IntegrityError):
+            storage._backend.store("duplicate", _make_event("duplicate"))
 
 
 class TestBusyTimeout:

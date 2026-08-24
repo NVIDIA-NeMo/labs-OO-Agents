@@ -399,3 +399,45 @@ def test_archived_status_preserved_after_roundtrip(backend):
     result = backend.get("1")
     assert type(result) is UserEvent
     assert result.status == EventStatus.ARCHIVED
+
+
+def test_iter_events_filters_type_and_can_reverse(backend):
+    backend.store("1", Task(prompt="old"))
+    backend.store(
+        "2",
+        ToolCallEvent(
+            tool_call_id="call-1",
+            name="tool",
+            arguments={},
+        ),
+    )
+    backend.store("3", Task(prompt="new"))
+
+    tasks = list(backend.iter_events(event_type="Task", newest_first=True))
+
+    assert [event.prompt for event in tasks] == ["new", "old"]
+
+
+def test_sqlite_iter_events_excludes_rows_appended_after_iteration_starts(sqlite_conn):
+    backend = SQLiteEventBackend(sqlite_conn)
+    backend.store("1", Task(prompt="old"))
+    backend.store("2", Task(prompt="current"))
+    events = backend.iter_events(event_type="Task")
+
+    assert next(events).prompt == "old"
+    backend.store("3", Task(prompt="later"))
+
+    assert [event.prompt for event in events] == ["current"]
+
+
+def test_sqlite_iter_events_excludes_rows_inserted_after_clear(sqlite_conn):
+    backend = SQLiteEventBackend(sqlite_conn)
+    backend.store("1", Task(prompt="old"))
+    backend.store("2", Task(prompt="current"))
+    events = backend.iter_events(event_type="Task")
+
+    assert next(events).prompt == "old"
+    backend.clear()
+    backend.store("1", Task(prompt="new"))
+
+    assert [event.prompt for event in events] == ["current"]
