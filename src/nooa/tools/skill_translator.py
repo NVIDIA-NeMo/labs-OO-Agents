@@ -32,8 +32,11 @@ _RESERVED_METHOD_NAMES = {
     "_read_resource",
     "_read_resource_bytes",
     "_format_resource_index",
+    "_RESOURCE_METHODS",
     *(name for name in dir(Skill) if not name.startswith("_")),
 }
+
+_RESOURCE_DOCSTRING_INLINE_LIMIT = 4000
 
 
 class TextSkillFile(BaseModel):
@@ -111,6 +114,16 @@ class OmittedScriptPlan(BaseModel):
     reason: str
 
 
+class ResourceMethodPlan(BaseModel):
+    """Plan for one named method exposing a bundled non-script resource."""
+
+    resource_path: str
+    method_name: str
+    return_annotation: Literal["str", "bytes"]
+    size_bytes: int
+    docstring: str
+
+
 class ConversionPlan(BaseModel):
     """Deterministic plan for converting a TextSkill into a package skill."""
 
@@ -123,6 +136,7 @@ class ConversionPlan(BaseModel):
     docstring: str
     script_methods: list[ScriptMethodPlan] = Field(default_factory=list)
     omitted_scripts: list[OmittedScriptPlan] = Field(default_factory=list)
+    resource_methods: list[ResourceMethodPlan] = Field(default_factory=list)
     resource_prefix: str = "resources"
 
 
@@ -296,7 +310,8 @@ class TextSkillTranslator(Skill):
                     function_methods=function_methods,
                 )
             )
-        docstring = _build_docstring(inventory, script_methods)
+        resource_methods = _resource_method_plans(inventory, used_api_names)
+        docstring = _build_docstring(inventory, script_methods, resource_methods)
 
         return ConversionPlan(
             source_dir=inventory.source_dir,
@@ -308,6 +323,7 @@ class TextSkillTranslator(Skill):
             docstring=docstring,
             script_methods=script_methods,
             omitted_scripts=omitted_scripts,
+            resource_methods=resource_methods,
         )
 
     def write_package(
@@ -535,6 +551,21 @@ def _script_method_name(script_path: str, used_names: set[str]) -> str:
     return name
 
 
+def _resource_method_name(resource_path: str, used_names: set[str]) -> str:
+    rel = Path(resource_path)
+    without_suffix = rel.with_suffix("").as_posix()
+    name = _normalize_identifier(without_suffix)
+    if name in _RESERVED_METHOD_NAMES:
+        name = f"{name}_resource"
+    base = name
+    index = 2
+    while name in used_names:
+        name = f"{base}_{index}"
+        index += 1
+    used_names.add(name)
+    return name
+
+
 def _api_method_name(script_path: str, used_names: set[str]) -> str:
     name = _normalize_identifier(Path(script_path).stem)
     if name in _RESERVED_METHOD_NAMES:
@@ -546,6 +577,69 @@ def _api_method_name(script_path: str, used_names: set[str]) -> str:
         index += 1
     used_names.add(name)
     return name
+
+
+def _resource_method_plans(inventory: TextSkillInventory, used_names: set[str]) -> list[ResourceMethodPlan]:
+    methods: list[ResourceMethodPlan] = []
+    for file in inventory.files:
+        if file.kind != "resource":
+            continue
+        path = inventory.source_dir / file.path
+        text = _read_resource_text_for_docstring(path)
+        return_annotation: Literal["str", "bytes"] = "str" if text is not None else "bytes"
+        method_name = _resource_method_name(file.path, used_names)
+        methods.append(
+            ResourceMethodPlan(
+                resource_path=file.path,
+                method_name=method_name,
+                return_annotation=return_annotation,
+                size_bytes=file.size_bytes,
+                docstring=_resource_method_docstring(
+                    resource_path=file.path,
+                    return_annotation=return_annotation,
+                    size_bytes=file.size_bytes,
+                    text=text,
+                ),
+            )
+        )
+    return methods
+
+
+def _read_resource_text_for_docstring(path: Path) -> str | None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if "\x00" in text:
+        return None
+    return text
+
+
+def _resource_method_docstring(
+    *,
+    resource_path: str,
+    return_annotation: Literal["str", "bytes"],
+    size_bytes: int,
+    text: str | None,
+) -> str:
+    if return_annotation == "bytes":
+        return (
+            f"Return bundled binary resource `{resource_path}` as bytes.\n\n"
+            f"Size: {size_bytes} bytes."
+        )
+    assert text is not None
+    if len(text) <= _RESOURCE_DOCSTRING_INLINE_LIMIT:
+        content = text
+    else:
+        content = (
+            text[:_RESOURCE_DOCSTRING_INLINE_LIMIT].rstrip()
+            + "\n\n[Truncated in docstring; call this method for the full resource.]"
+        )
+    return (
+        f"Return bundled text resource `{resource_path}`.\n\n"
+        "Resource contents:\n"
+        f"{content}"
+    )
 
 
 def _default_interpreter(file: TextSkillFile) -> str | None:
@@ -910,7 +1004,11 @@ def _has_argparse_api_shape(path: Path) -> bool:
     )
 
 
-def _build_docstring(inventory: TextSkillInventory, script_methods: list[ScriptMethodPlan]) -> str:
+def _build_docstring(
+    inventory: TextSkillInventory,
+    script_methods: list[ScriptMethodPlan],
+    resource_methods: list[ResourceMethodPlan],
+) -> str:
     title = inventory.description.strip() or inventory.skill_name
     lines = [
         title,
@@ -935,18 +1033,16 @@ def _build_docstring(inventory: TextSkillInventory, script_methods: list[ScriptM
         lines.extend(
             [
                 "",
-                "No public script APIs were inferred. Use the guidance above and the resource helpers when bundled resources are relevant.",
+                "No public script APIs were inferred. Use the guidance above and the bundled resource APIs when relevant.",
             ]
         )
-    lines.extend(
-        [
-            "",
-            "Resource helpers:",
-            "- list_resources() -> list[str]: list bundled non-script resource paths.",
-            "- read_resource(path: str) -> str: read a bundled text resource.",
-            "- read_resource_bytes(path: str) -> bytes: read a bundled binary resource.",
-        ]
-    )
+    if resource_methods:
+        lines.extend(["", "Bundled resource APIs:"])
+        for resource in resource_methods:
+            lines.append(
+                f"- {resource.method_name}() -> {resource.return_annotation}: "
+                f"returns `{resource.resource_path}` from package data."
+            )
     return "\n".join(lines)
 
 
@@ -1176,12 +1272,20 @@ def _loaded_names(statements: list[ast.stmt]) -> set[str]:
 def _render_init(plan: ConversionPlan) -> str:
     # Generated skills expose inferred package-style APIs; original scripts are
     # either omitted or rewritten into private implementation modules.
+    resource_methods = "\n".join(_render_resource_method(resource) for resource in plan.resource_methods)
     methods = "\n".join(
         rendered
-        for method in plan.script_methods
         for rendered in (
-            _render_api_method(plan, method),
-            *(_render_function_method(method, function) for function in method.function_methods),
+            resource_methods,
+            *(
+                rendered
+                for method in plan.script_methods
+                for rendered in (
+                    _render_api_method(plan, method),
+                    *(_render_function_method(method, function) for function in method.function_methods),
+                )
+                if rendered
+            ),
         )
         if rendered
     )
@@ -1190,12 +1294,19 @@ def _render_init(plan: ConversionPlan) -> str:
     docstring = textwrap.indent(_triple_quoted(plan.docstring), "    ")
     context_key = f"skill:{plan.registry_name}"
     attr_name = plan.registry_name.split(".")[-1].replace("-", "_")
+    resource_methods_tuple = repr(
+        tuple(
+            (resource.method_name, resource.resource_path, resource.return_annotation, resource.size_bytes)
+            for resource in plan.resource_methods
+        )
+    )
     template = textwrap.dedent(f'''\
         from __future__ import annotations
 
         from importlib import resources
         from pathlib import Path
 
+        from nooa.agentdoc import hidden
         from nooa.skill import Skill
 
 
@@ -1203,6 +1314,7 @@ def _render_init(plan: ConversionPlan) -> str:
         __DOCSTRING__
 
             context_block = ({context_key!r}, "self.{attr_name}.format_guidance()")
+            _RESOURCE_METHODS = {resource_methods_tuple}
 
             def _resource_root(self):
                 return resources.files(__package__) / "{plan.resource_prefix}"
@@ -1230,32 +1342,38 @@ def _render_init(plan: ConversionPlan) -> str:
                     raise FileNotFoundError(path)
                 return resolved.read_bytes()
 
-            def list_resources(self) -> list[str]:
-                """List bundled non-script resource paths from the original TextSkill."""
-                return self._list_resources()
-
-            def read_resource(self, path: str) -> str:
-                """Read a bundled text resource from the original TextSkill."""
-                return self._read_resource(path)
-
-            def read_resource_bytes(self, path: str) -> bytes:
-                """Read a bundled binary resource from the original TextSkill."""
-                return self._read_resource_bytes(path)
-
+            @hidden
             def format_guidance(self) -> str:
-                """Return the preserved TextSkill guidance and bundled resource index."""
+                """Return the preserved TextSkill guidance and bundled resource API index."""
                 resource_index = self._format_resource_index()
                 if resource_index:
-                    return type(self).__doc__ + "\\n\\nBundled resources:\\n" + resource_index
+                    return type(self).__doc__ + "\\n\\nBundled resource APIs:\\n" + resource_index
                 return type(self).__doc__ or ""
 
             def _format_resource_index(self) -> str:
-                resources = self._list_resources()
-                return "\\n".join(f"- {{path}}" for path in resources)
+                return "\\n".join(
+                    f"- {{method}}() -> {{kind}}: {{path}} ({{size}} bytes)"
+                    for method, path, kind, size in self._RESOURCE_METHODS
+                )
 
         __METHODS__
     ''')
     return template.replace("__DOCSTRING__", docstring).replace("__METHODS__", methods)
+
+
+def _render_resource_method(resource: ResourceMethodPlan) -> str:
+    body = (
+        f"return self._read_resource({resource.resource_path!r})"
+        if resource.return_annotation == "str"
+        else f"return self._read_resource_bytes({resource.resource_path!r})"
+    )
+    lines = [
+        f"def {resource.method_name}(self) -> {resource.return_annotation}:",
+        f"    {_triple_quoted(resource.docstring)}",
+        f"    {body}",
+        "",
+    ]
+    return textwrap.indent("\n".join(lines), "    ")
 
 
 def _render_api_method(plan: ConversionPlan, method: ScriptMethodPlan) -> str:
@@ -1696,13 +1814,24 @@ def _render_tests(plan: ConversionPlan) -> str:
         "def test_skill_instantiates_and_lists_resources():",
         f"    skill = {plan.class_name}()",
         "    visible_doc = doc(skill)",
-        "    assert 'list_resources' in visible_doc",
-        "    assert 'read_resource' in visible_doc",
+        "    assert 'list_resources' not in visible_doc",
+        "    assert 'read_resource' not in visible_doc",
         "    assert 'Original TextSkill guidance' in visible_doc",
         "    assert 'run_resource_script' not in visible_doc",
-        "    assert isinstance(skill.list_resources(), list)",
         "    assert isinstance(skill.format_guidance(), str)",
     ]
+    for resource in plan.resource_methods:
+        lines.extend(
+            [
+                f"    assert hasattr(skill, {resource.method_name!r})",
+                f"    assert {resource.method_name!r} in visible_doc",
+                f"    assert {resource.resource_path!r} in visible_doc",
+            ]
+        )
+        if resource.return_annotation == "str":
+            lines.append(f"    assert isinstance(skill.{resource.method_name}(), str)")
+        else:
+            lines.append(f"    assert isinstance(skill.{resource.method_name}(), bytes)")
     if plan.script_methods:
         for method in plan.script_methods:
             lines.extend(_test_assertions(method))

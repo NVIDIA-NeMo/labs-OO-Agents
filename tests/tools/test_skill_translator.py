@@ -65,6 +65,7 @@ def _make_text_skill(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (refs_dir / "notes.txt").write_text("reference notes\n", encoding="utf-8")
+    (refs_dir / "blob.bin").write_bytes(b"\x00\x01resource")
     return skill_dir
 
 
@@ -227,6 +228,7 @@ def test_inspect_text_skill_inventory(tmp_path):
     assert inventory.body == "Use this skill to greet people."
     assert {file.path for file in inventory.files} == {
         "SKILL.md",
+        "references/blob.bin",
         "references/notes.txt",
         "scripts/hello.py",
     }
@@ -311,6 +313,7 @@ async def test_translate_writes_valid_package_without_archiving_raw_scripts(tmp_
     assert result.registry_name == "local.hello-skill"
     assert [script.script_path for script in result.omitted_scripts] == ["scripts/hello.py"]
     assert "src/hello_skill/resources/SKILL.md" not in result.files_written
+    assert "src/hello_skill/resources/references/blob.bin" in result.files_written
     assert "src/hello_skill/resources/references/notes.txt" in result.files_written
     assert "src/hello_skill/resources/scripts/hello.py" not in result.files_written
     assert (result.package_dir / "pyproject.toml").exists()
@@ -328,13 +331,20 @@ async def test_translate_writes_valid_package_without_archiving_raw_scripts(tmp_
         skill = registry[result.registry_name]
         assert "references/notes.txt" in skill._list_resources()
         assert skill._read_resource("references/notes.txt") == "reference notes\n"
-        assert "references/notes.txt" in skill.list_resources()
-        assert skill.read_resource("references/notes.txt") == "reference notes\n"
+        assert "references/blob.bin" in skill._list_resources()
+        assert skill._read_resource_bytes("references/blob.bin") == b"\x00\x01resource"
+        assert skill.references_notes() == "reference notes\n"
+        assert skill.references_blob() == b"\x00\x01resource"
         visible_doc = doc(skill)
         assert "run_resource_script" not in visible_doc
         assert "run_hello" not in visible_doc
-        assert "list_resources" in visible_doc
-        assert "read_resource" in visible_doc
+        assert "list_resources" not in visible_doc
+        assert "read_resource" not in visible_doc
+        assert "references_notes" in visible_doc
+        assert "references/notes.txt" in visible_doc
+        assert "reference notes" in visible_doc
+        assert "references_blob" in visible_doc
+        assert "references/blob.bin" in visible_doc
         assert "Use this skill to greet people" in visible_doc
         assert not hasattr(skill, "run_hello")
     finally:
@@ -364,8 +374,8 @@ async def test_translated_importable_script_has_function_api_methods(tmp_path):
         assert "def label(" in visible_doc
         assert "run_math_tools" not in visible_doc
         assert "run_resource_script" not in visible_doc
-        assert "list_resources" in visible_doc
-        assert "read_resource" in visible_doc
+        assert "list_resources" not in visible_doc
+        assert "read_resource" not in visible_doc
         assert skill.add(3, y=4) == 7
         assert skill.label("item") == "label:item"
         assert skill.neighbors(10) == [(9, 0), (11, 0)]
@@ -445,8 +455,8 @@ async def test_translated_argparse_script_has_named_api_method(tmp_path):
         assert "def search(" in visible_doc
         assert "run_search" not in visible_doc
         assert "run_resource_script" not in visible_doc
-        assert "list_resources" in visible_doc
-        assert "read_resource" in visible_doc
+        assert "list_resources" not in visible_doc
+        assert "read_resource" not in visible_doc
         assert not hasattr(skill, "run_search")
         output = skill.search("records.jsonl", "needle", limit=3, dry_run=True)
         assert json.loads(output) == {
