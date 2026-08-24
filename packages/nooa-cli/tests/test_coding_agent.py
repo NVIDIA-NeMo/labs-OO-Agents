@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 from nooa_cli.coding import CodingAgent, discover_agent_instruction_files
+from nooa_cli.coding.delegation import CodingWorker
 from nooa_cli.tui.bootstrap import _instantiate_custom_agent
 
 from nooa.agentdoc import doc
@@ -167,41 +168,25 @@ async def test_coding_agent_owns_session_naming(tmp_path):
 
 
 def test_repository_instructions_are_read_boundedly(tmp_path, monkeypatch):
-    """The cap must bound the read, not just what is kept.
-
-    Truncating after read_text() still pulls a workspace-controlled file into
-    memory in full. The budget also has to cover the rendered text — headers,
-    separators, truncation markers — or the declared total is not the real one.
-    """
+    """The renderer passes a bounded content budget to its safe file reader."""
     from nooa_cli.coding import instructions
 
     (tmp_path / ".git").mkdir()
-    reads: list[int | None] = []
-    real_open = Path.open
+    (tmp_path / "AGENTS.md").write_text("placeholder")
+    reads: list[int] = []
 
-    def spying_open(self, *args, **kwargs):
-        stream = real_open(self, *args, **kwargs)
-        real_read = stream.read
+    def fake_read(path, limit):
+        reads.append(limit)
+        return "x" * limit, True
 
-        def read(size=-1):
-            reads.append(size)
-            return real_read(size)
-
-        stream.read = read  # type: ignore[method-assign]
-        return stream
-
-    monkeypatch.setattr(Path, "open", spying_open)
     monkeypatch.setattr(instructions, "_MAX_INSTRUCTION_FILE_CHARS", 100)
-    (tmp_path / "AGENTS.md").write_text("x" * 10_000)
+    monkeypatch.setattr(instructions, "_read_instruction_file", fake_read)
 
     rendered = instructions.render_agent_instructions(tmp_path)
 
-    # Positive sizes only: an unbounded .read() records -1, which satisfies
-    # any `<= limit` assertion and made this test pass against the very
-    # regression it names.
-    assert reads == [101], reads
+    assert reads == [100]
     assert "[... truncated ...]" in rendered
-    assert len(rendered) < 1_000
+    assert len(rendered) <= instructions._MAX_INSTRUCTION_TOTAL_CHARS
 
 
 async def test_a_directly_assigned_protected_attribute_is_still_protected(tmp_path):
@@ -234,6 +219,17 @@ async def test_a_directly_assigned_protected_attribute_is_still_protected(tmp_pa
         agent.skills.register("nemo.shell", shell)
     finally:
         await agent.close()
+
+
+async def test_coding_worker_inherits_repository_instructions(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "AGENTS.md").write_text("worker must run focused tests")
+
+    worker = CodingWorker(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        assert "worker must run focused tests" in str(worker.context["repository_instructions"])
+    finally:
+        await worker.close()
 
 
 async def test_coding_agent_delegates_with_same_model_and_workspace(tmp_path, monkeypatch):
