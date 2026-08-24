@@ -5,7 +5,47 @@ from io import StringIO
 
 from nooa_cli.tui.commands import _mcp_oauth_markdown_link
 from nooa_cli.tui.console import TUIConsole
+from nooa_cli.tui.output import AgentMessage
+from nooa_cli.tui.terminal_safety import strip_safe_ansi
 from rich.console import Console
+
+
+def test_agent_message_defaults_to_terminal_managed_wrapping():
+    message = (
+        "I left a brief closing note that the interaction design and implementation "
+        "need a more fundamental rethink. The local diagnostic mouse fix remains "
+        "uncommitted and was not pushed."
+    )
+    stream = StringIO()
+    console = TUIConsole()
+    console.replace_console(Console(file=stream, width=60, color_system=None))
+
+    output = AgentMessage(message)
+    console.print_agent(output.content, show_rule=False, soft_wrap=output.soft_wrap)
+
+    assert output.soft_wrap is True
+    assert stream.getvalue() == f"{message}\n"
+
+
+def test_agent_code_block_retains_visual_highlight_and_indent():
+    stream = StringIO()
+    console = TUIConsole()
+    console.replace_console(
+        Console(file=stream, width=40, force_terminal=True, color_system="truecolor")
+    )
+
+    console.print_agent(
+        'Before\n\n```python\nif ready:\n    print("one")\n```\n\nAfter',
+        show_rule=False,
+        soft_wrap=True,
+    )
+
+    rendered = stream.getvalue()
+    plain = strip_safe_ansi(rendered)
+    assert "\x1b[" in rendered
+    assert " " * 40 in plain
+    assert " if ready:" in plain
+    assert '     print("one")' in plain
 
 
 def test_agent_message_soft_wrap_preserves_long_url_as_one_logical_line():

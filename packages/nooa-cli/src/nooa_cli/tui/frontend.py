@@ -41,52 +41,89 @@ if TYPE_CHECKING:
     from .config import Config
 
 
+class _HistoryReplayRenderer:
+    """Width-aware history renderer retaining source metadata across replay."""
+
+    def __init__(self, output: HistoryReplay, *, copyable: bool = False) -> None:
+        from rich.markdown import Markdown
+
+        if copyable:
+            from .copyable_markdown import CopyableMarkdown
+
+            markdown_type = CopyableMarkdown
+        else:
+            markdown_type = Markdown
+        self.output = output
+        self.agent_markdown = [
+            markdown_type(turn.content) for turn in output.turns if turn.role == "agent"
+        ]
+
+    @property
+    def code_copy_actions(self) -> dict[str, str]:
+        from .copyable_markdown import CopyableMarkdown
+
+        actions: dict[str, str] = {}
+        for markdown in self.agent_markdown:
+            if isinstance(markdown, CopyableMarkdown):
+                actions.update(markdown.copy_actions)
+        return actions
+
+    def render(self, width: int) -> str:
+        from rich.console import Console as RichConsole
+        from rich.rule import Rule
+        from rich.text import Text
+
+        from .theme import CATPPUCCIN_THEME
+
+        dim = COLORS["overlay1"]
+        render_width = max(int(width), 1)
+        buf = io.StringIO()
+        # Rich ignores ``width=`` for force_terminal consoles when it can read the
+        # real terminal size. Supplying COLUMNS pins the semantic replay width.
+        console = RichConsole(
+            file=buf,
+            width=render_width,
+            height=1,
+            highlight=False,
+            force_terminal=True,
+            color_system="256",
+            theme=CATPPUCCIN_THEME,
+            _environ={"COLUMNS": str(render_width), "LINES": "25"},
+        )
+
+        if self.output.show_header:
+            omit_note = ""
+            if self.output.omitted_count:
+                omit_note = f" ({self.output.omitted_count} earlier turns omitted)"
+            console.print(
+                Rule(
+                    title=(f"[{dim}]session {self.output.session_id} — history{omit_note}[/]"),
+                    style=COLORS["surface1"],
+                )
+            )
+        agent_index = 0
+        for turn in self.output.turns:
+            if turn.role == "user":
+                # Reuse the live renderer so resumed and newly submitted messages
+                # have identical prompt glyphs, colors, padding, and wrapping.
+                from .user_message import render_user_bar
+
+                buf.write(render_user_bar(turn.content, render_width, COLORS))
+            else:
+                console.print(Text("OO:", style=f"bold {dim}"))
+                # Preserve semantic line boundaries. The transcript owner wraps for its
+                # current viewport; Rich hard wrapping would add copied whitespace.
+                console.print(self.agent_markdown[agent_index], style=dim, soft_wrap=True)
+                agent_index += 1
+            console.print()
+        if self.output.show_footer:
+            console.print(Rule(style=COLORS["surface1"]))
+        return buf.getvalue()
+
+
 def render_history_replay_to_ansi(output: HistoryReplay, width: int) -> str:
     """Render resumed conversation history to one ANSI block at *width*."""
-    from rich.console import Console as RichConsole
-    from rich.markdown import Markdown
-    from rich.rule import Rule
-    from rich.text import Text
-
-    dim = COLORS["overlay1"]
-
-    render_width = max(int(width), 1)
-    buf = io.StringIO()
-    # Rich ignores ``width=`` for force_terminal consoles when it can read the
-    # real terminal size.  Supplying COLUMNS pins the semantic replay width.
-    bc = RichConsole(
-        file=buf,
-        width=render_width,
-        highlight=False,
-        force_terminal=True,
-        _environ={"COLUMNS": str(render_width), "LINES": "25"},
-    )
-
-    if output.show_header:
-        omit_note = ""
-        if output.omitted_count:
-            omit_note = f" ({output.omitted_count} earlier turns omitted)"
-        bc.print(
-            Rule(
-                title=f"[{dim}]session {output.session_id} — history{omit_note}[/]",
-                style=COLORS["surface1"],
-            )
-        )
-    for turn in output.turns:
-        if turn.role == "user":
-            # Reuse the live renderer so resumed and newly submitted messages
-            # have identical prompt glyphs, colors, padding, and wrapping.
-            from .user_message import render_user_bar
-
-            buf.write(render_user_bar(turn.content, render_width, COLORS))
-        else:
-            bc.print(Text("OO:", style=f"bold {dim}"))
-            bc.print(Markdown(turn.content), style=dim)
-        bc.print()
-    if output.show_footer:
-        bc.print(Rule(style=COLORS["surface1"]))
-
-    return buf.getvalue()
+    return _HistoryReplayRenderer(output).render(width)
 
 
 # ---------------------------------------------------------------------------
@@ -544,16 +581,19 @@ class TerminalFrontend:
         else:
             width = self._console.console.width or 80
 
-        rendered = render_history_replay_to_ansi(output, width)
+        copyable = getattr(stream, "supports_code_copy_actions", False) is True
+        renderer = _HistoryReplayRenderer(output, copyable=copyable)
+        rendered = renderer.render(width)
         emit_with_replay = getattr(stream, "emit_with_replay", None)
         if getattr(stream, "supports_semantic_replay", False) is True and callable(
             emit_with_replay
         ):
             emit_with_replay(
                 rendered,
-                lambda o=output, s=stream, w=width: render_history_replay_to_ansi(
-                    o, s.replay_width(w) if callable(getattr(s, "replay_width", None)) else w
+                lambda r=renderer, s=stream, w=width: r.render(
+                    s.replay_width(w) if callable(getattr(s, "replay_width", None)) else w
                 ),
+                code_copy_actions=renderer.code_copy_actions,
             )
             return
 
