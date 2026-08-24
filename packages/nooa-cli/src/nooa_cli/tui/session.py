@@ -131,10 +131,13 @@ class _EmitStream:
         self._clear = clear
         self._buf: list[str] = []
         self._held = 0
+        self._agent_message_depth = 0
+        self._buffer_has_agent_message = False
 
     def write(self, text: str) -> int:
         if text:
             self._buf.append(text)
+            self._buffer_has_agent_message |= self._agent_message_depth > 0
         return len(text)
 
     def flush(self) -> None:
@@ -142,15 +145,23 @@ class _EmitStream:
             # Defer until the hold span releases — keep the buffer intact so
             # subsequent renders append to the same block.
             return
+        self._emit_buffer()
+
+    def _emit_buffer(self) -> None:
         if not self._buf:
             return
         chunk = "".join(self._buf)
         self._buf.clear()
-        if chunk:
+        agent_message = self._buffer_has_agent_message
+        self._buffer_has_agent_message = False
+        if agent_message:
+            self._emit(chunk, agent_message=True)
+        else:
             self._emit(chunk)
 
     def clear_transcript(self) -> None:
         self._buf.clear()
+        self._buffer_has_agent_message = False
         if self._clear is not None:
             self._clear()
 
@@ -179,15 +190,21 @@ class _EmitStream:
         code_copy_actions: dict[str, str] | None = None,
     ) -> None:
         if self._buf:
-            chunk = "".join(self._buf)
-            self._buf.clear()
-            if chunk:
-                self._emit(chunk)
+            self._emit_buffer()
         if text:
             kwargs: dict[str, Any] = {"replay": replay}
             if code_copy_actions:
                 kwargs["code_copy_actions"] = code_copy_actions
             self._emit(text, **kwargs)
+
+    @contextmanager
+    def agent_message(self):
+        """Mark blocks flushed in this span as semantic agent prose."""
+        self._agent_message_depth += 1
+        try:
+            yield
+        finally:
+            self._agent_message_depth -= 1
 
     @contextmanager
     def hold(self):
@@ -1005,6 +1022,7 @@ class Session:
         event_id: str | None = None,
         tags: set[str] | frozenset[str] | None = None,
         keep: bool = False,
+        agent_message: bool = False,
     ) -> None:
         """Render a Rich renderable → ANSI → enqueue to the block queue.
 
@@ -1036,7 +1054,13 @@ class Session:
             dict(renderable.copy_actions) if isinstance(renderable, CopyableMarkdown) else None
         )
         if replay is None:
-            self._app.emit_block(rendered, event_id=event_id, tags=tags, keep=keep)
+            self._app.emit_block(
+                rendered,
+                event_id=event_id,
+                tags=tags,
+                keep=keep,
+                agent_message=agent_message,
+            )
         else:
             self._app.emit_block(
                 rendered,
@@ -1045,6 +1069,7 @@ class Session:
                 tags=tags,
                 keep=keep,
                 code_copy_actions=code_copy_actions,
+                agent_message=agent_message,
             )
 
     def _get_command_runner(self):
