@@ -139,6 +139,21 @@ async def test_notify_callback_fires_after_internal_wakeup():
     assert calls == [1]
 
 
+@pytest.mark.asyncio
+async def test_notify_callback_failure_does_not_break_channel_put(caplog):
+    qm = QueueManager()
+    q = qm.queue("q")
+
+    def fail() -> None:
+        raise RuntimeError("host is shutting down")
+
+    qm.set_notify_callback(fail)
+    q.put("delivered")
+
+    assert await q.reader.get() == "delivered"
+    assert "QueueManager notify callback failed" in caplog.text
+
+
 def test_notify_callback_none_clears():
     qm = QueueManager()
     q = qm.queue("q")

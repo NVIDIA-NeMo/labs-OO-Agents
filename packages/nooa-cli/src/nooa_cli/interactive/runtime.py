@@ -21,6 +21,7 @@ class JobSnapshot:
     state: str
     queued: int
     values: tuple[Any, ...]
+    job_id: str = ""
 
 
 class AgentRuntime(InteractiveAgent, Protocol):

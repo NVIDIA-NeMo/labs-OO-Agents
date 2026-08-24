@@ -19,6 +19,7 @@ registration + aggregation.
 import asyncio
 import inspect
 import logging
+import uuid
 from collections import deque
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from typing import Annotated, Any, Literal
@@ -52,13 +53,10 @@ class QueueOutput(EventBase):
 
 
 class StreamEnd(EventBase):
-    """Emitted to the agent's event channel when a spawned job finishes.
-
-    Signals that no more values will arrive on ``channel_name``.
-    Lives here (not in events.py) per the additive-only constraint.
-    """
+    """Emitted to the agent's event channel when a spawned job finishes."""
 
     channel_name: str
+    job_id: str = ""
 
 
 class QueueReadTimeoutError(TimeoutError):
@@ -71,6 +69,8 @@ class JobError(EventBase):
     channel_name: str
     error_type: str
     error_message: str
+    job_id: str = ""
+    label: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +99,7 @@ class JobHandle:
     ) -> None:
         self.name = name
         self.label = label or name
+        self.job_id = uuid.uuid4().hex
         self.state: JobState = "running"
         self._task = task
         if buffer is True:
@@ -116,19 +117,34 @@ class JobHandle:
         return list(self._values)
 
     async def cancel(self) -> None:
-        """Cancel the underlying task and await its unwinding."""
+        """Cancel the underlying task and await its unwinding.
+
+        Cancellation of this caller is never mistaken for the expected
+        cancellation of the owned job.
+        """
         if self._task.done():
+            try:
+                self._task.exception()
+            except (asyncio.CancelledError, Exception):
+                pass
             return
         self._task.cancel()
         try:
-            await self._task
-        except (asyncio.CancelledError, Exception):
+            await asyncio.shield(self._task)
+        except asyncio.CancelledError:
+            caller = asyncio.current_task()
+            if caller is not None and caller.cancelling():
+                raise
+        except Exception:
             pass
         if self.state == "running":
             self.state = "cancelled"
 
     def __repr__(self) -> str:
-        return f"JobHandle(name={self.name!r}, label={self.label!r}, state={self.state!r})"
+        return (
+            f"JobHandle(job_id={self.job_id!r}, name={self.name!r}, "
+            f"label={self.label!r}, state={self.state!r})"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -137,26 +153,6 @@ class JobHandle:
 
 
 ChannelMode = Literal["queue", "event"]
-
-
-def _preview_item(item: Any, max_chars: int) -> str:
-    """Single-line bounded preview for the queue ``status()`` block.
-
-    Strings render as-is; non-strings go through ``pformat`` so deeply
-    nested dicts/lists come out bounded by default. Newlines and tabs
-    flatten to single chars so previews stay one line, then the whole
-    thing is clipped to ``max_chars`` with an ellipsis when needed.
-    """
-    from nooa.agentdoc import pformat
-
-    if isinstance(item, str):
-        text = item
-    else:
-        text = pformat(item, max_length=max_chars, max_string=max_chars, max_depth=2)
-    text = text.replace("\r\n", "\n").replace("\n", "↵").replace("\t", " ")
-    if len(text) > max_chars:
-        text = text[: max_chars - 1] + "…"
-    return text
 
 
 def _default_event_preview(value: Any) -> str:
@@ -456,25 +452,17 @@ class Channel[T]:
         return n
 
     def status(self, *, max_items: int = 3, max_chars: int = 80) -> str:
-        """Pending-count summary + short preview of waiting items.
+        """Return a payload-free pending-count summary.
 
-        Returns an empty string when:
-        - the channel is event-mode (no buffer),
-        - or the queue is drained.
-
-        Both make it cheap for ``QueueManager.status()`` to compose
-        the per-channel parts and skip empty ones.
+        Returns an empty string when the channel is event-mode (no buffer) or
+        drained. Inspecting status never exposes, claims, or dequeues payloads.
         """
+        # Retain the historical keyword arguments for caller compatibility;
+        # payload-free status intentionally does not use either preview limit.
+        del max_items, max_chars
         if self.mode != "queue" or not self._items:
             return ""
-        lines = [f"{self.name}: {len(self._items)} pending"]
-        snapshot = list(self._items)
-        for i, item in enumerate(snapshot[:max_items], start=1):
-            lines.append(f"  {i}. {_preview_item(item, max_chars)}")
-        overflow = len(snapshot) - max_items
-        if overflow > 0:
-            lines.append(f"  … {overflow} more")
-        return "\n".join(lines)
+        return f"{self.name}: {len(self._items)} pending"
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -543,12 +531,7 @@ class _ChannelReader[T]:
         return self._source.qsize()
 
     def status(self, *, max_items: int = 3, max_chars: int = 80) -> str:
-        """Delegate to the underlying ``Channel.status()``.
-
-        Exposed so the LLM can peek at pending items mid-turn —
-        ``self.user_messages.status()`` — without reaching into the
-        producer-side handle.
-        """
+        """Return the queue's payload-free pending-count summary."""
         return self._source.status(max_items=max_items, max_chars=max_chars)
 
     def flush(self) -> int:
@@ -633,7 +616,10 @@ class QueueManager:
         """
         self._signal_notify()
         if self._notify_callback is not None:
-            self._notify_callback()
+            try:
+                self._notify_callback()
+            except Exception:
+                logger.exception("QueueManager notify callback failed")
 
     def _signal_notify(self) -> None:
         """Set the ``_notify`` event so ``race()`` wakes on a put.
@@ -756,22 +742,18 @@ class QueueManager:
         """
         ch = self._channels.pop(name)  # KeyError if not found
         ch.flush()
-        # Cancel handles targeting this channel. task.cancel() is sync
-        # (it requests cancellation); the task will finish on its own.
-        remaining: list[JobHandle] = []
-        for h in self._handles:
-            if h.name == name:
-                h._task.cancel()
-                if h.state == "running":
-                    h.state = "cancelled"
-            else:
-                remaining.append(h)
-        self._handles = remaining
+        # Request cancellation but retain handles until shutdown can await their
+        # cleanup. Spawn closures are bound to the concrete channel and suppress
+        # stale output after a same-name replacement.
+        for handle in self._handles:
+            if handle.name == name and handle.state == "running":
+                handle.state = "cancelled"
+                handle._task.cancel()
 
     # ---- composite status block -----------------------------------------
 
     def status(self, *, max_items: int = 3, max_chars: int = 80) -> str:
-        """Composite ``status`` across queue-mode channels and active spawns.
+        """Return payload-free queue counts and active-spawn status.
 
         Wired into a dynamic context block (``queues``) so the LLM
         sees pending counts every turn. Event-mode channels skip —
@@ -793,12 +775,12 @@ class QueueManager:
         if active_spawns:
             spawn_lines = [f"⚡ {len(active_spawns)} active background job(s):"]
             for h in active_spawns:
-                spawn_lines.append(f"  • {h.label} → {h.name} (running)")
+                spawn_lines.append(f"  • [{h.job_id}] {h.label} → {h.name} (running)")
             spawn_status = "\n".join(spawn_lines)
             body = f"{body}\n{spawn_status}" if body else spawn_status
 
         # Cheat sheet: show cancel/cleanup commands
-        cancel_hints = [f".cancel('{h.name}')" for h in active_spawns]
+        cancel_hints = [f".cancel_job('{h.job_id}')" for h in active_spawns]
         extra = [
             n
             for n, ch in self._channels.items()
@@ -1000,41 +982,94 @@ class QueueManager:
 
         async def _run() -> None:
             handle = _handles_by_task[asyncio.current_task()]  # type: ignore[arg-type]
+            terminal_state: JobState = "done"
+            cancellation: asyncio.CancelledError | None = None
+
+            def is_current_channel() -> bool:
+                return self._channels.get(channel) is data_ch
+
+            failure_reported = False
+
+            def report_failure(exc: Exception) -> None:
+                nonlocal failure_reported
+                if failure_reported:
+                    logger.error(
+                        "spawn(%s) encountered an additional cleanup failure: %s",
+                        channel,
+                        exc,
+                        exc_info=exc,
+                    )
+                    return
+                failure_reported = True
+                error = JobError(
+                    channel_name=channel,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                    job_id=handle.job_id,
+                    label=handle.label,
+                )
+                if self._event_manager is not None and is_current_channel():
+                    try:
+                        self._event_manager.add(error)
+                    except Exception:
+                        logger.exception("spawn(%s) failed to publish JobError", channel)
+                if is_current_channel():
+                    try:
+                        data_ch.put(error)
+                    except Exception:
+                        logger.exception("spawn(%s) failed to publish data error", channel)
+                logger.error("spawn(%s) failed: %s", channel, exc, exc_info=exc)
+
             try:
                 if is_agen:
                     async for value in job:  # type: ignore[union-attr]
                         if handle._values is not None:
                             handle._values.append(value)
-                        data_ch.put(value)
+                        if is_current_channel():
+                            data_ch.put(value)
                 else:
                     result = await job  # type: ignore[misc]
                     if handle._values is not None:
                         handle._values.append(result)
-                    data_ch.put(result)
-                handle.state = "done"
-            except asyncio.CancelledError:
-                handle.state = "cancelled"
-                raise
+                    if is_current_channel():
+                        data_ch.put(result)
+            except asyncio.CancelledError as exc:
+                terminal_state = "cancelled"
+                cancellation = exc
             except Exception as exc:
-                handle.state = "failed"
-                error = JobError(
-                    channel_name=channel,
-                    error_type=type(exc).__name__,
-                    error_message=str(exc),
-                )
-                if self._event_manager is not None:
-                    self._event_manager.add(error)
-                # Also put on data channel so race() wakes the agent
-                data_ch.put(error)
-                logger.exception("spawn(%s) failed", channel)
+                terminal_state = "failed"
+                report_failure(exc)
             finally:
                 if is_agen:
-                    await job.aclose()  # type: ignore[union-attr]
-                if self._event_manager is not None:
-                    self._event_manager.add(StreamEnd(channel_name=channel))
+                    try:
+                        await job.aclose()  # type: ignore[union-attr]
+                    except asyncio.CancelledError as exc:
+                        terminal_state = "cancelled"
+                        cancellation = exc
+                    except Exception as exc:
+                        if terminal_state != "cancelled":
+                            terminal_state = "failed"
+                        report_failure(exc)
+                if self._event_manager is not None and is_current_channel():
+                    try:
+                        self._event_manager.add(
+                            StreamEnd(channel_name=channel, job_id=handle.job_id)
+                        )
+                    except Exception as exc:
+                        if terminal_state != "cancelled":
+                            terminal_state = "failed"
+                        logger.error(
+                            "spawn(%s) failed to publish StreamEnd: %s",
+                            channel,
+                            exc,
+                            exc_info=exc,
+                        )
+                handle.state = terminal_state
                 # Job terminal state is observable host state even when no
                 # value was put (for example cancellation or empty streams).
                 self._set_notify()
+            if cancellation is not None:
+                raise cancellation
 
         # Dict created before create_task so the closure can find the
         # handle even if the task runs immediately (single-threaded
@@ -1063,8 +1098,16 @@ class QueueManager:
 
     # ---- job registry ----------------------------------------------------
 
+    def handles(self) -> list[JobHandle]:
+        """Return a snapshot of every spawned job handle in creation order."""
+        return list(self._handles)
+
     def jobs(self) -> dict[str, JobState]:
-        """Return channel_name -> state for the most recent handle per channel."""
+        """Return channel_name -> state for the most recent handle per channel.
+
+        This channel-oriented compatibility view may collapse concurrent jobs;
+        use :meth:`handles` for job-oriented UI and control.
+        """
         return {h.name: h.state for h in self._handles}
 
     def job(self, name: str) -> JobHandle | None:
@@ -1074,8 +1117,20 @@ class QueueManager:
                 return h
         return None
 
+    def get_handle(self, job_id: str) -> JobHandle | None:
+        """Look up a spawned job by its stable unique ID."""
+        return next((handle for handle in self._handles if handle.job_id == job_id), None)
+
+    async def cancel_job(self, job_id: str) -> bool:
+        """Cancel exactly one spawned job by ID."""
+        handle = self.get_handle(job_id)
+        if handle is None:
+            return False
+        await handle.cancel()
+        return True
+
     async def cancel(self, channel: str) -> bool:
-        """Cancel the job on the named channel and flush pending items."""
+        """Cancel the most recent job on a channel and flush pending items."""
         h = self.job(channel)
         if h is None:
             return False
