@@ -72,9 +72,13 @@ def _mk(
     agent = _FakeAgent()
     emitted: list[Any] = []
     pending_code: dict[str, str] = {}
+
+    def emit_text(renderable: Any, **_kwargs: Any) -> None:
+        emitted.append(renderable)
+
     r = AgentEventRenderer(
         agent=agent,  # type: ignore[arg-type]
-        emit_text=emitted.append,
+        emit_text=emit_text,
         show_python=lambda: show_python,
         show_diffs=lambda: show_diffs,
         pending_code=pending_code,
@@ -176,6 +180,29 @@ def test_message_emits_inline_not_buffered() -> None:
     _fire_python_output(agent.event_manager, stderr="warn")
     markdowns_after = [e for e in emitted if isinstance(e, Markdown)]
     assert len(markdowns_after) == 1
+
+
+def test_message_marks_only_agent_prose_for_unseen_notification() -> None:
+    agent = _FakeAgent()
+    calls: list[tuple[Any, dict[str, Any]]] = []
+    renderer = AgentEventRenderer(
+        agent=agent,  # type: ignore[arg-type]
+        emit_text=lambda renderable, **kwargs: calls.append((renderable, kwargs)),
+        show_python=lambda: False,
+        show_diffs=lambda: True,
+        pending_code={},
+        colors=COLORS,
+    )
+    renderer.attach()
+
+    assert agent._render_message is not None
+    agent._render_message("new reply")
+
+    rule, message = calls
+    assert isinstance(rule[0], Rule)
+    assert "agent_message" not in rule[1]
+    assert isinstance(message[0], Markdown)
+    assert message[1]["agent_message"] is True
 
 
 def test_message_between_preview_and_cell_output_preserves_natural_order() -> None:

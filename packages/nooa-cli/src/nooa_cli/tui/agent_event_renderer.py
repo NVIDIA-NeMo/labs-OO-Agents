@@ -203,7 +203,7 @@ class AgentEventRenderer:
                 Rule(Text("OO ", style=self._colors["mauve"]), style="dim", align="left"),
                 **emit_kwargs,
             )
-        self._emit_text(Markdown(str(text)), **emit_kwargs)
+        self._emit_text(Markdown(str(text)), agent_message=True, **emit_kwargs)
 
     # ── agent event handlers ───────────────────────────────────────────
 

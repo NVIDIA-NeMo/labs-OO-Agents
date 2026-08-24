@@ -34,6 +34,7 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI, AnyFormattedText
 from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
+from prompt_toolkit.key_binding.bindings.scroll import scroll_page_down, scroll_page_up
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import (
     ConditionalContainer,
@@ -609,6 +610,88 @@ class _FullscreenDragBoundaryControl(_TranscriptGestureControlMixin, FormattedTe
         return super().mouse_handler(mouse_event)
 
 
+class _ComposerWindow(Window):
+    """Input window whose wheel viewport can detach from the edit cursor."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._manual_wheel_scroll = False
+        self.always_hide_cursor = Condition(self.manual_cursor_is_offscreen)
+
+    def reset_manual_wheel_scroll(self) -> None:
+        """Resume prompt_toolkit's normal keep-the-cursor-visible behavior."""
+        self._manual_wheel_scroll = False
+
+    def scroll_without_moving_cursor(self, delta: int) -> None:
+        """Move the wrapped viewport by visual rows, leaving the buffer cursor alone."""
+        info = self.render_info
+        if info is None or not delta:
+            return
+        self._manual_wheel_scroll = True
+        step = 1 if delta > 0 else -1
+        for _ in range(abs(delta)):
+            if step < 0:
+                if self.vertical_scroll_2 > 0:
+                    self.vertical_scroll_2 -= 1
+                elif self.vertical_scroll > 0:
+                    self.vertical_scroll -= 1
+                    self.vertical_scroll_2 = info.get_height_for_line(self.vertical_scroll) - 1
+            elif self._manual_rows_below(info) > info.window_height:
+                line_height = info.get_height_for_line(self.vertical_scroll)
+                if self.vertical_scroll_2 + 1 < line_height:
+                    self.vertical_scroll_2 += 1
+                elif self.vertical_scroll + 1 < info.content_height:
+                    self.vertical_scroll += 1
+                    self.vertical_scroll_2 = 0
+
+    def _manual_rows_below(self, info: Any) -> int:
+        """Return visual rows from the current manual viewport through EOF."""
+        return (
+            info.get_height_for_line(self.vertical_scroll)
+            - self.vertical_scroll_2
+            + sum(
+                info.get_height_for_line(line_number)
+                for line_number in range(self.vertical_scroll + 1, info.content_height)
+            )
+        )
+
+    def _scroll(self, ui_content: UIContent, width: int, height: int) -> None:
+        if not self._manual_wheel_scroll:
+            super()._scroll(ui_content, width, height)
+            return
+        self.vertical_scroll = min(max(0, self.vertical_scroll), max(0, ui_content.line_count - 1))
+        line_height = ui_content.get_height_for_line(
+            self.vertical_scroll, width, self.get_line_prefix
+        )
+        self.vertical_scroll_2 = min(max(0, self.vertical_scroll_2), line_height - 1)
+
+    def manual_cursor_is_offscreen(self) -> bool:
+        """Return whether detached wheel scrolling currently hides the edit cursor."""
+        info = self.render_info
+        if not self._manual_wheel_scroll or info is None:
+            return False
+        cursor = info.ui_content.cursor_position
+        rows_before_cursor = sum(
+            info.get_height_for_line(line_number) for line_number in range(cursor.y)
+        )
+        cursor_rows_in_line = info.ui_content.get_height_for_line(
+            cursor.y,
+            info.window_width,
+            self.get_line_prefix,
+            slice_stop=cursor.x,
+        )
+        cursor_visual_row = rows_before_cursor + max(0, cursor_rows_in_line - 1)
+        rows_before_viewport = (
+            sum(
+                info.get_height_for_line(line_number) for line_number in range(self.vertical_scroll)
+            )
+            + self.vertical_scroll_2
+        )
+        return not (
+            rows_before_viewport <= cursor_visual_row < rows_before_viewport + info.window_height
+        )
+
+
 class _NativeSelectionBufferControl(_TranscriptGestureControlMixin, BufferControl):
     """Composer control that hands transcript-wide pointer gestures to their owner."""
 
@@ -688,15 +771,25 @@ class _ReturnToTailControl(_TranscriptGestureControlMixin, FormattedTextControl)
         self,
         callback: Callable[[], None],
         *,
+        has_new_agent_message: Callable[[], bool] = lambda: False,
         transcript_drag_callback: Callable[[MouseEvent], bool] | None = None,
         transcript_scroll_callback: Callable[[int], None] | None = None,
         render_counter: Callable[[], int] = lambda: 0,
     ) -> None:
-        super().__init__(
-            lambda: _native_hyperlink_boundary(
-                [("class:return-to-tail", " ↓ Return to bottom (Ctrl+End)")],
+        def _formatted_text() -> list[tuple[str, str]]:
+            notice_visible = has_new_agent_message()
+            notice = " New agent message   " if notice_visible else " " * 21
+            fragments = [
+                ("class:return-to-tail" if notice_visible else "", notice),
+                ("class:return-to-tail", "↓ Return to bottom (Ctrl+End)"),
+            ]
+            return _native_hyperlink_boundary(
+                fragments,
                 render_counter=render_counter(),
-            ),
+            )
+
+        super().__init__(
+            _formatted_text,
             focusable=False,
             show_cursor=False,
             transcript_drag_callback=transcript_drag_callback,
@@ -824,6 +917,7 @@ class TranscriptBlock:
     replay_cache: dict[int, str] = field(default_factory=dict)
     fullscreen_rendered: str | None = None
     code_copy_actions: dict[str, str] = field(default_factory=dict)
+    agent_message: bool = False
 
 
 @dataclass(frozen=True)
@@ -1002,6 +1096,7 @@ class TUIApplication:
         # Option/Alt-drag can bypass reporting in supporting terminals; F6 is
         # the reliable escape hatch that disables application mouse handling.
         self._fullscreen_mouse_navigation = self._is_fullscreen
+        self._has_unseen_agent_message = False
         # Retained transcript replay units. On resize we intentionally clear
         # the visible screen + terminal scrollback, then rewrite these blocks.
         self._transcript_blocks: list[TranscriptBlock] = []
@@ -1030,6 +1125,7 @@ class TUIApplication:
             accept_handler=self._accept_handler,
         )
         self.input_buffer.on_text_changed += self._on_input_text_changed
+        self.input_buffer.on_cursor_position_changed += self._on_input_cursor_position_changed
 
         # History — a plain list of submitted strings and a cursor that
         # tracks Up/Down navigation. Simpler than prompt_toolkit's async
@@ -1178,7 +1274,7 @@ class TUIApplication:
         )
 
         input_style = "class:input-area"
-        input_window = Window(
+        input_window = _ComposerWindow(
             _NativeSelectionBufferControl(
                 self.input_buffer,
                 input_processors=[self._prompt_processor],
@@ -1186,14 +1282,14 @@ class TUIApplication:
                     self._handle_fullscreen_drag_over_bottom_chrome if self._is_fullscreen else None
                 ),
                 transcript_scroll_callback=(
-                    self._scroll_fullscreen_transcript if self._is_fullscreen else None
+                    self._scroll_fullscreen_input_or_transcript if self._is_fullscreen else None
                 ),
                 selection_copy_callback=(
                     self._copy_input_selection if self._is_fullscreen else None
                 ),
             ),
             wrap_lines=True,
-            height=Dimension(min=1),
+            height=(Dimension(min=1, max=10) if self._is_fullscreen else Dimension(min=1)),
             dont_extend_height=True,
             style=input_style,
         )
@@ -1288,6 +1384,7 @@ class TUIApplication:
 
         self._return_to_tail_control = _ReturnToTailControl(
             self._jump_fullscreen_to_tail,
+            has_new_agent_message=lambda: self._has_unseen_agent_message,
             transcript_drag_callback=self._handle_fullscreen_drag_over_bottom_chrome,
             transcript_scroll_callback=self._scroll_fullscreen_transcript,
             render_counter=lambda: self._app.render_counter,
@@ -1842,11 +1939,34 @@ class TUIApplication:
         except Exception:
             return terminal_cols(minimum=1), 18
 
+    def _fullscreen_input_overflows(self) -> bool:
+        """Return whether the capped composer currently has hidden visual rows."""
+        if not self._is_fullscreen:
+            return False
+        info = self._input_window.render_info
+        if info is None or info.window_height <= 0:
+            return False
+        return (
+            sum(info.get_height_for_line(line_number) for line_number in range(info.content_height))
+            > info.window_height
+        )
+
+    def _scroll_fullscreen_input_or_transcript(self, delta: int) -> None:
+        """Wheel the capped composer when overflowing, otherwise the transcript."""
+        if not self._fullscreen_input_overflows():
+            self._scroll_fullscreen_transcript(delta)
+            return
+        self._input_window.scroll_without_moving_cursor(delta)
+        if self._app.is_running:
+            self._app.invalidate()
+
     def _scroll_fullscreen_transcript(self, delta: int) -> None:
         if not self._is_fullscreen:
             return
         width, height = self._transcript_viewport_size()
         self._fullscreen_transcript.scroll_visual_lines(delta, width=width, height=height)
+        if self._fullscreen_transcript.viewport.follows_tail:
+            self._has_unseen_agent_message = False
         if self._app.is_running:
             self._app.invalidate()
 
@@ -1855,6 +1975,7 @@ class TUIApplication:
         if not self._is_fullscreen:
             return
         self._fullscreen_transcript.jump_to_tail()
+        self._has_unseen_agent_message = False
         if self._app.is_running:
             self._app.invalidate()
 
@@ -2077,13 +2198,21 @@ class TUIApplication:
 
         @kb.add("pageup", filter=fullscreen_transcript, eager=True)
         def _(event):
-            _, height = self._transcript_viewport_size()
-            self._scroll_fullscreen_transcript(-height)
+            if self._fullscreen_input_overflows():
+                self._input_window.reset_manual_wheel_scroll()
+                scroll_page_up(event)
+            else:
+                _, height = self._transcript_viewport_size()
+                self._scroll_fullscreen_transcript(-height)
 
         @kb.add("pagedown", filter=fullscreen_transcript, eager=True)
         def _(event):
-            _, height = self._transcript_viewport_size()
-            self._scroll_fullscreen_transcript(height)
+            if self._fullscreen_input_overflows():
+                self._input_window.reset_manual_wheel_scroll()
+                scroll_page_down(event)
+            else:
+                _, height = self._transcript_viewport_size()
+                self._scroll_fullscreen_transcript(height)
 
         @kb.add(Keys.ControlHome, filter=fullscreen_transcript, eager=True)
         def _(event):
@@ -2352,6 +2481,7 @@ class TUIApplication:
         text = buffer.text
         if not text.strip():
             return False
+        self._jump_fullscreen_to_tail()
         if not self._history or self._history[-1] != text:
             self._history.append(text)
         self._history_cursor = None
@@ -2615,9 +2745,20 @@ class TUIApplication:
             self._on_agent_activity()
         return accepted
 
+    def _resume_input_cursor_following(self) -> None:
+        """End a mouse-wheel viewport lease after the user edits or moves."""
+        input_window = getattr(self, "_input_window", None)
+        if isinstance(input_window, _ComposerWindow):
+            input_window.reset_manual_wheel_scroll()
+
     def _on_input_text_changed(self, _buffer: Buffer) -> None:
-        """Typing after an exit warning cancels the double-Ctrl-C gesture."""
+        """Resume cursor following and cancel any pending double-Ctrl-C gesture."""
+        self._resume_input_cursor_following()
         self._clear_ctrl_c_exit()
+
+    def _on_input_cursor_position_changed(self, _buffer: Buffer) -> None:
+        """Bring the edit cursor back onscreen after keyboard or pointer movement."""
+        self._resume_input_cursor_following()
 
     def request_command_cancel(self) -> bool:
         """Ask the host to cancel its active slash command, if any."""
@@ -2703,6 +2844,7 @@ class TUIApplication:
         self._fullscreen_semantic_replay_count = 0
         if self._is_fullscreen:
             self._fullscreen_transcript.clear()
+            self._has_unseen_agent_message = False
             self._app.invalidate()
             return
         self.output_buffer.set_document(Document(""), bypass_readonly=True)
@@ -2727,6 +2869,7 @@ class TUIApplication:
         tags: set[str] | frozenset[str] | None = None,
         keep: bool = False,
         code_copy_actions: dict[str, str] | None = None,
+        agent_message: bool = False,
     ) -> None:
         """Enqueue one ANSI-bearing block for the transcript.
 
@@ -2750,6 +2893,7 @@ class TUIApplication:
             tags=frozenset(str(t) for t in (tags or ())),
             keep=keep,
             code_copy_actions=dict(code_copy_actions or {}),
+            agent_message=agent_message,
         )
 
         # Before the consumer is up (pre-run_async) we're single-threaded
@@ -2766,6 +2910,7 @@ class TUIApplication:
                     copy_actions=block.code_copy_actions,
                 )
                 self._fullscreen_transcript.evict_prefix(evicted)
+                self._note_unseen_agent_message(block)
                 self._app.invalidate()
                 return
             self._append_stripped_to_buffer(rendered)
@@ -2903,6 +3048,7 @@ class TUIApplication:
                 copy_actions=block.code_copy_actions,
             )
             self._fullscreen_transcript.evict_prefix(evicted)
+            self._note_unseen_agent_message(block)
             self._app.invalidate()
             return
         self._append_stripped_to_buffer(rendered)
@@ -2922,6 +3068,13 @@ class TUIApplication:
                 out.flush()
             except Exception:
                 pass
+
+    def _note_unseen_agent_message(self, block: TranscriptBlock) -> None:
+        """Show a notice when agent prose arrives outside the anchored viewport."""
+        if self._fullscreen_transcript.viewport.follows_tail:
+            self._has_unseen_agent_message = False
+        elif block.agent_message:
+            self._has_unseen_agent_message = True
 
     def _append_stripped_to_buffer(self, text: str) -> None:
         """Append the ANSI-stripped transcript text to ``output_buffer``.

@@ -170,6 +170,40 @@ def test_emit_stream_coalesces_one_print_into_one_emit_call() -> None:
     assert "a" in calls[0] and "b" in calls[0]
 
 
+def test_emit_stream_marks_agent_message_scope_without_changing_other_emits() -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def emit(text: str, **kwargs: object) -> None:
+        calls.append((text, kwargs))
+
+    stream = _EmitStream(emit)
+    stream.write("activity")
+    stream.flush()
+    with stream.agent_message():
+        stream.write("agent reply")
+        stream.flush()
+
+    assert calls == [
+        ("activity", {}),
+        ("agent reply", {"agent_message": True}),
+    ]
+
+
+def test_emit_stream_preserves_agent_message_marker_across_held_flush() -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def emit(text: str, **kwargs: object) -> None:
+        calls.append((text, kwargs))
+
+    stream = _EmitStream(emit)
+    with stream.hold():
+        with stream.agent_message():
+            stream.write("agent reply")
+            stream.flush()
+
+    assert calls == [("agent reply", {"agent_message": True})]
+
+
 def test_emit_stream_empty_flush_is_noop() -> None:
     """Flushing an empty buffer doesn't emit a stray empty block."""
     calls: list[str] = []
@@ -186,6 +220,33 @@ def test_emit_stream_multiple_prints_produce_multiple_emits() -> None:
     c.print("first")
     c.print("second")
     assert len(calls) == 2
+
+
+def test_terminal_frontend_marks_agent_message_blocks() -> None:
+    from types import SimpleNamespace
+
+    from nooa_cli.tui.frontend import TerminalFrontend
+    from nooa_cli.tui.output import AgentMessage
+
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def emit(text: str, **kwargs: object) -> None:
+        calls.append((text, kwargs))
+
+    frontend = TerminalFrontend(SimpleNamespace(tui=SimpleNamespace(vi_mode=False)))
+    frontend.console.replace_console(
+        Console(
+            file=_EmitStream(emit),
+            force_terminal=True,
+            color_system="256",
+            width=80,
+        )
+    )
+
+    frontend._render_agent_message(AgentMessage("hello", show_rule=False))
+
+    assert len(calls) == 1
+    assert calls[0][1] == {"agent_message": True}
 
 
 def test_tui_console_replace_console_swaps_underlying_console() -> None:

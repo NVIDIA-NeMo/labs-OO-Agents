@@ -79,6 +79,76 @@ def test_fullscreen_copy_and_return_actions_share_status_region() -> None:
     assert bool(app._return_to_tail_container.filter())
 
 
+def test_fullscreen_agent_message_notice_appears_only_while_scrolled_up() -> None:
+    from prompt_toolkit.formatted_text import fragment_list_to_text, to_formatted_text
+
+    app = _make_fullscreen_app()
+    app.emit_block("".join(f"line {index}\n" for index in range(30)))
+    app._transcript_viewport_size = lambda: (20, 4)
+    app._scroll_fullscreen_transcript(-4)
+
+    app.emit_block("tool activity\n")
+    text = fragment_list_to_text(to_formatted_text(app._return_to_tail_control.text()))
+    assert "New agent message" not in text
+    return_position = text.index("Return to bottom")
+
+    app.emit_block("agent reply\n", agent_message=True)
+    fragments = to_formatted_text(app._return_to_tail_control.text())
+    text = fragment_list_to_text(fragments)
+    assert text.index("New agent message") < text.index("Return to bottom")
+    assert text.index("Return to bottom") == return_position
+    notice_style = next(style for style, value, *_ in fragments if "New agent message" in value)
+    return_style = next(style for style, value, *_ in fragments if "Return to bottom" in value)
+    assert notice_style == return_style
+    assert app._has_unseen_agent_message
+
+    app._jump_fullscreen_to_tail()
+    assert not app._has_unseen_agent_message
+    assert not bool(app._return_to_tail_container.filter())
+
+
+def test_fullscreen_clear_removes_unseen_agent_message_notice() -> None:
+    app = _make_fullscreen_app()
+    app.emit_block("".join(f"line {index}\n" for index in range(30)))
+    app._transcript_viewport_size = lambda: (20, 4)
+    app._scroll_fullscreen_transcript(-4)
+    app.emit_block("agent reply\n", agent_message=True)
+    assert app._has_unseen_agent_message
+
+    app.clear_transcript()
+
+    assert not app._has_unseen_agent_message
+    assert app._fullscreen_transcript.viewport.follows_tail
+
+
+def test_fullscreen_agent_message_at_tail_does_not_create_notice() -> None:
+    from prompt_toolkit.formatted_text import fragment_list_to_text, to_formatted_text
+
+    app = _make_fullscreen_app()
+    app.emit_block("agent reply\n", agent_message=True)
+
+    assert app._fullscreen_transcript.viewport.follows_tail
+    assert not app._has_unseen_agent_message
+    assert "New agent message" not in fragment_list_to_text(
+        to_formatted_text(app._return_to_tail_control.text())
+    )
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_input_composer_is_capped_at_ten_rows() -> None:
+    from prompt_toolkit.application.current import set_app
+
+    app = _make_fullscreen_app()
+    app.input_buffer.text = "\n".join(f"line {index}" for index in range(20))
+
+    with set_app(app._app):
+        dimension = app._input_window.preferred_height(80, 100)
+
+    assert dimension.min == 1
+    assert dimension.max == 10
+    assert dimension.preferred == 10
+
+
 def test_fullscreen_status_removes_visual_transcript_gap() -> None:
     from prompt_toolkit.formatted_text import fragment_list_to_text, to_formatted_text
 
@@ -1642,7 +1712,7 @@ def test_fullscreen_wheel_is_guarded_by_explicit_mouse_navigation_policy() -> No
     assert app._fullscreen_transcript.viewport.follows_tail
 
 
-def test_fullscreen_wheel_over_composer_scrolls_transcript_not_input() -> None:
+def test_fullscreen_wheel_over_short_composer_scrolls_transcript() -> None:
     from prompt_toolkit.mouse_events import MouseEventType
 
     app = _make_fullscreen_app()
@@ -1808,6 +1878,128 @@ def test_transcript_control_uses_current_frame_height_before_formatting() -> Non
 
 
 @pytest.mark.asyncio
+async def test_fullscreen_wheel_scrolls_overflowing_composer_instead_of_transcript() -> None:
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    async with TUIHarness(display_mode=DisplayMode.FULLSCREEN) as harness:
+        app = harness.app
+        assert app is not None
+        app.emit_block("".join(f"transcript {index}\n" for index in range(30)))
+        app.input_buffer.text = "\n".join(f"draft {index}" for index in range(20))
+        app.input_buffer.cursor_position = len(app.input_buffer.text)
+        app._app.invalidate()
+        await harness.wait_for(
+            lambda: (
+                app._input_window.render_info is not None
+                and app._input_window.render_info.window_height == 10
+                and app._input_window.vertical_scroll > 0
+            )
+        )
+        before_scroll = app._input_window.vertical_scroll
+        before_cursor_row = app.input_buffer.document.cursor_position_row
+
+        result = app._input_window.content.mouse_handler(
+            _mouse_event(MouseEventType.SCROLL_UP, button=None)
+        )
+        assert app._input_window.vertical_scroll < before_scroll
+
+        assert result is None
+        assert app._fullscreen_transcript.viewport.follows_tail
+        assert app.input_buffer.document.cursor_position_row == before_cursor_row
+        assert app._input_window.manual_cursor_is_offscreen()
+        after_up_scroll = app._input_window.vertical_scroll
+
+        result = app._input_window.content.mouse_handler(
+            _mouse_event(MouseEventType.SCROLL_DOWN, button=None)
+        )
+        assert app._input_window.vertical_scroll > after_up_scroll
+
+        assert result is None
+        assert app._fullscreen_transcript.viewport.follows_tail
+        assert app.input_buffer.document.cursor_position_row == before_cursor_row
+
+        app._input_window.content.mouse_handler(_mouse_event(MouseEventType.SCROLL_UP, button=None))
+        assert app._input_window.manual_cursor_is_offscreen()
+        await harness.type_keys("!")
+        await harness.wait_for(lambda: not app._input_window._manual_wheel_scroll)
+        await harness.wait_for(lambda: app._input_window.vertical_scroll == before_scroll)
+
+        assert app.input_buffer.document.cursor_position_row == before_cursor_row
+        assert not app._input_window.manual_cursor_is_offscreen()
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_wheel_scrolls_wrapped_draft_without_moving_cursor() -> None:
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    async with TUIHarness(display_mode=DisplayMode.FULLSCREEN) as harness:
+        app = harness.app
+        assert app is not None
+        app.input_buffer.text = "wrapped " * 300
+        app.input_buffer.cursor_position = len(app.input_buffer.text)
+        app._app.invalidate()
+        await harness.wait_for(
+            lambda: (
+                app._input_window.render_info is not None
+                and app._input_window.render_info.window_height == 10
+                and app._input_window.vertical_scroll_2 > 0
+            )
+        )
+        before_cursor = app.input_buffer.cursor_position
+        before_scroll = app._input_window.vertical_scroll_2
+
+        app._input_window.content.mouse_handler(_mouse_event(MouseEventType.SCROLL_UP, button=None))
+
+        assert app.input_buffer.cursor_position == before_cursor
+        assert app._input_window.vertical_scroll_2 < before_scroll
+        assert app._input_window.manual_cursor_is_offscreen()
+
+        await harness.type_keys("!")
+        await harness.wait_for(lambda: not app._input_window._manual_wheel_scroll)
+
+        assert app.input_buffer.cursor_position == before_cursor + 1
+        assert not app._input_window.manual_cursor_is_offscreen()
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_page_keys_scroll_overflowing_composer_instead_of_transcript() -> None:
+    async with TUIHarness(display_mode=DisplayMode.FULLSCREEN) as harness:
+        app = harness.app
+        assert app is not None
+        app.emit_block("".join(f"transcript {index}\n" for index in range(30)))
+        app.input_buffer.text = "\n".join(f"draft {index}" for index in range(20))
+        app.input_buffer.cursor_position = len(app.input_buffer.text)
+        app._app.invalidate()
+        await harness.wait_for(
+            lambda: (
+                app._input_window.render_info is not None
+                and app._input_window.render_info.window_height == 10
+            )
+        )
+        before_cursor_row = app.input_buffer.document.cursor_position_row
+
+        await harness.press("pageup")
+        await harness.wait_for(
+            lambda: app.input_buffer.document.cursor_position_row < before_cursor_row
+        )
+
+        assert app._fullscreen_transcript.viewport.follows_tail
+        assert app._input_window.vertical_scroll < 10
+        after_up_cursor_row = app.input_buffer.document.cursor_position_row
+
+        after_up_scroll = app._input_window.vertical_scroll
+        await harness.press("pagedown")
+        await harness.wait_for(
+            lambda: (
+                app.input_buffer.document.cursor_position_row > after_up_cursor_row
+                or app._input_window.vertical_scroll > after_up_scroll
+            )
+        )
+
+        assert app._fullscreen_transcript.viewport.follows_tail
+
+
+@pytest.mark.asyncio
 async def test_fullscreen_navigation_preserves_composer_draft_focus_and_mouse_policy() -> None:
     async with TUIHarness(display_mode=DisplayMode.FULLSCREEN) as harness:
         app = harness.app
@@ -1833,6 +2025,25 @@ async def test_fullscreen_navigation_preserves_composer_draft_focus_and_mouse_po
         await harness.wait_for(lambda: app._fullscreen_transcript.viewport.follows_tail)
         assert harness.capture_input() == "draft text"
         assert app._app.layout.current_buffer is app.input_buffer
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_enter_submission_returns_scrolled_transcript_to_tail() -> None:
+    async with TUIHarness(display_mode=DisplayMode.FULLSCREEN) as harness:
+        app = harness.app
+        assert app is not None
+        app.emit_block("".join(f"line {index}\n" for index in range(80)))
+        await harness.press("pageup")
+        await harness.wait_for(lambda: not app._fullscreen_transcript.viewport.follows_tail)
+        app.emit_block("agent reply\n", agent_message=True)
+        assert app._has_unseen_agent_message
+
+        await harness.type_keys("follow up")
+        await harness.press("enter")
+        await harness.wait_for(lambda: harness.agent.messages_received == ["follow up"])
+
+        assert app._fullscreen_transcript.viewport.follows_tail
+        assert not app._has_unseen_agent_message
 
 
 @pytest.mark.asyncio
