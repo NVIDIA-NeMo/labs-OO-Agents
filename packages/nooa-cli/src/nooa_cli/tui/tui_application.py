@@ -3217,6 +3217,17 @@ class TUIApplication:
         # the represented suffix with the individual handoff rows, while
         # retaining any runtime-owned prefix and every earlier queue item.
         tail = pending[-1]
+        # A lagging runtime snapshot can contain only the earliest handoffs;
+        # expand that represented prefix before adding newer optimistic rows.
+        for represented in range(len(handoff), 0, -1):
+            represented_handoff = handoff[:represented]
+            combined = "\n".join(represented_handoff)
+            if tail == combined:
+                return pending[:-1] + handoff
+            suffix = f"\n{combined}"
+            if tail.endswith(suffix):
+                return pending[:-1] + [tail[: -len(suffix)]] + handoff
+
         for represented in range(len(handoff), 0, -1):
             represented_handoff = handoff[-represented:]
             represented_display = handoff_display[-represented:]

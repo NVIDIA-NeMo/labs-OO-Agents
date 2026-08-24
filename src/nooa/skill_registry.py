@@ -487,13 +487,9 @@ class SkillRegistry(Skill):
                 if attr_name.startswith("_") or attr_name in _RESERVED_ATTRS:
                     logger.warning("Refusing to load skill with reserved name %s", attr_name)
                     continue
-                held_by = self._protected_conflict(name, attr_name, skill)
-                if held_by is not None:
+                if conflict := self._protected_conflict(name, attr_name, skill):
                     logger.warning(
-                        "Refusing to load skill %s as '%s': %s",
-                        name,
-                        attr_name,
-                        held_by,
+                        "Refusing to load skill %s as '%s': %s", name, attr_name, conflict
                     )
                     continue
                 if hasattr(self._agent, attr_name) and attr_name not in set(

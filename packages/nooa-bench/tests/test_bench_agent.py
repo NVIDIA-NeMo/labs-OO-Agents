@@ -94,6 +94,12 @@ def test_bench_agent_class_exists():
     assert hasattr(BenchAgent, "_run_evaluation")
 
 
+def test_bench_agent_close_is_hidden_from_model_docs():
+    agent = BenchAgent(llm=FakeLLMClient())
+
+    assert "def close(" not in doc(agent)
+
+
 def test_bench_agent_context_is_minimal_and_automatic():
     """Only actionable live context is exposed; compaction is automatic."""
     agent = BenchAgent(llm=FakeLLMClient())
@@ -386,6 +392,7 @@ async def test_delegate_launches_isolated_subagent_of_same_type(agent_type, monk
     assert observed["cwd"] == str(tmp_path)
     assert observed["depth"] == 1
     assert observed["max_depth"] == 4
+    assert observed["child"].shell.init_command == bench_agent_module._OPTIONAL_TESTBED_ACTIVATE
     assert observed["closed"] is True
 
 

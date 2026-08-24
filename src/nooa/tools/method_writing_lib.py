@@ -28,7 +28,7 @@ class MethodWriting(Skill):
 
         @strategy(PredictStrategy())
         async def detect_language(message: str) -> str:
-            \"\"\"Return the ISO 639-1 code for {{message}} (e.g. 'en', 'fr', 'ja').\"\"\"
+            \"\"\"Return the ISO 639-1 code for the supplied message (e.g. 'en', 'fr', 'ja').\"\"\"
             ...
 
         codes = await asyncio.gather(*(detect_language(m) for m in messages))
@@ -39,7 +39,7 @@ class MethodWriting(Skill):
 
         @strategy(CodeActStrategy())
         async def plan_itinerary(request: str) -> Itinerary:
-            \"\"\"Build a day-by-day travel itinerary from {{request}}.\"\"\"
+            \"\"\"Build a day-by-day travel itinerary from the request.\"\"\"
             ...
 
         result = await plan_itinerary(payload)
