@@ -299,3 +299,40 @@ Current result:
   schedule violates verifier local minimality for `(1, 1)`:
   `start=25`, `anchor=9`, and `start-1` is feasible. This remaining failure is
   no longer an obvious missing-guidance translator surface failure.
+
+## 2026-08-24 — Native LibrarySkill Guidance Rerun
+
+After removing translator output references to prior TextSkill packaging in
+`ce36d58e fix: hide translation provenance in library skills`, reran the same
+10-task NOOA `library_skill` SkillsBench sample.
+
+The run used:
+- SkillsBench checkout:
+  `/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench`
+- Credentials file:
+  `/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/.env`
+- NOOA model: `openai/openai/openai/gpt-5.5`
+- Sandbox: Docker
+- Condition: `library_skill`
+- Artifact root:
+  `jobs/nooa-skillsbench-gpt55-10-library-native-guidance/`
+
+Results:
+
+| Task | LibrarySkill native guidance |
+|---|---:|
+| `fix-visual-stability` | 1.0 |
+| `fix-erlang-ssh-cve` | 1.0 |
+| `video-silence-remover` | 0.0 |
+| `dynamic-object-aware-egomotion` | 0.0 |
+| `manufacturing-fjsp-optimization` | 0.0 |
+| `llm-prefix-cache-replay` | 1.0 |
+| `dapt-intrusion-detection` | 1.0 |
+| `offer-letter-generator` | 1.0 |
+| `parallel-tfidf-search` | 1.0 |
+| `reserves-at-risk-calc` | 0.0 |
+
+Current result:
+- Native-guidance NOOA LibrarySkill aggregate: 6/10.
+- This matches the previous patched LibrarySkill aggregate.
+- The pass/fail set is unchanged from the previous guidance-preservation rerun.
