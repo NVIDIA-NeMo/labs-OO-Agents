@@ -1458,12 +1458,24 @@ class TUIApplication:
 
     @staticmethod
     def _local_clipboard_command() -> tuple[str, ...] | None:
-        local_commands = (
+        # Graphical Linux clipboard clients can be installed even when their
+        # corresponding display is unavailable. In particular, displayless sbx
+        # environments expose an ``xclip`` compatibility shim that exits 0 for
+        # text without copying it. Do not treat that false success as a local
+        # clipboard write; fall through to OSC 52 instead.
+        local_commands = [
             ("pbcopy", ()),
-            ("wl-copy", ()),
-            ("xclip", ("-selection", "clipboard")),
-            ("xsel", ("--clipboard", "--input")),
-        )
+        ]
+        display_disabled = os.environ.get("SBX_NO_DISPLAY") == "1"
+        if not display_disabled and os.environ.get("WAYLAND_DISPLAY"):
+            local_commands.append(("wl-copy", ()))
+        if not display_disabled and os.environ.get("DISPLAY"):
+            local_commands.extend(
+                (
+                    ("xclip", ("-selection", "clipboard")),
+                    ("xsel", ("--clipboard", "--input")),
+                )
+            )
         for executable, arguments in local_commands:
             path = shutil.which(executable)
             if path is not None:
