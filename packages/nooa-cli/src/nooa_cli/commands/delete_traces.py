@@ -13,6 +13,8 @@ import urllib.request
 
 import click
 
+from nooa.tracing._viewer_auth import apply_viewer_auth
+
 NAME = "delete-traces"
 
 
@@ -44,14 +46,19 @@ def command(batch_id: str, endpoint: str):
 
     # Verify endpoint is reachable
     try:
-        with urllib.request.urlopen(f"{endpoint.rstrip('/')}/api/version", timeout=5):
+        request = urllib.request.Request(
+            f"{endpoint.rstrip('/')}/api/version",
+            headers=apply_viewer_auth({}),
+            method="GET",
+        )
+        with urllib.request.urlopen(request, timeout=5):
             pass
     except Exception:
         click.echo(f"Cannot reach viewer at {endpoint}. Is it running?")
         raise SystemExit(1) from None
 
     url = f"{endpoint.rstrip('/')}/api/traces?batch_id={urllib.parse.quote(batch_id, safe='')}"
-    req = urllib.request.Request(url, method="DELETE")
+    req = urllib.request.Request(url, headers=apply_viewer_auth({}), method="DELETE")
 
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:

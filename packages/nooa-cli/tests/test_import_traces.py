@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
-from nooa_cli.commands import _otlp_helpers, import_traces
+from nooa_cli.commands import _otlp_helpers, delete_traces, import_traces
 
 
 def _otlp_body(index: int) -> dict:
@@ -113,6 +113,64 @@ def test_post_trace_exposes_http_status_and_response_body(monkeypatch: pytest.Mo
     assert "HTTP 413 Content Too Large" in message
     assert "ingest body too large" in message
     assert "after 1 attempt" in message
+
+
+def test_remote_import_requests_use_configured_viewer_auth(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    requests: list[urllib.request.Request] = []
+
+    def urlopen(request, *, timeout):
+        requests.append(request)
+        return _Response()
+
+    monkeypatch.setenv("NOOA_VIEWER_AUTH_TOKEN", "test-viewer-token")
+    monkeypatch.setattr(_otlp_helpers.urllib.request, "urlopen", urlopen)
+
+    assert _otlp_helpers.check_endpoint_reachable("http://viewer:5001")
+    assert _otlp_helpers.session_exists("http://viewer:5001", "new-session")
+    _otlp_helpers.post_trace_with_retry("http://viewer:5001", _otlp_body(1))
+    _otlp_helpers.sync_ingest("http://viewer:5001")
+    assert _otlp_helpers.post_annotations("http://viewer:5001", [{"label": "good"}]) == 1
+    assert _otlp_helpers.post_journal_record(
+        "http://viewer:5001",
+        {"type": "blocks", "blocks": []},
+        "new-session",
+    )
+
+    assert len(requests) == 6
+    assert all(
+        request.get_header("Authorization") == "Bearer test-viewer-token" for request in requests
+    )
+
+
+def test_remote_cleanup_requests_use_configured_viewer_auth(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    requests: list[urllib.request.Request] = []
+
+    class DeleteResponse(_Response):
+        def read(self):
+            return b'{"deleted":1}'
+
+    def urlopen(request, *, timeout):
+        requests.append(request)
+        return DeleteResponse()
+
+    monkeypatch.setenv("NOOA_VIEWER_AUTH_TOKEN", "test-viewer-token")
+    monkeypatch.setattr(delete_traces.urllib.request, "urlopen", urlopen)
+
+    result = CliRunner().invoke(
+        delete_traces.command,
+        ["--batch-id", "batch-1", "--endpoint", "http://viewer:5001"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Deleted 1 trace(s)" in result.output
+    assert len(requests) == 2
+    assert all(
+        request.get_header("Authorization") == "Bearer test-viewer-token" for request in requests
+    )
 
 
 def test_import_batches_179_records_and_syncs_before_annotations(

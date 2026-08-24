@@ -10,6 +10,8 @@ import urllib.request
 
 import click
 
+from nooa.tracing._viewer_auth import apply_viewer_auth
+
 JOURNAL_ENVELOPE_KEY = "nooaJournal"
 JOURNAL_FORMAT = "nooa.message_journal"
 JOURNAL_VERSION = 1
@@ -92,7 +94,7 @@ def _post_trace_checked(endpoint: str, body: dict, timeout: float = 30) -> None:
     req = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=apply_viewer_auth({"Content-Type": "application/json"}),
         method="POST",
     )
     try:
@@ -203,7 +205,7 @@ def post_traces_batch_with_retry(
 def sync_ingest(endpoint: str, timeout: float = 35) -> None:
     """Wait until the viewer has processed every accepted OTLP request."""
     url = f"{endpoint.rstrip('/')}/v1/sync"
-    request = urllib.request.Request(url, method="POST")
+    request = urllib.request.Request(url, headers=apply_viewer_auth({}), method="POST")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             if response.status >= 300:
@@ -235,7 +237,7 @@ def post_annotations(endpoint: str, annotations: list[dict]) -> int:
         req = urllib.request.Request(
             url,
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers=apply_viewer_auth({"Content-Type": "application/json"}),
             method="POST",
         )
         try:
@@ -288,7 +290,7 @@ def post_journal_record(endpoint: str, record: dict, session_id: str) -> bool:
     request = urllib.request.Request(
         f"{endpoint.rstrip('/')}{path}",
         data=data,
-        headers=headers,
+        headers=apply_viewer_auth(headers),
         method="POST",
     )
     try:
@@ -301,7 +303,7 @@ def post_journal_record(endpoint: str, record: dict, session_id: str) -> bool:
 def session_exists(endpoint: str, session_id: str) -> bool:
     """Check whether a session already exists in the viewer."""
     url = f"{endpoint.rstrip('/')}/api/trace-count?session_id={urllib.parse.quote(session_id)}"
-    req = urllib.request.Request(url, method="GET")
+    req = urllib.request.Request(url, headers=apply_viewer_auth({}), method="GET")
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
             return resp.status == 200
@@ -311,8 +313,13 @@ def session_exists(endpoint: str, session_id: str) -> bool:
 
 def check_endpoint_reachable(endpoint: str) -> bool:
     """Return True if the viewer API is reachable."""
+    request = urllib.request.Request(
+        f"{endpoint.rstrip('/')}/api/version",
+        headers=apply_viewer_auth({}),
+        method="GET",
+    )
     try:
-        with urllib.request.urlopen(f"{endpoint.rstrip('/')}/api/version", timeout=5):
+        with urllib.request.urlopen(request, timeout=5):
             return True
     except Exception:
         return False
