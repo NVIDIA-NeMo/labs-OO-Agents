@@ -15,6 +15,8 @@ from nooa.storage.markers import nosnapshot
 from nooa.strategies import CodeActStrategy
 from nooa.tools import TodoManager
 from nooa.tools.shell_tools import ShellTools
+from nooa_cli.coding.context_rendering import SafeDelegationPrefill
+from nooa_cli.coding.instructions import render_agent_instructions
 from nooa_cli.tools.repo_tools import RepoTools
 
 if TYPE_CHECKING:
@@ -52,6 +54,9 @@ class CodingWorker(
         self.context_manager["python_tools"] = Context(
             doc(RepoTools, ShellTools, TodoManager), prefix=True
         )
+        instructions = render_agent_instructions(cwd)
+        if instructions:
+            self.context_manager["repository_instructions"] = Context(instructions, prefix=True)
         install_summarizer(summarization or SummarizationConfig(), self)
 
     async def close(self) -> None:
@@ -63,6 +68,7 @@ class CodingWorker(
             config=CodeActConfig(
                 max_retries=6,
                 text_only_stop_behavior="synthetic_comment",
+                prefill=SafeDelegationPrefill(),
             )
         )
     )
