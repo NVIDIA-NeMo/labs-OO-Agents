@@ -107,7 +107,10 @@ def render_agent_instructions(working_directory: str | Path) -> str:
         content_budget = min(_MAX_INSTRUCTION_FILE_CHARS, available)
         try:
             content, truncated = _read_instruction_file(path, content_budget)
-        except (OSError, UnicodeError):
+        except OSError as exc:
+            logger.warning("Skipping repository instructions from %s: %s", path, exc)
+            continue
+        except UnicodeError:
             continue
         content = content.strip()
         if not content:

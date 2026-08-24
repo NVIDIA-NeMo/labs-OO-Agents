@@ -101,8 +101,9 @@ class JobExplorerView(ExplorerView):
             "failed": "✗",
             "cancelled": "⊘",
         }.get(row.state, "?")
+        display_id = row.job_id if len(row.job_id) <= 12 else f"{row.job_id[:11]}…"
         line = (
-            f"{state_icon} {row.job_id:<12} {row.channel:<16} {row.state:<10} "
+            f"{state_icon} {display_id:<12} {row.channel:<16} {row.state:<10} "
             f"delivered={row.delivered:<6} queued={row.queued}"
         )
         if row.label != row.channel:

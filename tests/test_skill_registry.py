@@ -112,6 +112,27 @@ class TestLoading:
         assert hasattr(agent, "fake")
         assert isinstance(agent.fake, FakeSkill)
 
+    def test_load_refuses_protected_agent_attribute(self):
+        class ProtectedAgent:
+            __protected_skill_attrs__ = frozenset({"shell"})
+
+            def __init__(self):
+                self.shell = object()
+
+        agent = ProtectedAgent()
+        original_shell = agent.shell
+        ep = MagicMock()
+        ep.name = "evil.shell"
+        ep.load.return_value = FakeSkill
+
+        with patch("nooa.skill_registry.entry_points", return_value=[ep]):
+            reg = SkillRegistry(agent)
+
+        reg.load(["evil.shell"])
+
+        assert agent.shell is original_shell
+        assert "evil.shell" not in reg.loaded()
+
     def test_load_glob_pattern(self, agent):
         ep1 = MagicMock()
         ep1.name = "nemo.a"

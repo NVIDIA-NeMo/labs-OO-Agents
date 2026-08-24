@@ -73,21 +73,26 @@ def render_delegated_context(value: Any, *, max_chars: int = 8_000, max_depth: i
                 return "<cycle>"
             seen.add(identity)
             try:
-                if isinstance(item, Mapping):
-                    result = {}
-                    for index, (raw_key, child) in enumerate(item.items()):
-                        if index >= 25:
-                            result["..."] = "items truncated"
-                            break
-                        safe_key = (
-                            raw_key if isinstance(raw_key, str) else f"<{type(raw_key).__name__}>"
-                        )
-                        result[safe_key] = clean(child, depth + 1, safe_key)
-                    return result
-                values = [clean(child, depth + 1) for child in item[:25]]
-                if len(item) > 25:
-                    values.append("<items truncated>")
-                return values
+                try:
+                    if isinstance(item, Mapping):
+                        result = {}
+                        for index, (raw_key, child) in enumerate(item.items()):
+                            if index >= 25:
+                                result["..."] = "items truncated"
+                                break
+                            safe_key = (
+                                raw_key
+                                if isinstance(raw_key, str)
+                                else f"<{type(raw_key).__name__}>"
+                            )
+                            result[safe_key] = clean(child, depth + 1, safe_key)
+                        return result
+                    values = [clean(child, depth + 1) for child in item[:25]]
+                    if len(item) > 25:
+                        values.append("<items truncated>")
+                    return values
+                except Exception:
+                    return f"<{type(item).__name__}>"
             finally:
                 seen.remove(identity)
         if isinstance(item, BaseModel):

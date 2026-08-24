@@ -573,3 +573,57 @@ async def test_coding_agent_spawns_delegation_in_background(tmp_path):
         assert handle.state == "done"
     finally:
         await agent.close()
+
+
+def test_delegated_context_tolerates_hostile_collection_protocols():
+    from collections.abc import Mapping, Sequence
+
+    from nooa_cli.coding.context_rendering import SafeDelegationPrefill, render_delegated_context
+
+    class HostileMapping(Mapping):
+        def __getitem__(self, key):
+            raise RuntimeError("untrusted mapping access")
+
+        def __iter__(self):
+            raise RuntimeError("untrusted mapping iteration")
+
+        def __len__(self):
+            raise RuntimeError("untrusted mapping length")
+
+    class HostileSequence(Sequence):
+        def __getitem__(self, index):
+            raise RuntimeError("untrusted sequence access")
+
+        def __len__(self):
+            raise RuntimeError("untrusted sequence length")
+
+    assert render_delegated_context(HostileMapping()) == '"<HostileMapping>"'
+    assert render_delegated_context(HostileSequence()) == '"<HostileSequence>"'
+
+    call = SimpleNamespace(
+        method_name="delegate",
+        bound_parameters=lambda: {
+            "objective": "inspect safely",
+            "supplied_context": HostileSequence(),
+        },
+    )
+    code = SafeDelegationPrefill().get_code(call)
+    assert code is not None
+    assert "HostileSequence" in code
+
+
+def test_repository_instruction_read_failures_are_logged(tmp_path, monkeypatch, caplog):
+    from nooa_cli.coding import instructions
+
+    (tmp_path / ".git").mkdir()
+    path = tmp_path / "AGENTS.md"
+    path.write_text("placeholder")
+
+    def fail_read(_path, _limit):
+        raise OSError("secure reads unavailable")
+
+    monkeypatch.setattr(instructions, "_read_instruction_file", fail_read)
+
+    assert instructions.render_agent_instructions(tmp_path) == ""
+    assert f"Skipping repository instructions from {path}" in caplog.text
+    assert "secure reads unavailable" in caplog.text
