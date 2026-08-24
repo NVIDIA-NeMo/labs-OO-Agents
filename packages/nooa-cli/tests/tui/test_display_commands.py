@@ -69,9 +69,7 @@ async def test_skills_commands_lists_extensions_without_requiring_skill_registry
     result = await command.execute(["commands"])
 
     assert result.success is True
-    assert result.outputs[0].rows == [
-        ["/project-operation", "<target>", "Operate on this project"]
-    ]
+    assert result.outputs[0].rows == [["/project-operation", "<target>", "Operate on this project"]]
 
 
 @pytest.mark.asyncio
@@ -121,3 +119,82 @@ async def test_skills_add_discovers_immediately_and_persists(tmp_path, monkeypat
     assert "review-code" in registry._user_skills
     saved = yaml.safe_load((project_dir / "settings.yaml").read_text())
     assert saved["tui"]["additional_skills_dirs"] == [str(skills_root.resolve())]
+
+
+@pytest.mark.asyncio
+async def test_skills_activate_and_deactivate_are_persisted(tmp_path, monkeypatch) -> None:
+    from nooa.skill_registry import SkillRegistry
+
+    project_dir = tmp_path / ".nooa"
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
+    agent = SimpleNamespace(context_manager=MagicMock(), cwd=tmp_path)
+    agent.skills = SkillRegistry(agent)
+    agent.skills.register("local.reconnect", SimpleNamespace())
+    config = TUIConfig(active_skills=[], inactive_skills=["local.reconnect"])
+    command = SkillsCommand(MagicMock(), config, agent, skills_dirs=[])
+
+    activated = await command.execute(["activate", "local.reconnect"])
+
+    assert activated.success is True
+    assert config.active_skills == ["local.reconnect"]
+    assert config.inactive_skills == []
+    saved = yaml.safe_load((project_dir / "settings.yaml").read_text())
+    assert saved["tui"]["active_skills"] == ["local.reconnect"]
+    assert saved["tui"]["inactive_skills"] == []
+
+    deactivated = await command.execute(["deactivate", "local.reconnect"])
+
+    assert deactivated.success is True
+    assert config.active_skills == []
+    assert config.inactive_skills == ["local.reconnect"]
+    saved = yaml.safe_load((project_dir / "settings.yaml").read_text())
+    assert saved["tui"]["active_skills"] == []
+    assert saved["tui"]["inactive_skills"] == ["local.reconnect"]
+
+
+@pytest.mark.asyncio
+async def test_skills_does_not_persist_an_activation_that_did_not_take_effect(
+    tmp_path, monkeypatch
+) -> None:
+    from nooa.skill_registry import SkillRegistry
+
+    project_dir = tmp_path / ".nooa"
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
+    agent = SimpleNamespace(context_manager=MagicMock(), cwd=tmp_path)
+    agent.skills = SkillRegistry(agent)
+    agent.skills.register("local.broken", SimpleNamespace())
+    monkeypatch.setattr(agent.skills, "activate", lambda _patterns: None)
+    config = TUIConfig(active_skills=[])
+    command = SkillsCommand(MagicMock(), config, agent, skills_dirs=[])
+
+    result = await command.execute(["activate", "local.broken"])
+
+    assert result.success is False
+    assert result.outputs[0].content == "Failed to activate `local.broken`"
+    assert config.active_skills == []
+    assert not (project_dir / "settings.yaml").exists()
+
+
+@pytest.mark.asyncio
+async def test_skills_does_not_persist_a_deactivation_that_did_not_take_effect(
+    tmp_path, monkeypatch
+) -> None:
+    from nooa.skill_registry import SkillRegistry
+
+    project_dir = tmp_path / ".nooa"
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
+    agent = SimpleNamespace(context_manager=MagicMock(), cwd=tmp_path)
+    agent.skills = SkillRegistry(agent)
+    agent.skills.register("local.stuck", SimpleNamespace())
+    agent.skills.activate(["local.stuck"])
+    monkeypatch.setattr(agent.skills, "deactivate", lambda _patterns: None)
+    config = TUIConfig(active_skills=["local.stuck"], inactive_skills=[])
+    command = SkillsCommand(MagicMock(), config, agent, skills_dirs=[])
+
+    result = await command.execute(["deactivate", "local.stuck"])
+
+    assert result.success is False
+    assert result.outputs[0].content == "Failed to deactivate `local.stuck`"
+    assert config.active_skills == ["local.stuck"]
+    assert config.inactive_skills == []
+    assert not (project_dir / "settings.yaml").exists()

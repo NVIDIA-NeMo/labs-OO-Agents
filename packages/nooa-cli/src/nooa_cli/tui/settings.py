@@ -54,6 +54,8 @@ _COERCE: dict[str, Any] = {
     "tui.mcp_file": lambda v: Path(v),
     "tui.trace_dir": lambda v: Path(v) if v is not None else None,
     "tui.additional_skills_dirs": lambda v: [Path(item) for item in (v or [])],
+    "tui.active_skills": lambda v: [str(item) for item in (v or [])],
+    "tui.inactive_skills": lambda v: [str(item) for item in (v or [])],
 }
 
 
@@ -300,6 +302,8 @@ tui:
   # Additional skill roots. Prefer /skills add <directory> so these are
   # discovered immediately and saved here for future TUI runs.
   # additional_skills_dirs: []
+  # active_skills: []    # re-activate these before SessionResumed hooks run
+  # inactive_skills: []  # keep explicitly deactivated skills inactive on restart
 
   # Write trace files here (relative to project root, or ":project:").
   # trace_dir: .nooa/traces
