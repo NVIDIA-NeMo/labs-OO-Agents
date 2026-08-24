@@ -23,6 +23,33 @@ def _make_fullscreen_app():
         return TUIApplication(display_mode=DisplayMode.FULLSCREEN)
 
 
+def test_resize_application_prompt_toolkit_private_api_contract() -> None:
+    """Fail clearly if a prompt-toolkit upgrade changes private resize hooks."""
+    import inspect
+
+    from nooa_cli.tui.tui_application import _ResizeAwareApplication
+    from prompt_toolkit.application import Application
+
+    on_resize = inspect.signature(Application._on_resize)
+    assert tuple(on_resize.parameters) == ("self",)
+
+    redraw = inspect.signature(Application._redraw)
+    assert tuple(redraw.parameters) == ("self", "render_as_done")
+    assert redraw.parameters["render_as_done"].default is False
+
+    request_cursor = inspect.signature(Application._request_absolute_cursor_position)
+    assert tuple(request_cursor.parameters) == ("self",)
+
+    assert tuple(inspect.signature(_ResizeAwareApplication._on_resize).parameters) == ("self",)
+    assert tuple(inspect.signature(_ResizeAwareApplication._redraw).parameters) == (
+        "self",
+        "render_as_done",
+    )
+
+    app = _make_fullscreen_app()
+    assert isinstance(app._app._running_in_terminal, bool)
+
+
 def test_fullscreen_shell_owns_alternate_screen_and_transcript_window() -> None:
     app = _make_fullscreen_app()
 
@@ -226,12 +253,198 @@ async def test_fullscreen_resize_reflows_without_destructive_replay(
         assert app is not None
         app.emit_block("abcdefghijklmnop\n")
         assert app._fullscreen_transcript.text == "abcdefghijklmnop\n"
+        output.events.clear()
+        render_count = app._app.render_counter
         await harness.resize_from_terminal(5, 20)
-        await asyncio.sleep(0)
+        assert app._app.render_counter == render_count
+        await harness.wait_for(lambda: app._fullscreen_invalidate_count == 1)
         assert app._fullscreen_transcript.text == "abcdefghijklmnop\n"
-        assert app._fullscreen_invalidate_count == 1
+        assert app._app.render_counter == render_count + 1
+        flushes = [index for index, event in enumerate(output.events) if event == ("flush",)]
+        renderer_writes = [
+            index for index, event in enumerate(output.events) if event[0] == "write"
+        ]
+        assert len(flushes) == 1
+        assert renderer_writes
+        assert max(renderer_writes) < flushes[0]
 
     assert stdout.getvalue() == ""
+
+
+def test_resize_deferred_flush_restores_output_and_flushes_on_callback_error() -> None:
+    """A failed PTK mutation must not strand buffered terminal output."""
+    from .tui_app_harness import MutableRecordingOutput
+
+    output = MutableRecordingOutput()
+    with create_app_session(input=DummyInput(), output=output):
+        from nooa_cli.tui.tui_application import TUIApplication
+
+        app = TUIApplication(display_mode=DisplayMode.FULLSCREEN)
+
+    original_flush = output.flush
+    output.events.clear()
+
+    def failing_callback() -> None:
+        output.write_raw("partial mutation")
+        output.flush()
+        raise RuntimeError("render failed")
+
+    with pytest.raises(RuntimeError, match="render failed"):
+        app._app._run_with_deferred_flush(failing_callback)
+
+    assert output.flush == original_flush
+    assert output.events[-1] == ("flush",)
+    assert output.events.count(("flush",)) == 1
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_resize_while_subview_open_rebuilds_on_close() -> None:
+    """A modal view must defer, not consume, a semantic transcript resize."""
+    from .tui_app_harness import MutableRecordingOutput
+
+    class View:
+        mouse_support = True
+
+        def on_open(self) -> None:
+            pass
+
+        def on_close(self) -> None:
+            pass
+
+        def render(self, _width: int, _height: int) -> str:
+            return "temporary view"
+
+        def handle_key(self, key: str, _value: str | None = None) -> str:
+            return "close" if key == "quit" else "ignored"
+
+    output = MutableRecordingOutput(columns=10, rows=20)
+    async with TUIHarness(display_mode=DisplayMode.FULLSCREEN, output=output) as harness:
+        app = harness.app
+        assert app is not None
+        widths: list[int] = []
+
+        def semantic_projection() -> str:
+            width = app.transcript_columns()
+            widths.append(width)
+            return "wide transcript\n" if width >= 8 else "narrow\ntranscript\n"
+
+        app.emit_block(semantic_projection(), replay=semantic_projection)
+        opened = asyncio.create_task(app.open_subview(View()))  # type: ignore[arg-type]
+        await harness.wait_for(lambda: app.active_subview is not None)
+
+        output.set_size(6, 20)
+        app._app._on_resize()
+        await asyncio.sleep(0)
+
+        assert app._fullscreen_transcript.text == "wide transcript\n"
+        assert app._resize_reflow.has_pending_replay is True
+        assert app._fullscreen_invalidate_count == 0
+
+        await harness.press("q")
+        await asyncio.wait_for(opened, timeout=1)
+
+        assert app._fullscreen_transcript.text == "narrow\ntranscript\n"
+        assert widths == [9, 5]
+        assert app._resize_reflow.replayed_width == 6
+        assert app._resize_reflow.has_pending_replay is False
+        assert app._fullscreen_invalidate_count == 1
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_row_only_resize_publishes_one_settled_frame() -> None:
+    from .tui_app_harness import MutableRecordingOutput
+
+    output = MutableRecordingOutput(columns=80, rows=40)
+    async with TUIHarness(display_mode=DisplayMode.FULLSCREEN, output=output) as harness:
+        app = harness.app
+        assert app is not None
+        output.events.clear()
+        render_count = app._app.render_counter
+
+        output.set_size(80, 30)
+        app._app._on_resize()
+
+        assert app._app.render_counter == render_count
+        await harness.wait_for(lambda: app._fullscreen_invalidate_count == 1)
+        assert app._app.render_counter == render_count + 1
+        assert sum(event == ("flush",) for event in output.events) == 1
+        assert app._resize_reflow.has_pending_replay is False
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_duplicate_sigwinch_after_settle_has_no_delayed_repaint() -> None:
+    """Re-exposing a settled tmux pane may repaint once, never again later."""
+    from .tui_app_harness import MutableRecordingOutput
+
+    output = MutableRecordingOutput(columns=80, rows=40)
+    async with TUIHarness(display_mode=DisplayMode.FULLSCREEN, output=output) as harness:
+        app = harness.app
+        assert app is not None
+
+        output.set_size(60, 30)
+        app._app._on_resize()
+        await harness.wait_for(lambda: app._fullscreen_invalidate_count == 1)
+        settled_render_count = app._app.render_counter
+        output.events.clear()
+
+        app._app._on_resize()
+        assert app._app.render_counter == settled_render_count + 1
+        assert app._fullscreen_rebuild_timer is None
+        await asyncio.sleep(0.1)
+
+        assert app._app.render_counter == settled_render_count + 1
+        assert app._fullscreen_invalidate_count == 1
+        assert app._fullscreen_rebuild_timer is None
+        assert sum(event == ("flush",) for event in output.events) == 1
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_unreadable_size_uses_prompt_toolkit_resize() -> None:
+    """A transient geometry read failure must not suppress PTK's safe fallback."""
+    from .tui_app_harness import MutableRecordingOutput
+
+    output = MutableRecordingOutput(columns=80, rows=40)
+    async with TUIHarness(display_mode=DisplayMode.FULLSCREEN, output=output) as harness:
+        app = harness.app
+        assert app is not None
+        render_count = app._app.render_counter
+        original_read_terminal_size = app._read_terminal_size
+        app._read_terminal_size = lambda: None  # type: ignore[method-assign]
+        try:
+            app._app._on_resize()
+        finally:
+            app._read_terminal_size = original_read_terminal_size  # type: ignore[method-assign]
+
+        assert app._app.render_counter == render_count + 1
+        assert app._fullscreen_rebuild_timer is None
+        assert app._resize_redraw_deferred is False
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_transient_sigwinches_publish_only_final_frame() -> None:
+    """A live resize burst must not expose prompt_toolkit's intermediate sizes."""
+    from .tui_app_harness import MutableRecordingOutput
+
+    output = MutableRecordingOutput(columns=80, rows=40)
+    async with TUIHarness(display_mode=DisplayMode.FULLSCREEN, output=output) as harness:
+        app = harness.app
+        assert app is not None
+        app.emit_block("stable transcript\n")
+        output.events.clear()
+        render_count = app._app.render_counter
+
+        output.set_size(70, 35)
+        app._app._on_resize()
+        output.set_size(60, 30)
+        app._app._on_resize()
+        app._app._on_resize()  # Duplicate final SIGWINCH from tmux exposure.
+
+        assert app._app.render_counter == render_count
+        await harness.wait_for(lambda: app._fullscreen_invalidate_count == 1)
+        assert app._resize_reflow.observed_size == (60, 30)
+        assert app._app.render_counter == render_count + 1
+        assert sum(event == ("flush",) for event in output.events) == 1
+        assert app._fullscreen_rebuild_timer is None
 
 
 def test_fullscreen_resize_preserves_history_beyond_native_replay_tail() -> None:
