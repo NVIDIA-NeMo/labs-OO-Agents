@@ -36,6 +36,16 @@ def completer(mock_registry):
     return Completer(registry=mock_registry)
 
 
+def test_event_summary_previews_python_cell_code():
+    event = MagicMock()
+    event.name = "python_cell"
+    event.arguments = {"code": "# setup\nprint('experimental')"}
+
+    assert Completer._event_summary(event, "ToolCallEvent") == (
+        "python_cell — print('experimental')"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Slash command completion
 # ---------------------------------------------------------------------------

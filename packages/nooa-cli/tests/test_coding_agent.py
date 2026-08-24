@@ -271,6 +271,38 @@ async def test_coding_agent_delegates_with_same_model_and_workspace(tmp_path, mo
 
 
 @pytest.mark.asyncio
+async def test_coding_agent_delegate_todo_preserves_supplemental_context(tmp_path, monkeypatch):
+    """Todo and caller context remain separately accessible to the worker."""
+    observed = {}
+
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            self.todo = kwargs["todo"]
+
+        async def investigate(self, objective: str, supplied_context=None) -> str:
+            observed.update(objective=objective, supplied_context=supplied_context)
+            self.todo.comment(supplied_context["todo"], "worker finding")
+            return "review complete"
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(CodingAgent, "_worker_type", FakeWorker)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        task = agent.todo.add("review parser")
+        report = await agent.delegate(task, {"path": "parser.py"})
+
+        assert report == "review complete"
+        assert observed["objective"] == task.title
+        assert observed["supplied_context"]["todo"] is not task
+        assert observed["supplied_context"]["context"] == {"path": "parser.py"}
+        assert [comment.body for comment in task.comments] == ["worker finding"]
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
 async def test_coding_agent_delegate_merges_todo_notes_and_vars(tmp_path, monkeypatch):
     """A Todo delegation is isolated while running and merged before return."""
     observed = {}

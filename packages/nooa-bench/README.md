@@ -14,7 +14,7 @@ documentation.
 
 Two agent variants are available through `nemo-harbor --agent-type`:
 
-- `bench` — compact single-agent CodeAct baseline with automatic summarization.
+- `bench` — compact CodeAct baseline with automatic summarization and optional delegation.
 - `rlm` — the same controller plus explicit context-isolated coding workers.
 
 Apache-2.0 licensed.

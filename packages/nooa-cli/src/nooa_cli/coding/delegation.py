@@ -71,10 +71,13 @@ class CodingWorker(
 
         Read relevant files before drawing conclusions. Make edits only when the
         objective explicitly requests implementation. Report modified paths. Name each
-        verification command and its observed outcome; if none ran, state why. When a
-        Todo is supplied as ``supplied_context``, record useful findings with
-        ``self.todo.comment(supplied_context, ...)`` and task-scoped values with
-        ``self.todo.set_var(supplied_context, key, value)``. Return a
-        concise report rather than a raw transcript.
+        verification command and its observed outcome; if none ran, state why. For a
+        delegated Todo, ``supplied_context`` is either that Todo or a mapping with
+        ``"todo"`` and supplemental ``"context"`` entries. In the mapping form, use
+        ``todo = supplied_context["todo"]`` for Todo operations and inspect
+        ``supplied_context["context"]`` separately. Record useful findings with
+        ``self.todo.comment(todo, ...)`` and task-scoped values with
+        ``self.todo.set_var(todo, key, value)``. Return a concise report rather than a
+        raw transcript.
         """
         ...

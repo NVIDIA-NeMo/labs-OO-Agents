@@ -181,9 +181,11 @@ class CodingAgent(InteractiveAgent):
         String objectives retain the existing behavior.
 
         Use delegation for bounded exploration, diagnosis, review, or independently
-        verifiable implementation. Await this only when its report is required before
-        continuing; otherwise prefer ``spawn()``. Inspect and integrate the report
-        because this controller retains final verification ownership.
+        verifiable implementation. Workers do not expose ``delegate()`` or ``spawn()``,
+        so coding-agent delegation is intentionally single-level. Await this only when
+        its report is required before continuing; otherwise prefer ``spawn()``. Inspect
+        and integrate the report because this controller retains final verification
+        ownership.
         """
         todo_base = self.todo._copy_todo(objective) if isinstance(objective, Todo) else None
         worker_todos = TodoManager._with_todo(todo_base) if todo_base is not None else None
