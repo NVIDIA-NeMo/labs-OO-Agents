@@ -483,7 +483,7 @@ class TUIHarness(AbstractAsyncContextManager["TUIHarness"]):
         assert self.app is not None
         previous_size_reads = sum(event[0] == "get_size" for event in output.events)
         output.set_size(columns, rows)
-        self.app._app.invalidate()
+        self.app._app._on_resize()
         await self.wait_for(
             lambda: sum(event[0] == "get_size" for event in output.events) > previous_size_reads
         )

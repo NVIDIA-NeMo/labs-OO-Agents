@@ -103,7 +103,7 @@ class _ResizeAwareApplication(Application[Any]):
     def _on_resize(self) -> None:
         if self._defer_resize_redraw():
             return
-        super()._on_resize()
+        self._run_with_deferred_flush(super()._on_resize)
 
     def _redraw(self, render_as_done: bool = False) -> None:
         if not render_as_done and self._resize_redraw_is_deferred():
@@ -112,17 +112,10 @@ class _ResizeAwareApplication(Application[Any]):
 
     def redraw_after_deferred_resize(self) -> None:
         """Run prompt_toolkit's normal erase/redraw after resize settles."""
-        super()._on_resize()
+        self._run_with_deferred_flush(super()._on_resize)
 
-    def run_atomic_native_replay(self, replay: Callable[[Any], bool]) -> bool:
-        """Erase, replay, and redraw through one physical output flush.
-
-        ``run_in_terminal`` flushes its erase before invoking the callback. For
-        a semantic transcript replay that exposes an empty/intermediate frame
-        before the rebuilt transcript and live region. This transaction runs
-        synchronously on the UI loop and temporarily turns every renderer
-        flush into a no-op, then publishes the complete terminal update once.
-        """
+    def _run_with_deferred_flush(self, callback: Callable[[], Any]) -> Any:
+        """Buffer a prompt_toolkit terminal mutation and publish it once."""
         output = self.output
         physical_flush = output.flush
 
@@ -131,20 +124,34 @@ class _ResizeAwareApplication(Application[Any]):
 
         output.flush = defer_flush  # type: ignore[method-assign]
         try:
+            result = callback()
+        finally:
+            output.flush = physical_flush  # type: ignore[method-assign]
+        physical_flush()
+        return result
+
+    def run_atomic_native_replay(self, replay: Callable[[Any], bool]) -> bool:
+        """Erase, replay, and redraw through one physical output flush.
+
+        ``run_in_terminal`` flushes its erase before invoking the callback. For
+        a semantic transcript replay that exposes an empty/intermediate frame
+        before the rebuilt transcript and live region. This transaction runs
+        synchronously on the UI loop and buffers every renderer flush before
+        publishing the complete terminal update once.
+        """
+        output = self.output
+
+        def update() -> bool:
             self.renderer.erase()
             replayed = replay(output)
             self.renderer.reset()
             self._request_absolute_cursor_position()
             # Bypass this class's deferred-redraw guard: this is the one final
             # live-region frame belonging to the resize transaction.
-            super()._redraw()
-        finally:
-            output.flush = physical_flush  # type: ignore[method-assign]
+            super(_ResizeAwareApplication, self)._redraw()
+            return replayed
 
-        # Vt100_Output buffers all operations above. This is the transaction's
-        # only write to the underlying terminal.
-        physical_flush()
-        return replayed
+        return bool(self._run_with_deferred_flush(update))
 
 
 def _is_raw_mouse_report(data: str) -> bool:
@@ -3114,12 +3121,28 @@ class TUIApplication:
         changes can safely skip the first paint: the atomic native replay
         performs the final redraw. Row-only changes stay immediate.
         """
-        if not self.full_screen or not self._resize_replays_enabled:
+        if not self._resize_replays_enabled:
             return False
         current = self._read_terminal_size()
         if current is None:
             return False
         previous = self._resize_reflow.observed_size
+
+        if self._is_fullscreen:
+            # Alternate-screen mode owns every cell, so even a row-only resize
+            # can repaint the whole viewport. Hold SIGWINCH paints until the
+            # geometry settles rather than exposing each transient tmux size.
+            if previous == current:
+                return self._fullscreen_rebuild_timer is not None
+            self._resize_reflow.observe(current)
+            if previous is None or self._active_subview is not None:
+                return False
+            self._resize_redraw_deferred = True
+            self._schedule_fullscreen_rebuild()
+            return True
+
+        if not self.full_screen:
+            return False
         if previous == current:
             # Coalesce duplicate signals while a width transaction is pending.
             # Once settled, still let prompt_toolkit repaint its live region
@@ -3205,18 +3228,17 @@ class TUIApplication:
             self._schedule_resize_replay()
 
     def _schedule_fullscreen_rebuild(self) -> None:
-        """Coalesce semantic fullscreen re-rendering until resize input settles."""
-        # Static transcript blocks are projected by the model at any width and
-        # need no source rebuild. This makes the 10,000-record common case O(1)
-        # in the render callback.
-        if self._fullscreen_semantic_replay_count == 0:
-            self._cancel_fullscreen_drag()
-            self._fullscreen_invalidate_count += 1
-            self._app.invalidate()
-            return
+        """Coalesce fullscreen redraws until resize input settles."""
         loop = self._loop
         if loop is None or loop.is_closed():
-            self._rebuild_fullscreen_transcript()
+            if self._fullscreen_semantic_replay_count:
+                self._rebuild_fullscreen_transcript()
+            else:
+                # Static records project at render time; preserve the O(1)
+                # synchronous fallback used before the application loop starts.
+                self._cancel_fullscreen_drag()
+                self._fullscreen_invalidate_count += 1
+                self._app.invalidate()
             return
         if self._fullscreen_rebuild_timer is not None:
             self._fullscreen_rebuild_timer.cancel()
@@ -3234,7 +3256,21 @@ class TUIApplication:
         self._fullscreen_rebuild_timer = None
         if not self._resize_replays_enabled:
             return
-        self._rebuild_fullscreen_transcript()
+        if self._fullscreen_semantic_replay_count:
+            self._rebuild_fullscreen_transcript()
+        else:
+            # Static records are projected by the fullscreen model at render
+            # time, so only the settled prompt_toolkit frame is required.
+            self._cancel_fullscreen_drag()
+            self._fullscreen_invalidate_count += 1
+            self._finish_fullscreen_resize_redraw()
+
+    def _finish_fullscreen_resize_redraw(self) -> None:
+        if self._resize_redraw_deferred:
+            self._resize_redraw_deferred = False
+            self._app.redraw_after_deferred_resize()
+        else:
+            self._app.invalidate()
 
     def _rebuild_fullscreen_transcript(self) -> None:
         """Refresh width-sensitive semantic blocks from a one-width cache."""
@@ -3282,7 +3318,7 @@ class TUIApplication:
             ],
         )
         self._fullscreen_invalidate_count += 1
-        self._app.invalidate()
+        self._finish_fullscreen_resize_redraw()
 
     def _main_layout_is_compressed(self, size: tuple[int, int]) -> bool:
         """Return whether optional main-view rows cannot all fit."""

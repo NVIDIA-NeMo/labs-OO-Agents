@@ -226,12 +226,43 @@ async def test_fullscreen_resize_reflows_without_destructive_replay(
         assert app is not None
         app.emit_block("abcdefghijklmnop\n")
         assert app._fullscreen_transcript.text == "abcdefghijklmnop\n"
+        output.events.clear()
+        render_count = app._app.render_counter
         await harness.resize_from_terminal(5, 20)
-        await asyncio.sleep(0)
+        assert app._app.render_counter == render_count
+        await harness.wait_for(lambda: app._fullscreen_invalidate_count == 1)
         assert app._fullscreen_transcript.text == "abcdefghijklmnop\n"
-        assert app._fullscreen_invalidate_count == 1
+        assert app._app.render_counter == render_count + 1
+        assert sum(event == ("flush",) for event in output.events) == 1
 
     assert stdout.getvalue() == ""
+
+
+@pytest.mark.asyncio
+async def test_fullscreen_transient_sigwinches_publish_only_final_frame() -> None:
+    """A live resize burst must not expose prompt_toolkit's intermediate sizes."""
+    from .tui_app_harness import MutableRecordingOutput
+
+    output = MutableRecordingOutput(columns=80, rows=40)
+    async with TUIHarness(display_mode=DisplayMode.FULLSCREEN, output=output) as harness:
+        app = harness.app
+        assert app is not None
+        app.emit_block("stable transcript\n")
+        output.events.clear()
+        render_count = app._app.render_counter
+
+        output.set_size(70, 35)
+        app._app._on_resize()
+        output.set_size(60, 30)
+        app._app._on_resize()
+        app._app._on_resize()  # Duplicate final SIGWINCH from tmux exposure.
+
+        assert app._app.render_counter == render_count
+        await harness.wait_for(lambda: app._fullscreen_invalidate_count == 1)
+        assert app._resize_reflow.observed_size == (60, 30)
+        assert app._app.render_counter == render_count + 1
+        assert sum(event == ("flush",) for event in output.events) == 1
+        assert app._fullscreen_rebuild_timer is None
 
 
 def test_fullscreen_resize_preserves_history_beyond_native_replay_tail() -> None:
