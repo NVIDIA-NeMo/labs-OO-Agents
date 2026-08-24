@@ -1383,10 +1383,10 @@ class TUIApplication:
         )
 
         # Queue chrome is a pure projection of runtime state plus the short
-        # admission→transcript visibility handoff.
+        # admission→transcript visibility handoff. Host chrome may show payloads
+        # to the human; agent-facing Channel.status() remains counts-only.
         def _queue_pending() -> list[str]:
             return self._pending_input_display()
-
 
         def _queue_formatted():
             rows = []
@@ -1397,6 +1397,9 @@ class TUIApplication:
                 for index, text in enumerate(command_queue):
                     branch = "└─" if index == len(command_queue) - 1 else "├─"
                     rows.append(f"{branch} {sanitize_live_text(text)}")
+            for text in _queue_pending():
+                for line in sanitize_live_text(str(text)).split("\n"):
+                    rows.append(f"│ {line}")
             if not rows:
                 return []
             fragments = [("class:queue", "\n".join(rows))]
@@ -1405,7 +1408,6 @@ class TUIApplication:
                     fragments, render_counter=self._app.render_counter
                 )
             return fragments
-
 
         queue_window = ConditionalContainer(
             Window(
@@ -1420,7 +1422,7 @@ class TUIApplication:
                 wrap_lines=True,
                 dont_extend_height=True,
             ),
-            filter=Condition(lambda: bool(self._command_queue_texts)),
+            filter=Condition(lambda: bool(_queue_pending()) or bool(self._command_queue_texts)),
         )
 
         input_style = "class:input-area"
@@ -3216,12 +3218,14 @@ class TUIApplication:
         # retaining any runtime-owned prefix and every earlier queue item.
         tail = pending[-1]
         for represented in range(len(handoff), 0, -1):
-            combined = "\n".join(handoff[:represented])
+            represented_handoff = handoff[-represented:]
+            represented_display = handoff_display[-represented:]
+            combined = "\n".join(represented_handoff)
             if tail == combined:
-                return pending[:-1] + handoff_display
+                return pending[:-1] + represented_display
             suffix = f"\n{combined}"
             if tail.endswith(suffix):
-                return pending[:-1] + [tail[: -len(suffix)]] + handoff_display
+                return pending[:-1] + [tail[: -len(suffix)]] + represented_display
         return pending + handoff_display
 
     def submit_message(
