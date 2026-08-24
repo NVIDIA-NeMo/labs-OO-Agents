@@ -1193,17 +1193,32 @@ def _extract_instance_values(obj: Any, type_info: TypeInfo) -> dict[str, Any]:
                 values[field.name] = class_val
 
     # Also include all __dict__ attributes (for instances without annotations)
-    if hasattr(obj, "__dict__"):
-        from nooa.agentdoc._visibility import is_hidden_field as _is_hidden_field
+    from nooa.agentdoc._visibility import is_hidden_field as _is_hidden_field
 
+    def _include_dynamic(name: str, value: Any) -> bool:
+        # Pass the instance (not obj_type) to is_hidden_field so per-instance
+        # spec(self, name, hidden=True) overrides are honored for dynamic fields.
+        return (
+            name not in values
+            and not name.startswith("_")
+            and not callable(value)
+            and not _is_hidden_field(obj, name)
+            and name not in _excluded_fields
+        )
+
+    if hasattr(obj, "__dict__"):
         for name, value in obj.__dict__.items():
-            if (
-                name not in values
-                and not name.startswith("_")
-                and not callable(value)
-                and not _is_hidden_field(obj_type, name)
-                and name not in _excluded_fields
-            ):
+            if _include_dynamic(name, value):
+                values[name] = value
+
+    # Pydantic models with `extra="allow"` store dynamically-assigned fields in
+    # `__pydantic_extra__`, not `__dict__`, so the sweep above misses them. Read
+    # the raw dict directly (never `model_extra`, which is a property that can
+    # trigger validator machinery) and apply the same visibility guards.
+    pydantic_extra = getattr(obj, "__pydantic_extra__", None)
+    if isinstance(pydantic_extra, dict):
+        for name, value in pydantic_extra.items():
+            if _include_dynamic(name, value):
                 values[name] = value
 
     return values
