@@ -237,3 +237,65 @@ Local artifacts:
 - `jobs/nooa-skillsbench-gpt55-10-library-v2/`
 - `jobs/nooa-skillsbench-gpt55-10-library-v2/reserves-at-risk-calc__nooa__library-rerun/`
 - `jobs/nooa-skillsbench-gpt55-10-library-translation-validation/`
+
+## 2026-08-24 — LibrarySkill Guidance Preservation Rerun
+
+Committed the pre-fix experiment snapshot locally as
+`64660e7d chore: snapshot library skill skillsbench run`, then patched the
+TextSkill-to-LibrarySkill translator in `a84ef7a8 fix: preserve translated
+skill guidance`.
+
+Translator change:
+- Preserve the original TextSkill body in the generated LibrarySkill docstring
+  and README.
+- Add a dynamic `context_block` that exposes preserved guidance plus a bundled
+  resource index while the LibrarySkill is activated.
+- Expose public `list_resources()`, `read_resource()`, and
+  `read_resource_bytes()` helpers for non-script bundled resources.
+- Continue hiding raw script runners and only expose generated native APIs for
+  safely translated scripts.
+
+Validation:
+- `uv run pytest tests/tools/test_skill_translator.py packages/nooa-bench/tests/test_bench_agent.py packages/nooa-bench/tests/test_runner.py packages/nooa-bench/tests/test_skillsbench_runner.py -q`
+  - `63 passed`
+- `uv run ruff check src/nooa/tools/skill_translator.py tests/tools/test_skill_translator.py packages/nooa-bench/src/nooa_bench/bench_agent.py packages/nooa-bench/src/nooa_bench/runner.py packages/nooa-bench/src/nooa_bench/skillsbench_runner.py packages/nooa-bench/tests/test_bench_agent.py packages/nooa-bench/tests/test_runner.py packages/nooa-bench/tests/test_skillsbench_runner.py`
+  - passed
+
+Patched LibrarySkill rerun:
+- SkillsBench checkout:
+  `/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench`
+- Credentials file:
+  `/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/.env`
+- NOOA model: `openai/openai/openai/gpt-5.5`
+- Sandbox: Docker
+- Condition: `library_skill`
+- Artifact root:
+  `jobs/nooa-skillsbench-gpt55-10-library-guidance-fix-regressions/`
+
+Results:
+
+| Task | Previous LibrarySkill | Patched LibrarySkill |
+|---|---:|---:|
+| `fix-visual-stability` | 0.0 | 1.0 |
+| `fix-erlang-ssh-cve` | 1.0 | 1.0 |
+| `video-silence-remover` | 0.0 | 0.0 |
+| `dynamic-object-aware-egomotion` | 0.0 | 0.0 |
+| `manufacturing-fjsp-optimization` | 0.0 | 0.0 |
+| `llm-prefix-cache-replay` | 0.0 | 1.0 |
+| `dapt-intrusion-detection` | 0.0 | 1.0 |
+| `offer-letter-generator` | 1.0 | 1.0 |
+| `parallel-tfidf-search` | 1.0 | 1.0 |
+| `reserves-at-risk-calc` | 0.0 | 0.0 |
+
+Current result:
+- Patched NOOA LibrarySkill aggregate: 6/10.
+- Recovered three of the four prior LibrarySkill regressions versus TextSkill:
+  `fix-visual-stability`, `llm-prefix-cache-replay`, and
+  `dapt-intrusion-detection`.
+- `manufacturing-fjsp-optimization` still fails scoreably with
+  `agent_return_code=0`, `error=null`, and `verifier_error=null`. The translated
+  LibrarySkill now contains the exact right-shift/local-minimality guidance, and
+  the agent trajectory shows it used that guidance, but the final optimized
+  schedule violates verifier local minimality for `(1, 1)`:
+  `start=25`, `anchor=9`, and `start-1` is feasible. This remaining failure is
+  no longer an obvious missing-guidance translator surface failure.
