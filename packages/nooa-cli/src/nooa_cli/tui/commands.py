@@ -279,9 +279,14 @@ class Command(abc.ABC):
         return True, None
 
     def _persist_tui_setting(self, key: str, value: object) -> Path:
+        return self._persist_tui_settings({key: value})
+
+    def _persist_tui_settings(self, updates: dict[str, object]) -> Path:
         from .settings import write_settings_updates
 
-        path, _data = write_settings_updates({("tui", key): value})
+        path, _data = write_settings_updates(
+            {("tui", key): value for key, value in updates.items()}
+        )
         return path
 
 
@@ -1187,9 +1192,22 @@ class SkillsCommand(Command):
                 return CommandResult.err(f"Skill `{skill_id}` not found. Use /skills list.")
             try:
                 registry.activate([skill_id])
-                return CommandResult.ok(TextOutput(f"Skill `{skill_id}` activated", "success"))
             except Exception as e:
                 return CommandResult.err(f"Failed to activate `{skill_id}`: {e}")
+            if skill_id not in registry.activated():
+                return CommandResult.err(f"Failed to activate `{skill_id}`")
+            active = list(dict.fromkeys([*self.config.active_skills, skill_id]))
+            inactive = [name for name in self.config.inactive_skills if name != skill_id]
+            self.config.active_skills = active
+            self.config.inactive_skills = inactive
+            try:
+                self._persist_tui_settings({"active_skills": active, "inactive_skills": inactive})
+            except Exception as exc:
+                return CommandResult.ok(
+                    TextOutput(f"Skill `{skill_id}` activated", "success"),
+                    TextOutput(f"Could not save skill activation: {exc}", "warning"),
+                )
+            return CommandResult.ok(TextOutput(f"Skill `{skill_id}` activated", "success"))
 
         # deactivate
         skill_id = subargs[0]
@@ -1197,9 +1215,22 @@ class SkillsCommand(Command):
             return CommandResult.err(f"`{skill_id}` not active. Use /skills list.")
         try:
             registry.deactivate([skill_id])
-            return CommandResult.ok(TextOutput(f"Skill `{skill_id}` deactivated", "success"))
         except Exception as e:
             return CommandResult.err(f"Failed to deactivate `{skill_id}`: {e}")
+        if skill_id in registry.activated():
+            return CommandResult.err(f"Failed to deactivate `{skill_id}`")
+        active = [name for name in self.config.active_skills if name != skill_id]
+        inactive = list(dict.fromkeys([*self.config.inactive_skills, skill_id]))
+        self.config.active_skills = active
+        self.config.inactive_skills = inactive
+        try:
+            self._persist_tui_settings({"active_skills": active, "inactive_skills": inactive})
+        except Exception as exc:
+            return CommandResult.ok(
+                TextOutput(f"Skill `{skill_id}` deactivated", "success"),
+                TextOutput(f"Could not save skill deactivation: {exc}", "warning"),
+            )
+        return CommandResult.ok(TextOutput(f"Skill `{skill_id}` deactivated", "success"))
 
 
 # ---------------------------------------------------------------------------

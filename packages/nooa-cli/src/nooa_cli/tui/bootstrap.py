@@ -534,6 +534,51 @@ def build_registry(result: BootstrapResult, frontend: Frontend) -> CommandRegist
         )
         result.agent.skills.activate(["nemo.mcp"])  # type: ignore[union-attr]
 
+    skills = getattr(result.agent, "skills", None)
+    if skills is not None:
+        discover_dirs = getattr(skills, "discover_skills_dirs", None)
+        if result.config.tui.active_skills and callable(discover_dirs):
+            try:
+                discover_dirs(result.config.tui.skills_dirs)
+            except Exception as exc:
+                result.messages.append(
+                    TextOutput(f"Could not discover configured skills: {exc}", "warning")
+                )
+
+        discovered = set(skills.discovered())
+        for skill_name in result.config.tui.active_skills:
+            if skill_name not in discovered:
+                result.messages.append(
+                    TextOutput(f"Configured skill not found: {skill_name}", "warning")
+                )
+                continue
+            try:
+                skills.activate([skill_name])
+            except Exception as exc:
+                result.messages.append(
+                    TextOutput(f"Could not activate skill {skill_name}: {exc}", "warning")
+                )
+                continue
+            if skill_name not in skills.activated():
+                result.messages.append(
+                    TextOutput(f"Could not activate skill {skill_name}", "warning")
+                )
+
+        for skill_name in result.config.tui.inactive_skills:
+            if skill_name not in skills.activated():
+                continue
+            try:
+                skills.deactivate([skill_name])
+            except Exception as exc:
+                result.messages.append(
+                    TextOutput(f"Could not deactivate skill {skill_name}: {exc}", "warning")
+                )
+                continue
+            if skill_name in skills.activated():
+                result.messages.append(
+                    TextOutput(f"Could not deactivate skill {skill_name}", "warning")
+                )
+
     if result.session_id is not None:
         try:
             result.agent.event_manager.add(
