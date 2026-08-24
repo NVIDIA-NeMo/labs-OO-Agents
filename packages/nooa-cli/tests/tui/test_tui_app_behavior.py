@@ -578,8 +578,8 @@ async def test_baseline_command_queue_is_dynamic_not_scrollback():
         await h.wait_for(lambda: h.app._command_queue_texts == [])
 
 
-async def test_command_queue_formatted_has_no_trailing_newline():
-    """The queue formatter does not append a blank row before the session rule."""
+async def test_command_queue_chrome_shows_payloads_to_the_human():
+    """Host UI shows queued commands without exposing them to agent status."""
     from prompt_toolkit.formatted_text import fragment_list_to_text
 
     async with TUIHarness() as h:
@@ -588,6 +588,11 @@ async def test_command_queue_formatted_has_no_trailing_newline():
         queue_container = root.children[1].content
         queue_control = queue_container.content
         assert fragment_list_to_text(queue_control.text()) == "│ 1 command queued\n└─ !ls"
+
+        h.app.set_command_queue(["/models", "!echo secret"])
+        assert fragment_list_to_text(queue_control.text()) == (
+            "│ 2 commands queued\n├─ /models\n└─ !echo secret"
+        )
 
 
 async def test_baseline_command_queue_renders_below_status():
@@ -1095,18 +1100,14 @@ async def test_large_paste_queue_uses_compact_label_and_withdraw_restores_marker
 
 
 async def test_queue_displays_pending_message_while_agent_working():
-    """Type-ahead remains visibly queued until it enters the transcript."""
-
+    """Host UI shows queued type-ahead while agent-facing status stays private."""
     from prompt_toolkit.formatted_text import fragment_list_to_text
 
     agent = _blocking_agent()
     async with TUIHarness(agent=agent) as h:
         await h.type_keys("trigger")
         await h.press("enter")
-        # Agent is now blocked. Retire the accepted trigger's handoff, then the
-        # user type-aheads another message that should remain visible.
         await h.wait_for(lambda: h.app.is_thinking())
-        h.app.complete_pending_input_handoff("trigger")
         await h.type_keys("queued-msg")
         await h.press("enter")
         await h.wait_for(lambda: h.capture_queued() == ["queued-msg"])
@@ -1115,6 +1116,8 @@ async def test_queue_displays_pending_message_while_agent_working():
         queue_container = root.children[1].content
         queue_control = queue_container.content
         assert fragment_list_to_text(queue_control.text()) == "│ queued-msg"
+        assert agent.user_messages.status() == "user_messages: 1 pending"
+        assert "queued-msg" not in agent.user_messages.status()
 
 
 async def test_admitted_input_stays_visible_until_accepted_echo_commits():

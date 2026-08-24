@@ -38,6 +38,7 @@ class AgentJobSummary:
     state: AgentJobState
     queued: int
     values: tuple[str, ...] = ()
+    job_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
