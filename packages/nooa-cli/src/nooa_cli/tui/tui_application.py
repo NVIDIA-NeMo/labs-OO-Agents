@@ -125,8 +125,16 @@ class _ResizeAwareApplication(Application[Any]):
         output.flush = defer_flush  # type: ignore[method-assign]
         try:
             result = callback()
-        finally:
+        except BaseException:
             output.flush = physical_flush  # type: ignore[method-assign]
+            try:
+                physical_flush()
+            except Exception:
+                # Preserve the callback failure; callers cannot recover from a
+                # secondary flush error more usefully than from its root cause.
+                pass
+            raise
+        output.flush = physical_flush  # type: ignore[method-assign]
         physical_flush()
         return result
 
@@ -134,7 +142,7 @@ class _ResizeAwareApplication(Application[Any]):
         """Erase, replay, and redraw through one physical output flush.
 
         ``run_in_terminal`` flushes its erase before invoking the callback. For
-        a semantic transcript replay that exposes an empty/intermediate frame
+        a semantic transcript replay, this exposes an empty/intermediate frame
         before the rebuilt transcript and live region. This transaction runs
         synchronously on the UI loop and buffers every renderer flush before
         publishing the complete terminal update once.
@@ -1441,9 +1449,7 @@ class TUIApplication:
             # fullscreen subviews after terminal resize.
             terminal_size_polling_interval=None,
             defer_resize_redraw=self._defer_prompt_toolkit_resize_redraw,
-            resize_redraw_is_deferred=lambda: (
-                self._resize_redraw_deferred and self._active_subview is None
-            ),
+            resize_redraw_is_deferred=self._prompt_toolkit_resize_redraw_is_deferred,
         )
 
     def observe_agent(self) -> None:
@@ -1700,9 +1706,15 @@ class TUIApplication:
                 self._app.layout.focus(self._input_window)
             except Exception:
                 pass
+            if self._is_fullscreen and self._resize_reflow.has_pending_replay:
+                # The resize callback observes geometry while a modal subview is
+                # visible, but semantic transcript work stays deferred until the
+                # main view returns. Rebuild before invalidating so the first
+                # restored frame already has the settled projection.
+                self._rebuild_fullscreen_transcript()
             if self._app.is_running:
                 self._app.invalidate()
-            if self._resize_reflow.has_pending_replay:
+            if not self._is_fullscreen and self._resize_reflow.has_pending_replay:
                 self._schedule_resize_replay()
 
     def _prefill_input(self, text: str) -> None:
@@ -3142,6 +3154,15 @@ class TUIApplication:
 
         if not self.full_screen:
             return False
+        if self._app._running_in_terminal:
+            # Never let SIGWINCH erase an external editor/shell, including an
+            # unchanged duplicate signal. Observe changed geometry so a width
+            # replay remains pending; row-only changes use the handoff's final
+            # prompt_toolkit redraw after ownership returns.
+            if previous != current:
+                self._observe_terminal_size(current)
+            self._resize_redraw_deferred = True
+            return True
         if previous == current:
             # Coalesce duplicate signals while a width transaction is pending.
             # Once settled, still let prompt_toolkit repaint its live region
@@ -3155,6 +3176,28 @@ class TUIApplication:
             self._resize_redraw_deferred = True
             return True
         return False
+
+    def _prompt_toolkit_resize_redraw_is_deferred(self) -> bool:
+        """Keep a pending resize hidden until its terminal transaction can run."""
+        if not self._resize_redraw_deferred or self._active_subview is not None:
+            return False
+        if self.full_screen and self._resize_replays_enabled:
+            if self._resize_reflow.has_pending_replay:
+                if (
+                    self._resize_replay_timer is None
+                    and self._queued_resize_replay_generation is None
+                ):
+                    # ``run_in_terminal`` suppresses prompt_toolkit redraws while
+                    # an external program owns the terminal. Its final redraw
+                    # reaches this hook after ownership returns; resume the
+                    # deferred width replay then.
+                    self._schedule_resize_replay()
+                return True
+            # A row-only SIGWINCH needed no semantic replay. Let the handoff's
+            # own final redraw publish the new layout exactly once.
+            self._resize_redraw_deferred = False
+            return False
+        return True
 
     def _finish_deferred_resize_redraw(self) -> None:
         if not self._resize_redraw_deferred or not self._resize_replays_enabled:
@@ -3236,6 +3279,7 @@ class TUIApplication:
                 # Static records project at render time; preserve the O(1)
                 # synchronous fallback used before the application loop starts.
                 self._cancel_fullscreen_drag()
+                self._mark_fullscreen_resize_replayed()
                 self._fullscreen_invalidate_count += 1
                 self._app.invalidate()
             return
@@ -3261,8 +3305,14 @@ class TUIApplication:
             # Static records are projected by the fullscreen model at render
             # time, so only the settled prompt_toolkit frame is required.
             self._cancel_fullscreen_drag()
+            self._mark_fullscreen_resize_replayed()
             self._fullscreen_invalidate_count += 1
             self._finish_fullscreen_resize_redraw()
+
+    def _mark_fullscreen_resize_replayed(self) -> None:
+        request = self._resize_reflow.prepare_replay()
+        if request is not None and self._resize_reflow.is_current(request):
+            self._resize_reflow.mark_replayed(request)
 
     def _finish_fullscreen_resize_redraw(self) -> None:
         if self._resize_redraw_deferred:
@@ -3316,6 +3366,7 @@ class TUIApplication:
                 for index, block in enumerate(self._transcript_blocks)
             ],
         )
+        self._mark_fullscreen_resize_replayed()
         self._fullscreen_invalidate_count += 1
         self._finish_fullscreen_resize_redraw()
 
@@ -3354,6 +3405,11 @@ class TUIApplication:
             return
         self._resize_replay_timer = None
         if not self._resize_replays_enabled:
+            return
+        if self._app._running_in_terminal:
+            # An external editor/shell currently owns the terminal. Leave the
+            # request pending; prompt_toolkit's handoff redraw will schedule it
+            # through ``_prompt_toolkit_resize_redraw_is_deferred``.
             return
         current = self._read_terminal_size()
         if current is None:
@@ -3427,6 +3483,12 @@ class TUIApplication:
                 schedule_latest_pending = self._resize_reflow.has_pending_replay
                 return
             if self._active_subview is not None:
+                return
+            if self._app._running_in_terminal:
+                # A terminal handoff can begin after this barrier was queued.
+                # Never erase/replay over an external editor or shell; leave the
+                # request pending for prompt_toolkit's handoff redraw to resume.
+                schedule_latest_pending = self._resize_reflow.has_pending_replay
                 return
             if not item.transcript_blocks and not item.request.required:
                 self._resize_reflow.mark_replayed(item.request)

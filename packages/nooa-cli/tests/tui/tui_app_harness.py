@@ -247,6 +247,11 @@ class MutableRecordingOutput(DummyOutput):
     def set_size(self, columns: int, rows: int) -> None:
         self._size = Size(rows=int(rows), columns=int(columns))
 
+    def write(self, data: str) -> None:
+        self.events.append(("write", data))
+        if self._physical_replay_buffer is not None:
+            self._physical_replay_buffer.append(data)
+
     def write_raw(self, data: str) -> None:
         self.events.append(("write_raw", data))
         if "\x1b[3J" in data:

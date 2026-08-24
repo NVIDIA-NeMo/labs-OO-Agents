@@ -1435,6 +1435,63 @@ async def test_production_width_resize_waits_for_subview_to_close() -> None:
         assert h.app._resize_reflow.replayed_width == 60
 
 
+async def test_native_replay_resize_waits_for_external_terminal_handoff() -> None:
+    """Never erase/replay while ``run_in_terminal`` gives an editor ownership."""
+    output = MutableRecordingOutput(columns=80, rows=40)
+    async with TUIHarness(full_screen=True, output=output) as h:
+        h.app.emit_block("transcript behind editor\n")
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+        output.events.clear()
+        h.app._app._running_in_terminal = True
+
+        output.set_size(60, 30)
+        h.app._app._on_resize()
+        await h.wait_for(lambda: h.app._resize_replay_timer is None)
+
+        assert h.app._resize_reflow.has_pending_replay is True
+        assert h.app._fullscreen_invalidate_count == 0
+        assert not any(event[0] == "write_raw" and "\x1b[3J" in event[1] for event in output.events)
+
+        # Mirrors prompt_toolkit's handoff-finally order: release ownership,
+        # then redraw. The guarded redraw resumes the pending resize transaction.
+        h.app._app._running_in_terminal = False
+        h.app._app._redraw()
+        await h.wait_for(lambda: h.app._fullscreen_invalidate_count == 1)
+
+        assert h.app._resize_reflow.replayed_width == 60
+        assert h.app._resize_reflow.has_pending_replay is False
+        assert (
+            sum(event[0] == "write_raw" and "\x1b[3J" in event[1] for event in output.events) == 1
+        )
+
+
+async def test_native_replay_row_resize_waits_for_external_terminal_handoff() -> None:
+    """A row-only SIGWINCH must not erase an editor-owned terminal."""
+    output = MutableRecordingOutput(columns=80, rows=40)
+    async with TUIHarness(full_screen=True, output=output) as h:
+        output.events.clear()
+        render_count = h.app._app.render_counter
+        h.app._app._running_in_terminal = True
+
+        output.set_size(80, 30)
+        h.app._app._on_resize()
+
+        assert h.app._resize_redraw_deferred is True
+        assert h.app._resize_reflow.has_pending_replay is False
+        assert h.app._app.render_counter == render_count
+        assert ("erase_down",) not in output.events
+
+        # prompt_toolkit releases ownership before its handoff-finally redraw.
+        h.app._app._running_in_terminal = False
+        h.app._app._redraw()
+
+        assert h.app._resize_redraw_deferred is False
+        assert h.app._app.render_counter == render_count + 1
+        assert h.app._fullscreen_invalidate_count == 0
+        assert h.app._resize_replay_timer is None
+
+
 async def test_fullscreen_mode_rewrites_scrollback_on_resize() -> None:
     """Fullscreen writes transcript once, then resize rewrites the whole scrollback."""
     agent = FakeAgent()
