@@ -359,9 +359,15 @@ class TerminalFrontend:
         self._console.print_help(output.commands)
 
     def _render_agent_message(self, output: AgentMessage) -> None:
-        self._console.print_agent(
-            output.content, show_rule=output.show_rule, soft_wrap=output.soft_wrap
-        )
+        from contextlib import nullcontext
+
+        stream = getattr(self._console.console, "file", None)
+        agent_message = getattr(stream, "agent_message", None)
+        scope = agent_message() if callable(agent_message) else nullcontext()
+        with scope:
+            self._console.print_agent(
+                output.content, show_rule=output.show_rule, soft_wrap=output.soft_wrap
+            )
 
     def _render_clear(self, _output: ClearScreen) -> None:
         stream = getattr(self._console.console, "file", None)
