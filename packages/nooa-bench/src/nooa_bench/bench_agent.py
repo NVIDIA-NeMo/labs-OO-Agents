@@ -171,8 +171,10 @@ class BenchAgent(
         String objectives retain the existing behavior.
 
         Use delegation when isolated context helps exploration, diagnosis, review, or
-        implementation. Independent calls may run concurrently with ``asyncio.gather``.
-        Inspect and integrate each result; you retain final verification ownership.
+        implementation. Recursive same-kind delegation is bounded by
+        ``max_delegation_depth`` (default 4). Independent calls may run concurrently
+        with ``asyncio.gather``. Inspect and integrate each result; you retain final
+        verification ownership.
         """
         if self._delegation_depth >= self._max_delegation_depth:
             raise RuntimeError(f"maximum delegation depth ({self._max_delegation_depth}) reached")
