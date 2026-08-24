@@ -84,8 +84,9 @@ class AgentMessage:
     content: str
     # False for 2nd+ message() calls in the same turn — suppresses the OO ── rule
     show_rule: bool = True
-    # Delegate wrapping to the terminal so copied long lines contain no hard newlines.
-    soft_wrap: bool = False
+    # Delegate prose wrapping to the transcript owner so copied long lines contain
+    # neither Rich-inserted newlines nor width-padding spaces.
+    soft_wrap: bool = True
 
     def to_json(self) -> dict:
         return {
