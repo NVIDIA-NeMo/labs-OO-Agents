@@ -311,7 +311,7 @@ class TextSkillTranslator(Skill):
                 )
             )
         resource_methods = _resource_method_plans(inventory, used_api_names)
-        docstring = _build_docstring(inventory, script_methods, omitted_scripts, resource_methods)
+        docstring = _build_docstring(inventory, script_methods, resource_methods)
 
         return ConversionPlan(
             source_dir=inventory.source_dir,
@@ -1007,15 +1007,14 @@ def _has_argparse_api_shape(path: Path) -> bool:
 def _build_docstring(
     inventory: TextSkillInventory,
     script_methods: list[ScriptMethodPlan],
-    omitted_scripts: list[OmittedScriptPlan],
     resource_methods: list[ResourceMethodPlan],
 ) -> str:
     title = inventory.description.strip() or inventory.skill_name
     lines = [
         title,
         "",
-        "LibrarySkill-native guidance generated from the source skill.",
-        "Use the Python APIs on this skill; do not look for or invoke the original TextSkill scripts.",
+        "LibrarySkill-native guidance.",
+        "Use the public Python APIs on this skill.",
     ]
     public_methods = _public_method_guidance(script_methods)
     if public_methods:
@@ -1025,14 +1024,14 @@ def _build_docstring(
                 "Generated public APIs:",
                 *public_methods,
                 "",
-                "Use these public Python methods instead of invoking bundled scripts or subprocesses.",
+                "Use these public Python methods as the supported capability interface.",
             ]
         )
     else:
         lines.extend(
             [
                 "",
-                "No public script APIs were inferred. Use the adapted guidance and bundled resource APIs when relevant.",
+                "Use the guidance and bundled resource APIs when relevant.",
             ]
         )
     if resource_methods:
@@ -1042,23 +1041,22 @@ def _build_docstring(
                 f"- {resource.method_name}() -> {resource.return_annotation}: "
                 f"returns `{resource.resource_path}` from package data."
             )
-    adapted_guidance = _adapt_skill_guidance(inventory.body, script_methods, omitted_scripts, resource_methods)
+    adapted_guidance = _adapt_skill_guidance(inventory.body, script_methods, resource_methods)
     if adapted_guidance:
-        lines.extend(["", "Adapted guidance:", adapted_guidance])
+        lines.extend(["", "Guidance:", adapted_guidance])
     return "\n".join(lines)
 
 
 def _adapt_skill_guidance(
     body: str,
     script_methods: list[ScriptMethodPlan],
-    omitted_scripts: list[OmittedScriptPlan],
     resource_methods: list[ResourceMethodPlan],
 ) -> str:
     """Render source guidance as LibrarySkill-native instructions.
 
-    This is deliberately deterministic: it preserves task-specific details
-    while rewriting old script/resource references to the generated package API
-    names. The raw SKILL.md body is not copied as an "original" block.
+    This preserves task-specific details while rewriting script/resource
+    references to generated package API names. The raw body is not copied as a
+    provenance block.
     """
     guidance = body.strip()
     if not guidance:
@@ -1070,7 +1068,7 @@ def _adapt_skill_guidance(
     guidance = re.sub(r"\bSKILL\.md\b", "this LibrarySkill guidance", guidance)
     guidance = re.sub(
         r"\b(run|execute|invoke)\s+(?:the\s+)?(?:script\s+)?`?scripts/",
-        "call the generated LibrarySkill API for `scripts/",
+        "call the corresponding LibrarySkill API `scripts/",
         guidance,
         flags=re.IGNORECASE,
     )
@@ -1092,16 +1090,7 @@ def _adapt_skill_guidance(
     for old, new in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
         guidance = _replace_reference(guidance, old, new)
 
-    notes: list[str] = []
-    if omitted_scripts:
-        notes.append(
-            "Legacy source scripts that were not safely translated into public LibrarySkill APIs are not available for direct use:"
-        )
-        for script in omitted_scripts:
-            notes.append(f"- `{script.script_path}`: {script.reason}")
-    if notes:
-        guidance = guidance + "\n\n" + "\n".join(notes)
-    return guidance
+    return re.sub(r"`?scripts/[^`\s),.;:]+" + "`?", "the corresponding LibrarySkill API", guidance)
 
 
 def _script_public_api_names(method: ScriptMethodPlan) -> list[str]:
@@ -1127,7 +1116,7 @@ def _public_method_guidance(script_methods: list[ScriptMethodPlan]) -> list[str]
             parameters = ", ".join(_guidance_parameter(parameter) for parameter in function.parameters)
             lines.append(
                 f"- {function.method_name}({parameters}) -> {function.return_annotation}: "
-                "returns the Python value from the translated implementation."
+                "returns the Python value from the library implementation."
             )
     return lines
 
@@ -1143,8 +1132,8 @@ def _guidance_parameter(parameter: FunctionParameterPlan) -> str:
 
 def _method_return_guidance(function: ScriptFunctionPlan) -> str:
     if function.return_annotation == "object":
-        return "Return the Python value from the translated implementation."
-    return f"Return `{function.return_annotation}` from the translated implementation."
+        return "Return the Python value from the library implementation."
+    return f"Return `{function.return_annotation}` from the library implementation."
 
 
 def _toml_string(value: str) -> str:
@@ -1183,13 +1172,11 @@ def _render_readme(plan: ConversionPlan) -> str:
     return textwrap.dedent(f"""\
         # {plan.project_name}
 
-        Package skill translated from `{plan.source_dir}`.
+        NOOA LibrarySkill package.
 
         Registry name: `{plan.registry_name}`
 
-        Non-script TextSkill resources are bundled under package resources.
-        Scripts are bundled only when needed as private Python implementation
-        modules for generated package APIs.
+        Use the public Python APIs exposed by the Skill class.
 
         ## LibrarySkill-native guidance
 
@@ -1341,8 +1328,7 @@ def _loaded_names(statements: list[ast.stmt]) -> set[str]:
 
 
 def _render_init(plan: ConversionPlan) -> str:
-    # Generated skills expose inferred package-style APIs; original scripts are
-    # either omitted or rewritten into private implementation modules.
+    # Generated skills expose package-style APIs backed by private modules.
     resource_methods = "\n".join(_render_resource_method(resource) for resource in plan.resource_methods)
     methods = "\n".join(
         rendered

@@ -319,9 +319,11 @@ async def test_translate_writes_valid_package_without_archiving_raw_scripts(tmp_
     assert (result.package_dir / "pyproject.toml").exists()
     assert (result.package_dir / "src" / "hello_skill" / "__init__.py").exists()
     generated_text = _generated_text(result.package_dir)
-    assert "Legacy source scripts that were not safely translated" in generated_text
-    assert "scripts/hello.py" in generated_text
-    assert "Original TextSkill guidance" not in generated_text
+    assert "Legacy source scripts" not in generated_text
+    assert "scripts/hello.py" not in generated_text
+    assert "TextSkill" not in generated_text
+    assert "translated from" not in generated_text
+    assert "Original" not in generated_text
     assert "Use this skill to greet people" not in generated_text
     assert "Use this LibrarySkill to greet people" in generated_text
     generated_tests = _run_generated_tests(result.package_dir)
@@ -348,7 +350,8 @@ async def test_translate_writes_valid_package_without_archiving_raw_scripts(tmp_
         assert "reference notes" in visible_doc
         assert "references_blob" in visible_doc
         assert "references/blob.bin" in visible_doc
-        assert "Original TextSkill guidance" not in visible_doc
+        assert "TextSkill" not in visible_doc
+        assert "Original" not in visible_doc
         assert "Use this skill to greet people" not in visible_doc
         assert "Use this LibrarySkill to greet people" in visible_doc
         assert not hasattr(skill, "run_hello")
@@ -446,7 +449,8 @@ async def test_translated_argparse_script_has_named_api_method(tmp_path):
     assert "def search(" in init_source
     assert "def run_search(" not in init_source
     assert "run_resource_script" not in init_source
-    assert "Original TextSkill guidance" not in init_source
+    assert "TextSkill" not in init_source
+    assert "Original" not in init_source
     assert "Use this skill to search records" not in init_source
     assert "Use this LibrarySkill to search records" in init_source
     assert "Use these public Python methods" in init_source
