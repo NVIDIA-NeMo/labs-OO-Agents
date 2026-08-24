@@ -459,3 +459,55 @@ def test_file_edit_does_not_confuse_bounded_content_with_a_truncated_diff() -> N
     _fire_file_edit(agent.event_manager, content_complete=False, diff_complete=True)
 
     assert not any(isinstance(item, Text) and "truncated" in str(item) for item in emitted)
+
+
+def test_session_emit_text_adds_code_copy_metadata_only_in_fullscreen() -> None:
+    from nooa_cli.tui.config import DisplayMode
+    from nooa_cli.tui.copyable_markdown import CopyableMarkdown
+    from nooa_cli.tui.session import Session
+
+    class FakeApp:
+        display_mode = DisplayMode.FULLSCREEN
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        def emit_block(self, text, **kwargs) -> None:
+            self.calls.append((text, kwargs))
+
+    session = Session.__new__(Session)
+    session._app = FakeApp()
+    session._render_to_ansi = lambda renderable: (
+        str(renderable.markup) if isinstance(renderable, Markdown) else str(renderable)
+    )
+
+    Session._emit_text(session, Markdown("```python\nx = 1\n```"))
+
+    _text, kwargs = session._app.calls[0]
+    assert callable(kwargs["replay"])
+    assert list(kwargs["code_copy_actions"].values()) == ["x = 1"]
+    assert isinstance(kwargs["replay"].__defaults__[0], CopyableMarkdown)
+
+
+def test_session_emit_text_leaves_native_markdown_without_copy_metadata() -> None:
+    from nooa_cli.tui.config import DisplayMode
+    from nooa_cli.tui.session import Session
+
+    class FakeApp:
+        display_mode = DisplayMode.NATIVE
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        def emit_block(self, text, **kwargs) -> None:
+            self.calls.append((text, kwargs))
+
+    session = Session.__new__(Session)
+    session._app = FakeApp()
+    session._render_to_ansi = lambda renderable: str(renderable.markup)
+
+    Session._emit_text(session, Markdown("```python\nx = 1\n```"))
+
+    _text, kwargs = session._app.calls[0]
+    assert "replay" not in kwargs
+    assert "code_copy_actions" not in kwargs

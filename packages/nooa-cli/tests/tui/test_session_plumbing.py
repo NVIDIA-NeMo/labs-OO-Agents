@@ -127,6 +127,27 @@ def test_session_semantic_render_uses_isolated_consoles_across_threads(
     assert rendered == {"first": "first", "second": "second"}
 
 
+def test_session_markdown_render_preserves_copyable_line_boundaries() -> None:
+    """self.message() prose must not inherit Rich's width padding or hard wraps."""
+    from types import SimpleNamespace
+
+    from nooa_cli.tui.session import Session
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+    from rich.markdown import Markdown
+
+    message = (
+        "I left a brief closing note that the interaction design and implementation "
+        "need a more fundamental rethink. The local diagnostic mouse fix remains "
+        "uncommitted and was not pushed."
+    )
+    session = Session.__new__(Session)
+    session._app = SimpleNamespace(transcript_columns=lambda: 60)
+
+    rendered = strip_safe_ansi(session._render_to_ansi(Markdown(message)))
+
+    assert rendered == f"{message}\n"
+
+
 def test_emit_stream_coalesces_one_print_into_one_emit_call() -> None:
     """Rich writes many small chunks per ``Console.print``. ``_EmitStream``
     must buffer until the trailing ``flush()`` and call ``emit`` exactly
