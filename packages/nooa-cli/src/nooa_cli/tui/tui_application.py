@@ -1046,9 +1046,8 @@ class TUIApplication:
         self._resize_replay_schedule_generation = 0
         self._queued_resize_replay_generation: int | None = None
         self._resize_replay_failure_generation: int | None = None
-        # Native replay suppresses prompt_toolkit's immediate width redraw so
-        # its live-region redraw and our semantic transcript replay become one
-        # settled visible transition.
+        # Resize-aware modes suppress prompt_toolkit's immediate SIGWINCH
+        # redraw so transient geometry collapses into one settled frame.
         self._resize_redraw_deferred = False
         # A real height shrink can compress the non-full-screen live region
         # below its preferred height.  prompt_toolkit erases using a cursor
