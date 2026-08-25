@@ -2759,12 +2759,10 @@ class TUIApplication:
                 loop.call_soon_threadsafe(self._on_agent_change, state)
                 return
 
-        # A pre-interrupt observation may already be queued when cancellation is
-        # admitted. Only teardown may acknowledge the optimistic status; the
-        # minimum display interval keeps a fast cancellation from clearing it
-        # before prompt_toolkit can paint even one frame.
-        if state is None:
-            self._acknowledge_agent_interrupt()
+        # Observation teardown is independent from runtime turn cancellation.
+        # Only runtime_cancelled() may acknowledge interrupt feedback; otherwise
+        # a delayed observation-close callback could retire a newer turn's
+        # status.
         app = getattr(self, "_app", None)
         if app is not None and app.is_running:
             app.invalidate()

@@ -108,12 +108,14 @@ class _CopyableCodeBlock(CodeBlock):
         self.action_id = action_id
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
-        if self.action_id is not None:
+        if self.action_id is not None and options.max_width >= len("Copy"):
             # Replace Syntax's top padding row with a full-width, same-background
             # control row so the language and Copy action sit inside the panel.
+            # At widths below the full label, omit the action rather than expose
+            # an ambiguous linked suffix such as "y" or "py".
             header = Text(style=Syntax.get_theme(self.theme).get_background_style())
-            width = max(1, options.max_width)
-            copy_width = min(width, len("Copy"))
+            width = options.max_width
+            copy_width = len("Copy")
             trailing_space = width > copy_width
             available = width - copy_width - int(trailing_space)
             if self.lexer_name != "text" and available >= 4:
@@ -122,7 +124,7 @@ class _CopyableCodeBlock(CodeBlock):
                 header.append_text(language)
                 header.append(" · ", style="dim")
             header.append(
-                "Copy"[-copy_width:],
+                "Copy",
                 style=f"bold underline link {_COPY_URI_PREFIX}{self.action_id}",
             )
             if trailing_space:
