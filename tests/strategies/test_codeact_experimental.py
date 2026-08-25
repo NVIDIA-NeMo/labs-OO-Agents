@@ -3,6 +3,7 @@
 """Tests for the experimental single-tool CodeAct strategy."""
 
 import json
+from types import ModuleType
 from typing import Any, cast
 
 import pytest
@@ -147,6 +148,33 @@ async def test_return_result_is_available_inside_python_cells():
     ]
     assert len(completion_events) == 1
     assert completion_events[0].metadata["synthetic_type"] == "codeact_inline_return"
+
+
+@pytest.mark.asyncio
+async def test_python_cell_context_lists_static_module_capabilities():
+    strategy_instance = CodeActExperimental(config=CodeActConfig(prefill=None))
+    json_module = __import__("json")
+    pandas_module = __import__("pandas")
+    agent_module = ModuleType("test_capability_agent")
+    agent_module.json = json_module
+    agent_module.pd = pandas_module
+    agent = type("Agent", (), {})()
+    agent.__class__.__module__ = agent_module.__name__
+    runtime = type("Runtime", (), {"agent": agent})()
+
+    import sys
+
+    sys.modules[agent_module.__name__] = agent_module
+    try:
+        rendered = await strategy_instance.python_cell_context(runtime)
+    finally:
+        sys.modules.pop(agent_module.__name__, None)
+
+    assert rendered == (
+        "## Python cell context\n\n"
+        "Module capabilities already in scope: `json`, `pd` → `pandas`.\n"
+        "Use them directly; do not re-import them."
+    )
 
 
 @pytest.mark.asyncio
