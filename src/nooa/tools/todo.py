@@ -11,7 +11,7 @@ import uuid as _uuid
 from datetime import datetime
 from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from nooa import Skill, hidden
 from nooa.storage.markers import snapshotable
@@ -28,9 +28,9 @@ class TodoComment(BaseModel):
     """An append-only, snapshot-backed progress-journal entry.
 
     Survives across turns (snapshot-backed like the rest of the todo
-    state). Prefer this over mutating ``Todo.notes`` when you want a
-    chronological log: what was tried, what was found, why the approach
-    changed.
+    state). Use comments for meaningful findings, decisions, completed steps,
+    and verification results. Keep the Todo description aligned with the current
+    objective; comments preserve the chronology of how understanding changed.
     """
 
     id: str = Field(default_factory=lambda: _uuid.uuid4().hex[:8])
@@ -86,11 +86,25 @@ class Todo(BaseModel):
         default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M"),
         description="Creation time",
     )
-    notes: str = Field(default="", description="Current summary or instructions")
+    description: str = Field(
+        default="",
+        validation_alias=AliasChoices("description", "notes"),
+        description="Current scope, constraints, approach, and definition of done",
+    )
     comments: list[TodoComment] = Field(
         default_factory=list,
         description="Append-only chronological progress journal",
     )
+
+    @property
+    @hidden
+    def notes(self) -> str:
+        """Deprecated compatibility alias for ``description``."""
+        return self.description
+
+    @notes.setter
+    def notes(self, value: str) -> None:
+        self.description = value
 
     @field_validator("vars", mode="before")
     @classmethod
@@ -129,12 +143,13 @@ class Todo(BaseModel):
 
 @snapshotable
 class TodoManager(Skill):
-    """Track multi-step work, dependencies, metadata, and progress notes.
+    """Track multi-step work, dependencies, metadata, and progress comments.
 
     Every todo argument accepts either a ``Todo`` returned by this manager or
     its ID. Keep work visible with ``status()``, identify the current objective
-    with ``activate()``, inspect details with ``get()`` and ``comments()``, and
-    prune history with ``clear_done()``.
+    with ``activate()``, and inspect details with ``get()``. Keep titles and
+    descriptions aligned with the current understanding of the work. Add comments after material
+    findings, decisions, completed steps, and verification—not routine narration.
 
     Example::
 
@@ -223,7 +238,7 @@ class TodoManager(Skill):
             raise ValueError(f"todo {updated.id!r} is not managed by this TodoManager")
 
         candidate = current.model_copy(deep=True)
-        for field in ("title", "status", "deps", "notes"):
+        for field in ("title", "status", "deps", "description"):
             before = getattr(base, field)
             after = getattr(updated, field)
             existing = getattr(current, field)
@@ -261,7 +276,7 @@ class TodoManager(Skill):
 
         # Commit only after every conflict check has succeeded, preserving the
         # authoritative Todo object's identity for existing callers.
-        for field in ("title", "status", "deps", "notes", "vars", "comments"):
+        for field in ("title", "status", "deps", "description", "vars", "comments"):
             setattr(current, field, getattr(candidate, field))
         if current.status == "done" and current.id == self._active_id:
             self._active_id = None
@@ -271,18 +286,25 @@ class TodoManager(Skill):
         self,
         title: str,
         deps: list[Todo | str] | None = None,
-        notes: str = "",
+        description: str = "",
         **vars: Any,
     ) -> Todo:
         """Create and return an open todo.
 
-        ``deps`` accepts todos or IDs. ``notes`` is the current summary; extra
-        keywords become durable metadata retrievable with ``get_var()``.
+        ``deps`` accepts todos or IDs. ``description`` is the current scope,
+        constraints, approach, and definition of done; revise it as understanding
+        changes. Extra keywords become durable metadata available through the
+        returned Todo's ``v`` proxy.
         """
+        legacy_notes = vars.pop("notes", None)
+        if legacy_notes is not None:
+            if description:
+                raise ValueError("use either description or legacy notes, not both")
+            description = legacy_notes
         t = Todo(
             title=title,
             deps=[self._todo_id(dep) for dep in deps or []],
-            notes=notes,
+            description=description,
             vars=dict(vars),
         )
         self._todos[t.id] = t
@@ -293,6 +315,7 @@ class TodoManager(Skill):
         """Return the matching managed todo, or ``None`` if it is missing."""
         return self._todos.get(self._todo_id(todo_id))
 
+    @hidden
     def done(self, todo_id: Todo | str) -> Todo | None:
         """Mark a todo done and return it, or ``None`` if it is missing.
 
@@ -307,9 +330,10 @@ class TodoManager(Skill):
         return t
 
     def complete(self, todo_id: Todo | str) -> Todo | None:
-        """Mark a todo done. This is the preferred alias of ``done()``."""
+        """Mark a todo done and return it, or ``None`` if it is missing."""
         return self.done(todo_id)
 
+    @hidden
     def reopen(self, todo_id: Todo | str) -> Todo | None:
         """Mark a todo open and return it, or ``None`` if it is missing.
 
@@ -320,6 +344,7 @@ class TodoManager(Skill):
             t.status = "open"
         return t
 
+    @hidden
     def remove(self, todo_id: Todo | str) -> bool:
         """Remove a todo and its references from dependent todos."""
         todo_id = self._todo_id(todo_id)
@@ -333,12 +358,14 @@ class TodoManager(Skill):
             todo.deps = [dep_id for dep_id in todo.deps if dep_id != todo_id]
         return True
 
+    @hidden
     def clear(self) -> None:
         """Remove every todo from the current manager and clear the active task."""
         self._todos.clear()
         self._order.clear()
         self._active_id = None
 
+    @hidden
     def clear_done(self) -> int:
         """Remove completed todos and return how many were removed.
 
@@ -355,14 +382,18 @@ class TodoManager(Skill):
         return len(done_ids)
 
     def update(self, todo_id: Todo | str, **kwargs: Any) -> Todo | None:
-        """Update ``title``, ``status``, or ``notes`` and return the todo.
+        """Update ``title``, ``status``, or ``description`` and return the todo.
 
-        Returns ``None`` if the todo is missing. Other keyword names are ignored.
+        Keep title and description aligned with the current understanding of the
+        task. Use ``comment()`` to append material progress and evidence. Returns
+        ``None`` if the todo is missing; other keyword names are ignored.
         """
         t = self.get(todo_id)
         if t is None:
             return None
-        allowed = {"title", "status", "notes"}
+        if "notes" in kwargs and "description" not in kwargs:
+            kwargs["description"] = kwargs["notes"]
+        allowed = {"title", "status", "description"}
         for k, v in kwargs.items():
             if k in allowed:
                 setattr(t, k, v)
@@ -388,12 +419,14 @@ class TodoManager(Skill):
         self._active_id = todo_id
         return todo
 
+    @hidden
     def deactivate(self) -> Todo | None:
         """Clear the active task and return it, if one was active."""
         todo = self.active()
         self._active_id = None
         return todo
 
+    @hidden
     def active(self) -> Todo | None:
         """Return the active todo, or ``None`` when no open todo is active."""
         if self._active_id is None:
@@ -406,6 +439,7 @@ class TodoManager(Skill):
 
     # ── DEPENDENCIES ──────────────────────────────
 
+    @hidden
     def add_dep(self, todo_id: Todo | str, dep_id: Todo | str) -> Todo | None:
         """Add a dependency and return the todo, or ``None`` if it is missing."""
         t = self.get(todo_id)
@@ -414,6 +448,7 @@ class TodoManager(Skill):
             t.deps.append(dep_id)
         return t
 
+    @hidden
     def remove_dep(self, todo_id: Todo | str, dep_id: Todo | str) -> Todo | None:
         """Remove a dependency and return the todo, or ``None`` if it is missing."""
         t = self.get(todo_id)
@@ -434,6 +469,7 @@ class TodoManager(Skill):
             t.vars[key] = value
         return t
 
+    @hidden
     def del_var(self, todo_id: Todo | str, key: str) -> Todo | None:
         """Delete a metadata key and return the todo, or ``None`` if it is missing."""
         t = self.get(todo_id)
@@ -441,6 +477,7 @@ class TodoManager(Skill):
             t.vars.pop(key, None)
         return t
 
+    @hidden
     def get_var(self, todo_id: Todo | str, key: str) -> Any | None:
         """Return a metadata value, or ``None`` if the todo or key is missing."""
         t = self.get(todo_id)
@@ -449,10 +486,11 @@ class TodoManager(Skill):
     # ── COMMENTS ──────────────────────────────────
 
     def comment(self, todo_id: Todo | str, body: str) -> TodoComment | None:
-        """Append a progress note and return it, or ``None`` if the todo is missing.
+        """Append material progress and return it, or ``None`` if missing.
 
-        Comments are append-only, snapshot-backed journal entries. Read them with
-        ``comments(todo)``.
+        Record meaningful findings, decisions, completed steps, and verification
+        results—not routine narration. Comments are an append-only, snapshot-backed
+        journal visible on the ``Todo`` returned by ``get(todo)``.
         """
         t = self.get(todo_id)
         if t is None:
@@ -461,6 +499,7 @@ class TodoManager(Skill):
         t.comments.append(c)
         return c
 
+    @hidden
     def comments(self, todo_id: Todo | str) -> list[TodoComment]:
         """Return a chronological copy of comments, or ``[]`` if none exist."""
         t = self.get(todo_id)
@@ -486,6 +525,16 @@ class TodoManager(Skill):
         if status is None:
             return todos
         return [todo for todo in todos if self._effective_status(todo) == status]
+
+    # Skill lifecycle hooks are framework plumbing, not task-management operations.
+
+    @hidden
+    def attach(self, agent: Any) -> None:
+        super().attach(agent)
+
+    @hidden
+    def detach(self) -> None:
+        super().detach()
 
     # ── STATUS ────────────────────────────────────
 
@@ -513,8 +562,8 @@ class TodoManager(Skill):
             dep_text = f" [needs: {', '.join(shown)}{suffix}]"
 
         details: list[str] = []
-        if todo.notes.strip():
-            details.append("note")
+        if todo.description.strip():
+            details.append("description")
         if todo.vars:
             details.append(f"{len(todo.vars)} var{'s' if len(todo.vars) != 1 else ''}")
         if todo.comments:
@@ -560,7 +609,7 @@ class TodoManager(Skill):
     def status(self, max_items: int = _STATUS_MAX_ITEMS, max_chars: int = _STATUS_MAX_CHARS) -> str:
         """Return a compact, bounded progress summary.
 
-        When a todo is active, shows its notes and transitive dependencies,
+        When a todo is active, shows its description and transitive dependencies,
         followed by a compact summary of unrelated work. Otherwise, orders open
         and blocked work before newest completed history. ``list_todos()`` always
         returns the full workspace.
@@ -598,9 +647,11 @@ class TodoManager(Skill):
                         f"{len(active.comments)} comment{'s' if len(active.comments) != 1 else ''}"
                     )
                 lines = [f"Active [{active.id}] {active_title}", f"Status: {' · '.join(details)}"]
-                note = " ".join(active.notes.split())
-                if note:
-                    lines.append(f"Notes: {note}")
+                note = " ".join(active.description.split())
+                lines.append(f"Description: {note or '(none)'}")
+                if active.comments:
+                    recent = " ".join(active.comments[-1].body.split())
+                    lines.append(f"Recent activity: {recent}")
                 if rows or omitted_count or missing:
                     lines.append("")
                     lines.append("Dependencies:")
@@ -630,9 +681,19 @@ class TodoManager(Skill):
                     if other_count:
                         summary += (" · " if summary else "") + f"{other_count} other"
                     lines.extend(("", f"Other Todos: {summary}"))
-                lines.append(
-                    "Hint — clear active: self.todo.deactivate() · show all: self.todo.list_todos()"
-                )
+                hints = ["clear active: self.todo.deactivate()"]
+                if not note:
+                    hints.append(
+                        f'refine task: self.todo.update("{active.id}", description="scope and next step")'
+                    )
+                if not active.comments:
+                    hints.append(
+                        f'record progress: self.todo.comment("{active.id}", "what changed or was learned")'
+                    )
+                else:
+                    hints.append("record material progress with self.todo.comment(id, ...)")
+                hints.append("show all: self.todo.list_todos()")
+                lines.append("Hint — " + " · ".join(hints))
                 return self._bounded_status("\n".join(lines), max_chars)
 
             output = render_active(selected)
@@ -679,7 +740,7 @@ class TodoManager(Skill):
             hints: list[str] = []
             if omitted:
                 hints.append("list all: self.todo.list_todos()")
-            if any(todo.notes.strip() or todo.vars or todo.comments for todo in rows):
+            if any(todo.description.strip() or todo.vars or todo.comments for todo in rows):
                 hints.append("inspect: self.todo.get(id)")
             if by_status["done"]:
                 hints.append("prune done: self.todo.clear_done()")

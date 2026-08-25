@@ -34,7 +34,7 @@ class TodoExplorerRow:
     status: str
     deps: tuple[str, ...]
     created_at: str
-    notes: str
+    description: str
     comments: tuple[TodoExplorerComment, ...]
     search_text: str
 
@@ -56,7 +56,7 @@ def build_todo_rows(todo_manager: Any) -> list[TodoExplorerRow]:
             t.id,
             t.title,
             t.status,
-            t.notes,
+            t.description,
             *[comment.body for comment in comments],
         ]
         rows.append(
@@ -66,7 +66,7 @@ def build_todo_rows(todo_manager: Any) -> list[TodoExplorerRow]:
                 status=t.status,
                 deps=tuple(t.deps),
                 created_at=t.created_at,
-                notes=t.notes,
+                description=t.description,
                 comments=comments,
                 search_text="\n".join(search_parts),
             )
@@ -126,9 +126,9 @@ class TodoExplorerView(ExplorerView):
             lines.append(f"Dependencies: {', '.join(d[:8] for d in row.deps)}")
         lines.append("")
 
-        if row.notes:
-            lines.append("Notes:")
-            for raw in row.notes.splitlines() or [""]:
+        if row.description:
+            lines.append("Description:")
+            for raw in row.description.splitlines() or [""]:
                 lines.extend(wrap_plain_line(f"  {raw}", width))
             lines.append("")
 

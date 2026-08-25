@@ -11,11 +11,11 @@ def test_empty_status_is_minimal() -> None:
     assert TodoManager().status() == "(no todos)"
 
 
-def test_status_hides_payloads_and_advertises_inspection() -> None:
+def test_status_hides_description_payload_and_advertises_inspection() -> None:
     manager = TodoManager()
     todo = manager.add(
         "Investigate\nmultiline failure",
-        notes="secret note payload",
+        description="secret description payload",
         secret={"large": "value"},
     )
     manager.comment(todo, "secret comment payload")
@@ -23,8 +23,8 @@ def test_status_hides_payloads_and_advertises_inspection() -> None:
     output = manager.status()
 
     assert "Investigate multiline failure" in output
-    assert "· note · 1 var · 1 comment" in output
-    assert "secret note payload" not in output
+    assert "· description · 1 var · 1 comment" in output
+    assert "secret description payload" not in output
     assert "secret comment payload" not in output
     assert "large" not in output
     assert "inspect: self.todo.get(id)" in output
@@ -186,12 +186,14 @@ def test_todo_manager_docs_are_task_focused() -> None:
 
     assert "Every todo argument accepts either a ``Todo``" in output
     assert "def add(" in output
-    assert "extra\n        keywords become durable metadata" in output
-    assert "def clear_done(" in output
+    assert "Extra keywords become durable metadata" in output
+    assert "def clear_done(" not in output
     assert "def complete(" in output
+    assert "def done(" not in output
+    assert "notes:" not in output
     assert "def activate(" in output
-    assert "def deactivate(" in output
-    assert "def active(" in output
+    assert "def deactivate(" not in output
+    assert "def active(" not in output
     assert "def status(self, max_items: int = 10, max_chars: int = 2000)" in output
     assert "def to_dict(" not in output
     assert "def from_dict(" not in output
@@ -200,9 +202,25 @@ def test_todo_manager_docs_are_task_focused() -> None:
     assert "vars: SnapshotVars" not in output
     assert "class SnapshotVars:" not in output
     assert "def pop(" not in output
+    for administrative_method in (
+        "remove",
+        "clear",
+        "reopen",
+        "clear_done",
+        "deactivate",
+        "active",
+        "add_dep",
+        "remove_dep",
+        "del_var",
+        "get_var",
+        "comments",
+        "attach",
+        "detach",
+    ):
+        assert f"def {administrative_method}(" not in output
 
 
-def test_active_status_shows_notes_dependencies_and_other_summary() -> None:
+def test_active_status_shows_description_dependencies_and_other_summary() -> None:
     manager = TodoManager()
     unrelated_open = manager.add("unrelated open")
     unrelated_done = manager.add("unrelated done")
@@ -212,7 +230,7 @@ def test_active_status_shows_notes_dependencies_and_other_summary() -> None:
     root = manager.add(
         "active root",
         deps=[middle],
-        notes="Detailed instructions for the current work.",
+        description="Detailed instructions for the current work.",
         owner="controller",
     )
     manager.comment(root, "Implementation started")
@@ -225,7 +243,9 @@ def test_active_status_shows_notes_dependencies_and_other_summary() -> None:
     assert output.startswith(
         f"Active [{root.id}] active root\nStatus: blocked · 2 dependencies · 1 var · 1 comment"
     )
-    assert "Notes: Detailed instructions for the current work." in output
+    assert "Description: Detailed instructions for the current work." in output
+    assert "Recent activity: Implementation started" in output
+    assert "record material progress with self.todo.comment(id, ...)" in output
     rows = [line for line in output.splitlines() if line.startswith("  ") and "[" in line]
     assert [todo.id for todo in (leaf, middle)] == [
         line.split("[", 1)[1].split("]", 1)[0] for line in rows
@@ -246,6 +266,7 @@ def test_activate_replaces_previous_and_deactivate_restores_regular_status() -> 
     assert manager.activate(second) is second
     assert manager.active() is second
     assert "Other Todos: 1 open" in manager.status()
+    assert f'self.todo.comment("{second.id}", "what changed or was learned")' in manager.status()
 
     assert manager.deactivate() is second
     assert manager.active() is None
@@ -338,9 +359,9 @@ def test_active_round_trips_through_snapshot_and_ignores_invalid_ids() -> None:
     assert manager.to_dict()["active_id"] is None
 
 
-def test_active_status_bounds_long_notes_and_missing_dependencies() -> None:
+def test_active_status_bounds_long_description_and_missing_dependencies() -> None:
     manager = TodoManager()
-    root = manager.add("root", deps=["missing-" + "x" * 500], notes="n" * 500)
+    root = manager.add("root", deps=["missing-" + "x" * 500], description="n" * 500)
     manager.activate(root)
 
     output = manager.status(max_items=0, max_chars=200)

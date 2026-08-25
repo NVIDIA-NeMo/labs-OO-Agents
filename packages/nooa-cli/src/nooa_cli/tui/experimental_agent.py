@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from nooa import hidden, strategy
+from nooa import DynamicContext, hidden, strategy
 from nooa.config import CodeActConfig
 from nooa.interactive import RespondResult
 from nooa.strategies import CodeActExperimental
@@ -30,7 +30,11 @@ class ExperimentalCodingWorker(CodingWorker):
                 text_only_stop_behavior="synthetic_comment",
                 prefill=SafeDelegationPrefill(),
             )
-        )
+        ),
+        context={
+            "state": DynamicContext("pformat(self, max_length=50, max_string=500, max_depth=4)"),
+            "execution_context": DynamicContext("strategy.execution_context(runtime)"),
+        },
     )
     async def investigate(self, objective: str, supplied_context: Any = None) -> str:
         """Complete one bounded coding subtask and return a concise report.
@@ -41,9 +45,11 @@ class ExperimentalCodingWorker(CodingWorker):
         delegated Todo, ``supplied_context`` is either that Todo or a mapping with
         ``"todo"`` and supplemental ``"context"`` entries. In the mapping form, use
         ``todo = supplied_context["todo"]`` for Todo operations and inspect
-        ``supplied_context["context"]`` separately. Record findings on that Todo through
-        ``self.todo``. Return concise findings or changes rather than a
-        raw transcript.
+        ``supplied_context["context"]`` separately. Keep that Todo's title and
+        description aligned with the current understanding. Record material findings,
+        decisions, completed steps, and verification with ``self.todo.comment(...)``,
+        not routine narration. Return concise findings or changes rather than a raw
+        transcript.
         """
         ...
 
@@ -70,6 +76,9 @@ class ExperimentalTUIAgent(CodingAgent):
     ``return_result(RespondReason.WAIT, explanation="waiting for <label>")``. The host
     will invoke a new turn when the report arrives. Inspect the report in that
     notification before final verification.
+    For multi-step work, activate the current Todo. Keep its title and description
+    aligned with the current understanding, and append comments for material findings,
+    decisions, completed steps, and verification—not routine narration.
     Work until the newest request is complete or genuinely needs user input. Use
     as many Python cells as necessary, inspect
     each result, and never claim a check passed without running it. Send each
@@ -85,7 +94,10 @@ class ExperimentalTUIAgent(CodingAgent):
     _worker_type = ExperimentalCodingWorker
 
     @hidden
-    @strategy(CodeActExperimental(config=CodeActConfig(cell_timeout=1800.0)))
+    @strategy(
+        CodeActExperimental(config=CodeActConfig(cell_timeout=1800.0)),
+        context={"state": None, "execution_context": None},
+    )
     async def handle(self, notification: dict[str, list[Any]]) -> RespondResult: ...
 
 
