@@ -38,6 +38,23 @@ def test_tui_package_import_does_not_import_agent_stack() -> None:
     assert result.stdout.splitlines() == ["False", "False"]
 
 
+def test_interactive_import_defers_optional_datascience_stack() -> None:
+    code = (
+        "import sys\n"
+        "import nooa.interactive\n"
+        "print('numpy' in sys.modules)\n"
+        "print('pandas' in sys.modules)\n"
+        "print('plotly.express' in sys.modules)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.splitlines() == ["False", "False", "False"]
+
+
 @pytest.mark.asyncio
 async def test_pending_llm_health_does_not_emit_durable_startup_status(tmp_path, monkeypatch):
     from nooa_cli.tui.bootstrap import bootstrap

@@ -33,6 +33,8 @@ from nooa.storage.markers import nosnapshot
 from nooa.storage.snapshot_vars import SnapshotVars
 
 with hidden:
+    import importlib
+    import importlib.util
     from collections.abc import Callable
 
     from nooa import Agent
@@ -57,33 +59,75 @@ from nooa.runtime.producers import after, cron, monitor, run_job, tail  # noqa: 
 with hidden:
     import os
 
-# Optional third-party libraries — visible in REPL (use np, pd, px, go directly)
-try:
-    import numpy as np  # noqa: F401  # type: ignore[import-untyped]
-except ImportError:
-    pass
+@hidden
+class _LazyOptionalImport:
+    """Proxy an optional REPL convenience import until generated code uses it."""
 
-try:
-    import pandas as pd  # noqa: F401  # type: ignore[import-untyped]
-except ImportError:
-    pass
+    def __init__(self, module_name: str, attr_name: str | None = None) -> None:
+        self._module_name = module_name
+        self._attr_name = attr_name
+        self._loaded: Any | None = None
 
-try:
-    import plotly.express as px  # noqa: F401  # type: ignore[import-untyped]
-    import plotly.graph_objects as go  # noqa: F401  # type: ignore[import-untyped]
-    from plotly.subplots import make_subplots  # noqa: F401  # type: ignore[import-untyped]
-except ImportError:
-    pass
+    def _load(self) -> Any:
+        if self._loaded is None:
+            module = importlib.import_module(self._module_name)
+            self._loaded = getattr(module, self._attr_name) if self._attr_name else module
+        return self._loaded
 
-try:
-    import scipy  # noqa: F401  # type: ignore[import-untyped]
-except ImportError:
-    pass
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._load(), name)
 
-try:
-    import sklearn  # noqa: F401  # type: ignore[import-untyped]
-except ImportError:
-    pass
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return self._load()(*args, **kwargs)
+
+    def __dir__(self) -> list[str]:
+        try:
+            return sorted(set(super().__dir__()) | set(dir(self._load())))
+        except ImportError:
+            return super().__dir__()
+
+    def __repr__(self) -> str:
+        target = f"{self._module_name}.{self._attr_name}" if self._attr_name else self._module_name
+        if self._loaded is None:
+            return f"<lazy import {target}>"
+        return repr(self._loaded)
+
+
+@hidden
+def _optional_import(module_name: str, attr_name: str | None = None) -> _LazyOptionalImport | None:
+    try:
+        if importlib.util.find_spec(module_name) is None:
+            return None
+    except (ImportError, ValueError):
+        return None
+    return _LazyOptionalImport(module_name, attr_name)
+
+
+# Optional third-party libraries — visible in REPL (use np, pd, px, go directly).
+# Keep the names available without charging import cost before the first prompt.
+with hidden:
+    _np = _optional_import("numpy")
+    _pd = _optional_import("pandas")
+    _px = _optional_import("plotly.express")
+    _go = _optional_import("plotly.graph_objects")
+    _make_subplots = _optional_import("plotly.subplots", "make_subplots")
+    _scipy = _optional_import("scipy")
+    _sklearn = _optional_import("sklearn")
+
+if _np is not None:
+    np = _np  # noqa: F401
+if _pd is not None:
+    pd = _pd  # noqa: F401
+if _px is not None:
+    px = _px  # noqa: F401
+if _go is not None:
+    go = _go  # noqa: F401
+if _make_subplots is not None:
+    make_subplots = _make_subplots  # noqa: F401
+if _scipy is not None:
+    scipy = _scipy  # noqa: F401
+if _sklearn is not None:
+    sklearn = _sklearn  # noqa: F401
 
 with hidden:
     from nooa.unifiedllm import UnifiedLLM
