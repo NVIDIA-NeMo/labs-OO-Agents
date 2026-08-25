@@ -14,6 +14,7 @@ import pytest
 
 from nooa import Agent
 from nooa.agentdoc import doc
+from nooa.context_blocks import DynamicContext
 from nooa.skill import TextSkill
 from nooa.skill_registry import SkillRegistry
 from nooa.tools.skill_translator import TextSkillTranslator
@@ -355,6 +356,66 @@ async def test_translate_writes_valid_package_without_archiving_raw_scripts(tmp_
         assert "Use this skill to greet people" not in visible_doc
         assert "Use this LibrarySkill to greet people" in visible_doc
         assert not hasattr(skill, "run_hello")
+    finally:
+        await registry.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resource_docstrings_inline_only_small_preview(tmp_path):
+    skill_dir = _make_text_skill(tmp_path)
+    long_text = "start\n" + ("0123456789" * 160) + "\nunique-tail-marker\n"
+    (skill_dir / "references" / "long.md").write_text(long_text, encoding="utf-8")
+    translator = TextSkillTranslator()
+
+    result = translator.translate(skill_dir, tmp_path / "libs")
+    registry = SkillRegistry(_Agent())
+    registry.discover_libs(result.package_dir.parent)
+    try:
+        skill = registry[result.registry_name]
+        visible_doc = doc(skill)
+        assert skill.references_long() == long_text
+        assert "references_long" in visible_doc
+        assert "Resource contents:\n        start" in visible_doc
+        assert "01234567890123456789" in visible_doc
+        assert "unique-tail-marker" not in visible_doc
+        assert "[Truncated in docstring; call this method for the full resource.]" in visible_doc
+    finally:
+        await registry.aclose()
+
+
+@pytest.mark.asyncio
+async def test_translated_skill_context_block_renders_after_activation(tmp_path):
+    from nooa.runtime.context_builder import build_context
+
+    skill_dir = _make_text_skill(tmp_path)
+    translator = TextSkillTranslator()
+    result = translator.translate(skill_dir, tmp_path / "libs")
+
+    agent = Agent(llm=object())
+    registry = SkillRegistry(agent)
+    registry.discover_libs(result.package_dir.parent)
+    registry.activate([result.registry_name])
+    try:
+        context_key = f"skill:{result.registry_name}"
+        assert context_key in agent.context_manager
+        raw_block = dict(agent.context_manager._raw_items())[context_key]
+        assert isinstance(raw_block, DynamicContext)
+        assert raw_block.expr == "self.hello_skill.format_guidance()"
+
+        async def resolve_context_expr(key, value):
+            if isinstance(value, DynamicContext) and key == context_key:
+                return eval(value.expr, {}, {"self": agent})
+            return ""
+
+        built = await build_context(
+            context_manager=agent.context_manager,
+            event_manager=agent.event_manager,
+            strategy=None,
+            resolve_fn=resolve_context_expr,
+        )
+        rendered = next(block.content for block in built.blocks if block.key == context_key)
+        assert "Use this LibrarySkill to greet people" in rendered
+        assert "references_notes() -> str: references/notes.txt" in rendered
     finally:
         await registry.aclose()
 

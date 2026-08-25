@@ -36,7 +36,7 @@ _RESERVED_METHOD_NAMES = {
     *(name for name in dir(Skill) if not name.startswith("_")),
 }
 
-_RESOURCE_DOCSTRING_INLINE_LIMIT = 4000
+_RESOURCE_DOCSTRING_INLINE_LIMIT = 1000
 
 
 class TextSkillFile(BaseModel):
