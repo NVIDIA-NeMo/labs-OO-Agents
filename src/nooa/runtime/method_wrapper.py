@@ -12,7 +12,8 @@ for context variable management, tracing hooks, and execution routing.
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable, Generator
+from contextlib import contextmanager
 from functools import wraps
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -27,7 +28,11 @@ from nooa.runtime.context_vars import (
     _pop_agent_call_id,
     _push_agent_call_id,
 )
-from nooa.runtime.hooks import call_after_hook, call_before_hook
+from nooa.runtime.hooks import (
+    activate_agent_call_context,
+    call_after_hook,
+    call_before_hook,
+)
 
 if TYPE_CHECKING:
     from nooa.strategies.base import GenerationStrategy
@@ -49,6 +54,112 @@ async def _flush_litellm_journal() -> None:
         await asyncio.to_thread(flush_pending)
     finally:
         _in_agent_context.reset(token)
+
+
+@contextmanager
+def _generator_resume_context(agent: Any, call_id: str | None) -> Generator[None, None, None]:
+    """Activate agent context only while a generator body is running.
+
+    A generator suspends at every yield. Leaving these ContextVars active while
+    control is in the consumer would incorrectly make consumer work a child of
+    the generator method.
+    """
+    current_parent = _parent_agent_var.get()
+    is_subagent_call = current_parent is not None and current_parent is not agent
+
+    scoped_blocks_token = None
+    scoped_events_token = None
+    if is_subagent_call:
+        scoped_blocks_token = _scoped_blocks_var.set(None)
+        scoped_events_token = _scoped_events_var.set(None)
+
+    _push_agent_call_id(call_id)
+    parent_token = _parent_agent_var.set(agent)
+    try:
+        yield
+    finally:
+        _parent_agent_var.reset(parent_token)
+        if scoped_blocks_token is not None:
+            _scoped_blocks_var.reset(scoped_blocks_token)
+        if scoped_events_token is not None:
+            _scoped_events_var.reset(scoped_events_token)
+        _pop_agent_call_id()
+
+
+def _start_generator_call(
+    agent: Any,
+    original_func: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    call_id: str,
+    parent_call_id: str | None,
+    is_top_level: bool,
+    tracing_enabled: bool,
+    trace_attrs: dict[str, Any],
+) -> Any:
+    """Emit lifecycle start signals for a deterministic generator method."""
+    try:
+        agent.event_manager.add(
+            BeforeAgentCall(
+                method_name=original_func.__name__,
+                call_id=call_id,
+                parent_call_id=parent_call_id,
+                is_top_level=is_top_level,
+                needs_generation=False,
+            )
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("agent-call: BeforeAgentCall emission failed (generator)", exc_info=True)
+
+    if not tracing_enabled:
+        return None
+    return call_before_hook(
+        "before_agent_call",
+        agent=agent,
+        method_name=original_func.__name__,
+        args=args,
+        kwargs=kwargs,
+        call_id=call_id,
+        parent_call_id=parent_call_id,
+        **trace_attrs,
+    )
+
+
+def _finish_generator_call(
+    agent: Any,
+    original_func: Callable[..., Any],
+    call_id: str,
+    parent_call_id: str | None,
+    is_top_level: bool,
+    hook_context: Any,
+    result: Any,
+    exception: BaseException | None,
+) -> None:
+    """Emit lifecycle completion signals for a deterministic generator method."""
+    try:
+        agent.event_manager.add(
+            AfterAgentCall(
+                method_name=original_func.__name__,
+                call_id=call_id,
+                parent_call_id=parent_call_id,
+                is_top_level=is_top_level,
+                needs_generation=False,
+                success=exception is None,
+                exception_type=type(exception).__name__ if exception is not None else None,
+            )
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("agent-call: AfterAgentCall emission failed (generator)", exc_info=True)
+
+    if hook_context is not None:
+        call_after_hook(
+            "after_agent_call",
+            hook_context,
+            agent=agent,
+            method_name=original_func.__name__,
+            result=result,
+            exception=exception,
+        )
 
 
 def create_agent_method_wrapper(
@@ -377,6 +488,278 @@ def create_agent_method_wrapper(
     # Expose the mutable flag so @no_trace applied after @strategy can flip it
     setattr(wrapper, "_tracing_enabled", _tracing_enabled)  # noqa: B010
 
+    return wrapper
+
+
+def create_async_generator_agent_method_wrapper(
+    original_func: Callable[..., AsyncGenerator[Any, Any]],
+    *,
+    needs_tracing: bool,
+    cached_source_code: str | None = None,
+) -> Callable[..., AsyncGenerator[Any, Any]]:
+    """Wrap a deterministic async-generator agent method for tracing.
+
+    The method span starts on first iteration and ends on exhaustion, explicit
+    close, cancellation, or failure. Agent ContextVars are active only while the
+    generator body is advancing, never while control is suspended in its consumer.
+
+    ``agent_call`` middleware is intentionally not run: its contract represents
+    one awaited result and cannot model a suspended stream. A stream middleware
+    protocol should be added separately if interception of yielded values is needed.
+    """
+    _tracing_enabled = [needs_tracing]
+    no_send = object()
+
+    @wraps(original_func)
+    async def wrapper(self: Any, *args: Any, **kwargs: Any) -> AsyncGenerator[Any, Any]:
+        if not hasattr(self, "runtime"):
+            inner = original_func(self, *args, **kwargs)
+            send_value: Any = no_send
+            thrown: BaseException | None = None
+            while True:
+                try:
+                    if thrown is not None:
+                        item = await inner.athrow(thrown)
+                        thrown = None
+                    elif send_value is no_send:
+                        item = await anext(inner)
+                    else:
+                        item = await inner.asend(send_value)
+                        send_value = no_send
+                except StopAsyncIteration:
+                    return
+
+                try:
+                    send_value = yield item
+                except GeneratorExit:
+                    await inner.aclose()
+                    return
+                except BaseException as exc:
+                    thrown = exc
+                    send_value = no_send
+
+        runtime = self.runtime
+        call_id = str(uuid4())
+        parent_call_id = runtime._agent_call_id
+        is_top_level = _parent_agent_var.get() is None
+        active_call_id = call_id if _tracing_enabled[0] else parent_call_id
+        trace_attrs = _build_trace_attributes(
+            needs_generation=False,
+            strategy=None,
+            cached_source_code=cached_source_code,
+        )
+
+        inner = original_func(self, *args, **kwargs)
+        hook_context = None
+        result = None
+        exception_caught: BaseException | None = None
+        inner_closed = False
+        send_value: Any = no_send
+        thrown: BaseException | None = None
+
+        try:
+            with _generator_resume_context(self, active_call_id):
+                hook_context = _start_generator_call(
+                    self,
+                    original_func,
+                    args,
+                    kwargs,
+                    call_id,
+                    parent_call_id,
+                    is_top_level,
+                    _tracing_enabled[0],
+                    trace_attrs,
+                )
+
+            while True:
+                try:
+                    with (
+                        _generator_resume_context(self, active_call_id),
+                        activate_agent_call_context(hook_context),
+                    ):
+                        if thrown is not None:
+                            item = await inner.athrow(thrown)
+                            thrown = None
+                        elif send_value is no_send:
+                            item = await anext(inner)
+                        else:
+                            item = await inner.asend(send_value)
+                            send_value = no_send
+                except StopAsyncIteration:
+                    inner_closed = True
+                    return
+
+                try:
+                    send_value = yield item
+                except GeneratorExit:
+                    with (
+                        _generator_resume_context(self, active_call_id),
+                        activate_agent_call_context(hook_context),
+                    ):
+                        await inner.aclose()
+                    inner_closed = True
+                    return
+                except BaseException as exc:
+                    thrown = exc
+                    send_value = no_send
+        except BaseException as exc:
+            exception_caught = exc
+            raise
+        finally:
+            close_error: BaseException | None = None
+            if not inner_closed:
+                try:
+                    with (
+                        _generator_resume_context(self, active_call_id),
+                        activate_agent_call_context(hook_context),
+                    ):
+                        await inner.aclose()
+                except BaseException as close_exc:
+                    if exception_caught is None:
+                        exception_caught = close_exc
+                        close_error = close_exc
+            with activate_agent_call_context(hook_context):
+                _finish_generator_call(
+                    self,
+                    original_func,
+                    call_id,
+                    parent_call_id,
+                    is_top_level,
+                    hook_context,
+                    result,
+                    exception_caught,
+                )
+            if close_error is not None:
+                raise close_error
+
+    setattr(wrapper, "_agent_decorator", "auto")  # noqa: B010
+    setattr(wrapper, "_needs_generation", False)  # noqa: B010
+    setattr(wrapper, "_plan_strategy", None)  # noqa: B010
+    setattr(wrapper, "_tracing_enabled", _tracing_enabled)  # noqa: B010
+    setattr(wrapper, "_original", original_func)  # noqa: B010
+    return wrapper
+
+
+def create_generator_agent_method_wrapper(
+    original_func: Callable[..., Generator[Any, Any, Any]],
+    *,
+    needs_tracing: bool,
+    cached_source_code: str | None = None,
+) -> Callable[..., Generator[Any, Any, Any]]:
+    """Wrap a deterministic sync-generator agent method for tracing.
+
+    As with the async-generator wrapper, call context is active only while the
+    body advances. ``send()``, ``throw()``, ``close()``, and the generator's
+    final return value are forwarded.
+    """
+    _tracing_enabled = [needs_tracing]
+    no_send = object()
+
+    @wraps(original_func)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Generator[Any, Any, Any]:
+        if not hasattr(self, "runtime"):
+            return (yield from original_func(self, *args, **kwargs))
+
+        runtime = self.runtime
+        call_id = str(uuid4())
+        parent_call_id = runtime._agent_call_id
+        is_top_level = _parent_agent_var.get() is None
+        active_call_id = call_id if _tracing_enabled[0] else parent_call_id
+        trace_attrs = _build_trace_attributes(
+            needs_generation=False,
+            strategy=None,
+            cached_source_code=cached_source_code,
+        )
+
+        inner = original_func(self, *args, **kwargs)
+        hook_context = None
+        result = None
+        exception_caught: BaseException | None = None
+        inner_closed = False
+        send_value: Any = no_send
+        thrown: BaseException | None = None
+
+        try:
+            with _generator_resume_context(self, active_call_id):
+                hook_context = _start_generator_call(
+                    self,
+                    original_func,
+                    args,
+                    kwargs,
+                    call_id,
+                    parent_call_id,
+                    is_top_level,
+                    _tracing_enabled[0],
+                    trace_attrs,
+                )
+
+            while True:
+                try:
+                    with (
+                        _generator_resume_context(self, active_call_id),
+                        activate_agent_call_context(hook_context),
+                    ):
+                        if thrown is not None:
+                            item = inner.throw(thrown)
+                            thrown = None
+                        elif send_value is no_send:
+                            item = next(inner)
+                        else:
+                            item = inner.send(send_value)
+                            send_value = no_send
+                except StopIteration as stop:
+                    result = stop.value
+                    inner_closed = True
+                    return result
+
+                try:
+                    send_value = yield item
+                except GeneratorExit:
+                    with (
+                        _generator_resume_context(self, active_call_id),
+                        activate_agent_call_context(hook_context),
+                    ):
+                        inner.close()
+                    inner_closed = True
+                    return
+                except BaseException as exc:
+                    thrown = exc
+                    send_value = no_send
+        except BaseException as exc:
+            exception_caught = exc
+            raise
+        finally:
+            close_error: BaseException | None = None
+            if not inner_closed:
+                try:
+                    with (
+                        _generator_resume_context(self, active_call_id),
+                        activate_agent_call_context(hook_context),
+                    ):
+                        inner.close()
+                except BaseException as close_exc:
+                    if exception_caught is None:
+                        exception_caught = close_exc
+                        close_error = close_exc
+            with activate_agent_call_context(hook_context):
+                _finish_generator_call(
+                    self,
+                    original_func,
+                    call_id,
+                    parent_call_id,
+                    is_top_level,
+                    hook_context,
+                    result,
+                    exception_caught,
+                )
+            if close_error is not None:
+                raise close_error
+
+    setattr(wrapper, "_agent_decorator", "auto")  # noqa: B010
+    setattr(wrapper, "_needs_generation", False)  # noqa: B010
+    setattr(wrapper, "_plan_strategy", None)  # noqa: B010
+    setattr(wrapper, "_tracing_enabled", _tracing_enabled)  # noqa: B010
+    setattr(wrapper, "_original", original_func)  # noqa: B010
     return wrapper
 
 

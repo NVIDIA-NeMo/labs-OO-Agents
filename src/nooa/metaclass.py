@@ -19,7 +19,7 @@ from abc import ABCMeta
 from collections.abc import Callable
 from typing import Any
 
-from nooa.ellipsis_detection import has_ellipsis_body
+from nooa.ellipsis_detection import has_ellipsis_body, has_ellipsis_marker
 
 
 class AgentMeta(ABCMeta):
@@ -31,8 +31,13 @@ class AgentMeta(ABCMeta):
     Auto-wrapping criteria:
     - Generatable: async + ellipsis body (all: public, private, dunder)
     - Traceable (async): all async methods (if class sets _enable_tracing = True)
+    - Traceable (async generator): deterministic async-generator methods
     - Traceable (sync): all sync `def` methods except dunder names
       (if class sets _enable_tracing = True)
+    - Traceable (sync generator): deterministic sync-generator methods except dunders
+
+    Generator methods containing an ellipsis generation marker are rejected:
+    generation strategies commit one final result and do not define a stream protocol.
 
     Sync methods can't generate or run async middleware; they get tracing only.
     Properties, classmethods, and staticmethods are skipped (they aren't plain
@@ -75,21 +80,25 @@ class AgentMeta(ABCMeta):
             if hasattr(attr_value, "_agent_decorator"):
                 continue
 
-            # Async generator functions (async def … yield) are mutually exclusive
-            # with coroutine functions, so this guard must come first.  The sync
-            # wrapper closes its span before the generator body runs; the async
-            # wrapper awaits the whole coroutine, which an async gen is not.
-            # Either way the span would cover no real work and misattribute every
-            # nested LLM call to the consumer rather than the generator.  Reject
-            # loudly at class-creation time instead of emitting a wrong trace.
+            # Async generators are a distinct callable shape: they must preserve
+            # suspension semantics rather than pass through the coroutine or sync
+            # wrappers. Deterministic streams are supported; LLM-generated streams
+            # are not yet a defined generation strategy contract.
             if inspect.isasyncgenfunction(attr_value):
-                raise TypeError(
-                    f"{name}.{attr_name} is an async generator method "
-                    f"(async def with yield).  Generator methods are not supported "
-                    f"as agent methods — the framework cannot correctly scope a "
-                    f"tracing span across yield points.  Use a regular async def "
-                    f"with return instead."
-                )
+                if has_ellipsis_marker(attr_value):
+                    raise TypeError(
+                        f"{name}.{attr_name} is an LLM-generated async generator method. "
+                        f"Generation methods must produce one final result; streaming "
+                        f"generation is not supported. Remove the ellipsis to keep this "
+                        f"as a deterministic async generator, or use a regular async def "
+                        f"that returns a collected result."
+                    )
+
+                should_trace = mcs._should_trace(attr_name, attr_value, should_trace_class)
+                if should_trace:
+                    wrapped = mcs._create_async_generator_wrapper(attr_value)
+                    type.__setattr__(cls, attr_name, wrapped)
+                continue
 
             if inspect.iscoroutinefunction(attr_value):
                 # === Async method path (generation + tracing) ===
@@ -113,25 +122,30 @@ class AgentMeta(ABCMeta):
                 # === Sync method path (tracing only) ===
                 # `inspect.isfunction` is False for property/classmethod/staticmethod
                 # descriptors, so those are naturally skipped.
+                if inspect.isgeneratorfunction(attr_value):
+                    if has_ellipsis_marker(attr_value):
+                        raise TypeError(
+                            f"{name}.{attr_name} is an LLM-generated sync generator method. "
+                            f"Generation methods must be async and produce one final result; "
+                            f"streaming generation is not supported. Remove the ellipsis to "
+                            f"keep this as a deterministic generator, or return a collected "
+                            f"result from a regular async generation method."
+                        )
+
+                    # Sync dunders are intentionally never traced.
+                    if attr_name.startswith("__") and attr_name.endswith("__"):
+                        continue
+                    should_trace = mcs._should_trace(attr_name, attr_value, should_trace_class)
+                    if should_trace:
+                        wrapped = mcs._create_generator_wrapper(attr_value)
+                        type.__setattr__(cls, attr_name, wrapped)
+                    continue
+
                 # Skip dunders to avoid wrapping __init__/__init_subclass__/__setattr__/
                 # __getattribute__ etc. — risk of infinite recursion or running before
                 # the runtime exists. Custom dunders have to be async to be traced.
                 if attr_name.startswith("__") and attr_name.endswith("__"):
                     continue
-
-                # Sync generator functions (def … yield) hit this branch because
-                # inspect.isfunction returns True for them.  The sync wrapper calls
-                # the original once and treats the returned generator object as the
-                # result, closing the span before any body code runs.  Same class
-                # of misattribution as the async generator case above — reject now.
-                if inspect.isgeneratorfunction(attr_value):
-                    raise TypeError(
-                        f"{name}.{attr_name} is a sync generator method "
-                        f"(def with yield).  Generator methods are not supported "
-                        f"as agent methods — the framework cannot correctly scope a "
-                        f"tracing span across yield points.  Use a regular def with "
-                        f"return instead."
-                    )
 
                 should_trace = mcs._should_trace(attr_name, attr_value, should_trace_class)
                 if should_trace:
@@ -222,6 +236,32 @@ class AgentMeta(ABCMeta):
 
         cached_source_code = AgentMeta._extract_source_code(original_func)
         return create_sync_agent_method_wrapper(
+            original_func,
+            needs_tracing=True,
+            cached_source_code=cached_source_code,
+        )
+
+    @staticmethod
+    def _create_async_generator_wrapper(
+        original_func: Callable[..., Any],
+    ) -> Callable[..., Any]:
+        """Create a tracing wrapper for a deterministic async generator."""
+        from nooa.runtime.method_wrapper import create_async_generator_agent_method_wrapper
+
+        cached_source_code = AgentMeta._extract_source_code(original_func)
+        return create_async_generator_agent_method_wrapper(
+            original_func,
+            needs_tracing=True,
+            cached_source_code=cached_source_code,
+        )
+
+    @staticmethod
+    def _create_generator_wrapper(original_func: Callable[..., Any]) -> Callable[..., Any]:
+        """Create a tracing wrapper for a deterministic sync generator."""
+        from nooa.runtime.method_wrapper import create_generator_agent_method_wrapper
+
+        cached_source_code = AgentMeta._extract_source_code(original_func)
+        return create_generator_agent_method_wrapper(
             original_func,
             needs_tracing=True,
             cached_source_code=cached_source_code,

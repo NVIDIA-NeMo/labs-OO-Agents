@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for AgentMeta metaclass and auto-wrapping functionality."""
 
+import inspect
+
 import pytest
 
 from nooa.agent import Agent
@@ -1396,7 +1398,7 @@ def test_sync_method_calling_sync_method_chains_parent_call_id():
 
 
 # ============================================================================
-# Regression tests for generator method rejection (issue #38)
+# Regression tests for generator method support (issue #38)
 #
 # Previously, async generator methods (async def … yield) were silently
 # mis-dispatched to create_sync_agent_method_wrapper.  That wrapper calls the
@@ -1405,29 +1407,143 @@ def test_sync_method_calling_sync_method_chains_parent_call_id():
 # parented to the consumer, not the generator — the trace asserted a call
 # sequence that never happened.
 #
-# The correct behaviour is an explicit TypeError at class-creation time so
-# the author is told clearly what is wrong, rather than receiving a
-# confidently wrong audit trail.
+# Deterministic generators remain ordinary Python methods and receive
+# generator-aware tracing. Generators containing the ellipsis generation marker
+# are rejected because generation strategies currently produce one final result.
 # ============================================================================
 
 
-def test_async_generator_method_raises_at_class_creation():
-    """async def methods with yield must be rejected at class creation (issue #38)."""
-    with pytest.raises(TypeError, match="async generator"):
+@pytest.mark.asyncio
+async def test_deterministic_async_generator_method_is_supported():
+    """Implemented async generators retain their native iteration contract."""
+
+    class StreamAgent(Agent, llm=_TEST_LLM):
+        async def review(self, items: list[str]):
+            for item in items:
+                yield item.upper()
+
+    assert inspect.isasyncgenfunction(StreamAgent.review)
+    assert hasattr(StreamAgent.review, "_agent_decorator")
+    assert [item async for item in StreamAgent().review(["a", "b"])] == ["A", "B"]
+
+
+@pytest.mark.asyncio
+async def test_async_generator_forwards_asend_and_athrow():
+    """Tracing does not narrow the native async-generator protocol."""
+
+    class StreamAgent(Agent, llm=_TEST_LLM):
+        async def exchange(self):
+            received = yield "ready"
+            try:
+                yield received
+            except ValueError:
+                yield "handled"
+
+    stream = StreamAgent().exchange()
+    assert await anext(stream) == "ready"
+    assert await stream.asend("sent") == "sent"
+    assert await stream.athrow(ValueError("recover")) == "handled"
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+
+
+@pytest.mark.asyncio
+async def test_deterministic_async_generator_allows_ordinary_ellipsis_expressions():
+    """Only marker syntax is reserved; annotations and indexing remain Python."""
+
+    class EllipsisIndex:
+        def __getitem__(self, key):
+            assert key is ...
+            return 7
+
+    class StreamAgent(Agent, llm=_TEST_LLM):
+        async def values(self):
+            selected = EllipsisIndex()[...]
+            annotated: tuple[int, ...] = (selected,)
+            for value in annotated:
+                yield value
+
+    assert [item async for item in StreamAgent().values()] == [7]
+
+
+@pytest.mark.asyncio
+async def test_async_generator_without_runtime_preserves_native_protocol():
+    """The pre-runtime path forwards asend and athrow instead of narrowing iteration."""
+
+    class StreamAgent(Agent, llm=_TEST_LLM):
+        def __init__(self):
+            pass
+
+        async def exchange(self):
+            received = yield "ready"
+            try:
+                yield received
+            except ValueError:
+                yield "handled"
+
+    stream = StreamAgent().exchange()
+    assert await anext(stream) == "ready"
+    assert await stream.asend("sent") == "sent"
+    assert await stream.athrow(ValueError("recover")) == "handled"
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+
+
+def test_deterministic_sync_generator_method_is_supported():
+    """Implemented sync generators retain yield/send/return behavior."""
+
+    class StreamAgent(Agent, llm=_TEST_LLM):
+        def values(self):
+            received = yield 1
+            yield received
+            return "done"
+
+    assert inspect.isgeneratorfunction(StreamAgent.values)
+    stream = StreamAgent().values()
+    assert next(stream) == 1
+    assert stream.send(2) == 2
+    with pytest.raises(StopIteration, match="done"):
+        next(stream)
+
+
+def test_generated_async_generator_method_raises_at_class_creation():
+    """An async generator with the LLM marker gets a targeted error."""
+    with pytest.raises(TypeError, match="LLM-generated async generator"):
 
         class BadAgent(Agent, llm=_TEST_LLM):
             async def review(self, items: list[str]):
                 for item in items:
                     yield item
+                ...
 
 
-def test_sync_generator_method_raises_at_class_creation():
-    """def methods with yield must be rejected at class creation (issue #38)."""
-    with pytest.raises(TypeError, match="sync generator"):
+def test_yield_ellipsis_async_generator_gets_targeted_error():
+    """``yield ...`` is diagnosed as an attempted generated stream."""
+    with pytest.raises(TypeError, match="streaming generation is not supported"):
+
+        class BadAgent(Agent, llm=_TEST_LLM):
+            async def review(self):
+                yield ...
+
+
+def test_strategy_generator_error_explains_single_result_contract():
+    """@strategy rejects generated streams without claiming they are not async."""
+    with pytest.raises(TypeError, match="must produce one final result"):
+
+        class BadAgent(Agent, llm=_TEST_LLM):
+            @strategy(PurePythonStrategy())
+            async def review(self):
+                yield ...
+
+
+def test_generated_sync_generator_method_raises_at_class_creation():
+    """A sync generator cannot opt into LLM generation either."""
+    with pytest.raises(TypeError, match="LLM-generated sync generator"):
 
         class BadAgent(Agent, llm=_TEST_LLM):
             def produce(self, items: list[str]):
                 yield from items
+                ...
 
 
 def test_generator_error_message_names_method():
@@ -1438,6 +1554,124 @@ def test_generator_error_message_names_method():
             async def review(self, items: list[str]):
                 for item in items:
                     yield item
+                ...
+
+
+@pytest.mark.asyncio
+async def test_async_generator_trace_context_is_active_only_during_resume():
+    """Nested calls belong to the stream; consumer work between yields does not."""
+    from unittest.mock import MagicMock
+
+    from nooa.runtime.hooks import InstrumentationHooks, set_hooks
+
+    before_calls: list[dict] = []
+
+    def before(**kwargs):
+        before_calls.append(kwargs)
+        return {"call_id": kwargs["call_id"]}
+
+    mock_hooks = MagicMock(spec=InstrumentationHooks)
+    mock_hooks.before_agent_call.side_effect = before
+
+    class StreamAgent(Agent, llm=_TEST_LLM):
+        async def classify(self, item: int) -> int:
+            return item * 10
+
+        async def review(self):
+            yield await self.classify(1)
+            yield await self.classify(2)
+
+        async def consumer_work(self) -> None:
+            return None
+
+    try:
+        set_hooks(mock_hooks)
+        agent = StreamAgent()
+        stream = agent.review()
+        assert before_calls == []  # Calling a generator does not execute its body.
+        assert await anext(stream) == 10
+        await agent.consumer_work()
+        assert await anext(stream) == 20
+        with pytest.raises(StopAsyncIteration):
+            await anext(stream)
+    finally:
+        set_hooks(None)
+
+    review_call = next(c for c in before_calls if c["method_name"] == "review")
+    classify_calls = [c for c in before_calls if c["method_name"] == "classify"]
+    consumer_call = next(c for c in before_calls if c["method_name"] == "consumer_work")
+    assert len(classify_calls) == 2
+    assert all(c["parent_call_id"] == review_call["call_id"] for c in classify_calls)
+    assert consumer_call["parent_call_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_async_generator_aclose_finishes_body_and_trace():
+    """Explicit close runs generator cleanup and closes its method span."""
+    from unittest.mock import MagicMock
+
+    from nooa.runtime.hooks import InstrumentationHooks, set_hooks
+
+    mock_hooks = MagicMock(spec=InstrumentationHooks)
+    mock_hooks.before_agent_call.return_value = {}
+
+    class StreamAgent(Agent, llm=_TEST_LLM):
+        closed = False
+
+        async def values(self):
+            try:
+                yield 1
+                yield 2
+            finally:
+                self.closed = True
+
+    try:
+        set_hooks(mock_hooks)
+        agent = StreamAgent()
+        stream = agent.values()
+        assert await anext(stream) == 1
+        await stream.aclose()
+        assert agent.closed is True
+    finally:
+        set_hooks(None)
+
+    mock_hooks.before_agent_call.assert_called_once()
+    mock_hooks.after_agent_call.assert_called_once()
+    assert mock_hooks.after_agent_call.call_args.kwargs["exception"] is None
+
+
+@pytest.mark.asyncio
+async def test_async_generator_cancellation_finishes_trace_as_failure():
+    """Cancellation propagates and reports a failed generator lifecycle."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from nooa.runtime.hooks import InstrumentationHooks, set_hooks
+
+    mock_hooks = MagicMock(spec=InstrumentationHooks)
+    mock_hooks.before_agent_call.return_value = {}
+
+    class StreamAgent(Agent, llm=_TEST_LLM):
+        async def values(self):
+            yield 1
+            await asyncio.Event().wait()
+
+    try:
+        set_hooks(mock_hooks)
+        stream = StreamAgent().values()
+        assert await anext(stream) == 1
+        resume = asyncio.create_task(anext(stream))
+        await asyncio.sleep(0)
+        resume.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await resume
+    finally:
+        set_hooks(None)
+
+    mock_hooks.after_agent_call.assert_called_once()
+    assert isinstance(
+        mock_hooks.after_agent_call.call_args.kwargs["exception"], asyncio.CancelledError
+    )
 
 
 def test_regular_async_method_unaffected_by_generator_guard():

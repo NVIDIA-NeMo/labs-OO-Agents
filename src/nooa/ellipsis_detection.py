@@ -7,10 +7,12 @@ that use `...` as a marker for LLM code generation.
 
 Functions:
     has_ellipsis_body: Check if function body ENDS with `...`
+    has_ellipsis_marker: Check if a function body contains a generation ellipsis
     get_pre_ellipsis_code: Extract setup code before `...`
 """
 
 import ast
+import dis
 import inspect
 import textwrap
 import tokenize
@@ -114,6 +116,75 @@ def has_ellipsis_body(func: Callable[..., Any]) -> bool:
 
     # If we can't determine, assume it's not ellipsis (safer default)
     return False
+
+
+def has_ellipsis_marker(func: Callable[..., Any]) -> bool:
+    """Return whether *func* contains an ellipsis generation marker.
+
+    Ordinary generation methods are identified by :func:`has_ellipsis_body`,
+    because their body ends in a bare ``...`` statement. Generator functions
+    need a slightly broader check: ``yield ...`` is also a natural spelling of
+    an attempted generated stream. Generated streams are not currently a
+    supported execution model, so both spellings must be diagnosed rather than
+    accidentally executed as deterministic Python.
+
+    Ellipses inside nested functions or classes do not mark the outer function.
+    """
+    func_def = _get_function_ast(func)
+    if func_def is not None:
+
+        class _MarkerVisitor(ast.NodeVisitor):
+            found = False
+
+            def visit_Expr(self, node: ast.Expr) -> None:
+                if _is_ellipsis_stmt(node):
+                    self.found = True
+                    return
+                self.generic_visit(node)
+
+            def visit_Yield(self, node: ast.Yield) -> None:
+                if isinstance(node.value, ast.Constant) and node.value.value is ...:
+                    self.found = True
+
+            def visit_YieldFrom(self, node: ast.YieldFrom) -> None:
+                if isinstance(node.value, ast.Constant) and node.value.value is ...:
+                    self.found = True
+
+            # Nested definitions have their own generation semantics.
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                return
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                return
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                return
+
+            def visit_Lambda(self, node: ast.Lambda) -> None:
+                return
+
+        visitor = _MarkerVisitor()
+        for stmt in _get_body_without_docstring(func_def.body):
+            visitor.visit(stmt)
+        return visitor.found
+
+    # Dynamically created functions may not have source. Detect the direct
+    # ``LOAD_CONST Ellipsis; YIELD_VALUE`` bytecode shape without treating
+    # ordinary uses such as ``items[...]`` as generation markers. The existing
+    # body detector covers functions carrying ``_generated_source``.
+    try:
+        instructions = list(dis.get_instructions(func))
+        for index, current in enumerate(instructions):
+            if current.opname != "LOAD_CONST" or current.argval is not ...:
+                continue
+            for following in instructions[index + 1 : index + 3]:
+                if following.opname == "YIELD_VALUE":
+                    return True
+                if following.opname not in {"ASYNC_GEN_WRAP", "CALL_INTRINSIC_1"}:
+                    break
+    except Exception:
+        pass
+    return has_ellipsis_body(func)
 
 
 def get_pre_ellipsis_code(func: Callable[..., Any]) -> str | None:

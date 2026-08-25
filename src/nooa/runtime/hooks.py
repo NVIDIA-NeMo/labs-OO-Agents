@@ -27,11 +27,23 @@ Usage:
 """
 
 import logging
+import sys
 import time
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
 from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class AgentCallContextActivator(Protocol):
+    """Optional hook extension for methods that suspend and later resume."""
+
+    def activate_agent_call(self, context: Any) -> AbstractContextManager[None]:
+        """Restore the native tracing context represented by ``context``."""
+        ...
 
 
 @runtime_checkable
@@ -412,10 +424,54 @@ def call_after_hook(hook_name: str, context: Any, **kwargs: Any) -> None:
         _record_tracing_overhead(time.perf_counter() - t0)
 
 
+@contextmanager
+def activate_agent_call_context(context: Any) -> Iterator[None]:
+    """Activate an instrumentation call context for suspended-method execution.
+
+    Most methods run continuously between their before/after hooks, so hook
+    implementations can recover parentage from the framework call stack. A
+    generator can instead resume in a different task, where task-local tracing
+    state is intentionally absent. Instrumentation backends may implement
+    ``activate_agent_call(context)`` as a context manager to restore their native
+    context for each resume.
+
+    Activation is optional and defensive: hook failures are logged and never
+    prevent the generator body from running or change exception propagation.
+    """
+    hooks = get_hooks()
+    if not isinstance(hooks, AgentCallContextActivator) or context is None:
+        yield
+        return
+
+    try:
+        manager = hooks.activate_agent_call(context)
+        manager.__enter__()
+    except Exception:
+        logger.warning("Hook activate_agent_call failed", exc_info=True)
+        yield
+        return
+
+    try:
+        yield
+    except BaseException:
+        try:
+            manager.__exit__(*sys.exc_info())
+        except Exception:
+            logger.warning("Hook activate_agent_call cleanup failed", exc_info=True)
+        raise
+    else:
+        try:
+            manager.__exit__(None, None, None)
+        except Exception:
+            logger.warning("Hook activate_agent_call cleanup failed", exc_info=True)
+
+
 __all__ = [
+    "AgentCallContextActivator",
     "InstrumentationHooks",
     "set_hooks",
     "get_hooks",
     "call_before_hook",
     "call_after_hook",
+    "activate_agent_call_context",
 ]
