@@ -99,6 +99,15 @@ async def test_experimental_tui_agent_delegates_to_experimental_worker(tmp_path)
             "You are a careful software-development agent working in one local repository."
         )
         prompt = ExperimentalTUIAgent.__doc__ or ""
+        normalized_prompt = " ".join(prompt.split())
+        policy = (
+            "Use an RLM-style controller policy: complete requests directly when they fit "
+            "in a few turns. For larger requests, decompose only when there are distinct, "
+            "context-heavy, independently verifiable subtasks; keep tightly coupled or "
+            "small sequential work local. The top-level controller may spawn bounded, "
+            "non-recursive workers for subtasks that benefit from separate context."
+        )
+        assert policy in normalized_prompt
         assert "prefer it over awaiting" in prompt
         assert "immediately finish that turn" in prompt
         assert "Never poll a spawned handle" in prompt
