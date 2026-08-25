@@ -15,6 +15,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from nooa import Skill, hidden
 from nooa.storage.markers import snapshotable
+from nooa.storage.persistent_vars import PersistentVars
 from nooa.storage.snapshot_vars import SnapshotVars
 
 _MISSING = object()
@@ -38,57 +39,8 @@ class TodoComment(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M"))
 
 
-class TodoVars:
-    """Durable work state scoped to one Todo.
-
-    Store task-specific plans, findings, artifacts, checkpoints, and verification
-    metadata here. Use the agent's ``self.v`` instead for cross-task identity,
-    stable preferences, environment facts, and long-running coordination. Keep
-    transient scratch data in cell locals.
-
-    Write ``todo.v.commits = [...]`` instead of ``todo.vars["commits"]``.
-    Reads and writes go through the snapshot-backed ``Todo.vars`` mapping.
-    """
-
-    def __init__(self, todo: "Todo"):
-        object.__setattr__(self, "_todo", todo)
-
-    def __getattr__(self, key: str) -> Any:
-        try:
-            return self._todo.vars[key]
-        except KeyError:
-            raise AttributeError(f"No var {key!r} on todo {self._todo.id}") from None
-
-    def __setattr__(self, key: str, value: Any) -> None:
-        self._todo.vars[key] = value
-
-    def __delattr__(self, key: str) -> None:
-        try:
-            del self._todo.vars[key]
-        except KeyError:
-            raise AttributeError(f"No var {key!r} on todo {self._todo.id}") from None
-
-    def __contains__(self, key: str) -> bool:
-        return key in self._todo.vars
-
-    def keys(self) -> list[str]:
-        """Return the names of all task-scoped variables."""
-        return list(self._todo.vars.keys())
-
-    def items(self) -> list[tuple[str, Any]]:
-        """Return task-scoped variable name-value pairs for inspection."""
-        return list(self._todo.vars.items())
-
-    def get(self, key: str, default: Any = None) -> Any:
-        """Return a task-scoped value, or ``default`` when absent."""
-        return self._todo.vars.get(key, default)
-
-    def clear(self) -> None:
-        """Remove all task-scoped variables from this Todo."""
-        self._todo.vars.clear()
-
-    def __repr__(self) -> str:
-        return repr(self._todo.vars)
+# Backward-compatible import name; both agent.v and todo.v use PersistentVars.
+TodoVars = PersistentVars
 
 
 class Todo(BaseModel):
@@ -137,7 +89,7 @@ class Todo(BaseModel):
         raise TypeError(f"Todo.vars must be a dict or SnapshotVars, got {type(value).__name__}")
 
     @property
-    def v(self) -> "TodoVars":
+    def v(self) -> PersistentVars:
         """Durable task-specific work state backed by ``self.vars``.
 
         Store plans, findings, artifacts, checkpoints, and verification metadata
@@ -152,7 +104,7 @@ class Todo(BaseModel):
             del t.v.commits      # remove
             "commits" in t.v     # False
         """
-        return TodoVars(self)
+        return PersistentVars(self)
 
     @hidden
     def is_blocked(self, all_todos: dict[str, "Todo"]) -> bool:
