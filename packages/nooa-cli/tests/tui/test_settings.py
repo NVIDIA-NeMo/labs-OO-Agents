@@ -56,6 +56,7 @@ class TestRoundTrip:
         original = Config()
         original.tui.default_model = "my-model"
         original.tui.vi_mode = True
+        original.tui.theme = "vslight"
         original.tui.toolbar_items = ["model", "cwd", "session"]
         original.tui.active_skills = ["nvzurich.agent_mesh"]
         original.tui.inactive_skills = ["nemo.repo"]
@@ -65,6 +66,7 @@ class TestRoundTrip:
         loaded = load_settings(Config())
         assert loaded.tui.default_model == "my-model"
         assert loaded.tui.vi_mode is True
+        assert loaded.tui.theme == "vslight"
         assert loaded.tui.toolbar_items == ["model", "cwd", "session"]
         assert loaded.tui.active_skills == ["nvzurich.agent_mesh"]
         assert loaded.tui.inactive_skills == ["nemo.repo"]
@@ -100,6 +102,12 @@ class TestLayering:
         loaded = load_settings(Config())
         # null removed the key from the merged dict → field keeps its default.
         assert loaded.tui.agent_spec is None
+
+    def test_invalid_theme_fails_clearly(self, user_dir, project_dir):
+        (project_dir / "settings.yaml").write_text("tui:\n  theme: ultraviolet\n")
+
+        with pytest.raises(ValueError, match="ultraviolet"):
+            load_settings(Config())
 
     def test_path_coercion(self, user_dir, project_dir):
         (user_dir / "settings.yaml").write_text(

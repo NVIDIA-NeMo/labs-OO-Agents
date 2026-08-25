@@ -104,6 +104,9 @@ class TUIConfig(BaseModel):
     # Trace output directory (None = OTLP auto-probe only; --trace writes files)
     trace_dir: Path | None = None
 
+    # Color theme selected by ``/theme`` and restored on the next launch.
+    theme: Literal["mocha", "latte", "vsdark", "vslight"] = "mocha"
+
     # Vi keybindings in prompt_toolkit input
     vi_mode: bool = False
 
