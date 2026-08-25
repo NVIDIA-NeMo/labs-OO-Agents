@@ -106,6 +106,25 @@ class TestTodoVarsIntegration:
         t.v.commits = ["abc"]
         assert t.vars["commits"] == ["abc"]
 
+    def test_todo_vars_inspection_and_cleanup_api(self):
+        from nooa.agentdoc import doc
+        from nooa.tools.todo import Todo, TodoVars
+
+        todo = Todo(title="x", vars={"commit": "abc", "passed": True})
+        assert todo.v.keys() == ["commit", "passed"]
+        assert todo.v.items() == [("commit", "abc"), ("passed", True)]
+        assert todo.v.get("commit") == "abc"
+        assert todo.v.get("missing", "fallback") == "fallback"
+
+        rendered = doc(TodoVars)
+        assert "def keys(self) -> list[str]" in rendered
+        assert "def items(self) -> list[tuple[str, Any]]" in rendered
+        assert "def get(self, key: str, default: Any = None) -> Any" in rendered
+        assert "def clear(self) -> None" in rendered
+
+        todo.v.clear()
+        assert todo.v.keys() == []
+
     def test_todo_dict_vars_filters_unserializable(self):
         from nooa.tools.todo import Todo
 

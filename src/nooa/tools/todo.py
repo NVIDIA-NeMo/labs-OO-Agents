@@ -39,12 +39,15 @@ class TodoComment(BaseModel):
 
 
 class TodoVars:
-    """Attribute-access proxy for a todo's vars dict.
+    """Durable work state scoped to one Todo.
 
-    Lets you write ``t.v.commits = [...]`` instead of
-    ``t.vars["commits"] = [...]``.  Reads and writes go straight
-    through to the underlying ``Todo.vars`` dict, so snapshot
-    serialisation is unaffected.
+    Store task-specific plans, findings, artifacts, checkpoints, and verification
+    metadata here. Use the agent's ``self.v`` instead for cross-task identity,
+    stable preferences, environment facts, and long-running coordination. Keep
+    transient scratch data in cell locals.
+
+    Write ``todo.v.commits = [...]`` instead of ``todo.vars["commits"]``.
+    Reads and writes go through the snapshot-backed ``Todo.vars`` mapping.
     """
 
     def __init__(self, todo: "Todo"):
@@ -67,6 +70,22 @@ class TodoVars:
 
     def __contains__(self, key: str) -> bool:
         return key in self._todo.vars
+
+    def keys(self) -> list[str]:
+        """Return the names of all task-scoped variables."""
+        return list(self._todo.vars.keys())
+
+    def items(self) -> list[tuple[str, Any]]:
+        """Return task-scoped variable name-value pairs for inspection."""
+        return list(self._todo.vars.items())
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Return a task-scoped value, or ``default`` when absent."""
+        return self._todo.vars.get(key, default)
+
+    def clear(self) -> None:
+        """Remove all task-scoped variables from this Todo."""
+        self._todo.vars.clear()
 
     def __repr__(self) -> str:
         return repr(self._todo.vars)
@@ -119,7 +138,11 @@ class Todo(BaseModel):
 
     @property
     def v(self) -> "TodoVars":
-        """Attribute-access proxy for ``self.vars``.
+        """Durable task-specific work state backed by ``self.vars``.
+
+        Store plans, findings, artifacts, checkpoints, and verification metadata
+        here. Use the agent's ``self.v`` for durable cross-task identity and
+        long-running state; use cell locals for transient scratch data.
 
         Usage::
 

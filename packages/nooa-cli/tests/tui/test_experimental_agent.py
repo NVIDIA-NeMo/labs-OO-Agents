@@ -88,12 +88,8 @@ async def test_experimental_tui_agent_uses_only_python_cell(tmp_path):
             str(message.get("content", "")) for message in llm.last_messages
         )
         assert "<python_state" in rendered_context
-        assert (
-            "notification"
-            not in rendered_context.split("<python_state", 1)[1].split("</python_state>", 1)[0]
-        )
-        assert "Current method inputs are in scope but omitted here." in rendered_context
-        assert "Reusable cell state (method inputs omitted): none" in rendered_context
+        state_block = rendered_context.split("<python_state", 1)[1].split("</python_state>", 1)[0]
+        assert "Cell locals (includes method inputs): notification (dict)" in state_block
         assert "`self.v`: none" in rendered_context
         assert f"self.shell.cwd: {tmp_path}" in rendered_context
         completion_events = [
@@ -132,6 +128,10 @@ async def test_experimental_tui_agent_delegates_to_experimental_worker(tmp_path)
         assert policy in normalized_prompt
         assert "prefer it over awaiting" in prompt
         assert "immediately finish that turn" in prompt
+        assert "durable cross-task identity" in normalized_prompt
+        assert "task-specific plans" in normalized_prompt
+        assert "Todo's ``v`` proxy" in prompt
+        assert "do not use either persistent store as an uncurated dump" in normalized_prompt
         assert "Never poll a spawned handle" in prompt
         assert "asyncio.sleep()" in prompt
         assert "will invoke a new turn when the report arrives" in prompt
