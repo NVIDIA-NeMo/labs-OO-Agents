@@ -350,7 +350,7 @@ async def test_python_cell_state_context_lists_import_aliases_without_module_rep
 
     rendered = await strategy_instance.python_cell_state_context(runtime)
 
-    assert "Imports: json_alias → json, path_module → pathlib" in rendered
+    assert "Cell imports: json_alias → json, path_module → pathlib" in rendered
     assert "<module " not in rendered
     assert "Cell locals (includes method inputs): none" in rendered
 
@@ -386,4 +386,4 @@ async def test_python_cell_state_helper_returns_complete_inventory():
     assert inventory["cell_locals"]["question"] == "str"
     assert "Out" not in inventory["cell_locals"]
     assert "json_alias" not in inventory["cell_locals"]
-    assert inventory["imports"] == {"json_alias": "json"}
+    assert inventory["cell_imports"] == {"json_alias": "json"}
