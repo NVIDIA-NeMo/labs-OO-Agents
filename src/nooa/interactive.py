@@ -307,9 +307,10 @@ class AgentVars:
     ``self.vars["spec"] = "..."``. Reads and writes go straight
     through to ``self.vars`` so snapshot serialization is unaffected.
 
-    Use for variables that need to survive across turns and across
-    sessions but aren't tied to a specific todo. (For per-todo state,
-    use ``self.todo.<id>.v`` — same shape, narrower scope.)
+    Use for durable, cross-task agent state: identity, user/environment
+    preferences, stable capabilities, and long-running coordination state.
+    Task-specific plans, findings, artifacts, and checkpoints belong on the
+    relevant Todo's ``v`` proxy instead. Keep transient scratch data in cell locals.
 
     Values are snapshot-backed: assigning something that can't be
     snapshot-serialized (a live client, socket, callable, ...) logs a
@@ -337,6 +338,22 @@ class AgentVars:
 
     def __contains__(self, key: str) -> bool:
         return key in self._agent.vars
+
+    def keys(self) -> list[str]:
+        """Return the names of all persistent variables."""
+        return list(self._agent.vars.keys())
+
+    def items(self) -> list[tuple[str, Any]]:
+        """Return persistent variable name-value pairs for inspection."""
+        return list(self._agent.vars.items())
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Return a persistent value, or ``default`` when the name is absent."""
+        return self._agent.vars.get(key, default)
+
+    def clear(self) -> None:
+        """Remove all persistent variables."""
+        self._agent.vars.clear()
 
     def __repr__(self) -> str:
         return repr(self._agent.vars)
@@ -417,9 +434,11 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         """Attribute-access proxy for ``self.vars`` — the agent's
         persistent variable dict.
 
-        Use for state that should survive across turns and sessions
-        but isn't tied to a specific todo. Snapshot-backed via
-        ``self.vars``.
+        Use for durable cross-task state such as agent identity, stable
+        preferences, environment facts, and long-running coordination. Put
+        task-specific plans, findings, artifacts, and checkpoints on the relevant
+        Todo's ``v`` proxy. Keep transient scratch data in cell locals.
+        Snapshot-backed via ``self.vars``.
 
         Usage::
 
@@ -429,10 +448,9 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
             del self.v.cursor
 
         Compare:
-        - REPL locals → cleared between turns.
-        - ``self.v.k = v`` → snapshot-backed, survives turns + sessions.
-        - ``self.todo.<t>.v.k = v`` → same as ``self.v`` but scoped to
-          one todo.
+        - ``self.v.k = v`` → durable cross-task identity/long-running state.
+        - ``todo.v.k = v`` → durable work state scoped to one task.
+        - REPL locals → transient scratch state for the current work session.
         """
         return AgentVars(self)
 
