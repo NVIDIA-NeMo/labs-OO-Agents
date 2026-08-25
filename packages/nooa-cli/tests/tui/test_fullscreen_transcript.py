@@ -598,12 +598,45 @@ def test_fullscreen_hyperlink_hit_testing_survives_projection_and_wrapping() -> 
 
     assert model.hyperlink_at(x=0, y=0, width=8, height=3) == "https://example.test/docs"
     assert model.hyperlink_at(x=1, y=1, width=8, height=3) == "https://example.test/docs"
-    assert model.hyperlink_at(x=2, y=1, width=8, height=3) is None
+    assert model.hyperlink_at(x=4, y=1, width=8, height=3) is None
 
     blank = FullscreenTranscriptModel()
     blank.append("\x1b]8;;https://example.test/docs\x1b\\foo\n\nbar\x1b]8;;\x1b\\")
     assert blank.hyperlink_at(x=0, y=1, width=20, height=3) is None
     assert blank.hyperlink_at(x=19, y=1, width=20, height=3) is None
+
+
+def test_fullscreen_projection_wraps_prose_at_word_boundaries() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+    model = FullscreenTranscriptModel()
+    model.append("alpha beta gamma-delta")
+
+    rows = _projected_row_texts(model, 11)
+
+    assert rows == ["alpha beta ", "gamma-delta"]
+    assert "".join(rows) == model.text
+
+
+def test_fullscreen_projection_keeps_an_exactly_full_row() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+    model = FullscreenTranscriptModel()
+    model.append("alpha beta next")
+
+    assert _projected_row_texts(model, 10) == ["alpha ", "beta next"]
+
+
+def test_fullscreen_projection_folds_one_long_word_without_losing_text() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+    model = FullscreenTranscriptModel()
+    model.append("supercalifragilistic")
+
+    rows = _projected_row_texts(model, 6)
+
+    assert rows == ["superc", "alifra", "gilist", "ic"]
+    assert "".join(rows) == model.text
 
 
 def test_fullscreen_hyperlink_hit_testing_matches_combining_grapheme_rendering() -> None:
@@ -677,6 +710,22 @@ async def test_fullscreen_edit_returns_command_error_without_terminal_handoff(
     assert result.success is False
     assert len(result.outputs) == 1
     assert "native or native-replay" in result.outputs[0].content
+
+
+def test_fullscreen_transcript_never_projects_past_physical_width() -> None:
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    from .tui_app_harness import MutableRecordingOutput
+
+    output = MutableRecordingOutput(columns=20, rows=12)
+    with create_app_session(input=DummyInput(), output=output):
+        app = TUIApplication(display_mode=DisplayMode.FULLSCREEN)
+
+    control = app._output_window.content
+    control._render_width = 80
+    control._render_height = 7
+
+    assert app._transcript_viewport_size() == (20, 7)
 
 
 def test_fullscreen_width_change_reprojects_semantic_blocks_and_unwraps() -> None:
@@ -1079,7 +1128,7 @@ def test_projection_cache_extends_incrementally_on_stream_append(
 
     assert calls == [1]
     assert extended[: len(first_projection) - 1] == first_projection[:-1]
-    assert _projected_row_texts(model, 8)[-3:] == ["stream d", "elta", ""]
+    assert _projected_row_texts(model, 8)[-3:] == ["stream ", "delta", ""]
 
 
 def test_adjacent_records_have_one_separator_without_blank_row() -> None:
@@ -1390,7 +1439,7 @@ def test_fullscreen_screen_preserves_native_osc8_metadata_across_wrapped_rows() 
     app.emit_block(
         "plain \x1b]8;id=docs;https://example.test/docs\x1b\\linked text\x1b]8;;\x1b\\ tail"
     )
-    app._transcript_viewport_size = lambda: (8, 3)
+    app._transcript_viewport_size = lambda: (8, 5)
     assert app._output_window is not None
     app._app.render_counter += 1
     screen = Screen()
@@ -1398,7 +1447,7 @@ def test_fullscreen_screen_preserves_native_osc8_metadata_across_wrapped_rows() 
         app._output_window.write_to_screen(
             screen,
             MouseHandlers(),
-            WritePosition(xpos=0, ypos=0, width=8, height=3),
+            WritePosition(xpos=0, ypos=0, width=8, height=5),
             parent_style="",
             erase_bg=False,
             z_index=None,
@@ -1406,9 +1455,9 @@ def test_fullscreen_screen_preserves_native_osc8_metadata_across_wrapped_rows() 
 
     target = "\x1b]8;;https://example.test/docs\x1b\\"
     close = "\x1b]8;;\x1b\\"
-    assert screen.zero_width_escapes[0][6] == target
     assert screen.zero_width_escapes[1][0] == target
-    assert screen.zero_width_escapes[1][3] == close
+    assert screen.zero_width_escapes[2][0] == target
+    assert screen.zero_width_escapes[2][4] == close
     assert all(
         "id=docs" not in sequence
         for row in screen.zero_width_escapes.values()
@@ -3479,6 +3528,29 @@ def _copy_label_position(model, *, width: int, height: int) -> tuple[int, int]:
         if "Copy" in line:
             return line.index("Copy"), y
     raise AssertionError("copy label was not rendered")
+
+
+def test_copyable_markdown_preserves_long_list_item_for_fullscreen_reflow() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+
+    suffix = "the complete suffix remains visible after an intelligent wrap"
+    markdown = (
+        "- **[#205 — Trace Explorer](https://example.test/issues/205)** — "
+        "a long explanation that reaches beyond the initial Rich console width; " + suffix
+    )
+    _renderable, ansi = _copyable_markdown_ansi(markdown, width=60)
+
+    plain = strip_safe_ansi(ansi)
+    assert suffix in plain
+
+    model = FullscreenTranscriptModel()
+    model.append(ansi)
+    rows = [row for row in _projected_row_texts(model, 40) if row]
+
+    assert "".join(rows) == plain.strip("\n")
+    assert all(not row.endswith(("explan", "intellig")) for row in rows[:-1])
+    assert any(row.endswith(" ") for row in rows[:-1])
 
 
 def test_copyable_markdown_exposes_exact_fenced_code_payloads() -> None:
