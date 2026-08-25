@@ -265,15 +265,20 @@ class CodingAgent(InteractiveAgent):
         host will invoke a new turn with the completed report; inspect and integrate it
         before final verification. Each notification item is
         ``{"objective": <str>, "report": <str>}``, so concurrent jobs remain identifiable.
-        The host displays a short label derived from the objective while the worker and
-        notification retain the complete text. Pass ``label`` to override the display
-        text without changing the worker objective.
+        The host displays a short label derived from the objective and a bounded
+        model-facing description identifying it as a coding delegate, while the worker
+        and notification retain the complete text. Pass ``label`` to override the compact
+        display text without changing the worker objective.
         """
         objective_text = objective.title if isinstance(objective, Todo) else objective
         return self.queue_manager.spawn(
             self._delegation_report(objective, supplied_context),
             channel="delegates",
             label=self._delegation_label(objective_text, label),
+            description=(
+                "Finite coding delegate. Its report arrives through the delegates channel "
+                "when complete; continue other work and do not poll this job."
+            ),
         )
 
     def get_summarization_status(self) -> dict[str, Any]:
