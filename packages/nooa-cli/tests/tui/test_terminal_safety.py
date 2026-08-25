@@ -9,10 +9,20 @@ from nooa_cli.tui.terminal_safety import (
     normalize_transcript_block,
     safe_http_url,
     safe_hyperlink_spans,
+    safe_hyperlink_target,
     sanitize_transcript_ansi,
     strip_safe_ansi,
 )
 from rich.cells import cell_len
+
+
+def test_visible_code_line_uses_terminal_cells_for_tab_stops() -> None:
+    from nooa_cli.tui.copyable_markdown import visible_code_line
+
+    rendered, source_map = visible_code_line("界\t")
+
+    assert rendered == "界  "
+    assert source_map == ((0, 1), (1, 2), (1, 2))
 
 
 def test_transcript_normalizer_allows_style_but_exposes_terminal_commands() -> None:
@@ -111,15 +121,34 @@ def test_safe_http_url_rejects_terminal_controls() -> None:
         assert safe_http_url(url) is None, f"accepted U+{codepoint:04X}"
 
 
+def test_safe_hyperlink_target_accepts_absolute_file_urls_only() -> None:
+    assert safe_hyperlink_target("file:///tmp/example.py") == "file:///tmp/example.py"
+    assert safe_hyperlink_target("file://path/to/file") == "file:///path/to/file"
+    assert safe_hyperlink_target("file://localhost/tmp/example.py") == (
+        "file://localhost/tmp/example.py"
+    )
+    assert safe_hyperlink_target("file:relative/path") is None
+    assert safe_hyperlink_target("file:////server/share") is None
+    assert safe_hyperlink_target("file://localhost//server/share") is None
+    assert safe_hyperlink_target("file:///%2Fserver/share") is None
+    assert safe_hyperlink_target("file://%2Fserver/share") is None
+    assert safe_hyperlink_target("file://%5C%5Cserver/share") is None
+    assert safe_hyperlink_target(r"file:///\\server\share") is None
+    assert safe_hyperlink_target("file:///tmp/%00unsafe") is None
+    assert safe_hyperlink_target("javascript:alert(1)") is None
+
+
 def test_safe_hyperlink_spans_reports_safe_label_bounds() -> None:
     linked = "before \x1b]8;id=7;https://example.test/path\x1b\\label\x1b]8;;\x1b\\ after"
-    unsafe = "\x1b]8;;file:///tmp/secret\x1b\\local\x1b]8;;\x1b\\"
+    local = "\x1b]8;;file:///tmp/example.py\x1b\\local\x1b]8;;\x1b\\"
+    unsafe = "\x1b]8;;javascript:alert(1)\x1b\\script\x1b]8;;\x1b\\"
 
     assert safe_hyperlink_spans(linked) == ((7, 12, "https://example.test/path"),)
+    assert safe_hyperlink_spans(local) == ((0, 5, "file:///tmp/example.py"),)
     assert safe_hyperlink_spans(unsafe) == ()
 
 
-def test_hyperlink_hit_testing_accepts_only_http_targets() -> None:
+def test_hyperlink_hit_testing_accepts_safe_browser_and_file_targets() -> None:
     linked = "before \x1b]8;id=7;https://example.test/path\x1b\\label\x1b]8;;\x1b\\ after"
 
     assert hyperlink_at_plain_offset(linked, 7) == "https://example.test/path"
@@ -127,5 +156,8 @@ def test_hyperlink_hit_testing_accepts_only_http_targets() -> None:
     assert hyperlink_at_plain_offset(linked, 6) is None
     assert hyperlink_at_plain_offset(linked, 12) is None
 
-    unsafe = "\x1b]8;;file:///tmp/secret\x1b\\local\x1b]8;;\x1b\\"
+    local = "\x1b]8;;file:///tmp/example.py\x1b\\local\x1b]8;;\x1b\\"
+    assert hyperlink_at_plain_offset(local, 0) == "file:///tmp/example.py"
+
+    unsafe = "\x1b]8;;javascript:alert(1)\x1b\\script\x1b]8;;\x1b\\"
     assert hyperlink_at_plain_offset(unsafe, 0) is None
