@@ -76,29 +76,29 @@ class CodeActExperimental(CodeActStrategy):
         inputs = {} if call is None else call.bound_parameters()
         input_names = set(inputs)
         local_types = {str(name): type(value).__name__ for name, value in inputs.items()}
+        import_names: dict[str, str] = {}
         if live_locals:
             names = sorted(name for name in live_locals if isinstance(name, str))
             for name in names:
                 value = live_locals[name]
-                if (
-                    name == "Out"
-                    or name.startswith("_")
-                    or name in input_names
-                    or isinstance(value, ModuleType)
-                    or isinstance(value, type)
-                    or callable(value)
-                ):
+                if name == "Out" or name.startswith("_") or name in input_names:
+                    continue
+                if isinstance(value, ModuleType):
+                    import_names[name] = value.__name__
+                    continue
+                if isinstance(value, type) or callable(value):
                     continue
                 local_types[name] = type(value).__name__
         local_items = sorted(local_types.items())
+        import_items = sorted(import_names.items())
 
         agent = runtime.agent
         lines = ["## Python state"]
         shell = getattr(agent, "shell", None)
         if shell is not None and (cwd := getattr(shell, "cwd", None)) is not None:
-            lines.extend(("", f"self.shell.cwd: {self._python_state_label(cwd)}"))
+            lines.extend(("", f"`self.shell.cwd`: {self._python_state_label(cwd)}"))
         elif (cwd := getattr(agent, "cwd", None)) is not None:
-            lines.extend(("", f"self.cwd: {self._python_state_label(cwd)}"))
+            lines.extend(("", f"`self.cwd`: {self._python_state_label(cwd)}"))
 
         persistent_vars = getattr(agent, "vars", None)
         if persistent_vars:
@@ -110,6 +110,19 @@ class CodeActExperimental(CodeActStrategy):
             )
         elif hasattr(agent, "v"):
             lines.append("`self.v`: none")
+
+        if import_items:
+            visible_imports = import_items[:20]
+            omitted = len(import_items) - len(visible_imports)
+            suffix = f' (+{omitted} more; `print(python_state()["imports"])`)' if omitted else ""
+            imports = ", ".join(
+                f"{self._python_state_label(name, max_chars=80)} → "
+                f"{self._python_state_label(module_name, max_chars=80)}"
+                for name, module_name in visible_imports
+            )
+            lines.extend(("", f"Imports: {imports}{suffix}"))
+        else:
+            lines.extend(("", "Imports: none"))
 
         if local_items:
             visible = local_items[:20]
