@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 from nooa_cli.tui import theme
 from nooa_cli.tui.commands import ThemeCommand
 from nooa_cli.tui.config import Config, TUIConfig
@@ -32,9 +33,7 @@ def test_input_uses_terminal_background_across_themes() -> None:
         theme.set_theme(original_theme)
 
 
-async def test_theme_command_refreshes_and_persists_selection(
-    tmp_path, monkeypatch
-) -> None:
+async def test_theme_command_refreshes_and_persists_selection(tmp_path, monkeypatch) -> None:
     import yaml
 
     class LiveApp:
@@ -47,7 +46,7 @@ async def test_theme_command_refreshes_and_persists_selection(
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
     original_theme = theme.get_theme()
     app = LiveApp()
-    frontend = SimpleNamespace(_app=app, _input_handler=None)
+    frontend = SimpleNamespace(refresh_theme=app.refresh_style)
     config = TUIConfig()
     command = ThemeCommand(frontend, config=config, agent=object())
     try:
@@ -78,3 +77,81 @@ def test_terminal_frontend_restores_persisted_theme(tmp_path, monkeypatch) -> No
         assert frontend._console.console.get_style("agent").color.triplet == (111, 66, 193)
     finally:
         theme.set_theme(original_theme)
+
+
+@pytest.mark.parametrize(
+    ("name", "syntax_theme"),
+    [
+        ("mocha", "monokai"),
+        ("latte", "gruvbox-light"),
+        ("vsdark", "github-dark"),
+        ("vslight", "vs"),
+    ],
+)
+def test_each_ui_theme_has_a_matching_syntax_theme(name: str, syntax_theme: str) -> None:
+    from pygments.styles import get_style_by_name
+
+    original_theme = theme.get_theme()
+    try:
+        theme.set_theme(name)
+        assert theme.get_syntax_theme() == syntax_theme
+        assert get_style_by_name(syntax_theme) is not None
+    finally:
+        theme.set_theme(original_theme)
+
+
+def test_unknown_syntax_theme_name_fails_clearly() -> None:
+    with pytest.raises(ValueError, match="Unknown theme 'ultraviolet'"):
+        theme.get_syntax_theme("ultraviolet")
+
+
+def test_retained_markdown_tracks_live_theme_but_explicit_override_does_not() -> None:
+    import io
+
+    from nooa_cli.tui.copyable_markdown import TerminalMarkdown
+    from rich.console import Console
+
+    original_theme = theme.get_theme()
+    active = TerminalMarkdown("```python\nprint('hello')\n```")
+    explicit = TerminalMarkdown("```python\nprint('hello')\n```", code_theme="ansi_dark")
+    try:
+        for name in theme.THEMES:
+            theme.set_theme(name)
+            for renderable in (active, explicit):
+                Console(file=io.StringIO(), width=80).print(renderable)
+            assert active.code_theme == theme.get_syntax_theme(name)
+            assert explicit.code_theme == "ansi_dark"
+    finally:
+        theme.set_theme(original_theme)
+
+
+def test_console_theme_refresh_replaces_console_without_disturbing_temporary_themes() -> None:
+    import io
+
+    from nooa_cli.tui.console import TUIConsole
+    from rich.console import Console
+    from rich.theme import Theme
+
+    output = io.StringIO()
+    tui_console = TUIConsole()
+    original = Console(
+        file=output,
+        force_terminal=True,
+        color_system="256",
+        width=73,
+        theme=theme.create_theme(),
+    )
+    tui_console.replace_console(original)
+    original.push_theme(Theme({"temporary": "bold red"}))
+    original_width = original.width
+
+    tui_console.refresh_theme()
+
+    assert tui_console.console is not original
+    assert tui_console.console.file is output
+    assert tui_console.console.width == original_width
+    assert tui_console.console.color_system == "256"
+    assert tui_console.console.get_style("agent").color is not None
+    # The old console's temporary scope remains balanced and independently usable.
+    assert original.get_style("temporary").bold is True
+    original.pop_theme()

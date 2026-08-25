@@ -16,6 +16,7 @@ from rich.syntax import Syntax
 from rich.text import Text
 
 from .terminal_safety import safe_hyperlink_target
+from .theme import get_syntax_theme
 
 _COPY_URI_PREFIX = "nooa-copy://"
 _CODE_SOURCE_URI_PREFIX = "nooa-code-source://"
@@ -25,6 +26,9 @@ class TerminalMarkdown(Markdown):
     """Rich Markdown whose parser also permits validated ``file://`` links."""
 
     def __init__(self, markup: str, **kwargs: Any) -> None:
+        self.uses_active_code_theme = "code_theme" not in kwargs
+        if self.uses_active_code_theme:
+            kwargs["code_theme"] = get_syntax_theme()
         super().__init__(markup, **kwargs)
         if "file:" not in markup.lower():
             return
@@ -48,6 +52,12 @@ class TerminalMarkdown(Markdown):
                 if normalized is not None and target != normalized:
                     child.attrSet("href", normalized)
 
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        # Retained Markdown objects are replayed after live /theme changes.
+        if self.uses_active_code_theme:
+            self.code_theme = get_syntax_theme()
+        yield from super().__rich_console__(console, options)
+
 
 def visible_code_line(source: str) -> tuple[str, tuple[tuple[int, int], ...]]:
     """Expose terminal controls and map each rendered code point to source."""
@@ -56,9 +66,11 @@ def visible_code_line(source: str) -> tuple[str, tuple[tuple[int, int], ...]]:
     column = 0
     cursor = 0
     while cursor < len(source):
-        control = ord(source[cursor]) < 0x20 or ord(source[cursor]) == 0x7F or 0x80 <= ord(
-            source[cursor]
-        ) <= 0x9F
+        control = (
+            ord(source[cursor]) < 0x20
+            or ord(source[cursor]) == 0x7F
+            or 0x80 <= ord(source[cursor]) <= 0x9F
+        )
         if control:
             stop = cursor + 1
             codepoint = ord(source[cursor])

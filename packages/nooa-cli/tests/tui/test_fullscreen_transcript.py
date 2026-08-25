@@ -3639,9 +3639,7 @@ def test_copyable_markdown_renders_and_hit_tests_file_links() -> None:
 
     model = FullscreenTranscriptModel()
     model.append(ansi)
-    assert model.hyperlink_at(x=label_start, y=0, width=60, height=2) == (
-        "file:///path/to/file"
-    )
+    assert model.hyperlink_at(x=label_start, y=0, width=60, height=2) == ("file:///path/to/file")
 
 
 def test_copyable_markdown_preserves_nested_and_multiline_list_structure() -> None:
@@ -3702,12 +3700,8 @@ def test_copyable_markdown_places_copy_action_in_top_code_padding() -> None:
         " " * 30,
     ]
     fragments = to_formatted_text(ANSI(sanitize_transcript_ansi(ansi)))
-    copy_style = next(
-        style for style, text, *_rest in fragments if text == "C" and "bg:" in style
-    )
-    code_style = next(
-        style for style, text, *_rest in fragments if text == "p" and "bg:" in style
-    )
+    copy_style = next(style for style, text, *_rest in fragments if text == "C" and "bg:" in style)
+    code_style = next(style for style, text, *_rest in fragments if text == "p" and "bg:" in style)
     assert copy_style.split("bg:", 1)[1].split()[0] == code_style.split("bg:", 1)[1].split()[0]
 
 
@@ -4124,3 +4118,139 @@ def test_fullscreen_code_copy_drag_away_does_not_copy(
     control.mouse_handler(_mouse_event(MouseEventType.MOUSE_UP, x=x, y=y))
 
     assert copied == []
+
+
+async def test_fullscreen_theme_refresh_recolors_mixed_retained_history_for_all_themes() -> None:
+    from types import SimpleNamespace
+
+    from nooa_cli.tui import theme
+    from nooa_cli.tui.frontend import TerminalFrontend
+    from nooa_cli.tui.output import (
+        AgentMessage,
+        HelpOutput,
+        HistoryReplay,
+        HistoryTurn,
+        StartupInfo,
+        TableOutput,
+        TextOutput,
+    )
+    from nooa_cli.tui.session import _EmitStream
+    from rich.console import Console
+
+    original_theme = theme.get_theme()
+    try:
+        theme.set_theme("mocha")
+        app = _make_fullscreen_app()
+        frontend = TerminalFrontend(SimpleNamespace(tui=SimpleNamespace(theme="mocha")))
+        frontend.bind_app(app)
+        stream = _EmitStream(
+            app.emit_block,
+            replay_width=lambda: 72,
+            layout_width=lambda: 72,
+            supports_code_copy_actions=True,
+        )
+        frontend._console.replace_console(
+            Console(
+                file=stream,
+                force_terminal=True,
+                color_system="256",
+                width=72,
+                theme=theme.create_theme(),
+            )
+        )
+        app.emit_block("raw retained output\n", event_id="raw", tags={"raw"}, keep=True)
+        outputs = [
+            *(
+                TextOutput(f"retained {level}", level)
+                for level in ("info", "error", "warning", "success", "status")
+            ),
+            TableOutput(["kind", "value"], [["theme", "live"]], title="retained table"),
+            HelpOutput({"/theme": "Switch theme"}),
+            AgentMessage("Retained prose with `inline code` and:\n\n```python\nprint('live')\n```"),
+            StartupInfo(
+                model="provider/model",
+                short_model="model",
+                working_dir="/work",
+                vi_mode=False,
+            ),
+            HistoryReplay(
+                turns=[HistoryTurn(role="agent", content="Earlier retained response with `code`")],
+                session_id="theme-history",
+                show_header=True,
+                show_footer=True,
+            ),
+        ]
+        with frontend.batch_render():
+            for output in outputs:
+                await frontend.render(output)
+
+        assert len(app._transcript_blocks) == 3
+        raw_block, batched_block, history_block = app._transcript_blocks
+        assert raw_block.replay is None
+        assert raw_block.event_id == "raw"
+        assert raw_block.tags == frozenset({"raw"})
+        assert raw_block.keep is True
+        assert batched_block.replay is not None
+        assert history_block.replay is not None
+        record_ids = [block.transcript_record_id for block in app._transcript_blocks]
+        copy_actions = [dict(block.code_copy_actions) for block in app._transcript_blocks]
+        raw_rendered = raw_block.fullscreen_rendered
+        rendered_by_theme = {}
+        for name in theme.THEMES:
+            theme.set_theme(name)
+            frontend.refresh_theme()
+            rendered_by_theme[name] = "".join(
+                block.fullscreen_rendered or "" for block in app._transcript_blocks
+            )
+            plain = app._fullscreen_transcript.text
+            assert raw_block.fullscreen_rendered == raw_rendered
+            assert [block.transcript_record_id for block in app._transcript_blocks] == record_ids
+            assert [block.code_copy_actions for block in app._transcript_blocks] == copy_actions
+            for expected in (
+                "raw retained output",
+                *(
+                    f"retained {level}"
+                    for level in ("info", "error", "warning", "success", "status")
+                ),
+                "retained table",
+                "/theme",
+                "Retained prose",
+                "NOOA ready",
+                "Earlier retained response",
+            ):
+                assert plain.count(expected) == 1
+
+        assert len(set(rendered_by_theme.values())) == len(theme.THEMES)
+    finally:
+        theme.set_theme(original_theme)
+
+
+def test_fullscreen_theme_refresh_recolors_retained_agent_event_syntax() -> None:
+    from nooa_cli.tui import theme
+    from nooa_cli.tui.session import Session
+    from nooa_cli.tui.theme import ThemeSyntax
+
+    original_theme = theme.get_theme()
+    try:
+        theme.set_theme("mocha")
+        app = _make_fullscreen_app()
+        session = Session.__new__(Session)
+        session._app = app
+        syntax = ThemeSyntax(
+            "def greet(name: str) -> str:\n    return name",
+            "python",
+            background_color="default",
+        )
+        session._emit_text(syntax)
+        before = app._transcript_blocks[0].fullscreen_rendered
+        assert before is not None
+
+        theme.set_theme("vslight")
+        app.refresh_style()
+        after = app._transcript_blocks[0].fullscreen_rendered
+
+        assert after is not None
+        assert after != before
+        assert app._fullscreen_transcript.text.count("def greet") == 1
+    finally:
+        theme.set_theme(original_theme)

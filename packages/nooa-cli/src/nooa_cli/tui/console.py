@@ -34,6 +34,22 @@ class TUIConsole:
         """
         self.console = console
 
+    def refresh_theme(self) -> None:
+        """Replace the Rich console with one using the active palette."""
+        old = self.console
+        self.console = Console(
+            file=old.file,
+            force_terminal=old.is_terminal,
+            color_system=old.color_system,
+            width=old.width,
+            height=old.height,
+            no_color=old.no_color,
+            tab_size=old.tab_size,
+            legacy_windows=old.legacy_windows,
+            safe_box=old.safe_box,
+            theme=create_theme(),
+        )
+
     def start_spinner(self, message: str = "thinking...") -> None:
         """Start the thinking spinner with an empty input prompt.
 

@@ -20,6 +20,7 @@ from .explorer_base import (
     wrap_plain_line,
 )
 from .subapp import SubviewKeyResult
+from .theme import ThemeSyntax, get_syntax_theme
 
 
 def highlight_terms_with_current(
@@ -775,7 +776,6 @@ def _highlight_syntax(text: str, width: int, language: str = "python") -> str:
         import io
 
         from rich.console import Console as RichConsole
-        from rich.syntax import Syntax
 
         render_width = max(int(width), 20)
         buf = io.StringIO()
@@ -787,10 +787,9 @@ def _highlight_syntax(text: str, width: int, language: str = "python") -> str:
             _environ={"COLUMNS": str(render_width), "LINES": "25"},
         )
         console.print(
-            Syntax(
+            ThemeSyntax(
                 text,
                 language or "python",
-                theme="monokai",
                 word_wrap=True,
                 line_numbers=False,
                 background_color="default",
@@ -820,7 +819,7 @@ def _render_markdown(markdown: str, width: int) -> str:
             width=render_width,
             _environ={"COLUMNS": str(render_width), "LINES": "25"},
         )
-        console.print(Markdown(markdown))
+        console.print(Markdown(markdown, code_theme=get_syntax_theme()))
         return buf.getvalue()
     except Exception:
         wrapped: list[str] = []
