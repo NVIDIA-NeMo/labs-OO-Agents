@@ -8,7 +8,8 @@ import secrets
 from typing import Any
 
 from rich.console import Console, ConsoleOptions, RenderResult
-from rich.markdown import CodeBlock, Markdown
+from rich.markdown import CodeBlock, ListItem, Markdown
+from rich.segment import Segment
 from rich.syntax import Syntax
 from rich.text import Text
 
@@ -74,6 +75,45 @@ class _CopyableCodeBlock(CodeBlock):
         yield from console.render(syntax, options.update(no_wrap=False, overflow="fold"))
 
 
+class _SemanticListItem(ListItem):
+    """Render complete list-item text for renderer-owned wrapping.
+
+    Rich's normal list renderer calls ``render_lines`` even under
+    ``soft_wrap=True``. That clips each list item to the Console width before
+    the fullscreen transcript can reflow it, permanently losing the suffix.
+    Emit the prefix and semantic child stream instead; the transcript model
+    owns visual wrapping at the current viewport width.
+    """
+
+    def _semantic_lines(self, console: Console, options: ConsoleOptions) -> list[list[Segment]]:
+        """Render logical child lines without Rich's width-cropping pass."""
+        rendered = console.render(self.elements, options)
+        styled = Segment.apply_style(rendered, self.style)
+        return list(Segment.split_lines(styled)) or [[]]
+
+    def render_bullet(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        bullet_style = console.get_style("markdown.item.bullet", default="none")
+        for index, line in enumerate(self._semantic_lines(console, options)):
+            yield Segment(" • " if index == 0 else "   ", bullet_style)
+            yield from line
+            yield Segment.line()
+
+    def render_number(
+        self,
+        console: Console,
+        options: ConsoleOptions,
+        number: int,
+        last_number: int,
+    ) -> RenderResult:
+        number_width = len(str(last_number)) + 2
+        number_style = console.get_style("markdown.item.number", default="none")
+        for index, line in enumerate(self._semantic_lines(console, options)):
+            prefix = f"{number}".rjust(number_width - 1) + " " if index == 0 else " " * number_width
+            yield Segment(prefix, number_style)
+            yield from line
+            yield Segment.line()
+
+
 class CopyableMarkdown(Markdown):
     """Rich Markdown that exposes exact fenced-code payloads by stable action ID."""
 
@@ -81,6 +121,7 @@ class CopyableMarkdown(Markdown):
         **Markdown.elements,
         "fence": _CopyableCodeBlock,
         "code_block": _CopyableCodeBlock,
+        "list_item_open": _SemanticListItem,
     }
 
     def __init__(self, markup: str, **kwargs: Any) -> None:
