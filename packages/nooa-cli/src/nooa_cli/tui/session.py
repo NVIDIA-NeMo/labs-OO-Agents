@@ -404,7 +404,7 @@ class Session:
         from .agent_event_renderer import AgentEventRenderer
         from .input_handler import SlashCommandCompleter
         from .output import TextOutput
-        from .theme import CATPPUCCIN_THEME
+        from .theme import create_theme
         from .tui_application import TUIApplication
 
         # Save terminal attributes so we can restore them on exit, even
@@ -660,7 +660,7 @@ class Session:
                     force_terminal=True,
                     color_system="256",
                     width=120,
-                    theme=CATPPUCCIN_THEME,
+                    theme=create_theme(),
                 )
             )
 

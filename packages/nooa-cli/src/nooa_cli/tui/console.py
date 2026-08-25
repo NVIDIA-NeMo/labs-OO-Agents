@@ -13,14 +13,14 @@ from rich.table import Table
 from rich.text import Text
 
 from .copyable_markdown import TerminalMarkdown
-from .theme import CATPPUCCIN_THEME, COLORS
+from .theme import COLORS, create_theme
 
 
 class TUIConsole:
     """Rich console wrapper with Catppuccin styling for the NOOA TUI."""
 
     def __init__(self) -> None:
-        self.console = Console(theme=CATPPUCCIN_THEME)
+        self.console = Console(theme=create_theme())
         self._live_spinner: Live | None = None
         self._spinner: Spinner | None = None
 
