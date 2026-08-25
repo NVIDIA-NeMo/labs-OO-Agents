@@ -517,6 +517,33 @@ async def test_fullscreen_transient_sigwinches_publish_only_final_frame() -> Non
         assert app._fullscreen_rebuild_timer is None
 
 
+def test_fullscreen_theme_refresh_recolors_retained_semantic_scrollback() -> None:
+    from nooa_cli.tui import theme
+    from nooa_cli.tui.session import Session
+    from rich.text import Text
+
+    original_theme = theme.get_theme()
+    try:
+        theme.set_theme("mocha")
+        app = _make_fullscreen_app()
+        session = Session.__new__(Session)
+        session._app = app
+        session._emit_text(Text("hello", style="agent.response"))
+        before = app._transcript_blocks[0].fullscreen_rendered
+        assert before is not None
+
+        theme.set_theme("latte")
+        app.refresh_style()
+        after = app._transcript_blocks[0].fullscreen_rendered
+
+        assert after is not None
+        assert after != before
+        assert app._transcript_blocks[0].replay_cache
+        assert app._fullscreen_transcript.text.count("hello") == 1
+    finally:
+        theme.set_theme(original_theme)
+
+
 def test_fullscreen_resize_preserves_history_beyond_native_replay_tail() -> None:
     app = _make_fullscreen_app()
     for index in range(app._untagged_replay_tail + 7):
@@ -667,7 +694,7 @@ def test_fullscreen_does_not_emit_native_metadata_for_unsafe_link_target() -> No
     from prompt_toolkit.formatted_text import to_formatted_text
 
     app = _make_fullscreen_app()
-    app.emit_block("\x1b]8;;file:///tmp/secret\x1b\\label\x1b]8;;\x1b\\")
+    app.emit_block("\x1b]8;;javascript:alert(1)\x1b\\label\x1b]8;;\x1b\\")
 
     fragments = to_formatted_text(app._fullscreen_transcript.formatted_text())
 
@@ -2560,6 +2587,28 @@ async def test_fullscreen_link_click_opens_safe_http_url(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_fullscreen_file_link_click_uses_platform_opener(monkeypatch) -> None:
+    app = _make_fullscreen_app()
+    url = "file:///path/to/file"
+    app.emit_block(f"\x1b]8;;{url}\x1b\\link\x1b]8;;\x1b\\")
+    app._transcript_viewport_size = lambda: (20, 2)
+    calls: list[str] = []
+
+    async def open_file(target: str) -> bool:
+        calls.append(target)
+        return True
+
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    monkeypatch.setattr(app, "_open_local_url", open_file)
+
+    assert app._open_fullscreen_link_at(1, 0) is True
+    assert app._link_task is not None
+    await app._link_task
+    assert calls == [url]
+
+
+@pytest.mark.asyncio
 async def test_fullscreen_link_open_failure_copies_url(monkeypatch) -> None:
     app = _make_fullscreen_app()
     url = "https://example.test/docs"
@@ -3570,6 +3619,28 @@ def test_copyable_markdown_preserves_safe_markdown_links() -> None:
     model.append(ansi)
     assert model.hyperlink_at(x=label_start, y=0, width=60, height=2) == (
         "https://example.test/docs"
+    )
+
+
+def test_copyable_markdown_renders_and_hit_tests_file_links() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+    from nooa_cli.tui.terminal_safety import safe_hyperlink_spans, strip_safe_ansi
+
+    _renderable, ansi = _copyable_markdown_ansi(
+        "Open [the file](file://path/to/file) locally.", width=60
+    )
+
+    plain = strip_safe_ansi(ansi)
+    assert "[the file](file://path/to/file)" not in plain
+    label_start = plain.index("the file")
+    assert safe_hyperlink_spans(ansi) == (
+        (label_start, label_start + len("the file"), "file:///path/to/file"),
+    )
+
+    model = FullscreenTranscriptModel()
+    model.append(ansi)
+    assert model.hyperlink_at(x=label_start, y=0, width=60, height=2) == (
+        "file:///path/to/file"
     )
 
 

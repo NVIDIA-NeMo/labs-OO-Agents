@@ -200,6 +200,7 @@ class TestBatchRendering:
         assert all(
             "bg:" in style for style, text, *_ in to_formatted_text(ANSI(rendered)) if text != "\n"
         )
+        assert rendered == render_user_bar(replay.turns[0].content, 20, COLORS)
 
     def test_resumed_agent_prose_has_no_render_width_whitespace(self):
         from nooa_cli.tui.frontend import render_history_replay_to_ansi
