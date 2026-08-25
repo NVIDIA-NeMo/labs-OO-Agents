@@ -84,6 +84,11 @@ async def test_experimental_tui_agent_uses_only_python_cell(tmp_path):
         )
         assert "<state" not in system_prompt
         assert "<execution_context" not in system_prompt
+        assert "<python_cell_context" in system_prompt
+        assert "Module capabilities already in scope:" in system_prompt
+        assert "`json`" in system_prompt
+        assert "`np` → `numpy`" in system_prompt
+        assert "`pd` → `pandas`" in system_prompt
         rendered_context = "\n".join(
             str(message.get("content", "")) for message in llm.last_messages
         )
@@ -102,6 +107,25 @@ async def test_experimental_tui_agent_uses_only_python_cell(tmp_path):
         ]
         assert len(completion_events) == 1
         assert completion_events[0].metadata["synthetic_type"] == "codeact_inline_return"
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_experimental_tui_agent_module_capabilities_execute_without_import(tmp_path):
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _response(
+                "return_result(RespondResult(kind=RespondReason.DONE, "
+                "explanation=json.dumps({'columns': list(pd.DataFrame({'x': [1]}).columns)})))"
+            )
+        ]
+    )
+    agent = ExperimentalTUIAgent(llm=llm, cwd=tmp_path)
+    try:
+        result = await agent.handle({"user_messages": ["exercise module capabilities"]})
+        assert result.kind is RespondReason.DONE
+        assert result.explanation == '{"columns": ["x"]}'
     finally:
         await agent.close()
 

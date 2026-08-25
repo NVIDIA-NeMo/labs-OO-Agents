@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Experimental single-tool CodeAct strategy."""
 
+import inspect
 from html import escape
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
@@ -48,6 +49,9 @@ class CodeActExperimental(CodeActStrategy):
         """Put the execution contract on the tool and keep only runtime context blocks."""
         overrides = super().get_block_overrides()
         overrides["strategy_prompt"] = None
+        overrides["python_cell_context"] = DynamicContext(
+            "strategy.python_cell_context(runtime)"
+        )
         overrides["python_cell_state"] = DynamicContext(
             "strategy.python_cell_state_context(runtime)"
         )
@@ -55,13 +59,52 @@ class CodeActExperimental(CodeActStrategy):
 
     def get_static_block_keys(self) -> set[str]:
         """Exclude the removed strategy prompt from the cacheable context prefix."""
-        return super().get_static_block_keys() - {"strategy_prompt"}
+        return (super().get_static_block_keys() - {"strategy_prompt"}) | {
+            "python_cell_context"
+        }
 
     def get_block_order(self) -> list[str] | None:
         """Place live locals immediately after the stable execution context."""
         order = [key for key in (super().get_block_order() or []) if key != "strategy_prompt"]
-        index = order.index("execution_context") + 1
-        return [*order[:index], "python_cell_state", *order[index:]]
+        index = order.index("execution_context")
+        return [
+            *order[:index],
+            "python_cell_context",
+            "execution_context",
+            "python_cell_state",
+            *order[index + 1 :],
+        ]
+
+    async def python_cell_context(self, runtime: RuntimeServices) -> str:
+        """Render static module capabilities available in generated Python cells."""
+        agent_module = inspect.getmodule(type(runtime.agent))
+        if agent_module is None:
+            return ""
+
+        from nooa.runtime.restrictions import is_from_blocked_module
+
+        context = self._extract_module_context(agent_module, agent=runtime.agent)
+        modules = sorted(
+            (name, value.__name__)
+            for name, value in context.items()
+            if isinstance(value, ModuleType)
+            and not is_from_blocked_module(value, self.config.restrictions.blocked_modules)
+        )
+        if not modules:
+            return ""
+
+        labels = ", ".join(
+            f"`{name}`" if name == module_name else f"`{name}` → `{module_name}`"
+            for name, module_name in modules
+        )
+        return "\n".join(
+            (
+                "## Python cell context",
+                "",
+                f"Module capabilities already in scope: {labels}.",
+                "Use them directly; do not re-import them.",
+            )
+        )
 
     @staticmethod
     def _python_cell_state_label(value: Any, *, max_chars: int = 160) -> str:

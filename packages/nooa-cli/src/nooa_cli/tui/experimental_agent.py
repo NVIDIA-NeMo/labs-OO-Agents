@@ -4,7 +4,37 @@
 
 from __future__ import annotations
 
+import datetime  # noqa: F401 — module capability exposed to generated Python cells
+import json  # noqa: F401 — module capability exposed to generated Python cells
+import re  # noqa: F401 — module capability exposed to generated Python cells
 from typing import Any
+
+# Optional data libraries follow the standard InteractiveAgent capability aliases.
+try:
+    import numpy as np  # noqa: F401  # type: ignore[import-untyped]
+except ImportError:
+    pass
+
+try:
+    import pandas as pd  # noqa: F401  # type: ignore[import-untyped]
+except ImportError:
+    pass
+
+try:
+    import plotly.express as px  # noqa: F401  # type: ignore[import-untyped]
+    import plotly.graph_objects as go  # noqa: F401  # type: ignore[import-untyped]
+except ImportError:
+    pass
+
+try:
+    import scipy  # noqa: F401  # type: ignore[import-untyped]
+except ImportError:
+    pass
+
+try:
+    import sklearn  # noqa: F401  # type: ignore[import-untyped]
+except ImportError:
+    pass
 
 from nooa import DynamicContext, hidden, strategy
 from nooa.config import CodeActConfig
