@@ -8,6 +8,7 @@ serialized execution, and complete transparency.
 """
 
 import logging as _logging
+from typing import Any
 
 from nooa._version import __version__
 
@@ -59,38 +60,41 @@ from nooa.skill import Skill, TextSkill, get_slash_commands, slash_command  # no
 from nooa.skill_registry import skill_from_module  # noqa: E402
 
 # Export storage
-from nooa.storage import StorageManager  # noqa: E402
-
-# Export strategy base class and implementations.
-# NOTE: CodeActLiteStrategy and ReflexionStrategy are experimental. They are NOT
-# imported raw here — that would bypass the FutureWarning gate in
-# nooa.experimental. Instead they are exposed lazily via __getattr__
-# below, which returns the warning-emitting factories.
-from nooa.strategies import (  # noqa: E402
-    CodeActStrategy,
-    GenerationStrategy,
-    InspectInputsPrefill,
-    PredictStrategy,
-    get_default_strategy,
-    set_default_strategy,
-)
+from nooa.storage.manager import StorageManager  # noqa: E402
 from nooa.strategy_validation import (  # noqa: E402
     InvariantError,
     MethodPostcondition,
     MethodPrecondition,
 )
 from nooa.token_counter import char_approximate_token_counter  # noqa: E402
-from nooa.unifiedllm import LLMResponse  # noqa: E402
+from nooa.unifiedllm.types import LLMResponse  # noqa: E402
+
+# Experimental strategies are handled separately below to preserve the FutureWarning gate.
+_LAZY_EXPORTS = {
+    "CodeActStrategy": "nooa.strategies",
+    "GenerationStrategy": "nooa.strategies",
+    "InspectInputsPrefill": "nooa.strategies",
+    "Prefill": "nooa.strategies",
+    "PredictStrategy": "nooa.strategies",
+    "get_default_strategy": "nooa.strategies",
+    "set_default_strategy": "nooa.strategies",
+}
 
 
 # Lazy re-export of llm_config_chain — defer importing the llm_config /
 # paths machinery (and the registry it touches) until the helper is
 # actually called, keeping ``import nooa`` cheap.
-def __getattr__(name):
+def __getattr__(name: str) -> Any:
     if name == "llm_config_chain":
         from nooa.llm_config import llm_config_chain
 
         return llm_config_chain
+    if name in _LAZY_EXPORTS:
+        from importlib import import_module
+
+        value = getattr(import_module(_LAZY_EXPORTS[name]), name)
+        globals()[name] = value
+        return value
     # Experimental strategies: route through the warning factories so that
     # `from nooa import CodeActLiteStrategy; CodeActLiteStrategy()`
     # emits the same FutureWarning as importing from nooa.experimental.
@@ -99,6 +103,10 @@ def __getattr__(name):
 
         return getattr(experimental, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))
 
 
 __all__ = [
@@ -129,6 +137,7 @@ __all__ = [
     "MethodPrecondition",
     "MethodPostcondition",
     # Prefill plugins
+    "Prefill",
     "InspectInputsPrefill",
     # Prompt inspection
     "print_prompt",

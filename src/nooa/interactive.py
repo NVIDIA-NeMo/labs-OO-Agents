@@ -28,6 +28,7 @@ from nooa import hidden, strategy
 from nooa.agentdoc import doc
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
+from nooa.interactive_config import SummarizationConfig
 from nooa.storage.markers import nosnapshot
 from nooa.storage.snapshot_vars import SnapshotVars
 
@@ -166,22 +167,6 @@ class AgentMessage(Metadata):
     _role: ClassVar[Role] = Role.METADATA
 
     content: str = ""
-
-
-class SummarizationConfig(BaseModel):
-    """Configuration for history summarization.
-
-    ``max_tokens`` defaults to ``None`` meaning "80% of the LLM's context
-    window, resolved at install time." The old 100K absolute was fine when
-    models had ~200K context but fired at ~10% usage on 1M-context models
-    like Opus 4.8, making summarization feel constant. Set an explicit
-    integer to pin a specific threshold.
-    """
-
-    policy: Literal["token_budget", "none"] = "token_budget"
-    max_tokens: int | None = None
-    preserve_recent: int = 10
-    target_chars: int = 4000
 
 
 # Default model used when an agent class is defined without an explicit LLM

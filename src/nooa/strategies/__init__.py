@@ -3,25 +3,22 @@
 """Generation strategies for nooa.
 
 One class = one strategy. Each strategy owns its configuration.
+
+Strategy implementations are loaded lazily so importing the package does not
+load concrete LLM providers before generation needs them.
 """
 
-from contextvars import ContextVar
+from __future__ import annotations
 
-from nooa.config import CodeActConfig
+from contextvars import ContextVar
+from typing import Any
+
 from nooa.strategies.base import GenerationStrategy, RuntimeServices
-from nooa.strategies.codeact import CodeActStrategy
-from nooa.strategies.codeact_lite import CodeActLiteStrategy
-from nooa.strategies.composite import CompositeStrategy
-from nooa.strategies.current_call import CurrentCall
-from nooa.strategies.predict import PredictStrategy
-from nooa.strategies.prefill import InspectInputsPrefill, Prefill
-from nooa.strategies.reflexion import ReflexionStrategy
-from nooa.strategies.template import TemplateStrategy
 
 # NOTE: CodeActLiteStrategy and ReflexionStrategy are experimental. The
 # FutureWarning gate lives on the top-level package (nooa.__getattr__),
-# so importing them from here — `from nooa.strategies import
-# CodeActLiteStrategy` — is an intentional un-gated (warning-free) escape hatch.
+# so importing them from here - `from nooa.strategies import
+# CodeActLiteStrategy` - is an intentional un-gated (warning-free) escape hatch.
 
 # =============================================================================
 # Default Strategy Override
@@ -33,6 +30,18 @@ from nooa.strategies.template import TemplateStrategy
 _default_strategy_var: ContextVar[GenerationStrategy | None] = ContextVar(
     "default_strategy", default=None
 )
+
+_STRATEGY_EXPORTS = {
+    "CurrentCall": "nooa.strategies.current_call",
+    "CompositeStrategy": "nooa.strategies.composite",
+    "TemplateStrategy": "nooa.strategies.template",
+    "CodeActStrategy": "nooa.strategies.codeact",
+    "CodeActLiteStrategy": "nooa.strategies.codeact_lite",
+    "ReflexionStrategy": "nooa.strategies.reflexion",
+    "PredictStrategy": "nooa.strategies.predict",
+    "Prefill": "nooa.strategies.prefill",
+    "InspectInputsPrefill": "nooa.strategies.prefill",
+}
 
 
 def get_default_strategy() -> GenerationStrategy:
@@ -50,6 +59,9 @@ def get_default_strategy() -> GenerationStrategy:
     """
     strategy = _default_strategy_var.get()
     if strategy is None:
+        from nooa.config import CodeActConfig
+        from nooa.strategies.codeact import CodeActStrategy
+
         return CodeActStrategy(config=CodeActConfig())
     return strategy
 
@@ -82,6 +94,22 @@ def set_default_strategy(strategy: GenerationStrategy | None) -> None:
         set_default_strategy(None)
     """
     _default_strategy_var.set(strategy)
+
+
+def __getattr__(name: str) -> Any:
+    module_name = _STRATEGY_EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    from importlib import import_module
+
+    value = getattr(import_module(module_name), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))
 
 
 __all__ = [

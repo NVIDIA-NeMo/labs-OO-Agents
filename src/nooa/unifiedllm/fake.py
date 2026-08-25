@@ -9,7 +9,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from nooa.unifiedllm.unifiedllm import LLMResponse, Tool, ToolCall, UnifiedLLM
+from nooa.unifiedllm.types import LLMResponse, Tool, ToolCall
+from nooa.unifiedllm.unifiedllm import UnifiedLLM
 
 
 class FakeLLMClient(UnifiedLLM):

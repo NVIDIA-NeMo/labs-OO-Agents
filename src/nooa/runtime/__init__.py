@@ -10,15 +10,24 @@ Middleware types are imported directly from ``nooa.runtime.middleware``::
     from nooa.runtime.middleware import LLMCallContext, LLMCallMiddleware
 """
 
-from nooa.agentdoc import FileBackedTruncatingStringIO, TruncatingStringIO
-from nooa.config.truncation_config import TruncationConfig
-from nooa.runtime.actor import ActorRuntime
-from nooa.runtime.event_manager import EventManager
-from nooa.runtime.event_query import EventQuery
-from nooa.runtime.events import EventsApi
-from nooa.runtime.hooks import InstrumentationHooks, get_hooks, set_hooks
-from nooa.runtime.media_capture import show
-from nooa.runtime.pprint import pprint
+from __future__ import annotations
+
+from typing import Any
+
+_MODULE_BY_NAME = {
+    "ActorRuntime": "nooa.runtime.actor",
+    "EventManager": "nooa.runtime.event_manager",
+    "EventQuery": "nooa.runtime.event_query",
+    "EventsApi": "nooa.runtime.events",
+    "InstrumentationHooks": "nooa.runtime.hooks",
+    "set_hooks": "nooa.runtime.hooks",
+    "get_hooks": "nooa.runtime.hooks",
+    "TruncationConfig": "nooa.config.truncation_config",
+    "TruncatingStringIO": "nooa.agentdoc",
+    "FileBackedTruncatingStringIO": "nooa.agentdoc",
+    "pprint": "nooa.runtime.pprint",
+    "show": "nooa.runtime.media_capture",
+}
 
 __all__ = [
     "ActorRuntime",
@@ -37,3 +46,19 @@ __all__ = [
     "pprint",
     "show",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    module_name = _MODULE_BY_NAME.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    from importlib import import_module
+
+    value = getattr(import_module(module_name), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))
