@@ -1156,6 +1156,8 @@ class TUIApplication:
         self._session_label: str = ""
         self._spinner_frame: str = "⠋"
         self._spinner_frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        self._pulse_frame: str = "·"
+        self._pulse_frames = "·•"
         self._spinner_task: asyncio.Task | None = None
         self._command_status_text: str = ""
         self._command_queue_texts: list[str] = []
@@ -2597,8 +2599,16 @@ class TUIApplication:
         async def _animate() -> None:
             i = 0
             try:
-                while self.is_thinking() or self._llm_probe_status_text:
+                while (
+                    self.is_thinking()
+                    or self._interrupting_agent_turn
+                    or self._llm_probe_status_text
+                ):
                     self._spinner_frame = self._spinner_frames[i % len(self._spinner_frames)]
+                    # Match the command runner's calm half-second dot pulse
+                    # while retaining the thinking spinner's smoother cadence.
+                    pulse_index = int((i * 0.08) / 0.5)
+                    self._pulse_frame = self._pulse_frames[pulse_index % len(self._pulse_frames)]
                     if self._app.is_running:
                         self._app.invalidate()
                     i += 1
@@ -2862,8 +2872,10 @@ class TUIApplication:
             self._interrupt_status_acknowledged = False
             self._interrupt_completion_pending = False
             self._interrupt_status_started_at = time.monotonic()
+            self._pulse_frame = self._pulse_frames[0]
             if self._app.is_running:
                 self._app.invalidate()
+            self._ensure_spinner_task()
             if self._on_agent_activity is not None:
                 self._on_agent_activity()
         return accepted
@@ -4127,7 +4139,7 @@ class TUIApplication:
         if self._interrupting_agent_turn or (
             state is not None and state.workspace.cancellation is CancellationState.REQUESTED
         ):
-            rows.append([("class:status", "Interrupting agent turn")])
+            rows.append([("class:status", f"{self._pulse_frame} Interrupting agent turn")])
         elif self.is_thinking():
             rows.append([("class:status", f"{self._spinner_frame} thinking...")])
         if self._llm_probe_status_text:
