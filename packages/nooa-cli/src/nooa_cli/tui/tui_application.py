@@ -1615,9 +1615,15 @@ class TUIApplication:
             # must force each semantic callback to render again at this width.
             for block in self._transcript_blocks:
                 block.replay_cache.clear()
-            self._rebuild_fullscreen_transcript()
-        else:
-            self._app.invalidate()
+            self._schedule_fullscreen_rebuild()
+            return
+        if self.full_screen and self._resize_replays_enabled and self._transcript_blocks:
+            current = self._read_terminal_size()
+            if current is not None and self._resize_reflow.observed_size is None:
+                self._resize_reflow.observe(current)
+            if self._resize_reflow.request_replay():
+                self._schedule_resize_replay()
+        self._app.invalidate()
 
     async def open_event_explorer(self, event_manager: Any) -> None:
         """Open the event explorer as an in-app subview."""

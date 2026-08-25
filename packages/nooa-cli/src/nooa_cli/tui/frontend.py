@@ -33,7 +33,7 @@ from .output import (
     TextOutput,
     Thinking,
 )
-from .theme import COLORS
+from .theme import COLORS, ThemeSyntax
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
@@ -141,6 +141,10 @@ class Frontend(Protocol):
     async def render(self, output: Output) -> None:
         """Render one structured output object."""
         ...
+
+    def refresh_theme(self) -> None:
+        """Apply the active theme to live rendering surfaces."""
+        pass
 
     def batch_render(self) -> "AbstractContextManager[None]":
         """Context manager grouping multiple ``render()`` calls into one block.
@@ -282,6 +286,15 @@ class TerminalFrontend:
             raise RuntimeError("TUI application is not ready.")
         await self._app.open_activity_overlay(outputs)
 
+    def refresh_theme(self) -> None:
+        """Refresh all live rendering surfaces from the active palette."""
+        self._console.refresh_theme()
+        if self._input_handler is not None:
+            self._input_handler.refresh_style()
+        refresh_app = getattr(self._app, "refresh_style", None)
+        if callable(refresh_app):
+            refresh_app()
+
     def init_input(self, registry) -> None:
         """Wire up the prompt_toolkit input handler with slash completions."""
         from .input_handler import TUIInputHandler
@@ -317,7 +330,52 @@ class TerminalFrontend:
                 self._console.console.width = max(
                     int(replay_width(self._console.console.width or 80)), 1
                 )
+            stream = getattr(self._console.console, "file", None)
+            semantic_replay = getattr(stream, "semantic_replay", None)
+            replayable = not isinstance(
+                output, (ClearScreen, HistoryReplay, SplashScreen, Thinking)
+            )
+            if replayable and callable(semantic_replay):
+                width = self._console.console.width or 80
+                with semantic_replay(
+                    lambda o=output, s=stream, w=width: self._render_output_to_ansi(
+                        o,
+                        s.replay_width(w) if callable(getattr(s, "replay_width", None)) else w,
+                    )
+                ):
+                    handler(output)
+            else:
+                handler(output)
+
+    def _render_output_to_ansi(self, output: Output, width: int) -> str:
+        """Render one structured output with the current palette for replay."""
+        from rich.console import Console as RichConsole
+
+        from .console import TUIConsole
+        from .theme import create_theme
+
+        buf = io.StringIO()
+        console = TUIConsole()
+        console.replace_console(
+            RichConsole(
+                file=buf,
+                force_terminal=True,
+                color_system="256",
+                width=max(int(width), 1),
+                height=1,
+                theme=create_theme(),
+            )
+        )
+        renderer = object.__new__(TerminalFrontend)
+        renderer._config = self._config
+        renderer._console = console
+        renderer._input_handler = None
+        renderer._app = self._app
+        renderer._renderers = renderer._build_renderer_map()
+        handler = renderer._renderers.get(type(output))
+        if handler is not None:
             handler(output)
+        return buf.getvalue()
 
     def batch_render(self):
         """Coalesce the enclosed ``render()`` calls into one scrollback block.
@@ -527,7 +585,6 @@ class TerminalFrontend:
     def _render_diff(self, output: DiffOutput) -> None:
         """Render a unified diff with syntax highlighting."""
         from rich.rule import Rule
-        from rich.syntax import Syntax
 
         if not output.diff.strip():
             return
@@ -535,7 +592,7 @@ class TerminalFrontend:
         self._console.console.print(
             Rule(title=f"[bold]{label}[/bold]", style=COLORS["surface2"], align="left")
         )
-        self._console.console.print(Syntax(output.diff, "diff", theme="monokai", word_wrap=True))
+        self._console.console.print(ThemeSyntax(output.diff, "diff", word_wrap=True))
 
     async def open_editor(
         self, filename: str, content: str, language: str = "plaintext"
@@ -696,7 +753,6 @@ class TerminalFrontend:
         """Render a code execution panel (reasoning + code + output)."""
 
         from rich.rule import Rule
-        from rich.syntax import Syntax
         from rich.text import Text
 
         try:
@@ -724,10 +780,9 @@ class TerminalFrontend:
             # highlighted line drift. Only full-cell blocks get the cosmetic strip.
             code = execution.code.rstrip() if execution.start_line > 1 else execution.code.strip()
             elements.append(
-                Syntax(
+                ThemeSyntax(
                     code,
                     "python",
-                    theme="monokai",
                     line_numbers=True,
                     word_wrap=True,
                     start_line=execution.start_line,

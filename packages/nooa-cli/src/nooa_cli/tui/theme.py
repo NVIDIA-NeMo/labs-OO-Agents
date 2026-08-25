@@ -17,6 +17,8 @@ Usage::
     console._theme = create_theme()
 """
 
+from rich.console import Console, ConsoleOptions, RenderResult
+from rich.syntax import Syntax
 from rich.theme import Theme
 
 # ---------------------------------------------------------------------------
@@ -148,6 +150,16 @@ THEMES: dict[str, dict[str, str]] = {
     "vslight": _VS_LIGHT,
 }
 
+# Pygments styles selected to match each UI palette. Syntax renderers keep
+# their existing transparent/default background policy; this mapping only
+# changes token colours.
+SYNTAX_THEMES: dict[str, str] = {
+    "mocha": "monokai",
+    "latte": "gruvbox-light",
+    "vsdark": "github-dark",
+    "vslight": "vs",
+}
+
 # ---------------------------------------------------------------------------
 # Active palette — a mutable dict updated in-place so that callers who did
 # `from .theme import COLORS` keep a live reference after set_theme().
@@ -160,6 +172,30 @@ _active_name: str = "mocha"
 def get_theme() -> str:
     """Return the name of the currently active theme."""
     return _active_name
+
+
+def get_syntax_theme(name: str | None = None) -> str:
+    """Return the Pygments style paired with a built-in UI theme."""
+    selected = _active_name if name is None else name
+    try:
+        return SYNTAX_THEMES[selected]
+    except KeyError as exc:
+        raise ValueError(f"Unknown theme {selected!r}. Choose from: {', '.join(THEMES)}") from exc
+
+
+class ThemeSyntax(Syntax):
+    """Syntax highlighting that follows the active UI theme when replayed."""
+
+    def __init__(self, code: str, lexer: object, **kwargs: object) -> None:
+        self._uses_active_theme = "theme" not in kwargs
+        if self._uses_active_theme:
+            kwargs["theme"] = get_syntax_theme()
+        super().__init__(code, lexer, **kwargs)  # type: ignore[arg-type]
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        if self._uses_active_theme:
+            self._theme = self.get_theme(get_syntax_theme())
+        yield from super().__rich_console__(console, options)
 
 
 def set_theme(name: str) -> None:

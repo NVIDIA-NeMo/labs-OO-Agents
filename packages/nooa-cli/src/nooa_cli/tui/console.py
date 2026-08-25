@@ -23,6 +23,7 @@ class TUIConsole:
         self.console = Console(theme=create_theme())
         self._live_spinner: Live | None = None
         self._spinner: Spinner | None = None
+        self._spinner_message: str | None = None
 
     def replace_console(self, console: Console) -> None:
         """Swap the underlying Rich Console (e.g. to redirect output).
@@ -33,6 +34,27 @@ class TUIConsole:
         directly, a private on a foreign object.
         """
         self.console = console
+
+    def refresh_theme(self) -> None:
+        """Replace the Rich console with one using the active palette."""
+        spinner_message = self._spinner_message
+        if self._live_spinner is not None:
+            self.stop_spinner()
+        old = self.console
+        self.console = Console(
+            file=old.file,
+            force_terminal=old.is_terminal,
+            color_system=old.color_system,
+            width=old.width,
+            height=old.height,
+            no_color=old.no_color,
+            tab_size=old.tab_size,
+            legacy_windows=old.legacy_windows,
+            safe_box=old.safe_box,
+            theme=create_theme(),
+        )
+        if spinner_message is not None:
+            self.start_spinner(spinner_message)
 
     def start_spinner(self, message: str = "thinking...") -> None:
         """Start the thinking spinner with an empty input prompt.
@@ -46,6 +68,7 @@ class TUIConsole:
 
         from rich.console import Group
 
+        self._spinner_message = message
         self._spinner = Spinner(
             "dots",
             text=Text(message, style=f"{COLORS['subtext1']}"),
@@ -67,6 +90,7 @@ class TUIConsole:
             self._live_spinner.stop()
             self._live_spinner = None
             self._spinner = None
+            self._spinner_message = None
 
     def print_agent(self, message: str, *, show_rule: bool = True, soft_wrap: bool = False) -> None:
         """Print an agent response, optionally with terminal-managed wrapping."""
