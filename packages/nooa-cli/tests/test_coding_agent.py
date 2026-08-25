@@ -463,6 +463,8 @@ async def test_coding_agent_spawns_delegation_in_background(tmp_path):
     try:
         handle = agent.spawn(objective, {"path": "parser.py"})
         assert handle.label == "review parser."
+        assert handle.description.startswith("Finite coding delegate.")
+        assert "delegates channel" in agent.queue_manager.status()
         assert handle.state == "running"
         await started.wait()
         assert agent.delegates.status() == ""
