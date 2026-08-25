@@ -9,13 +9,12 @@ import textwrap
 from collections.abc import Iterable
 
 from rich.console import Console as RichConsole
-from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
 from .output import CodeExecution, Output, TableOutput, TextOutput
 from .subapp import SubviewKeyResult
-from .theme import COLORS
+from .theme import COLORS, ThemeSyntax
 
 _BAR_STYLE = "\x1b[48;5;236;38;5;252m"
 
@@ -114,10 +113,9 @@ def _code_lines(output: CodeExecution, width: int, *, ansi: bool) -> list[str]:
             lines.extend(
                 _render_rich_lines(
                     [
-                        Syntax(
+                        ThemeSyntax(
                             code,
                             "python",
-                            theme="monokai",
                             line_numbers=True,
                             word_wrap=True,
                             start_line=output.start_line,
