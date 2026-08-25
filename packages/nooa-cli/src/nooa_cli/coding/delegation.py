@@ -81,8 +81,10 @@ class CodingWorker(
         delegated Todo, ``supplied_context`` is either that Todo or a mapping with
         ``"todo"`` and supplemental ``"context"`` entries. In the mapping form, use
         ``todo = supplied_context["todo"]`` for Todo operations and inspect
-        ``supplied_context["context"]`` separately. Record useful findings with
-        ``self.todo.comment(todo, ...)`` and task-scoped values with
+        ``supplied_context["context"]`` separately. Keep the Todo title and description
+        aligned with the current understanding. Record material findings, decisions,
+        completed steps, and verification with ``self.todo.comment(todo, ...)``—not
+        routine narration—and record task-scoped values with
         ``self.todo.set_var(todo, key, value)``. Return a concise report rather than a
         raw transcript.
         """

@@ -299,7 +299,7 @@ async def test_coding_agent_delegate_todo_preserves_supplemental_context(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_coding_agent_delegate_merges_todo_notes_and_vars(tmp_path, monkeypatch):
+async def test_coding_agent_delegate_merges_todo_description_and_vars(tmp_path, monkeypatch):
     """A Todo delegation is isolated while running and merged before return."""
     observed = {}
 
@@ -326,7 +326,7 @@ async def test_coding_agent_delegate_merges_todo_notes_and_vars(tmp_path, monkey
     monkeypatch.setattr(CodingAgent, "_worker_type", FakeWorker)
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
-        task = agent.todo.add("review parser", notes="focus on errors")
+        task = agent.todo.add("review parser", description="focus on errors")
         original_identity = id(task)
 
         report = await agent.delegate(task)
