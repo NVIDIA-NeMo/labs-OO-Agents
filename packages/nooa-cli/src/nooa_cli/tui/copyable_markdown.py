@@ -34,6 +34,19 @@ class _CopyableCodeBlock(CodeBlock):
         self.action_id = action_id
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        if self.action_id is not None:
+            # Replace Syntax's top padding row with a full-width, same-background
+            # control row so the language and Copy action sit inside the panel.
+            header = Text(style=Syntax.get_theme(self.theme).get_background_style())
+            if self.lexer_name != "text":
+                header.append(f"{self.lexer_name} · ", style="dim")
+            header.append(
+                "Copy",
+                style=f"bold underline link {_COPY_URI_PREFIX}{self.action_id}",
+            )
+            header.append(" ")
+            header.align("right", options.max_width)
+            yield header
         # Drop only Markdown's structural newline. Source trailing spaces and
         # blank lines are real clipboard content and must remain addressable.
         code = str(self.text).removesuffix("\n")
@@ -49,8 +62,8 @@ class _CopyableCodeBlock(CodeBlock):
             self.lexer_name,
             theme=self.theme,
             word_wrap=True,
-            # The footer below occupies the existing bottom padding row.
-            padding=(1, 1, 0, 1) if self.action_id is not None else 1,
+            # The header above occupies the existing top padding row.
+            padding=(0, 1, 1, 1) if self.action_id is not None else 1,
         )
         if self.action_id is not None:
             for line_number, line in enumerate(source_lines, 1):
@@ -65,19 +78,6 @@ class _CopyableCodeBlock(CodeBlock):
         # Override that option locally so long source lines still wrap rather
         # than being cropped from the transcript.
         yield from console.render(syntax, options.update(no_wrap=False, overflow="fold"))
-        if self.action_id is not None:
-            # Keep the language and action inside the code panel by painting the
-            # former bottom padding row with Syntax's own background style.
-            footer = Text(style=Syntax.get_theme(self.theme).get_background_style())
-            if self.lexer_name != "text":
-                footer.append(f"{self.lexer_name} · ", style="dim")
-            footer.append(
-                "Copy",
-                style=f"bold underline link {_COPY_URI_PREFIX}{self.action_id}",
-            )
-            footer.append(" ")
-            footer.align("right", options.max_width)
-            yield footer
 
 
 class _SemanticListItem(ListItem):
