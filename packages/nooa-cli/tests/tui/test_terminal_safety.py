@@ -87,8 +87,14 @@ def test_user_bar_is_control_safe_cell_aware_and_reserves_final_column() -> None
 
     assert "\x1b[2J" not in bar
     visible_lines = strip_safe_ansi(sanitize_transcript_ansi(bar)).splitlines()
-    assert visible_lines
+    assert len(visible_lines) >= 3
+    assert visible_lines[0] == visible_lines[-1] == " " * 9
     assert all(cell_len(line) == 9 for line in visible_lines)
+
+    styled_lines = bar.splitlines()
+    assert styled_lines[0] == styled_lines[-1] == (
+        "\x1b[38;5;189;48;5;59m" + " " * 9 + "\x1b[0m"
+    )
 
 
 def test_hyperlink_target_length_is_bounded() -> None:

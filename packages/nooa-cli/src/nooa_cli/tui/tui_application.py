@@ -1021,7 +1021,7 @@ class TUIApplication:
                 runs.
             on_cancel_command: Synchronously request cancellation of the
                 active slash command. Returns whether a command accepted the
-                request. Esc falls back to interrupting the agent when false.
+                request. Bare Esc falls back to interrupting the agent when false.
             on_bang: Called with the bang body (e.g. ``"echo hi"`` for
                 ``!echo hi``). Session wires this to run_in_terminal +
                 bash. If omitted, bang commands are only recorded in
@@ -2369,15 +2369,6 @@ class TUIApplication:
         def _(event):
             _extend_input_selection(event, event.current_buffer.cursor_down)
 
-        @kb.add("c-c", filter=input_selection_active, eager=True)
-        def _(event):
-            # Copy composer selection without turning Ctrl-C into cancellation.
-            # Keep the selection visible so repeated copy is harmless.
-            _document, clipboard_data = self.input_buffer.document.cut_selection()
-            if clipboard_data.text:
-                event.app.clipboard.set_data(clipboard_data)
-                self._start_fullscreen_selection_copy(clipboard_data.text)
-
         @kb.add("c-x", filter=input_selection_active, eager=True)
         def _(event):
             # Retain the text in prompt_toolkit's clipboard before deleting it.
@@ -2388,24 +2379,33 @@ class TUIApplication:
                 self._start_fullscreen_selection_copy(clipboard_data.text)
                 self.input_buffer.cut_selection()
 
-        @kb.add("c-c", filter=subview_inactive)
+        @kb.add("c-c", filter=subview_inactive, eager=True)
         def _(event):
-            # The second C-c in the confirmation window exits through the
-            # normal Application path; Session.run() then performs its full
-            # snapshot/close/terminal-restoration cleanup in ``finally``.
+            # Ctrl-C advances one destructive step per press: discard a draft,
+            # then interrupt active work, then confirm exit. Never combine a
+            # composer clear with cancellation, so a draft is recoverably cheap
+            # to abandon even while an agent is running.
+            if event.current_buffer.text:
+                event.current_buffer.reset()
+                self._history_cursor = None
+                self._clear_ctrl_c_exit()
+                return
+
+            # After the clear/interrupt step, an armed press exits even if
+            # cancellation cleanup has not acknowledged yet.
             if self._ctrl_c_exit_armed:
                 self._clear_ctrl_c_exit()
                 event.app.exit()
                 return
 
-            # The first C-c always clears the composer. While an agent is
-            # running it also requests cancellation; at an idle prompt it arms
-            # the existing second-C-c-to-exit confirmation.
-            event.current_buffer.reset()
-            self._history_cursor = None
-            if self.request_agent_cancel(source="ctrl-c"):
+            # A slash command owns its cancellation independently of the agent
+            # turn. Treat either accepted cancellation as the interrupt step.
+            if self.request_command_cancel() or self.request_agent_cancel(source="ctrl-c"):
                 self._arm_ctrl_c_exit()
                 return
+
+            # At an idle prompt, retain the established double-Ctrl-C safety
+            # gesture.
             self._arm_ctrl_c_exit()
 
         @kb.add("c-d", filter=subview_inactive)
@@ -2457,9 +2457,19 @@ class TUIApplication:
         def _(event):
             self._history_navigate(+1)
 
-        # Esc: soft-cancel the agent while preserving the queue. Any
-        # messages already submitted during the turn are delivered as
-        # the next respond() via the done-callback.
+        # Absorb escape-prefixed Meta/Option input as one non-interrupting
+        # gesture. prompt_toolkit otherwise falls back from an unmatched pair
+        # such as Option-[ (ESC + "[") to the bare-Escape binding below, which
+        # accidentally cancels the active turn. More-specific bindings (for
+        # example Alt+Enter and Emacs Meta navigation) still win.
+        @kb.add("escape", Keys.Any, filter=subview_inactive)
+        def _(event):
+            data = event.data
+            if data and data != "\x1b":
+                event.current_buffer.insert_text(data)
+
+        # A standalone Esc is emitted only after prompt_toolkit's VT parser has
+        # allowed time for a possible escape-prefixed key to arrive.
         @kb.add("escape", filter=subview_inactive)
         def _(event):
             if self.request_command_cancel():

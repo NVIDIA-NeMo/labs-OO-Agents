@@ -51,6 +51,8 @@ if TYPE_CHECKING:
 _KEY_SEQUENCES: dict[str, str] = {
     "enter": "\r",
     "escape": "\x1b",
+    "option-[": "\x1b[",
+    "option-]": "\x1b]",
     "q": "q",
     "tab": "\t",
     "backspace": "\x7f",

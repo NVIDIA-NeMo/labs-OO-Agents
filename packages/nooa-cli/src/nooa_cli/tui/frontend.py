@@ -679,7 +679,7 @@ class TerminalFrontend:
 
         keybinds = ("vi mode  " if info.vi_mode else "") + (
             "Tab: complete  |  ↑↓: history  |  Ctrl+U: clear  |  Shift+Enter: newline  |  "
-            "Esc: interrupt  |  Ctrl+C ×2: exit"
+            "Esc: interrupt  |  Ctrl+C: clear / interrupt / exit"
         )
         table.add_row("keys", f"[{overlay}]{keybinds}[/]")
         table.add_row(
