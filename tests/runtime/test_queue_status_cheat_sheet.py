@@ -84,6 +84,8 @@ async def test_active_spawns_shown_when_queues_empty():
     assert "active background job" in status
     assert "ci_monitor" in status
     assert "running" in status
+    assert "Output arrives through channels" in status
+    assert "do not poll job handles" in status
 
     # Cleanup
     await qm.shutdown()
