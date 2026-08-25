@@ -14,6 +14,7 @@ import pytest
 
 from nooa import Agent
 from nooa.agentdoc import doc
+from nooa.context_blocks import DynamicContext
 from nooa.skill import TextSkill
 from nooa.skill_registry import SkillRegistry
 from nooa.tools.skill_translator import TextSkillTranslator
@@ -65,6 +66,7 @@ def _make_text_skill(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (refs_dir / "notes.txt").write_text("reference notes\n", encoding="utf-8")
+    (refs_dir / "blob.bin").write_bytes(b"\x00\x01resource")
     return skill_dir
 
 
@@ -227,6 +229,7 @@ def test_inspect_text_skill_inventory(tmp_path):
     assert inventory.body == "Use this skill to greet people."
     assert {file.path for file in inventory.files} == {
         "SKILL.md",
+        "references/blob.bin",
         "references/notes.txt",
         "scripts/hello.py",
     }
@@ -311,13 +314,19 @@ async def test_translate_writes_valid_package_without_archiving_raw_scripts(tmp_
     assert result.registry_name == "local.hello-skill"
     assert [script.script_path for script in result.omitted_scripts] == ["scripts/hello.py"]
     assert "src/hello_skill/resources/SKILL.md" not in result.files_written
+    assert "src/hello_skill/resources/references/blob.bin" in result.files_written
     assert "src/hello_skill/resources/references/notes.txt" in result.files_written
     assert "src/hello_skill/resources/scripts/hello.py" not in result.files_written
     assert (result.package_dir / "pyproject.toml").exists()
     assert (result.package_dir / "src" / "hello_skill" / "__init__.py").exists()
     generated_text = _generated_text(result.package_dir)
-    assert "No import-safe public functions or supported argparse API could be inferred" not in generated_text
+    assert "Legacy source scripts" not in generated_text
+    assert "scripts/hello.py" not in generated_text
+    assert "TextSkill" not in generated_text
+    assert "translated from" not in generated_text
+    assert "Original" not in generated_text
     assert "Use this skill to greet people" not in generated_text
+    assert "Use this LibrarySkill to greet people" in generated_text
     generated_tests = _run_generated_tests(result.package_dir)
     assert generated_tests.returncode == 0, generated_tests.stdout + generated_tests.stderr
 
@@ -328,12 +337,85 @@ async def test_translate_writes_valid_package_without_archiving_raw_scripts(tmp_
         skill = registry[result.registry_name]
         assert "references/notes.txt" in skill._list_resources()
         assert skill._read_resource("references/notes.txt") == "reference notes\n"
+        assert "references/blob.bin" in skill._list_resources()
+        assert skill._read_resource_bytes("references/blob.bin") == b"\x00\x01resource"
+        assert skill.references_notes() == "reference notes\n"
+        assert skill.references_blob() == b"\x00\x01resource"
         visible_doc = doc(skill)
         assert "run_resource_script" not in visible_doc
         assert "run_hello" not in visible_doc
         assert "list_resources" not in visible_doc
         assert "read_resource" not in visible_doc
+        assert "references_notes" in visible_doc
+        assert "references/notes.txt" in visible_doc
+        assert "reference notes" in visible_doc
+        assert "references_blob" in visible_doc
+        assert "references/blob.bin" in visible_doc
+        assert "TextSkill" not in visible_doc
+        assert "Original" not in visible_doc
+        assert "Use this skill to greet people" not in visible_doc
+        assert "Use this LibrarySkill to greet people" in visible_doc
         assert not hasattr(skill, "run_hello")
+    finally:
+        await registry.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resource_docstrings_inline_only_small_preview(tmp_path):
+    skill_dir = _make_text_skill(tmp_path)
+    long_text = "start\n" + ("0123456789" * 160) + "\nunique-tail-marker\n"
+    (skill_dir / "references" / "long.md").write_text(long_text, encoding="utf-8")
+    translator = TextSkillTranslator()
+
+    result = translator.translate(skill_dir, tmp_path / "libs")
+    registry = SkillRegistry(_Agent())
+    registry.discover_libs(result.package_dir.parent)
+    try:
+        skill = registry[result.registry_name]
+        visible_doc = doc(skill)
+        assert skill.references_long() == long_text
+        assert "references_long" in visible_doc
+        assert "Resource contents:\n        start" in visible_doc
+        assert "01234567890123456789" in visible_doc
+        assert "unique-tail-marker" not in visible_doc
+        assert "[Truncated in docstring; call this method for the full resource.]" in visible_doc
+    finally:
+        await registry.aclose()
+
+
+@pytest.mark.asyncio
+async def test_translated_skill_context_block_renders_after_activation(tmp_path):
+    from nooa.runtime.context_builder import build_context
+
+    skill_dir = _make_text_skill(tmp_path)
+    translator = TextSkillTranslator()
+    result = translator.translate(skill_dir, tmp_path / "libs")
+
+    agent = Agent(llm=object())
+    registry = SkillRegistry(agent)
+    registry.discover_libs(result.package_dir.parent)
+    registry.activate([result.registry_name])
+    try:
+        context_key = f"skill:{result.registry_name}"
+        assert context_key in agent.context_manager
+        raw_block = dict(agent.context_manager._raw_items())[context_key]
+        assert isinstance(raw_block, DynamicContext)
+        assert raw_block.expr == "getattr(self, 'hello_skill').format_guidance()"
+
+        async def resolve_context_expr(key, value):
+            if isinstance(value, DynamicContext) and key == context_key:
+                return eval(value.expr, {}, {"self": agent})
+            return ""
+
+        built = await build_context(
+            context_manager=agent.context_manager,
+            event_manager=agent.event_manager,
+            strategy=None,
+            resolve_fn=resolve_context_expr,
+        )
+        rendered = next(block.content for block in built.blocks if block.key == context_key)
+        assert "Use this LibrarySkill to greet people" in rendered
+        assert "references_notes() -> str: references/notes.txt" in rendered
     finally:
         await registry.aclose()
 
@@ -428,11 +510,14 @@ async def test_translated_argparse_script_has_named_api_method(tmp_path):
     assert "def search(" in init_source
     assert "def run_search(" not in init_source
     assert "run_resource_script" not in init_source
-    assert "Original SKILL.md guidance" not in init_source
+    assert "TextSkill" not in init_source
+    assert "Original" not in init_source
     assert "Use this skill to search records" not in init_source
-    assert "Use the public Python methods" in init_source
+    assert "Use this LibrarySkill to search records" in init_source
+    assert "Use these public Python methods" in init_source
     assert "search(path: str, query: str, limit: int | None = 10, dry_run: bool = False) -> str" in init_source
     assert "Use this skill to search records" not in _generated_text(result.package_dir)
+    assert "Use this LibrarySkill to search records" in _generated_text(result.package_dir)
 
     registry = SkillRegistry(_Agent())
     registry.discover_libs(result.package_dir.parent)

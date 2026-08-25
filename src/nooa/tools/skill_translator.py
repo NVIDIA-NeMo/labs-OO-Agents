@@ -24,12 +24,19 @@ from nooa.skill import Skill, _find_skill_md, _parse_frontmatter
 _RESERVED_METHOD_NAMES = {
     "run_resource_script",
     "read_resource",
+    "read_resource_bytes",
     "list_resources",
+    "format_guidance",
     "_resource_root",
     "_list_resources",
     "_read_resource",
+    "_read_resource_bytes",
+    "_format_resource_index",
+    "_RESOURCE_METHODS",
     *(name for name in dir(Skill) if not name.startswith("_")),
 }
+
+_RESOURCE_DOCSTRING_INLINE_LIMIT = 1000
 
 
 class TextSkillFile(BaseModel):
@@ -107,6 +114,16 @@ class OmittedScriptPlan(BaseModel):
     reason: str
 
 
+class ResourceMethodPlan(BaseModel):
+    """Plan for one named method exposing a bundled non-script resource."""
+
+    resource_path: str
+    method_name: str
+    return_annotation: Literal["str", "bytes"]
+    size_bytes: int
+    docstring: str
+
+
 class ConversionPlan(BaseModel):
     """Deterministic plan for converting a TextSkill into a package skill."""
 
@@ -119,6 +136,7 @@ class ConversionPlan(BaseModel):
     docstring: str
     script_methods: list[ScriptMethodPlan] = Field(default_factory=list)
     omitted_scripts: list[OmittedScriptPlan] = Field(default_factory=list)
+    resource_methods: list[ResourceMethodPlan] = Field(default_factory=list)
     resource_prefix: str = "resources"
 
 
@@ -292,7 +310,8 @@ class TextSkillTranslator(Skill):
                     function_methods=function_methods,
                 )
             )
-        docstring = _build_docstring(inventory, script_methods)
+        resource_methods = _resource_method_plans(inventory, used_api_names)
+        docstring = _build_docstring(inventory, script_methods, resource_methods)
 
         return ConversionPlan(
             source_dir=inventory.source_dir,
@@ -304,6 +323,7 @@ class TextSkillTranslator(Skill):
             docstring=docstring,
             script_methods=script_methods,
             omitted_scripts=omitted_scripts,
+            resource_methods=resource_methods,
         )
 
     def write_package(
@@ -531,6 +551,21 @@ def _script_method_name(script_path: str, used_names: set[str]) -> str:
     return name
 
 
+def _resource_method_name(resource_path: str, used_names: set[str]) -> str:
+    rel = Path(resource_path)
+    without_suffix = rel.with_suffix("").as_posix()
+    name = _normalize_identifier(without_suffix)
+    if name in _RESERVED_METHOD_NAMES:
+        name = f"{name}_resource"
+    base = name
+    index = 2
+    while name in used_names:
+        name = f"{base}_{index}"
+        index += 1
+    used_names.add(name)
+    return name
+
+
 def _api_method_name(script_path: str, used_names: set[str]) -> str:
     name = _normalize_identifier(Path(script_path).stem)
     if name in _RESERVED_METHOD_NAMES:
@@ -542,6 +577,69 @@ def _api_method_name(script_path: str, used_names: set[str]) -> str:
         index += 1
     used_names.add(name)
     return name
+
+
+def _resource_method_plans(inventory: TextSkillInventory, used_names: set[str]) -> list[ResourceMethodPlan]:
+    methods: list[ResourceMethodPlan] = []
+    for file in inventory.files:
+        if file.kind != "resource":
+            continue
+        path = inventory.source_dir / file.path
+        text = _read_resource_text_for_docstring(path)
+        return_annotation: Literal["str", "bytes"] = "str" if text is not None else "bytes"
+        method_name = _resource_method_name(file.path, used_names)
+        methods.append(
+            ResourceMethodPlan(
+                resource_path=file.path,
+                method_name=method_name,
+                return_annotation=return_annotation,
+                size_bytes=file.size_bytes,
+                docstring=_resource_method_docstring(
+                    resource_path=file.path,
+                    return_annotation=return_annotation,
+                    size_bytes=file.size_bytes,
+                    text=text,
+                ),
+            )
+        )
+    return methods
+
+
+def _read_resource_text_for_docstring(path: Path) -> str | None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if "\x00" in text:
+        return None
+    return text
+
+
+def _resource_method_docstring(
+    *,
+    resource_path: str,
+    return_annotation: Literal["str", "bytes"],
+    size_bytes: int,
+    text: str | None,
+) -> str:
+    if return_annotation == "bytes":
+        return (
+            f"Return bundled binary resource `{resource_path}` as bytes.\n\n"
+            f"Size: {size_bytes} bytes."
+        )
+    assert text is not None
+    if len(text) <= _RESOURCE_DOCSTRING_INLINE_LIMIT:
+        content = text
+    else:
+        content = (
+            text[:_RESOURCE_DOCSTRING_INLINE_LIMIT].rstrip()
+            + "\n\n[Truncated in docstring; call this method for the full resource.]"
+        )
+    return (
+        f"Return bundled text resource `{resource_path}`.\n\n"
+        "Resource contents:\n"
+        f"{content}"
+    )
 
 
 def _default_interpreter(file: TextSkillFile) -> str | None:
@@ -906,25 +1004,106 @@ def _has_argparse_api_shape(path: Path) -> bool:
     )
 
 
-def _build_docstring(inventory: TextSkillInventory, script_methods: list[ScriptMethodPlan]) -> str:
+def _build_docstring(
+    inventory: TextSkillInventory,
+    script_methods: list[ScriptMethodPlan],
+    resource_methods: list[ResourceMethodPlan],
+) -> str:
     title = inventory.description.strip() or inventory.skill_name
     lines = [
         title,
         "",
-        "Package-native skill translated from a traditional TextSkill.",
-        "Use the public Python methods on this skill instead of invoking scripts or subprocesses.",
+        "LibrarySkill-native guidance.",
+        "Use the public Python APIs on this skill.",
     ]
     public_methods = _public_method_guidance(script_methods)
     if public_methods:
-        lines.extend(["", "Public APIs:", *public_methods])
+        lines.extend(
+            [
+                "",
+                "Generated public APIs:",
+                *public_methods,
+                "",
+                "Use these public Python methods as the supported capability interface.",
+            ]
+        )
     else:
         lines.extend(
             [
                 "",
-                "No public script APIs were inferred. This package only carries private bundled resources for package code.",
+                "Use the guidance and bundled resource APIs when relevant.",
             ]
         )
+    if resource_methods:
+        lines.extend(["", "Bundled resource APIs:"])
+        for resource in resource_methods:
+            lines.append(
+                f"- {resource.method_name}() -> {resource.return_annotation}: "
+                f"returns `{resource.resource_path}` from package data."
+            )
+    adapted_guidance = _adapt_skill_guidance(inventory.body, script_methods, resource_methods)
+    if adapted_guidance:
+        lines.extend(["", "Guidance:", adapted_guidance])
     return "\n".join(lines)
+
+
+def _adapt_skill_guidance(
+    body: str,
+    script_methods: list[ScriptMethodPlan],
+    resource_methods: list[ResourceMethodPlan],
+) -> str:
+    """Render source guidance as LibrarySkill-native instructions.
+
+    This preserves task-specific details while rewriting script/resource
+    references to generated package API names. The raw body is not copied as a
+    provenance block.
+    """
+    guidance = body.strip()
+    if not guidance:
+        return ""
+
+    guidance = re.sub(r"\bUse this skill\b", "Use this LibrarySkill", guidance)
+    guidance = re.sub(r"\bthis skill\b", "this LibrarySkill", guidance)
+    guidance = re.sub(r"\bthe skill\b", "the LibrarySkill", guidance)
+    guidance = re.sub(r"\bSKILL\.md\b", "this LibrarySkill guidance", guidance)
+    guidance = re.sub(
+        r"\b(run|execute|invoke)\s+(?:the\s+)?(?:script\s+)?`?scripts/",
+        "call the corresponding LibrarySkill API `scripts/",
+        guidance,
+        flags=re.IGNORECASE,
+    )
+
+    replacements: list[tuple[str, str]] = []
+    for method in script_methods:
+        public_names = _script_public_api_names(method)
+        if not public_names:
+            continue
+        replacement = " or ".join(f"`{name}()`" for name in public_names)
+        replacements.append((method.script_path, replacement))
+        replacements.append((Path(method.script_path).name, replacement))
+
+    for resource in resource_methods:
+        replacement = f"`{resource.method_name}()`"
+        replacements.append((resource.resource_path, replacement))
+        replacements.append((Path(resource.resource_path).name, replacement))
+
+    for old, new in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
+        guidance = _replace_reference(guidance, old, new)
+
+    return re.sub(r"`?scripts/[^`\s),.;:]+" + "`?", "the corresponding LibrarySkill API", guidance)
+
+
+def _script_public_api_names(method: ScriptMethodPlan) -> list[str]:
+    names: list[str] = []
+    if method.api_method_name:
+        names.append(method.api_method_name)
+    names.extend(function.method_name for function in method.function_methods)
+    return names
+
+
+def _replace_reference(text: str, old: str, new: str) -> str:
+    escaped = re.escape(old)
+    return re.sub(rf"`?{escaped}`?", new, text)
 
 
 def _public_method_guidance(script_methods: list[ScriptMethodPlan]) -> list[str]:
@@ -937,7 +1116,7 @@ def _public_method_guidance(script_methods: list[ScriptMethodPlan]) -> list[str]
             parameters = ", ".join(_guidance_parameter(parameter) for parameter in function.parameters)
             lines.append(
                 f"- {function.method_name}({parameters}) -> {function.return_annotation}: "
-                "returns the Python value from the translated implementation."
+                "returns the Python value from the library implementation."
             )
     return lines
 
@@ -953,8 +1132,8 @@ def _guidance_parameter(parameter: FunctionParameterPlan) -> str:
 
 def _method_return_guidance(function: ScriptFunctionPlan) -> str:
     if function.return_annotation == "object":
-        return "Return the Python value from the translated implementation."
-    return f"Return `{function.return_annotation}` from the translated implementation."
+        return "Return the Python value from the library implementation."
+    return f"Return `{function.return_annotation}` from the library implementation."
 
 
 def _toml_string(value: str) -> str:
@@ -993,13 +1172,15 @@ def _render_readme(plan: ConversionPlan) -> str:
     return textwrap.dedent(f"""\
         # {plan.project_name}
 
-        Package skill translated from `{plan.source_dir}`.
+        NOOA LibrarySkill package.
 
         Registry name: `{plan.registry_name}`
 
-        Non-script TextSkill resources are bundled under package resources.
-        Scripts are bundled only when needed as private Python implementation
-        modules for generated package APIs.
+        Use the public Python APIs exposed by the Skill class.
+
+        ## LibrarySkill-native guidance
+
+        {textwrap.indent(plan.docstring, "        ")}
     """)
 
 
@@ -1147,31 +1328,50 @@ def _loaded_names(statements: list[ast.stmt]) -> set[str]:
 
 
 def _render_init(plan: ConversionPlan) -> str:
-    # Generated skills expose inferred package-style APIs; original scripts are
-    # either omitted or rewritten into private implementation modules.
+    # Generated skills expose package-style APIs backed by private modules.
+    resource_methods = "\n".join(_render_resource_method(resource) for resource in plan.resource_methods)
     methods = "\n".join(
         rendered
-        for method in plan.script_methods
         for rendered in (
-            _render_api_method(plan, method),
-            *(_render_function_method(method, function) for function in method.function_methods),
+            resource_methods,
+            *(
+                rendered
+                for method in plan.script_methods
+                for rendered in (
+                    _render_api_method(plan, method),
+                    *(_render_function_method(method, function) for function in method.function_methods),
+                )
+                if rendered
+            ),
         )
         if rendered
     )
     if methods:
         methods = "\n" + methods
     docstring = textwrap.indent(_triple_quoted(plan.docstring), "    ")
+    context_key = f"skill:{plan.registry_name}"
+    attr_name = plan.registry_name.split(".")[-1].replace("-", "_")
+    resource_methods_tuple = repr(
+        tuple(
+            (resource.method_name, resource.resource_path, resource.return_annotation, resource.size_bytes)
+            for resource in plan.resource_methods
+        )
+    )
     template = textwrap.dedent(f'''\
         from __future__ import annotations
 
         from importlib import resources
         from pathlib import Path
 
+        from nooa.agentdoc import hidden
         from nooa.skill import Skill
 
 
         class {plan.class_name}(Skill):
         __DOCSTRING__
+
+            context_block = ({context_key!r}, "getattr(self, {attr_name!r}).format_guidance()")
+            _RESOURCE_METHODS = {resource_methods_tuple}
 
             def _resource_root(self):
                 return resources.files(__package__) / "{plan.resource_prefix}"
@@ -1187,17 +1387,50 @@ def _render_init(plan: ConversionPlan) -> str:
 
             def _read_resource(self, path: str) -> str:
                 """Read a bundled resource as text."""
+                return self._read_resource_bytes(path).decode()
+
+            def _read_resource_bytes(self, path: str) -> bytes:
+                """Read a bundled resource as bytes."""
                 root = Path(self._resource_root()).resolve()
                 resolved = (root / path).resolve()
                 if not resolved.is_relative_to(root):
                     raise ValueError(f"Path {{path!r}} escapes package resources")
                 if not resolved.is_file():
                     raise FileNotFoundError(path)
-                return resolved.read_text()
+                return resolved.read_bytes()
+
+            @hidden
+            def format_guidance(self) -> str:
+                """Return the LibrarySkill-native guidance and bundled resource API index."""
+                resource_index = self._format_resource_index()
+                if resource_index:
+                    return type(self).__doc__ + "\\n\\nBundled resource APIs:\\n" + resource_index
+                return type(self).__doc__ or ""
+
+            def _format_resource_index(self) -> str:
+                return "\\n".join(
+                    f"- {{method}}() -> {{kind}}: {{path}} ({{size}} bytes)"
+                    for method, path, kind, size in self._RESOURCE_METHODS
+                )
 
         __METHODS__
     ''')
     return template.replace("__DOCSTRING__", docstring).replace("__METHODS__", methods)
+
+
+def _render_resource_method(resource: ResourceMethodPlan) -> str:
+    body = (
+        f"return self._read_resource({resource.resource_path!r})"
+        if resource.return_annotation == "str"
+        else f"return self._read_resource_bytes({resource.resource_path!r})"
+    )
+    lines = [
+        f"def {resource.method_name}(self) -> {resource.return_annotation}:",
+        f"    {_triple_quoted(resource.docstring)}",
+        f"    {body}",
+        "",
+    ]
+    return textwrap.indent("\n".join(lines), "    ")
 
 
 def _render_api_method(plan: ConversionPlan, method: ScriptMethodPlan) -> str:
@@ -1640,8 +1873,22 @@ def _render_tests(plan: ConversionPlan) -> str:
         "    visible_doc = doc(skill)",
         "    assert 'list_resources' not in visible_doc",
         "    assert 'read_resource' not in visible_doc",
+        "    assert 'LibrarySkill-native guidance' in visible_doc",
         "    assert 'run_resource_script' not in visible_doc",
+        "    assert isinstance(skill.format_guidance(), str)",
     ]
+    for resource in plan.resource_methods:
+        lines.extend(
+            [
+                f"    assert hasattr(skill, {resource.method_name!r})",
+                f"    assert {resource.method_name!r} in visible_doc",
+                f"    assert {resource.resource_path!r} in visible_doc",
+            ]
+        )
+        if resource.return_annotation == "str":
+            lines.append(f"    assert isinstance(skill.{resource.method_name}(), str)")
+        else:
+            lines.append(f"    assert isinstance(skill.{resource.method_name}(), bytes)")
     if plan.script_methods:
         for method in plan.script_methods:
             lines.extend(_test_assertions(method))
