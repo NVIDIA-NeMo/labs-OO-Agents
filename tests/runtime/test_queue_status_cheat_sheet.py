@@ -30,7 +30,7 @@ def test_pending_queue_shows_public_reader_hint():
     status = qm.status()
 
     assert "user_messages: 1 pending" in status
-    assert "💡 dequeue: await self.user_messages.get()" in status
+    assert "Hint: dequeue: await self.user_messages.get()" in status
 
 
 def test_cheat_sheet_appears_with_extra_channels():
