@@ -46,6 +46,8 @@ _PROVIDER_API_KEY_ENV: dict[str, str] = {
     "nvidia_nim": "NVIDIA_API_KEY",
 }
 
+_NO_MODELS_CONFIGURED_MESSAGE = "No LLM connected. Run `/connect` to configure one."
+
 
 @dataclass
 class HealthCheckResult:
@@ -95,6 +97,20 @@ def unresolved_model_health(model: str) -> HealthCheckResult:
         ),
         blocking=True,
     )
+
+
+def no_models_configured_health() -> HealthCheckResult:
+    """Return the first-run result when no model aliases are configured."""
+    return HealthCheckResult(
+        ok=False,
+        error_message=_NO_MODELS_CONFIGURED_MESSAGE,
+        blocking=True,
+    )
+
+
+def is_no_models_configured_health(result: HealthCheckResult | None) -> bool:
+    """Return True when *result* is the first-run no-models state."""
+    return result is not None and result.error_message == _NO_MODELS_CONFIGURED_MESSAGE
 
 
 def _get_expected_env_var(llm: UnifiedLLM) -> str | None:

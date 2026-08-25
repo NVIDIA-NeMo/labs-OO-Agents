@@ -39,6 +39,102 @@ def test_tui_package_import_does_not_import_agent_stack() -> None:
 
 
 @pytest.mark.asyncio
+async def test_empty_registry_startup_prompts_connect_without_default_model_probe(
+    tmp_path, monkeypatch
+):
+    from nooa_cli.tui.bootstrap import bootstrap, build_startup_info
+    from nooa_cli.tui.config import Config
+    from nooa_cli.tui.session import Session
+    from nooa_cli.tui.toolbar import ToolbarRegistry
+
+    _configure_project(monkeypatch, tmp_path)
+    cfg = Config()
+    cfg.agent.summarization.policy = "none"
+
+    monkeypatch.setattr("nooa.llm_config.llm_config_chain", lambda: [])
+    monkeypatch.setattr("nooa.secrets.load_secrets_into_env", lambda: None)
+    monkeypatch.setattr(
+        "nooa_cli.tui.config.get_llm",
+        lambda _config: (_ for _ in ()).throw(AssertionError("get_llm should not run")),
+    )
+
+    result = await bootstrap(cfg)
+    try:
+        assert result.blocking_llm_health is not None
+        assert result.blocking_llm_health.blocking is True
+        assert result.blocking_llm_health.pending is False
+        assert result.blocking_llm_health.error_message == (
+            "No LLM connected. Run `/connect` to configure one."
+        )
+        assert result.blocking_llm_health.fix_hint is None
+        contents = [getattr(output, "content", "") for output in result.messages]
+        assert contents == []
+        assert all("ANTHROPIC_API_KEY" not in content for content in contents)
+        assert all("claude-opus" not in content for content in contents)
+
+        startup_info = build_startup_info(result)
+        assert startup_info.model == "run /connect to configure one"
+        assert startup_info.short_model == "No LLM connected"
+        assert startup_info.llm_ready is False
+        assert startup_info.llm_status == "not_connected"
+
+        session = Session.__new__(Session)
+        session.config = cfg
+        session.registry = SimpleNamespace(blocking_llm_health=result.blocking_llm_health)
+        session._toolbar = ToolbarRegistry(load_plugins=False)
+        session._session_manager = SimpleNamespace(session_id="12345678-abcd", name=None)
+        session.agent = SimpleNamespace(shell=SimpleNamespace(cwd=str(tmp_path)))
+        session._context_usage_label = lambda: ""
+        assert "No LLM" in session._session_label()
+        assert "claude-opus" not in session._session_label()
+    finally:
+        if result.session_manager is not None:
+            result.session_manager.close()
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_builtin_default_prompts_connect_without_claude_probe(
+    tmp_path, monkeypatch
+):
+    from nooa_cli.tui.bootstrap import bootstrap, build_startup_info
+    from nooa_cli.tui.config import Config
+
+    project_dir = _configure_project(monkeypatch, tmp_path)
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "llm_config.yaml").write_text(
+        "models:\n"
+        "  qwen3-1.7b:\n"
+        "    model_name: ollama_chat/qwen3:1.7b\n"
+        "    api_base: http://localhost:11434\n"
+    )
+    cfg = Config()
+    cfg.agent.summarization.policy = "none"
+
+    monkeypatch.setattr("nooa.llm_config.bundled_config_paths", lambda: [])
+    monkeypatch.setattr("nooa.secrets.load_secrets_into_env", lambda: None)
+    monkeypatch.setattr(
+        "nooa_cli.tui.config.get_llm",
+        lambda _config: (_ for _ in ()).throw(AssertionError("get_llm should not run")),
+    )
+
+    result = await bootstrap(cfg)
+    try:
+        assert result.blocking_llm_health is not None
+        assert result.blocking_llm_health.error_message == (
+            "No LLM connected. Run `/connect` to configure one."
+        )
+        assert result.messages == []
+
+        startup_info = build_startup_info(result)
+        assert startup_info.short_model == "No LLM connected"
+        assert startup_info.model == "run /connect to configure one"
+        assert startup_info.llm_status == "not_connected"
+    finally:
+        if result.session_manager is not None:
+            result.session_manager.close()
+
+
+@pytest.mark.asyncio
 async def test_pending_llm_health_does_not_emit_durable_startup_status(tmp_path, monkeypatch):
     from nooa_cli.tui.bootstrap import bootstrap
     from nooa_cli.tui.config import Config
@@ -184,6 +280,10 @@ async def test_model_switch_clears_pending_startup_info(monkeypatch):
     )
     config = SimpleNamespace(default_model="old/model")
     command = ModelCommand(AsyncMock(), config, agent, registry=registry)
+    command.frontend._app = SimpleNamespace(
+        refresh_transcript_blocks=Mock(return_value=True),
+        invalidate=Mock(),
+    )
     command._persist_tui_setting = lambda _key, _value: Path("settings.yaml")
 
     async def _agent_run_async(fn):
@@ -205,6 +305,8 @@ async def test_model_switch_clears_pending_startup_info(monkeypatch):
     assert startup_info.short_model == "model"
     assert startup_info.llm_ready is True
     assert startup_info.llm_status == "ready"
+    command.frontend._app.refresh_transcript_blocks.assert_called_once_with("startup-info")
+    command.frontend._app.invalidate.assert_not_called()
 
 
 async def asyncio_wait_for_background_tasks(session) -> None:
