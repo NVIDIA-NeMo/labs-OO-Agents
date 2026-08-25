@@ -2442,6 +2442,7 @@ async def test_fast_cancel_status_survives_runtime_ack_long_enough_to_render() -
         await h.wait_output_contains("Interrupted agent turn")
 
         assert "Interrupting agent turn" in h.capture_status()
+        await h.wait_for(lambda: "Interrupting agent turn" in _last_screen_text(h.app))
         await asyncio.sleep(0.25)
         assert "Interrupting agent turn" in h.capture_status()
         await h.wait_for(lambda: "Interrupting agent turn" not in h.capture_status())
@@ -2460,6 +2461,41 @@ async def test_cancel_status_ignores_stale_pre_interrupt_observation() -> None:
 
         assert h.capture_status().startswith("Interrupting agent turn")
         await h.wait_for(lambda: not h.app.is_thinking())
+
+
+async def test_foreign_thread_interrupt_ack_runs_on_tui_owner_loop() -> None:
+    """Observation teardown must not mutate timers from its worker thread."""
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("first")
+        await h.wait_for(lambda: h.app.is_thinking())
+        assert h.app.request_agent_cancel(source="escape") is True
+
+        owner_thread = threading.get_ident()
+        ack_threads: list[int] = []
+        original_ack = h.app._acknowledge_agent_interrupt
+
+        def record_ack() -> None:
+            ack_threads.append(threading.get_ident())
+            original_ack()
+
+        h.app._acknowledge_agent_interrupt = record_ack
+        callback_errors: list[BaseException] = []
+
+        def publish_teardown() -> None:
+            try:
+                h.app._on_agent_change(None)
+            except BaseException as exc:
+                callback_errors.append(exc)
+
+        producer = threading.Thread(target=publish_teardown)
+        producer.start()
+        producer.join(timeout=1.0)
+        assert not producer.is_alive()
+        assert callback_errors == []
+
+        await h.wait_for(lambda: bool(ack_threads))
+        assert set(ack_threads) == {owner_thread}
 
 
 async def test_cancel_does_not_deliver_queued_message_until_cleanup_ack() -> None:
@@ -2494,6 +2530,9 @@ async def test_cancel_does_not_deliver_queued_message_until_cleanup_ack() -> Non
         release_cleanup.set()
         await asyncio.wait_for(cleanup_done.wait(), timeout=1.0)
         await h.wait_for(lambda: agent.messages_received == ["first", "queued"])
+        await h.wait_for(
+            lambda: "Interrupting agent turn" not in h.capture_status(), timeout=0.25
+        )
 
 
 async def test_escape_cancels_agent_turn_but_not_spawned_jobs() -> None:
