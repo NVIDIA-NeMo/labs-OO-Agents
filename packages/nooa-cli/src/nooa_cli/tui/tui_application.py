@@ -1073,6 +1073,7 @@ class TUIApplication:
         self._exit_hint_text = ""
         self._interrupting_agent_turn = False
         self._interrupt_status_acknowledged = False
+        self._interrupt_completion_pending = False
         self._interrupt_status_started_at: float | None = None
         self._interrupt_status_clear_timer: asyncio.TimerHandle | None = None
         self._transient_status_text = ""
@@ -2754,8 +2755,6 @@ class TUIApplication:
         # before prompt_toolkit can paint even one frame.
         if state is None:
             self._acknowledge_agent_interrupt()
-        elif state is not None:
-            self._retire_acknowledged_interrupt_for_new_turn(state)
         app = getattr(self, "_app", None)
         if app is not None and app.is_running:
             app.invalidate()
@@ -2763,6 +2762,10 @@ class TUIApplication:
 
     def runtime_notification_received(self) -> None:
         """Refresh native chrome after the host dequeues runtime work."""
+        if self._interrupt_completion_pending:
+            # A replacement turn is beginning. Retire the completed turn's
+            # optimistic label before rendering any chrome for the new work.
+            self._clear_agent_interrupt_status()
         self._on_dispatcher_dequeued()
 
     def runtime_state_changed(self) -> None:
@@ -2774,32 +2777,20 @@ class TUIApplication:
             self._refresh_runner_state()
 
     def _refresh_runner_state(self) -> None:
-        # This hook runs at the runtime transition site, while observation
-        # delivery may still be coalesced behind other UI work. Read the
-        # immutable source snapshot so a queued replacement turn cannot inherit
-        # the prior turn's delayed interrupt label even for one frame.
-        agent = self._agent
-        if agent is not None:
-            self._retire_acknowledged_interrupt_for_new_turn(agent.state)
         if self._app.is_running:
             self._app.invalidate()
         self._ensure_spinner_task()
 
-    def _retire_acknowledged_interrupt_for_new_turn(self, state: Any) -> None:
-        if (
-            self._interrupting_agent_turn
-            and self._interrupt_status_acknowledged
-            and state.lifecycle in {AgentLifecycle.THINKING, AgentLifecycle.WAITING}
-            and state.workspace.cancellation is CancellationState.NONE
-        ):
-            # A queued message has started a new turn. Never let the previous
-            # turn's minimum display interval label this fresh work as stopping.
-            self._clear_agent_interrupt_status()
-
     def runtime_cancelled(self) -> None:
-        """Acknowledge completed cancellation and render its transcript marker."""
-        self._schedule_agent_callback(self._acknowledge_agent_interrupt)
-        self.emit_block("\x1b[33m✗ Interrupted agent turn.\x1b[0m\n")
+        """Replace optimistic feedback with the completed-cancellation marker."""
+        self._schedule_agent_callback(self._complete_agent_interrupt)
+
+    def _complete_agent_interrupt(self) -> None:
+        if not self._interrupting_agent_turn:
+            self.emit_block("\x1b[33m✗ Interrupted agent turn.\x1b[0m\n")
+            return
+        self._interrupt_completion_pending = True
+        self._acknowledge_agent_interrupt()
 
     def _acknowledge_agent_interrupt(self) -> None:
         """Clear interrupt feedback only after it had time to reach a frame."""
@@ -2827,12 +2818,19 @@ class TUIApplication:
             )
 
     def _clear_agent_interrupt_status(self) -> None:
+        timer = self._interrupt_status_clear_timer
         self._interrupt_status_clear_timer = None
+        if timer is not None:
+            timer.cancel()
+        emit_completion = self._interrupt_completion_pending
+        self._interrupt_completion_pending = False
         self._interrupt_status_started_at = None
         self._interrupt_status_acknowledged = False
         self._interrupting_agent_turn = False
         if self._app.is_running:
             self._app.invalidate()
+        if emit_completion:
+            self.emit_block("\x1b[33m✗ Interrupted agent turn.\x1b[0m\n")
 
     def invalidate(self) -> None:
         """Thread-safe repaint hook for composition-root-owned policies."""
@@ -2862,6 +2860,7 @@ class TUIApplication:
                 self._interrupt_status_clear_timer = None
             self._interrupting_agent_turn = True
             self._interrupt_status_acknowledged = False
+            self._interrupt_completion_pending = False
             self._interrupt_status_started_at = time.monotonic()
             if self._app.is_running:
                 self._app.invalidate()
@@ -3264,6 +3263,7 @@ class TUIApplication:
                 self._interrupt_status_clear_timer = None
             self._interrupting_agent_turn = False
             self._interrupt_status_acknowledged = False
+            self._interrupt_completion_pending = False
             self._interrupt_status_started_at = None
             if self._transient_status_timer is not None:
                 self._transient_status_timer.cancel()
