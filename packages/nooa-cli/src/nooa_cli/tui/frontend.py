@@ -230,6 +230,12 @@ class TerminalFrontend:
     """
 
     def __init__(self, config: "Config") -> None:
+        from .theme import set_theme
+
+        # Apply the persisted palette before constructing any Rich or
+        # prompt-toolkit rendering surfaces.
+        set_theme(getattr(config.tui, "theme", "mocha"))
+
         from .console import TUIConsole
 
         self._config = config

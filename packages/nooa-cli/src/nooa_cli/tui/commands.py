@@ -1030,6 +1030,7 @@ class ThemeCommand(Command):
 
         name = args[0].lower()
         theme_module.set_theme(name)
+        self.config.theme = name
 
         # Replace the base theme in Rich Console's ThemeStack
         # We can't just push - we need to replace the base entry
@@ -1051,7 +1052,17 @@ class ThemeCommand(Command):
         if callable(refresh_app_style):
             refresh_app_style()
 
-        return CommandResult.ok(TextOutput(f"Switched to {name} theme", "success"))
+        try:
+            path = self._persist_tui_setting("theme", name)
+        except Exception as exc:
+            return CommandResult.ok(
+                TextOutput(f"Switched to {name} theme", "success"),
+                TextOutput(f"Could not save the theme preference: {exc}", "warning"),
+            )
+        return CommandResult.ok(
+            TextOutput(f"Switched to {name} theme", "success"),
+            TextOutput(f"Saved in {path}", "status"),
+        )
 
 
 # ---------------------------------------------------------------------------

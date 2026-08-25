@@ -51,6 +51,7 @@ SETTINGS_ENV_VAR = "NEMO_OO_SETTINGS"
 # coerced here. Dotted path (section.field) → callable; unlisted = set as-is.
 _COERCE: dict[str, Any] = {
     "tui.display_mode": lambda v: _coerce_display_mode(v),
+    "tui.theme": lambda v: _coerce_theme(v),
     "tui.mcp_file": lambda v: Path(v),
     "tui.trace_dir": lambda v: Path(v) if v is not None else None,
     "tui.additional_skills_dirs": lambda v: [Path(item) for item in (v or [])],
@@ -65,6 +66,15 @@ def _coerce_display_mode(value: Any) -> Any:
     from .config import DisplayMode
 
     return DisplayMode(value)
+
+
+def _coerce_theme(value: Any) -> str:
+    from .theme import THEMES
+
+    name = str(value).lower()
+    if name not in THEMES:
+        raise ValueError(f"Unknown theme {value!r}. Choose from: {', '.join(THEMES)}")
+    return name
 
 
 # Fields that are computed / runtime-only and must NOT be persisted or
@@ -270,6 +280,9 @@ SETTINGS_TEMPLATE = """\
 tui:
   # LLM model alias (from the unifiedllm registry) or a litellm model name.
   # default_model: {default_model}
+
+  # Color palette. Prefer /theme <name> so the choice is applied and saved.
+  # theme: mocha               # mocha | latte | vsdark | vslight
 
   # Show the agent's Python execution panels.
   # show_python: false
