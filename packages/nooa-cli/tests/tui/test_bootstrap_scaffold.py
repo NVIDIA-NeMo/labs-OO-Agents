@@ -40,6 +40,7 @@ def test_scaffold_writes_settings_with_model_and_preserves_literal_braces(tmp_pa
     # The {default_model} placeholder is substituted...
     assert "nvidia/llama-3.3" in written
     assert "{default_model}" not in written
+    assert "# theme: mocha" in written
     # ...while literal braces from the inline-MCP example survive verbatim.
     assert "${MAAS_API_KEY}" in written
 
