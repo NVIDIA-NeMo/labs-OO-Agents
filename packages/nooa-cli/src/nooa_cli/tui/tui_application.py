@@ -1600,9 +1600,16 @@ class TUIApplication:
             self._agent_controller.observe(self._agent)
 
     def refresh_style(self) -> None:
-        """Apply the current TUI palette to the live prompt-toolkit app."""
+        """Apply the current palette to chrome and retained fullscreen output."""
         self._app.style = create_prompt_style()
-        self._app.invalidate()
+        if self._is_fullscreen and self._fullscreen_semantic_replay_count:
+            # Width caches also contain resolved theme colors. Theme changes
+            # must force each semantic callback to render again at this width.
+            for block in self._transcript_blocks:
+                block.replay_cache.clear()
+            self._rebuild_fullscreen_transcript()
+        else:
+            self._app.invalidate()
 
     async def open_event_explorer(self, event_manager: Any) -> None:
         """Open the event explorer as an in-app subview."""
@@ -2002,7 +2009,7 @@ class TUIApplication:
         return control.handle_external_mouse(mouse_event, below=True)
 
     def _open_fullscreen_link_at(self, x: int, y: int) -> bool:
-        """Open the safe HTTP(S) hyperlink under a click without affecting drag-copy."""
+        """Open a safe hyperlink under a click without affecting drag-copy."""
         if not self._is_fullscreen:
             return False
         width, height = self._transcript_viewport_size()

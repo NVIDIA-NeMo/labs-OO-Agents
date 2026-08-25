@@ -7,15 +7,46 @@ from __future__ import annotations
 import secrets
 from typing import Any
 
-from rich.cells import split_graphemes
+from markdown_it import MarkdownIt
+from rich.cells import cell_len, split_graphemes
 from rich.console import Console, ConsoleOptions, RenderResult
 from rich.markdown import CodeBlock, ListItem, Markdown
 from rich.segment import Segment
 from rich.syntax import Syntax
 from rich.text import Text
 
+from .terminal_safety import safe_hyperlink_target
+
 _COPY_URI_PREFIX = "nooa-copy://"
 _CODE_SOURCE_URI_PREFIX = "nooa-code-source://"
+
+
+class TerminalMarkdown(Markdown):
+    """Rich Markdown whose parser also permits validated ``file://`` links."""
+
+    def __init__(self, markup: str, **kwargs: Any) -> None:
+        super().__init__(markup, **kwargs)
+        if "file://" not in markup.lower():
+            return
+        parser = MarkdownIt().enable("strikethrough").enable("table")
+        default_validate = parser.validateLink
+
+        def validate_link(target: str) -> bool:
+            validated = safe_hyperlink_target(target)
+            return default_validate(target) or (
+                validated is not None and validated.lower().startswith("file://")
+            )
+
+        parser.validateLink = validate_link
+        self.parsed = parser.parse(markup)
+        for token in self.parsed:
+            for child in token.children or ():
+                if child.type != "link_open":
+                    continue
+                target = child.attrGet("href")
+                normalized = safe_hyperlink_target(target)
+                if normalized is not None and target != normalized:
+                    child.attrSet("href", normalized)
 
 
 def visible_code_line(source: str) -> tuple[str, tuple[tuple[int, int], ...]]:
@@ -55,7 +86,7 @@ def visible_code_line(source: str) -> tuple[str, tuple[tuple[int, int], ...]]:
         for start, stop, visible in spans:
             rendered.append(visible)
             source_map.extend((start, stop) for _ in visible)
-            column += len(visible)
+            column += cell_len(visible)
             cursor = stop
     return "".join(rendered), tuple(source_map)
 
@@ -172,7 +203,7 @@ class _SemanticListItem(ListItem):
             yield Segment.line()
 
 
-class CopyableMarkdown(Markdown):
+class CopyableMarkdown(TerminalMarkdown):
     """Rich Markdown that exposes exact fenced-code payloads by stable action ID."""
 
     elements = {
