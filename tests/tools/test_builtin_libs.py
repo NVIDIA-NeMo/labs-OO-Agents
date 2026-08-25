@@ -51,10 +51,13 @@ def test_codeact_strategy_instructions_no_longer_has_decomposition():
 
     src = inspect.getsource(CodeActStrategy.strategy_instructions)
     assert "Task decomposition" not in src
-    experimental_src = inspect.getsource(CodeActExperimental.strategy_instructions)
-    assert "@strategy(PredictStrategy())" not in experimental_src
-    assert "asyncio.gather" not in experimental_src
-    assert "Reserve delegation for bounded tasks" in experimental_src
+
+    experimental = CodeActExperimental()
+    tool_description = experimental._build_execute_python_tool().description
+    assert "@strategy(PredictStrategy())" not in tool_description
+    assert "asyncio.gather" not in tool_description
+    assert "plain-text replies do not execute work" in tool_description
+    assert "return_result(value)" in tool_description
 
 
 def test_context_api_not_in_protected_blocks():
