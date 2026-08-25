@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 class CodeActExperimental(CodeActStrategy):
     """Single-provider-tool CodeAct variant with in-cell completion.
 
-    The model receives only ``execute_python`` as a provider tool. ``return_result``
+    The model receives only ``python_cell`` as a provider tool. ``return_result``
     remains available inside Python cells, where it completes the task. Bare
     expressions do not complete the task, and trailing strings are suppressed
     to avoid echoing prose as if it were a result.
@@ -43,14 +43,19 @@ class CodeActExperimental(CodeActStrategy):
         return "CODEACT_EXPERIMENTAL"
 
     def get_block_overrides(self) -> dict[str, Any]:
-        """Keep the stable execution contract separate from changing REPL locals."""
+        """Put the execution contract on the tool and keep only runtime context blocks."""
         overrides = super().get_block_overrides()
+        overrides["strategy_prompt"] = None
         overrides["repl_locals"] = DynamicContext("strategy.repl_locals_context(runtime)")
         return overrides
 
+    def get_static_block_keys(self) -> set[str]:
+        """Exclude the removed strategy prompt from the cacheable context prefix."""
+        return super().get_static_block_keys() - {"strategy_prompt"}
+
     def get_block_order(self) -> list[str] | None:
         """Place live locals immediately after the stable execution context."""
-        order = super().get_block_order() or []
+        order = [key for key in (super().get_block_order() or []) if key != "strategy_prompt"]
         index = order.index("execution_context") + 1
         return [*order[:index], "repl_locals", *order[index:]]
 
@@ -73,7 +78,34 @@ class CodeActExperimental(CodeActStrategy):
         )
 
     def _python_tool_name(self) -> str:
-        return "execute_python"
+        return "python_cell"
+
+    def _build_execute_python_tool(self) -> Any:
+        """Build the sole provider tool, including its complete operating contract."""
+        tool = super()._build_execute_python_tool()
+        tool.description = """Execute one cell in a persistent Python session.
+
+Parameters are pre-loaded as locals, and names defined in one cell remain available
+in later cells. Use `await` directly, `print`/`pprint` to inspect values, and
+`doc(obj)` for APIs. This is your only provider tool: call it on every turn because
+plain-text replies do not execute work or finish the task.
+
+To finish, call `return_result(value)` inside the cell. It immediately submits a
+value matching the method's annotated return type. A bare final expression does not
+finish the task. In particular, a trailing string is not shown; use `print(text)`
+when you want to inspect prose before submitting it.
+
+Use Python for arithmetic, iteration, transforms, and batches rather than manually
+constructing large outputs. Define reusable helpers at the top of a cell. Existing
+methods on `self` may be called with `await` when async.
+
+Restrictions (will throw):
+- `eval`, `exec`, `compile`, `__import__`, `input`, `breakpoint`
+- `globals`, `locals`, `vars`, `asyncio.run`, `loop.run_until_complete`
+- Attaching callables to the agent: `self.foo = fn`, `setattr(self, "foo", fn)`,
+  `type(self).foo = fn`
+"""
+        return tool
 
     def _build_tools(self, return_type: Any, method_name: str) -> list[Any]:
         del return_type, method_name
@@ -83,7 +115,7 @@ class CodeActExperimental(CodeActStrategy):
         return False
 
     def _available_tool_names(self) -> str:
-        return "execute_python"
+        return "python_cell"
 
     def _python_output_value(self, result: Any) -> Any:
         if result.has_return and not result.error:
@@ -93,37 +125,8 @@ class CodeActExperimental(CodeActStrategy):
         return None
 
     @strategy(TemplateStrategy())
-    async def strategy_instructions(self, runtime: RuntimeServices) -> str:
-        """
-        ## Strategy
-
-        You have a persistent Python session. Parameters are pre-loaded as locals,
-        and names defined in one cell remain available in later cells. Use `await`
-        directly, `print`/`pprint` to inspect values, and `doc(obj)` for APIs.
-
-        **Your only tool is `execute_python(code)`.** You must call it each turn;
-        plain-text replies do not execute work or finish the task.
-
-        To finish, call `return_result(value)` inside `execute_python`; this immediately
-        submits a value matching the method's annotated return type. A bare final
-        expression does not finish the task. In particular, a trailing string is not
-        shown; use `print(text)` when you want to inspect prose before submitting it.
-
-        Use Python for arithmetic, iteration, transforms, and batches rather than
-        manually constructing large outputs. Define reusable helpers at the top of
-        a cell. Existing methods on `self` may be called with `await` when async.
-
-        ## Restrictions (will throw)
-
-        - `eval`, `exec`, `compile`, `__import__`, `input`, `breakpoint`
-        - `globals`, `locals`, `vars`, `asyncio.run`, `loop.run_until_complete`
-        - Attaching callables to the agent: `self.foo = fn`, `setattr(self, 'foo', fn)`, `type(self).foo = fn`
-        """
-        ...
-
-    @strategy(TemplateStrategy())
     async def _tool_use_reminder(self, runtime: RuntimeServices, reason: str) -> str:
-        """{reason} Call `execute_python(code)`. To finish, call `return_result(value)` inside the cell."""
+        """{reason} Call `python_cell(code)`. To finish, call `return_result(value)` inside the cell."""
         ...
 
     @staticmethod
@@ -132,9 +135,9 @@ class CodeActExperimental(CodeActStrategy):
             Error(
                 content=(
                     "Your last reply was plain text with no tool call, so it was dropped. "
-                    f"To finish `{call.method_name}`, call `execute_python` with "
+                    f"To finish `{call.method_name}`, call `python_cell` with "
                     "`return_result(value)` inside the cell. To continue working, "
-                    "call `execute_python` with the next computation."
+                    "call `python_cell` with the next computation."
                 )
             )
         )
