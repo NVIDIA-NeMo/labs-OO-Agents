@@ -230,16 +230,26 @@ class _SemanticListItem(ListItem):
     owns visual wrapping at the current viewport width.
     """
 
-    def _semantic_lines(self, console: Console, options: ConsoleOptions) -> list[list[Segment]]:
+    def _semantic_lines(
+        self,
+        console: Console,
+        options: ConsoleOptions,
+        *,
+        prefix_width: int,
+    ) -> list[list[Segment]]:
         """Render logical child lines without Rich's width-cropping pass."""
-        rendered = console.render(self.elements, options)
+        child_options = options.update(width=max(1, options.max_width - prefix_width))
+        rendered = console.render(self.elements, child_options)
         styled = Segment.apply_style(rendered, self.style)
         return list(Segment.split_lines(styled)) or [[]]
 
     def render_bullet(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        prefix_width = 3
         bullet_style = console.get_style("markdown.item.bullet", default="none")
-        for index, line in enumerate(self._semantic_lines(console, options)):
-            yield Segment(" • " if index == 0 else "   ", bullet_style)
+        for index, line in enumerate(
+            self._semantic_lines(console, options, prefix_width=prefix_width)
+        ):
+            yield Segment(" • " if index == 0 else " " * prefix_width, bullet_style)
             yield from line
             yield Segment.line()
 
@@ -252,7 +262,9 @@ class _SemanticListItem(ListItem):
     ) -> RenderResult:
         number_width = len(str(last_number)) + 2
         number_style = console.get_style("markdown.item.number", default="none")
-        for index, line in enumerate(self._semantic_lines(console, options)):
+        for index, line in enumerate(
+            self._semantic_lines(console, options, prefix_width=number_width)
+        ):
             prefix = f"{number}".rjust(number_width - 1) + " " if index == 0 else " " * number_width
             yield Segment(prefix, number_style)
             yield from line
