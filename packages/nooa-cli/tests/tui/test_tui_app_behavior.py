@@ -354,12 +354,19 @@ async def test_baseline_ctrl_d_exits():
         await h.wait_for(lambda: not h.app.is_running)
 
 
-async def test_baseline_ctrl_c_clears_input_and_requires_confirmation():
+async def test_ctrl_c_clears_input_then_confirms_idle_exit():
     async with TUIHarness() as h:
         await h.type_keys("discard this command")
         await h.wait_input_equals("discard this command")
+
+        # Clearing a draft is its own step and never arms or exits.
         await h.press("c-c")
         await h.wait_input_equals("")
+        assert "Press Ctrl+C again to exit" not in h.capture_status()
+        assert h.app.is_running
+
+        # With no active turn, the next press arms the existing safe exit.
+        await h.press("c-c")
         await h.wait_for(lambda: "Press Ctrl+C again to exit" in h.capture_status())
         assert h.app.is_running
 
@@ -953,7 +960,7 @@ async def test_interleaved_cmd_msg_msg_commands_fire_immediately():
         )
 
 
-async def test_queue_esc_soft_cancels_and_delivers_queue():
+async def test_bare_escape_interrupts_and_delivers_queued_input():
     agent = _blocking_agent()
     async with TUIHarness(agent=agent) as h:
         await h.submit_async("first")
@@ -962,6 +969,23 @@ async def test_queue_esc_soft_cancels_and_delivers_queue():
         await h.press("enter")
         await h.press("escape")
         await h.wait_for(lambda: agent.messages_received == ["first", "queued"])
+
+
+@pytest.mark.parametrize("key", ["option-[", "option-]"])
+async def test_option_brackets_do_not_interrupt_active_turn(key: str):
+    """Raw ESC-prefixed bracket bytes are Meta input, not standalone Escape."""
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("first")
+        await h.wait_for(lambda: h.app.is_thinking())
+
+        await h.press(key)
+        await h.wait_for(lambda: h.capture_input() in {"[", "]"})
+
+        assert h.app.is_thinking()
+        assert h.capture_input() == key[-1]
+        assert "cancelling" not in h.capture_status()
+        agent.block.set()
 
 
 async def test_esc_prefers_active_slash_command_over_agent_interrupt():
@@ -1006,18 +1030,52 @@ async def test_cancelled_agent_run_async_propagates_to_agent_loop():
 # ╚══════════════════════════════════════════════════════════════════════╝
 
 
-async def test_hard_ctrl_c_interrupts_and_clears_buffer():
-    """C-c while the agent is working cancels the agent and clears the buffer."""
+async def test_ctrl_c_clears_draft_before_interrupting_active_turn():
+    """Each Ctrl-C advances exactly one clear → interrupt → exit step."""
     agent = _blocking_agent()
     async with TUIHarness(agent=agent) as h:
         await h.submit_async("first")
         await h.wait_for(lambda: h.app.is_thinking())
         await h.type_keys("in-progress")
         await h.wait_input_equals("in-progress")
+
         await h.press("c-c")
-        # Agent gets cancelled and the in-progress input is discarded.
+        await h.wait_input_equals("")
+        assert h.app.is_thinking()
+        assert "Press Ctrl+C again to exit" not in h.capture_status()
+
+        await h.press("c-c")
+        await h.wait_for(lambda: not h.app.is_thinking())
+        assert "Press Ctrl+C again to exit" in h.capture_status()
+
+
+async def test_ctrl_c_with_empty_composer_interrupts_active_turn():
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("first")
+        await h.wait_for(lambda: h.app.is_thinking())
+
+        await h.press("c-c")
+
         await h.wait_for(lambda: not h.app.is_thinking())
         assert h.capture_input() == ""
+        assert "Press Ctrl+C again to exit" in h.capture_status()
+
+
+async def test_ctrl_c_clears_keyboard_selection_before_interrupting():
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("first")
+        await h.wait_for(lambda: h.app.is_thinking())
+        await h.type_keys("draft")
+        h.app.input_buffer.start_selection()
+        h.app.input_buffer.cursor_left(count=2)
+
+        await h.press("c-c")
+
+        await h.wait_input_equals("")
+        assert h.app.is_thinking()
+        assert "Press Ctrl+C again to exit" not in h.capture_status()
 
 
 async def test_hard_agent_error_shown_in_output():
