@@ -311,7 +311,10 @@ async def test_coding_agent_delegate_merges_todo_notes_and_vars(tmp_path, monkey
         async def investigate(self, objective: str, supplied_context=None) -> str:
             delegated = self.todo.list_todos()[0]
             observed.update(
-                objective=objective, supplied_context=supplied_context, delegated=delegated
+                objective=objective,
+                supplied_context=supplied_context,
+                delegated=delegated,
+                active=self.todo.active(),
             )
             self.todo.comment(delegated, "worker finding")
             self.todo.set_var(delegated, "path", "parser.py")
@@ -332,6 +335,7 @@ async def test_coding_agent_delegate_merges_todo_notes_and_vars(tmp_path, monkey
         assert observed["objective"] == task.title
         assert observed["supplied_context"] is observed["delegated"]
         assert observed["delegated"] is not task
+        assert observed["active"] is observed["delegated"]
         assert id(agent.todo.get(task)) == original_identity
         assert [comment.body for comment in task.comments] == ["worker finding"]
         assert task.v.path == "parser.py"

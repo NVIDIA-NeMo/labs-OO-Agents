@@ -188,6 +188,10 @@ def test_todo_manager_docs_are_task_focused() -> None:
     assert "def add(" in output
     assert "extra\n        keywords become durable metadata" in output
     assert "def clear_done(" in output
+    assert "def complete(" in output
+    assert "def activate(" in output
+    assert "def deactivate(" in output
+    assert "def active(" in output
     assert "def status(self, max_items: int = 10, max_chars: int = 2000)" in output
     assert "def to_dict(" not in output
     assert "def from_dict(" not in output
@@ -196,3 +200,188 @@ def test_todo_manager_docs_are_task_focused() -> None:
     assert "vars: SnapshotVars" not in output
     assert "class SnapshotVars:" not in output
     assert "def pop(" not in output
+
+
+def test_active_status_shows_notes_dependencies_and_other_summary() -> None:
+    manager = TodoManager()
+    unrelated_open = manager.add("unrelated open")
+    unrelated_done = manager.add("unrelated done")
+    manager.complete(unrelated_done)
+    leaf = manager.add("leaf dependency")
+    middle = manager.add("middle dependency", deps=[leaf])
+    root = manager.add(
+        "active root",
+        deps=[middle],
+        notes="Detailed instructions for the current work.",
+        owner="controller",
+    )
+    manager.comment(root, "Implementation started")
+
+    assert manager.activate(root) is root
+    assert manager.active() is root
+
+    output = manager.status()
+
+    assert output.startswith(
+        f"Active [{root.id}] active root\nStatus: blocked · 2 dependencies · 1 var · 1 comment"
+    )
+    assert "Notes: Detailed instructions for the current work." in output
+    rows = [line for line in output.splitlines() if line.startswith("  ") and "[" in line]
+    assert [todo.id for todo in (leaf, middle)] == [
+        line.split("[", 1)[1].split("]", 1)[0] for line in rows
+    ]
+    assert "Other Todos: 1 open · 1 done" in output
+    assert "unrelated open" not in output
+    assert "unrelated done" not in output
+    assert "clear active: self.todo.deactivate()" in output
+    assert manager.list_todos() == [unrelated_open, unrelated_done, leaf, middle, root]
+
+
+def test_activate_replaces_previous_and_deactivate_restores_regular_status() -> None:
+    manager = TodoManager()
+    first = manager.add("first")
+    second = manager.add("second")
+
+    manager.activate(first)
+    assert manager.activate(second) is second
+    assert manager.active() is second
+    assert "Other Todos: 1 open" in manager.status()
+
+    assert manager.deactivate() is second
+    assert manager.active() is None
+    assert "first" in manager.status()
+    assert "second" in manager.status()
+    assert manager.deactivate() is None
+
+
+def test_activate_rejects_unmanaged_or_completed_todo() -> None:
+    manager = TodoManager()
+    other = TodoManager().add("other")
+    completed = manager.add("completed")
+    manager.complete(completed)
+
+    with pytest.raises(ValueError, match="not managed"):
+        manager.activate(other)
+    with pytest.raises(ValueError, match="already done"):
+        manager.activate(completed)
+
+
+def test_complete_alias_clears_active_only_for_active_root() -> None:
+    manager = TodoManager()
+    dependency = manager.add("dependency")
+    root = manager.add("root", deps=[dependency])
+    manager.activate(root)
+
+    assert manager.complete(dependency) is dependency
+    assert dependency.status == "done"
+    assert manager.active() is root
+
+    assert manager.complete(root) is root
+    assert root.status == "done"
+    assert manager.active() is None
+
+
+def test_other_completion_paths_clear_active_root() -> None:
+    manager = TodoManager()
+    via_update = manager.add("updated")
+    manager.activate(via_update)
+    manager.update(via_update, status="done")
+    assert manager.active() is None
+
+    via_merge = manager.add("merged")
+    manager.activate(via_merge)
+    base = manager.copy_todo(via_merge)
+    worker = base.model_copy(deep=True)
+    worker.status = "done"
+    manager.merge_todo(worker, base=base)
+    assert manager.active() is None
+
+    direct = manager.add("direct")
+    manager.activate(direct)
+    direct.status = "done"
+    assert manager.active() is None
+
+
+def test_removing_or_clearing_active_root_clears_selection() -> None:
+    manager = TodoManager()
+    removed = manager.add("removed")
+    manager.activate(removed)
+    assert manager.remove(removed) is True
+    assert manager.active() is None
+
+    cleared = manager.add("cleared")
+    manager.activate(cleared)
+    manager.clear()
+    assert manager.active() is None
+
+    done = manager.add("clear done")
+    manager.activate(done)
+    done.status = "done"
+    assert manager.clear_done() == 1
+    assert manager.active() is None
+
+
+def test_active_round_trips_through_snapshot_and_ignores_invalid_ids() -> None:
+    manager = TodoManager()
+    root = manager.add("root")
+    manager.activate(root)
+
+    restored = TodoManager(manager.to_dict())
+    assert restored.active() is not None
+    assert restored.active().id == root.id
+
+    stale_state = manager.to_dict()
+    stale_state["active_id"] = "missing"
+    assert TodoManager(stale_state).active() is None
+
+    root.status = "done"
+    assert manager.to_dict()["active_id"] is None
+
+
+def test_active_status_bounds_long_notes_and_missing_dependencies() -> None:
+    manager = TodoManager()
+    root = manager.add("root", deps=["missing-" + "x" * 500], notes="n" * 500)
+    manager.activate(root)
+
+    output = manager.status(max_items=0, max_chars=200)
+
+    assert len(output) <= 200
+    assert output.endswith("… status truncated")
+
+
+def test_active_status_handles_deep_graph_and_cycles_without_recursion() -> None:
+    manager = TodoManager()
+    dependency = manager.add("dependency 0")
+    for index in range(1, 1_101):
+        dependency = manager.add(f"dependency {index}", deps=[dependency])
+    root = manager.add("root", deps=[dependency])
+    manager.add_dep(manager.list_todos()[0], root)
+    manager.activate(root)
+
+    output = manager.status(max_items=3)
+
+    assert output.startswith(f"Active [{root.id}] root")
+    assert "+1098 dependencies not shown" in output
+
+
+def test_active_dependency_order_is_dependency_first_for_shared_siblings() -> None:
+    manager = TodoManager()
+    shared = manager.add("shared")
+    dependent = manager.add("dependent", deps=[shared])
+    root = manager.add("root", deps=[dependent, shared])
+    manager.activate(root)
+
+    output = manager.status()
+    rows = [line for line in output.splitlines() if line.startswith("  ") and "[" in line]
+
+    assert [shared.id, dependent.id] == [line.split("[", 1)[1].split("]", 1)[0] for line in rows]
+
+
+def test_with_todo_makes_open_delegated_todo_active() -> None:
+    manager = TodoManager()
+    todo = manager.add("delegated")
+
+    worker_manager = TodoManager.with_todo(todo)
+
+    assert worker_manager.active() is not None
+    assert worker_manager.active().id == todo.id
