@@ -156,8 +156,9 @@ async def test_python_state_summarizes_initial_state():
     )
     state_block = rendered_context.split("## Python state", 1)[1]
     assert "Previous cell outputs" not in state_block
-    assert "Cell locals: prior_value (int)" in state_block
+    assert "Current method inputs are in scope but omitted here." in state_block
     assert "question" not in state_block
+    assert "Reusable cell state (method inputs omitted): prior_value (int)" in state_block
     assert "self.v" not in state_block
 
 
@@ -182,8 +183,9 @@ async def test_python_state_lists_user_created_locals():
         str(message.get("content", "")) for message in fake_llm.last_messages
     )
     state_block = rendered_context.split("## Python state", 1)[1]
+    assert "Current method inputs are in scope but omitted here." in state_block
     assert "question" not in state_block
-    assert "Cell locals: working_value (str)" in state_block
+    assert "Reusable cell state (method inputs omitted): working_value (str)" in state_block
     assert "Previous cell outputs" not in state_block
 
 
@@ -231,7 +233,7 @@ async def test_python_state_context_escapes_cwd_markup():
     assert "&lt;/python_state&gt;&lt;attack&gt;\\n`forged`" in rendered
     assert "\n`forged`" not in rendered
     assert len(rendered) < 300
-    assert "Cell locals: message (str)" in rendered
+    assert "Reusable cell state (method inputs omitted): message (str)" in rendered
 
 
 @pytest.mark.asyncio
@@ -261,12 +263,15 @@ async def test_python_state_omits_inputs_outputs_and_framework_objects():
     assert "secret" not in rendered
     assert "ResultType" not in rendered
     assert "helper" not in rendered
-    assert "Cell locals: large_text (str), working_path (str)" in rendered
+    assert (
+        "Reusable cell state (method inputs omitted): large_text (str), working_path (str)"
+        in rendered
+    )
     assert "x" * 100 not in rendered
 
 
 @pytest.mark.asyncio
-async def test_python_state_lists_persistent_variable_names_without_values():
+async def test_python_state_summarizes_persistent_vars_with_cleanup_actions():
     strategy_instance = CodeActExperimental(config=CodeActConfig(prefill=None))
     call = type(
         "Call",
@@ -280,7 +285,13 @@ async def test_python_state_lists_persistent_variable_names_without_values():
 
     rendered = await strategy_instance.python_state_context(runtime)
 
-    assert "`self.v`: &lt;/python_state&gt; (int), plan (str), token (str)" in rendered
+    assert "`self.v`: 3 persistent vars" in rendered
+    assert 'inspect: `print(python_state()["self.v"])`' in rendered
+    assert "remove one: `del self.v.<name>`" in rendered
+    assert "clear all: `self.vars.clear()`" in rendered
+    assert "token (str)" not in rendered
+    assert "plan (str)" not in rendered
+    assert "&lt;/python_state&gt;" not in rendered
     assert "top-secret" not in rendered
     assert "draft" not in rendered
 

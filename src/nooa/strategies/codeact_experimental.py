@@ -100,20 +100,17 @@ class CodeActExperimental(CodeActStrategy):
 
         persistent_vars = getattr(agent, "vars", None)
         if persistent_vars:
-            var_items = sorted(
-                (str(name), type(value).__name__) for name, value in persistent_vars.items()
+            count = len(persistent_vars)
+            lines.append(
+                f"`self.v`: {count} persistent var{'s' if count != 1 else ''} — "
+                'inspect: `print(python_state()["self.v"])`; '
+                "remove one: `del self.v.<name>`; clear all: `self.vars.clear()`"
             )
-            visible = var_items[:20]
-            omitted = len(var_items) - len(visible)
-            suffix = f" (+{omitted} more; `print(python_state())`)" if omitted else ""
-            items = ", ".join(
-                f"{self._python_state_label(name, max_chars=80)} "
-                f"({self._python_state_label(type_name, max_chars=80)})"
-                for name, type_name in visible
-            )
-            lines.append(f"`self.v`: {items}{suffix}")
         elif hasattr(agent, "v"):
             lines.append("`self.v`: none")
+
+        if input_names:
+            lines.extend(("", "Current method inputs are in scope but omitted here."))
 
         if local_items:
             visible = local_items[:20]
@@ -127,9 +124,9 @@ class CodeActExperimental(CodeActStrategy):
                 f"({self._python_state_label(type_name, max_chars=80)})"
                 for name, type_name in visible
             )
-            lines.extend(("", f"Cell locals: {items}{suffix}"))
+            lines.extend(("", f"Reusable cell state (method inputs omitted): {items}{suffix}"))
         else:
-            lines.extend(("", "Cell locals: none"))
+            lines.extend(("", "Reusable cell state (method inputs omitted): none"))
         return "\n".join(lines)
 
     def _build_builtins(self, runtime: RuntimeServices, call: "CurrentCall") -> dict[str, Any]:
