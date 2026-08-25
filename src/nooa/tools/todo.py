@@ -668,7 +668,7 @@ class TodoManager(Skill):
                 else:
                     hints.append("record material progress with self.todo.comment(id, ...)")
                 hints.append("show all: self.todo.list_todos()")
-                lines.append("Hint — " + " · ".join(hints))
+                lines.append("Hint: " + " · ".join(hints))
                 return self._bounded_status("\n".join(lines), max_chars)
 
             output = render_active(selected)
@@ -720,7 +720,7 @@ class TodoManager(Skill):
             if by_status["done"]:
                 hints.append("prune done: self.todo.clear_done()")
             if hints:
-                lines.append("Hint — " + " · ".join(hints))
+                lines.append("Hint: " + " · ".join(hints))
             return "\n".join(lines)
 
         output = render(selected)
