@@ -1246,6 +1246,20 @@ async def test_out_of_order_echo_retires_only_matching_handoff(echo: str) -> Non
     assert [item.text for item in app._pending_input_handoff] == ["one", "three"]
 
 
+async def test_duplicate_coalesced_echo_retires_all_submission_handoffs():
+    from nooa_cli.tui.tui_application import TUIApplication, _PendingInputHandoff
+
+    app = TUIApplication(display_mode="fullscreen")
+    app._pending_input_handoff = [
+        _PendingInputHandoff("test"),
+        _PendingInputHandoff("test"),
+    ]
+
+    app.complete_pending_input_handoff("test\ntest")
+
+    assert app._pending_input_handoff == []
+
+
 async def test_coalesced_echo_with_runtime_prefix_retires_tui_handoffs():
     agent = _blocking_agent()
     async with TUIHarness(agent=agent) as h:
