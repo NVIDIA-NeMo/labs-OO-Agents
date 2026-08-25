@@ -3553,6 +3553,36 @@ def test_copyable_markdown_preserves_long_list_item_for_fullscreen_reflow() -> N
     assert any(row.endswith(" ") for row in rows[:-1])
 
 
+def test_copyable_markdown_preserves_nested_and_multiline_list_structure() -> None:
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+
+    _renderable, ansi = _copyable_markdown_ansi(
+        "- parent item\n"
+        "  - nested item one\n"
+        "  - nested item two\n"
+        "- first paragraph\n\n"
+        "  second paragraph in the same item\n\n"
+        "  > quoted child\n"
+        "98. ninety eight\n"
+        "99. ninety nine\n"
+        "100. one hundred",
+        width=30,
+    )
+
+    lines = [line.rstrip() for line in strip_safe_ansi(ansi).splitlines() if line.strip()]
+    assert lines == [
+        " • parent item",
+        "    • nested item one",
+        "    • nested item two",
+        " • first paragraph",
+        "   second paragraph in the same item",
+        "   ▌ quoted child",
+        "  98 ninety eight",
+        "  99 ninety nine",
+        " 100 one hundred",
+    ]
+
+
 def test_copyable_markdown_exposes_exact_fenced_code_payloads() -> None:
     from nooa_cli.tui.terminal_safety import strip_safe_ansi
 
