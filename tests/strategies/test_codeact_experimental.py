@@ -156,9 +156,7 @@ async def test_python_state_summarizes_initial_state():
     )
     state_block = rendered_context.split("## Python state", 1)[1]
     assert "Previous cell outputs" not in state_block
-    assert "Current method inputs are in scope but omitted here." in state_block
-    assert "question" not in state_block
-    assert "Reusable cell state (method inputs omitted): prior_value (int)" in state_block
+    assert "Cell locals (includes method inputs): prior_value (int), question (str)" in state_block
     assert "self.v" not in state_block
 
 
@@ -183,9 +181,9 @@ async def test_python_state_lists_user_created_locals():
         str(message.get("content", "")) for message in fake_llm.last_messages
     )
     state_block = rendered_context.split("## Python state", 1)[1]
-    assert "Current method inputs are in scope but omitted here." in state_block
-    assert "question" not in state_block
-    assert "Reusable cell state (method inputs omitted): working_value (str)" in state_block
+    assert (
+        "Cell locals (includes method inputs): question (str), working_value (str)" in state_block
+    )
     assert "Previous cell outputs" not in state_block
 
 
@@ -233,7 +231,7 @@ async def test_python_state_context_escapes_cwd_markup():
     assert "&lt;/python_state&gt;&lt;attack&gt;\\n`forged`" in rendered
     assert "\n`forged`" not in rendered
     assert len(rendered) < 300
-    assert "Reusable cell state (method inputs omitted): message (str)" in rendered
+    assert "Cell locals (includes method inputs): message (str)" in rendered
 
 
 @pytest.mark.asyncio
@@ -259,12 +257,12 @@ async def test_python_state_omits_inputs_outputs_and_framework_objects():
 
     rendered = await strategy_instance.python_state_context(runtime)
 
-    assert "notification" not in rendered
+    assert "notification (dict)" in rendered
     assert "secret" not in rendered
     assert "ResultType" not in rendered
     assert "helper" not in rendered
     assert (
-        "Reusable cell state (method inputs omitted): large_text (str), working_path (str)"
+        "Cell locals (includes method inputs): large_text (str), notification (dict), working_path (str)"
         in rendered
     )
     assert "x" * 100 not in rendered
@@ -286,9 +284,9 @@ async def test_python_state_summarizes_persistent_vars_with_cleanup_actions():
     rendered = await strategy_instance.python_state_context(runtime)
 
     assert "`self.v`: 3 persistent vars" in rendered
-    assert 'inspect: `print(python_state()["self.v"])`' in rendered
+    assert "inspect: `print(self.v.items())`" in rendered
     assert "remove one: `del self.v.<name>`" in rendered
-    assert "clear all: `self.vars.clear()`" in rendered
+    assert "clear all: `self.v.clear()`" in rendered
     assert "token (str)" not in rendered
     assert "plan (str)" not in rendered
     assert "&lt;/python_state&gt;" not in rendered
@@ -347,9 +345,9 @@ async def test_python_state_helper_returns_complete_inventory():
     inventory = builtins["python_state"]()
 
     assert inventory["self.v"] == {"plan": "str"}
-    assert len(inventory["cell_locals"]) == 25
+    assert len(inventory["cell_locals"]) == 26
     assert inventory["cell_locals"]["value_24"] == "int"
-    assert "question" not in inventory["cell_locals"]
+    assert inventory["cell_locals"]["question"] == "str"
     assert "Out" not in inventory["cell_locals"]
     assert "json_alias" not in inventory["cell_locals"]
     assert inventory["imports"] == {"json_alias": "json"}
