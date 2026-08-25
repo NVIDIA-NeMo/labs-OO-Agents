@@ -200,7 +200,7 @@ class AgentEventRenderer:
         if not self._agent_has_messaged:
             self._agent_has_messaged = True
             self._emit_text(
-                Rule(Text("OO ", style=self._colors["mauve"]), style="dim", align="left"),
+                Rule(Text("OO ", style="agent"), style="dim", align="left"),
                 **emit_kwargs,
             )
         self._emit_text(TerminalMarkdown(str(text)), agent_message=True, **emit_kwargs)
@@ -276,17 +276,14 @@ class AgentEventRenderer:
         # rule, syntax-highlighted code, 'oo stdout' rule + stdout,
         # 'oo stderr' rule + stderr.
         if self._show_python() and code:
-            mauve = self._colors["mauve"]
-            red = self._colors["red"]
-            text_color = self._colors["text"]
-            self._emit_text(Rule(Text("oo python", style=mauve), style="dim", align="left"))
+            self._emit_text(Rule(Text("oo python", style="agent"), style="dim", align="left"))
             self._emit_text(ThemeSyntax(code.strip(), "python", background_color="default"))
             if stdout.strip():
-                self._emit_text(Rule(Text("oo stdout", style=mauve), style="dim", align="left"))
-                self._emit_text(Text(stdout.rstrip("\n"), style=text_color))
+                self._emit_text(Rule(Text("oo stdout", style="agent"), style="dim", align="left"))
+                self._emit_text(Text(stdout.rstrip("\n"), style="agent.response"))
             if stderr.strip():
-                self._emit_text(Rule(Text("oo stderr", style=red), style="dim", align="left"))
-                self._emit_text(Text(stderr.rstrip("\n"), style=red))
+                self._emit_text(Rule(Text("oo stderr", style="error"), style="dim", align="left"))
+                self._emit_text(Text(stderr.rstrip("\n"), style="error"))
             return
 
         # Preview mode: show a one-line error summary (muted red).
@@ -309,7 +306,7 @@ class AgentEventRenderer:
         kwargs = self._event_emit_kwargs(event)
         self._emit_text(
             Rule(
-                Text(f"oo {operation} · {path}", style=self._colors["mauve"]),
+                Text(f"oo {operation} · {path}", style="agent"),
                 style="dim",
                 align="left",
             ),

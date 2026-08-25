@@ -1615,7 +1615,7 @@ class TUIApplication:
             # must force each semantic callback to render again at this width.
             for block in self._transcript_blocks:
                 block.replay_cache.clear()
-            self._rebuild_fullscreen_transcript()
+            self._schedule_fullscreen_rebuild()
             return
         if self.full_screen and self._resize_replays_enabled and self._transcript_blocks:
             current = self._read_terminal_size()
