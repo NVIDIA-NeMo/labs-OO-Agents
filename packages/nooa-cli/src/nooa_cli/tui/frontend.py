@@ -144,7 +144,7 @@ class Frontend(Protocol):
 
     def refresh_theme(self) -> None:
         """Apply the active theme to live rendering surfaces."""
-        ...
+        pass
 
     def batch_render(self) -> "AbstractContextManager[None]":
         """Context manager grouping multiple ``render()`` calls into one block.
