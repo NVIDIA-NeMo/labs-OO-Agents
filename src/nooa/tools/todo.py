@@ -132,15 +132,16 @@ class TodoManager(Skill):
     """Track multi-step work, dependencies, metadata, and progress notes.
 
     Every todo argument accepts either a ``Todo`` returned by this manager or
-    its ID. Keep active work visible with ``status()``, inspect details with
-    ``get()`` and ``comments()``, and prune history with ``clear_done()``.
+    its ID. Keep work visible with ``status()``, identify the current objective
+    with ``activate()``, inspect details with ``get()`` and ``comments()``, and
+    prune history with ``clear_done()``.
 
     Example::
 
         explore = self.todo.add("Explore the repository")
         fix = self.todo.add("Implement the fix", deps=[explore])
         self.todo.comment(explore, "Found the relevant code in parser.py")
-        self.todo.done(explore)
+        self.todo.complete(explore)
         print(self.todo.status())
     """
 
@@ -150,6 +151,7 @@ class TodoManager(Skill):
     def __init__(self, state: dict | None = None) -> None:
         self._todos: dict[str, Todo] = {}
         self._order: list[str] = []  # insertion order
+        self._active_id: str | None = None
         if state:
             self.from_dict(state)
 
@@ -158,10 +160,12 @@ class TodoManager(Skill):
     @hidden
     def to_dict(self) -> dict:
         """Return snapshot state for later restoration by ``from_dict()``."""
+        self.active()  # Normalize direct mutation of the manager-owned Todo.
         return {
             "todos": [
                 t.model_dump() for t in (self._todos[i] for i in self._order if i in self._todos)
             ],
+            "active_id": self._active_id,
         }
 
     @hidden
@@ -173,6 +177,9 @@ class TodoManager(Skill):
             t = Todo.model_validate(raw)
             self._todos[t.id] = t
             self._order.append(t.id)
+        active_id = data.get("active_id")
+        active = self._todos.get(active_id) if isinstance(active_id, str) else None
+        self._active_id = active_id if active is not None and active.status != "done" else None
 
     # ── CRUD ──────────────────────────────────────
 
@@ -202,6 +209,7 @@ class TodoManager(Skill):
         copied = todo.model_copy(deep=True)
         manager._todos[copied.id] = copied
         manager._order.append(copied.id)
+        manager._active_id = copied.id if copied.status != "done" else None
         return manager
 
     @hidden
@@ -255,6 +263,8 @@ class TodoManager(Skill):
         # authoritative Todo object's identity for existing callers.
         for field in ("title", "status", "deps", "notes", "vars", "comments"):
             setattr(current, field, getattr(candidate, field))
+        if current.status == "done" and current.id == self._active_id:
+            self._active_id = None
         return current
 
     def add(
@@ -284,11 +294,21 @@ class TodoManager(Skill):
         return self._todos.get(self._todo_id(todo_id))
 
     def done(self, todo_id: Todo | str) -> Todo | None:
-        """Mark a todo done and return it, or ``None`` if it is missing."""
+        """Mark a todo done and return it, or ``None`` if it is missing.
+
+        Completing the active todo also clears the active selection; completing
+        one of its dependencies leaves the active task selected.
+        """
         t = self.get(todo_id)
         if t:
             t.status = "done"
+            if t.id == self._active_id:
+                self._active_id = None
         return t
+
+    def complete(self, todo_id: Todo | str) -> Todo | None:
+        """Mark a todo done. This is the preferred alias of ``done()``."""
+        return self.done(todo_id)
 
     def reopen(self, todo_id: Todo | str) -> Todo | None:
         """Mark a todo open and return it, or ``None`` if it is missing.
@@ -307,14 +327,17 @@ class TodoManager(Skill):
             return False
         del self._todos[todo_id]
         self._order = [i for i in self._order if i != todo_id]
+        if todo_id == self._active_id:
+            self._active_id = None
         for todo in self._todos.values():
             todo.deps = [dep_id for dep_id in todo.deps if dep_id != todo_id]
         return True
 
     def clear(self) -> None:
-        """Remove every todo from the current manager."""
+        """Remove every todo from the current manager and clear the active task."""
         self._todos.clear()
         self._order.clear()
+        self._active_id = None
 
     def clear_done(self) -> int:
         """Remove completed todos and return how many were removed.
@@ -325,6 +348,8 @@ class TodoManager(Skill):
         for todo_id in done_ids:
             del self._todos[todo_id]
         self._order = [todo_id for todo_id in self._order if todo_id not in done_ids]
+        if self._active_id in done_ids:
+            self._active_id = None
         for todo in self._todos.values():
             todo.deps = [dep_id for dep_id in todo.deps if dep_id not in done_ids]
         return len(done_ids)
@@ -341,7 +366,43 @@ class TodoManager(Skill):
         for k, v in kwargs.items():
             if k in allowed:
                 setattr(t, k, v)
+        if t.status == "done" and t.id == self._active_id:
+            self._active_id = None
         return t
+
+    # ── ACTIVE TODO ────────────────────────────────
+
+    def activate(self, todo_id: Todo | str) -> Todo:
+        """Make one open todo the active task shown prominently by ``status()``.
+
+        A new call replaces the previous active task. The full workspace remains
+        available through ``list_todos()``. Raises ``ValueError`` when the todo
+        is missing or already complete.
+        """
+        todo_id = self._todo_id(todo_id)
+        todo = self._todos.get(todo_id)
+        if todo is None:
+            raise ValueError(f"todo {todo_id!r} is not managed by this TodoManager")
+        if todo.status == "done":
+            raise ValueError(f"todo {todo_id!r} is already done")
+        self._active_id = todo_id
+        return todo
+
+    def deactivate(self) -> Todo | None:
+        """Clear the active task and return it, if one was active."""
+        todo = self.active()
+        self._active_id = None
+        return todo
+
+    def active(self) -> Todo | None:
+        """Return the active todo, or ``None`` when no open todo is active."""
+        if self._active_id is None:
+            return None
+        todo = self._todos.get(self._active_id)
+        if todo is None or todo.status == "done":
+            self._active_id = None
+            return None
+        return todo
 
     # ── DEPENDENCIES ──────────────────────────────
 
@@ -461,12 +522,48 @@ class TodoManager(Skill):
         detail_text = f" · {' · '.join(details)}" if details else ""
         return f"  {icon} [{todo.id}] {self._status_title(todo.title)}{dep_text}{detail_text}"
 
+    def _dependency_closure(self, root: Todo) -> tuple[list[Todo], list[str]]:
+        """Return transitive dependencies before *root*, without recursion."""
+        ordered: list[Todo] = []
+        state: dict[str, int] = {root.id: 1}  # 1 = visiting, 2 = emitted
+        missing: list[str] = []
+        stack: list[tuple[Todo, int]] = [(root, 0)]
+        while stack:
+            todo, dep_index = stack[-1]
+            if dep_index >= len(todo.deps):
+                stack.pop()
+                state[todo.id] = 2
+                if todo.id != root.id:
+                    ordered.append(todo)
+                continue
+
+            dep_id = todo.deps[dep_index]
+            stack[-1] = (todo, dep_index + 1)
+            dependency = self._todos.get(dep_id)
+            if dependency is None:
+                if dep_id not in missing:
+                    missing.append(dep_id)
+                continue
+            if state.get(dependency.id, 0) == 0:
+                state[dependency.id] = 1
+                stack.append((dependency, 0))
+        return ordered, missing
+
+    @staticmethod
+    def _bounded_status(output: str, max_chars: int) -> str:
+        """Apply a final hard bound even when fixed status framing is large."""
+        if len(output) <= max_chars:
+            return output
+        marker = "\n… status truncated"
+        return output[: max_chars - len(marker)].rstrip() + marker
+
     def status(self, max_items: int = _STATUS_MAX_ITEMS, max_chars: int = _STATUS_MAX_CHARS) -> str:
         """Return a compact, bounded progress summary.
 
-        Orders open and blocked work before newest completed history. Detail
-        payloads use compact badges; inspect one with ``get()`` or ``comments()``.
-        ``max_items`` and ``max_chars`` bound model-context usage.
+        When a todo is active, shows its notes and transitive dependencies,
+        followed by a compact summary of unrelated work. Otherwise, orders open
+        and blocked work before newest completed history. ``list_todos()`` always
+        returns the full workspace.
         """
         if max_items < 0:
             raise ValueError("max_items must be non-negative")
@@ -476,6 +573,73 @@ class TodoManager(Skill):
         todos = [self._todos[i] for i in self._order if i in self._todos]
         if not todos:
             return "(no todos)"
+
+        active = self.active()
+        if active is not None:
+            dependencies, missing = self._dependency_closure(active)
+            # The active task is always represented by its detail card; max_items
+            # limits the additional dependency rows.
+            selected = dependencies[:max_items]
+
+            def render_active(rows: list[Todo]) -> str:
+                omitted_count = len(dependencies) - len(rows)
+                active_title = self._status_title(active.title)
+                effective = self._effective_status(active)
+                details = [effective]
+                if dependencies or missing:
+                    details.append(
+                        f"{len(dependencies) + len(missing)} "
+                        f"dependenc{'y' if len(dependencies) + len(missing) == 1 else 'ies'}"
+                    )
+                if active.vars:
+                    details.append(f"{len(active.vars)} var{'s' if len(active.vars) != 1 else ''}")
+                if active.comments:
+                    details.append(
+                        f"{len(active.comments)} comment{'s' if len(active.comments) != 1 else ''}"
+                    )
+                lines = [f"Active [{active.id}] {active_title}", f"Status: {' · '.join(details)}"]
+                note = " ".join(active.notes.split())
+                if note:
+                    lines.append(f"Notes: {note}")
+                if rows or omitted_count or missing:
+                    lines.append("")
+                    lines.append("Dependencies:")
+                    lines.extend(self._status_line(todo) for todo in rows)
+                if omitted_count:
+                    lines.append(f"  … +{omitted_count} dependencies not shown")
+                if missing:
+                    lines.append(f"  ! missing dependencies: {', '.join(missing)}")
+
+                dependency_ids = {todo.id for todo in dependencies}
+                other = [
+                    todo for todo in todos if todo.id != active.id and todo.id not in dependency_ids
+                ]
+                if other:
+                    counts: dict[str, int] = {}
+                    for todo in other:
+                        status = self._effective_status(todo)
+                        counts[status] = counts.get(status, 0) + 1
+                    summary = " · ".join(
+                        f"{count} {status}"
+                        for status in ("open", "blocked", "done")
+                        if (count := counts.get(status, 0))
+                    )
+                    other_count = len(other) - sum(
+                        counts.get(status, 0) for status in ("open", "blocked", "done")
+                    )
+                    if other_count:
+                        summary += (" · " if summary else "") + f"{other_count} other"
+                    lines.extend(("", f"Other Todos: {summary}"))
+                lines.append(
+                    "Hint — clear active: self.todo.deactivate() · show all: self.todo.list_todos()"
+                )
+                return self._bounded_status("\n".join(lines), max_chars)
+
+            output = render_active(selected)
+            while selected and output.endswith("… status truncated"):
+                selected.pop()
+                output = render_active(selected)
+            return output
 
         by_status: dict[str, list[Todo]] = {"open": [], "blocked": [], "done": []}
         other: list[Todo] = []
