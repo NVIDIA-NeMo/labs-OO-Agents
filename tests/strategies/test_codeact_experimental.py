@@ -280,7 +280,7 @@ async def test_python_state_lists_persistent_variable_names_without_values():
 
     rendered = await strategy_instance.python_state_context(runtime)
 
-    assert "`self.v`: &lt;/python_state&gt;, plan, token" in rendered
+    assert "`self.v`: &lt;/python_state&gt; (int), plan (str), token (str)" in rendered
     assert "top-secret" not in rendered
     assert "draft" not in rendered
 

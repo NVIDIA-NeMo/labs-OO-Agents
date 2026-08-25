@@ -100,14 +100,18 @@ class CodeActExperimental(CodeActStrategy):
 
         persistent_vars = getattr(agent, "vars", None)
         if persistent_vars:
-            var_names = sorted(str(name) for name in persistent_vars)[:20]
-            omitted = len(persistent_vars) - len(var_names)
-            suffix = f" (+{omitted} more)" if omitted else ""
-            lines.append(
-                "`self.v`: "
-                + ", ".join(self._python_state_label(name, max_chars=80) for name in var_names)
-                + suffix
+            var_items = sorted(
+                (str(name), type(value).__name__) for name, value in persistent_vars.items()
             )
+            visible = var_items[:20]
+            omitted = len(var_items) - len(visible)
+            suffix = f" (+{omitted} more)" if omitted else ""
+            items = ", ".join(
+                f"{self._python_state_label(name, max_chars=80)} "
+                f"({self._python_state_label(type_name, max_chars=80)})"
+                for name, type_name in visible
+            )
+            lines.append(f"`self.v`: {items}{suffix}")
         elif hasattr(agent, "v"):
             lines.append("`self.v`: none")
 
