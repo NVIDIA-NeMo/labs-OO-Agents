@@ -802,7 +802,7 @@ class QueueManager:
         ]
         if pending_readers:
             reads = " | ".join(f"await self.{name}.get()" for name in pending_readers)
-            body = f"{body}\n💡 dequeue: {reads}"
+            body = f"{body}\nHint: dequeue: {reads}"
 
         # Show active spawns — tells the LLM "monitors are running"
         # even when no items are pending (items were already delivered).
@@ -835,7 +835,7 @@ class QueueManager:
         all_hints = cancel_hints + cleanup_hints
         if all_hints:
             hints = " | ".join(all_hints)
-            cheat = f"💡 self.queue_manager{hints} | .shutdown()"
+            cheat = f"Hint: self.queue_manager{hints} | .shutdown()"
             body = f"{body}\n{cheat}" if body else cheat
 
         return body
