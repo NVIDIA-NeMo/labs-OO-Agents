@@ -16,6 +16,7 @@ from prompt_toolkit.formatted_text import ANSI, FormattedText, to_formatted_text
 from rich.cells import split_graphemes
 from wcwidth import wcswidth
 
+from .copyable_markdown import visible_code_line
 from .terminal_safety import (
     _hyperlink_spans_from_safe_ansi,
     project_prompt_toolkit_ansi,
@@ -443,30 +444,8 @@ class FullscreenTranscriptModel:
                 if line_number >= len(payload_lines):
                     continue
                 source_line = payload_lines[line_number]
-                expanded_to_source: list[tuple[int, int]] = []
-                column = 0
-                source_index = 0
-                source_parts = source_line.split("\t")
-                for part_index, part in enumerate(source_parts):
-                    grapheme_spans, _ = split_graphemes(part)
-                    for start, stop, _cells in grapheme_spans:
-                        source_start = source_index + start
-                        source_stop = source_index + stop
-                        # Syntax expands tabs by Python string columns before
-                        # rendering. Map each rendered code point back to the
-                        # complete source grapheme; projection handles cell width.
-                        expanded_to_source.extend(
-                            (source_start, source_stop) for _ in range(stop - start)
-                        )
-                        column += stop - start
-                    source_index += len(part)
-                    if part_index + 1 < len(source_parts):
-                        width = 4 - (column % 4)
-                        expanded_to_source.extend(
-                            (source_index, source_index + 1) for _ in range(width)
-                        )
-                        source_index += 1
-                        column += width
+                _rendered_line, source_map = visible_code_line(source_line)
+                expanded_to_source = list(source_map)
                 if not source_line:
                     # CopyableMarkdown paints one linked placeholder cell for
                     # an otherwise unstyleable empty source row. It represents
@@ -499,7 +478,11 @@ class FullscreenTranscriptModel:
             if not mappings:
                 continue
 
-            header_start = plain.rfind("\n", 0, label_ranges[0][0]) + 1
+            # The generated Copy link occupies Syntax's top padding row;
+            # Syntax retains one bottom padding row after the source. Keep both
+            # decorations inside the semantic region so dragging across the
+            # complete panel still projects to exact source text.
+            display_start = plain.rfind("\n", 0, label_ranges[0][0]) + 1
             last_line_end = plain.find("\n", mappings[-1].display_stop)
             if last_line_end < 0:
                 display_stop = len(plain)
@@ -507,7 +490,7 @@ class FullscreenTranscriptModel:
                 bottom_end = plain.find("\n", last_line_end + 1)
                 display_stop = len(plain) if bottom_end < 0 else bottom_end + 1
             regions.append(
-                _CodeSelectionRegion(header_start, display_stop, payload, tuple(mappings))
+                _CodeSelectionRegion(display_start, display_stop, payload, tuple(mappings))
             )
         return tuple(sorted(regions, key=lambda region: region.display_start))
 

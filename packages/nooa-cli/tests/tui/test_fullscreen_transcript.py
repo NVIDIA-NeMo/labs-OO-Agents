@@ -517,6 +517,33 @@ async def test_fullscreen_transient_sigwinches_publish_only_final_frame() -> Non
         assert app._fullscreen_rebuild_timer is None
 
 
+def test_fullscreen_theme_refresh_recolors_retained_semantic_scrollback() -> None:
+    from nooa_cli.tui import theme
+    from nooa_cli.tui.session import Session
+    from rich.text import Text
+
+    original_theme = theme.get_theme()
+    try:
+        theme.set_theme("mocha")
+        app = _make_fullscreen_app()
+        session = Session.__new__(Session)
+        session._app = app
+        session._emit_text(Text("hello", style="agent.response"))
+        before = app._transcript_blocks[0].fullscreen_rendered
+        assert before is not None
+
+        theme.set_theme("latte")
+        app.refresh_style()
+        after = app._transcript_blocks[0].fullscreen_rendered
+
+        assert after is not None
+        assert after != before
+        assert app._transcript_blocks[0].replay_cache
+        assert app._fullscreen_transcript.text.count("hello") == 1
+    finally:
+        theme.set_theme(original_theme)
+
+
 def test_fullscreen_resize_preserves_history_beyond_native_replay_tail() -> None:
     app = _make_fullscreen_app()
     for index in range(app._untagged_replay_tail + 7):
@@ -667,7 +694,7 @@ def test_fullscreen_does_not_emit_native_metadata_for_unsafe_link_target() -> No
     from prompt_toolkit.formatted_text import to_formatted_text
 
     app = _make_fullscreen_app()
-    app.emit_block("\x1b]8;;file:///tmp/secret\x1b\\label\x1b]8;;\x1b\\")
+    app.emit_block("\x1b]8;;javascript:alert(1)\x1b\\label\x1b]8;;\x1b\\")
 
     fragments = to_formatted_text(app._fullscreen_transcript.formatted_text())
 
@@ -872,7 +899,9 @@ def test_fullscreen_session_production_rendering_reprojects_narrow_then_wide(
     wide = app._fullscreen_transcript.text
     assert app.output_buffer.text == ""
     assert expected_wide != expected_narrow
-    expected_visible = "abcdefgh\n" if producer == "rich" else " ❯ abcdefgh  \n"
+    expected_visible = (
+        "abcdefgh\n" if producer == "rich" else " " * 13 + "\n ❯ abcdefgh  \n" + " " * 13 + "\n"
+    )
     assert wide == expected_visible
     assert wide != narrow
 
@@ -2558,6 +2587,28 @@ async def test_fullscreen_link_click_opens_safe_http_url(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_fullscreen_file_link_click_uses_platform_opener(monkeypatch) -> None:
+    app = _make_fullscreen_app()
+    url = "file:///path/to/file"
+    app.emit_block(f"\x1b]8;;{url}\x1b\\link\x1b]8;;\x1b\\")
+    app._transcript_viewport_size = lambda: (20, 2)
+    calls: list[str] = []
+
+    async def open_file(target: str) -> bool:
+        calls.append(target)
+        return True
+
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    monkeypatch.setattr(app, "_open_local_url", open_file)
+
+    assert app._open_fullscreen_link_at(1, 0) is True
+    assert app._link_task is not None
+    await app._link_task
+    assert calls == [url]
+
+
+@pytest.mark.asyncio
 async def test_fullscreen_link_open_failure_copies_url(monkeypatch) -> None:
     app = _make_fullscreen_app()
     url = "https://example.test/docs"
@@ -3182,7 +3233,7 @@ def test_fullscreen_composer_mouse_selection_is_mirrored_non_destructively(monke
 
 
 @pytest.mark.asyncio
-async def test_fullscreen_input_selection_can_be_copied_and_cut(monkeypatch) -> None:
+async def test_fullscreen_input_selection_ctrl_c_clears_and_ctrl_x_cuts(monkeypatch) -> None:
     from nooa_cli.tui.tui_application import _ClipboardResult
     from prompt_toolkit.selection import SelectionState
 
@@ -3200,22 +3251,21 @@ async def test_fullscreen_input_selection_can_be_copied_and_cut(monkeypatch) -> 
         app.input_buffer.cursor_position = 4
         app.input_buffer.selection_state = SelectionState(original_cursor_position=0)
         await harness.press("c-c")
-        await harness.wait_for(lambda: copied == ["copy"])
-        if app._clipboard_task is not None:
-            await app._clipboard_task
+        await harness.wait_input_equals("")
 
-        assert copied == ["copy"]
-        assert app.input_buffer.text == "copy and cut"
-        assert app.input_buffer.selection_state is not None
+        assert copied == []
+        assert app.input_buffer.selection_state is None
+        assert app._ctrl_c_exit_armed is False
 
+        app.input_buffer.text = "copy and cut"
         app.input_buffer.cursor_position = 12
         app.input_buffer.selection_state = SelectionState(original_cursor_position=9)
         await harness.press("c-x")
-        await harness.wait_for(lambda: copied == ["copy", "cut"])
+        await harness.wait_for(lambda: copied == ["cut"])
         if app._clipboard_task is not None:
             await app._clipboard_task
 
-        assert copied == ["copy", "cut"]
+        assert copied == ["cut"]
         assert app.input_buffer.text == "copy and "
         assert app.input_buffer.selection_state is None
         assert app._app.clipboard.get_data().text == "cut"
@@ -3223,7 +3273,7 @@ async def test_fullscreen_input_selection_can_be_copied_and_cut(monkeypatch) -> 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("display_mode", [DisplayMode.NATIVE, DisplayMode.NATIVE_REPLAY])
-async def test_native_input_selection_copy_does_not_cancel_or_clear(
+async def test_native_input_selection_ctrl_c_clears_without_copying(
     monkeypatch, display_mode: DisplayMode
 ) -> None:
     from nooa_cli.tui.tui_application import _ClipboardResult
@@ -3243,12 +3293,10 @@ async def test_native_input_selection_copy_does_not_cancel_or_clear(
         app.input_buffer.cursor_position = 4
         app.input_buffer.selection_state = SelectionState(original_cursor_position=0)
         await harness.press("c-c")
-        await harness.wait_for(lambda: copied == ["copy"])
-        if app._clipboard_task is not None:
-            await app._clipboard_task
+        await harness.wait_input_equals("")
 
-        assert app.input_buffer.text == "copy safely"
-        assert app.input_buffer.selection_state is not None
+        assert copied == []
+        assert app.input_buffer.selection_state is None
         assert app._ctrl_c_exit_armed is False
 
 
@@ -3553,6 +3601,49 @@ def test_copyable_markdown_preserves_long_list_item_for_fullscreen_reflow() -> N
     assert any(row.endswith(" ") for row in rows[:-1])
 
 
+def test_copyable_markdown_preserves_safe_markdown_links() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+    from nooa_cli.tui.terminal_safety import safe_hyperlink_spans, strip_safe_ansi
+
+    _renderable, ansi = _copyable_markdown_ansi(
+        "Read the [documentation](https://example.test/docs) for details.", width=60
+    )
+
+    plain = strip_safe_ansi(ansi)
+    label_start = plain.index("documentation")
+    assert safe_hyperlink_spans(ansi) == (
+        (label_start, label_start + len("documentation"), "https://example.test/docs"),
+    )
+
+    model = FullscreenTranscriptModel()
+    model.append(ansi)
+    assert model.hyperlink_at(x=label_start, y=0, width=60, height=2) == (
+        "https://example.test/docs"
+    )
+
+
+def test_copyable_markdown_renders_and_hit_tests_file_links() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+    from nooa_cli.tui.terminal_safety import safe_hyperlink_spans, strip_safe_ansi
+
+    _renderable, ansi = _copyable_markdown_ansi(
+        "Open [the file](file://path/to/file) locally.", width=60
+    )
+
+    plain = strip_safe_ansi(ansi)
+    assert "[the file](file://path/to/file)" not in plain
+    label_start = plain.index("the file")
+    assert safe_hyperlink_spans(ansi) == (
+        (label_start, label_start + len("the file"), "file:///path/to/file"),
+    )
+
+    model = FullscreenTranscriptModel()
+    model.append(ansi)
+    assert model.hyperlink_at(x=label_start, y=0, width=60, height=2) == (
+        "file:///path/to/file"
+    )
+
+
 def test_copyable_markdown_preserves_nested_and_multiline_list_structure() -> None:
     from nooa_cli.tui.terminal_safety import strip_safe_ansi
 
@@ -3596,6 +3687,65 @@ def test_copyable_markdown_exposes_exact_fenced_code_payloads() -> None:
     assert " print('one')" in plain
     assert " " * 60 in plain
     assert list(renderable.copy_actions.values()) == ["print('one')", "  exact spacing  "]
+
+
+def test_copyable_markdown_places_copy_action_in_top_code_padding() -> None:
+    from nooa_cli.tui.terminal_safety import sanitize_transcript_ansi, strip_safe_ansi
+    from prompt_toolkit.formatted_text import ANSI, to_formatted_text
+
+    _renderable, ansi = _copyable_markdown_ansi("```python\nprint('one')\n```", width=30)
+    lines = strip_safe_ansi(ansi).splitlines()
+
+    assert lines == [
+        "python · Copy ".rjust(30),
+        " print('one')".ljust(30),
+        " " * 30,
+    ]
+    fragments = to_formatted_text(ANSI(sanitize_transcript_ansi(ansi)))
+    copy_style = next(
+        style for style, text, *_rest in fragments if text == "C" and "bg:" in style
+    )
+    code_style = next(
+        style for style, text, *_rest in fragments if text == "p" and "bg:" in style
+    )
+    assert copy_style.split("bg:", 1)[1].split()[0] == code_style.split("bg:", 1)[1].split()[0]
+
+
+@pytest.mark.parametrize(
+    ("markdown", "width"),
+    [
+        ("```python\nx\n```", 8),
+        ("```averyverylonglexername\nx\n```", 12),
+    ],
+)
+def test_copyable_markdown_keeps_complete_copy_label_at_narrow_width(
+    markdown: str, width: int
+) -> None:
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+
+    _renderable, ansi = _copyable_markdown_ansi(markdown, width=width)
+
+    assert "Copy" in strip_safe_ansi(ansi).splitlines()[0]
+
+
+@pytest.mark.parametrize("width", [1, 2, 3])
+def test_copyable_markdown_omits_ambiguous_copy_suffix_at_tiny_width(width: int) -> None:
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+
+    _renderable, ansi = _copyable_markdown_ansi("```text\nx\n```", width=width)
+    first_line = strip_safe_ansi(ansi).splitlines()[0]
+
+    assert not any(label in first_line for label in ("y", "py", "opy"))
+    assert "nooa-copy://" not in ansi
+
+
+def test_copyable_markdown_keeps_full_copy_label_at_minimum_action_width() -> None:
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+
+    _renderable, ansi = _copyable_markdown_ansi("```text\nx\n```", width=4)
+
+    assert strip_safe_ansi(ansi).splitlines()[0] == "Copy"
+    assert "nooa-copy://" in ansi
 
 
 def test_copyable_markdown_does_not_offer_copy_for_empty_fence() -> None:
@@ -3667,6 +3817,30 @@ def test_fullscreen_drag_copy_projects_decorated_code_to_exact_source() -> None:
     # full-width background fill, and blank padding rows.
     model.begin_selection(x=0, y=header_y, width=60, height=20)
     model.update_selection(x=59, y=after_y - 1, width=60, height=20)
+
+    assert model.selected_text() == source
+
+
+def test_fullscreen_code_selection_exposes_controls_but_copies_original_source() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+    from nooa_cli.tui.terminal_safety import safe_hyperlink_spans, strip_safe_ansi
+
+    source = "a\x1b[31mb\x1b]8;;https://evil.test\x1b\\c"
+    renderable, ansi = _copyable_markdown_ansi(f"```text\n{source}\n```", width=160)
+    plain = strip_safe_ansi(ansi)
+
+    assert r"a\x1b[31mb\x1b]8;;https://evil.test\x1b\c" in plain
+    assert safe_hyperlink_spans(ansi) == ()
+
+    model = FullscreenTranscriptModel()
+    model.append(ansi, copy_actions=renderable.copy_actions)
+    lines = "".join(
+        fragment[1] for fragment in model.formatted_text(width=160, height=20)
+    ).splitlines()
+    header_y = next(index for index, line in enumerate(lines) if "Copy" in line)
+    last_panel_y = max(index for index, line in enumerate(lines) if line and not line.isspace()) + 1
+    model.begin_selection(x=0, y=header_y, width=160, height=20)
+    model.update_selection(x=159, y=last_panel_y, width=160, height=20)
 
     assert model.selected_text() == source
 

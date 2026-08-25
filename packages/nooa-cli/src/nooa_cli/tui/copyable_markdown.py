@@ -7,14 +7,88 @@ from __future__ import annotations
 import secrets
 from typing import Any
 
+from markdown_it import MarkdownIt
+from rich.cells import cell_len, split_graphemes
 from rich.console import Console, ConsoleOptions, RenderResult
 from rich.markdown import CodeBlock, ListItem, Markdown
 from rich.segment import Segment
 from rich.syntax import Syntax
 from rich.text import Text
 
+from .terminal_safety import safe_hyperlink_target
+
 _COPY_URI_PREFIX = "nooa-copy://"
 _CODE_SOURCE_URI_PREFIX = "nooa-code-source://"
+
+
+class TerminalMarkdown(Markdown):
+    """Rich Markdown whose parser also permits validated ``file://`` links."""
+
+    def __init__(self, markup: str, **kwargs: Any) -> None:
+        super().__init__(markup, **kwargs)
+        if "file:" not in markup.lower():
+            return
+        parser = MarkdownIt().enable("strikethrough").enable("table")
+        default_validate = parser.validateLink
+
+        def validate_link(target: str) -> bool:
+            validated = safe_hyperlink_target(target)
+            return default_validate(target) or (
+                validated is not None and validated.lower().startswith("file://")
+            )
+
+        parser.validateLink = validate_link
+        self.parsed = parser.parse(markup)
+        for token in self.parsed:
+            for child in token.children or ():
+                if child.type != "link_open":
+                    continue
+                target = child.attrGet("href")
+                normalized = safe_hyperlink_target(target)
+                if normalized is not None and target != normalized:
+                    child.attrSet("href", normalized)
+
+
+def visible_code_line(source: str) -> tuple[str, tuple[tuple[int, int], ...]]:
+    """Expose terminal controls and map each rendered code point to source."""
+    rendered: list[str] = []
+    source_map: list[tuple[int, int]] = []
+    column = 0
+    cursor = 0
+    while cursor < len(source):
+        control = ord(source[cursor]) < 0x20 or ord(source[cursor]) == 0x7F or 0x80 <= ord(
+            source[cursor]
+        ) <= 0x9F
+        if control:
+            stop = cursor + 1
+            codepoint = ord(source[cursor])
+            if source[cursor] == "\t":
+                visible = " " * (4 - (column % 4))
+            elif source[cursor] == "\r":
+                visible = r"\r"
+            else:
+                width = 2 if codepoint <= 0xFF else 4
+                prefix = "x" if width == 2 else "u"
+                visible = f"\\{prefix}{codepoint:0{width}x}"
+            spans = ((cursor, stop, visible),)
+        else:
+            run_stop = cursor + 1
+            while run_stop < len(source):
+                codepoint = ord(source[run_stop])
+                if codepoint < 0x20 or codepoint == 0x7F or 0x80 <= codepoint <= 0x9F:
+                    break
+                run_stop += 1
+            graphemes, _ = split_graphemes(source[cursor:run_stop])
+            spans = tuple(
+                (cursor + start, cursor + stop, source[cursor + start : cursor + stop])
+                for start, stop, _cells in graphemes
+            )
+        for start, stop, visible in spans:
+            rendered.append(visible)
+            source_map.extend((start, stop) for _ in visible)
+            column += cell_len(visible)
+            cursor = stop
+    return "".join(rendered), tuple(source_map)
 
 
 class _CopyableCodeBlock(CodeBlock):
@@ -34,14 +108,29 @@ class _CopyableCodeBlock(CodeBlock):
         self.action_id = action_id
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
-        if self.action_id is not None:
-            header = Text(justify="right")
-            if self.lexer_name != "text":
-                header.append(f"{self.lexer_name} · ", style="dim")
+        show_header = self.action_id is not None and options.max_width >= len("Copy")
+        if show_header:
+            # Replace Syntax's top padding row with a full-width, same-background
+            # control row so the language and Copy action sit inside the panel.
+            # At widths below the full label, omit the action rather than expose
+            # an ambiguous linked suffix such as "y" or "py".
+            header = Text(style=Syntax.get_theme(self.theme).get_background_style())
+            width = options.max_width
+            copy_width = len("Copy")
+            trailing_space = width > copy_width
+            available = width - copy_width - int(trailing_space)
+            if self.lexer_name != "text" and available >= 4:
+                language = Text(self.lexer_name, style="dim")
+                language.truncate(available - 3, overflow="ellipsis")
+                header.append_text(language)
+                header.append(" · ", style="dim")
             header.append(
                 "Copy",
                 style=f"bold underline link {_COPY_URI_PREFIX}{self.action_id}",
             )
+            if trailing_space:
+                header.append(" ")
+            header.align("right", width)
             yield header
         # Drop only Markdown's structural newline. Source trailing spaces and
         # blank lines are real clipboard content and must remain addressable.
@@ -51,18 +140,21 @@ class _CopyableCodeBlock(CodeBlock):
         # line. A single styled space occupies an already-painted code cell and
         # gives semantic selection a stable anchor for that source newline.
         rendered_code = (
-            "\n".join(line or " " for line in source_lines) if self.action_id is not None else code
+            "\n".join(visible_code_line(line)[0] or " " for line in source_lines)
+            if self.action_id is not None
+            else code
         )
         syntax = Syntax(
             rendered_code,
             self.lexer_name,
             theme=self.theme,
             word_wrap=True,
-            padding=1,
+            # The header above occupies the existing top padding row.
+            padding=(0, 1, 1, 1) if show_header else 1,
         )
         if self.action_id is not None:
             for line_number, line in enumerate(source_lines, 1):
-                rendered_length = len(line.expandtabs(4)) or 1
+                rendered_length = len(visible_code_line(line)[0]) or 1
                 syntax.stylize_range(
                     f"link {_CODE_SOURCE_URI_PREFIX}{self.action_id}/{line_number - 1}",
                     (line_number, 0),
@@ -114,7 +206,7 @@ class _SemanticListItem(ListItem):
             yield Segment.line()
 
 
-class CopyableMarkdown(Markdown):
+class CopyableMarkdown(TerminalMarkdown):
     """Rich Markdown that exposes exact fenced-code payloads by stable action ID."""
 
     elements = {

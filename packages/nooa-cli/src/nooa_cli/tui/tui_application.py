@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -899,6 +900,7 @@ def format_session_rule(cols: int, label: str = "") -> list[tuple[str, str]]:
 
 PROMPT_MARKER = "❯ "
 _CTRL_C_EXIT_WINDOW_SECONDS = 2.0
+_MIN_INTERRUPT_STATUS_SECONDS = 0.75
 _TRANSCRIPT_CLEAR_SEQUENCE = "\x1b[r\x1b[0m\x1b[H\x1b[2J\x1b[3J\x1b[H"
 _FULLSCREEN_TRANSCRIPT_MAX_RECORDS = 10_000
 _FULLSCREEN_TRANSCRIPT_MAX_BYTES = 16 * 1024 * 1024
@@ -1021,7 +1023,7 @@ class TUIApplication:
                 runs.
             on_cancel_command: Synchronously request cancellation of the
                 active slash command. Returns whether a command accepted the
-                request. Esc falls back to interrupting the agent when false.
+                request. Bare Esc falls back to interrupting the agent when false.
             on_bang: Called with the bang body (e.g. ``"echo hi"`` for
                 ``!echo hi``). Session wires this to run_in_terminal +
                 bash. If omitted, bang commands are only recorded in
@@ -1069,6 +1071,11 @@ class TUIApplication:
         self._ctrl_c_exit_armed = False
         self._ctrl_c_exit_timer: asyncio.TimerHandle | None = None
         self._exit_hint_text = ""
+        self._interrupting_agent_turn = False
+        self._interrupt_status_acknowledged = False
+        self._interrupt_completion_pending = False
+        self._interrupt_status_started_at: float | None = None
+        self._interrupt_status_clear_timer: asyncio.TimerHandle | None = None
         self._transient_status_text = ""
         self._transient_status_style = "class:status"
         self._transient_status_timer: asyncio.TimerHandle | None = None
@@ -1149,6 +1156,8 @@ class TUIApplication:
         self._session_label: str = ""
         self._spinner_frame: str = "⠋"
         self._spinner_frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        self._pulse_frame: str = "·"
+        self._pulse_frames = "·•"
         self._spinner_task: asyncio.Task | None = None
         self._command_status_text: str = ""
         self._command_queue_texts: list[str] = []
@@ -1581,6 +1590,12 @@ class TUIApplication:
             defer_resize_redraw=self._defer_prompt_toolkit_resize_redraw,
             resize_redraw_is_deferred=self._prompt_toolkit_resize_redraw_is_deferred,
         )
+        # Bare Escape passes through both the VT100 prefix parser and the key
+        # binding prefix matcher. Their one-second defaults make interruption
+        # feel broken; terminal-generated Meta sequences arrive as one read, so
+        # a short ambiguity window preserves them without delaying Esc.
+        self._app.ttimeoutlen = 0.05
+        self._app.timeoutlen = 0.05
 
     def observe_agent(self) -> None:
         """Observe the configured agent for this application run.
@@ -1593,9 +1608,16 @@ class TUIApplication:
             self._agent_controller.observe(self._agent)
 
     def refresh_style(self) -> None:
-        """Apply the current TUI palette to the live prompt-toolkit app."""
+        """Apply the current palette to chrome and retained fullscreen output."""
         self._app.style = create_prompt_style()
-        self._app.invalidate()
+        if self._is_fullscreen and self._fullscreen_semantic_replay_count:
+            # Width caches also contain resolved theme colors. Theme changes
+            # must force each semantic callback to render again at this width.
+            for block in self._transcript_blocks:
+                block.replay_cache.clear()
+            self._rebuild_fullscreen_transcript()
+        else:
+            self._app.invalidate()
 
     async def open_event_explorer(self, event_manager: Any) -> None:
         """Open the event explorer as an in-app subview."""
@@ -1995,7 +2017,7 @@ class TUIApplication:
         return control.handle_external_mouse(mouse_event, below=True)
 
     def _open_fullscreen_link_at(self, x: int, y: int) -> bool:
-        """Open the safe HTTP(S) hyperlink under a click without affecting drag-copy."""
+        """Open a safe hyperlink under a click without affecting drag-copy."""
         if not self._is_fullscreen:
             return False
         width, height = self._transcript_viewport_size()
@@ -2369,15 +2391,6 @@ class TUIApplication:
         def _(event):
             _extend_input_selection(event, event.current_buffer.cursor_down)
 
-        @kb.add("c-c", filter=input_selection_active, eager=True)
-        def _(event):
-            # Copy composer selection without turning Ctrl-C into cancellation.
-            # Keep the selection visible so repeated copy is harmless.
-            _document, clipboard_data = self.input_buffer.document.cut_selection()
-            if clipboard_data.text:
-                event.app.clipboard.set_data(clipboard_data)
-                self._start_fullscreen_selection_copy(clipboard_data.text)
-
         @kb.add("c-x", filter=input_selection_active, eager=True)
         def _(event):
             # Retain the text in prompt_toolkit's clipboard before deleting it.
@@ -2388,24 +2401,36 @@ class TUIApplication:
                 self._start_fullscreen_selection_copy(clipboard_data.text)
                 self.input_buffer.cut_selection()
 
-        @kb.add("c-c", filter=subview_inactive)
+        @kb.add("c-c", filter=subview_inactive, eager=True)
         def _(event):
-            # The second C-c in the confirmation window exits through the
-            # normal Application path; Session.run() then performs its full
-            # snapshot/close/terminal-restoration cleanup in ``finally``.
+            # Ctrl-C advances one destructive step per press: discard a draft,
+            # then interrupt active work, then confirm exit. Never combine a
+            # composer clear with cancellation, so a draft is recoverably cheap
+            # to abandon even while an agent is running.
+            if event.current_buffer.text:
+                event.current_buffer.reset()
+                self._history_cursor = None
+                self._clear_ctrl_c_exit()
+                return
+
+            # After the clear/interrupt step, an armed press exits even if
+            # cancellation cleanup has not acknowledged yet.
             if self._ctrl_c_exit_armed:
                 self._clear_ctrl_c_exit()
                 event.app.exit()
                 return
 
-            # The first C-c always clears the composer. While an agent is
-            # running it also requests cancellation; at an idle prompt it arms
-            # the existing second-C-c-to-exit confirmation.
-            event.current_buffer.reset()
-            self._history_cursor = None
-            if self.request_agent_cancel(source="ctrl-c"):
+            # Slash commands and agent work can overlap. Attempt both instead
+            # of short-circuiting so one Ctrl-C interrupts every active turn
+            # owner before the next press becomes the exit step.
+            command_cancelled = self.request_command_cancel()
+            agent_cancelled = self.request_agent_cancel(source="ctrl-c")
+            if command_cancelled or agent_cancelled:
                 self._arm_ctrl_c_exit()
                 return
+
+            # At an idle prompt, retain the established double-Ctrl-C safety
+            # gesture.
             self._arm_ctrl_c_exit()
 
         @kb.add("c-d", filter=subview_inactive)
@@ -2457,9 +2482,19 @@ class TUIApplication:
         def _(event):
             self._history_navigate(+1)
 
-        # Esc: soft-cancel the agent while preserving the queue. Any
-        # messages already submitted during the turn are delivered as
-        # the next respond() via the done-callback.
+        # Absorb escape-prefixed Meta/Option input as one non-interrupting
+        # gesture. prompt_toolkit otherwise falls back from an unmatched pair
+        # such as Option-[ (ESC + "[") to the bare-Escape binding below, which
+        # accidentally cancels the active turn. More-specific bindings (for
+        # example Alt+Enter and Emacs Meta navigation) still win.
+        @kb.add("escape", Keys.Any, filter=subview_inactive)
+        def _(event):
+            data = event.data
+            if data and data != "\x1b":
+                event.current_buffer.insert_text(data)
+
+        # A standalone Esc is emitted only after prompt_toolkit's VT parser has
+        # allowed time for a possible escape-prefixed key to arrive.
         @kb.add("escape", filter=subview_inactive)
         def _(event):
             if self.request_command_cancel():
@@ -2564,8 +2599,16 @@ class TUIApplication:
         async def _animate() -> None:
             i = 0
             try:
-                while self.is_thinking() or self._llm_probe_status_text:
+                while (
+                    self.is_thinking()
+                    or self._interrupting_agent_turn
+                    or self._llm_probe_status_text
+                ):
                     self._spinner_frame = self._spinner_frames[i % len(self._spinner_frames)]
+                    # Match the command runner's calm half-second dot pulse
+                    # while retaining the thinking spinner's smoother cadence.
+                    pulse_index = int((i * 0.08) / 0.5)
+                    self._pulse_frame = self._pulse_frames[pulse_index % len(self._pulse_frames)]
                     if self._app.is_running:
                         self._app.invalidate()
                     i += 1
@@ -2702,7 +2745,24 @@ class TUIApplication:
         else:
             loop.call_soon_threadsafe(callback)
 
-    def _on_agent_change(self, _state: Any) -> None:
+    def _on_agent_change(self, state: Any) -> None:
+        # Agent implementations may publish from worker threads. Keep timer and
+        # prompt-toolkit mutations on the Application's owner loop even if a
+        # caller bypasses the controller's normal scheduler boundary.
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            try:
+                on_ui_loop = asyncio.get_running_loop() is loop
+            except RuntimeError:
+                on_ui_loop = False
+            if not on_ui_loop:
+                loop.call_soon_threadsafe(self._on_agent_change, state)
+                return
+
+        # Observation teardown is independent from runtime turn cancellation.
+        # Only runtime_cancelled() may acknowledge interrupt feedback; otherwise
+        # a delayed observation-close callback could retire a newer turn's
+        # status.
         app = getattr(self, "_app", None)
         if app is not None and app.is_running:
             app.invalidate()
@@ -2710,6 +2770,10 @@ class TUIApplication:
 
     def runtime_notification_received(self) -> None:
         """Refresh native chrome after the host dequeues runtime work."""
+        if self._interrupt_completion_pending:
+            # A replacement turn is beginning. Retire the completed turn's
+            # optimistic label before rendering any chrome for the new work.
+            self._clear_agent_interrupt_status()
         self._on_dispatcher_dequeued()
 
     def runtime_state_changed(self) -> None:
@@ -2726,8 +2790,55 @@ class TUIApplication:
         self._ensure_spinner_task()
 
     def runtime_cancelled(self) -> None:
-        """Render the existing interruption marker for a cancelled local turn."""
-        self.emit_block("\x1b[33m✗ Interrupted agent turn.\x1b[0m\n")
+        """Replace optimistic feedback with the completed-cancellation marker."""
+        self._schedule_agent_callback(self._complete_agent_interrupt)
+
+    def _complete_agent_interrupt(self) -> None:
+        if not self._interrupting_agent_turn:
+            self.emit_block("\x1b[33m✗ Interrupted agent turn.\x1b[0m\n")
+            return
+        self._interrupt_completion_pending = True
+        self._acknowledge_agent_interrupt()
+
+    def _acknowledge_agent_interrupt(self) -> None:
+        """Clear interrupt feedback only after it had time to reach a frame."""
+        if not self._interrupting_agent_turn:
+            return
+        self._interrupt_status_acknowledged = True
+        started_at = self._interrupt_status_started_at
+        remaining = (
+            0.0
+            if started_at is None
+            else _MIN_INTERRUPT_STATUS_SECONDS - (time.monotonic() - started_at)
+        )
+        if remaining <= 0:
+            self._clear_agent_interrupt_status()
+        elif self._interrupt_status_clear_timer is None:
+            loop = self._loop
+            if loop is None or not loop.is_running():
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    self._clear_agent_interrupt_status()
+                    return
+            self._interrupt_status_clear_timer = loop.call_later(
+                remaining, self._clear_agent_interrupt_status
+            )
+
+    def _clear_agent_interrupt_status(self) -> None:
+        timer = self._interrupt_status_clear_timer
+        self._interrupt_status_clear_timer = None
+        if timer is not None:
+            timer.cancel()
+        emit_completion = self._interrupt_completion_pending
+        self._interrupt_completion_pending = False
+        self._interrupt_status_started_at = None
+        self._interrupt_status_acknowledged = False
+        self._interrupting_agent_turn = False
+        if self._app.is_running:
+            self._app.invalidate()
+        if emit_completion:
+            self.emit_block("\x1b[33m✗ Interrupted agent turn.\x1b[0m\n")
 
     def invalidate(self) -> None:
         """Thread-safe repaint hook for composition-root-owned policies."""
@@ -2749,8 +2860,22 @@ class TUIApplication:
         if self._agent_controller.state is None:
             return False
         accepted = self._agent_controller.interrupt()
-        if accepted and self._on_agent_activity is not None:
-            self._on_agent_activity()
+        if accepted:
+            # The runtime observation callback may arrive on another loop. Paint
+            # acknowledgement immediately so the key press never appears lost.
+            if self._interrupt_status_clear_timer is not None:
+                self._interrupt_status_clear_timer.cancel()
+                self._interrupt_status_clear_timer = None
+            self._interrupting_agent_turn = True
+            self._interrupt_status_acknowledged = False
+            self._interrupt_completion_pending = False
+            self._interrupt_status_started_at = time.monotonic()
+            self._pulse_frame = self._pulse_frames[0]
+            if self._app.is_running:
+                self._app.invalidate()
+            self._ensure_spinner_task()
+            if self._on_agent_activity is not None:
+                self._on_agent_activity()
         return accepted
 
     def _resume_input_cursor_following(self) -> None:
@@ -3143,6 +3268,13 @@ class TUIApplication:
             self._resize_replays_enabled = False
             self._cancel_resize_replay_work()
             self._clear_ctrl_c_exit()
+            if self._interrupt_status_clear_timer is not None:
+                self._interrupt_status_clear_timer.cancel()
+                self._interrupt_status_clear_timer = None
+            self._interrupting_agent_turn = False
+            self._interrupt_status_acknowledged = False
+            self._interrupt_completion_pending = False
+            self._interrupt_status_started_at = None
             if self._transient_status_timer is not None:
                 self._transient_status_timer.cancel()
                 self._transient_status_timer = None
@@ -4002,8 +4134,10 @@ class TUIApplication:
         state = self._agent_controller.state
         if self._agent_controller.failure is not None:
             rows.append([("class:status", "Agent observation disconnected.")])
-        if state is not None and state.workspace.cancellation is CancellationState.REQUESTED:
-            rows.append([("class:status", f"{self._spinner_frame} cancelling agent turn...")])
+        if self._interrupting_agent_turn or (
+            state is not None and state.workspace.cancellation is CancellationState.REQUESTED
+        ):
+            rows.append([("class:status", f"{self._pulse_frame} Interrupting agent turn")])
         elif self.is_thinking():
             rows.append([("class:status", f"{self._spinner_frame} thinking...")])
         if self._llm_probe_status_text:

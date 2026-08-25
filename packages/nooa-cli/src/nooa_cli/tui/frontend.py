@@ -45,14 +45,9 @@ class _HistoryReplayRenderer:
     """Width-aware history renderer retaining source metadata across replay."""
 
     def __init__(self, output: HistoryReplay, *, copyable: bool = False) -> None:
-        from rich.markdown import Markdown
+        from .copyable_markdown import CopyableMarkdown, TerminalMarkdown
 
-        if copyable:
-            from .copyable_markdown import CopyableMarkdown
-
-            markdown_type = CopyableMarkdown
-        else:
-            markdown_type = Markdown
+        markdown_type = CopyableMarkdown if copyable else TerminalMarkdown
         self.output = output
         self.agent_markdown = [
             markdown_type(turn.content) for turn in output.turns if turn.role == "agent"
@@ -73,7 +68,7 @@ class _HistoryReplayRenderer:
         from rich.rule import Rule
         from rich.text import Text
 
-        from .theme import CATPPUCCIN_THEME
+        from .theme import create_theme
 
         dim = COLORS["overlay1"]
         render_width = max(int(width), 1)
@@ -87,7 +82,7 @@ class _HistoryReplayRenderer:
             highlight=False,
             force_terminal=True,
             color_system="256",
-            theme=CATPPUCCIN_THEME,
+            theme=create_theme(),
             _environ={"COLUMNS": str(render_width), "LINES": "25"},
         )
 
@@ -115,7 +110,7 @@ class _HistoryReplayRenderer:
                 # current viewport; Rich hard wrapping would add copied whitespace.
                 console.print(self.agent_markdown[agent_index], style=dim, soft_wrap=True)
                 agent_index += 1
-            console.print()
+                console.print()
         if self.output.show_footer:
             console.print(Rule(style=COLORS["surface1"]))
         return buf.getvalue()
@@ -235,6 +230,12 @@ class TerminalFrontend:
     """
 
     def __init__(self, config: "Config") -> None:
+        from .theme import set_theme
+
+        # Apply the persisted palette before constructing any Rich or
+        # prompt-toolkit rendering surfaces.
+        set_theme(getattr(config.tui, "theme", "mocha"))
+
         from .console import TUIConsole
 
         self._config = config
@@ -679,7 +680,7 @@ class TerminalFrontend:
 
         keybinds = ("vi mode  " if info.vi_mode else "") + (
             "Tab: complete  |  ↑↓: history  |  Ctrl+U: clear  |  Shift+Enter: newline  |  "
-            "Esc: interrupt  |  Ctrl+C ×2: exit"
+            "Esc: interrupt  |  Ctrl+C: clear / interrupt / exit"
         )
         table.add_row("keys", f"[{overlay}]{keybinds}[/]")
         table.add_row(
