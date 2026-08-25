@@ -795,6 +795,14 @@ class QueueManager:
             if ch.mode == "queue"
         ]
         body = "\n".join(p for p in parts if p)
+        pending_readers = [
+            name
+            for name, channel in self._channels.items()
+            if channel.mode == "queue" and not channel.is_empty() and name.isidentifier()
+        ]
+        if pending_readers:
+            reads = " | ".join(f"await self.{name}.get()" for name in pending_readers)
+            body = f"{body}\n💡 dequeue: {reads}"
 
         # Show active spawns — tells the LLM "monitors are running"
         # even when no items are pending (items were already delivered).
