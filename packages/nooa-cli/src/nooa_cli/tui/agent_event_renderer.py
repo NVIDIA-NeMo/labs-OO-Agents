@@ -38,11 +38,11 @@ from collections.abc import Callable
 from typing import Any, Protocol
 
 from rich.rule import Rule
-from rich.syntax import Syntax
 from rich.text import Text
 
 from .code_preview import _code_preview
 from .copyable_markdown import TerminalMarkdown
+from .theme import ThemeSyntax
 
 
 class _ReasoningEvent(Protocol):
@@ -280,9 +280,7 @@ class AgentEventRenderer:
             red = self._colors["red"]
             text_color = self._colors["text"]
             self._emit_text(Rule(Text("oo python", style=mauve), style="dim", align="left"))
-            self._emit_text(
-                Syntax(code.strip(), "python", theme="monokai", background_color="default")
-            )
+            self._emit_text(ThemeSyntax(code.strip(), "python", background_color="default"))
             if stdout.strip():
                 self._emit_text(Rule(Text("oo stdout", style=mauve), style="dim", align="left"))
                 self._emit_text(Text(stdout.rstrip("\n"), style=text_color))
@@ -318,7 +316,7 @@ class AgentEventRenderer:
             **kwargs,
         )
         self._emit_text(
-            Syntax(diff, "diff", theme="monokai", background_color="default", word_wrap=True),
+            ThemeSyntax(diff, "diff", background_color="default", word_wrap=True),
             **kwargs,
         )
         if not bool(getattr(event, "diff_complete", True)):
