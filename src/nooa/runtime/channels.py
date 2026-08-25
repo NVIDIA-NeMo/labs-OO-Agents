@@ -85,7 +85,9 @@ class JobHandle:
 
     Tracks the lifecycle of one spawned coroutine or async generator.
     ``cancel()`` requests cancellation and awaits cleanup so generator
-    ``finally`` blocks run before the call returns.
+    ``finally`` blocks run before the call returns. ``state`` and ``values``
+    are snapshots for inspection, not completion-waiting primitives; consume
+    job output through its channel instead of polling the handle.
 
     If ``buffer`` was passed to ``spawn()``, yielded values accumulate
     in ``self.values``:
@@ -568,6 +570,10 @@ class QueueManager:
     Then race them per turn::
 
         items = await qm.race()   # list[(name, item)] — winner first
+
+    ``spawn()`` is channel-driven: background output wakes ``race()`` and is
+    consumed from the target channel. ``JobHandle`` exposes lifecycle snapshots
+    and cancellation, but is not a completion-waiting primitive.
     """
 
     def __init__(self, *, event_manager: Any = None) -> None:
@@ -776,6 +782,7 @@ class QueueManager:
             spawn_lines = [f"⚡ {len(active_spawns)} active background job(s):"]
             for h in active_spawns:
                 spawn_lines.append(f"  • [{h.job_id}] {h.label} → {h.name} (running)")
+            spawn_lines.append("  ↳ Output arrives through channels; do not poll job handles.")
             spawn_status = "\n".join(spawn_lines)
             body = f"{body}\n{spawn_status}" if body else spawn_status
 
@@ -965,7 +972,12 @@ class QueueManager:
         the agent). The handle's state transitions to ``"failed"``.
 
         Returns a ``JobHandle`` with ``name``, ``state``, ``cancel()``,
-        and ``values`` (buffered items if ``buffer`` is set).
+        and ``values`` (buffered items if ``buffer`` is set). Output and errors
+        are delivered through the named channel; consume that channel directly or
+        through ``race()`` rather than polling ``JobHandle.state``/``values`` or
+        sleeping. In a turn-based host, yield the current turn so its dispatcher can
+        wait on ``race()`` and deliver the channel notification. The host defines the
+        mechanism for yielding; ``QueueManager`` does not assume a response protocol.
 
         ``buffer`` controls value accumulation on the handle:
         - ``False`` (default): no buffering.

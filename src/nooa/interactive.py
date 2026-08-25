@@ -525,7 +525,8 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         Do ALL the work before returning. Use as many ``execute_python``
         calls as needed — explore, implement, test, iterate. A turn that
         returns after one or two cells when the task clearly needs more
-        is a bug. The only reasons to call ``return_result`` are:
+        is a bug, except when yielding for a live background dependency.
+        The only reasons to call ``return_result`` are:
 
         1. You have genuinely completed everything the user asked for.
         2. You need user input to proceed (ambiguity, confirmation).
@@ -556,8 +557,6 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         declared queue/event channel and re-enters ``handle()`` with the first
         arrival. Use ``kind`` to say why you are stopping, not to select a
         different queue primitive.
-
-
 
         ## Available queues
 

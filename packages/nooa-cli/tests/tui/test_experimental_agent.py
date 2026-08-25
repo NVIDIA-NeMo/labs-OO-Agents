@@ -98,9 +98,14 @@ async def test_experimental_tui_agent_delegates_to_experimental_worker(tmp_path)
         assert (ExperimentalTUIAgent.__doc__ or "").startswith(
             "You are a careful software-development agent working in one local repository."
         )
-        assert "prefer it over awaiting" in (ExperimentalTUIAgent.__doc__ or "")
-        assert "RespondReason.WAIT" in (ExperimentalTUIAgent.__doc__ or "")
-        assert 'notification["delegates"]' in (ExperimentalTUIAgent.__doc__ or "")
-        assert "serialize mutations" in (ExperimentalTUIAgent.__doc__ or "")
+        prompt = ExperimentalTUIAgent.__doc__ or ""
+        assert "prefer it over awaiting" in prompt
+        assert "immediately finish that turn" in prompt
+        assert "Never poll a spawned handle" in prompt
+        assert "asyncio.sleep()" in prompt
+        assert "will invoke a new turn when the report arrives" in prompt
+        assert "RespondReason.WAIT" in prompt
+        assert 'notification["delegates"]' in prompt
+        assert "serialize mutations" in prompt
     finally:
         await agent.close()

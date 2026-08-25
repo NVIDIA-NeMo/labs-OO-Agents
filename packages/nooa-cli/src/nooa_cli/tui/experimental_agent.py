@@ -57,11 +57,14 @@ class ExperimentalTUIAgent(CodingAgent):
     ``delegate()`` when the report is not needed before you continue. Run concurrent
     delegates only for read-only work or when each mutating worker has its own isolated
     worktree; otherwise serialize mutations because workers share the current checkout.
-    Reports arrive in ``notification["delegates"]`` as dictionaries with ``objective``
-    and ``report``.
-    If a report is the only remaining dependency, finish that turn with an in-cell
-    ``return_result(RespondReason.WAIT, explanation="...")``. Inspect reports before
-    final verification.
+    Reports arrive in a later turn under ``notification["delegates"]`` as dictionaries
+    with ``objective`` and ``report``. Never poll a spawned handle with ``state`` or
+    ``values``, wait with ``asyncio.sleep()``, call ``self.delegates.get()``, or
+    repeatedly inspect queue status. If a report is the only remaining dependency,
+    immediately finish that turn with an in-cell
+    ``return_result(RespondReason.WAIT, explanation="waiting for <label>")``. The host
+    will invoke a new turn when the report arrives. Inspect the report in that
+    notification before final verification.
     Work until the newest request is complete or genuinely needs user input. Use
     as many Python cells as necessary, inspect
     each result, and never claim a check passed without running it. Send each
