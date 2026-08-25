@@ -136,6 +136,8 @@ class _EmitStream:
         self._semantic_replay: Callable[[], str] | None = None
         self._semantic_replay_recorded = False
         self._semantic_replay_parts: list[str | Callable[[], str]] = []
+        self._buffer_tags: set[str] = set()
+        self._buffer_keep = False
 
     def write(self, text: str) -> int:
         if text:
@@ -171,15 +173,31 @@ class _EmitStream:
             kwargs["replay"] = lambda parts=replay_parts: "".join(
                 part() if callable(part) else part for part in parts
             )
+        if self._buffer_tags:
+            kwargs["tags"] = frozenset(self._buffer_tags)
+            self._buffer_tags.clear()
+        if self._buffer_keep:
+            kwargs["keep"] = True
+            self._buffer_keep = False
         self._emit(chunk, **kwargs)
 
     @contextmanager
-    def semantic_replay(self, replay: Callable[[], str]):
+    def semantic_replay(
+        self,
+        replay: Callable[[], str],
+        *,
+        tags: set[str] | frozenset[str] | None = None,
+        keep: bool = False,
+    ):
         """Retain one structured render without mixing adjacent output blocks."""
         previous = self._semantic_replay
         previous_recorded = self._semantic_replay_recorded
+        previous_tags = set(self._buffer_tags)
+        previous_keep = self._buffer_keep
         self._semantic_replay = replay
         self._semantic_replay_recorded = False
+        self._buffer_tags.update(tags or ())
+        self._buffer_keep = self._buffer_keep or keep
         self._held += 1
         try:
             yield
@@ -187,12 +205,16 @@ class _EmitStream:
             self._held -= 1
             self._semantic_replay = previous
             self._semantic_replay_recorded = previous_recorded
+            self._buffer_tags.update(previous_tags)
+            self._buffer_keep = self._buffer_keep or previous_keep
             if self._held == 0:
                 self.flush()
 
     def clear_transcript(self) -> None:
         self._buf.clear()
         self._semantic_replay_parts.clear()
+        self._buffer_tags.clear()
+        self._buffer_keep = False
         self._buffer_has_agent_message = False
         if self._clear is not None:
             self._clear()
@@ -220,6 +242,8 @@ class _EmitStream:
         replay: Callable[[], str],
         *,
         code_copy_actions: dict[str, str] | None = None,
+        tags: set[str] | frozenset[str] | None = None,
+        keep: bool = False,
     ) -> None:
         if self._buf:
             self._emit_buffer()
@@ -227,6 +251,10 @@ class _EmitStream:
             kwargs: dict[str, Any] = {"replay": replay}
             if code_copy_actions:
                 kwargs["code_copy_actions"] = code_copy_actions
+            if tags:
+                kwargs["tags"] = tags
+            if keep:
+                kwargs["keep"] = keep
             self._emit(text, **kwargs)
 
     @contextmanager
@@ -1281,13 +1309,20 @@ class Session:
         """Render configured toolbar items on the rule above the input."""
         from .toolbar import ToolbarContext
 
+        model = self.config.tui.default_model
+        health = getattr(self.registry, "blocking_llm_health", None)
+        from .health_check import is_no_models_configured_health
+
+        if is_no_models_configured_health(health):
+            model = "No LLM"
+
         manager = self._session_manager
         shell = getattr(self.agent, "shell", None)
         cwd = Path(getattr(shell, "cwd", self.config.agent.working_dir)).resolve()
         return self._toolbar.render(
             self.config.tui.toolbar_items,
             ToolbarContext(
-                model=self.config.tui.default_model,
+                model=model,
                 working_directory=cwd,
                 context_usage=self._context_usage_label(),
                 session_id=manager.session_id if manager is not None else None,
