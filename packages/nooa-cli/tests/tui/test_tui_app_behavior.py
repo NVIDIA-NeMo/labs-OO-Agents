@@ -960,6 +960,12 @@ async def test_interleaved_cmd_msg_msg_commands_fire_immediately():
         )
 
 
+async def test_escape_prefix_ambiguity_window_is_short():
+    async with TUIHarness() as h:
+        assert h.app._app.ttimeoutlen == pytest.approx(0.05)
+        assert h.app._app.timeoutlen == pytest.approx(0.05)
+
+
 async def test_bare_escape_interrupts_and_delivers_queued_input():
     agent = _blocking_agent()
     async with TUIHarness(agent=agent) as h:
