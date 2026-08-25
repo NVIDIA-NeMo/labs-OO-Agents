@@ -3,9 +3,9 @@
 """Experimental single-tool CodeAct strategy."""
 
 from html import escape
+from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
-from nooa.agentdoc import truncating_pformat
 from nooa.context_blocks import DynamicContext
 from nooa.decorators import strategy
 from nooa.events import Error
@@ -48,7 +48,7 @@ class CodeActExperimental(CodeActStrategy):
         """Put the execution contract on the tool and keep only runtime context blocks."""
         overrides = super().get_block_overrides()
         overrides["strategy_prompt"] = None
-        overrides["repl_locals"] = DynamicContext("strategy.repl_locals_context(runtime)")
+        overrides["python_state"] = DynamicContext("strategy.python_state_context(runtime)")
         return overrides
 
     def get_static_block_keys(self) -> set[str]:
@@ -59,47 +59,70 @@ class CodeActExperimental(CodeActStrategy):
         """Place live locals immediately after the stable execution context."""
         order = [key for key in (super().get_block_order() or []) if key != "strategy_prompt"]
         index = order.index("execution_context") + 1
-        return [*order[:index], "repl_locals", *order[index:]]
+        return [*order[:index], "python_state", *order[index:]]
 
-    async def repl_locals_context(self, runtime: RuntimeServices) -> str:
-        """Render a bounded view of values available in the next cell."""
+    @staticmethod
+    def _python_state_label(value: Any, *, max_chars: int = 160) -> str:
+        """Return a bounded single-line label safe inside the XML context block."""
+        text = str(value).replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
+        if len(text) > max_chars:
+            text = f"{text[: max_chars - 1]}…"
+        return escape(text, quote=False)
+
+    async def python_state_context(self, runtime: RuntimeServices) -> str:
+        """Render compact working state without repeating inputs or output history."""
         call = getattr(runtime, "current_call", None)
-        local_values: dict[str, Any] = {}
-        if call is not None:
-            local_values.update(call.bound_parameters())
-            live_locals = call.execution_locals or call.session_locals
-            if live_locals:
-                local_values.update(live_locals)
-
-        lines: list[str] = []
-        visible_names = sorted(local_values)[:30]
-        for name in visible_names:
-            item = local_values[name]
-            value = (
-                repr(item if len(item) <= 120 else f"{item[:119]}…")
-                if isinstance(item, str)
-                else truncating_pformat(
-                    item,
-                    max_chars=300,
-                    max_length=10,
-                    max_string=120,
-                    max_depth=2,
-                )
-            )
-            lines.append(f"- `{name} = {escape(value, quote=False)}`")
-        omitted = len(local_values) - len(visible_names)
-        if omitted:
-            lines.append(f"- … {omitted} more local(s) omitted")
+        live_locals = None if call is None else (call.execution_locals or call.session_locals)
+        input_names = set() if call is None else set(call.bound_parameters())
+        local_items: list[tuple[str, str]] = []
+        if live_locals:
+            names = sorted(name for name in live_locals if isinstance(name, str))
+            for name in names:
+                value = live_locals[name]
+                if (
+                    name == "Out"
+                    or name.startswith("_")
+                    or name in input_names
+                    or isinstance(value, ModuleType)
+                    or isinstance(value, type)
+                    or callable(value)
+                ):
+                    continue
+                local_items.append((name, type(value).__name__))
 
         agent = runtime.agent
-        if hasattr(agent, "v"):
-            lines.append("- `self.v` — persistent session variables")
+        lines = ["## Python state"]
         shell = getattr(agent, "shell", None)
-        cwd = getattr(shell, "cwd", getattr(agent, "cwd", None))
-        if cwd is not None:
-            lines.append(f"- `self.shell.cwd = {cwd!r}`")
+        if shell is not None and (cwd := getattr(shell, "cwd", None)) is not None:
+            lines.extend(("", f"self.shell.cwd: {self._python_state_label(cwd)}"))
+        elif (cwd := getattr(agent, "cwd", None)) is not None:
+            lines.extend(("", f"self.cwd: {self._python_state_label(cwd)}"))
 
-        return "## Locals\n\nAvailable in the next cell:\n\n" + "\n".join(lines)
+        persistent_vars = getattr(agent, "vars", None)
+        if persistent_vars:
+            var_names = sorted(str(name) for name in persistent_vars)[:20]
+            omitted = len(persistent_vars) - len(var_names)
+            suffix = f" (+{omitted} more)" if omitted else ""
+            lines.append(
+                "`self.v`: "
+                + ", ".join(self._python_state_label(name, max_chars=80) for name in var_names)
+                + suffix
+            )
+        elif hasattr(agent, "v"):
+            lines.append("`self.v`: none")
+
+        if local_items:
+            visible = local_items[:20]
+            suffix = f" (+{len(local_items) - len(visible)} more)" if len(local_items) > 20 else ""
+            items = ", ".join(
+                f"{self._python_state_label(name, max_chars=80)} "
+                f"({self._python_state_label(type_name, max_chars=80)})"
+                for name, type_name in visible
+            )
+            lines.extend(("", f"Cell locals: {items}{suffix}"))
+        else:
+            lines.extend(("", "Cell locals: none"))
+        return "\n".join(lines)
 
     def _always_available_text(self) -> str:
         return (
