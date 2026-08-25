@@ -3597,7 +3597,7 @@ def test_copyable_markdown_exposes_exact_fenced_code_payloads() -> None:
     assert list(renderable.copy_actions.values()) == ["print('one')", "  exact spacing  "]
 
 
-def test_copyable_markdown_places_copy_action_in_bottom_code_padding() -> None:
+def test_copyable_markdown_places_copy_action_in_top_code_padding() -> None:
     from nooa_cli.tui.terminal_safety import sanitize_transcript_ansi, strip_safe_ansi
     from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 
@@ -3605,9 +3605,9 @@ def test_copyable_markdown_places_copy_action_in_bottom_code_padding() -> None:
     lines = strip_safe_ansi(ansi).splitlines()
 
     assert lines == [
-        " " * 30,
-        " print('one')".ljust(30),
         "python · Copy ".rjust(30),
+        " print('one')".ljust(30),
+        " " * 30,
     ]
     fragments = to_formatted_text(ANSI(sanitize_transcript_ansi(ansi)))
     copy_style = next(
@@ -3616,7 +3616,6 @@ def test_copyable_markdown_places_copy_action_in_bottom_code_padding() -> None:
     code_style = next(
         style for style, text, *_rest in fragments if text == "p" and "bg:" in style
     )
-    assert "bg:" in copy_style
     assert copy_style.split("bg:", 1)[1].split()[0] == code_style.split("bg:", 1)[1].split()[0]
 
 
@@ -3682,13 +3681,13 @@ def test_fullscreen_drag_copy_projects_decorated_code_to_exact_source() -> None:
     lines = "".join(
         fragment[1] for fragment in model.formatted_text(width=60, height=20)
     ).splitlines()
-    footer_y = next(index for index, line in enumerate(lines) if "Copy" in line)
-    first_code_y = next(index for index, line in enumerate(lines) if "if ready:" in line)
+    header_y = next(index for index, line in enumerate(lines) if "Copy" in line)
+    after_y = next(index for index, line in enumerate(lines) if "After" in line)
 
-    # Drag over the complete visual panel, including its top padding, gutter,
-    # full-width background fill, and Copy footer.
-    model.begin_selection(x=0, y=first_code_y - 1, width=60, height=20)
-    model.update_selection(x=59, y=footer_y, width=60, height=20)
+    # Drag over the complete visual panel, including its Copy header, gutter,
+    # full-width background fill, and blank padding rows.
+    model.begin_selection(x=0, y=header_y, width=60, height=20)
+    model.update_selection(x=59, y=after_y - 1, width=60, height=20)
 
     assert model.selected_text() == source
 
@@ -3707,10 +3706,10 @@ def test_copyable_markdown_wraps_long_code_without_clipping() -> None:
     lines = "".join(
         fragment[1] for fragment in model.formatted_text(width=32, height=20)
     ).splitlines()
-    first_code_y = next(index for index, line in enumerate(lines) if "x" in line)
-    footer_y = next(index for index, line in enumerate(lines) if "Copy" in line)
-    model.begin_selection(x=0, y=first_code_y - 1, width=32, height=20)
-    model.update_selection(x=31, y=footer_y, width=32, height=20)
+    header_y = next(index for index, line in enumerate(lines) if "Copy" in line)
+    last_panel_y = max(index for index, line in enumerate(lines) if "x" in line) + 1
+    model.begin_selection(x=0, y=header_y, width=32, height=20)
+    model.update_selection(x=31, y=last_panel_y, width=32, height=20)
 
     assert model.selected_text() == source
 
@@ -3755,11 +3754,11 @@ def test_fullscreen_code_selection_preserves_trailing_blank_lines() -> None:
     lines = "".join(
         fragment[1] for fragment in model.formatted_text(width=30, height=20)
     ).splitlines()
-    first_source_y = next(index for index, line in enumerate(lines) if "abc" in line)
-    footer_y = next(index for index, line in enumerate(lines) if "Copy" in line)
+    header_y = next(index for index, line in enumerate(lines) if "Copy" in line)
+    last_source_y = max(index for index, line in enumerate(lines) if index > header_y) - 1
 
-    model.begin_selection(x=0, y=first_source_y, width=30, height=20)
-    model.update_selection(x=29, y=footer_y, width=30, height=20)
+    model.begin_selection(x=0, y=header_y, width=30, height=20)
+    model.update_selection(x=1, y=last_source_y, width=30, height=20)
 
     assert model.selected_text() == source
 
@@ -3817,11 +3816,11 @@ def test_fullscreen_drag_copy_source_mapping_survives_resize_replay() -> None:
     lines = "".join(
         fragment[1] for fragment in model.formatted_text(width=32, height=20)
     ).splitlines()
-    first_source_y = next(index for index, line in enumerate(lines) if "first_call" in line)
-    footer_y = next(index for index, line in enumerate(lines) if "Copy" in line)
+    header_y = next(index for index, line in enumerate(lines) if "Copy" in line)
+    last_panel_y = max(index for index, line in enumerate(lines) if line and not line.isspace()) + 1
 
-    model.begin_selection(x=0, y=first_source_y - 1, width=32, height=20)
-    model.update_selection(x=31, y=footer_y, width=32, height=20)
+    model.begin_selection(x=0, y=header_y, width=32, height=20)
+    model.update_selection(x=31, y=last_panel_y, width=32, height=20)
 
     assert model.selected_text() == source
 
@@ -3914,12 +3913,12 @@ def test_fullscreen_drag_over_decorated_code_copies_exact_source(
     lines = "".join(
         fragment[1] for fragment in app._fullscreen_transcript.formatted_text(width=60, height=20)
     ).splitlines()
-    first_code_y = next(index for index, line in enumerate(lines) if "if ready:" in line)
-    footer_y = next(index for index, line in enumerate(lines) if "Copy" in line)
+    header_y = next(index for index, line in enumerate(lines) if "Copy" in line)
+    last_panel_y = max(index for index, line in enumerate(lines) if line and not line.isspace()) + 1
 
-    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_DOWN, x=0, y=first_code_y - 1))
-    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_MOVE, x=59, y=footer_y))
-    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_UP, x=59, y=footer_y))
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_DOWN, x=0, y=header_y))
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_MOVE, x=59, y=last_panel_y))
+    control.mouse_handler(_mouse_event(MouseEventType.MOUSE_UP, x=59, y=last_panel_y))
 
     assert copied == [source]
 

@@ -325,10 +325,10 @@ class TestBatchRendering:
         lines = "".join(
             fragment[1] for fragment in model.formatted_text(width=60, height=30)
         ).splitlines()
-        first_code_y = next(index for index, line in enumerate(lines) if "if ready:" in line)
-        footer_y = next(index for index, line in enumerate(lines) if "Copy" in line)
-        model.begin_selection(x=0, y=first_code_y - 1, width=60, height=30)
-        model.update_selection(x=59, y=footer_y, width=60, height=30)
+        header_y = next(index for index, line in enumerate(lines) if "Copy" in line)
+        after_y = next(index for index, line in enumerate(lines) if "After" in line)
+        model.begin_selection(x=0, y=header_y, width=60, height=30)
+        model.update_selection(x=59, y=after_y - 1, width=60, height=30)
         assert model.selected_text() == source
 
         current_width = 42
@@ -338,10 +338,10 @@ class TestBatchRendering:
         lines = "".join(
             fragment[1] for fragment in resized.formatted_text(width=42, height=30)
         ).splitlines()
-        first_code_y = next(index for index, line in enumerate(lines) if "if ready:" in line)
-        footer_y = next(index for index, line in enumerate(lines) if "Copy" in line)
-        resized.begin_selection(x=0, y=first_code_y - 1, width=42, height=30)
-        resized.update_selection(x=41, y=footer_y, width=42, height=30)
+        header_y = next(index for index, line in enumerate(lines) if "Copy" in line)
+        after_y = next(index for index, line in enumerate(lines) if "After" in line)
+        resized.begin_selection(x=0, y=header_y, width=42, height=30)
+        resized.update_selection(x=41, y=after_y - 1, width=42, height=30)
         assert resized.selected_text() == source
 
     def test_fullscreen_resumed_code_uses_live_syntax_theme(self):

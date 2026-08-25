@@ -499,17 +499,17 @@ class FullscreenTranscriptModel:
             if not mappings:
                 continue
 
-            # Syntax contributes one top padding row, while the generated
-            # Copy link lives in the bottom padding row after the source. Keep
-            # both decorations inside the semantic region so dragging across
-            # the complete panel still projects to exact source text.
-            first_code_line = plain.rfind("\n", 0, mappings[0].display_start) + 1
-            if first_code_line > 0:
-                display_start = plain.rfind("\n", 0, first_code_line - 1) + 1
+            # The generated Copy link occupies Syntax's top padding row;
+            # Syntax retains one bottom padding row after the source. Keep both
+            # decorations inside the semantic region so dragging across the
+            # complete panel still projects to exact source text.
+            display_start = plain.rfind("\n", 0, label_ranges[0][0]) + 1
+            last_line_end = plain.find("\n", mappings[-1].display_stop)
+            if last_line_end < 0:
+                display_stop = len(plain)
             else:
-                display_start = 0
-            footer_end = plain.find("\n", label_ranges[-1][1])
-            display_stop = len(plain) if footer_end < 0 else footer_end + 1
+                bottom_end = plain.find("\n", last_line_end + 1)
+                display_stop = len(plain) if bottom_end < 0 else bottom_end + 1
             regions.append(
                 _CodeSelectionRegion(display_start, display_stop, payload, tuple(mappings))
             )

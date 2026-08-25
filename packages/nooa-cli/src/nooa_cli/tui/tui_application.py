@@ -1582,6 +1582,12 @@ class TUIApplication:
             defer_resize_redraw=self._defer_prompt_toolkit_resize_redraw,
             resize_redraw_is_deferred=self._prompt_toolkit_resize_redraw_is_deferred,
         )
+        # Bare Escape passes through both the VT100 prefix parser and the key
+        # binding prefix matcher. Their one-second defaults make interruption
+        # feel broken; terminal-generated Meta sequences arrive as one read, so
+        # a short ambiguity window preserves them without delaying Esc.
+        self._app.ttimeoutlen = 0.05
+        self._app.timeoutlen = 0.05
 
     def observe_agent(self) -> None:
         """Observe the configured agent for this application run.
