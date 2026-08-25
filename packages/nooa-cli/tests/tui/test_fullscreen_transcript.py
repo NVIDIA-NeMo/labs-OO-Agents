@@ -3780,6 +3780,25 @@ def test_copyable_markdown_preserves_nested_and_multiline_list_structure() -> No
     ]
 
 
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        "- queued rows:\n\n  ```text\n  │ test\n\n  │ test\n  ```",
+        "5. queued rows:\n\n   ```text\n   │ test\n\n   │ test\n   ```",
+    ],
+)
+def test_copyable_markdown_nested_code_respects_list_content_width(markdown: str) -> None:
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+    from rich.cells import cell_len
+
+    width = 40
+    renderable, ansi = _copyable_markdown_ansi(markdown, width=width)
+
+    lines = strip_safe_ansi(ansi).splitlines()
+    assert all(cell_len(line) <= width for line in lines)
+    assert list(renderable.copy_actions.values()) == ["│ test\n\n│ test"]
+
+
 def test_copyable_markdown_exposes_exact_fenced_code_payloads() -> None:
     from nooa_cli.tui.terminal_safety import strip_safe_ansi
 
