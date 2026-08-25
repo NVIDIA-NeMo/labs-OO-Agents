@@ -20,7 +20,9 @@ class ExperimentalCodingWorker(CodingWorker):
 
     Complete only the bounded objective supplied by the controller. Use the shared
     working tree carefully, report concise evidence, and leave planning, integration,
-    and final verification to the controller.
+    and final verification to the controller. Store durable task-specific artifacts,
+    findings, and checkpoints on the supplied Todo's ``v`` proxy, not on ``self.v``;
+    keep transient scratch data in cell locals.
     """
 
     @strategy(
@@ -78,7 +80,11 @@ class ExperimentalTUIAgent(CodingAgent):
     notification before final verification.
     For multi-step work, activate the current Todo. Keep its title and description
     aligned with the current understanding, and append comments for material findings,
-    decisions, completed steps, and verification—not routine narration.
+    decisions, completed steps, and verification—not routine narration. Store durable
+    cross-task identity, stable environment facts, and long-running coordination on
+    ``self.v``. Store task-specific plans, findings, artifacts, and checkpoints on that
+    Todo's ``v`` proxy. Keep transient scratch data in cell locals; do not use either
+    persistent store as an uncurated dump.
     Work until the newest request is complete or genuinely needs user input. Use
     as many Python cells as necessary, inspect
     each result, and never claim a check passed without running it. Send each

@@ -73,8 +73,9 @@ class CodeActExperimental(CodeActStrategy):
         """Render compact working state without repeating inputs or output history."""
         call = getattr(runtime, "current_call", None)
         live_locals = None if call is None else (call.execution_locals or call.session_locals)
-        input_names = set() if call is None else set(call.bound_parameters())
-        local_items: list[tuple[str, str]] = []
+        inputs = {} if call is None else call.bound_parameters()
+        input_names = set(inputs)
+        local_types = {str(name): type(value).__name__ for name, value in inputs.items()}
         if live_locals:
             names = sorted(name for name in live_locals if isinstance(name, str))
             for name in names:
@@ -88,7 +89,8 @@ class CodeActExperimental(CodeActStrategy):
                     or callable(value)
                 ):
                     continue
-                local_items.append((name, type(value).__name__))
+                local_types[name] = type(value).__name__
+        local_items = sorted(local_types.items())
 
         agent = runtime.agent
         lines = ["## Python state"]
@@ -103,14 +105,11 @@ class CodeActExperimental(CodeActStrategy):
             count = len(persistent_vars)
             lines.append(
                 f"`self.v`: {count} persistent var{'s' if count != 1 else ''} — "
-                'inspect: `print(python_state()["self.v"])`; '
-                "remove one: `del self.v.<name>`; clear all: `self.vars.clear()`"
+                "inspect: `print(self.v.items())`; "
+                "remove one: `del self.v.<name>`; clear all: `self.v.clear()`"
             )
         elif hasattr(agent, "v"):
             lines.append("`self.v`: none")
-
-        if input_names:
-            lines.extend(("", "Current method inputs are in scope but omitted here."))
 
         if local_items:
             visible = local_items[:20]
@@ -124,9 +123,9 @@ class CodeActExperimental(CodeActStrategy):
                 f"({self._python_state_label(type_name, max_chars=80)})"
                 for name, type_name in visible
             )
-            lines.extend(("", f"Reusable cell state (method inputs omitted): {items}{suffix}"))
+            lines.extend(("", f"Cell locals (includes method inputs): {items}{suffix}"))
         else:
-            lines.extend(("", "Reusable cell state (method inputs omitted): none"))
+            lines.extend(("", "Cell locals (includes method inputs): none"))
         return "\n".join(lines)
 
     def _build_builtins(self, runtime: RuntimeServices, call: "CurrentCall") -> dict[str, Any]:
@@ -136,7 +135,8 @@ class CodeActExperimental(CodeActStrategy):
             """Return the complete name-to-type inventory for persistent and cell state."""
             persistent = getattr(runtime.agent, "vars", {})
             live = call.execution_locals or call.session_locals or {}
-            input_names = set(call.bound_parameters())
+            inputs = call.bound_parameters()
+            input_names = set(inputs)
             visible = {
                 name: value
                 for name, value in live.items()
@@ -150,9 +150,12 @@ class CodeActExperimental(CodeActStrategy):
             return {
                 "self.v": {str(name): type(value).__name__ for name, value in persistent.items()},
                 "cell_locals": {
-                    name: type(value).__name__
-                    for name, value in visible.items()
-                    if not isinstance(value, ModuleType)
+                    **{str(name): type(value).__name__ for name, value in inputs.items()},
+                    **{
+                        name: type(value).__name__
+                        for name, value in visible.items()
+                        if not isinstance(value, ModuleType)
+                    },
                 },
                 "imports": {
                     name: value.__name__

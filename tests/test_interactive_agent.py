@@ -60,6 +60,25 @@ def test_persistent_vars_proxy(agent):
     assert isinstance(agent.v, AgentVars)
 
 
+def test_persistent_vars_inspection_and_cleanup_api(agent):
+    agent.v.cursor = 3
+    agent.v.plan = "draft"
+
+    assert agent.v.keys() == ["cursor", "plan"]
+    assert agent.v.items() == [("cursor", 3), ("plan", "draft")]
+    assert agent.v.get("cursor") == 3
+    assert agent.v.get("missing", "fallback") == "fallback"
+
+    rendered = doc(type(agent.v))
+    assert "def keys(self) -> list[str]" in rendered
+    assert "def items(self) -> list[tuple[str, Any]]" in rendered
+    assert "def get(self, key: str, default: Any = None) -> Any" in rendered
+    assert "def clear(self) -> None" in rendered
+
+    agent.v.clear()
+    assert agent.v.keys() == []
+
+
 def test_message_records_event_and_renders(agent):
     rendered: list[str] = []
     agent._render_message = lambda text, **kw: rendered.append(text)
