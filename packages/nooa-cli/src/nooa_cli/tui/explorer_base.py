@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .subapp import SubviewKeyResult
+from .theme import get_syntax_theme
 
 # ─── ANSI styling primitives ─────────────────────────────────────────────────
 
@@ -127,7 +128,7 @@ def render_markdown_lines(markdown: str, width: int) -> list[str]:
             width=render_width,
             _environ={"COLUMNS": str(render_width), "LINES": "25"},
         )
-        console.print(Markdown(markdown))
+        console.print(Markdown(markdown, code_theme=get_syntax_theme()))
         return buf.getvalue().splitlines() or [""]
     except Exception:
         lines: list[str] = []

@@ -1032,25 +1032,9 @@ class ThemeCommand(Command):
         theme_module.set_theme(name)
         self.config.theme = name
 
-        # Replace the base theme in Rich Console's ThemeStack
-        # We can't just push - we need to replace the base entry
-        if hasattr(self.frontend, "_console") and hasattr(self.frontend._console, "console"):  # type: ignore[attr-defined]
-            console = self.frontend._console.console  # type: ignore[attr-defined]
-            new_theme = theme_module.create_theme()
-
-            # Directly replace the base theme in the stack
-            # This is the only way to actually change colors since Theme snapshots
-            # the COLORS dict at creation time
-            console._theme_stack._entries[0] = new_theme.styles
-            console._theme_stack.get = console._theme_stack._entries[-1].get
-
-        # Rebuild prompt_toolkit style for the new theme
-        if hasattr(self.frontend, "_input_handler") and self.frontend._input_handler is not None:  # type: ignore[attr-defined]
-            self.frontend._input_handler.refresh_style()  # type: ignore[attr-defined]
-        app = getattr(self.frontend, "_app", None)
-        refresh_app_style = getattr(app, "refresh_style", None)
-        if callable(refresh_app_style):
-            refresh_app_style()
+        refresh_theme = getattr(self.frontend, "refresh_theme", None)
+        if callable(refresh_theme):
+            refresh_theme()
 
         try:
             path = self._persist_tui_setting("theme", name)

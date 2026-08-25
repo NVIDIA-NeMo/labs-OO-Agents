@@ -133,10 +133,18 @@ class _EmitStream:
         self._held = 0
         self._agent_message_depth = 0
         self._buffer_has_agent_message = False
+        self._semantic_replay: Callable[[], str] | None = None
+        self._semantic_replay_recorded = False
+        self._semantic_replay_parts: list[str | Callable[[], str]] = []
 
     def write(self, text: str) -> int:
         if text:
             self._buf.append(text)
+            if self._semantic_replay is None:
+                self._semantic_replay_parts.append(text)
+            elif not self._semantic_replay_recorded:
+                self._semantic_replay_parts.append(self._semantic_replay)
+                self._semantic_replay_recorded = True
             self._buffer_has_agent_message |= self._agent_message_depth > 0
         return len(text)
 
@@ -154,13 +162,37 @@ class _EmitStream:
         self._buf.clear()
         agent_message = self._buffer_has_agent_message
         self._buffer_has_agent_message = False
+        kwargs: dict[str, Any] = {}
         if agent_message:
-            self._emit(chunk, agent_message=True)
-        else:
-            self._emit(chunk)
+            kwargs["agent_message"] = True
+        replay_parts = tuple(self._semantic_replay_parts)
+        self._semantic_replay_parts.clear()
+        if any(callable(part) for part in replay_parts):
+            kwargs["replay"] = lambda parts=replay_parts: "".join(
+                part() if callable(part) else part for part in parts
+            )
+        self._emit(chunk, **kwargs)
+
+    @contextmanager
+    def semantic_replay(self, replay: Callable[[], str]):
+        """Retain one structured render without mixing adjacent output blocks."""
+        previous = self._semantic_replay
+        previous_recorded = self._semantic_replay_recorded
+        self._semantic_replay = replay
+        self._semantic_replay_recorded = False
+        self._held += 1
+        try:
+            yield
+        finally:
+            self._held -= 1
+            self._semantic_replay = previous
+            self._semantic_replay_recorded = previous_recorded
+            if self._held == 0:
+                self.flush()
 
     def clear_transcript(self) -> None:
         self._buf.clear()
+        self._semantic_replay_parts.clear()
         self._buffer_has_agent_message = False
         if self._clear is not None:
             self._clear()
@@ -1039,15 +1071,16 @@ class Session:
             from rich.markdown import Markdown
 
             if type(renderable) in {Markdown, TerminalMarkdown}:
-                renderable = CopyableMarkdown(
-                    renderable.markup,
-                    code_theme=renderable.code_theme,
-                    justify=renderable.justify,
-                    style=renderable.style,
-                    hyperlinks=renderable.hyperlinks,
-                    inline_code_lexer=renderable.inline_code_lexer,
-                    inline_code_theme=renderable.inline_code_theme,
-                )
+                markdown_options = {
+                    "justify": renderable.justify,
+                    "style": renderable.style,
+                    "hyperlinks": renderable.hyperlinks,
+                    "inline_code_lexer": renderable.inline_code_lexer,
+                    "inline_code_theme": renderable.inline_code_theme,
+                }
+                if not getattr(renderable, "uses_active_code_theme", False):
+                    markdown_options["code_theme"] = renderable.code_theme
+                renderable = CopyableMarkdown(renderable.markup, **markdown_options)
         rendered = self._render_to_ansi(renderable)
         replay = (lambda r=renderable: self._render_to_ansi(r)) if full_screen else None
         code_copy_actions = (
