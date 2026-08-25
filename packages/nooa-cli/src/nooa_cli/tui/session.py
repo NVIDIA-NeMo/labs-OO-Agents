@@ -982,7 +982,7 @@ class Session:
 
     def _render_to_ansi(self, renderable: Any) -> str:
         """Render a Rich renderable using the current terminal width."""
-        from .theme import CATPPUCCIN_THEME
+        from .theme import create_theme
         from .tui_application import terminal_cols
 
         try:
@@ -1002,7 +1002,7 @@ class Session:
             # height is explicit too. Rendering is unpaged, so its value is
             # immaterial; fixing it keeps wrapping tied to transcript width.
             height=1,
-            theme=CATPPUCCIN_THEME,
+            theme=create_theme(),
         )
         # Markdown prose must retain semantic line boundaries. Rich's default
         # width wrapping pads every visual row and inserts hard newlines, which
@@ -1032,13 +1032,13 @@ class Session:
         assert self._app is not None
 
         from .config import DisplayMode
-        from .copyable_markdown import CopyableMarkdown
+        from .copyable_markdown import CopyableMarkdown, TerminalMarkdown
 
         full_screen = getattr(self._app, "display_mode", None) is DisplayMode.FULLSCREEN
         if full_screen:
             from rich.markdown import Markdown
 
-            if type(renderable) is Markdown:
+            if type(renderable) in {Markdown, TerminalMarkdown}:
                 renderable = CopyableMarkdown(
                     renderable.markup,
                     code_theme=renderable.code_theme,

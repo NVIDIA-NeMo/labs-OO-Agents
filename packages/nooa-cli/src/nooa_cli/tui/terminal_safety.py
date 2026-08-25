@@ -13,13 +13,13 @@ from __future__ import annotations
 
 import re
 import shutil
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from rich.cells import split_graphemes
 
 _ESC = "\x1b"
 
-_MAX_SAFE_HTTP_URL_LENGTH = 2_048
+_MAX_SAFE_HYPERLINK_LENGTH = 2_048
 
 # This expression is used only after ``sanitize_transcript_ansi`` has reduced
 # the language to SGR and OSC-8.  It deliberately recognizes both OSC
@@ -138,11 +138,11 @@ def sanitize_transcript_ansi(value: str) -> str:
     return "".join(output)
 
 
-def safe_http_url(value: str | None) -> str | None:
-    """Return a control-free HTTP(S) URL suitable for an explicit browser launch."""
+def safe_hyperlink_target(value: str | None) -> str | None:
+    """Return a control-free HTTP(S) or absolute file URL for explicit opening."""
     if (
         not value
-        or len(value) > _MAX_SAFE_HTTP_URL_LENGTH
+        or len(value) > _MAX_SAFE_HYPERLINK_LENGTH
         or any(
             character.isspace() or ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F
             for character in value
@@ -153,9 +153,41 @@ def safe_http_url(value: str | None) -> str | None:
         parsed = urlsplit(value)
     except ValueError:
         return None
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    if parsed.scheme in {"http", "https"}:
+        return value if parsed.netloc else None
+    if parsed.scheme == "file":
+        if not parsed.path.startswith("/"):
+            return None
+        local_path = parsed.path
+        authority = parsed.netloc
+        if authority and authority.lower() != "localhost":
+            # Users commonly spell a local path as ``file://path/to/file``.
+            # Interpret its authority as the first path segment rather than as
+            # a remote host, which could trigger network authentication.
+            local_path = f"/{authority}{parsed.path}"
+            authority = ""
+        # Reject UNC/device-like paths after combining and decoding every path
+        # component; encoded separators in the apparent authority must not
+        # evade the local-only policy.
+        decoded_path = unquote(local_path)
+        if (
+            decoded_path.startswith("//")
+            or "\\" in decoded_path
+            or any(
+                ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in decoded_path
+            )
+        ):
+            return None
+        return urlunsplit(("file", authority, local_path, parsed.query, parsed.fragment))
+    return None
+
+
+def safe_http_url(value: str | None) -> str | None:
+    """Return a control-free HTTP(S) URL suitable for an explicit browser launch."""
+    target = safe_hyperlink_target(value)
+    if target is None:
         return None
-    return value
+    return target if urlsplit(target).scheme in {"http", "https"} else None
 
 
 def hyperlink_at_plain_offset(value: str, offset: int) -> str | None:
@@ -190,7 +222,7 @@ def _hyperlink_spans_from_safe_ansi(
                     spans.append((active[0], plain_offset, active[1]))
                 payload = sequence[4:-1] if sequence.endswith("\x07") else sequence[4:-2]
                 _parameters, _separator, target = payload.partition(";")
-                url = safe_http_url(target)
+                url = safe_hyperlink_target(target)
                 active = (plain_offset, url) if url is not None else None
             index = match.end()
             continue
