@@ -3552,6 +3552,27 @@ def test_copyable_markdown_preserves_long_list_item_for_fullscreen_reflow() -> N
     assert any(row.endswith(" ") for row in rows[:-1])
 
 
+def test_copyable_markdown_preserves_safe_markdown_links() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+    from nooa_cli.tui.terminal_safety import safe_hyperlink_spans, strip_safe_ansi
+
+    _renderable, ansi = _copyable_markdown_ansi(
+        "Read the [documentation](https://example.test/docs) for details.", width=60
+    )
+
+    plain = strip_safe_ansi(ansi)
+    label_start = plain.index("documentation")
+    assert safe_hyperlink_spans(ansi) == (
+        (label_start, label_start + len("documentation"), "https://example.test/docs"),
+    )
+
+    model = FullscreenTranscriptModel()
+    model.append(ansi)
+    assert model.hyperlink_at(x=label_start, y=0, width=60, height=2) == (
+        "https://example.test/docs"
+    )
+
+
 def test_copyable_markdown_preserves_nested_and_multiline_list_structure() -> None:
     from nooa_cli.tui.terminal_safety import strip_safe_ansi
 
@@ -3617,6 +3638,23 @@ def test_copyable_markdown_places_copy_action_in_top_code_padding() -> None:
         style for style, text, *_rest in fragments if text == "p" and "bg:" in style
     )
     assert copy_style.split("bg:", 1)[1].split()[0] == code_style.split("bg:", 1)[1].split()[0]
+
+
+@pytest.mark.parametrize(
+    ("markdown", "width"),
+    [
+        ("```python\nx\n```", 8),
+        ("```averyverylonglexername\nx\n```", 12),
+    ],
+)
+def test_copyable_markdown_keeps_complete_copy_label_at_narrow_width(
+    markdown: str, width: int
+) -> None:
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+
+    _renderable, ansi = _copyable_markdown_ansi(markdown, width=width)
+
+    assert "Copy" in strip_safe_ansi(ansi).splitlines()[0]
 
 
 def test_copyable_markdown_does_not_offer_copy_for_empty_fence() -> None:
@@ -3688,6 +3726,30 @@ def test_fullscreen_drag_copy_projects_decorated_code_to_exact_source() -> None:
     # full-width background fill, and blank padding rows.
     model.begin_selection(x=0, y=header_y, width=60, height=20)
     model.update_selection(x=59, y=after_y - 1, width=60, height=20)
+
+    assert model.selected_text() == source
+
+
+def test_fullscreen_code_selection_exposes_controls_but_copies_original_source() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+    from nooa_cli.tui.terminal_safety import safe_hyperlink_spans, strip_safe_ansi
+
+    source = "a\x1b[31mb\x1b]8;;https://evil.test\x1b\\c"
+    renderable, ansi = _copyable_markdown_ansi(f"```text\n{source}\n```", width=160)
+    plain = strip_safe_ansi(ansi)
+
+    assert r"a\x1b[31mb\x1b]8;;https://evil.test\x1b\c" in plain
+    assert safe_hyperlink_spans(ansi) == ()
+
+    model = FullscreenTranscriptModel()
+    model.append(ansi, copy_actions=renderable.copy_actions)
+    lines = "".join(
+        fragment[1] for fragment in model.formatted_text(width=160, height=20)
+    ).splitlines()
+    header_y = next(index for index, line in enumerate(lines) if "Copy" in line)
+    last_panel_y = max(index for index, line in enumerate(lines) if line and not line.isspace()) + 1
+    model.begin_selection(x=0, y=header_y, width=160, height=20)
+    model.update_selection(x=159, y=last_panel_y, width=160, height=20)
 
     assert model.selected_text() == source
 

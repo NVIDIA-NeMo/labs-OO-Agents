@@ -1055,6 +1055,21 @@ async def test_ctrl_c_clears_draft_before_interrupting_active_turn():
         assert "Press Ctrl+C again to exit" in h.capture_status()
 
 
+async def test_ctrl_c_cancels_overlapping_command_and_agent_turn():
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("first")
+        await h.wait_for(lambda: h.app.is_thinking())
+        command_cancellations: list[bool] = []
+        h.app._on_cancel_command = lambda: command_cancellations.append(True) or True
+
+        await h.press("c-c")
+
+        await h.wait_for(lambda: not h.app.is_thinking())
+        assert command_cancellations == [True]
+        assert "Press Ctrl+C again to exit" in h.capture_status()
+
+
 async def test_ctrl_c_with_empty_composer_interrupts_active_turn():
     agent = _blocking_agent()
     async with TUIHarness(agent=agent) as h:
@@ -2414,6 +2429,21 @@ async def test_cancel_status_is_immediate_and_stays_until_agent_cleanup_ack() ->
         await h.wait_for(lambda: not h.app.is_thinking())
         await h.wait_for(lambda: "Interrupting agent turn" not in h.capture_status())
         await h.wait_output_contains("Interrupted")
+
+
+async def test_cancel_status_ignores_stale_pre_interrupt_observation() -> None:
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("first")
+        await h.wait_for(lambda: h.app.is_thinking())
+        stale_state = h.app._agent_controller.state
+        assert stale_state is not None
+
+        assert h.app.request_agent_cancel(source="escape") is True
+        h.app._on_agent_change(stale_state)
+
+        assert h.capture_status().startswith("Interrupting agent turn")
+        await h.wait_for(lambda: not h.app.is_thinking())
 
 
 async def test_cancel_does_not_deliver_queued_message_until_cleanup_ack() -> None:

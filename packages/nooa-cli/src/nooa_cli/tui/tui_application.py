@@ -2405,9 +2405,12 @@ class TUIApplication:
                 event.app.exit()
                 return
 
-            # A slash command owns its cancellation independently of the agent
-            # turn. Treat either accepted cancellation as the interrupt step.
-            if self.request_command_cancel() or self.request_agent_cancel(source="ctrl-c"):
+            # Slash commands and agent work can overlap. Attempt both instead
+            # of short-circuiting so one Ctrl-C interrupts every active turn
+            # owner before the next press becomes the exit step.
+            command_cancelled = self.request_command_cancel()
+            agent_cancelled = self.request_agent_cancel(source="ctrl-c")
+            if command_cancelled or agent_cancelled:
                 self._arm_ctrl_c_exit()
                 return
 
@@ -2720,7 +2723,10 @@ class TUIApplication:
             loop.call_soon_threadsafe(callback)
 
     def _on_agent_change(self, state: Any) -> None:
-        if state is None or state.workspace.cancellation is not CancellationState.REQUESTED:
+        # A pre-interrupt observation may already be queued when cancellation is
+        # admitted. Only teardown may clear the optimistic acknowledgement;
+        # normal completion clears it through ``runtime_cancelled``.
+        if state is None:
             self._interrupting_agent_turn = False
         app = getattr(self, "_app", None)
         if app is not None and app.is_running:
