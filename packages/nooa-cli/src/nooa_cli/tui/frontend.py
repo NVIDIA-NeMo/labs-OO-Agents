@@ -691,7 +691,43 @@ class TerminalFrontend:
         stream.write(rendered)
         stream.flush()
 
+    def _render_startup_to_string(self, info: StartupInfo, width: int) -> str:
+        from rich.console import Console as RichConsole
+
+        from .theme import CATPPUCCIN_THEME
+
+        buf = io.StringIO()
+        render_width = max(int(width), 1)
+        console = RichConsole(
+            file=buf,
+            width=render_width,
+            highlight=False,
+            force_terminal=True,
+            color_system="256",
+            theme=CATPPUCCIN_THEME,
+            _environ={"COLUMNS": str(render_width), "LINES": "25"},
+        )
+        self._print_startup(info, console)
+        return buf.getvalue()
+
     def _render_startup(self, info: StartupInfo) -> None:
+        stream = getattr(self._console.console, "file", None)
+        semantic_replay = getattr(stream, "semantic_replay", None)
+        if getattr(stream, "supports_semantic_replay", False) is True and callable(semantic_replay):
+            with semantic_replay(
+                lambda s=stream: self._render_startup_to_string(
+                    info,
+                    s.layout_width(120) if callable(getattr(s, "layout_width", None)) else 120,
+                ),
+                tags={"startup-info"},
+                keep=True,
+            ):
+                self._print_startup(info, self._console.console)
+            return
+
+        self._print_startup(info, self._console.console)
+
+    def _print_startup(self, info: StartupInfo, console: Any) -> None:
         from rich.rule import Rule
         from rich.table import Table
 
@@ -702,11 +738,13 @@ class TerminalFrontend:
         peach = COLORS["peach"]
 
         llm_status = getattr(info, "llm_status", "ready" if info.llm_ready else "unavailable")
-        if llm_status in {"ready", "checking"}:
+        if llm_status == "not_connected":
+            title = f"[bold {COLORS['mauve']}]NOOA[/]"
+        elif llm_status in {"ready", "checking"}:
             title = f"[bold {COLORS['mauve']}]NOOA ready[/]"
         else:
             title = f"[bold {COLORS['red']}]NOOA — LLM unavailable[/]"
-        self._console.console.print(Rule(title=title, style=COLORS["surface2"]))
+        console.print(Rule(title=title, style=COLORS["surface2"]))
 
         table = Table.grid(padding=(0, 2))
         table.add_column(style=f"bold {sapphire}", no_wrap=True)
@@ -746,8 +784,8 @@ class TerminalFrontend:
         )
         table.add_row("!cmd", f"[{overlay}]run a bash command (e.g. !ls -la)[/]")
 
-        self._console.console.print(table)
-        self._console.console.print()
+        console.print(table)
+        console.print()
 
     def _render_code_execution(self, execution: CodeExecution) -> None:
         """Render a code execution panel (reasoning + code + output)."""

@@ -455,6 +455,28 @@ class ModelCommand(Command):
             return False, "Usage: /model [name]"
         return True, None
 
+    def _mark_model_ready(self, selected: str) -> None:
+        """Update shared model UI state after a successful switch."""
+        if self._registry is not None:
+            self._registry.blocking_llm_health = None
+            startup_info = getattr(self._registry, "startup_info", None)
+            if startup_info is not None:
+                from nooa_cli.tui.session import _short_model_name
+
+                startup_info.model = selected
+                startup_info.short_model = _short_model_name(selected)
+                startup_info.llm_ready = True
+                startup_info.llm_status = "ready"
+
+        app = getattr(self.frontend, "_app", None)
+        refreshed = False
+        refresh_transcript_blocks = getattr(app, "refresh_transcript_blocks", None)
+        if callable(refresh_transcript_blocks):
+            refreshed = bool(refresh_transcript_blocks("startup-info"))
+        invalidate = getattr(app, "invalidate", None)
+        if callable(invalidate) and not refreshed:
+            invalidate()
+
     async def execute(self, args: list[str]) -> "CommandResult":
         if not args:
             return CommandResult.ok(
@@ -501,27 +523,24 @@ class ModelCommand(Command):
         except Exception as e:
             return CommandResult.err(f"Failed to switch model: {e}")
         self.config.default_model = selected
-        if self._registry is not None:
-            self._registry.blocking_llm_health = None
-            startup_info = getattr(self._registry, "startup_info", None)
-            if startup_info is not None:
-                from nooa_cli.tui.session import _short_model_name
-
-                startup_info.model = selected
-                startup_info.short_model = _short_model_name(selected)
-                startup_info.llm_ready = True
-                startup_info.llm_status = "ready"
+        self._mark_model_ready(selected)
         try:
             settings_path = self._persist_tui_setting("default_model", selected)
         except Exception as e:
             logger.warning("Failed to persist selected TUI model %r: %s", selected, e)
-            return CommandResult.ok(
-                TextOutput(f"Switched to model: {selected}", "success"),
-                TextOutput(f"Could not save the project default: {e}", "warning"),
+            return CommandResult(
+                success=True,
+                outputs=[
+                    TextOutput(f"Switched to model: {selected}", "success"),
+                    TextOutput(f"Could not save the project default: {e}", "warning"),
+                ],
             )
-        return CommandResult.ok(
-            TextOutput(f"Switched to model: {selected}", "success"),
-            TextOutput(f"Saved as the project default in {settings_path}", "status"),
+        return CommandResult(
+            success=True,
+            outputs=[
+                TextOutput(f"Switched to model: {selected}", "success"),
+                TextOutput(f"Saved as the project default in {settings_path}", "status"),
+            ],
         )
 
     async def _add_to_registry(self, server_url: str) -> "CommandResult":
@@ -845,13 +864,20 @@ class ModelCommand(Command):
 class ConnectCommand(ModelCommand):
     """Friendly model-backend setup entry point."""
 
+    _PRESET_ENDPOINTS: ClassVar[dict[str, str]] = {
+        "OpenAI": "https://api.openai.com/v1",
+        "Anthropic": "https://api.anthropic.com",
+        "Ollama local": "http://localhost:11434",
+    }
+    _CUSTOM_ENDPOINT = "Custom OpenAI-compatible endpoint..."
+
     @property
     def name(self) -> str:
         return "connect"
 
     @classmethod
     def help_text(cls) -> dict[str, str]:
-        return {"/connect [server-url]": "Connect a model backend by URL"}
+        return {"/connect [server-url]": "Connect a model backend; prompts if URL is omitted"}
 
     def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
         if len(args) > 1:
@@ -862,15 +888,28 @@ class ConnectCommand(ModelCommand):
         server_url = args[0] if args else ""
         if not server_url:
             prompt_text = getattr(self.frontend, "prompt_text", None)
-            if not callable(prompt_text):
-                return CommandResult.err("Usage: /connect <server-url>")
-            server_url = await prompt_text(
-                "Connect model backend",
-                "API base URL (Anthropic, Ollama, and OpenAI-compatible servers are auto-detected).",
-                "http://localhost:11434",
-            )
+            prompt_choice = getattr(self.frontend, "prompt_choice", None)
+            if callable(prompt_choice):
+                selected = await prompt_choice(
+                    "Connect model backend",
+                    "Choose a provider or endpoint type.",
+                    [*self._PRESET_ENDPOINTS.keys(), self._CUSTOM_ENDPOINT],
+                )
+                if not selected:
+                    return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
+                server_url = self._PRESET_ENDPOINTS.get(selected, "")
+                if not server_url and selected != self._CUSTOM_ENDPOINT:
+                    return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
+            if not server_url and not callable(prompt_text):
+                return CommandResult.err("Usage: /connect [server-url]")
             if not server_url:
-                return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
+                server_url = await prompt_text(
+                    "Custom model endpoint",
+                    "API base URL (OpenAI-compatible servers, Anthropic, and Ollama are auto-detected).",
+                    "http://localhost:11434",
+                )
+                if not server_url:
+                    return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
         return await self._add_to_registry(server_url)
 
 
