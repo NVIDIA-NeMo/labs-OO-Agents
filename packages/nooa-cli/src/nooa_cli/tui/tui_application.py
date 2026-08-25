@@ -1072,6 +1072,7 @@ class TUIApplication:
         self._ctrl_c_exit_timer: asyncio.TimerHandle | None = None
         self._exit_hint_text = ""
         self._interrupting_agent_turn = False
+        self._interrupt_status_acknowledged = False
         self._interrupt_status_started_at: float | None = None
         self._interrupt_status_clear_timer: asyncio.TimerHandle | None = None
         self._transient_status_text = ""
@@ -2734,12 +2735,27 @@ class TUIApplication:
             loop.call_soon_threadsafe(callback)
 
     def _on_agent_change(self, state: Any) -> None:
+        # Agent implementations may publish from worker threads. Keep timer and
+        # prompt-toolkit mutations on the Application's owner loop even if a
+        # caller bypasses the controller's normal scheduler boundary.
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            try:
+                on_ui_loop = asyncio.get_running_loop() is loop
+            except RuntimeError:
+                on_ui_loop = False
+            if not on_ui_loop:
+                loop.call_soon_threadsafe(self._on_agent_change, state)
+                return
+
         # A pre-interrupt observation may already be queued when cancellation is
         # admitted. Only teardown may acknowledge the optimistic status; the
         # minimum display interval keeps a fast cancellation from clearing it
         # before prompt_toolkit can paint even one frame.
         if state is None:
             self._acknowledge_agent_interrupt()
+        elif state is not None:
+            self._retire_acknowledged_interrupt_for_new_turn(state)
         app = getattr(self, "_app", None)
         if app is not None and app.is_running:
             app.invalidate()
@@ -2758,9 +2774,27 @@ class TUIApplication:
             self._refresh_runner_state()
 
     def _refresh_runner_state(self) -> None:
+        # This hook runs at the runtime transition site, while observation
+        # delivery may still be coalesced behind other UI work. Read the
+        # immutable source snapshot so a queued replacement turn cannot inherit
+        # the prior turn's delayed interrupt label even for one frame.
+        agent = self._agent
+        if agent is not None:
+            self._retire_acknowledged_interrupt_for_new_turn(agent.state)
         if self._app.is_running:
             self._app.invalidate()
         self._ensure_spinner_task()
+
+    def _retire_acknowledged_interrupt_for_new_turn(self, state: Any) -> None:
+        if (
+            self._interrupting_agent_turn
+            and self._interrupt_status_acknowledged
+            and state.lifecycle in {AgentLifecycle.THINKING, AgentLifecycle.WAITING}
+            and state.workspace.cancellation is CancellationState.NONE
+        ):
+            # A queued message has started a new turn. Never let the previous
+            # turn's minimum display interval label this fresh work as stopping.
+            self._clear_agent_interrupt_status()
 
     def runtime_cancelled(self) -> None:
         """Acknowledge completed cancellation and render its transcript marker."""
@@ -2771,6 +2805,7 @@ class TUIApplication:
         """Clear interrupt feedback only after it had time to reach a frame."""
         if not self._interrupting_agent_turn:
             return
+        self._interrupt_status_acknowledged = True
         started_at = self._interrupt_status_started_at
         remaining = (
             0.0
@@ -2794,6 +2829,7 @@ class TUIApplication:
     def _clear_agent_interrupt_status(self) -> None:
         self._interrupt_status_clear_timer = None
         self._interrupt_status_started_at = None
+        self._interrupt_status_acknowledged = False
         self._interrupting_agent_turn = False
         if self._app.is_running:
             self._app.invalidate()
@@ -2825,6 +2861,7 @@ class TUIApplication:
                 self._interrupt_status_clear_timer.cancel()
                 self._interrupt_status_clear_timer = None
             self._interrupting_agent_turn = True
+            self._interrupt_status_acknowledged = False
             self._interrupt_status_started_at = time.monotonic()
             if self._app.is_running:
                 self._app.invalidate()
@@ -3226,6 +3263,7 @@ class TUIApplication:
                 self._interrupt_status_clear_timer.cancel()
                 self._interrupt_status_clear_timer = None
             self._interrupting_agent_turn = False
+            self._interrupt_status_acknowledged = False
             self._interrupt_status_started_at = None
             if self._transient_status_timer is not None:
                 self._transient_status_timer.cancel()
