@@ -87,10 +87,13 @@ async def test_experimental_tui_agent_uses_only_python_cell(tmp_path):
         rendered_context = "\n".join(
             str(message.get("content", "")) for message in llm.last_messages
         )
-        assert "<repl_locals" in rendered_context
-        assert "`notification =" in rendered_context
-        assert "`self.v` — persistent session variables" in rendered_context
-        assert f"`self.shell.cwd = {tmp_path!r}`" in rendered_context
+        assert "<python_state" in rendered_context
+        assert (
+            "notification"
+            not in rendered_context.split("<python_state", 1)[1].split("</python_state>", 1)[0]
+        )
+        assert "`self.v`: none" in rendered_context
+        assert f"self.shell.cwd: {tmp_path}" in rendered_context
         completion_events = [
             event
             for event in agent.event_manager.values()
