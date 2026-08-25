@@ -2431,6 +2431,22 @@ async def test_cancel_status_is_immediate_and_stays_until_agent_cleanup_ack() ->
         await h.wait_output_contains("Interrupted")
 
 
+async def test_fast_cancel_status_survives_runtime_ack_long_enough_to_render() -> None:
+    """A fast cancellation must not replace its acknowledgement before one frame."""
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("first")
+        await h.wait_for(lambda: h.app.is_thinking())
+
+        await h.press("escape")
+        await h.wait_output_contains("Interrupted agent turn")
+
+        assert "Interrupting agent turn" in h.capture_status()
+        await asyncio.sleep(0.25)
+        assert "Interrupting agent turn" in h.capture_status()
+        await h.wait_for(lambda: "Interrupting agent turn" not in h.capture_status())
+
+
 async def test_cancel_status_ignores_stale_pre_interrupt_observation() -> None:
     agent = _blocking_agent()
     async with TUIHarness(agent=agent) as h:

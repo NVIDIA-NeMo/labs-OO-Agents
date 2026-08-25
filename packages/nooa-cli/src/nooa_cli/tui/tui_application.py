@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -899,6 +900,7 @@ def format_session_rule(cols: int, label: str = "") -> list[tuple[str, str]]:
 
 PROMPT_MARKER = "❯ "
 _CTRL_C_EXIT_WINDOW_SECONDS = 2.0
+_MIN_INTERRUPT_STATUS_SECONDS = 0.75
 _TRANSCRIPT_CLEAR_SEQUENCE = "\x1b[r\x1b[0m\x1b[H\x1b[2J\x1b[3J\x1b[H"
 _FULLSCREEN_TRANSCRIPT_MAX_RECORDS = 10_000
 _FULLSCREEN_TRANSCRIPT_MAX_BYTES = 16 * 1024 * 1024
@@ -1070,6 +1072,8 @@ class TUIApplication:
         self._ctrl_c_exit_timer: asyncio.TimerHandle | None = None
         self._exit_hint_text = ""
         self._interrupting_agent_turn = False
+        self._interrupt_status_started_at: float | None = None
+        self._interrupt_status_clear_timer: asyncio.TimerHandle | None = None
         self._transient_status_text = ""
         self._transient_status_style = "class:status"
         self._transient_status_timer: asyncio.TimerHandle | None = None
@@ -2731,10 +2735,11 @@ class TUIApplication:
 
     def _on_agent_change(self, state: Any) -> None:
         # A pre-interrupt observation may already be queued when cancellation is
-        # admitted. Only teardown may clear the optimistic acknowledgement;
-        # normal completion clears it through ``runtime_cancelled``.
+        # admitted. Only teardown may acknowledge the optimistic status; the
+        # minimum display interval keeps a fast cancellation from clearing it
+        # before prompt_toolkit can paint even one frame.
         if state is None:
-            self._interrupting_agent_turn = False
+            self._acknowledge_agent_interrupt()
         app = getattr(self, "_app", None)
         if app is not None and app.is_running:
             app.invalidate()
@@ -2759,8 +2764,39 @@ class TUIApplication:
 
     def runtime_cancelled(self) -> None:
         """Acknowledge completed cancellation and render its transcript marker."""
-        self._interrupting_agent_turn = False
+        self._schedule_agent_callback(self._acknowledge_agent_interrupt)
         self.emit_block("\x1b[33m✗ Interrupted agent turn.\x1b[0m\n")
+
+    def _acknowledge_agent_interrupt(self) -> None:
+        """Clear interrupt feedback only after it had time to reach a frame."""
+        if not self._interrupting_agent_turn:
+            return
+        started_at = self._interrupt_status_started_at
+        remaining = (
+            0.0
+            if started_at is None
+            else _MIN_INTERRUPT_STATUS_SECONDS - (time.monotonic() - started_at)
+        )
+        if remaining <= 0:
+            self._clear_agent_interrupt_status()
+        elif self._interrupt_status_clear_timer is None:
+            loop = self._loop
+            if loop is None or not loop.is_running():
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    self._clear_agent_interrupt_status()
+                    return
+            self._interrupt_status_clear_timer = loop.call_later(
+                remaining, self._clear_agent_interrupt_status
+            )
+
+    def _clear_agent_interrupt_status(self) -> None:
+        self._interrupt_status_clear_timer = None
+        self._interrupt_status_started_at = None
+        self._interrupting_agent_turn = False
+        if self._app.is_running:
+            self._app.invalidate()
 
     def invalidate(self) -> None:
         """Thread-safe repaint hook for composition-root-owned policies."""
@@ -2785,7 +2821,11 @@ class TUIApplication:
         if accepted:
             # The runtime observation callback may arrive on another loop. Paint
             # acknowledgement immediately so the key press never appears lost.
+            if self._interrupt_status_clear_timer is not None:
+                self._interrupt_status_clear_timer.cancel()
+                self._interrupt_status_clear_timer = None
             self._interrupting_agent_turn = True
+            self._interrupt_status_started_at = time.monotonic()
             if self._app.is_running:
                 self._app.invalidate()
             if self._on_agent_activity is not None:
@@ -3182,6 +3222,11 @@ class TUIApplication:
             self._resize_replays_enabled = False
             self._cancel_resize_replay_work()
             self._clear_ctrl_c_exit()
+            if self._interrupt_status_clear_timer is not None:
+                self._interrupt_status_clear_timer.cancel()
+                self._interrupt_status_clear_timer = None
+            self._interrupting_agent_turn = False
+            self._interrupt_status_started_at = None
             if self._transient_status_timer is not None:
                 self._transient_status_timer.cancel()
                 self._transient_status_timer = None
