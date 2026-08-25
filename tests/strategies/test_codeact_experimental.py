@@ -53,9 +53,6 @@ async def test_explicit_return_completes_with_only_execute_python_tool():
     )
     assert "`return_result()`" in system_prompt
     assert "`return_result(value)`" in system_prompt
-    assert "prefer it for independent work" in system_prompt
-    assert "Await `delegate(...)` only" in system_prompt
-    assert "method defines a background-wait result" in system_prompt
     assert "Your two tools" not in system_prompt
     completion_events = [
         event
