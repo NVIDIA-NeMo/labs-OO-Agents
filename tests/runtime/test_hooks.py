@@ -6,6 +6,7 @@ import pytest
 
 from nooa.runtime.hooks import (
     InstrumentationHooks,
+    activate_agent_call_context,
     call_after_hook,
     call_before_hook,
     get_hooks,
@@ -154,6 +155,56 @@ class TestInstrumentationHooksProtocol:
 
         hooks = PartialHooks()
         assert not isinstance(hooks, InstrumentationHooks)
+
+
+class TestAgentCallContextActivation:
+    """The optional suspended-method extension remains safe and transparent."""
+
+    def teardown_method(self):
+        set_hooks(None)
+
+    def test_activates_and_deactivates_around_body(self):
+        calls = []
+
+        class Manager:
+            def __enter__(self):
+                calls.append("enter")
+
+            def __exit__(self, exc_type, exc, traceback):
+                calls.append(("exit", exc_type))
+
+        class Hooks:
+            def activate_agent_call(self, context):
+                calls.append(("context", context))
+                return Manager()
+
+        set_hooks(Hooks())
+        with activate_agent_call_context({"span": "opaque"}):
+            calls.append("body")
+
+        assert calls == [
+            ("context", {"span": "opaque"}),
+            "enter",
+            "body",
+            ("exit", None),
+        ]
+
+    def test_backend_cannot_suppress_application_exception(self):
+        class SuppressingManager:
+            def __enter__(self):
+                return None
+
+            def __exit__(self, exc_type, exc, traceback):
+                return True
+
+        class Hooks:
+            def activate_agent_call(self, context):
+                return SuppressingManager()
+
+        set_hooks(Hooks())
+        with pytest.raises(ValueError, match="application failure"):
+            with activate_agent_call_context({}):
+                raise ValueError("application failure")
 
 
 class MockHooks:

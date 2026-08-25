@@ -33,7 +33,7 @@ The framework already shows the LLM every argument: the method signature accompa
 - **Helpers beat prompts.** Deterministic logic as regular methods > telling the LLM to figure it out. Methods are visible to the LLM via `doc(self)` (auto-generated API documentation). Define helpers as class methods, not as lambda/function references assigned to `self`.
 - **Evidence before assertions.** Run tests/verification before claiming work is done. Enforce in the orchestrator.
 - **Everything visible by default.** Module-level and agent-level names are visible to the LLM (in `doc(self)` and exec_globals). Hide explicitly with `@hidden`, `Annotated[T, hidden]`, or `with hidden:`.
-- **Generator methods are hand-written, never generated.** A method containing `yield` is traced like any other, but it can't be an LLM-generation stub — generation applies only to coroutine methods. Writing both (`yield` *and* a `...` body) raises `TypeError` at class-creation time rather than silently ignoring the `...`. See [Generator methods](#generator-methods).
+- **Generator methods are hand-written, never generated.** A method containing `yield` is traced like any other, but generation strategies commit one final result and do not define a stream protocol. Writing both `yield` and a `...` generation marker raises `TypeError`; applying `@strategy` to a deterministic generator also raises with instructions to remove the decorator. See [Generator methods](#generator-methods).
 
 ### Visibility
 
@@ -186,10 +186,13 @@ class MyAgent(Agent, llm=llm):
 
 Two limits worth knowing:
 
-- **A generator can't be a generation stub.** `yield` plus a `...` body raises
-  `TypeError` at class creation. Generation applies only to coroutine methods,
-  so the `...` would otherwise be silently ignored and the method would run as
-  an ordinary generator yielding whatever its body literally contained.
+- **A generator can't be a generation stub.** `yield` plus a `...` generation
+  marker raises `TypeError` at class creation. Generation strategies commit one
+  final result; supporting generated streams would require a separate protocol
+  for yields, completion, errors, cancellation, middleware, and validation.
+- **A deterministic generator does not use `@strategy`.** It is regular Python
+  and is supported directly as an agent method. The decorator is rejected with
+  a targeted message instead of the misleading “must be async” diagnostic.
 - **Decorated generators are not detected.** If you wrap a generator method in
   your own decorator, the framework sees the decorator rather than the
   generator and falls back to the plain method wrapper, so calls made by the

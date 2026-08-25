@@ -19,7 +19,7 @@ from abc import ABCMeta
 from collections.abc import Callable
 from typing import Any
 
-from nooa.ellipsis_detection import has_ellipsis_body
+from nooa.ellipsis_detection import has_ellipsis_body, has_ellipsis_marker
 
 
 class AgentMeta(ABCMeta):
@@ -227,7 +227,7 @@ class AgentMeta(ABCMeta):
         so unlike the dispatch it deliberately looks through `__wrapped__` and
         into staticmethod/classmethod descriptors — neither of which reaches the
         dispatch branches, and both of which can hide the contradiction.
-        `has_ellipsis_body` unwraps too, so the two agree on what they inspect.
+        Ellipsis detection unwraps too, so the two agree on what they inspect.
         """
         # staticmethod/classmethod are not functions; inspect the wrapped one.
         method_obj = (
@@ -247,7 +247,7 @@ class AgentMeta(ABCMeta):
         if not (inspect.isgeneratorfunction(unwrapped) or inspect.isasyncgenfunction(unwrapped)):
             return
 
-        if not has_ellipsis_body(method_obj):
+        if not has_ellipsis_marker(method_obj):
             return
 
         is_async = inspect.isasyncgenfunction(unwrapped)
@@ -256,14 +256,12 @@ class AgentMeta(ABCMeta):
             if is_async
             else "a generator (def with yield)"
         )
-        keyword = "async def" if is_async else "def"
         raise TypeError(
-            f"{class_name}.{method_name} is {shape} with an ellipsis body, "
-            f"but generator methods cannot be LLM-generated — generation only "
-            f"applies to coroutine methods, so the `...` would be silently "
-            f"ignored and the method would run as an ordinary generator.\n"
-            f"Either write the generator body out in full, or drop the `yield` "
-            f"and make it a plain `{keyword}` method for the LLM to implement."
+            f"{class_name}.{method_name} is {shape} with the `...` generation marker, "
+            f"but generator methods cannot be LLM-generated: generation methods "
+            f"produce one final result, so generated streams are not supported.\n"
+            f"Either remove `...` and write the deterministic generator body in full, "
+            f"or remove `yield` and make it a plain `async def` generation method."
         )
 
     @staticmethod

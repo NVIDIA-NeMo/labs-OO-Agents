@@ -1523,6 +1523,56 @@ def test_generator_without_ellipsis_is_accepted():
     assert GoodAgent.review._needs_generation is False
 
 
+@pytest.mark.asyncio
+async def test_generator_allows_ordinary_ellipsis_expressions():
+    """Annotations and indexing use Ellipsis as data, not as generation syntax."""
+
+    class EllipsisIndex:
+        def __getitem__(self, key):
+            assert key is ...
+            return 7
+
+    class GoodAgent(Agent, llm=_TEST_LLM):
+        async def values(self):
+            def nested_placeholder(): ...
+
+            selected = EllipsisIndex()[...]
+            annotated: tuple[int, ...] = (selected,)
+            assert nested_placeholder() is None
+            yield annotated[0]
+
+    assert [item async for item in GoodAgent().values()] == [7]
+
+
+def test_yield_ellipsis_generator_gets_single_result_error():
+    """``yield ...`` is diagnosed as an attempted generated stream."""
+    with pytest.raises(TypeError, match="produce one final result"):
+
+        class BadAgent(Agent, llm=_TEST_LLM):
+            async def review(self):
+                yield ...
+
+
+def test_strategy_generated_generator_explains_single_result_contract():
+    """@strategy must not misdiagnose an async generator as non-async."""
+    with pytest.raises(TypeError, match="must produce one final result"):
+
+        class BadAgent(Agent, llm=_TEST_LLM):
+            @strategy(PurePythonStrategy())
+            async def review(self):
+                yield ...
+
+
+def test_strategy_deterministic_generator_says_to_remove_decorator():
+    """A deterministic generator needs no generation strategy."""
+    with pytest.raises(TypeError, match=r"Remove @strategy"):
+
+        class BadAgent(Agent, llm=_TEST_LLM):
+            @strategy(PurePythonStrategy())
+            async def review(self):
+                yield "implemented"
+
+
 # --- Defect 2: span scoping across yields -----------------------------------
 
 

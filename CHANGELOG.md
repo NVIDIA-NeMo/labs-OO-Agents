@@ -15,7 +15,7 @@ to follow semantic versioning.
   generator, so LLM calls made by the body were recorded as children of whichever
   method drained it. Body calls now nest under the generator, and calls the
   consumer makes between yields do not.
-- Breaking: a generator method with an ellipsis body (`yield` *and* `...`) now
-  raises `TypeError` at class-creation time. Generation applies only to coroutine
-  methods, so such a method silently skipped generation and ran as an ordinary
-  generator. Either write the body out in full, or drop the `yield`.
+- Breaking: a generator method with the `...` generation marker (including
+  `yield ...`) now raises `TypeError` at class-creation time. Generation
+  strategies commit one final result and do not define a stream protocol.
+  Deterministic generators remain supported without `@strategy`.

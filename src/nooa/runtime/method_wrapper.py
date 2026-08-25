@@ -48,7 +48,11 @@ from nooa.runtime.context_vars import (
     _pop_agent_call_id,
     _push_agent_call_id,
 )
-from nooa.runtime.hooks import call_after_hook, call_before_hook
+from nooa.runtime.hooks import (
+    activate_agent_call_context,
+    call_after_hook,
+    call_before_hook,
+)
 
 if TYPE_CHECKING:
     from nooa.strategies.base import GenerationStrategy
@@ -592,6 +596,21 @@ def _emit_after_agent_call(
 
 
 @contextmanager
+def _gen_resume_context(
+    self: Any, active_call_id: str | None, *, set_parent_agent: bool
+) -> Iterator[None]:
+    """Install framework call context only while a generator body is running."""
+    _push_agent_call_id(active_call_id)
+    parent_token = _parent_agent_var.set(self) if set_parent_agent else None
+    try:
+        yield
+    finally:
+        if parent_token is not None:
+            _parent_agent_var.reset(parent_token)
+        _pop_agent_call_id()
+
+
+@contextmanager
 def _gen_agent_span(
     self: Any,
     original_func: Callable[..., Any],
@@ -599,7 +618,7 @@ def _gen_agent_span(
     kwargs: dict[str, Any],
     cached_source_code: str | None,
     tracing_enabled: bool,
-) -> Iterator[str | None]:
+) -> Iterator[tuple[str | None, Any]]:
     """Open and close the AGENT span around a generator method's whole lifetime.
 
     Yields the call id the generator's wrapper should push around each
@@ -623,7 +642,8 @@ def _gen_agent_span(
         tracing_enabled: Whether to fire the before/after tracing hooks.
 
     Yields:
-        The call id to push while the generator body is running.
+        The call id and opaque instrumentation context to activate while the
+        generator body is running.
     """
     call_id = str(uuid4())
     parent_call_id = self.runtime._agent_call_id
@@ -651,7 +671,7 @@ def _gen_agent_span(
             )
         # @no_trace methods propagate the parent's id so children find the
         # nearest traced ancestor — same semantics as the other wrappers.
-        yield call_id if tracing_enabled else parent_call_id
+        yield (call_id if tracing_enabled else parent_call_id, hook_context)
     except GeneratorExit:
         raise
     except BaseException as e:
@@ -667,14 +687,15 @@ def _gen_agent_span(
             exception_caught,
         )
         if hook_context is not None:
-            call_after_hook(
-                "after_agent_call",
-                hook_context,
-                agent=self,
-                method_name=original_func.__name__,
-                result=None,
-                exception=exception_caught,
-            )
+            with activate_agent_call_context(hook_context):
+                call_after_hook(
+                    "after_agent_call",
+                    hook_context,
+                    agent=self,
+                    method_name=original_func.__name__,
+                    result=None,
+                    exception=exception_caught,
+                )
 
 
 def create_async_gen_agent_method_wrapper(
@@ -737,34 +758,30 @@ def create_async_gen_agent_method_wrapper(
                 self, original_func, args, kwargs, cached_source_code, _tracing_enabled[0]
             )
             if instrumented
-            else nullcontext(None)
+            else nullcontext((None, None))
         )
 
-        with span as active_call_id:
+        with span as (active_call_id, hook_context):
             try:
                 # `asend`/`athrow` rather than `__anext__`/raise, so the wrapper
                 # stays transparent to consumers driving it bidirectionally.
                 to_send: Any = None
                 to_throw: BaseException | None = None
-                parent_token = None
                 while True:
-                    # Push only for the slice where the body actually runs.
-                    if instrumented:
-                        _push_agent_call_id(active_call_id)
-                        parent_token = _parent_agent_var.set(self)
                     try:
-                        if to_throw is not None:
-                            item = await agen.athrow(to_throw)
-                        else:
-                            item = await agen.asend(to_send)
-                        to_send = to_throw = None
+                        resume_context = (
+                            _gen_resume_context(self, active_call_id, set_parent_agent=True)
+                            if instrumented
+                            else nullcontext()
+                        )
+                        with resume_context, activate_agent_call_context(hook_context):
+                            if to_throw is not None:
+                                item = await agen.athrow(to_throw)
+                            else:
+                                item = await agen.asend(to_send)
+                            to_send = to_throw = None
                     except StopAsyncIteration:
                         break
-                    finally:
-                        if instrumented:
-                            assert parent_token is not None
-                            _parent_agent_var.reset(parent_token)
-                            _pop_agent_call_id()
                     # Suspended: the consumer runs here with our id *not* on the stack.
                     try:
                         to_send = yield item
@@ -779,7 +796,13 @@ def create_async_gen_agent_method_wrapper(
                 # this span. The close itself may raise (a body whose cleanup
                 # fails, or one that ignores GeneratorExit); the enclosing `with`
                 # still ends the span, so a failed close cannot leak it.
-                await agen.aclose()
+                close_context = (
+                    _gen_resume_context(self, active_call_id, set_parent_agent=True)
+                    if instrumented
+                    else nullcontext()
+                )
+                with close_context, activate_agent_call_context(hook_context):
+                    await agen.aclose()
 
     setattr(wrapper, "_agent_decorator", "auto")  # noqa: B010
     setattr(wrapper, "_needs_generation", False)  # noqa: B010
@@ -830,10 +853,10 @@ def create_sync_gen_agent_method_wrapper(
                 self, original_func, args, kwargs, cached_source_code, _tracing_enabled[0]
             )
             if instrumented
-            else nullcontext(None)
+            else nullcontext((None, None))
         )
 
-        with span as active_call_id:
+        with span as (active_call_id, hook_context):
             try:
                 # `send`/`throw` rather than `next`/raise, so the wrapper stays
                 # transparent to consumers driving it bidirectionally.
@@ -844,21 +867,22 @@ def create_sync_gen_agent_method_wrapper(
                     # drives subagent LLM inheritance, which is async-only —
                     # matching `create_sync_agent_method_wrapper`, which also
                     # leaves it alone.
-                    if instrumented:
-                        _push_agent_call_id(active_call_id)
                     try:
-                        if to_throw is not None:
-                            item = gen.throw(to_throw)
-                        else:
-                            item = gen.send(to_send)
-                        to_send = to_throw = None
+                        resume_context = (
+                            _gen_resume_context(self, active_call_id, set_parent_agent=False)
+                            if instrumented
+                            else nullcontext()
+                        )
+                        with resume_context, activate_agent_call_context(hook_context):
+                            if to_throw is not None:
+                                item = gen.throw(to_throw)
+                            else:
+                                item = gen.send(to_send)
+                            to_send = to_throw = None
                     except StopIteration as stop:
                         # Carry the wrapped generator's `return` value out, so
                         # `yield from` and StopIteration.value stay transparent.
                         return stop.value
-                    finally:
-                        if instrumented:
-                            _pop_agent_call_id()
                     try:
                         to_send = yield item
                     except GeneratorExit:
@@ -869,7 +893,13 @@ def create_sync_gen_agent_method_wrapper(
                         to_throw = e
             finally:
                 # See the async wrapper: a close that raises must not leak the span.
-                gen.close()
+                close_context = (
+                    _gen_resume_context(self, active_call_id, set_parent_agent=False)
+                    if instrumented
+                    else nullcontext()
+                )
+                with close_context, activate_agent_call_context(hook_context):
+                    gen.close()
 
     setattr(wrapper, "_agent_decorator", "auto")  # noqa: B010
     setattr(wrapper, "_needs_generation", False)  # noqa: B010

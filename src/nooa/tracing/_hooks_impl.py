@@ -197,6 +197,13 @@ class OpenInferenceHooks:
         # This pattern prevents potential timing issues with ContextVar inheritance in async contexts
         spans_dict = _get_active_spans()
         parent_span = spans_dict.get(parent_call_id) if parent_call_id else None
+        if parent_span is None and parent_call_id:
+            # A suspended method may resume in another task, whose task-local
+            # registry starts empty. Its wrapper reactivates the lifecycle span,
+            # so native OTel context is the authoritative fallback for children.
+            current_span = trace.get_current_span()
+            if current_span.get_span_context().is_valid:
+                parent_span = current_span
 
         # If this method was invoked directly from an agent's executing code (e.g.
         # self.submit() inside execute_python), nest it under the active code_execution
@@ -284,9 +291,29 @@ class OpenInferenceHooks:
         return {
             "span": span,
             "call_id": call_id,
+            # Keep the registry that owns this lifecycle entry. A generator's
+            # after-hook may run from a different task with another registry.
+            "_span_registry": spans_dict,
             **extra_kwargs,
             "start_time": time.time(),
         }
+
+    @contextlib.contextmanager
+    def activate_agent_call(self, context: Any):
+        """Make an existing agent-call span current without ending it."""
+        span = context.get("span") if isinstance(context, dict) else None
+        if span is None:
+            yield
+            return
+        # Lifecycle completion owns error recording and status. Reactivation
+        # must not treat normal StopIteration/StopAsyncIteration as failures.
+        with trace.use_span(
+            span,
+            end_on_exit=False,
+            record_exception=False,
+            set_status_on_exception=False,
+        ):
+            yield
 
     def after_agent_call(
         self,
@@ -328,7 +355,10 @@ class OpenInferenceHooks:
         self._turn_counters.pop(call_id, None)
 
         # Remove from tracking
-        if call_id and call_id in _get_active_spans():
+        registry = context.get("_span_registry")
+        if isinstance(registry, dict):
+            registry.pop(call_id, None)
+        elif call_id and call_id in _get_active_spans():
             del _get_active_spans()[call_id]
 
     def before_generation(

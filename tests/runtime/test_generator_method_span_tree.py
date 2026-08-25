@@ -14,7 +14,11 @@ resumed by whoever happens to be draining it.
 So this file asserts the exported spans directly.
 """
 
+import asyncio
+
 import pytest
+from opentelemetry import trace
+from opentelemetry.trace import StatusCode
 
 from nooa import Agent
 from nooa.runtime.hooks import set_hooks
@@ -138,3 +142,102 @@ async def test_abandoned_generator_span_is_still_exported(in_memory_spans):
         "abandoned generator never exported its span"
     )
     assert not _get_active_spans(), f"span registry not drained: {_get_active_spans()}"
+
+
+@pytest.mark.asyncio
+async def test_generator_span_reactivates_across_tasks(in_memory_spans):
+    """Each resume restores native OTel context without leaking it to consumers."""
+    from nooa.tracing._hooks_impl import _get_active_spans
+
+    agent = _GeneratorAgent(llm=FakeLLMClient())
+    stream = agent.produce(2)
+    first_item_ready = asyncio.Event()
+    inspect_starting_registry = asyncio.Event()
+
+    async def first_resume():
+        item = await anext(stream)
+        first_item_ready.set()
+        await inspect_starting_registry.wait()
+        return item, dict(_get_active_spans())
+
+    starting_task = asyncio.create_task(first_resume())
+    await first_item_ready.wait()
+
+    # The generator is suspended, so neither its framework context nor its
+    # native OTel context may bleed into work performed by the consumer.
+    assert not trace.get_current_span().get_span_context().is_valid
+    assert await agent.between_yields(99) == 99
+
+    assert await asyncio.create_task(anext(stream)) == 1
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.create_task(anext(stream))
+
+    # Completion happened in another task. It must still remove the lifecycle
+    # span from the registry belonging to the task that started the stream.
+    inspect_starting_registry.set()
+    first_item, starting_registry = await starting_task
+    assert first_item == 0
+    assert starting_registry == {}
+
+    spans = in_memory_spans.get_finished_spans()
+    parent_name = _parent_namer(spans)
+    produce = next(s for s in spans if s.name == "method.produce")
+    children = [s for s in spans if s.name == "method.in_body"]
+    consumer = next(s for s in spans if s.name == "method.between_yields")
+
+    assert len(children) == 2
+    assert all(parent_name(span) == "method.produce" for span in children)
+    assert consumer.parent is None
+    assert produce.status.status_code is StatusCode.OK
+    assert not [event for event in produce.events if event.name == "exception"]
+
+
+@pytest.mark.asyncio
+async def test_cross_task_aclose_parents_traced_cleanup(in_memory_spans):
+    """A cleanup method run by aclose remains inside the generator lifecycle span."""
+
+    class CleanupAgent(Agent):
+        async def cleanup(self) -> None:
+            return None
+
+        async def values(self):
+            try:
+                yield 1
+            finally:
+                await self.cleanup()
+
+    agent = CleanupAgent(llm=FakeLLMClient())
+    stream = agent.values()
+    assert await asyncio.create_task(anext(stream)) == 1
+    await asyncio.create_task(stream.aclose())
+
+    spans = in_memory_spans.get_finished_spans()
+    stream_span = next(s for s in spans if s.name == "method.values")
+    cleanup_span = next(s for s in spans if s.name == "method.cleanup")
+
+    assert cleanup_span.parent is not None
+    assert cleanup_span.parent.span_id == stream_span.context.span_id
+
+
+@pytest.mark.asyncio
+async def test_cross_task_generator_cancellation_marks_span_error(in_memory_spans):
+    """Cancellation during a later resume ends the lifecycle span as an error."""
+
+    class SlowAgent(Agent):
+        async def values(self):
+            yield "ready"
+            await asyncio.Event().wait()
+
+    stream = SlowAgent(llm=FakeLLMClient()).values()
+    assert await asyncio.create_task(anext(stream)) == "ready"
+
+    resume = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+    resume.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await resume
+
+    [stream_span] = [
+        span for span in in_memory_spans.get_finished_spans() if span.name == "method.values"
+    ]
+    assert stream_span.status.status_code is StatusCode.ERROR
