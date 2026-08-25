@@ -236,6 +236,22 @@ def test_message_parses_safe_file_link_as_markdown() -> None:
     )
 
 
+def test_message_parses_single_slash_absolute_file_link() -> None:
+    from nooa_cli.tui.copyable_markdown import TerminalMarkdown
+
+    markdown = TerminalMarkdown("Open [the file](file:/tmp/example.py).")
+    tokens = [
+        child
+        for token in markdown.parsed
+        for child in (token.children or [])
+    ]
+
+    assert any(
+        token.type == "link_open" and token.attrGet("href") == "file:///tmp/example.py"
+        for token in tokens
+    )
+
+
 def test_message_between_preview_and_cell_output_preserves_natural_order() -> None:
     """``self.message()`` is called *inside* the cell body, so the
     ``∴`` code preview (fired on the enclosing ``ToolCallEvent``)
