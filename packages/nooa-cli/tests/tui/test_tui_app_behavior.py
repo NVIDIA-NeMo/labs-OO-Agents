@@ -2418,10 +2418,10 @@ async def test_cancel_status_is_immediate_and_stays_until_agent_cleanup_ack() ->
         assert h.app.request_agent_cancel(source="escape") is True
         # Acknowledge the accepted key press synchronously, before the agent
         # loop has even entered cancellation cleanup.
-        assert h.capture_status().startswith("Interrupting agent turn")
+        assert h.capture_status() == "· Interrupting agent turn"
         assert cleanup_started.is_set() is False
         await asyncio.wait_for(cleanup_started.wait(), timeout=1.0)
-        assert "Interrupting agent turn" in h.capture_status()
+        await h.wait_for(lambda: h.capture_status() == "• Interrupting agent turn")
         assert h.app.is_thinking() is True
         assert cleanup_done.is_set() is False
         release_cleanup.set()
@@ -2462,7 +2462,7 @@ async def test_cancel_status_ignores_stale_pre_interrupt_observation() -> None:
         assert h.app.request_agent_cancel(source="escape") is True
         h.app._on_agent_change(stale_state)
 
-        assert h.capture_status().startswith("Interrupting agent turn")
+        assert h.capture_status().endswith("Interrupting agent turn")
         await h.wait_for(lambda: not h.app.is_thinking())
 
 
