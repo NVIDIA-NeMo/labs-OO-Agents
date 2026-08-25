@@ -482,6 +482,11 @@ class TUIHarness(AbstractAsyncContextManager["TUIHarness"]):
         self._pipe.send_text(_key_sequence(key))
         await asyncio.sleep(0)
 
+    async def paste(self, text: str) -> None:
+        """Send one terminal bracketed-paste event."""
+        self._pipe.send_text(f"\x1b[200~{text}\x1b[201~")
+        await asyncio.sleep(0)
+
     async def resize_from_terminal(self, columns: int, rows: int) -> None:
         """Change terminal geometry and drive the supported redraw path."""
         output = self.output

@@ -543,6 +543,163 @@ async def test_input_backspace_deletes_char():
         await h.wait_input_equals("ab")
 
 
+async def test_small_bracketed_paste_remains_literal_and_normalizes_line_endings():
+    async with TUIHarness() as h:
+        await h.paste("one\r\ntwo\rthree")
+        await h.wait_input_equals("one\ntwo\nthree")
+
+
+async def test_large_paste_thresholds_use_utf8_bytes_or_line_count():
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    app = TUIApplication(display_mode="native-replay")
+    app._insert_bracketed_paste(app.input_buffer, "é" * 2047 + "x")
+    assert len(app.input_buffer.text) == 2048
+
+    app.input_buffer.reset()
+    app._insert_bracketed_paste(app.input_buffer, "é" * 2048)
+    assert len(app.input_buffer.text) == 1
+    assert app._resolve_paste_attachments(app.input_buffer.text) == "é" * 2048
+
+    app.input_buffer.reset()
+    nineteen_lines = "\n".join("x" for _ in range(19))
+    app._insert_bracketed_paste(app.input_buffer, nineteen_lines)
+    assert app.input_buffer.text == nineteen_lines
+
+    app.input_buffer.reset()
+    twenty_lines = "\n".join("x" for _ in range(20))
+    app._insert_bracketed_paste(app.input_buffer, twenty_lines)
+    assert len(app.input_buffer.text) == 1
+    assert app._resolve_paste_attachments(app.input_buffer.text) == twenty_lines
+
+
+async def test_reserved_private_use_input_cannot_alias_an_attachment():
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    app = TUIApplication(display_mode="native-replay")
+    payload = "\n".join(f"secret {index}" for index in range(20))
+    app._insert_bracketed_paste(app.input_buffer, payload)
+    marker = app.input_buffer.text
+
+    app.input_buffer.reset()
+    app.input_buffer.insert_text(marker)
+    assert app.input_buffer.text == f"\\U{ord(marker):08x}"
+    assert app._resolve_paste_attachments(app.input_buffer.text) == app.input_buffer.text
+
+    app.input_buffer.reset()
+    app._insert_bracketed_paste(app.input_buffer, marker)
+    assert app.input_buffer.text == f"\\U{ord(marker):08x}"
+    assert app._resolve_paste_attachments(app.input_buffer.text) == app.input_buffer.text
+
+
+async def test_reserved_private_use_prefill_is_escaped_with_cursor_at_end():
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    app = TUIApplication(display_mode="native-replay")
+    marker = chr(0xF0000)
+    app._prefill_input(f"a{marker}b")
+
+    assert app.input_buffer.text == "a\\U000f0000b"
+    assert app.input_buffer.cursor_position == len(app.input_buffer.text)
+
+
+async def test_deleted_large_paste_releases_its_payload():
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    app = TUIApplication(display_mode="native-replay")
+    payload = "\n".join(f"secret {index}" for index in range(20))
+    app._insert_bracketed_paste(app.input_buffer, payload)
+    assert app._paste_attachment_bytes == len(payload.encode("utf-8"))
+
+    app.input_buffer.reset()
+
+    assert app._paste_attachments == {}
+    assert app._paste_attachment_bytes == 0
+
+
+async def test_large_bracketed_paste_is_one_atomic_composer_character():
+    payload = "\n".join(f"line {index}" for index in range(20))
+    async with TUIHarness() as h:
+        await h.type_keys("before ")
+        await h.paste(payload)
+        await h.type_keys(" after")
+        await h.wait_for(lambda: len(h.capture_input()) == len("before  after") + 1)
+
+        draft = h.capture_input()
+        marker = draft[len("before ")]
+        assert h.app._resolve_paste_attachments(marker) == payload
+        label = "[Pasted text #1 · 20 lines]"
+        assert h.app._compact_composer_text(marker) == label
+        await h.wait_for(lambda: label in _last_screen_text(h.app))
+
+        h.app.input_buffer.cursor_position = len("before ") + 1
+        await h.press("backspace")
+        await h.wait_input_equals("before  after")
+
+        h.app.input_buffer.undo()
+        assert h.capture_input() == draft
+        h.app.input_buffer.cursor_position = len("before ")
+        await h.press("delete")
+        await h.wait_input_equals("before  after")
+
+
+async def test_large_paste_expands_exactly_on_submit_without_expanding_mentions(tmp_path):
+    mentioned = tmp_path / "typed.txt"
+    mentioned.write_text("typed file contents")
+    payload = "@pasted.txt\n" + "\n".join(f"payload {index}" for index in range(19))
+
+    async with TUIHarness() as h:
+        await h.type_keys("read @typed.txt then ")
+        await h.paste(payload)
+        await h.wait_for(lambda: len(h.capture_input()) == len("read @typed.txt then ") + 1)
+        from dataclasses import replace
+
+        state = h.app._agent_controller.state
+        assert state is not None
+        h.app._agent_controller._state = replace(
+            state,
+            workspace=replace(state.workspace, working_directory=str(tmp_path)),
+        )
+        await h.press("enter")
+        await h.wait_for(lambda: len(h.agent.messages_received) == 1)
+
+        submitted = h.agent.messages_received[0]
+        assert f"[typed.txt](<{mentioned.resolve()}>)" in submitted
+        assert submitted.endswith(payload)
+        assert "@pasted.txt" in submitted
+        assert h.capture_input() == ""
+        await h.press("up")
+        await h.wait_for(lambda: len(h.capture_input()) == len("read @typed.txt then ") + 1)
+
+
+async def test_attachment_boundary_does_not_create_a_mention_boundary(tmp_path):
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    mentioned = tmp_path / "secret.txt"
+    mentioned.write_text("secret")
+    app = TUIApplication(display_mode="native-replay")
+    payload = "X" + "y" * 4095
+    app._insert_bracketed_paste(app.input_buffer, payload)
+    marker = app.input_buffer.text
+
+    assert (
+        app._resolve_composer_submission(f"{marker}@secret.txt", mention_base=tmp_path)
+        == f"{payload}@secret.txt"
+    )
+    assert app._resolve_composer_submission(
+        f"{marker} @secret.txt", mention_base=tmp_path
+    ).endswith(f" [secret.txt](<{mentioned.resolve()}>)")
+
+
+async def test_large_whitespace_only_paste_is_not_submitted():
+    async with TUIHarness() as h:
+        await h.paste("\n" * 20)
+        await h.wait_for(lambda: len(h.capture_input()) == 1)
+        await h.press("enter")
+        await asyncio.sleep(0)
+        assert h.agent.messages_received == []
+
+
 async def test_input_history_up_on_empty_buffer():
     """With no queue, Up on an empty buffer recalls the previous submission."""
     async with TUIHarness() as h:
@@ -709,6 +866,28 @@ def _blocking_agent() -> FakeAgent:
     agent = FakeAgent()
     agent.block.clear()  # unset → handle() blocks on wait()
     return agent
+
+
+async def test_large_paste_queue_uses_compact_label_and_withdraw_restores_marker():
+    payload = "\n".join(f"queued {index}" for index in range(20))
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("trigger")
+        await h.wait_for(lambda: h.app.is_thinking())
+        h.app.complete_pending_input_handoff("trigger")
+
+        await h.paste(payload)
+        await h.wait_for(lambda: len(h.capture_input()) == 1)
+        marker = h.capture_input()
+        await h.press("enter")
+        await h.wait_for(lambda: h.app._pending_input_display() == ["[Pasted text #1 · 20 lines]"])
+        assert h.capture_queued() == [payload]
+        assert h.app.pending_input_echo_text(payload) == "[Pasted text #1 · 20 lines]"
+
+        await h.press("up")
+        await h.wait_input_equals(marker)
+        assert h.app._resolve_paste_attachments(h.capture_input()) == payload
+        assert h.app._pending_input_display() == []
 
 
 async def test_queue_displays_above_prompt_while_agent_working():
@@ -2539,9 +2718,7 @@ async def test_cancel_does_not_deliver_queued_message_until_cleanup_ack() -> Non
         release_cleanup.set()
         await asyncio.wait_for(cleanup_done.wait(), timeout=1.0)
         await h.wait_for(lambda: agent.messages_received == ["first", "queued"])
-        await h.wait_for(
-            lambda: "Interrupting agent turn" not in h.capture_status(), timeout=0.25
-        )
+        await h.wait_for(lambda: "Interrupting agent turn" not in h.capture_status(), timeout=0.25)
 
 
 async def test_escape_cancels_agent_turn_but_not_spawned_jobs() -> None:
