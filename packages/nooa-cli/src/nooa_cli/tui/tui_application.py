@@ -1069,6 +1069,7 @@ class TUIApplication:
         self._ctrl_c_exit_armed = False
         self._ctrl_c_exit_timer: asyncio.TimerHandle | None = None
         self._exit_hint_text = ""
+        self._interrupting_agent_turn = False
         self._transient_status_text = ""
         self._transient_status_style = "class:status"
         self._transient_status_timer: asyncio.TimerHandle | None = None
@@ -2712,7 +2713,9 @@ class TUIApplication:
         else:
             loop.call_soon_threadsafe(callback)
 
-    def _on_agent_change(self, _state: Any) -> None:
+    def _on_agent_change(self, state: Any) -> None:
+        if state is None or state.workspace.cancellation is not CancellationState.REQUESTED:
+            self._interrupting_agent_turn = False
         app = getattr(self, "_app", None)
         if app is not None and app.is_running:
             app.invalidate()
@@ -2736,7 +2739,8 @@ class TUIApplication:
         self._ensure_spinner_task()
 
     def runtime_cancelled(self) -> None:
-        """Render the existing interruption marker for a cancelled local turn."""
+        """Acknowledge completed cancellation and render its transcript marker."""
+        self._interrupting_agent_turn = False
         self.emit_block("\x1b[33m✗ Interrupted agent turn.\x1b[0m\n")
 
     def invalidate(self) -> None:
@@ -2759,8 +2763,14 @@ class TUIApplication:
         if self._agent_controller.state is None:
             return False
         accepted = self._agent_controller.interrupt()
-        if accepted and self._on_agent_activity is not None:
-            self._on_agent_activity()
+        if accepted:
+            # The runtime observation callback may arrive on another loop. Paint
+            # acknowledgement immediately so the key press never appears lost.
+            self._interrupting_agent_turn = True
+            if self._app.is_running:
+                self._app.invalidate()
+            if self._on_agent_activity is not None:
+                self._on_agent_activity()
         return accepted
 
     def _resume_input_cursor_following(self) -> None:
@@ -4012,8 +4022,10 @@ class TUIApplication:
         state = self._agent_controller.state
         if self._agent_controller.failure is not None:
             rows.append([("class:status", "Agent observation disconnected.")])
-        if state is not None and state.workspace.cancellation is CancellationState.REQUESTED:
-            rows.append([("class:status", f"{self._spinner_frame} cancelling agent turn...")])
+        if self._interrupting_agent_turn or (
+            state is not None and state.workspace.cancellation is CancellationState.REQUESTED
+        ):
+            rows.append([("class:status", "Interrupting agent turn")])
         elif self.is_thinking():
             rows.append([("class:status", f"{self._spinner_frame} thinking...")])
         if self._llm_probe_status_text:
