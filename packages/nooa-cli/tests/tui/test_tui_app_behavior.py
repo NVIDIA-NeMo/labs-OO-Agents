@@ -354,12 +354,19 @@ async def test_baseline_ctrl_d_exits():
         await h.wait_for(lambda: not h.app.is_running)
 
 
-async def test_baseline_ctrl_c_clears_input_and_requires_confirmation():
+async def test_ctrl_c_clears_input_then_confirms_idle_exit():
     async with TUIHarness() as h:
         await h.type_keys("discard this command")
         await h.wait_input_equals("discard this command")
+
+        # Clearing a draft is its own step and never arms or exits.
         await h.press("c-c")
         await h.wait_input_equals("")
+        assert "Press Ctrl+C again to exit" not in h.capture_status()
+        assert h.app.is_running
+
+        # With no active turn, the next press arms the existing safe exit.
+        await h.press("c-c")
         await h.wait_for(lambda: "Press Ctrl+C again to exit" in h.capture_status())
         assert h.app.is_running
 
@@ -953,7 +960,13 @@ async def test_interleaved_cmd_msg_msg_commands_fire_immediately():
         )
 
 
-async def test_queue_esc_soft_cancels_and_delivers_queue():
+async def test_escape_prefix_ambiguity_window_is_short():
+    async with TUIHarness() as h:
+        assert h.app._app.ttimeoutlen == pytest.approx(0.05)
+        assert h.app._app.timeoutlen == pytest.approx(0.05)
+
+
+async def test_bare_escape_interrupts_and_delivers_queued_input():
     agent = _blocking_agent()
     async with TUIHarness(agent=agent) as h:
         await h.submit_async("first")
@@ -962,6 +975,23 @@ async def test_queue_esc_soft_cancels_and_delivers_queue():
         await h.press("enter")
         await h.press("escape")
         await h.wait_for(lambda: agent.messages_received == ["first", "queued"])
+
+
+@pytest.mark.parametrize("key", ["option-[", "option-]"])
+async def test_option_brackets_do_not_interrupt_active_turn(key: str):
+    """Raw ESC-prefixed bracket bytes are Meta input, not standalone Escape."""
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("first")
+        await h.wait_for(lambda: h.app.is_thinking())
+
+        await h.press(key)
+        await h.wait_for(lambda: h.capture_input() in {"[", "]"})
+
+        assert h.app.is_thinking()
+        assert h.capture_input() == key[-1]
+        assert "Interrupting agent turn" not in h.capture_status()
+        agent.block.set()
 
 
 async def test_esc_prefers_active_slash_command_over_agent_interrupt():
@@ -1006,18 +1036,67 @@ async def test_cancelled_agent_run_async_propagates_to_agent_loop():
 # ╚══════════════════════════════════════════════════════════════════════╝
 
 
-async def test_hard_ctrl_c_interrupts_and_clears_buffer():
-    """C-c while the agent is working cancels the agent and clears the buffer."""
+async def test_ctrl_c_clears_draft_before_interrupting_active_turn():
+    """Each Ctrl-C advances exactly one clear → interrupt → exit step."""
     agent = _blocking_agent()
     async with TUIHarness(agent=agent) as h:
         await h.submit_async("first")
         await h.wait_for(lambda: h.app.is_thinking())
         await h.type_keys("in-progress")
         await h.wait_input_equals("in-progress")
+
         await h.press("c-c")
-        # Agent gets cancelled and the in-progress input is discarded.
+        await h.wait_input_equals("")
+        assert h.app.is_thinking()
+        assert "Press Ctrl+C again to exit" not in h.capture_status()
+
+        await h.press("c-c")
+        await h.wait_for(lambda: not h.app.is_thinking())
+        assert "Press Ctrl+C again to exit" in h.capture_status()
+
+
+async def test_ctrl_c_cancels_overlapping_command_and_agent_turn():
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("first")
+        await h.wait_for(lambda: h.app.is_thinking())
+        command_cancellations: list[bool] = []
+        h.app._on_cancel_command = lambda: command_cancellations.append(True) or True
+
+        await h.press("c-c")
+
+        await h.wait_for(lambda: not h.app.is_thinking())
+        assert command_cancellations == [True]
+        assert "Press Ctrl+C again to exit" in h.capture_status()
+
+
+async def test_ctrl_c_with_empty_composer_interrupts_active_turn():
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("first")
+        await h.wait_for(lambda: h.app.is_thinking())
+
+        await h.press("c-c")
+
         await h.wait_for(lambda: not h.app.is_thinking())
         assert h.capture_input() == ""
+        assert "Press Ctrl+C again to exit" in h.capture_status()
+
+
+async def test_ctrl_c_clears_keyboard_selection_before_interrupting():
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("first")
+        await h.wait_for(lambda: h.app.is_thinking())
+        await h.type_keys("draft")
+        h.app.input_buffer.start_selection()
+        h.app.input_buffer.cursor_left(count=2)
+
+        await h.press("c-c")
+
+        await h.wait_input_equals("")
+        assert h.app.is_thinking()
+        assert "Press Ctrl+C again to exit" not in h.capture_status()
 
 
 async def test_hard_agent_error_shown_in_output():
@@ -2313,8 +2392,8 @@ async def test_non_fullscreen_keeps_native_scrollback_path() -> None:
         assert h.app._fullscreen_invalidate_count == 0
 
 
-async def test_cancel_status_stays_cancelling_until_agent_cleanup_ack() -> None:
-    """Esc keeps a visible cancelling state until the agent turn unwinds."""
+async def test_cancel_status_is_immediate_and_stays_until_agent_cleanup_ack() -> None:
+    """Esc immediately acknowledges interruption until the agent turn unwinds."""
     agent = FakeAgent()
     step_started = ThreadGate()
     cleanup_started = ThreadGate()
@@ -2337,14 +2416,95 @@ async def test_cancel_status_stays_cancelling_until_agent_cleanup_ack() -> None:
         await h.wait_for(lambda: h.app.is_thinking())
         await asyncio.wait_for(step_started.wait(), timeout=1.0)
         assert h.app.request_agent_cancel(source="escape") is True
+        # Acknowledge the accepted key press synchronously, before the agent
+        # loop has even entered cancellation cleanup.
+        assert h.capture_status() == "· Interrupting agent turn"
+        assert cleanup_started.is_set() is False
         await asyncio.wait_for(cleanup_started.wait(), timeout=1.0)
-        assert "cancelling" in h.capture_status()
+        await h.wait_for(lambda: h.capture_status() == "• Interrupting agent turn")
         assert h.app.is_thinking() is True
         assert cleanup_done.is_set() is False
         release_cleanup.set()
         await asyncio.wait_for(cleanup_done.wait(), timeout=1.0)
         await h.wait_for(lambda: not h.app.is_thinking())
+        await h.wait_for(lambda: "Interrupting agent turn" not in h.capture_status())
         await h.wait_output_contains("Interrupted")
+
+
+async def test_fast_cancel_status_survives_runtime_ack_long_enough_to_render() -> None:
+    """A fast cancellation must not replace its acknowledgement before one frame."""
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("first")
+        await h.wait_for(lambda: h.app.is_thinking())
+
+        await h.press("escape")
+
+        await h.wait_for(lambda: "Interrupting agent turn" in h.capture_status())
+        await h.wait_for(lambda: "Interrupting agent turn" in _last_screen_text(h.app))
+        await asyncio.sleep(0.25)
+        assert "Interrupting agent turn" in h.capture_status()
+        assert "Interrupted agent turn" not in h.capture_output()
+
+        await h.wait_output_contains("Interrupted agent turn")
+        assert "Interrupting agent turn" not in h.capture_status()
+        await h.wait_for(lambda: "Interrupting agent turn" not in _last_screen_text(h.app))
+
+
+async def test_cancel_status_ignores_stale_pre_interrupt_observation() -> None:
+    agent = _blocking_agent()
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("first")
+        await h.wait_for(lambda: h.app.is_thinking())
+        stale_state = h.app._agent_controller.state
+        assert stale_state is not None
+
+        assert h.app.request_agent_cancel(source="escape") is True
+        h.app._on_agent_change(stale_state)
+
+        assert h.capture_status().endswith("Interrupting agent turn")
+        await h.wait_for(lambda: not h.app.is_thinking())
+
+
+async def test_observation_teardown_does_not_acknowledge_active_interrupt() -> None:
+    """Closing an observation must not complete an unrelated active turn."""
+    agent = FakeAgent()
+    cleanup_started = ThreadGate()
+    release_cleanup = ThreadGate()
+
+    async def step(_self: FakeAgent, _msg: str) -> None:
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cleanup_started.set()
+            await release_cleanup.wait()
+            raise
+
+    agent.queue(step)
+    async with TUIHarness(agent=agent) as h:
+        await h.submit_async("first")
+        await h.wait_for(lambda: h.app.is_thinking())
+        assert h.app.request_agent_cancel(source="escape") is True
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1.0)
+
+        callback_errors: list[BaseException] = []
+
+        def publish_teardown() -> None:
+            try:
+                h.app._on_agent_change(None)
+            except BaseException as exc:
+                callback_errors.append(exc)
+
+        producer = threading.Thread(target=publish_teardown)
+        producer.start()
+        producer.join(timeout=1.0)
+        assert not producer.is_alive()
+        assert callback_errors == []
+
+        await asyncio.sleep(0)
+        assert h.app._interrupt_status_acknowledged is False
+        assert h.capture_status().endswith("Interrupting agent turn")
+        release_cleanup.set()
 
 
 async def test_cancel_does_not_deliver_queued_message_until_cleanup_ack() -> None:
@@ -2375,10 +2535,13 @@ async def test_cancel_does_not_deliver_queued_message_until_cleanup_ack() -> Non
         assert h.app.request_agent_cancel(source="escape") is True
         await asyncio.wait_for(cleanup_started.wait(), timeout=1.0)
         assert agent.messages_received == ["first"]
-        assert "cancelling" in h.capture_status()
+        assert "Interrupting agent turn" in h.capture_status()
         release_cleanup.set()
         await asyncio.wait_for(cleanup_done.wait(), timeout=1.0)
         await h.wait_for(lambda: agent.messages_received == ["first", "queued"])
+        await h.wait_for(
+            lambda: "Interrupting agent turn" not in h.capture_status(), timeout=0.25
+        )
 
 
 async def test_escape_cancels_agent_turn_but_not_spawned_jobs() -> None:
@@ -2429,7 +2592,7 @@ async def test_repeated_ctrl_c_exits_while_cancel_is_pending() -> None:
         await asyncio.wait_for(step_started.wait(), timeout=1.0)
         await h.press("c-c")
         await asyncio.wait_for(cleanup_started.wait(), timeout=1.0)
-        assert "cancelling" in h.capture_status()
+        assert "Interrupting agent turn" in h.capture_status()
         assert "Press Ctrl+C again to exit" in h.capture_status()
         await h.press("c-c")
         await h.wait_for(lambda: not h.app.is_running)

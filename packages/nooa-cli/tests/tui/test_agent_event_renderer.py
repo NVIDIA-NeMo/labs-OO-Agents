@@ -205,6 +205,53 @@ def test_message_marks_only_agent_prose_for_unseen_notification() -> None:
     assert message[1]["agent_message"] is True
 
 
+def test_message_parses_safe_file_link_as_markdown() -> None:
+    from nooa_cli.tui.copyable_markdown import TerminalMarkdown
+
+    agent = _FakeAgent()
+    calls: list[tuple[Any, dict[str, Any]]] = []
+    renderer = AgentEventRenderer(
+        agent=agent,  # type: ignore[arg-type]
+        emit_text=lambda renderable, **kwargs: calls.append((renderable, kwargs)),
+        show_python=lambda: False,
+        show_diffs=lambda: True,
+        pending_code={},
+        colors=COLORS,
+    )
+    renderer.attach()
+
+    assert agent._render_message is not None
+    agent._render_message("Open [the file](file://path/to/file).")
+
+    markdown = next(renderable for renderable, _kwargs in calls if isinstance(renderable, Markdown))
+    assert isinstance(markdown, TerminalMarkdown)
+    tokens = [
+        child
+        for token in markdown.parsed
+        for child in (token.children or [])
+    ]
+    assert any(
+        token.type == "link_open" and token.attrGet("href") == "file:///path/to/file"
+        for token in tokens
+    )
+
+
+def test_message_parses_single_slash_absolute_file_link() -> None:
+    from nooa_cli.tui.copyable_markdown import TerminalMarkdown
+
+    markdown = TerminalMarkdown("Open [the file](file:/tmp/example.py).")
+    tokens = [
+        child
+        for token in markdown.parsed
+        for child in (token.children or [])
+    ]
+
+    assert any(
+        token.type == "link_open" and token.attrGet("href") == "file:///tmp/example.py"
+        for token in tokens
+    )
+
+
 def test_message_between_preview_and_cell_output_preserves_natural_order() -> None:
     """``self.message()`` is called *inside* the cell body, so the
     ``∴`` code preview (fired on the enclosing ``ToolCallEvent``)
