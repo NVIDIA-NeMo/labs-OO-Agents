@@ -57,6 +57,18 @@ async def test_explicit_return_completes_with_only_python_cell_tool():
     assert "python_cell()" in system_prompt
     tool = (fake_llm.last_tools or [])[0]
     assert "persistent Python session" in tool.description
+    assert "Already available without import" in tool.description
+    for name in (
+        "self",
+        "print()",
+        "pprint()",
+        "doc()",
+        "python_cell_state()",
+        "return_result()",
+        "asyncio",
+        "typing",
+    ):
+        assert f"`{name}`" in tool.description
     assert "plain-text replies do not execute work" in tool.description
     assert "return_result(value)" in tool.description
     assert "Restrictions (will throw)" in tool.description
