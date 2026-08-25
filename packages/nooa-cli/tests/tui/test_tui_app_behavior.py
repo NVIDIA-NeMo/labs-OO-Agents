@@ -2439,13 +2439,16 @@ async def test_fast_cancel_status_survives_runtime_ack_long_enough_to_render() -
         await h.wait_for(lambda: h.app.is_thinking())
 
         await h.press("escape")
-        await h.wait_output_contains("Interrupted agent turn")
 
-        assert "Interrupting agent turn" in h.capture_status()
+        await h.wait_for(lambda: "Interrupting agent turn" in h.capture_status())
         await h.wait_for(lambda: "Interrupting agent turn" in _last_screen_text(h.app))
         await asyncio.sleep(0.25)
         assert "Interrupting agent turn" in h.capture_status()
-        await h.wait_for(lambda: "Interrupting agent turn" not in h.capture_status())
+        assert "Interrupted agent turn" not in h.capture_output()
+
+        await h.wait_output_contains("Interrupted agent turn")
+        assert "Interrupting agent turn" not in h.capture_status()
+        await h.wait_for(lambda: "Interrupting agent turn" not in _last_screen_text(h.app))
 
 
 async def test_cancel_status_ignores_stale_pre_interrupt_observation() -> None:
