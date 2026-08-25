@@ -1932,7 +1932,15 @@ class TUIApplication:
         if isinstance(control, _FullscreenTranscriptControl):
             current = control.render_size
             if current is not None:
-                return current
+                # During a debounced resize this control can still expose the
+                # previous frame's width. Never project wider than the physical
+                # terminal or prompt_toolkit will clip the overflow before the
+                # next frame can update ``render_size``.
+                try:
+                    physical_width = max(1, int(self._app.output.get_size().columns))
+                except Exception:
+                    physical_width = current[0]
+                return min(current[0], physical_width), current[1]
         try:
             size = self._app.output.get_size()
             return max(1, int(size.columns)), max(1, int(size.rows) - 6)
