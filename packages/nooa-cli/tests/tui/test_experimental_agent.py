@@ -89,9 +89,10 @@ async def test_experimental_tui_agent_uses_only_python_cell(tmp_path):
         )
         assert "<python_state" in rendered_context
         state_block = rendered_context.split("<python_state", 1)[1].split("</python_state>", 1)[0]
+        assert "Imports: none" in state_block
         assert "Cell locals (includes method inputs): notification (dict)" in state_block
         assert "`self.v`: none" in rendered_context
-        assert f"self.shell.cwd: {tmp_path}" in rendered_context
+        assert f"`self.shell.cwd`: {tmp_path}" in rendered_context
         completion_events = [
             event
             for event in agent.event_manager.values()

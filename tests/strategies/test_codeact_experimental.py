@@ -312,11 +312,35 @@ async def test_python_state_uses_bounded_agent_cwd_fallback_and_local_names():
 
     rendered = await strategy_instance.python_state_context(runtime)
 
-    assert "self.cwd: /fallback/" in rendered
-    assert "self.shell.cwd" not in rendered
+    assert "`self.cwd`: /fallback/" in rendered
+    assert "`self.shell.cwd`" not in rendered
     assert "\nforged" not in rendered
     assert "\\nforged" not in rendered  # truncated before the injected suffix
     assert len(rendered) < 400
+
+
+@pytest.mark.asyncio
+async def test_python_state_context_lists_import_aliases_without_module_repr():
+    strategy_instance = CodeActExperimental(config=CodeActConfig(prefill=None))
+    call = type(
+        "Call",
+        (),
+        {
+            "bound_parameters": lambda self: {},
+            "execution_locals": {
+                "json_alias": __import__("json"),
+                "path_module": __import__("pathlib"),
+            },
+            "session_locals": None,
+        },
+    )()
+    runtime = type("Runtime", (), {"current_call": call, "agent": object()})()
+
+    rendered = await strategy_instance.python_state_context(runtime)
+
+    assert "Imports: json_alias → json, path_module → pathlib" in rendered
+    assert "<module " not in rendered
+    assert "Cell locals (includes method inputs): none" in rendered
 
 
 @pytest.mark.asyncio
