@@ -336,3 +336,45 @@ Current result:
 - Native-guidance NOOA LibrarySkill aggregate: 6/10.
 - This matches the previous patched LibrarySkill aggregate.
 - The pass/fail set is unchanged from the previous guidance-preservation rerun.
+
+## 2026-08-25 — Manufacturing FJSP Flakiness Check
+
+Reran `manufacturing-fjsp-optimization` to check whether the remaining
+TextSkill-vs-LibrarySkill difference is stable or caused by model variance.
+
+The check used:
+- SkillsBench checkout:
+  `/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench`
+- Credentials file:
+  `/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/.env`
+- NOOA model: `openai/openai/openai/gpt-5.5`
+- Sandbox: Docker
+- Artifact root:
+  `jobs/nooa-skillsbench-gpt55-manufacturing-flakiness-check/`
+
+Fresh rerun results:
+
+| Condition | Result | Notes |
+|---|---:|---|
+| `text_skill` | 0.0 | Scoreable verifier failure with `agent_return_code=0`, `error=null`, and `verifier_error=null`. |
+| `library_skill` | inconclusive | Interrupted after the agent stopped making progress before producing `agent/result.json` or verifier outputs. |
+
+The fresh TextSkill rerun failed despite the original 10-task TextSkill control
+passing this task. The verifier failure was:
+
+```text
+FAILED test_L3_local_minimal_right_shift_in_precedence_aware_order
+Not locally minimal for (1, 1): start=25 anchor=9. start-1 seems feasible.
+```
+
+Interpretation:
+- `manufacturing-fjsp-optimization` is not a stable one-run
+  TextSkill-only win.
+- The translated LibrarySkill did not strip the FJSP code snippets: the
+  generated README and LibrarySkill docstring both retain all seven original
+  fenced Python blocks from `SKILL.md`.
+- The remaining issue is behavioral reliability. Both skill modes leave the
+  model to implement the right-shift/local-minimality policy from guidance, and
+  the model can omit or misapply that rule in a run-specific way.
+- A fair comparison for this task needs repeated runs per condition, for
+  example 3 or more runs each, instead of relying on a single pass/fail sample.
