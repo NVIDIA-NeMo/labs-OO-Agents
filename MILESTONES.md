@@ -419,3 +419,56 @@ Current result:
   rerun after failing in the previous two LibrarySkill 10-task sweeps.
 - `fix-visual-stability` passed but had repeated Next dev-server readiness
   recovery failures during the rollout before ultimately reaching reward 1.0.
+
+## 2026-08-25 — Skill-Guided LibrarySkill Rerun
+
+Ran the same 10-task NOOA `library_skill` SkillsBench sample with packages
+generated from the standalone translation guidance in:
+`/Users/adevoto/.herdr/worktrees/nemo_oo_agents/feat-skill-translate/skills/nooa-skill-translation/SKILL.md`.
+
+This run did not call the in-repo `TextSkillTranslator` during package
+generation. A prebuilt package tree was generated under the job root according
+to the skill guidance, then copied into each rollout's
+`translated_library_skills/` directory. The generated packages:
+- exclude root `SKILL.md` files from package resources;
+- exclude `scripts/` trees from package resources;
+- expose safe Python functions as native LibrarySkill methods under public
+  APIs, with copied code living under private `_impl/` modules;
+- expose non-code resources through named resource methods;
+- avoid translation provenance and generic script-runner APIs in visible skill
+  docs.
+
+The run used:
+- SkillsBench checkout:
+  `/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench`
+- Credentials file:
+  `/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/.env`
+- NOOA model: `openai/openai/openai/gpt-5.5`
+- Sandbox: Docker
+- Condition: `library_skill`
+- Artifact root:
+  `jobs/nooa-skillsbench-gpt55-10-library-skill-guided/`
+
+Results:
+
+| Task | Skill-guided LibrarySkill |
+|---|---:|
+| `fix-visual-stability` | 1.0 |
+| `fix-erlang-ssh-cve` | 1.0 |
+| `video-silence-remover` | 0.0 |
+| `dynamic-object-aware-egomotion` | 0.0 |
+| `manufacturing-fjsp-optimization` | 0.0 |
+| `llm-prefix-cache-replay` | 1.0 |
+| `dapt-intrusion-detection` | 0.0 |
+| `offer-letter-generator` | 1.0 |
+| `parallel-tfidf-search` | 1.0 |
+| `reserves-at-risk-calc` | 0.0 |
+
+Current result:
+- Skill-guided NOOA LibrarySkill aggregate: 5/10.
+- All failures were scoreable task failures: `agent_return_code=0`, no agent
+  error, and no verifier infrastructure error in the summaries.
+- Versus the resource-preview translator rerun, this lost
+  `dynamic-object-aware-egomotion` and `dapt-intrusion-detection`.
+- The PCAP skill package did expose native helper methods from `pcap_utils.py`;
+  the failure is therefore not a package discovery or activation failure.
