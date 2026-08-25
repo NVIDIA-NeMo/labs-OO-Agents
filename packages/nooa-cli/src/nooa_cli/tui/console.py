@@ -7,12 +7,12 @@ Uses Catppuccin Mocha theme from https://catppuccin.com/palette/
 
 from rich.console import Console
 from rich.live import Live
-from rich.markdown import Markdown
 from rich.rule import Rule
 from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
+from .copyable_markdown import TerminalMarkdown
 from .theme import CATPPUCCIN_THEME, COLORS
 
 
@@ -91,7 +91,7 @@ class TUIConsole:
             self.console.print(
                 Rule(title="[agent]OO[/agent]", style=COLORS["surface2"], align="left")
             )
-        self.console.print(Markdown(cleaned), soft_wrap=soft_wrap)
+        self.console.print(TerminalMarkdown(cleaned), soft_wrap=soft_wrap)
 
     def print_error(self, message: str) -> None:
         """Print an error message."""
