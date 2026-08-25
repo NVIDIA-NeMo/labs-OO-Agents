@@ -22,8 +22,17 @@ import io
 import re
 from typing import Any
 
+from nooa.agentdoc._document import (
+    DocumentSubject,
+    collect_subject_references,
+    normalize_subjects,
+)
 from nooa.agentdoc._info import REQUIRED, CallableInfo, ModuleInfo, TypeInfo
-from nooa.agentdoc._metadata import is_expand_false
+from nooa.agentdoc._introspection import (
+    _extract_instance_values,
+    _instance_dict,
+    _is_structured_instance,
+)
 from nooa.agentdoc._structured import _ClassRef, _InstanceRef
 from nooa.agentdoc.protocols import SupportsInstanceValues
 
@@ -81,41 +90,6 @@ def _resolve_field_type_by_name(type_name: str, context_obj: type | None) -> typ
     return None
 
 
-def _collect_referenced_types(
-    seed_types: set[type],
-    *,
-    exclude: type | None = None,
-    max_depth: int,
-) -> list[type]:
-    """Collect referenced types with bounded breadth-first traversal.
-
-    ``seed_types`` are the direct references (depth 1). Each subsequent level
-    follows references from the preceding level until ``max_depth`` is reached.
-    """
-    from nooa.agentdoc._discover import discover_referenced_types
-
-    all_types: set[type] = set()
-    # Exclude the primary type from the seed too: a type that references itself in its
-    # own method signatures (common, e.g. DataFrame methods returning DataFrame) must
-    # not list itself under "Referenced Types".
-    frontier = {t for t in seed_types if t is not exclude}
-    for _ in range(max_depth):
-        if not frontier:
-            break
-        all_types.update(frontier)
-        next_frontier: set[type] = set()
-        for ref_type in frontier:
-            for new_type in discover_referenced_types(ref_type):
-                if (
-                    new_type not in all_types
-                    and not is_expand_false(new_type)
-                    and new_type is not exclude
-                ):
-                    next_frontier.add(new_type)
-        frontier = next_frontier
-    return sorted(all_types, key=lambda type_: type_.__name__)
-
-
 def _field_type_docstring(
     field_default: Any, context_obj: type | None, type_name: str | None = None
 ) -> str | None:
@@ -132,6 +106,72 @@ def _field_type_docstring(
         return None
     docstring = inspect.cleandoc(raw_doc)
     return docstring.split("\n")[0].strip()
+
+
+def _format_document_subject(
+    subject: DocumentSubject,
+    *,
+    concise: bool,
+    max_length: int | None = None,
+    indent: int = 0,
+) -> str:
+    """Format one already-normalized document subject without discovering references."""
+    info = subject.info
+    if isinstance(info, TypeInfo):
+        return _format_type_info(
+            info,
+            concise=concise,
+            type_depth=0,
+            max_length=max_length,
+            indent=indent,
+            context_obj=subject.represented_type,
+            instance_values=subject.values,
+            visibility_obj=subject.obj if subject.values is not None else None,
+        )
+    if isinstance(info, CallableInfo):
+        return _format_callable_info(info, concise=concise, type_depth=0, indent=indent)
+    if isinstance(info, ModuleInfo):
+        return _format_module_info(
+            info,
+            concise=concise,
+            concise_members=bool(getattr(subject.obj, "__agentdoc_concise_members__", False)),
+            indent=indent,
+        )
+    return _pformat_to_str(
+        subject.obj,
+        concise=concise,
+        inline_depth=0,
+        max_length=None,
+        max_string=None,
+        max_depth=3,
+        instance_mode="type",
+    )
+
+
+def render_document(objs: list[Any], *, concise: bool, inline_depth: int) -> str:
+    """Render primaries and one shared referenced-types section."""
+    subjects = normalize_subjects(objs)
+    sections = [_format_document_subject(subject, concise=concise) for subject in subjects]
+    references = collect_subject_references(subjects, max_depth=inline_depth)
+    if references:
+        sections.extend(("", "## Referenced Types"))
+        sections.extend(_format_document_subject(subject, concise=True) for subject in references)
+    return "\n".join(sections)
+
+
+def _render_inline_references(
+    subject: DocumentSubject, *, depth: int, max_length: int | None, indent: int
+) -> str:
+    """Render the historical inline reference suffix used by direct ``pformat`` calls."""
+    references = collect_subject_references([subject], max_depth=depth)
+    if not references:
+        return ""
+    ind = "    " * indent
+    rendered = [
+        _format_document_subject(ref, concise=True, max_length=max_length, indent=indent)
+        for ref in references
+    ]
+    return f"{ind}## Referenced Types\n" + "\n\n".join(rendered)
 
 
 def _pformat(
@@ -242,88 +282,9 @@ def _pformat(
             # Instance of a structured type. doc() deliberately ignores a custom
             # __repr__: documentation must retain the type's API contract.
             if instance_mode == "type":
-                # Show type structure with runtime values (for doc())
-                from nooa.agentdoc._structured import extract_type_info
-                from nooa.agentdoc._visibility import is_hidden_field
-                from nooa.agentdoc.registry import get_type_info_extractor
-
-                obj_type = type(_object)
-                # Check if instance has spec() overrides that could unhide class-hidden fields.
-                # spec(self, "field", hidden=False) in __init__ → per-instance opt-in.
-                _instance_fields_meta = (_instance_dict(_object) or {}).get(
-                    "_agentdoc_fields_docs"
-                ) or {}
-                _has_instance_overrides = any(
-                    meta.get("hidden") is False for meta in _instance_fields_meta.values()
-                )
-                extractor = get_type_info_extractor(obj_type)
-                if extractor:
-                    result = extractor(_object)
-                    if isinstance(result, tuple):
-                        type_info, values = result
-                    else:
-                        type_info = result
-                        values = _extract_instance_values(_object, result)
-                    # Filter with instance (supports instance-level spec() overrides)
-                    type_info = TypeInfo(
-                        name=type_info.name,
-                        base=type_info.base,
-                        fields=[
-                            f for f in type_info.fields if not is_hidden_field(_object, f.name)
-                        ],
-                        methods=type_info.methods,
-                        docstring=type_info.docstring,
-                    )
-                elif isinstance(_object, SupportsInstanceValues):
-                    if _has_instance_overrides:
-                        # Get all fields (including class-hidden) then re-filter by instance.
-                        # Use _skip_protocol to get raw fields; take methods from protocol path.
-                        raw_info = extract_type_info(
-                            obj_type, _skip_protocol=True, _include_hidden=True
-                        )
-                        protocol_info = extract_type_info(obj_type)
-                        type_info = TypeInfo(
-                            name=protocol_info.name,
-                            base=protocol_info.base,
-                            fields=[
-                                f for f in raw_info.fields if not is_hidden_field(_object, f.name)
-                            ],
-                            methods=protocol_info.methods,
-                            docstring=protocol_info.docstring,
-                        )
-                    else:
-                        type_info = extract_type_info(obj_type)
-                    values = _object.__instance_values__()
-                else:
-                    if _has_instance_overrides:
-                        raw_info = extract_type_info(
-                            obj_type, _skip_protocol=True, _include_hidden=True
-                        )
-                        protocol_info = extract_type_info(obj_type)
-                        type_info = TypeInfo(
-                            name=protocol_info.name,
-                            base=protocol_info.base,
-                            fields=[
-                                f for f in raw_info.fields if not is_hidden_field(_object, f.name)
-                            ],
-                            methods=protocol_info.methods,
-                            docstring=protocol_info.docstring,
-                        )
-                    else:
-                        type_info = extract_type_info(obj_type)
-                    values = _extract_instance_values(_object, type_info)
-
-                # Apply per-instance visibility in every extraction branch.
-                # This handles both hidden=False opt-ins and hidden=True overrides
-                # on fields already present in the type-level contract.
-                type_info = TypeInfo(
-                    name=type_info.name,
-                    base=type_info.base,
-                    fields=[f for f in type_info.fields if not is_hidden_field(_object, f.name)],
-                    methods=type_info.methods,
-                    docstring=type_info.docstring,
-                )
-
+                subject = normalize_subjects([_object])[0]
+                assert isinstance(subject.info, TypeInfo)
+                type_info, values = subject.info, subject.values or {}
                 _stream.write(
                     _format_type_info(
                         type_info,
@@ -331,7 +292,7 @@ def _pformat(
                         type_depth=inline_depth,
                         max_length=max_length,
                         indent=_indent,
-                        context_obj=obj_type,
+                        context_obj=type(_object),
                         instance_values=values,
                         visibility_obj=_object,
                     )
@@ -390,111 +351,6 @@ def _pformat_to_str(
         _indent=_indent,
     )
     return stream.getvalue()
-
-
-def _instance_dict(obj: Any) -> dict[str, Any] | None:
-    """Return an instance ``__dict__`` without invoking ``__getattr__``."""
-    try:
-        value = object.__getattribute__(obj, "__dict__")
-    except AttributeError:
-        return None
-    return value if isinstance(value, dict) else None
-
-
-def _is_structured_instance(obj: Any, *, respect_custom_repr: bool = True) -> bool:
-    """Check if object is an instance that should be formatted with type info.
-
-    Returns True for:
-    - Pydantic models
-    - dataclasses
-    - NamedTuples
-    - attrs classes
-    - Any custom class instance with __dict__ (not built-in types)
-
-    Args:
-        obj: Candidate instance.
-        respect_custom_repr: If true, plain classes with custom ``__repr__``
-            are treated as values. ``doc()`` disables this to retain type docs.
-
-    Returns False for:
-    - Types (classes themselves)
-    - Built-in types (str, int, list, dict, etc.)
-    - None
-    """
-    if isinstance(obj, type):
-        return False
-
-    # Skip built-in types and None
-    if obj is None:
-        return False
-
-    if isinstance(obj, (str, int, float, bool, bytes, bytearray)):
-        return False
-
-    from nooa.agentdoc._structured import _ClassRef, _InstanceRef
-
-    if isinstance(obj, (_ClassRef, _InstanceRef)):
-        return False
-
-    obj_type = type(obj)
-
-    # Check for NamedTuple BEFORE checking for regular tuples
-    # NamedTuples have a _fields attribute
-    if (
-        hasattr(obj_type, "_fields")
-        and isinstance(getattr(obj_type, "_fields", None), tuple)
-        and isinstance(obj, tuple)
-    ):
-        return True
-
-    # Now safe to exclude regular tuples, lists, sets, dicts
-    if isinstance(obj, (list, tuple, set, frozenset, dict)):
-        return False
-
-    # Pydantic (check before builtins guard — classes defined in exec()/REPL
-    # get __module__='builtins' but are still structured types)
-    if hasattr(obj_type, "model_fields"):
-        return True
-
-    # dataclass
-    import dataclasses
-
-    if dataclasses.is_dataclass(obj_type):
-        return True
-
-    # attrs
-    if hasattr(obj_type, "__attrs_attrs__"):
-        return True
-
-    # Skip if it's a built-in type (range, slice, memoryview, etc.)
-    if obj_type.__module__ == "builtins":
-        return False
-
-    # pformat() respects a custom __repr__, while doc() always renders the
-    # type-level API contract and augments it with runtime instance fields.
-    if respect_custom_repr:
-        for klass in obj_type.__mro__:
-            if klass is object:
-                break
-            if "__repr__" in klass.__dict__:
-                return False
-
-    # In doc mode, every non-builtin instance is documentable even when an
-    # empty/private-only __slots__ leaves it with no runtime values. pformat()
-    # still requires a public slot before choosing structured value rendering.
-    if _instance_dict(obj) is None:
-        if not respect_custom_repr:
-            return True
-        return any(
-            slot
-            for klass in obj_type.__mro__
-            if klass is not object
-            for slot in getattr(klass, "__slots__", ())
-            if not slot.startswith("_")
-        )
-
-    # Any other custom class instance with __dict__
-    return True
 
 
 def _format_type_info(
@@ -697,72 +553,21 @@ def _format_type_info(
         if truncated_methods:
             lines.append(f"{ind}    # ... +{truncated_methods} more methods")
 
-    # Add Referenced Types section if we have context and type_depth > 0
+    # Direct pformat() keeps its historical inline suffix, but delegates graph policy.
     if context_obj is not None and type_depth > 0:
-        from nooa.agentdoc._discover import (
-            _extract_types_from_hint,
-            _is_custom_type,
-            discover_referenced_types,
-        )
-        from nooa.agentdoc._structured import extract_type_info
-        from nooa.agentdoc._visibility import is_hidden_field as _is_hidden_field
-
-        visible_field_names = {field.name for field in info.fields}
-        seed_set: set[type] = {
-            t
-            for t in discover_referenced_types(
+        suffix = _render_inline_references(
+            DocumentSubject(
                 context_obj,
-                field_names=visible_field_names if visibility_obj is not None else None,
-            )
-            if not is_expand_false(t)
-        }
-
-        # Also discover types from extra instance attributes
-        if instance_values:
-            extra_discovered: set[type] = set()
-
-            for name, value in instance_values.items():
-                if name.startswith("_"):
-                    continue
-                if visibility_obj is not None and _is_hidden_field(visibility_obj, name):
-                    continue
-                # Skip callables unless they're classes
-                if callable(value) and not isinstance(value, type):
-                    continue
-
-                # Extract type from the value
-                value_type = type(value)
-                if isinstance(value, type):
-                    # It's a class itself (like WorkerAgent = WorkerAgent)
-                    value_type = value
-
-                # Extract types from the value's type
-                _extract_types_from_hint(value_type, extra_discovered)
-
-            # Filter to only custom types and add to seed_set
-            for extra_type in extra_discovered:
-                if _is_custom_type(extra_type) and not is_expand_false(extra_type):
-                    seed_set.add(extra_type)
-
-        # Collect referenced types to the requested depth, then render them flat.
-        referenced_types = _collect_referenced_types(
-            seed_set, exclude=context_obj, max_depth=type_depth
+                info,
+                instance_values,
+                context_obj if isinstance(context_obj, type) else type(context_obj),
+            ),
+            depth=type_depth,
+            max_length=max_length,
+            indent=indent,
         )
-        if referenced_types:
-            lines.append(f"{ind}## Referenced Types")
-
-            for ref_type in referenced_types:
-                ref_info = extract_type_info(ref_type)
-                ref_doc = _format_type_info(
-                    ref_info,
-                    concise=True,
-                    type_depth=0,  # All types already collected — no nested ## sections
-                    max_length=max_length,
-                    indent=indent,
-                    context_obj=ref_type,
-                )
-                lines.append(ref_doc)
-                lines.append("")
+        if suffix:
+            lines.append(suffix)
 
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).rstrip("\n")
 
@@ -826,33 +631,17 @@ def _format_callable_info(
     else:
         lines.append(f"{ind}    ...")
 
-    # Add Referenced Types section if we have context and type_depth > 0
-    # (not when formatting as a method within a class)
+    # Direct pformat() keeps its historical inline suffix, but delegates graph policy.
     if context_obj is not None and type_depth > 0 and not as_method:
-        from nooa.agentdoc._discover import discover_referenced_types
-        from nooa.agentdoc._structured import extract_type_info
-
-        seed_set = {t for t in discover_referenced_types(context_obj) if not is_expand_false(t)}
-        referenced_types = _collect_referenced_types(
-            seed_set, exclude=context_obj, max_depth=type_depth
+        suffix = _render_inline_references(
+            DocumentSubject(context_obj, info),
+            depth=type_depth,
+            max_length=None,
+            indent=indent,
         )
-
-        if referenced_types:
+        if suffix:
             lines.append("")
-            lines.append(f"{ind}## Referenced Types")
-
-            for ref_type in referenced_types:
-                ref_info = extract_type_info(ref_type)
-                ref_doc = _format_type_info(
-                    ref_info,
-                    concise=True,
-                    type_depth=0,  # All types already collected — no nested ## sections
-                    max_length=None,
-                    indent=indent,
-                    context_obj=ref_type,
-                )
-                lines.append(ref_doc)
-                lines.append("")
+            lines.append(suffix)
 
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).rstrip("\n")
 
@@ -1193,106 +982,6 @@ def _format_instance_repr(
                 return r
 
     return f"{type_name}({', '.join(parts)})"
-
-
-def _extract_instance_values(obj: Any, type_info: TypeInfo) -> dict[str, Any]:
-    """Extract current field values from an instance.
-
-    Args:
-        obj: Instance to extract values from
-        type_info: TypeInfo describing the type
-
-    Returns:
-        Dictionary mapping field names to current values
-    """
-    values = {}
-
-    # First, get values for type fields
-    obj_type = type(obj)
-
-    # Respect Pydantic's exclude=True — those fields often contain large
-    # internal state (e.g. captured_locals with arbitrary user objects that
-    # can trigger expensive I/O when formatted, blocking the event loop).
-    _excluded_fields: set[str] = set()
-    if hasattr(obj_type, "model_fields"):
-        _excluded_fields = {
-            name
-            for name, field_info in obj_type.model_fields.items()
-            if getattr(field_info, "exclude", False)
-        }
-
-    obj_dict = _instance_dict(obj) or {}
-
-    # Collect slot names for __slots__-based classes (no __dict__)
-    _slots: set[str] = set()
-    for cls in obj_type.__mro__:
-        slots = getattr(cls, "__slots__", ())
-        if isinstance(slots, str):
-            _slots.add(slots)
-        else:
-            _slots.update(slots)
-
-    for field in type_info.fields:
-        if field.name in _excluded_fields:
-            continue
-        # Read from __dict__ first (instance data, always safe).
-        if field.name in obj_dict:
-            values[field.name] = obj_dict[field.name]
-        elif field.name in _slots:
-            # A subclass may replace an inherited slot with an arbitrary
-            # descriptor. Only invoke the concrete member descriptor found by
-            # static lookup; properties and custom descriptors are not safe.
-            slot_descriptor = inspect.getattr_static(obj_type, field.name, _MISSING)
-            if inspect.ismemberdescriptor(slot_descriptor):
-                try:
-                    values[field.name] = slot_descriptor.__get__(obj, obj_type)
-                except AttributeError:
-                    pass
-        elif isinstance(obj, dict) and field.name in obj:
-            # TypedDict instances are dicts
-            values[field.name] = obj[field.name]
-        else:
-            # Fall back to class-level plain values (non-descriptors).
-            # This handles annotated class defaults like `x: int = 5`.
-            # Descriptors (property, classmethod, etc.) are skipped — they
-            # can trigger arbitrary I/O.
-            class_val = inspect.getattr_static(obj_type, field.name, _MISSING)
-            if (
-                class_val is not _MISSING
-                and inspect.getattr_static(type(class_val), "__get__", None) is None
-            ):
-                values[field.name] = class_val
-
-    # Also include runtime-only attributes that are not declared type fields.
-    # Most objects store them in __dict__; Pydantic models with extra="allow"
-    # store them separately in __pydantic_extra__.
-    from nooa.agentdoc._visibility import is_hidden_field as _is_hidden_field
-
-    def _include_dynamic(name: str, value: Any) -> bool:
-        return (
-            name not in values
-            and not name.startswith("_")
-            and not callable(value)
-            and not _is_hidden_field(obj, name)
-            and name not in _excluded_fields
-        )
-
-    for name, value in obj_dict.items():
-        if _include_dynamic(name, value):
-            values[name] = value
-
-    pydantic_extra = None
-    if hasattr(obj_type, "model_fields"):
-        try:
-            pydantic_extra = object.__getattribute__(obj, "__pydantic_extra__")
-        except AttributeError:
-            pass
-    if isinstance(pydantic_extra, dict):
-        for name, value in pydantic_extra.items():
-            if _include_dynamic(name, value):
-                values[name] = value
-
-    return values
 
 
 def _format_nested_instance(
