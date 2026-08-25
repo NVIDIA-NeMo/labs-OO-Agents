@@ -157,7 +157,7 @@ function extractOutput(attrs: Record<string, unknown>): string | null {
 
 function formatToolCallContent(tc: ToolCall): { content: string; lang: string } {
   if (
-    tc.name === 'execute_python' &&
+    ['execute_python', 'python_cell'].includes(tc.name) &&
     typeof tc.arguments === 'object' &&
     tc.arguments !== null &&
     'code' in tc.arguments

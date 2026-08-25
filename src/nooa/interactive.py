@@ -522,8 +522,8 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
         ## Work ethic
 
-        Do ALL the work before returning. Use as many ``execute_python``
-        calls as needed — explore, implement, test, iterate. A turn that
+        Do ALL the work before returning. Use as many execution cells
+        as needed — explore, implement, test, iterate. A turn that
         returns after one or two cells when the task clearly needs more
         is a bug, except when yielding for a live background dependency.
         The only reasons to call ``return_result`` are:
