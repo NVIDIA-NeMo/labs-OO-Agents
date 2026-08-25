@@ -155,3 +155,43 @@ def test_console_theme_refresh_replaces_console_without_disturbing_temporary_the
     # The old console's temporary scope remains balanced and independently usable.
     assert original.get_style("temporary").bold is True
     original.pop_theme()
+
+
+def test_console_theme_refresh_rebinds_active_spinner(monkeypatch) -> None:
+    from nooa_cli.tui import console as console_module
+    from nooa_cli.tui.console import TUIConsole
+
+    instances = []
+
+    class FakeLive:
+        def __init__(self, _renderable, *, console, **_kwargs) -> None:
+            self.console = console
+            self.started = False
+            self.stopped = False
+            instances.append(self)
+
+        def start(self) -> None:
+            self.started = True
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    monkeypatch.setattr(console_module, "Live", FakeLive)
+    tui_console = TUIConsole()
+    original_console = tui_console.console
+    tui_console.start_spinner("still working")
+    old_live = tui_console._live_spinner
+
+    tui_console.refresh_theme()
+
+    assert old_live is not None
+    assert old_live.stopped is True
+    assert tui_console.console is not original_console
+    assert tui_console._live_spinner is instances[-1]
+    assert tui_console._live_spinner.console is tui_console.console
+    assert tui_console._live_spinner.started is True
+    assert tui_console._spinner_message == "still working"
+
+    tui_console.stop_spinner()
+    assert instances[-1].stopped is True
+    assert tui_console._live_spinner is None

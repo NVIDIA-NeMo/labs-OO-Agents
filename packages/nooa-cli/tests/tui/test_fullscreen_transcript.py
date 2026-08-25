@@ -4254,3 +4254,36 @@ def test_fullscreen_theme_refresh_recolors_retained_agent_event_syntax() -> None
         assert app._fullscreen_transcript.text.count("def greet") == 1
     finally:
         theme.set_theme(original_theme)
+
+
+@pytest.mark.asyncio
+async def test_native_replay_theme_refresh_requests_same_width_replay() -> None:
+    from nooa_cli.tui.tui_application import (
+        TranscriptBlock,
+        TUIApplication,
+        _ResizeReplayQueueItem,
+    )
+
+    from .tui_app_harness import MutableRecordingOutput
+
+    output = MutableRecordingOutput(columns=80, rows=24)
+    with create_app_session(input=DummyInput(), output=output):
+        app = TUIApplication(display_mode=DisplayMode.NATIVE_REPLAY)
+    app._loop = asyncio.get_running_loop()
+    app._block_queue = asyncio.Queue()
+    app._resize_replays_enabled = True
+    app._resize_reflow.observe((80, 24))
+    app.emit_block("old theme\n", replay=lambda: "new theme\n")
+
+    app.refresh_style()
+
+    assert app._resize_reflow.replay_required is True
+    assert app._resize_reflow.pending_width == 80
+    await asyncio.sleep(0.1)
+    queued = app._block_queue.get_nowait()
+    assert isinstance(queued, TranscriptBlock)
+    queued = app._block_queue.get_nowait()
+    assert isinstance(queued, _ResizeReplayQueueItem)
+    assert queued.request.required is True
+    assert queued.request.width == 80
+    app._cancel_resize_replay_work()
