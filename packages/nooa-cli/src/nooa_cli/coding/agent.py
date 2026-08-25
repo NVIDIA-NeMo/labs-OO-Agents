@@ -46,9 +46,13 @@ class CodingAgent(InteractiveAgent):
     returns immediately; prefer it over awaiting ``delegate()`` when the report is
     not needed before you continue. Run concurrent delegates only for read-only work
     or when each mutating worker has its own isolated worktree; otherwise serialize
-    mutations because workers share the current checkout. Reports arrive in later ``delegates``
-    notifications under ``notification["delegates"]`` as dictionaries containing
-    ``objective`` and ``report``. Inspect and integrate them before final verification.
+    mutations because workers share the current checkout. Reports arrive in a later turn
+    under ``notification["delegates"]`` as dictionaries containing ``objective`` and
+    ``report``. Never poll a spawned handle with ``state``/``values``, wait with
+    ``asyncio.sleep()``, call ``self.delegates.get()``, or repeatedly inspect queue
+    status. When no independent work remains, immediately return ``WAIT``; the host
+    will invoke a new turn when the report arrives. Inspect and integrate that report
+    before final verification.
 
     Work until the newest request is complete or genuinely needs user input. Use
     as many execution cells as necessary, inspect each result, and never claim a
@@ -252,10 +256,14 @@ class CodingAgent(InteractiveAgent):
         Prefer this over awaiting ``delegate()`` when the report is not required before
         continuing. State the outcome, scope, and whether edits are allowed in
         ``objective``. Only overlap read-only workers or workers assigned separate
-        worktrees; serialize edits in one checkout. Continue useful controller work while it runs. Its report arrives
-        in a later ``delegates`` notification. If the report is the only remaining
-        dependency, finish the current turn with ``WAIT``; inspect and integrate the
-        later report before final verification. Each notification item is
+        worktrees; serialize edits in one checkout. Continue useful controller work while
+        it runs. Its report arrives in a later ``delegates`` notification. Never poll
+        the returned handle, sleep to wait, call ``self.delegates.get()``, or repeatedly
+        inspect queue state. If the report is the only remaining dependency, immediately
+        finish the current turn with
+        ``return_result(RespondReason.WAIT, explanation="waiting for <label>")``. The
+        host will invoke a new turn with the completed report; inspect and integrate it
+        before final verification. Each notification item is
         ``{"objective": <str>, "report": <str>}``, so concurrent jobs remain identifiable.
         The host displays a short label derived from the objective while the worker and
         notification retain the complete text. Pass ``label`` to override the display

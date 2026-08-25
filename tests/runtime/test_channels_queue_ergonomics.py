@@ -21,7 +21,7 @@ import asyncio
 
 import pytest
 
-from nooa.runtime.channels import Channel, QueueManager
+from nooa.runtime.channels import Channel, JobHandle, QueueManager
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -36,6 +36,20 @@ class FakeEventManager:
 
     def add(self, event) -> None:
         self.events.append(event)
+
+
+def test_spawn_docs_explain_channel_driven_waiting():
+    """QueueManager documents waiting without assuming an agent response protocol."""
+    manager_docs = QueueManager.__doc__ or ""
+    spawn_docs = QueueManager.spawn.__doc__ or ""
+    handle_docs = JobHandle.__doc__ or ""
+
+    assert "``spawn()`` is channel-driven" in manager_docs
+    assert "not a completion-waiting primitive" in manager_docs
+    assert "through ``race()`` rather than polling" in spawn_docs
+    assert "yield the current turn" in spawn_docs
+    assert "does not assume a response protocol" in spawn_docs
+    assert "not completion-waiting primitives" in handle_docs
 
 
 # ---------------------------------------------------------------------------

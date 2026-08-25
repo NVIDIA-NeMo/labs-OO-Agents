@@ -113,14 +113,6 @@ class CodeActExperimental(CodeActStrategy):
         manually constructing large outputs. Define reusable helpers at the top of
         a cell. Existing methods on `self` may be called with `await` when async.
 
-        Reserve delegation for bounded tasks that benefit from an isolated context
-        and are strictly simpler than the current task. If `self`
-        exposes `spawn(...)`, prefer it for independent work: it returns immediately,
-        so continue useful work while the report runs. Await `delegate(...)` only when
-        its report is required before continuing. If a spawned report is your only
-        remaining dependency and the method defines a background-wait result, use that
-        documented result; inspect the later notification before final completion.
-
         ## Restrictions (will throw)
 
         - `eval`, `exec`, `compile`, `__import__`, `input`, `breakpoint`

@@ -486,8 +486,15 @@ def test_coding_agent_prompt_exposes_bounded_delegation(tmp_path):
             "You are a careful software-development agent working in one local repository."
         )
         assert "spawn" in rendered
-        assert "prefer it over awaiting ``delegate()``" in (CodingAgent.__doc__ or "")
-        assert "Reports arrive in later ``delegates``" in (CodingAgent.__doc__ or "")
+        prompt = CodingAgent.__doc__ or ""
+        assert "prefer it over awaiting ``delegate()``" in prompt
+        assert 'notification["delegates"]' in prompt
+        assert "Never poll a spawned handle" in prompt
+        assert "asyncio.sleep()" in prompt
+        assert "immediately return ``WAIT``" in prompt
+        assert "will invoke a new turn when the report arrives" in prompt
+        assert "serialize" in prompt
+        assert "mutations" in prompt
     finally:
         # This sync test does not start shell work; close is covered elsewhere.
         pass
