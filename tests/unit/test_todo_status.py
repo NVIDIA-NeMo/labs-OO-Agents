@@ -27,7 +27,7 @@ def test_status_hides_description_payload_and_advertises_inspection() -> None:
     assert "secret description payload" not in output
     assert "secret comment payload" not in output
     assert "large" not in output
-    assert "inspect: self.todo.get(id)" in output
+    assert "Hint: inspect: self.todo.get(id)" in output
     assert "list all" not in output
     assert "prune done" not in output
 
@@ -49,7 +49,7 @@ def test_status_prioritizes_active_work_and_recent_done_history() -> None:
     assert "old done" not in output
     assert "recent done" not in output
     assert "… +2 not shown (2 done)" in output
-    assert "list all: self.todo.list_todos()" in output
+    assert "Hint: list all: self.todo.list_todos()" in output
     assert "prune done: self.todo.clear_done()" in output
 
 
