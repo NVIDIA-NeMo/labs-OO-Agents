@@ -26,7 +26,7 @@ class TerminalMarkdown(Markdown):
 
     def __init__(self, markup: str, **kwargs: Any) -> None:
         super().__init__(markup, **kwargs)
-        if "file://" not in markup.lower():
+        if "file:" not in markup.lower():
             return
         parser = MarkdownIt().enable("strikethrough").enable("table")
         default_validate = parser.validateLink
