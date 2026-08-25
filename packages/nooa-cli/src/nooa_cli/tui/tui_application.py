@@ -3321,13 +3321,30 @@ class TUIApplication:
 
     def complete_pending_input_handoff(self, text: str) -> None:
         """Retire the submissions represented by one consumed queue item."""
-        for represented in range(len(self._pending_input_handoff), 0, -1):
-            combined = "\n".join(
-                handoff.text for handoff in self._pending_input_handoff[:represented]
+        combined = ""
+        prefixes: list[str] = []
+        for handoff in self._pending_input_handoff:
+            combined = f"{combined}\n{handoff.text}" if prefixes else handoff.text
+            prefixes.append(combined)
+
+        consumed = next(
+            (index for index, candidate in enumerate(prefixes, 1) if candidate == text),
+            None,
+        )
+        if consumed is None:
+            # A runtime-owned prefix may precede the TUI submissions. Prefer
+            # the longest suffix so repeated handoffs cannot match too early.
+            consumed = next(
+                (
+                    index
+                    for index in range(len(prefixes), 0, -1)
+                    if text.endswith(f"\n{prefixes[index - 1]}")
+                ),
+                None,
             )
-            if text == combined or text.endswith(f"\n{combined}"):
-                del self._pending_input_handoff[:represented]
-                break
+        if consumed is not None:
+            del self._pending_input_handoff[:consumed]
+
         else:
             # A callback can arrive after another consumer has advanced the
             # queue. Retire the matching admission without dropping older rows.
