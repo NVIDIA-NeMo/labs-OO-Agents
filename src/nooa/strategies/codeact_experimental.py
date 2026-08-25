@@ -105,7 +105,7 @@ class CodeActExperimental(CodeActStrategy):
             )
             visible = var_items[:20]
             omitted = len(var_items) - len(visible)
-            suffix = f" (+{omitted} more)" if omitted else ""
+            suffix = f" (+{omitted} more; `print(python_state())`)" if omitted else ""
             items = ", ".join(
                 f"{self._python_state_label(name, max_chars=80)} "
                 f"({self._python_state_label(type_name, max_chars=80)})"
@@ -117,7 +117,11 @@ class CodeActExperimental(CodeActStrategy):
 
         if local_items:
             visible = local_items[:20]
-            suffix = f" (+{len(local_items) - len(visible)} more)" if len(local_items) > 20 else ""
+            suffix = (
+                f" (+{len(local_items) - len(visible)} more; `print(python_state())`)"
+                if len(local_items) > 20
+                else ""
+            )
             items = ", ".join(
                 f"{self._python_state_label(name, max_chars=80)} "
                 f"({self._python_state_label(type_name, max_chars=80)})"
@@ -128,10 +132,45 @@ class CodeActExperimental(CodeActStrategy):
             lines.extend(("", "Cell locals: none"))
         return "\n".join(lines)
 
+    def _build_builtins(self, runtime: RuntimeServices, call: "CurrentCall") -> dict[str, Any]:
+        builtins = super()._build_builtins(runtime, call)
+
+        def python_state() -> dict[str, dict[str, str]]:
+            """Return the complete name-to-type inventory for persistent and cell state."""
+            persistent = getattr(runtime.agent, "vars", {})
+            live = call.execution_locals or call.session_locals or {}
+            input_names = set(call.bound_parameters())
+            visible = {
+                name: value
+                for name, value in live.items()
+                if isinstance(name, str)
+                and name != "Out"
+                and not name.startswith("_")
+                and name not in input_names
+                and not isinstance(value, type)
+                and not callable(value)
+            }
+            return {
+                "self.v": {str(name): type(value).__name__ for name, value in persistent.items()},
+                "cell_locals": {
+                    name: type(value).__name__
+                    for name, value in visible.items()
+                    if not isinstance(value, ModuleType)
+                },
+                "imports": {
+                    name: value.__name__
+                    for name, value in visible.items()
+                    if isinstance(value, ModuleType)
+                },
+            }
+
+        builtins["python_state"] = python_state
+        return builtins
+
     def _always_available_text(self) -> str:
         return (
             "Always available without import: `self`, `print()`, `pprint()`, `doc()`, "
-            "`return_result()`, plus stdlib `asyncio` and `typing`."
+            "`python_state()`, `return_result()`, plus stdlib `asyncio` and `typing`."
         )
 
     def _python_tool_name(self) -> str:

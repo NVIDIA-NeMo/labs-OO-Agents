@@ -203,7 +203,7 @@ async def test_python_state_context_bounds_many_values():
 
     rendered = await strategy_instance.python_state_context(runtime)
 
-    assert "(+20 more)" in rendered
+    assert "(+20 more; `print(python_state())`)" in rendered
     assert "value_19" in rendered
     assert "value_20" not in rendered
     assert len(rendered) < 5_000
@@ -308,3 +308,37 @@ async def test_python_state_uses_bounded_agent_cwd_fallback_and_local_names():
     assert "\nforged" not in rendered
     assert "\\nforged" not in rendered  # truncated before the injected suffix
     assert len(rendered) < 400
+
+
+@pytest.mark.asyncio
+async def test_python_state_helper_returns_complete_inventory():
+    strategy_instance = CodeActExperimental(config=CodeActConfig(prefill=None))
+    call = type(
+        "Call",
+        (),
+        {
+            "bound_parameters": lambda self: {"question": "input"},
+            "execution_locals": {
+                "Out": object(),
+                "question": "input",
+                "json_alias": __import__("json"),
+                **{f"value_{index:02}": index for index in range(25)},
+            },
+            "session_locals": None,
+            "kwargs": {},
+            "return_type": str,
+        },
+    )()
+    agent = type("Agent", (), {"vars": {"plan": "draft"}})()
+    runtime = type("Runtime", (), {"agent": agent})()
+
+    builtins = strategy_instance._build_builtins(runtime, call)
+    inventory = builtins["python_state"]()
+
+    assert inventory["self.v"] == {"plan": "str"}
+    assert len(inventory["cell_locals"]) == 25
+    assert inventory["cell_locals"]["value_24"] == "int"
+    assert "question" not in inventory["cell_locals"]
+    assert "Out" not in inventory["cell_locals"]
+    assert "json_alias" not in inventory["cell_locals"]
+    assert inventory["imports"] == {"json_alias": "json"}
