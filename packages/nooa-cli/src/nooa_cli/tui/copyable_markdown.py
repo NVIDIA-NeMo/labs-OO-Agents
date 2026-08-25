@@ -108,7 +108,8 @@ class _CopyableCodeBlock(CodeBlock):
         self.action_id = action_id
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
-        if self.action_id is not None and options.max_width >= len("Copy"):
+        show_header = self.action_id is not None and options.max_width >= len("Copy")
+        if show_header:
             # Replace Syntax's top padding row with a full-width, same-background
             # control row so the language and Copy action sit inside the panel.
             # At widths below the full label, omit the action rather than expose
@@ -149,7 +150,7 @@ class _CopyableCodeBlock(CodeBlock):
             theme=self.theme,
             word_wrap=True,
             # The header above occupies the existing top padding row.
-            padding=(0, 1, 1, 1) if self.action_id is not None else 1,
+            padding=(0, 1, 1, 1) if show_header else 1,
         )
         if self.action_id is not None:
             for line_number, line in enumerate(source_lines, 1):
