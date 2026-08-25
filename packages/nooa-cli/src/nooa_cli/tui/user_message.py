@@ -23,20 +23,26 @@ def _hex_to_ansi256(hex_color: str) -> int:
 
 
 def render_user_bar(text: str, cols: int, colors: dict[str, str]) -> str:
-    """Render one live or resumed user message as full-width highlighted rows."""
+    """Render one live or resumed user message with highlighted breathing room."""
     width = max(int(cols), 1)
     foreground = _hex_to_ansi256(colors["text"])
     background = _hex_to_ansi256(colors["surface2"])
     style_on = f"\x1b[38;5;{foreground};48;5;{background}m"
     style_off = "\x1b[0m"
 
-    rows: list[str] = []
+    def styled_row(content: str = "") -> str:
+        return f"{style_on}{set_cell_size(content, width)}{style_off}"
+
+    # Keep one full-width, same-background blank row above and below every
+    # accepted message so the padding survives both live output and replay.
+    rows: list[str] = [styled_row()]
     for index, line in enumerate(sanitize_live_text(text).split("\n")):
         shown = f" ❯ {line} " if index == 0 else f" {line} "
         # Rich's cell helpers preserve grapheme clusters and measure wide
         # glyphs correctly. Every row is exactly the safe content width.
         chunks = chop_cells(shown, width) or [""]
-        rows.extend(f"{style_on}{set_cell_size(chunk, width)}{style_off}" for chunk in chunks)
+        rows.extend(styled_row(chunk) for chunk in chunks)
+    rows.append(styled_row())
     return "\n".join(rows) + "\n"
 
 

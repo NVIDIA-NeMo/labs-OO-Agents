@@ -872,7 +872,9 @@ def test_fullscreen_session_production_rendering_reprojects_narrow_then_wide(
     wide = app._fullscreen_transcript.text
     assert app.output_buffer.text == ""
     assert expected_wide != expected_narrow
-    expected_visible = "abcdefgh\n" if producer == "rich" else " ❯ abcdefgh  \n"
+    expected_visible = (
+        "abcdefgh\n" if producer == "rich" else " " * 13 + "\n ❯ abcdefgh  \n" + " " * 13 + "\n"
+    )
     assert wide == expected_visible
     assert wide != narrow
 
@@ -3182,7 +3184,7 @@ def test_fullscreen_composer_mouse_selection_is_mirrored_non_destructively(monke
 
 
 @pytest.mark.asyncio
-async def test_fullscreen_input_selection_can_be_copied_and_cut(monkeypatch) -> None:
+async def test_fullscreen_input_selection_ctrl_c_clears_and_ctrl_x_cuts(monkeypatch) -> None:
     from nooa_cli.tui.tui_application import _ClipboardResult
     from prompt_toolkit.selection import SelectionState
 
@@ -3200,22 +3202,21 @@ async def test_fullscreen_input_selection_can_be_copied_and_cut(monkeypatch) -> 
         app.input_buffer.cursor_position = 4
         app.input_buffer.selection_state = SelectionState(original_cursor_position=0)
         await harness.press("c-c")
-        await harness.wait_for(lambda: copied == ["copy"])
-        if app._clipboard_task is not None:
-            await app._clipboard_task
+        await harness.wait_input_equals("")
 
-        assert copied == ["copy"]
-        assert app.input_buffer.text == "copy and cut"
-        assert app.input_buffer.selection_state is not None
+        assert copied == []
+        assert app.input_buffer.selection_state is None
+        assert app._ctrl_c_exit_armed is False
 
+        app.input_buffer.text = "copy and cut"
         app.input_buffer.cursor_position = 12
         app.input_buffer.selection_state = SelectionState(original_cursor_position=9)
         await harness.press("c-x")
-        await harness.wait_for(lambda: copied == ["copy", "cut"])
+        await harness.wait_for(lambda: copied == ["cut"])
         if app._clipboard_task is not None:
             await app._clipboard_task
 
-        assert copied == ["copy", "cut"]
+        assert copied == ["cut"]
         assert app.input_buffer.text == "copy and "
         assert app.input_buffer.selection_state is None
         assert app._app.clipboard.get_data().text == "cut"
@@ -3223,7 +3224,7 @@ async def test_fullscreen_input_selection_can_be_copied_and_cut(monkeypatch) -> 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("display_mode", [DisplayMode.NATIVE, DisplayMode.NATIVE_REPLAY])
-async def test_native_input_selection_copy_does_not_cancel_or_clear(
+async def test_native_input_selection_ctrl_c_clears_without_copying(
     monkeypatch, display_mode: DisplayMode
 ) -> None:
     from nooa_cli.tui.tui_application import _ClipboardResult
@@ -3243,12 +3244,10 @@ async def test_native_input_selection_copy_does_not_cancel_or_clear(
         app.input_buffer.cursor_position = 4
         app.input_buffer.selection_state = SelectionState(original_cursor_position=0)
         await harness.press("c-c")
-        await harness.wait_for(lambda: copied == ["copy"])
-        if app._clipboard_task is not None:
-            await app._clipboard_task
+        await harness.wait_input_equals("")
 
-        assert app.input_buffer.text == "copy safely"
-        assert app.input_buffer.selection_state is not None
+        assert copied == []
+        assert app.input_buffer.selection_state is None
         assert app._ctrl_c_exit_armed is False
 
 
