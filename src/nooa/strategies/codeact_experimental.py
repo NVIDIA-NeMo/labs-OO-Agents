@@ -117,16 +117,16 @@ class CodeActExperimental(CodeActStrategy):
             visible_imports = import_items[:20]
             omitted = len(import_items) - len(visible_imports)
             suffix = (
-                f' (+{omitted} more; `print(python_cell_state()["imports"])`)' if omitted else ""
+                f' (+{omitted} more; `print(python_cell_state()["cell_imports"])`)'
+                if omitted
+                else ""
             )
             imports = ", ".join(
                 f"{self._python_cell_state_label(name, max_chars=80)} → "
                 f"{self._python_cell_state_label(module_name, max_chars=80)}"
                 for name, module_name in visible_imports
             )
-            lines.extend(("", f"Imports: {imports}{suffix}"))
-        else:
-            lines.extend(("", "Imports: none"))
+            lines.extend(("", f"Cell imports: {imports}{suffix}"))
 
         if local_items:
             visible = local_items[:20]
@@ -174,7 +174,7 @@ class CodeActExperimental(CodeActStrategy):
                         if not isinstance(value, ModuleType)
                     },
                 },
-                "imports": {
+                "cell_imports": {
                     name: value.__name__
                     for name, value in visible.items()
                     if isinstance(value, ModuleType)
