@@ -78,6 +78,16 @@ class JobError(EventBase):
 # ---------------------------------------------------------------------------
 
 JobState = Literal["running", "done", "cancelled", "failed"]
+_MAX_JOB_DESCRIPTION_LENGTH = 240
+_MAX_RENDERED_ACTIVE_JOBS = 8
+
+
+def _normalize_job_description(description: str) -> str:
+    """Collapse whitespace and bound model-facing background-job context."""
+    compact = " ".join(description.split())
+    if len(compact) <= _MAX_JOB_DESCRIPTION_LENGTH:
+        return compact
+    return f"{compact[: _MAX_JOB_DESCRIPTION_LENGTH - 1].rstrip()}…"
 
 
 class JobHandle:
@@ -89,6 +99,10 @@ class JobHandle:
     are snapshots for inspection, not completion-waiting primitives; consume
     job output through its channel instead of polling the handle.
 
+    ``label`` is the compact job identity shown in status; ``description`` is
+    optional, bounded model-facing context explaining the job's purpose and
+    expected lifetime.
+
     If ``buffer`` was passed to ``spawn()``, yielded values accumulate
     in ``self.values``:
     - ``buffer=False`` (default): no accumulation, ``.values`` is empty.
@@ -97,10 +111,16 @@ class JobHandle:
     """
 
     def __init__(
-        self, name: str, task: asyncio.Task[Any], buffer: bool | int = False, label: str = ""
+        self,
+        name: str,
+        task: asyncio.Task[Any],
+        buffer: bool | int = False,
+        label: str = "",
+        description: str = "",
     ) -> None:
         self.name = name
         self.label = label or name
+        self.description = _normalize_job_description(description)
         self.job_id = uuid.uuid4().hex
         self.state: JobState = "running"
         self._task = task
@@ -145,7 +165,8 @@ class JobHandle:
     def __repr__(self) -> str:
         return (
             f"JobHandle(job_id={self.job_id!r}, name={self.name!r}, "
-            f"label={self.label!r}, state={self.state!r})"
+            f"label={self.label!r}, description={self.description!r}, "
+            f"state={self.state!r})"
         )
 
 
@@ -778,16 +799,25 @@ class QueueManager:
         # Show active spawns — tells the LLM "monitors are running"
         # even when no items are pending (items were already delivered).
         active_spawns = [h for h in self._handles if h.state == "running"]
+        visible_spawns = active_spawns[:_MAX_RENDERED_ACTIVE_JOBS]
         if active_spawns:
             spawn_lines = [f"⚡ {len(active_spawns)} active background job(s):"]
-            for h in active_spawns:
+            for h in visible_spawns:
                 spawn_lines.append(f"  • [{h.job_id}] {h.label} → {h.name} (running)")
+                if h.description:
+                    spawn_lines.append(f"    {h.description}")
+            omitted = len(active_spawns) - len(visible_spawns)
+            if omitted:
+                spawn_lines.append(
+                    f"  … {omitted} more active job(s) omitted; inspect "
+                    "self.queue_manager.running_handles() for their IDs."
+                )
             spawn_lines.append("  ↳ Output arrives through channels; do not poll job handles.")
             spawn_status = "\n".join(spawn_lines)
             body = f"{body}\n{spawn_status}" if body else spawn_status
 
         # Cheat sheet: show cancel/cleanup commands
-        cancel_hints = [f".cancel_job('{h.job_id}')" for h in active_spawns]
+        cancel_hints = [f".cancel_job('{h.job_id}')" for h in visible_spawns]
         extra = [
             n
             for n, ch in self._channels.items()
@@ -956,6 +986,7 @@ class QueueManager:
         channel: str,
         buffer: bool | int = False,
         label: str = "",
+        description: str = "",
     ) -> JobHandle:
         """Run *job* in the background, routing output to *channel*.
 
@@ -971,13 +1002,19 @@ class QueueManager:
         (for context rendering) and the data channel (so race() wakes
         the agent). The handle's state transitions to ``"failed"``.
 
-        Returns a ``JobHandle`` with ``name``, ``state``, ``cancel()``,
-        and ``values`` (buffered items if ``buffer`` is set). Output and errors
+        Returns a ``JobHandle`` with ``name``, ``label``, ``description``,
+        ``state``, ``cancel()``, and ``values`` (buffered items if ``buffer`` is
+        set). Output and errors
         are delivered through the named channel; consume that channel directly or
         through ``race()`` rather than polling ``JobHandle.state``/``values`` or
         sleeping. In a turn-based host, yield the current turn so its dispatcher can
         wait on ``race()`` and deliver the channel notification. The host defines the
         mechanism for yielding; ``QueueManager`` does not assume a response protocol.
+
+        ``description`` is optional model-facing context shown with active jobs in
+        ``status()``. Whitespace is collapsed and the value is bounded to 240
+        characters. Use it to distinguish the job's purpose, especially for
+        infrastructure producers whose channel and label are otherwise ambiguous.
 
         ``buffer`` controls value accumulation on the handle:
         - ``False`` (default): no buffering.
@@ -1088,7 +1125,13 @@ class QueueManager:
         # guarantee, but clearer ordering).
         _handles_by_task: dict[asyncio.Task[Any], JobHandle] = {}
         task = asyncio.create_task(_run(), name=f"spawn[{channel}]")
-        handle = JobHandle(name=channel, task=task, buffer=buffer, label=label)
+        handle = JobHandle(
+            name=channel,
+            task=task,
+            buffer=buffer,
+            label=label,
+            description=description,
+        )
         _handles_by_task[task] = handle
         self._handles.append(handle)
         # Publish the RUNNING transition independently of channel values.
