@@ -378,3 +378,44 @@ Interpretation:
   the model can omit or misapply that rule in a run-specific way.
 - A fair comparison for this task needs repeated runs per condition, for
   example 3 or more runs each, instead of relying on a single pass/fail sample.
+
+## 2026-08-25 — Resource Preview LibrarySkill Rerun
+
+After `4b7c8619 test: cover translated skill context and resource previews`,
+reran the same 10-task NOOA `library_skill` SkillsBench sample. This translator
+version lowers per-resource docstring previews from 4000 to 1000 characters and
+adds coverage for generated LibrarySkill context-block activation/rendering.
+
+The run used:
+- SkillsBench checkout:
+  `/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench`
+- Credentials file:
+  `/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/.env`
+- NOOA model: `openai/openai/openai/gpt-5.5`
+- Sandbox: Docker
+- Condition: `library_skill`
+- Artifact root:
+  `jobs/nooa-skillsbench-gpt55-10-library-resource-preview/`
+
+Results:
+
+| Task | LibrarySkill resource-preview rerun |
+|---|---:|
+| `fix-visual-stability` | 1.0 |
+| `fix-erlang-ssh-cve` | 1.0 |
+| `video-silence-remover` | 0.0 |
+| `dynamic-object-aware-egomotion` | 1.0 |
+| `manufacturing-fjsp-optimization` | 0.0 |
+| `llm-prefix-cache-replay` | 1.0 |
+| `dapt-intrusion-detection` | 1.0 |
+| `offer-letter-generator` | 1.0 |
+| `parallel-tfidf-search` | 1.0 |
+| `reserves-at-risk-calc` | 0.0 |
+
+Current result:
+- Resource-preview NOOA LibrarySkill aggregate: 7/10.
+- This is +1 versus the previous native-guidance LibrarySkill rerun.
+- The changed pass is `dynamic-object-aware-egomotion`, which passed in this
+  rerun after failing in the previous two LibrarySkill 10-task sweeps.
+- `fix-visual-stability` passed but had repeated Next dev-server readiness
+  recovery failures during the rollout before ultimately reaching reward 1.0.
