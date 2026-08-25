@@ -524,7 +524,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         parts = [
             "## Execution Context",
             "",
-            "These names are already in scope inside `execute_python()` (state "
+            f"These names are already in scope inside `{self._python_tool_name()}()` (state "
             "persists across cells) — call them, don't re-import or re-define. "
             "Use `doc(name)` to inspect any type or function in detail.",
             "",

@@ -15,10 +15,10 @@ from nooa.strategies.codeact_experimental import CodeActExperimental
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
 
-def _execute_python(code: str, call_id: str = "call_1") -> ToolCall:
+def _python_cell(code: str, call_id: str = "call_1") -> ToolCall:
     return ToolCall(
         id=call_id,
-        name="execute_python",
+        name="python_cell",
         arguments=json.dumps({"code": code}),
     )
 
@@ -27,14 +27,14 @@ def _response(code: str, call_id: str = "call_1") -> LLMResponse:
     return LLMResponse(
         raw_response=None,
         content="",
-        tool_calls=[_execute_python(code, call_id)],
+        tool_calls=[_python_cell(code, call_id)],
         finish_reason="tool_calls",
         assistant_message={"role": "assistant", "content": ""},
     )
 
 
 @pytest.mark.asyncio
-async def test_explicit_return_completes_with_only_execute_python_tool():
+async def test_explicit_return_completes_with_only_python_cell_tool():
     fake_llm = FakeLLMClient(scripted_responses=[_response("return 42")])
 
     class TestAgent(Agent, llm=fake_llm):
@@ -45,15 +45,21 @@ async def test_explicit_return_completes_with_only_execute_python_tool():
 
     agent = TestAgent()
     assert await agent.answer() == 42
-    assert [tool.name for tool in fake_llm.last_tools or []] == ["execute_python"]
+    assert [tool.name for tool in fake_llm.last_tools or []] == ["python_cell"]
     system_prompt = "\n".join(
         str(message.get("content", ""))
         for message in fake_llm.last_messages
         if message.get("role") == "system"
     )
-    assert "`return_result()`" in system_prompt
-    assert "`return_result(value)`" in system_prompt
-    assert "Your two tools" not in system_prompt
+    assert "<strategy_prompt" not in system_prompt
+    assert "## Strategy" not in system_prompt
+    assert "execute_python" not in system_prompt
+    assert "python_cell()" in system_prompt
+    tool = (fake_llm.last_tools or [])[0]
+    assert "persistent Python session" in tool.description
+    assert "plain-text replies do not execute work" in tool.description
+    assert "return_result(value)" in tool.description
+    assert "Restrictions (will throw)" in tool.description
     completion_events = [
         event
         for event in agent.event_manager.values()
@@ -93,7 +99,7 @@ def test_prompt_and_execution_context_advertise_inline_return_result():
     assert "return_result" in strategy_instance._always_available_text()
     sentinel = object()
     assert strategy_instance._strategy_builtins(sentinel) == {"return_result": sentinel}
-    assert strategy_instance._available_tool_names() == "execute_python"
+    assert strategy_instance._available_tool_names() == "python_cell"
 
 
 def test_compatibility_factory_returns_supported_strategy_without_warning():
@@ -105,7 +111,7 @@ def test_compatibility_factory_returns_supported_strategy_without_warning():
 
 
 @pytest.mark.asyncio
-async def test_return_result_is_available_inside_execute_python_cells():
+async def test_return_result_is_available_inside_python_cells():
     fake_llm = FakeLLMClient(scripted_responses=[_response("return_result(41)", "call_1")])
 
     class TestAgent(Agent, llm=fake_llm):

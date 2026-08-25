@@ -20,7 +20,7 @@ def _response(code: str) -> LLMResponse:
         tool_calls=[
             ToolCall(
                 id="call_1",
-                name="execute_python",
+                name="python_cell",
                 arguments=json.dumps({"code": code}),
             )
         ],
@@ -62,7 +62,7 @@ async def test_bootstrap_selects_default_or_legacy_agent(
 
 
 @pytest.mark.asyncio
-async def test_experimental_tui_agent_uses_only_execute_python(tmp_path):
+async def test_experimental_tui_agent_uses_only_python_cell(tmp_path):
     llm = FakeLLMClient(
         scripted_responses=[
             _response(
@@ -76,7 +76,7 @@ async def test_experimental_tui_agent_uses_only_execute_python(tmp_path):
         result = await agent.handle({"user_messages": ["inspect the repository"]})
         assert result.kind is RespondReason.DONE
         assert result.explanation == "request completed"
-        assert [tool.name for tool in llm.last_tools or []] == ["execute_python"]
+        assert [tool.name for tool in llm.last_tools or []] == ["python_cell"]
         completion_events = [
             event
             for event in agent.event_manager.values()
