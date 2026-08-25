@@ -8,7 +8,7 @@ import pytest
 from nooa_cli.tui.config import load_agent_class
 from nooa_cli.tui.experimental_agent import ExperimentalCodingWorker, ExperimentalTUIAgent
 
-from nooa.context_blocks import ToolCallEvent
+from nooa.context_blocks import DynamicContext, ToolCallEvent
 from nooa.interactive import RespondReason
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
@@ -77,6 +77,20 @@ async def test_experimental_tui_agent_uses_only_python_cell(tmp_path):
         assert result.kind is RespondReason.DONE
         assert result.explanation == "request completed"
         assert [tool.name for tool in llm.last_tools or []] == ["python_cell"]
+        system_prompt = "\n".join(
+            str(message.get("content", ""))
+            for message in llm.last_messages
+            if message.get("role") == "system"
+        )
+        assert "<state" not in system_prompt
+        assert "<execution_context" not in system_prompt
+        rendered_context = "\n".join(
+            str(message.get("content", "")) for message in llm.last_messages
+        )
+        assert "<repl_locals" in rendered_context
+        assert "`notification =" in rendered_context
+        assert "`self.v` — persistent session variables" in rendered_context
+        assert f"`self.shell.cwd = {tmp_path!r}`" in rendered_context
         completion_events = [
             event
             for event in agent.event_manager.values()
@@ -93,6 +107,9 @@ async def test_experimental_tui_agent_delegates_to_experimental_worker(tmp_path)
     agent = ExperimentalTUIAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         assert agent._worker_type is ExperimentalCodingWorker
+        worker_context = ExperimentalCodingWorker.investigate._strategy_context
+        assert isinstance(worker_context["state"], DynamicContext)
+        assert isinstance(worker_context["execution_context"], DynamicContext)
         assert not hasattr(ExperimentalCodingWorker, "delegate")
         assert not hasattr(ExperimentalCodingWorker, "spawn")
         assert (ExperimentalTUIAgent.__doc__ or "").startswith(

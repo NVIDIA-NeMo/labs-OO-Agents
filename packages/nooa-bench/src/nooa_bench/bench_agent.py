@@ -93,7 +93,9 @@ class BenchAgent(
 
     Read relevant code before editing, preserve unrelated work, make the smallest
     sufficient change, and verify with an observed command result. Use todos only
-    when they clarify multi-step work. Finish with ``TaskResult``.
+    when they clarify multi-step work. Keep an active Todo's title and description
+    aligned with the current understanding, and comment material findings, decisions,
+    completed steps, and verification—not routine narration. Finish with ``TaskResult``.
     """
 
     shell: ShellTools
@@ -199,8 +201,10 @@ class BenchAgent(
         if todo_base is not None:
             subagent.todo = TodoManager.with_todo(todo_base)
             description = (
-                f"{todo_base.title}\n\nWork on todo {todo_base.id}. Record useful findings with "
-                "self.todo.comment(...) and task-scoped values with self.todo.set_var(...)."
+                f"{todo_base.title}\n\nWork on active todo {todo_base.id}. Keep its title and "
+                "description aligned with the current understanding. Record material findings, "
+                "decisions, completed steps, and verification with self.todo.comment(...), not "
+                "routine narration; use self.todo.set_var(...) for structured artifacts."
             )
         else:
             description = str(objective)
@@ -239,7 +243,9 @@ class RLMBenchAgent(BenchAgent):
 
     Read relevant code before editing, preserve unrelated work, make the smallest
     sufficient change, and verify with an observed command result. Use todos only
-    when they clarify multi-step work. Finish with ``TaskResult``.
+    when they clarify multi-step work. Keep an active Todo's title and description
+    aligned with the current understanding, and comment material findings, decisions,
+    completed steps, and verification—not routine narration. Finish with ``TaskResult``.
 
     Use context-isolated subagents deliberately for bounded, context-heavy work.
     Keep planning, integration, final verification, and the final ``TaskResult``

@@ -398,7 +398,7 @@ async def test_delegate_launches_isolated_subagent_of_same_type(agent_type, monk
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
-async def test_delegate_todo_merges_worker_notes(agent_type, monkeypatch, tmp_path):
+async def test_delegate_todo_merges_worker_description(agent_type, monkeypatch, tmp_path):
     expected = TaskResult(
         solution_description="Inspected parser.",
         evidence="Focused check passed.",
@@ -408,7 +408,8 @@ async def test_delegate_todo_merges_worker_notes(agent_type, monkeypatch, tmp_pa
     async def fake_solve(self, description: str):
         delegated = self.todo.list_todos()[0]
         assert delegated is not task
-        assert description.startswith(f"{task.title}\n\nWork on todo {task.id}.")
+        assert description.startswith(f"{task.title}\n\nWork on active todo {task.id}.")
+        assert "Record material findings" in description
         self.todo.comment(delegated, "worker finding")
         self.todo.set_var(delegated, "path", "parser.py")
         return expected
@@ -421,7 +422,7 @@ async def test_delegate_todo_merges_worker_notes(agent_type, monkeypatch, tmp_pa
     monkeypatch.setattr(agent_type, "_solve_task", fake_solve)
     monkeypatch.setattr(_FakeShell, "close", fake_close, raising=False)
     agent = agent_type(llm=FakeLLMClient(), working_dir=str(tmp_path))
-    task = agent.todo.add("Inspect parser", notes="focus on errors")
+    task = agent.todo.add("Inspect parser", description="focus on errors")
 
     result = await agent.delegate(task)
 

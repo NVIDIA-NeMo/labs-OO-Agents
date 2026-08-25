@@ -11,14 +11,26 @@ import pytest
 from nooa.runtime.channels import QueueManager
 
 
-def test_no_cheat_sheet_with_only_user_messages():
-    """No cheat sheet when only user_messages is registered."""
+def test_no_cheat_sheet_with_only_empty_user_messages():
+    """No cheat sheet when the sole user_messages queue is empty."""
     qm = QueueManager()
     qm.queue("user_messages")
     status = qm.status()
     assert "queue_manager" not in status.lower()
     assert "remove_channel" not in status
     assert "shutdown" not in status
+
+
+def test_pending_queue_shows_public_reader_hint():
+    """Pending counts explain how the agent can consume the queued item."""
+    qm = QueueManager()
+    channel = qm.queue("user_messages")
+    channel.put("follow-up")
+
+    status = qm.status()
+
+    assert "user_messages: 1 pending" in status
+    assert "💡 dequeue: await self.user_messages.get()" in status
 
 
 def test_cheat_sheet_appears_with_extra_channels():

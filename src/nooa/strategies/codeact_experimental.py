@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Experimental single-tool CodeAct strategy."""
 
+from html import escape
 from typing import TYPE_CHECKING, Any
 
+from nooa.agentdoc import truncating_pformat
 from nooa.context_blocks import DynamicContext
 from nooa.decorators import strategy
 from nooa.events import Error
@@ -60,16 +62,44 @@ class CodeActExperimental(CodeActStrategy):
         return [*order[:index], "repl_locals", *order[index:]]
 
     async def repl_locals_context(self, runtime: RuntimeServices) -> str:
-        """Render method parameters and persistent names available in the next cell."""
+        """Render a bounded view of values available in the next cell."""
         call = getattr(runtime, "current_call", None)
-        local_names: set[str] = set()
+        local_values: dict[str, Any] = {}
         if call is not None:
-            local_names.update(call.bound_parameters())
+            local_values.update(call.bound_parameters())
             live_locals = call.execution_locals or call.session_locals
             if live_locals:
-                local_names.update(live_locals)
-        names = "\n".join(f"- `{name}`" for name in sorted(local_names))
-        return f"## Locals\n\nAvailable in the next cell:\n\n{names}"
+                local_values.update(live_locals)
+
+        lines: list[str] = []
+        visible_names = sorted(local_values)[:30]
+        for name in visible_names:
+            item = local_values[name]
+            value = (
+                repr(item if len(item) <= 120 else f"{item[:119]}…")
+                if isinstance(item, str)
+                else truncating_pformat(
+                    item,
+                    max_chars=300,
+                    max_length=10,
+                    max_string=120,
+                    max_depth=2,
+                )
+            )
+            lines.append(f"- `{name} = {escape(value, quote=False)}`")
+        omitted = len(local_values) - len(visible_names)
+        if omitted:
+            lines.append(f"- … {omitted} more local(s) omitted")
+
+        agent = runtime.agent
+        if hasattr(agent, "v"):
+            lines.append("- `self.v` — persistent session variables")
+        shell = getattr(agent, "shell", None)
+        cwd = getattr(shell, "cwd", getattr(agent, "cwd", None))
+        if cwd is not None:
+            lines.append(f"- `self.shell.cwd = {cwd!r}`")
+
+        return "## Locals\n\nAvailable in the next cell:\n\n" + "\n".join(lines)
 
     def _always_available_text(self) -> str:
         return (

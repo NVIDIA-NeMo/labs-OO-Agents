@@ -54,6 +54,10 @@ class CodingAgent(InteractiveAgent):
     will invoke a new turn when the report arrives. Inspect and integrate that report
     before final verification.
 
+    For multi-step work, activate the current Todo. Keep its title and description
+    aligned with the current understanding, and append comments for material findings,
+    decisions, completed steps, and verification—not routine narration.
+
     Work until the newest request is complete or genuinely needs user input. Use
     as many execution cells as necessary, inspect each result, and never claim a
     check passed without running it. Send each user-facing answer or question
