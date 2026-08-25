@@ -48,7 +48,9 @@ class CodeActExperimental(CodeActStrategy):
         """Put the execution contract on the tool and keep only runtime context blocks."""
         overrides = super().get_block_overrides()
         overrides["strategy_prompt"] = None
-        overrides["python_state"] = DynamicContext("strategy.python_state_context(runtime)")
+        overrides["python_cell_state"] = DynamicContext(
+            "strategy.python_cell_state_context(runtime)"
+        )
         return overrides
 
     def get_static_block_keys(self) -> set[str]:
@@ -59,17 +61,17 @@ class CodeActExperimental(CodeActStrategy):
         """Place live locals immediately after the stable execution context."""
         order = [key for key in (super().get_block_order() or []) if key != "strategy_prompt"]
         index = order.index("execution_context") + 1
-        return [*order[:index], "python_state", *order[index:]]
+        return [*order[:index], "python_cell_state", *order[index:]]
 
     @staticmethod
-    def _python_state_label(value: Any, *, max_chars: int = 160) -> str:
+    def _python_cell_state_label(value: Any, *, max_chars: int = 160) -> str:
         """Return a bounded single-line label safe inside the XML context block."""
         text = str(value).replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
         if len(text) > max_chars:
             text = f"{text[: max_chars - 1]}…"
         return escape(text, quote=False)
 
-    async def python_state_context(self, runtime: RuntimeServices) -> str:
+    async def python_cell_state_context(self, runtime: RuntimeServices) -> str:
         """Render compact working state without repeating inputs or output history."""
         call = getattr(runtime, "current_call", None)
         live_locals = None if call is None else (call.execution_locals or call.session_locals)
@@ -93,12 +95,12 @@ class CodeActExperimental(CodeActStrategy):
         import_items = sorted(import_names.items())
 
         agent = runtime.agent
-        lines = ["## Python state"]
+        lines = ["## Python cell state"]
         shell = getattr(agent, "shell", None)
         if shell is not None and (cwd := getattr(shell, "cwd", None)) is not None:
-            lines.extend(("", f"`self.shell.cwd`: {self._python_state_label(cwd)}"))
+            lines.extend(("", f"`self.shell.cwd`: {self._python_cell_state_label(cwd)}"))
         elif (cwd := getattr(agent, "cwd", None)) is not None:
-            lines.extend(("", f"`self.cwd`: {self._python_state_label(cwd)}"))
+            lines.extend(("", f"`self.cwd`: {self._python_cell_state_label(cwd)}"))
 
         persistent_vars = getattr(agent, "vars", None)
         if persistent_vars:
@@ -114,10 +116,12 @@ class CodeActExperimental(CodeActStrategy):
         if import_items:
             visible_imports = import_items[:20]
             omitted = len(import_items) - len(visible_imports)
-            suffix = f' (+{omitted} more; `print(python_state()["imports"])`)' if omitted else ""
+            suffix = (
+                f' (+{omitted} more; `print(python_cell_state()["imports"])`)' if omitted else ""
+            )
             imports = ", ".join(
-                f"{self._python_state_label(name, max_chars=80)} → "
-                f"{self._python_state_label(module_name, max_chars=80)}"
+                f"{self._python_cell_state_label(name, max_chars=80)} → "
+                f"{self._python_cell_state_label(module_name, max_chars=80)}"
                 for name, module_name in visible_imports
             )
             lines.extend(("", f"Imports: {imports}{suffix}"))
@@ -127,13 +131,13 @@ class CodeActExperimental(CodeActStrategy):
         if local_items:
             visible = local_items[:20]
             suffix = (
-                f" (+{len(local_items) - len(visible)} more; `print(python_state())`)"
+                f" (+{len(local_items) - len(visible)} more; `print(python_cell_state())`)"
                 if len(local_items) > 20
                 else ""
             )
             items = ", ".join(
-                f"{self._python_state_label(name, max_chars=80)} "
-                f"({self._python_state_label(type_name, max_chars=80)})"
+                f"{self._python_cell_state_label(name, max_chars=80)} "
+                f"({self._python_cell_state_label(type_name, max_chars=80)})"
                 for name, type_name in visible
             )
             lines.extend(("", f"Cell locals (includes method inputs): {items}{suffix}"))
@@ -144,7 +148,7 @@ class CodeActExperimental(CodeActStrategy):
     def _build_builtins(self, runtime: RuntimeServices, call: "CurrentCall") -> dict[str, Any]:
         builtins = super()._build_builtins(runtime, call)
 
-        def python_state() -> dict[str, dict[str, str]]:
+        def python_cell_state() -> dict[str, dict[str, str]]:
             """Return the complete name-to-type inventory for persistent and cell state."""
             persistent = getattr(runtime.agent, "vars", {})
             live = call.execution_locals or call.session_locals or {}
@@ -177,13 +181,13 @@ class CodeActExperimental(CodeActStrategy):
                 },
             }
 
-        builtins["python_state"] = python_state
+        builtins["python_cell_state"] = python_cell_state
         return builtins
 
     def _always_available_text(self) -> str:
         return (
             "Always available without import: `self`, `print()`, `pprint()`, `doc()`, "
-            "`python_state()`, `return_result()`, plus stdlib `asyncio` and `typing`."
+            "`python_cell_state()`, `return_result()`, plus stdlib `asyncio` and `typing`."
         )
 
     def _python_tool_name(self) -> str:

@@ -87,8 +87,10 @@ async def test_experimental_tui_agent_uses_only_python_cell(tmp_path):
         rendered_context = "\n".join(
             str(message.get("content", "")) for message in llm.last_messages
         )
-        assert "<python_state" in rendered_context
-        state_block = rendered_context.split("<python_state", 1)[1].split("</python_state>", 1)[0]
+        assert "<python_cell_state" in rendered_context
+        state_block = rendered_context.split("<python_cell_state", 1)[1].split(
+            "</python_cell_state>", 1
+        )[0]
         assert "Imports: none" in state_block
         assert "Cell locals (includes method inputs): notification (dict)" in state_block
         assert "`self.v`: none" in rendered_context
