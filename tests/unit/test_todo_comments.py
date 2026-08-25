@@ -62,13 +62,12 @@ def test_comments_survive_snapshot_round_trip():
     assert [c.body for c in preserved] == ["one", "two"]
 
 
-def test_comment_does_not_overwrite_notes():
-    """Comments and ``notes`` are independent fields — append to one doesn't
-    touch the other."""
+def test_comment_does_not_overwrite_description():
+    """Comments and ``description`` are independent fields."""
     tm = TodoManager()
-    t = tm.add("Item", notes="static note")
+    t = tm.add("Item", description="static note")
     tm.comment(t.id, "progress log entry")
-    assert t.notes == "static note"
+    assert t.description == "static note"
     assert [c.body for c in tm.comments(t.id)] == ["progress log entry"]
 
 
@@ -130,8 +129,8 @@ def test_manager_methods_accept_todo_objects() -> None:
     assert first.deps == [second.id]
     assert tm.remove_dep(first, second) is first
     assert first.deps == []
-    assert tm.update(first, title="renamed", notes="detail") is first
-    assert (first.title, first.notes) == ("renamed", "detail")
+    assert tm.update(first, title="renamed", description="detail") is first
+    assert (first.title, first.description) == ("renamed", "detail")
     assert tm.set_var(first, "answer", 42) is first
     assert tm.get_var(first, "answer") == 42
     assert tm.del_var(first, "answer") is first
@@ -153,6 +152,44 @@ def test_manager_rejects_non_todo_non_string_references() -> None:
         tm.get(42)  # type: ignore[arg-type]
 
 
+def test_legacy_notes_input_and_property_remain_compatible() -> None:
+    tm = TodoManager()
+    todo = tm.add("legacy", notes="old description")
+
+    assert todo.description == "old description"
+    assert todo.notes == "old description"
+    todo.notes = "changed through alias"
+    assert todo.description == "changed through alias"
+    assert tm.update(todo, notes="changed through update") is todo
+    assert todo.description == "changed through update"
+
+    restored = TodoManager(
+        {
+            "todos": [
+                {
+                    "id": todo.id,
+                    "title": todo.title,
+                    "status": todo.status,
+                    "deps": [],
+                    "vars": {},
+                    "created_at": todo.created_at,
+                    "notes": "legacy snapshot",
+                    "comments": [],
+                }
+            ]
+        }
+    )
+    assert restored.get(todo.id).description == "legacy snapshot"
+    assert "notes" not in restored.to_dict()["todos"][0]
+    assert restored.to_dict()["todos"][0]["description"] == "legacy snapshot"
+
+
+def test_add_rejects_description_and_legacy_notes_together() -> None:
+    tm = TodoManager()
+    with pytest.raises(ValueError, match="either description or legacy notes"):
+        tm.add("ambiguous", description="new", notes="old")
+
+
 def test_delegation_transfer_methods_are_public_but_hidden() -> None:
     from nooa.agentdoc import doc
 
@@ -168,12 +205,12 @@ def test_delegation_transfer_methods_are_public_but_hidden() -> None:
 
 def test_delegation_copy_is_independent_and_merge_preserves_identity() -> None:
     tm = TodoManager()
-    original = tm.add("review", notes="start", nested={"values": [1]})
+    original = tm.add("review", description="start", nested={"values": [1]})
     tm.comment(original, "controller baseline")
     base = tm.copy_todo(original)
     worker = base.model_copy(deep=True)
 
-    worker.notes = "worker notes"
+    worker.description = "worker description"
     worker.v.nested["values"].append(2)
     worker.v.result = {"file": "parser.py"}
     worker.comments.append(TodoComment(body="worker finding"))
@@ -181,7 +218,7 @@ def test_delegation_copy_is_independent_and_merge_preserves_identity() -> None:
     merged = tm.merge_todo(worker, base=base)
 
     assert merged is original
-    assert original.notes == "worker notes"
+    assert original.description == "worker description"
     assert original.v.nested == {"values": [1, 2]}
     assert original.v.result == {"file": "parser.py"}
     assert [comment.body for comment in original.comments] == [
@@ -216,10 +253,10 @@ def test_delegation_merge_rejects_conflicting_field_changes() -> None:
     original = tm.add("review")
     base = tm.copy_todo(original)
     worker = base.model_copy(deep=True)
-    original.notes = "controller notes"
-    worker.notes = "worker notes"
+    original.description = "controller description"
+    worker.description = "worker description"
 
-    with pytest.raises(ValueError, match="conflicting 'notes' changes"):
+    with pytest.raises(ValueError, match="conflicting 'description' changes"):
         tm.merge_todo(worker, base=base)
 
 
@@ -229,7 +266,7 @@ def test_manager_preserves_id_keyword_compatibility() -> None:
     second = tm.add("second")
 
     assert tm.get(todo_id=first.id) is first
-    assert tm.update(todo_id=first.id, notes="note") is first
+    assert tm.update(todo_id=first.id, description="note") is first
     assert tm.add_dep(todo_id=first.id, dep_id=second.id) is first
     assert tm.remove_dep(todo_id=first.id, dep_id=second.id) is first
     assert tm.set_var(todo_id=first.id, key="value", value=1) is first
@@ -244,20 +281,20 @@ def test_manager_preserves_id_keyword_compatibility() -> None:
 
 def test_delegation_merge_conflict_is_atomic() -> None:
     tm = TodoManager()
-    original = tm.add("review", notes="base")
+    original = tm.add("review", description="base")
     base = tm.copy_todo(original)
     worker = base.model_copy(deep=True)
     worker.title = "worker title"
-    worker.notes = "worker notes"
+    worker.description = "worker description"
     worker.v.finding = "worker value"
     worker.comments.append(TodoComment(body="worker comment"))
-    original.notes = "controller notes"
+    original.description = "controller description"
 
-    with pytest.raises(ValueError, match="conflicting 'notes' changes"):
+    with pytest.raises(ValueError, match="conflicting 'description' changes"):
         tm.merge_todo(worker, base=base)
 
     assert original.title == "review"
-    assert original.notes == "controller notes"
+    assert original.description == "controller description"
     assert "finding" not in original.v
     assert original.comments == []
 
