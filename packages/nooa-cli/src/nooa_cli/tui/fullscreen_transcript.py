@@ -866,29 +866,55 @@ class FullscreenTranscriptModel:
             styled_chars.extend((style, char) for char in text)
 
         rows: list[_ProjectedRow] = []
-        row: list[tuple[str, str]] = []
+        row: list[tuple[tuple[str, str], ...]] = []
         row_source_spans: list[tuple[int, int]] = []
+        row_widths: list[int] = []
         row_cells = 0
         source_offset = 0
         semantic_offset = 0
         row_source_offset = 0
         row_semantic_offset = 0
+
+        def emit_row(stop: int | None = None) -> None:
+            """Emit a row prefix and retain any suffix for the next row."""
+            nonlocal row, row_source_spans, row_widths, row_cells
+            nonlocal row_source_offset, row_semantic_offset
+            if stop is None:
+                stop = len(row_source_spans)
+            rows.append(
+                _ProjectedRow(
+                    ViewportAnchor(record.record_id, row_source_offset, row_semantic_offset),
+                    tuple(fragment for cluster in row[:stop] for fragment in cluster),
+                    tuple(row_source_spans[:stop]),
+                    record.hyperlinks,
+                )
+            )
+            emitted_spans = row_source_spans[:stop]
+            row_source_offset += len(emitted_spans)
+            row_semantic_offset += sum(
+                1 for start, stop_ in emitted_spans if not record.plain[start:stop_].isspace()
+            )
+            row = row[stop:]
+            row_source_spans = row_source_spans[stop:]
+            row_widths = row_widths[stop:]
+            row_cells = sum(row_widths)
+
+        def word_break() -> int | None:
+            """Return a natural break after the last whitespace in this row."""
+            for index in range(len(row) - 1, -1, -1):
+                if "".join(char for _style, char in row[index]).isspace():
+                    # Keep the delimiter in the preceding visual row. This
+                    # preserves exact copy semantics without indenting the
+                    # continuation by a source separator.
+                    return index + 1
+            return None
+
         for start, stop, cells in cls._grapheme_spans(styled_chars):
             cluster = styled_chars[start:stop]
             cluster_text = "".join(char for _, char in cluster)
             if cluster_text == "\n":
-                rows.append(
-                    _ProjectedRow(
-                        ViewportAnchor(record.record_id, row_source_offset, row_semantic_offset),
-                        tuple(row),
-                        tuple(row_source_spans),
-                        record.hyperlinks,
-                    )
-                )
+                emit_row()
                 source_offset += 1
-                row = []
-                row_source_spans = []
-                row_cells = 0
                 row_source_offset = source_offset
                 row_semantic_offset = semantic_offset
                 continue
@@ -903,54 +929,23 @@ class FullscreenTranscriptModel:
             if len(normalized) == 1:
                 cluster = [(cluster[0][0] if cluster else "", normalized)]
                 cluster_text = normalized
-            cells = max(cells, 0)
-            if cells > width:
-                # No terminal can faithfully fit this cluster in the viewport.
-                # Preserve the valid Unicode and clip only its layout footprint.
-                cells = width
-            if row and cells and row_cells + cells > width:
-                rows.append(
-                    _ProjectedRow(
-                        ViewportAnchor(record.record_id, row_source_offset, row_semantic_offset),
-                        tuple(row),
-                        tuple(row_source_spans),
-                        record.hyperlinks,
-                    )
-                )
-                row = []
-                row_source_spans = []
-                row_cells = 0
-                row_source_offset = source_offset
-                row_semantic_offset = semantic_offset
-            row.extend(cluster)
+            cells = min(max(cells, 0), width)
+
+            while row and cells and row_cells + cells > width:
+                # Prefer a semantic word boundary. If this row has no
+                # whitespace (a URL, identifier, or other long token), fold at
+                # the grapheme boundary as the lossless fallback.
+                natural_break = word_break()
+                emit_row(natural_break)
+            row.append(tuple(cluster))
             row_source_spans.append((start, stop))
+            row_widths.append(cells)
             row_cells += cells
             source_offset += 1
             if not cluster_text.isspace():
                 semantic_offset += 1
-            if row_cells >= width and stop < len(styled_chars) and styled_chars[stop][1] != "\n":
-                rows.append(
-                    _ProjectedRow(
-                        ViewportAnchor(record.record_id, row_source_offset, row_semantic_offset),
-                        tuple(row),
-                        tuple(row_source_spans),
-                        record.hyperlinks,
-                    )
-                )
-                row = []
-                row_source_spans = []
-                row_cells = 0
-                row_source_offset = source_offset
-                row_semantic_offset = semantic_offset
         if row or not rows or (styled_chars and styled_chars[-1][1] != "\n"):
-            rows.append(
-                _ProjectedRow(
-                    ViewportAnchor(record.record_id, row_source_offset, row_semantic_offset),
-                    tuple(row),
-                    tuple(row_source_spans),
-                    record.hyperlinks,
-                )
-            )
+            emit_row()
         return rows
 
     @staticmethod
