@@ -2466,23 +2466,27 @@ async def test_cancel_status_ignores_stale_pre_interrupt_observation() -> None:
         await h.wait_for(lambda: not h.app.is_thinking())
 
 
-async def test_foreign_thread_interrupt_ack_runs_on_tui_owner_loop() -> None:
-    """Observation teardown must not mutate timers from its worker thread."""
-    agent = _blocking_agent()
+async def test_observation_teardown_does_not_acknowledge_active_interrupt() -> None:
+    """Closing an observation must not complete an unrelated active turn."""
+    agent = FakeAgent()
+    cleanup_started = ThreadGate()
+    release_cleanup = ThreadGate()
+
+    async def step(_self: FakeAgent, _msg: str) -> None:
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cleanup_started.set()
+            await release_cleanup.wait()
+            raise
+
+    agent.queue(step)
     async with TUIHarness(agent=agent) as h:
         await h.submit_async("first")
         await h.wait_for(lambda: h.app.is_thinking())
         assert h.app.request_agent_cancel(source="escape") is True
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1.0)
 
-        owner_thread = threading.get_ident()
-        ack_threads: list[int] = []
-        original_ack = h.app._acknowledge_agent_interrupt
-
-        def record_ack() -> None:
-            ack_threads.append(threading.get_ident())
-            original_ack()
-
-        h.app._acknowledge_agent_interrupt = record_ack
         callback_errors: list[BaseException] = []
 
         def publish_teardown() -> None:
@@ -2497,8 +2501,10 @@ async def test_foreign_thread_interrupt_ack_runs_on_tui_owner_loop() -> None:
         assert not producer.is_alive()
         assert callback_errors == []
 
-        await h.wait_for(lambda: bool(ack_threads))
-        assert set(ack_threads) == {owner_thread}
+        await asyncio.sleep(0)
+        assert h.app._interrupt_status_acknowledged is False
+        assert h.capture_status().endswith("Interrupting agent turn")
+        release_cleanup.set()
 
 
 async def test_cancel_does_not_deliver_queued_message_until_cleanup_ack() -> None:

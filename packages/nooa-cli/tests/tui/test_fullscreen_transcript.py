@@ -3728,6 +3728,26 @@ def test_copyable_markdown_keeps_complete_copy_label_at_narrow_width(
     assert "Copy" in strip_safe_ansi(ansi).splitlines()[0]
 
 
+@pytest.mark.parametrize("width", [1, 2, 3])
+def test_copyable_markdown_omits_ambiguous_copy_suffix_at_tiny_width(width: int) -> None:
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+
+    _renderable, ansi = _copyable_markdown_ansi("```text\nx\n```", width=width)
+    first_line = strip_safe_ansi(ansi).splitlines()[0]
+
+    assert not any(label in first_line for label in ("y", "py", "opy"))
+    assert "nooa-copy://" not in ansi
+
+
+def test_copyable_markdown_keeps_full_copy_label_at_minimum_action_width() -> None:
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+
+    _renderable, ansi = _copyable_markdown_ansi("```text\nx\n```", width=4)
+
+    assert strip_safe_ansi(ansi).splitlines()[0] == "Copy"
+    assert "nooa-copy://" in ansi
+
+
 def test_copyable_markdown_does_not_offer_copy_for_empty_fence() -> None:
     renderable, ansi = _copyable_markdown_ansi("```python\n```")
 
