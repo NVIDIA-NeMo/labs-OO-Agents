@@ -30,6 +30,7 @@ from nooa.agentdoc import doc
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
 from nooa.storage.markers import nosnapshot
+from nooa.storage.persistent_vars import PersistentVars
 from nooa.storage.snapshot_vars import SnapshotVars
 
 with hidden:
@@ -300,63 +301,8 @@ def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
     )
 
 
-class AgentVars:
-    """Attribute-access proxy for an agent's persistent ``vars`` dict.
-
-    Mirrors ``TodoVars``: write ``self.v.spec = "..."`` instead of
-    ``self.vars["spec"] = "..."``. Reads and writes go straight
-    through to ``self.vars`` so snapshot serialization is unaffected.
-
-    Use for durable, cross-task agent state: identity, user/environment
-    preferences, stable capabilities, and long-running coordination state.
-    Task-specific plans, findings, artifacts, and checkpoints belong on the
-    relevant Todo's ``v`` proxy instead. Keep transient scratch data in cell locals.
-
-    Values are snapshot-backed: assigning something that can't be
-    snapshot-serialized (a live client, socket, callable, ...) logs a
-    warning and is **not stored** — it won't survive ``/exit`` + resume.
-    Store serializable data (dict/str/number/Pydantic model) instead.
-    """
-
-    def __init__(self, agent: Any):
-        object.__setattr__(self, "_agent", agent)
-
-    def __getattr__(self, key: str) -> Any:
-        try:
-            return self._agent.vars[key]
-        except KeyError:
-            raise AttributeError(f"No var {key!r} on agent") from None
-
-    def __setattr__(self, key: str, value: Any) -> None:
-        self._agent.vars[key] = value
-
-    def __delattr__(self, key: str) -> None:
-        try:
-            del self._agent.vars[key]
-        except KeyError:
-            raise AttributeError(f"No var {key!r} on agent") from None
-
-    def __contains__(self, key: str) -> bool:
-        return key in self._agent.vars
-
-    def keys(self) -> list[str]:
-        """Return the names of all persistent variables."""
-        return list(self._agent.vars.keys())
-
-    def items(self) -> list[tuple[str, Any]]:
-        """Return persistent variable name-value pairs for inspection."""
-        return list(self._agent.vars.items())
-
-    def get(self, key: str, default: Any = None) -> Any:
-        """Return a persistent value, or ``default`` when the name is absent."""
-        return self._agent.vars.get(key, default)
-
-    def clear(self) -> None:
-        """Remove all persistent variables."""
-        self._agent.vars.clear()
-
-    def __repr__(self) -> str:
-        return repr(self._agent.vars)
+# Backward-compatible import name; both agent.v and todo.v use PersistentVars.
+AgentVars = PersistentVars
 
 
 @hidden
@@ -430,7 +376,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
             self.context["web"] = Context(doc(self.web), prefix=True)
 
     @property
-    def v(self) -> AgentVars:
+    def v(self) -> PersistentVars:
         """Attribute-access proxy for ``self.vars`` — the agent's
         persistent variable dict.
 
@@ -452,7 +398,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         - ``todo.v.k = v`` → durable work state scoped to one task.
         - REPL locals → transient scratch state for the current work session.
         """
-        return AgentVars(self)
+        return PersistentVars(self)
 
     def message(self, text: str, *, echo: bool = False) -> None:
         """Send a Markdown message to the user.
