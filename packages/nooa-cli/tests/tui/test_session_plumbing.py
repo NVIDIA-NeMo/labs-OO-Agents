@@ -60,6 +60,32 @@ def test_session_emission_uses_only_resolved_display_mode_for_replay(monkeypatch
         app.complete_pending_input_handoff.assert_called_once_with("hello")
 
 
+def test_user_message_ui_uses_compact_pending_echo_text(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import nooa_cli.tui.session as session_module
+    from nooa_cli.tui.config import DisplayMode
+    from nooa_cli.tui.session import Session
+
+    build_user_bar = Mock(return_value="BAR")
+    monkeypatch.setattr(session_module, "_build_user_bar", build_user_bar)
+    app = SimpleNamespace(
+        display_mode=DisplayMode.NATIVE_REPLAY,
+        pending_input_echo_text=lambda text: "[Pasted text #1 · 20 lines]",
+        emit_block=Mock(),
+        complete_pending_input_handoff=Mock(),
+    )
+    session = Session.__new__(Session)
+    session._app = app
+    session._renderer = Mock()
+
+    session._on_user_message_ui("full payload")
+
+    assert build_user_bar.call_args.args[0] == "[Pasted text #1 · 20 lines]"
+    app.complete_pending_input_handoff.assert_called_once_with("full payload")
+
+
 def test_stale_user_message_ui_callback_is_ignored_after_session_swap() -> None:
     from unittest.mock import Mock
 
