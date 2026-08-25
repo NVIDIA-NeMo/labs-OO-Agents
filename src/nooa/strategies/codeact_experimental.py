@@ -199,8 +199,9 @@ class CodeActExperimental(CodeActStrategy):
         tool.description = """Execute one cell in a persistent Python session.
 
 Parameters are pre-loaded as locals, and names defined in one cell remain available
-in later cells. Use `await` directly, `print`/`pprint` to inspect values, and
-`doc(obj)` for APIs. This is your only provider tool: call it on every turn because
+in later cells. Already available without import: `self`, `print()`, `pprint()`,
+`doc()`, `python_cell_state()`, `return_result()`, `asyncio`, and `typing`. Use
+`await` directly. This is your only provider tool: call it on every turn because
 plain-text replies do not execute work or finish the task.
 
 To finish, call `return_result(value)` inside the cell. It immediately submits a
