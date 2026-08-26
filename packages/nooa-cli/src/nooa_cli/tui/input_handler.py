@@ -253,6 +253,7 @@ def create_prompt_style() -> Style:
             "return-to-tail": f"bg:{COLORS['surface1']} {COLORS['blue']} bold",
             # Session resume picker: semantic roles compose for selected,
             # unavailable, and fuzzy-match states without relying on color alone.
+            "resume-picker.title": f"{COLORS['text']} bold",
             "resume-picker.row": COLORS["text"],
             "resume-picker.selected": f"bg:{COLORS['surface2']} {COLORS['text']}",
             "resume-picker.unavailable": f"{COLORS['overlay1']} italic",
