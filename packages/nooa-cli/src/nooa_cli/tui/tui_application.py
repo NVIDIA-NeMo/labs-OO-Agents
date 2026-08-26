@@ -40,6 +40,8 @@ from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import (
     ConditionalContainer,
     DynamicContainer,
+    Float,
+    FloatContainer,
     HSplit,
     Layout,
     VSplit,
@@ -1227,6 +1229,8 @@ class TUIApplication:
         self._active_subview: InAppSubview | None = None
         self._active_subview_done: asyncio.Future[None] | None = None
         self._subview_control: FormattedTextControl | None = None
+        self._resume_picker: Any | None = None
+        self._resume_picker_done: asyncio.Future[str | None] | None = None
 
         # Input window: where user keystrokes land. A caller (Session)
         # passes the real CommandRegistry-backed completer; otherwise
@@ -1684,9 +1688,30 @@ class TUIApplication:
                 return False
             return bool(getattr(view, "mouse_support", True))
 
+        resume_float = Float(
+            content=ConditionalContainer(
+                DynamicContainer(
+                    lambda: (
+                        self._resume_picker.container
+                        if self._resume_picker is not None
+                        else Window()
+                    )
+                ),
+                filter=Condition(lambda: self._resume_picker is not None),
+            ),
+        )
+        resume_root = FloatContainer(
+            content=DynamicContainer(_root_container), floats=[resume_float]
+        )
+
+        def _layout_root():
+            if self._resume_picker is not None:
+                return resume_root
+            return _root_container()
+
         self._app = _ResizeAwareApplication(
             layout=Layout(
-                DynamicContainer(_root_container),
+                DynamicContainer(_layout_root),
                 focused_element=input_window,
             ),
             key_bindings=kb,
@@ -1754,6 +1779,45 @@ class TUIApplication:
         from .session_explorer import SessionExplorerView
 
         await self.open_subview(SessionExplorerView())
+
+    async def open_session_resume_dialog(self, active_session_id: str | None = None) -> str | None:
+        """Choose a resumable session in a modal owned by this Application."""
+        from .resume_picker import ResumePicker, ResumePickerRow
+        from .session_manager import SessionManager
+
+        if self._resume_picker_done is not None and not self._resume_picker_done.done():
+            return None
+        rows = [
+            ResumePickerRow.from_meta(
+                meta,
+                attached=SessionManager.is_active(meta.id),
+                current=meta.id == active_session_id,
+            )
+            for meta in SessionManager.list_sessions(limit=None)
+            if meta.turn_count > 0
+        ]
+        self._cancel_fullscreen_drag()
+        self._resume_picker = ResumePicker(rows, self._app)
+        loop = asyncio.get_running_loop()
+        self._resume_picker_done = loop.create_future()
+        previous = self._app.layout.current_control
+        self._app.layout.focus(self._resume_picker.query_control)
+        self._app.invalidate()
+        try:
+            return await self._resume_picker_done
+        finally:
+            self._resume_picker = None
+            self._resume_picker_done = None
+            try:
+                self._app.layout.focus(previous)
+            except Exception:
+                self._app.layout.focus(self._input_window)
+            self._app.invalidate()
+
+    def _finish_resume_picker(self, value: str | None) -> None:
+        done = self._resume_picker_done
+        if done is not None and not done.done():
+            done.set_result(value)
 
     async def open_activity_overlay(self, outputs: list[Any]) -> None:
         """Open the activity snapshot as an in-app subview."""
@@ -2347,8 +2411,39 @@ class TUIApplication:
         legacy = _legacy_kb(vi_mode=False)
 
         kb = KeyBindings()
-        subview_active = Condition(lambda: self._active_subview is not None)
-        subview_inactive = ~subview_active
+        resume_picker_active = Condition(lambda: self._resume_picker is not None)
+        subview_active = Condition(
+            lambda: self._active_subview is not None and self._resume_picker is None
+        )
+        subview_inactive = ~subview_active & ~resume_picker_active
+
+        @kb.add("escape", filter=resume_picker_active, eager=True)
+        @kb.add("c-c", filter=resume_picker_active, eager=True)
+        def _(event):
+            self._finish_resume_picker(None)
+
+        @kb.add("enter", filter=resume_picker_active, eager=True)
+        def _(event):
+            picker = self._resume_picker
+            if picker is not None:
+                selected = picker.selected_id()
+                if selected is not None:
+                    self._finish_resume_picker(selected)
+
+        @kb.add("up", filter=resume_picker_active, eager=True)
+        @kb.add("c-p", filter=resume_picker_active, eager=True)
+        def _(event):
+            if self._resume_picker is not None:
+                self._resume_picker.move(-1)
+                event.app.invalidate()
+
+        @kb.add("down", filter=resume_picker_active, eager=True)
+        @kb.add("c-n", filter=resume_picker_active, eager=True)
+        def _(event):
+            if self._resume_picker is not None:
+                self._resume_picker.move(1)
+                event.app.invalidate()
+
         input_selection_active = (
             Condition(lambda: self.input_buffer.selection_state is not None) & subview_inactive
         )
