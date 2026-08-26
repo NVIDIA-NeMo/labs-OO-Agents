@@ -84,6 +84,8 @@ async def test_experimental_tui_agent_uses_only_python_cell(tmp_path):
         )
         assert "<state" not in system_prompt
         assert "<execution_context" not in system_prompt
+        assert "<python_cell_tools" in system_prompt
+        assert "<python_tools" not in system_prompt
         assert "<python_cell_context" in system_prompt
         assert "Module capabilities already in scope:" in system_prompt
         assert "`json`" in system_prompt
