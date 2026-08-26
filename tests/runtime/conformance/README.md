@@ -17,8 +17,8 @@ pytest node ID, e.g. `test_stdout_is_captured[sandbox]`.
 | Namespace persistence across cells | cell 2 reads cell 1's binding | |
 | Helper definitions across cells | `def` in cell 1, called in cell 2 | |
 | Restriction enforcement | `execution_status`, `.error` | `RestrictionsConfig` defaults apply to both backends |
-| Validation retry | session completes after a rejected cell | |
-| Nested agent/tool calls | event ordering | |
+| Validation retry | session completes after a rejected cell | **Deferred** — not yet covered |
+| Nested agent/tool calls | event ordering | **Deferred** — not yet covered |
 | `PythonOutput` status and ordering | `event_type` sequence, `tool_call_id` | |
 | Runtime exception surfacing | `execution_status is ResultStatus.ERROR` | Error *text* is #189-dependent; assert status and type only |
 | Runtime exception source context | `PythonOutput.error` | **Deferred to #189** — see #191 |
@@ -43,10 +43,11 @@ Not parameterised. Remain in their existing suites.
 
 ## Capability-dependent skips
 
-Sandbox params skip with an explicit reason from `probe_capabilities()`
-(`Capabilities.linux`, `.landlock_abi`, `.seccomp`, `.rlimit`) rather than
-silently degrading. `SandboxConfig(require=False)` keeps portable semantic
-tests runnable where enforcement is unavailable.
+Sandbox params skip with an explicit reason when the host cannot enforce the
+guards the backend relies on — non-Linux, or missing landlock, seccomp or
+rlimit. `SandboxConfig(require=False)` would otherwise let a cell run with
+enforcement absent, so a pass on such a host would say nothing about the
+behaviour being asserted.
 
 ## Open question
 
