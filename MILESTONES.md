@@ -472,3 +472,68 @@ Current result:
   `dynamic-object-aware-egomotion` and `dapt-intrusion-detection`.
 - The PCAP skill package did expose native helper methods from `pcap_utils.py`;
   the failure is therefore not a package discovery or activation failure.
+
+## 2026-08-26 — Frozen LibrarySkill Evaluation Protocol
+
+Status: dev protocol frozen; held-out test not run.
+
+Added `experiments/library-skill-translation/` with:
+- `README.md`: research question, design, metrics, run commands, and current
+  result summary.
+- `dev_tasks.txt`: the 10 tasks already used during translator development.
+- `test_tasks.txt`: the remaining 77 tasks under `skillsbench/tasks`.
+
+Also hardened the generated package tests emitted by `TextSkillTranslator` so
+each generated package verifies that `SkillRegistry.activate()` registers the
+LibrarySkill `context_block` and that the registered dynamic expression points
+at `self.<skill_attr>.format_guidance()`.
+
+Validation:
+- `uv run pytest tests/tools/test_skill_translator.py -q`
+  - `27 passed`
+- `uv run ruff check src/nooa/tools/skill_translator.py tests/tools/test_skill_translator.py`
+  - passed
+- `uv run pytest tests/tools/test_skill_translator.py packages/nooa-bench/tests/test_bench_agent.py packages/nooa-bench/tests/test_runner.py packages/nooa-bench/tests/test_skillsbench_runner.py -q`
+  - `65 passed`
+
+Commit: `b5c04755 test: freeze library skill evaluation protocol`.
+
+Reran the frozen 10-task dev split with:
+- SkillsBench checkout:
+  `/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench`
+- Credentials file:
+  `/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/.env`
+- NOOA model: `openai/openai/openai/gpt-5.5`
+- Sandbox: Docker
+- Condition: `library_skill`
+- Main artifact root:
+  `jobs/nooa-skillsbench-library-dev-b5c04755/`
+- Manufacturing scoreable rerun root:
+  `jobs/nooa-skillsbench-library-dev-b5c04755-scoreable-reruns/`
+
+Results:
+
+| Task | Frozen LibrarySkill dev rerun |
+|---|---:|
+| `fix-visual-stability` | 1.0 |
+| `fix-erlang-ssh-cve` | 1.0 |
+| `video-silence-remover` | 0.0 |
+| `dynamic-object-aware-egomotion` | 0.0 |
+| `manufacturing-fjsp-optimization` | 0.0 |
+| `llm-prefix-cache-replay` | 1.0 |
+| `dapt-intrusion-detection` | 1.0 |
+| `offer-letter-generator` | 1.0 |
+| `parallel-tfidf-search` | 1.0 |
+| `reserves-at-risk-calc` | 0.0 |
+
+Current result:
+- Frozen LibrarySkill dev rerun aggregate: 6/10 scoreable.
+- The main manufacturing attempt timed out after the 1800s agent timeout with
+  `reward=None`; a single rerun completed scoreably with `reward=0.0`, which is
+  the value recorded above.
+- All other failures were scoreable task failures with `agent_return_code=0`,
+  no agent error, and no verifier infrastructure error.
+- This rerun did not reproduce the one-off
+  `dynamic-object-aware-egomotion` pass from the resource-preview run, so that
+  dev task should be treated as flaky or marginal.
+- No held-out test task has been run under this frozen protocol.

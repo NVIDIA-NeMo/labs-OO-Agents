@@ -111,6 +111,31 @@ Development set status:
 - Guidance-preserving `library_skill`: 6/10.
 - Resource-preview and activation-tested `library_skill`: 7/10.
 - Naive skill-guided package generation: 5/10.
+- Frozen protocol dev rerun at `b5c04755`: 6/10 scoreable, using a single
+  scoreable rerun for `manufacturing-fjsp-optimization` after the first attempt
+  timed out before verifier scoring.
+
+Frozen protocol dev rerun:
+
+| Task | LibrarySkill `b5c04755` |
+|---|---:|
+| `fix-visual-stability` | 1.0 |
+| `fix-erlang-ssh-cve` | 1.0 |
+| `video-silence-remover` | 0.0 |
+| `dynamic-object-aware-egomotion` | 0.0 |
+| `manufacturing-fjsp-optimization` | 0.0 |
+| `llm-prefix-cache-replay` | 1.0 |
+| `dapt-intrusion-detection` | 1.0 |
+| `offer-letter-generator` | 1.0 |
+| `parallel-tfidf-search` | 1.0 |
+| `reserves-at-risk-calc` | 0.0 |
+
+Run artifacts:
+
+- Main dev rerun:
+  `jobs/nooa-skillsbench-library-dev-b5c04755/`
+- Manufacturing scoreable rerun:
+  `jobs/nooa-skillsbench-library-dev-b5c04755-scoreable-reruns/`
 
 Current interpretation:
 
@@ -118,4 +143,8 @@ Current interpretation:
   guidance is preserved and executable skill assets become ergonomic APIs.
 - Naive packaging regresses because valid Python packages are not necessarily
   good LibrarySkills: activation context and API discoverability matter.
+- The frozen dev rerun did not reproduce the one-off
+  `dynamic-object-aware-egomotion` pass from the resource-preview rerun. Treat
+  that task as dev-set flaky or marginal rather than evidence of a stable
+  translator gain.
 - The held-out test set has not been run under the frozen protocol.
