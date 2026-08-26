@@ -51,7 +51,7 @@ async def test_execution_counts_increment_in_order(codeact_agent):
 
     outputs = [e for e in agent.event_manager.values() if e.event_type == "PythonOutput"]
     counts = [o.execution_count for o in outputs]
-    assert counts == sorted(counts)
+    assert counts == list(range(counts[0], counts[0] + len(counts)))
     assert len(set(counts)) == len(counts)
 
 
