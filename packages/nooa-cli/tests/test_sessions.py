@@ -268,3 +268,13 @@ def test_reads_legacy_tui_session_events(tmp_path):
         ("user", "old user"),
         ("agent", "old agent"),
     ]
+
+
+def test_list_none_returns_all_sessions(tmp_path):
+    store = SessionStore(tmp_path)
+    for index in range(25):
+        session = store.create(session_id=f"session-{index}")
+        session.close()
+
+    assert len(store.list()) == 20
+    assert len(store.list(limit=None)) == 25

@@ -11,7 +11,7 @@ dependencies = [
     # starts to require a newer core API). No auto-lockstep — published
     # wheels declare what they actually need, not what was co-released.
     "nooa[mcp,memory]",
-    "click>=8.1.0",
+    "click>=8.2",
     # CLI config files
     "pyyaml>=6.0",
     "prompt-toolkit>=3.0.41,<3.1.0",
