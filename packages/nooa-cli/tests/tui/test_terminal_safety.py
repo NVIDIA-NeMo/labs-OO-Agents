@@ -91,9 +91,9 @@ def test_user_bar_is_control_safe_cell_aware_and_reserves_final_column() -> None
         def transcript_columns() -> int:
             return 9  # ten physical columns, with one deliberately reserved
 
-    colors = {"text": "#cdd6f4", "surface2": "#585b70", "base": "#1e1e2e"}
+    colors = {"text": "#cdd6f4", "surface2": "#585b70"}
     bar = _build_user_bar("wide 界\x1b[2J\r", _App(), colors)  # type: ignore[arg-type]
-    assert bar.startswith("\x1b[38;5;16;48;5;59m" + "▔" * 9)
+    assert bar.startswith("\x1b[38;5;59;49;7m" + "▔" * 9)
     assert "\x1b[38;5;189;48;5;59m" in bar
 
     assert "\x1b[2J" not in bar
@@ -104,7 +104,7 @@ def test_user_bar_is_control_safe_cell_aware_and_reserves_final_column() -> None
     assert all(cell_len(line) == 9 for line in visible_lines)
 
     styled_lines = bar.splitlines()
-    edge_style = "\x1b[38;5;16;48;5;59m"
+    edge_style = "\x1b[38;5;59;49;7m"
     assert styled_lines[0] == edge_style + "▔" * 9 + "\x1b[0m"
     assert styled_lines[-1] == edge_style + "▁" * 9 + "\x1b[0m"
 
