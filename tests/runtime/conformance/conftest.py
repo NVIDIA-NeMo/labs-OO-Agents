@@ -127,3 +127,8 @@ def codeact_agent(backend: Backend):
         return _ConformanceAgent(llm=FakeLLMClient(scripted_responses=scripted_responses))
 
     return _make
+
+
+def outputs(agent) -> list:
+    """Every PythonOutput event the session emitted, in order."""
+    return [e for e in agent.event_manager.values() if e.event_type == "PythonOutput"]

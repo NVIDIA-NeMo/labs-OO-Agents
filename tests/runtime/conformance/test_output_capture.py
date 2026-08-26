@@ -4,14 +4,7 @@
 
 from __future__ import annotations
 
-from nooa.events import PythonOutput
-
-from .conftest import cell, finish, resp
-
-
-def _outputs(agent) -> list[PythonOutput]:
-    """Every PythonOutput event the session emitted, in order."""
-    return [e for e in agent.event_manager.values() if e.event_type == "PythonOutput"]
+from .conftest import cell, finish, outputs, resp
 
 
 async def test_stdout_is_captured(codeact_agent):
@@ -23,13 +16,14 @@ async def test_stdout_is_captured(codeact_agent):
     )
     assert await agent.run() == 1
 
-    outputs = _outputs(agent)
-    assert len(outputs) == 1
-    assert "hello from the cell" in outputs[0].stdout
-    assert outputs[0].stderr == ""
+    events = outputs(agent)
+    assert len(events) == 1
+    assert "hello from the cell" in events[0].stdout
+    assert events[0].stderr == ""
 
 
 async def test_stderr_is_captured(codeact_agent):
+    """Sandbox stderr crosses a worker pipe; the streams must stay separated."""
     agent = codeact_agent(
         [
             resp("", tool_calls=[cell("import sys\nprint('warned', file=sys.stderr)")]),
@@ -38,7 +32,7 @@ async def test_stderr_is_captured(codeact_agent):
     )
     assert await agent.run() == 1
 
-    outputs = _outputs(agent)
-    assert len(outputs) == 1
-    assert "warned" in outputs[0].stderr
-    assert "warned" not in outputs[0].stdout
+    events = outputs(agent)
+    assert len(events) == 1
+    assert "warned" in events[0].stderr
+    assert "warned" not in events[0].stdout

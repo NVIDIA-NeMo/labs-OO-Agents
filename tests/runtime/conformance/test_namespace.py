@@ -4,11 +4,11 @@
 
 from __future__ import annotations
 
-from .conftest import cell, finish, resp
+from .conftest import cell, finish, outputs, resp
 
 
 async def test_bindings_persist_across_cells(codeact_agent):
-    """A name bound in cell 1 is readable in cell 2."""
+    """The sandbox keeps a live worker namespace rather than re-executing prior cells."""
     agent = codeact_agent(
         [
             resp("", tool_calls=[cell("total = 40", call_id="c1")]),
@@ -18,13 +18,13 @@ async def test_bindings_persist_across_cells(codeact_agent):
     )
     assert await agent.run() == 1
 
-    outputs = [e for e in agent.event_manager.values() if e.event_type == "PythonOutput"]
-    assert len(outputs) == 2
-    assert "42" in outputs[1].stdout
+    events = outputs(agent)
+    assert len(events) == 2
+    assert "42" in events[1].stdout
 
 
 async def test_helper_definitions_persist_across_cells(codeact_agent):
-    """A function defined in cell 1 is callable in cell 2."""
+    """Function objects survive between cells without being re-sent across the boundary."""
     agent = codeact_agent(
         [
             resp("", tool_calls=[cell("def double(v):\n    return v * 2", call_id="c1")]),
@@ -34,13 +34,13 @@ async def test_helper_definitions_persist_across_cells(codeact_agent):
     )
     assert await agent.run() == 1
 
-    outputs = [e for e in agent.event_manager.values() if e.event_type == "PythonOutput"]
-    assert len(outputs) == 2
-    assert "42" in outputs[1].stdout
+    events = outputs(agent)
+    assert len(events) == 2
+    assert "42" in events[1].stdout
 
 
 async def test_imports_persist_across_cells(codeact_agent):
-    """A module imported in cell 1 is bound in cell 2."""
+    """Module objects stay bound in the worker namespace; they are not re-imported per cell."""
     agent = codeact_agent(
         [
             resp("", tool_calls=[cell("import math", call_id="c1")]),
@@ -50,6 +50,6 @@ async def test_imports_persist_across_cells(codeact_agent):
     )
     assert await agent.run() == 1
 
-    outputs = [e for e in agent.event_manager.values() if e.event_type == "PythonOutput"]
-    assert len(outputs) == 2
-    assert "42" in outputs[1].stdout
+    events = outputs(agent)
+    assert len(events) == 2
+    assert "42" in events[1].stdout
