@@ -27,9 +27,11 @@ def render_user_bar(text: str, cols: int, colors: dict[str, str]) -> str:
     width = max(int(cols), 1)
     foreground = _hex_to_ansi256(colors["text"])
     background = _hex_to_ansi256(colors["surface2"])
-    terminal_background = _hex_to_ansi256(colors["base"])
     style_on = f"\x1b[38;5;{foreground};48;5;{background}m"
-    edge_style = f"\x1b[38;5;{terminal_background};48;5;{background}m"
+    # Reverse the bar color over SGR's semantic default background. After
+    # reversal, the glyph uses the terminal's real background while the rest
+    # of each cell remains the user-bar color—without querying OSC 11.
+    edge_style = f"\x1b[38;5;{background};49;7m"
     style_off = "\x1b[0m"
 
     def styled_row(content: str = "") -> str:
