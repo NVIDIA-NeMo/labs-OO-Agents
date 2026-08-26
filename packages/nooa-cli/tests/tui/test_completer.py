@@ -161,10 +161,9 @@ def test_connect_endpoint_completion_filters_partial(completer, monkeypatch):
         },
     )
 
-    assert [
-        item.text
-        for item in completer.complete("/connect https://oth")
-    ] == ["/connect https://other.example.test/v1"]
+    assert [item.text for item in completer.complete("/connect https://oth")] == [
+        "/connect https://other.example.test/v1"
+    ]
 
 
 def test_connect_provider_completion_no_hardcoded_shortcuts(completer):
@@ -710,9 +709,7 @@ def test_mcp_lists_lifecycle_actions():
 def test_mcp_action_completion_filters_partial_input():
     completer = Completer(registry=_mcp_registry([]))
 
-    assert [item.text for item in completer.complete("/mcp ap")] == [
-        "/mcp approve"
-    ]
+    assert [item.text for item in completer.complete("/mcp ap")] == ["/mcp approve"]
 
 
 def test_mcp_connect_lists_configured_servers():
@@ -757,12 +754,8 @@ def test_mcp_remove_offers_configured_servers():
 def test_mcp_approve_and_revoke_complete_configured_servers():
     reg = _mcp_registry(["maas-jira"])
     completer = Completer(registry=reg)
-    assert [item.text for item in completer.complete("/mcp approve ")] == [
-        "/mcp approve maas-jira"
-    ]
-    assert [item.text for item in completer.complete("/mcp revoke ")] == [
-        "/mcp revoke maas-jira"
-    ]
+    assert [item.text for item in completer.complete("/mcp approve ")] == ["/mcp approve maas-jira"]
+    assert [item.text for item in completer.complete("/mcp revoke ")] == ["/mcp revoke maas-jira"]
 
 
 def test_mcp_completion_marks_approved_server():

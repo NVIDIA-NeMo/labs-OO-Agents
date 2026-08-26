@@ -54,9 +54,7 @@ def test_working_dir_scopes_project_settings(tmp_path: Path, monkeypatch) -> Non
     workspace = tmp_path / "workspace"
     project_config = workspace / ".nooa"
     project_config.mkdir(parents=True)
-    (project_config / "settings.yaml").write_text(
-        "tui:\n  default_model: workspace-model\n"
-    )
+    (project_config / "settings.yaml").write_text("tui:\n  default_model: workspace-model\n")
     monkeypatch.delenv("NEMO_OO_PROJECT_DIR", raising=False)
     seen = {}
 
