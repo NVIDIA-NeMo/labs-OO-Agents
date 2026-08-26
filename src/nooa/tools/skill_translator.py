@@ -1860,10 +1860,13 @@ def _render_argument_append(argument: ScriptArgumentPlan) -> list[str]:
 
 
 def _render_tests(plan: ConversionPlan) -> str:
+    attr_name = plan.registry_name.split(".")[-1].replace("-", "_")
     lines = [
         "from pathlib import Path",
         "",
+        "from nooa import Agent",
         "from nooa.agentdoc import doc",
+        "from nooa.context_blocks import DynamicContext",
         "from nooa.skill_registry import SkillRegistry",
         f"from {plan.package_name} import {plan.class_name}",
         "",
@@ -1907,6 +1910,22 @@ def _render_tests(plan: ConversionPlan) -> str:
             "    try:",
             "        registry.discover_libs(package_dir.parent)",
             f"        assert {plan.registry_name!r} in registry.loaded()",
+            "    finally:",
+            "        registry.close()",
+            "",
+            "",
+            "def test_skill_registry_activation_registers_context_block():",
+            "    package_dir = Path(__file__).resolve().parents[1]",
+            "    agent = Agent(llm=object())",
+            "    registry = SkillRegistry(agent)",
+            "    try:",
+            "        registry.discover_libs(package_dir.parent)",
+            f"        registry.activate([{plan.registry_name!r}])",
+            f"        context_key = {f'skill:{plan.registry_name}'!r}",
+            "        assert context_key in agent.context_manager",
+            "        raw_block = dict(agent.context_manager._raw_items())[context_key]",
+            "        assert isinstance(raw_block, DynamicContext)",
+            f"        assert raw_block.expr == {f'self.{attr_name}.format_guidance()'!r}",
             "    finally:",
             "        registry.close()",
         ]
