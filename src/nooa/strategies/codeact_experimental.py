@@ -199,12 +199,12 @@ class CodeActExperimental(CodeActStrategy):
             lines.extend(
                 (
                     "",
-                    "Cell locals (current call only; includes method inputs; reuse unchanged "
-                    f"values): {items}{suffix}",
+                    "Cell locals (includes method inputs; reuse unchanged values): "
+                    f"{items}{suffix}",
                 )
             )
         else:
-            lines.extend(("", "Cell locals (current call only; includes method inputs): none"))
+            lines.extend(("", "Cell locals (includes method inputs): none"))
         return "\n".join(lines)
 
     def _build_builtins(self, runtime: RuntimeServices, call: "CurrentCall") -> dict[str, Any]:
@@ -261,11 +261,9 @@ class CodeActExperimental(CodeActStrategy):
         tool.description = """Execute one cell in the current method call's Python session.
 
 Parameters are pre-loaded as locals. Names defined in one cell remain available in
-later cells of this call; reuse them instead of recreating unchanged values. Cell
-locals are discarded when the method call ends—use `self.v` or the active Todo's
-`v` proxy only for state that must survive later calls. `self.shell` keeps its working
-directory across cells and method calls; use relative paths and call `cd` only when
-intentionally changing directories. Already available without import: `self`,
+later cells of this call; reuse them instead of recreating unchanged values. The
+caller controls whether locals survive after the method returns, so follow the agent's
+application-specific state guidance. Already available without import: `self`,
 `print()`, `pprint()`,
 `doc()`, `python_cell_state()`, `return_result()`, `asyncio`, and `typing`. Use
 `await` directly. This is your only provider tool: call it on every turn because

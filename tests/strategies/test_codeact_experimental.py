@@ -59,8 +59,11 @@ async def test_explicit_return_completes_with_only_python_cell_tool():
     tool = (fake_llm.last_tools or [])[0]
     assert "current method call's Python session" in tool.description
     normalized_description = " ".join(tool.description.split())
-    assert "Cell locals are discarded when the method call ends" in normalized_description
-    assert "call `cd` only when intentionally changing directories" in normalized_description
+    assert "caller controls whether locals survive" in normalized_description
+    assert "application-specific state guidance" in normalized_description
+    assert "Cell locals are discarded" not in normalized_description
+    assert "self.v" not in normalized_description
+    assert "self.shell" not in normalized_description
     assert "Already available without import" in tool.description
     for name in (
         "self",
@@ -200,7 +203,7 @@ async def test_python_cell_state_summarizes_initial_state():
     state_block = rendered_context.split("## Python cell state", 1)[1]
     assert "Previous cell outputs" not in state_block
     assert (
-        "Cell locals (current call only; includes method inputs; reuse unchanged values): "
+        "Cell locals (includes method inputs; reuse unchanged values): "
         "prior_value (int), question (str)" in state_block
     )
     assert "self.v" not in state_block
@@ -228,7 +231,7 @@ async def test_python_cell_state_lists_user_created_locals():
     )
     state_block = rendered_context.split("## Python cell state", 1)[1]
     assert (
-        "Cell locals (current call only; includes method inputs; reuse unchanged values): "
+        "Cell locals (includes method inputs; reuse unchanged values): "
         "question (str), working_value (str)" in state_block
     )
     assert "Previous cell outputs" not in state_block
@@ -279,7 +282,7 @@ async def test_python_cell_state_context_escapes_cwd_markup():
     assert "\n`forged`" not in rendered
     assert len(rendered) < 500
     assert (
-        "Cell locals (current call only; includes method inputs; reuse unchanged values): "
+        "Cell locals (includes method inputs; reuse unchanged values): "
         "message (str)" in rendered
     )
 
@@ -312,7 +315,7 @@ async def test_python_cell_state_omits_inputs_outputs_and_framework_objects():
     assert "ResultType" not in rendered
     assert "helper" not in rendered
     assert (
-        "Cell locals (current call only; includes method inputs; reuse unchanged values): "
+        "Cell locals (includes method inputs; reuse unchanged values): "
         "large_text (str), notification (dict), working_path (str)"
         in rendered
     )
@@ -391,7 +394,7 @@ async def test_python_cell_state_context_lists_import_aliases_without_module_rep
 
     assert "Cell imports: json_alias → json, path_module → pathlib" in rendered
     assert "<module " not in rendered
-    assert "Cell locals (current call only; includes method inputs): none" in rendered
+    assert "Cell locals (includes method inputs): none" in rendered
 
 
 @pytest.mark.asyncio

@@ -100,8 +100,8 @@ async def test_experimental_tui_agent_uses_only_python_cell(tmp_path):
         )[0]
         assert "Cell imports:" not in state_block
         assert (
-            "Cell locals (current call only; includes method inputs; reuse unchanged "
-            "values): notification (dict)" in state_block
+            "Cell locals (includes method inputs; reuse unchanged values): "
+            "notification (dict)" in state_block
         )
         assert "`self.v`: none" in rendered_context
         assert (
@@ -200,5 +200,21 @@ async def test_experimental_tui_agent_delegates_to_experimental_worker(tmp_path)
         assert "RespondReason.WAIT" in prompt
         assert 'notification["delegates"]' in prompt
         assert "serialize mutations" in prompt
+        assert "Each ``handle()`` call gets fresh cell locals" in prompt
+        assert "use relative paths and call ``cd`` only when intentionally changing" in prompt
+        worker_prompt = ExperimentalCodingWorker.__doc__ or ""
+        worker_method_prompt = ExperimentalCodingWorker.investigate.__doc__ or ""
+        normalized_worker_prompt = " ".join(worker_prompt.split())
+        normalized_worker_method_prompt = " ".join(worker_method_prompt.split())
+        assert "Each ``investigate()`` call gets fresh cell locals" in normalized_worker_prompt
+        assert (
+            "Plain-string delegations have no Todo-backed durable task state"
+            in normalized_worker_prompt
+        )
+        assert "When a Todo is present" in normalized_worker_method_prompt
+        assert "self.todo.comment(todo, ...)" in normalized_worker_method_prompt
+        assert "For a plain-string objective" in normalized_worker_method_prompt
+        assert "do not call Todo APIs" in normalized_worker_method_prompt
+        assert "self.todo.comment(...)" not in normalized_worker_method_prompt
     finally:
         await agent.close()
