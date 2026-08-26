@@ -58,12 +58,37 @@ def finish(result: Any = None, call_id: str = "cret") -> ToolCall:
     return ToolCall(id=call_id, name="return_result", arguments=json.dumps({"result": result}))
 
 
+def _sandbox_skip_reason() -> str | None:
+    """Why the sandbox backend cannot be exercised here, or None if it can.
+
+    ``SandboxConfig(require=False)`` lets a cell run with enforcement missing,
+    so a green test on a host without these guards would say nothing about the
+    behaviour being asserted. Skip explicitly instead.
+    """
+    if not CAPS.linux:
+        return "sandbox backend requires Linux"
+    missing = [
+        name
+        for name, present in (
+            ("landlock", CAPS.landlock_abi >= 1),
+            ("seccomp", CAPS.seccomp),
+            ("rlimit", CAPS.rlimit),
+        )
+        if not present
+    ]
+    if missing:
+        return f"host cannot enforce: {', '.join(missing)}"
+    return None
+
+
 @pytest.fixture(params=BACKENDS)
 def backend(request: pytest.FixtureRequest) -> Backend:
     """The execution backend under test; puts the name in the node ID."""
     name: Backend = request.param
-    if name == "sandbox" and not CAPS.linux:
-        pytest.skip(f"sandbox backend needs Linux (host reports {CAPS.linux=})")
+    if name == "sandbox":
+        reason = _sandbox_skip_reason()
+        if reason is not None:
+            pytest.skip(reason)
     return name
 
 
