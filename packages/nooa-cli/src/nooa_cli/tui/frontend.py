@@ -266,6 +266,14 @@ class TerminalFrontend:
             raise RuntimeError("TUI application is not ready.")
         await self._app.open_session_explorer()
 
+    async def open_session_resume_dialog(
+        self, *, active_session_id: str | None = None
+    ) -> str | None:
+        """Open the dedicated in-application session resume picker."""
+        if self._app is None:
+            raise RuntimeError("TUI application is not ready.")
+        return await self._app.open_session_resume_dialog(active_session_id)
+
     async def open_job_explorer(self) -> None:
         if self._app is None:
             raise RuntimeError("TUI application is not ready.")

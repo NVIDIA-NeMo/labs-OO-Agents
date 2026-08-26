@@ -670,6 +670,26 @@ def _acquire_session_lock(lock_path: str) -> int:
     return fd
 
 
+def is_sqlite_database_active(db_path: str | Path) -> bool:
+    """Return whether an open manager currently holds the database lock."""
+    path = Path(db_path)
+    if str(db_path) == ":memory:":
+        return False
+    try:
+        fd = os.open(path.with_suffix(".lock"), os.O_RDWR)
+    except FileNotFoundError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
 def delete_sqlite_database(db_path: str | Path) -> bool:
     """Delete an inactive SQLite database and its WAL/SHM sidecars.
 
