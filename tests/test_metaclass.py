@@ -1553,6 +1553,24 @@ def test_yield_ellipsis_generator_gets_single_result_error():
                 yield ...
 
 
+def test_nested_yield_ellipsis_generator_gets_single_result_error():
+    """An ellipsis yielded through another yield is still a generation marker."""
+    with pytest.raises(TypeError, match="produce one final result"):
+
+        class BadAgent(Agent, llm=_TEST_LLM):
+            async def review(self):
+                yield (yield ...)
+
+
+def test_nested_yield_from_ellipsis_generator_gets_single_result_error():
+    """Yield-from traversal must find an ellipsis inside its yielded expression."""
+    with pytest.raises(TypeError, match="produce one final result"):
+
+        class BadAgent(Agent, llm=_TEST_LLM):
+            def review(self):
+                yield from (yield ...)
+
+
 def test_strategy_generated_generator_explains_single_result_contract():
     """@strategy must not misdiagnose an async generator as non-async."""
     with pytest.raises(TypeError, match="must produce one final result"):

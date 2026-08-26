@@ -144,10 +144,12 @@ def has_ellipsis_marker(func: Callable[..., Any]) -> bool:
             def visit_Yield(self, node: ast.Yield) -> None:
                 if isinstance(node.value, ast.Constant) and node.value.value is ...:
                     self.found = True
+                self.generic_visit(node)
 
             def visit_YieldFrom(self, node: ast.YieldFrom) -> None:
                 if isinstance(node.value, ast.Constant) and node.value.value is ...:
                     self.found = True
+                self.generic_visit(node)
 
             def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
                 return
