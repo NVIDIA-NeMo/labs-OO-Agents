@@ -51,7 +51,7 @@ class CodingWorker(
         self.shell = ShellTools(cwd=str(cwd), init_command=init_command)
         self.repo = RepoTools(root=str(cwd), session=self.shell.session)
         self.todo = todo or TodoManager()
-        self.context_manager["python_tools"] = Context(
+        self.context_manager["python_cell_tools"] = Context(
             doc(RepoTools, ShellTools, TodoManager), prefix=True
         )
         instructions = render_agent_instructions(cwd)

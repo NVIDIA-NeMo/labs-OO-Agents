@@ -155,7 +155,7 @@ class CodingAgent(InteractiveAgent):
         if skills_dirs:
             self.skills.discover_skills_dirs(skills_dirs)
 
-        self.context["python_tools"] = Context(
+        self.context["python_cell_tools"] = Context(
             doc(RepoTools, ActivityShellTools),
             prefix=True,
         )
