@@ -1578,7 +1578,7 @@ datascience = [
 
 [package.metadata]
 requires-dist = [
-    { name = "click", specifier = ">=8.1.0" },
+    { name = "click", specifier = ">=8.2" },
     { name = "nooa", extras = ["mcp", "memory"], editable = "." },
     { name = "numpy", marker = "extra == 'datascience'", specifier = ">=1.24.0" },
     { name = "pandas", marker = "extra == 'datascience'", specifier = ">=2.0.0" },

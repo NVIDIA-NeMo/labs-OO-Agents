@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import sys
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -16,6 +17,17 @@ from pathlib import Path
 import click
 
 _RESUME_LAST = "__last__"
+
+
+def _empty_usage() -> dict[str, int | float]:
+    """Return the complete zero-valued usage envelope."""
+    return {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0.0,
+    }
 
 
 @contextmanager
@@ -132,9 +144,23 @@ def command(
     from nooa_cli.headless import run_headless
     from nooa_cli.tui.config import Config
 
+    run_id = str(uuid.uuid4())
+    session_id: object = None
+    terminal_emitted = False
+
     def emit_event(event: dict[str, object]) -> None:
+        nonlocal run_id, session_id, terminal_emitted
+        event_run_id = event.get("run_id")
+        if isinstance(event_run_id, str):
+            run_id = event_run_id
+        session_id = event.get("session_id")
         if output_format == "jsonl":
             click.echo(json.dumps(event, ensure_ascii=False))
+            is_terminal = (
+                str(event.get("type", "")).startswith("turn.")
+                and event.get("type") != "turn.started"
+            )
+            terminal_emitted = terminal_emitted or is_terminal
 
     with _project_scope(working_dir):
         try:
@@ -161,21 +187,26 @@ def command(
                 )
             )
         except KeyboardInterrupt:
-            if output_format == "jsonl":
+            cancelled_result = {
+                "schema_version": 1,
+                "session_id": session_id,
+                "run_id": run_id,
+                "status": "cancelled",
+                "messages": [],
+                "explanation": "cancelled",
+                "usage": _empty_usage(),
+                "error": None,
+            }
+            if output_format == "json":
+                click.echo(json.dumps(cancelled_result, ensure_ascii=False))
+            elif output_format == "jsonl" and not terminal_emitted:
                 cancelled = {
                     "schema_version": 1,
                     "type": "turn.cancelled",
                     "timestamp": datetime.now(UTC).isoformat(),
-                    "session_id": None,
-                    "result": {
-                        "schema_version": 1,
-                        "session_id": None,
-                        "status": "cancelled",
-                        "messages": [],
-                        "explanation": "cancelled",
-                        "usage": {},
-                        "error": None,
-                    },
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "result": cancelled_result,
                 }
                 click.echo(json.dumps(cancelled, ensure_ascii=False))
             raise click.exceptions.Exit(130) from None
@@ -185,11 +216,12 @@ def command(
             if output_format in {"json", "jsonl"}:
                 error = {
                     "schema_version": 1,
-                    "session_id": None,
+                    "session_id": session_id,
+                    "run_id": run_id,
                     "status": "failed",
                     "messages": [],
                     "explanation": str(exc),
-                    "usage": {},
+                    "usage": _empty_usage(),
                     "error": {"type": type(exc).__name__, "message": str(exc)},
                 }
                 if output_format == "jsonl":
@@ -197,7 +229,8 @@ def command(
                         "schema_version": 1,
                         "type": "turn.failed",
                         "timestamp": datetime.now(UTC).isoformat(),
-                        "session_id": None,
+                        "session_id": session_id,
+                        "run_id": run_id,
                         "result": error,
                     }
                 click.echo(json.dumps(error, ensure_ascii=False))
