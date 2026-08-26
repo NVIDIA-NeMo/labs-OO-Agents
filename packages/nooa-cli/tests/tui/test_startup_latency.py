@@ -57,8 +57,7 @@ async def test_pending_llm_health_does_not_emit_durable_startup_status(tmp_path,
         assert result.blocking_llm_health is not None
         assert result.blocking_llm_health.pending is True
         assert all(
-            "Checking LLM endpoint in the background"
-            not in str(getattr(output, "content", ""))
+            "Checking LLM endpoint in the background" not in str(getattr(output, "content", ""))
             for output in result.messages
         )
     finally:
