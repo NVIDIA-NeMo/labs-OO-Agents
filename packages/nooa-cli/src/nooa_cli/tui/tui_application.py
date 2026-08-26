@@ -3003,22 +3003,6 @@ class TUIApplication:
                 break
         self._reclaim_paste_attachments()
 
-    def pending_input_echo_text(self, text: str) -> str:
-        """Return compact display text for a consumed runtime queue item."""
-        for represented in range(len(self._pending_input_handoff), 0, -1):
-            handoffs = self._pending_input_handoff[:represented]
-            combined = "\n".join(item.text for item in handoffs)
-            display = "\n".join(item.display_text or item.text for item in handoffs)
-            if text == combined:
-                return display
-            suffix = f"\n{combined}"
-            if text.endswith(suffix):
-                return f"{text[: -len(suffix)]}\n{display}"
-        for handoff in reversed(self._pending_input_handoff):
-            if handoff.text == text:
-                return handoff.display_text or handoff.text
-        return text
-
     def complete_pending_input_handoff(self, text: str) -> None:
         """Retire the submissions represented by one consumed queue item."""
         for represented in range(len(self._pending_input_handoff), 0, -1):

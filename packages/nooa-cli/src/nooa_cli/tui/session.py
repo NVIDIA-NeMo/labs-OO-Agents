@@ -1349,16 +1349,12 @@ class Session:
             return
         assert self._renderer is not None and self._app is not None
 
-        project_echo = getattr(self._app, "pending_input_echo_text", None)
-        display_text = project_echo(text) if callable(project_echo) else text
-        bar = _build_user_bar(display_text, self._app, self._colors)
+        bar = _build_user_bar(text, self._app, self._colors)
         from .config import DisplayMode
 
         full_screen = getattr(self._app, "display_mode", None) is DisplayMode.FULLSCREEN
         replay = (
-            (lambda t=display_text: _build_user_bar(t, self._app, self._colors))
-            if full_screen
-            else None
+            (lambda t=text: _build_user_bar(t, self._app, self._colors)) if full_screen else None
         )
         emit_kwargs = {}
         if event_id is not None:
