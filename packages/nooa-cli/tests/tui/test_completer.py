@@ -102,6 +102,7 @@ def test_slash_case_insensitive(completer):
                 "/reasoning high",
             ],
         ),
+        ("/statusbar ", ["/statusbar reset", "/statusbar set"]),
         ("/toolbar ", ["/toolbar reset", "/toolbar set"]),
         ("/memory ", ["/memory on", "/memory local", "/memory off"]),
         (
@@ -183,14 +184,18 @@ def test_skills_add_completes_directories_only(tmp_path, mock_registry):
     ]
 
 
-def test_toolbar_set_completes_unselected_items(completer):
-    first = completer.complete("/toolbar set ")
+def test_statusbar_set_completes_unselected_items(completer):
+    first = completer.complete("/statusbar set ")
     assert first
 
-    selected = first[0].text.removeprefix("/toolbar set ")
-    remaining = completer.complete(f"/toolbar set {selected} ")
-    assert all(item.text.startswith(f"/toolbar set {selected} ") for item in remaining)
-    assert all(item.text != f"/toolbar set {selected} {selected}" for item in remaining)
+    selected = first[0].text.removeprefix("/statusbar set ")
+    remaining = completer.complete(f"/statusbar set {selected} ")
+    assert all(item.text.startswith(f"/statusbar set {selected} ") for item in remaining)
+    assert all(item.text != f"/statusbar set {selected} {selected}" for item in remaining)
+
+
+def test_toolbar_set_completion_remains_as_deprecated_alias(completer):
+    assert completer.complete("/toolbar set ")
 
 
 # ---------------------------------------------------------------------------

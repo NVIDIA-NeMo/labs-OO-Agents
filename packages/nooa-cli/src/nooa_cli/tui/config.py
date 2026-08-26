@@ -23,7 +23,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field, PrivateAttr, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 if TYPE_CHECKING:
     from nooa.unifiedllm import CompletionClient
@@ -151,11 +151,29 @@ class TUIConfig(BaseModel):
     full_screen: bool = True
     _display_mode_warning_emitted: bool = PrivateAttr(default=False)
 
-    # Ordered, structured toolbar providers. Third-party packages can register
-    # additional providers through the ``nooa_cli.tui.toolbar_items`` group.
-    toolbar_items: list[str] = Field(
+    # Ordered, structured statusbar providers. Third-party packages can register
+    # additional providers through the ``nooa_cli.tui.statusbar_items`` group.
+    statusbar_items: list[str] = Field(
         default_factory=lambda: ["time", "model", "context", "session"]
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_toolbar_items(cls, value: object) -> object:
+        """Accept the legacy settings key without writing it back."""
+        if isinstance(value, dict) and "statusbar_items" not in value and "toolbar_items" in value:
+            value = dict(value)
+            value["statusbar_items"] = value.pop("toolbar_items")
+        return value
+
+    @property
+    def toolbar_items(self) -> list[str]:
+        """Deprecated alias for :attr:`statusbar_items`."""
+        return self.statusbar_items
+
+    @toolbar_items.setter
+    def toolbar_items(self, value: list[str]) -> None:
+        self.statusbar_items = value
 
 
 def resolve_display_mode(config: TUIConfig) -> DisplayMode:

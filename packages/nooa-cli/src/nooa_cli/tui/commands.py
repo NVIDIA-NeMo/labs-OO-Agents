@@ -1658,50 +1658,50 @@ class KeepGoingCommand(Command):
         return model or None
 
 
-class ToolbarCommand(Command):
-    """Configure ordered, named toolbar items."""
+class StatusbarCommand(Command):
+    """Configure ordered, named statusbar items."""
 
     @property
     def name(self) -> str:
-        return "toolbar"
+        return "statusbar"
 
     @classmethod
     def help_text(cls) -> dict[str, str]:
-        return {"/toolbar [reset|set <items...>]": "Show or configure toolbar items"}
+        return {"/statusbar [reset|set <items...>]": "Show or configure statusbar items"}
 
     def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
         return True, None
 
     async def execute(self, args: list[str]) -> "CommandResult":
-        from .toolbar import ToolbarRegistry
+        from .statusbar import StatusbarRegistry
 
-        available = ToolbarRegistry().names()
+        available = StatusbarRegistry().names()
         if not args:
-            active = " · ".join(self.config.toolbar_items)
+            active = " · ".join(self.config.statusbar_items)
             return CommandResult.ok(
                 TextOutput(
-                    f"Toolbar: {active}\nAvailable items: {', '.join(available)}",
+                    f"Statusbar: {active}\nAvailable items: {', '.join(available)}",
                     "info",
                 )
             )
 
         if args[0].lower() == "reset":
-            self.config.toolbar_items = ["time", "model", "context", "session"]
+            self.config.statusbar_items = ["time", "model", "context", "session"]
             return CommandResult.ok(
-                TextOutput("Toolbar reset to time · model · context · session.", "success")
+                TextOutput("Statusbar reset to time · model · context · session.", "success")
             )
 
         requested = args[1:] if args[0].lower() == "set" else args
         requested = list(dict.fromkeys(item.lower() for item in requested))
         if not requested:
-            return CommandResult.err("Usage: /toolbar set <item> [item ...]")
+            return CommandResult.err("Usage: /statusbar set <item> [item ...]")
         unknown = [item for item in requested if item not in available]
         if unknown:
             return CommandResult.err(
-                f"Unknown toolbar item(s): {', '.join(unknown)}. Available: {', '.join(available)}"
+                f"Unknown statusbar item(s): {', '.join(unknown)}. Available: {', '.join(available)}"
             )
-        self.config.toolbar_items = requested
-        return CommandResult.ok(TextOutput(f"Toolbar set to: {' · '.join(requested)}", "success"))
+        self.config.statusbar_items = requested
+        return CommandResult.ok(TextOutput(f"Statusbar set to: {' · '.join(requested)}", "success"))
 
 
 # ---------------------------------------------------------------------------
@@ -2518,7 +2518,8 @@ class CommandRegistry:
         "todos": TodosCommand,
         "mcp": MCPCommand,
         "trace-url": TraceUrlCommand,
-        "toolbar": ToolbarCommand,
+        "statusbar": StatusbarCommand,
+        "toolbar": StatusbarCommand,  # Deprecated command alias.
         "activity": ActivityCommand,
         "reasoning": ReasoningCommand,
     }

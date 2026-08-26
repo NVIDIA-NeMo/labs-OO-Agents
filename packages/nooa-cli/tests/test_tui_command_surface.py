@@ -30,8 +30,9 @@ def test_builtin_command_surface_is_explicit_and_pruned():
         "show-diffs",
         "show-python",
         "skills",
+        "statusbar",
         "theme",
         "todos",
-        "toolbar",
+        "toolbar",  # Deprecated alias.
         "trace-url",
     }
