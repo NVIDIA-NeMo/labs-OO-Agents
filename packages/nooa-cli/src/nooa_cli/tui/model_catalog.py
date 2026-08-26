@@ -265,7 +265,9 @@ def fetch_native_provider_models(
             raise ModelCatalogError(
                 f"Provider model catalog rejected authentication (HTTP {status})."
             ) from exc
-        raise ModelCatalogError(f"Provider model catalog request failed with HTTP {status}.") from exc
+        raise ModelCatalogError(
+            f"Provider model catalog request failed with HTTP {status}."
+        ) from exc
     except httpx.HTTPError as exc:
         raise ModelCatalogError(f"Could not reach provider model catalog: {exc}") from exc
     except ValueError as exc:
@@ -458,9 +460,7 @@ def registry_entry(
 ) -> dict[str, Any]:
     """Build the minimal registry entry for an OpenAI-compatible server."""
     if ollama:
-        model_name = (
-            model_id if model_id.startswith("ollama_chat/") else f"ollama_chat/{model_id}"
-        )
+        model_name = model_id if model_id.startswith("ollama_chat/") else f"ollama_chat/{model_id}"
         entry: dict[str, Any] = {"model_name": model_name, "api_base": ollama_api_base(api_base)}
     else:
         model_name = model_id if model_id.startswith("openai/") else f"openai/{model_id}"
@@ -549,11 +549,7 @@ def write_model_alias(
             suffix = source[value_node.end_mark.index :]
             if suffix and not suffix.startswith("\n"):
                 replacement = f"{replacement}\n  "
-            updated = (
-                f"{source[: alias_node.start_mark.index]}"
-                f"{replacement}"
-                f"{suffix}"
-            )
+            updated = f"{source[: alias_node.start_mark.index]}{replacement}{suffix}"
         else:
             insertion = models_node.end_mark.index
             prefix = "" if insertion == 0 or source[insertion - 1] == "\n" else "\n"
