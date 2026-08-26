@@ -50,8 +50,14 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl, 
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.layout.menus import CompletionsMenuControl
-from prompt_toolkit.layout.processors import BeforeInput
+from prompt_toolkit.layout.processors import (
+    BeforeInput,
+    Processor,
+    Transformation,
+    TransformationInput,
+)
 from prompt_toolkit.layout.screen import Char, Screen, WritePosition
+from prompt_toolkit.layout.utils import explode_text_fragments
 from prompt_toolkit.mouse_events import (
     MouseButton,
     MouseEvent,
@@ -524,8 +530,41 @@ class _FullscreenTranscriptControl(FormattedTextControl):
         self._set_autoscroll(self._autoscroll_direction, delay=0.12)
 
 
+def _escape_paste_marker_chars(text: str) -> str:
+    """Make reserved attachment scalars literal and non-resolving."""
+    return "".join(
+        f"\\U{ord(char):08x}" if _PASTE_MARKER_START <= ord(char) <= _PASTE_MARKER_END else char
+        for char in text
+    )
+
+
 class _ComposerBuffer(Buffer):
     """Input buffer with conventional selection-aware editing semantics."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self._after_reset: Callable[[], None] | None = None
+        super().__init__(*args, **kwargs)
+
+    def reset(
+        self,
+        document: Document | None = None,
+        append_to_history: bool = False,
+    ) -> None:
+        super().reset(document=document, append_to_history=append_to_history)
+        if self._after_reset is not None:
+            self._after_reset()
+
+    def insert_attachment_marker(self, marker: str) -> None:
+        """Replace any active selection with one application-owned marker."""
+        if self.selection_state is not None:
+            self.cut_selection()
+        super().insert_text(marker)
+
+    def insert_trusted_draft(self, text: str) -> None:
+        """Insert an app-owned draft whose attachment markers are trusted."""
+        if self.selection_state is not None:
+            self.cut_selection()
+        super().insert_text(text)
 
     def insert_text(
         self,
@@ -537,7 +576,7 @@ class _ComposerBuffer(Buffer):
         if self.selection_state is not None:
             self.cut_selection()
         super().insert_text(
-            data,
+            _escape_paste_marker_chars(data),
             overwrite=overwrite,
             move_cursor=move_cursor,
             fire_event=fire_event,
@@ -904,6 +943,12 @@ _MIN_INTERRUPT_STATUS_SECONDS = 0.75
 _TRANSCRIPT_CLEAR_SEQUENCE = "\x1b[r\x1b[0m\x1b[H\x1b[2J\x1b[3J\x1b[H"
 _FULLSCREEN_TRANSCRIPT_MAX_RECORDS = 10_000
 _FULLSCREEN_TRANSCRIPT_MAX_BYTES = 16 * 1024 * 1024
+_PASTE_ATTACHMENT_MIN_BYTES = 2 * 1024
+_PASTE_ATTACHMENT_MIN_LINES = 10
+_PASTE_ATTACHMENT_MAX_TOTAL_BYTES = 16 * 1024 * 1024
+_COMPOSER_HISTORY_MAX_ENTRIES = 100
+_PASTE_MARKER_START = 0xF0000
+_PASTE_MARKER_END = 0xFFFFD
 
 
 @dataclass
@@ -929,11 +974,75 @@ class _ResizeReplayQueueItem:
     transcript_epoch: int
 
 
+@dataclass(frozen=True, slots=True)
+class _PasteAttachment:
+    """Immutable payload represented by one private-use composer character."""
+
+    number: int
+    text: str
+    byte_count: int
+    line_count: int
+
+    @property
+    def label(self) -> str:
+        if self.line_count > 1:
+            size = f"{self.line_count} lines"
+        elif self.byte_count < 1024:
+            size = f"{self.byte_count} bytes"
+        else:
+            size = f"{self.byte_count / 1024:.1f} KiB"
+        return f"[Pasted text #{self.number} · {size}]"
+
+
+class _PasteAttachmentProcessor(Processor):
+    """Render one-character attachment markers as compact readable labels."""
+
+    def __init__(self, lookup: Callable[[str], _PasteAttachment | None]) -> None:
+        self._lookup = lookup
+
+    def apply_transformation(self, ti: TransformationInput) -> Transformation:
+        fragments = explode_text_fragments(ti.fragments)
+        positions: dict[int, int] = {}
+        rendered: list[tuple[Any, ...]] = []
+        display_position = 0
+        for source_position, fragment in enumerate(fragments):
+            positions[source_position] = display_position
+            style, character, *handler = fragment
+            attachment = self._lookup(character)
+            if attachment is None:
+                rendered.append(fragment)
+                display_position += 1
+            else:
+                label = attachment.label
+                rendered.append((f"{style} class:paste-attachment", label, *handler))
+                display_position += len(label)
+        positions[len(fragments)] = display_position
+
+        def source_to_display(position: int) -> int:
+            return positions.get(position, display_position)
+
+        def display_to_source(position: int) -> int:
+            previous_source = 0
+            for source_position, rendered_position in positions.items():
+                if rendered_position > position:
+                    break
+                previous_source = source_position
+            return previous_source
+
+        return Transformation(
+            rendered,
+            source_to_display=source_to_display,
+            display_to_source=display_to_source,
+        )
+
+
 @dataclass(frozen=True, slots=True, eq=False)
 class _PendingInputHandoff:
     """One admitted submission awaiting transcript commit or withdrawal."""
 
     text: str
+    display_text: str | None = None
+    draft_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1166,6 +1275,15 @@ class TUIApplication:
         self._pending_input_handoff: list[_PendingInputHandoff] = []
         self._llm_probe_status_text: str = ""
 
+        # Large bracketed pastes stay out of the editable source buffer. Each
+        # payload is represented there by one private-use scalar, so cursor
+        # movement, selection, undo, Backspace, and Delete remain atomic.
+        self._paste_attachments: dict[str, _PasteAttachment] = {}
+        self._paste_attachment_bytes = 0
+        self._next_paste_attachment_number = 1
+        self._next_paste_marker = _PASTE_MARKER_START
+        self._paste_processor = _PasteAttachmentProcessor(self._paste_attachments.get)
+        self.input_buffer._after_reset = self._reclaim_paste_attachments
         self._prompt_processor = BeforeInput(PROMPT_MARKER, style="class:prompt")
         # Many-producer, single-consumer path for transcript content:
         # emit_block() enqueues one ANSI chunk; a single background task
@@ -1286,7 +1404,7 @@ class TUIApplication:
         input_window = _ComposerWindow(
             _NativeSelectionBufferControl(
                 self.input_buffer,
-                input_processors=[self._prompt_processor],
+                input_processors=[self._paste_processor, self._prompt_processor],
                 transcript_drag_callback=(
                     self._handle_fullscreen_drag_over_bottom_chrome if self._is_fullscreen else None
                 ),
@@ -1876,8 +1994,9 @@ class TUIApplication:
                 self._schedule_resize_replay()
 
     def _prefill_input(self, text: str) -> None:
-        self.input_buffer.text = text
-        self.input_buffer.cursor_position = len(text)
+        escaped = _escape_paste_marker_chars(text)
+        self.input_buffer.text = escaped
+        self.input_buffer.cursor_position = len(escaped)
         try:
             self.input_buffer.cancel_completion()
         except Exception:
@@ -2137,8 +2256,11 @@ class TUIApplication:
 
     def _copy_input_selection(self, text: str) -> None:
         """Mirror a prompt_toolkit composer selection to app and system clipboards."""
+        resolved = self._resolve_paste_attachments(text)
+        # Keep source markers on the in-app clipboard so a later yank remains
+        # atomic; only the system clipboard receives expanded payload text.
         self._app.clipboard.set_text(text)
-        self._start_fullscreen_selection_copy(text)
+        self._start_fullscreen_selection_copy(resolved)
 
     def _start_fullscreen_selection_copy(self, text: str) -> None:
         """Copy without blocking prompt_toolkit's event loop on local helpers."""
@@ -2294,6 +2416,10 @@ class TUIApplication:
         def _(event):
             self._subview_key(event, "text", event.data)
 
+        @kb.add(Keys.BracketedPaste, filter=subview_inactive, eager=True)
+        def _(event):
+            self._insert_bracketed_paste(event.current_buffer, event.data)
+
         @kb.add("escape", filter=subview_active, eager=True)
         def _(event):
             self._subview_key(event, "escape")
@@ -2397,14 +2523,21 @@ class TUIApplication:
         def _(event):
             _extend_input_selection(event, event.current_buffer.cursor_down)
 
+        @kb.add("c-y", filter=subview_inactive, eager=True)
+        def _(event):
+            clipboard_text = event.app.clipboard.get_data().text
+            if clipboard_text:
+                self.input_buffer.insert_trusted_draft(clipboard_text)
+
         @kb.add("c-x", filter=input_selection_active, eager=True)
         def _(event):
             # Retain the text in prompt_toolkit's clipboard before deleting it.
             # This leaves an in-app recovery path if the system copy later fails.
             _document, clipboard_data = self.input_buffer.document.cut_selection()
             if clipboard_data.text:
+                resolved = self._resolve_paste_attachments(clipboard_data.text)
                 event.app.clipboard.set_data(clipboard_data)
-                self._start_fullscreen_selection_copy(clipboard_data.text)
+                self._start_fullscreen_selection_copy(resolved)
                 self.input_buffer.cut_selection()
 
         @kb.add("c-c", filter=subview_inactive, eager=True)
@@ -2478,9 +2611,10 @@ class TUIApplication:
         def _(event):
             popped = _pop_last_queued()
             if popped is not None:
+                draft = self._draft_for_withdrawn_input(popped)
                 self.complete_pending_input_handoff(popped)
-                self.input_buffer.text = popped
-                self.input_buffer.cursor_position = len(popped)
+                self.input_buffer.text = draft
+                self.input_buffer.cursor_position = len(draft)
                 return
             self._history_navigate(-1)
 
@@ -2528,26 +2662,35 @@ class TUIApplication:
         the text, don't keep it as the working-lines tip).
         """
         text = buffer.text
-        if not text.strip():
+        state = self._agent_controller.state
+        mention_base = None if state is None else state.working_directory
+        resolved = self._resolve_composer_submission(text, mention_base=mention_base)
+        if not resolved.strip():
             return False
         self._jump_fullscreen_to_tail()
         if not self._history or self._history[-1] != text:
             self._history.append(text)
+            del self._history[:-_COMPOSER_HISTORY_MAX_ENTRIES]
         self._history_cursor = None
 
         if text.startswith("/"):
-            self._commands_dispatched.append(text)
-            self._run_callback(self._on_command, text)
+            self._commands_dispatched.append(resolved)
+            self._run_callback(self._on_command, resolved)
             return False
         if text.startswith("!"):
-            body = text[1:].strip()
+            body = resolved[1:].strip()
             self._last_bang_command = body
             self._run_callback(self._on_bang, body)
             return False
 
-        state = self._agent_controller.state
-        mention_base = None if state is None else state.working_directory
-        self.submit_message(expand_mentions(text, base_dir=mention_base))
+        if resolved == text:
+            self.submit_message(resolved)
+        else:
+            self.submit_message(
+                resolved,
+                display_text=self._compact_composer_text(text),
+                draft_text=text,
+            )
         return False
 
     def _run_callback(
@@ -2632,6 +2775,152 @@ class TUIApplication:
             return
         self._spinner_task = loop.create_task(_animate())
 
+    def _insert_bracketed_paste(self, buffer: Buffer, data: str) -> None:
+        """Insert terminal paste data, compacting large payloads to one marker."""
+        normalized = data.replace("\r\n", "\n").replace("\r", "\n")
+        byte_count = len(normalized.encode("utf-8"))
+        line_count = normalized.count("\n") + 1
+        should_attach = (
+            byte_count >= _PASTE_ATTACHMENT_MIN_BYTES or line_count >= _PASTE_ATTACHMENT_MIN_LINES
+        )
+        if not should_attach:
+            buffer.insert_text(normalized)
+            return
+        if buffer.selection_state is not None:
+            buffer.cut_selection()
+        self._make_paste_attachment_room(byte_count)
+        if self._paste_attachment_bytes + byte_count > _PASTE_ATTACHMENT_MAX_TOTAL_BYTES:
+            buffer.insert_text(normalized)
+            self._show_transient_status(
+                "Paste attachment limit reached; inserted full text instead.",
+                style="class:status",
+            )
+            return
+
+        marker = self._allocate_paste_marker()
+        attachment = _PasteAttachment(
+            number=self._next_paste_attachment_number,
+            text=normalized,
+            byte_count=byte_count,
+            line_count=line_count,
+        )
+        self._next_paste_attachment_number += 1
+        self._paste_attachments[marker] = attachment
+        self._paste_attachment_bytes += byte_count
+        if isinstance(buffer, _ComposerBuffer):
+            buffer.insert_attachment_marker(marker)
+        else:
+            buffer.insert_text(marker)
+
+    def _make_paste_attachment_room(self, byte_count: int) -> None:
+        """Evict oldest draft history until a new payload fits, when possible."""
+        self._reclaim_paste_attachments()
+        while (
+            self._history
+            and self._paste_attachment_bytes + byte_count > _PASTE_ATTACHMENT_MAX_TOTAL_BYTES
+        ):
+            self._history.pop(0)
+            if self._history_cursor is not None:
+                self._history_cursor = max(0, self._history_cursor - 1)
+            self._reclaim_paste_attachments()
+
+    def _reclaim_paste_attachments(self) -> None:
+        """Release payloads no longer reachable from editable UI state."""
+        if not self._paste_attachments:
+            return
+        referenced = set(self.input_buffer.text)
+        referenced.update("".join(self._history))
+        referenced.update("".join(item.draft_text or "" for item in self._pending_input_handoff))
+        for text, _cursor in (*self.input_buffer._undo_stack, *self.input_buffer._redo_stack):
+            referenced.update(text)
+        app = getattr(self, "_app", None)
+        clipboard = getattr(app, "clipboard", None)
+        if clipboard is not None:
+            try:
+                referenced.update(clipboard.get_data().text)
+            except Exception:
+                pass
+        stale = [marker for marker in self._paste_attachments if marker not in referenced]
+        for marker in stale:
+            self._paste_attachment_bytes -= self._paste_attachments.pop(marker).byte_count
+
+    def _allocate_paste_marker(self) -> str:
+        """Return an unused supplementary private-use scalar."""
+        capacity = _PASTE_MARKER_END - _PASTE_MARKER_START + 1
+        for _ in range(capacity):
+            marker_value = self._next_paste_marker
+            self._next_paste_marker += 1
+            if self._next_paste_marker > _PASTE_MARKER_END:
+                self._next_paste_marker = _PASTE_MARKER_START
+            marker = chr(marker_value)
+            if marker not in self._paste_attachments and marker not in self.input_buffer.text:
+                return marker
+        raise RuntimeError("Paste attachment marker space exhausted")
+
+    def _compact_composer_text(self, text: str) -> str:
+        """Project an attachment-bearing draft to safe human-readable labels."""
+        return "".join(
+            attachment.label if (attachment := self._paste_attachments.get(char)) else char
+            for char in text
+        )
+
+    def _resolve_paste_attachments(self, text: str) -> str:
+        """Expand markers while leaving every payload byte-for-codepoint intact."""
+        return "".join(
+            attachment.text if (attachment := self._paste_attachments.get(char)) else char
+            for char in text
+        )
+
+    def _resolve_composer_submission(self, text: str, *, mention_base: Any) -> str:
+        """Expand typed mentions but keep attachment payloads opaque."""
+        result: list[str] = []
+        literal: list[str] = []
+
+        def flush_literal(*, following: str = "") -> None:
+            if not literal:
+                return
+            text_segment = "".join(literal)
+            # Attachment boundaries are not lexical boundaries. Add guards
+            # where an adjacent payload continues a non-whitespace token, but
+            # never scan the opaque payload itself for mentions.
+            prefix_guard = "x" if result and result[-1] and not result[-1][-1].isspace() else ""
+            suffix_guard = "x" if following and not following[0].isspace() else ""
+            guarded = f"{prefix_guard}{text_segment}{suffix_guard}"
+            expanded = expand_mentions(guarded, base_dir=mention_base)
+            if suffix_guard and not expanded.endswith(suffix_guard):
+                # The guard became part of a resolved mention token. That token
+                # crosses the attachment boundary and must remain literal.
+                expanded = guarded
+            end = len(expanded) - len(suffix_guard) if suffix_guard else len(expanded)
+            result.append(expanded[len(prefix_guard) : end])
+            literal.clear()
+
+        for char in text:
+            attachment = self._paste_attachments.get(char)
+            if attachment is None:
+                literal.append(char)
+            else:
+                flush_literal(following=attachment.text)
+                result.append(attachment.text)
+        flush_literal()
+        return "".join(result)
+
+    def _draft_for_withdrawn_input(self, text: str) -> str:
+        """Recover compact attachment markers for one withdrawn queue item."""
+        for represented in range(len(self._pending_input_handoff), 0, -1):
+            handoffs = self._pending_input_handoff[:represented]
+            combined_text = "\n".join(item.text for item in handoffs)
+            combined_draft = "\n".join(item.draft_text or item.text for item in handoffs)
+            if text == combined_text:
+                return combined_draft
+            suffix = f"\n{combined_text}"
+            if text.endswith(suffix):
+                return f"{text[: -len(suffix)]}\n{combined_draft}"
+        for handoff in reversed(self._pending_input_handoff):
+            if handoff.text == text:
+                return handoff.draft_text or handoff.text
+        return _escape_paste_marker_chars(text)
+
     def _history_navigate(self, direction: int) -> None:
         """Move the history cursor by ``direction`` (-1=older, +1=newer)."""
         if not self._history:
@@ -2654,10 +2943,11 @@ class TUIApplication:
         state = self._agent_controller.state
         pending = [] if state is None else list(state.pending_inputs)
         handoff = [item.text for item in self._pending_input_handoff]
+        handoff_display = [item.display_text or item.text for item in self._pending_input_handoff]
         if not handoff:
             return pending
         if not pending:
-            return handoff
+            return handoff_display
 
         # Runtime coalesces new admissions into its final queue item. Replace
         # the represented suffix with the individual handoff rows, while
@@ -2666,13 +2956,19 @@ class TUIApplication:
         for represented in range(len(handoff), 0, -1):
             combined = "\n".join(handoff[:represented])
             if tail == combined:
-                return pending[:-1] + handoff
+                return pending[:-1] + handoff_display
             suffix = f"\n{combined}"
             if tail.endswith(suffix):
-                return pending[:-1] + [tail[: -len(suffix)]] + handoff
-        return pending + handoff
+                return pending[:-1] + [tail[: -len(suffix)]] + handoff_display
+        return pending + handoff_display
 
-    def submit_message(self, user_message: str) -> None:
+    def submit_message(
+        self,
+        user_message: str,
+        *,
+        display_text: str | None = None,
+        draft_text: str | None = None,
+    ) -> None:
         """Submit text through the current interactive agent."""
         if self._agent_controller.state is None:
             return
@@ -2687,7 +2983,11 @@ class TUIApplication:
                 return
         # Register visibility before admission: another loop may consume and
         # queue the accepted transcript echo before ``submit`` returns.
-        handoff = _PendingInputHandoff(user_message)
+        handoff = _PendingInputHandoff(
+            user_message,
+            user_message if display_text is None else display_text,
+            user_message if draft_text is None else draft_text,
+        )
         self._pending_input_handoff.append(handoff)
         try:
             accepted = self._agent_controller.submit(user_message)
@@ -2709,16 +3009,16 @@ class TUIApplication:
             if candidate is handoff:
                 self._pending_input_handoff.pop(index)
                 break
+        self._reclaim_paste_attachments()
 
     def complete_pending_input_handoff(self, text: str) -> None:
         """Retire the submissions represented by one consumed queue item."""
-        combined = ""
-        consumed = 0
-        for handoff in self._pending_input_handoff:
-            combined = f"{combined}\n{handoff.text}" if consumed else handoff.text
-            consumed += 1
-            if combined == text or text.endswith(f"\n{combined}"):
-                del self._pending_input_handoff[:consumed]
+        for represented in range(len(self._pending_input_handoff), 0, -1):
+            combined = "\n".join(
+                handoff.text for handoff in self._pending_input_handoff[:represented]
+            )
+            if text == combined or text.endswith(f"\n{combined}"):
+                del self._pending_input_handoff[:represented]
                 break
         else:
             # A callback can arrive after another consumer has advanced the
@@ -2727,12 +3027,14 @@ class TUIApplication:
                 if handoff.text == text or text.endswith(f"\n{handoff.text}"):
                     del self._pending_input_handoff[index]
                     break
+        self._reclaim_paste_attachments()
         if self._app.is_running:
             self._app.invalidate()
 
     def clear_pending_input_handoffs(self) -> None:
         """Discard optimistic queue rows after the runtime queue is flushed."""
         self._pending_input_handoff.clear()
+        self._reclaim_paste_attachments()
         if self._app.is_running:
             self._app.invalidate()
 
@@ -2894,6 +3196,7 @@ class TUIApplication:
         """Resume cursor following and cancel any pending double-Ctrl-C gesture."""
         self._resume_input_cursor_following()
         self._clear_ctrl_c_exit()
+        self._reclaim_paste_attachments()
 
     def _on_input_cursor_position_changed(self, _buffer: Buffer) -> None:
         """Bring the edit cursor back onscreen after keyboard or pointer movement."""
