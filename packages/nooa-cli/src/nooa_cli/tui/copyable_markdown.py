@@ -192,7 +192,15 @@ class _SemanticBlockQuote(BlockQuote):
         # before adding the quote marker to every resulting visual row.
         prefix_text = "▌ " if options.max_width >= 3 else ""
         content_width = max(options.max_width - cell_len(prefix_text), 1)
-        rendered = console.render(self.elements, options.update(height=None))
+        rendered = console.render(
+            self.elements,
+            options.update(
+                width=max(options.max_width, 80),
+                height=None,
+                no_wrap=False,
+                overflow="fold",
+            ),
+        )
         logical_lines = list(Segment.split_lines(Segment.apply_style(rendered, self.style))) or [[]]
         prefix = Segment(prefix_text, self.style)
         for logical_line in logical_lines:
