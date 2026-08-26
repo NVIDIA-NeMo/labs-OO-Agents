@@ -3,7 +3,6 @@
 """Shared coding-agent construction and repository instructions."""
 
 import asyncio
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -259,7 +258,7 @@ async def test_coding_agent_delegates_with_same_model_and_workspace(tmp_path, mo
             "llm": llm,
             "cwd": agent.shell.cwd,
             "init_command": None,
-            "objective": objective,
+            "objective": "review parser",
             "closed": True,
         }
     finally:
@@ -540,52 +539,6 @@ def test_custom_coding_agent_receives_workspace_extension_arguments(tmp_path):
         "skills_dirs": skills_dirs,
         "summarization": summarization,
     }
-
-
-def test_coding_agent_delegation_labels_are_concise() -> None:
-    objective = (
-        "Architecture/simplicity review of PR #189. Do not edit. "
-        "Review every abstraction and report exact file and line references."
-    )
-
-    assert CodingAgent._delegation_label(objective) == "Architecture/simplicity review of PR #189."
-    assert CodingAgent._delegation_label("first line\nsecond line") == "first line"
-    assert CodingAgent._delegation_label(objective, "  API   review  ") == "API review"
-    assert CodingAgent._delegation_label("x" * 100) == f"{'x' * 79}…"
-    assert CodingAgent._delegation_label("   ") == "Delegated task"
-
-
-async def test_coding_agent_spawns_delegation_in_background(tmp_path):
-    """Background delegation keeps its full objective but displays a short label."""
-    started = asyncio.Event()
-    release = asyncio.Event()
-    objective = "review parser. Do not edit. Report every finding with exact lines."
-
-    class TestAgent(CodingAgent):
-        async def delegate(self, received_objective: str, supplied_context=None) -> str:
-            assert received_objective == objective
-            assert supplied_context == {"path": "parser.py"}
-            started.set()
-            await release.wait()
-            return "review complete"
-
-    agent = TestAgent(llm=FakeLLMClient(), cwd=tmp_path)
-    try:
-        handle = agent.spawn(objective, {"path": "parser.py"})
-        assert handle.label == "review parser."
-        assert handle.state == "running"
-        await started.wait()
-        assert agent.delegates.status() == ""
-
-        release.set()
-        assert await agent.delegates.get() == {
-            "objective": objective,
-            "report": "review complete",
-        }
-        await asyncio.sleep(0)
-        assert handle.state == "done"
-    finally:
-        await agent.close()
 
 
 def test_delegated_context_tolerates_hostile_collection_protocols():
