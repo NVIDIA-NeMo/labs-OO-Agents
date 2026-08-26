@@ -900,7 +900,7 @@ def test_fullscreen_session_production_rendering_reprojects_narrow_then_wide(
     assert app.output_buffer.text == ""
     assert expected_wide != expected_narrow
     expected_visible = (
-        "abcdefgh\n" if producer == "rich" else " " * 13 + "\n ❯ abcdefgh  \n" + " " * 13 + "\n"
+        "abcdefgh\n" if producer == "rich" else "▔" * 13 + "\n ❯ abcdefgh  \n" + "▁" * 13 + "\n"
     )
     assert wide == expected_visible
     assert wide != narrow
