@@ -61,9 +61,19 @@ def inject_resource_attrs(
     Existing keys are preserved unless ``overwrite`` is true. Values are typed:
     str → stringValue, bool → boolValue, int → intValue.
     """
-    for rs in body.get("resourceSpans", []):
+    resource_spans = body.get("resourceSpans")
+    if not isinstance(resource_spans, list):
+        return body
+
+    for rs in resource_spans:
+        if not isinstance(rs, dict):
+            continue
         resource = rs.setdefault("resource", {})
+        if not isinstance(resource, dict):
+            continue
         existing = resource.setdefault("attributes", [])
+        if not isinstance(existing, list):
+            continue
         existing_by_key = {
             attribute["key"]: attribute
             for attribute in existing

@@ -198,6 +198,49 @@ def test_remote_import_requests_use_configured_viewer_auth(
     )
 
 
+def test_resource_attribute_injection_skips_malformed_entries():
+    body = {
+        "resourceSpans": [
+            "not-an-object",
+            {"resource": "not-an-object"},
+            {"resource": {"attributes": {}}},
+            {"resource": {"attributes": []}},
+        ]
+    }
+
+    assert _otlp_helpers.inject_resource_attrs(body, {"session.id": "session-1"}) is body
+    assert body["resourceSpans"][3]["resource"]["attributes"] == [
+        {"key": "session.id", "value": {"stringValue": "session-1"}}
+    ]
+
+
+def test_harbor_live_session_lookup_uses_configured_viewer_auth(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    requests: list[urllib.request.Request] = []
+
+    class MatchResponse(_Response):
+        def read(self):
+            return b'{"match":{"session_id":"live-session"}}'
+
+    def urlopen(request, *, timeout):
+        requests.append(request)
+        return MatchResponse()
+
+    monkeypatch.setenv("NOOA_VIEWER_AUTH_TOKEN", "test-viewer-token")
+    monkeypatch.setattr(import_harbor.urllib.request, "urlopen", urlopen)
+
+    session_id = import_harbor._find_matching_live_session(
+        "http://viewer:5001",
+        {"task_name": "task-1", "model_name": "model-1"},
+        "experiment-1",
+    )
+
+    assert session_id == "live-session"
+    assert len(requests) == 1
+    assert requests[0].get_header("Authorization") == "Bearer test-viewer-token"
+
+
 def test_remote_cleanup_requests_use_configured_viewer_auth(
     monkeypatch: pytest.MonkeyPatch,
 ):
