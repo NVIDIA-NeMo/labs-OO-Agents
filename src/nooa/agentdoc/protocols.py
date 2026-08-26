@@ -82,10 +82,12 @@ class SupportsCallableInfo(Protocol):
 
 @runtime_checkable
 class SupportsInstanceValues(Protocol):
-    """Protocol for instances that control their value extraction.
+    """Protocol for instances that control runtime value extraction.
 
-    Implement this to control which field values are shown when an instance
-    is documented (e.g., to hide internal state).
+    Implement this to control which current values are shown. In ``doc()``,
+    fields omitted from this mapping remain part of the type-level API contract;
+    use ``hidden`` or ``spec(..., hidden=True)`` to hide documented fields.
+    In ``pformat()``, omitted fields are excluded from the value representation.
 
     Example:
         class MyClass:
@@ -93,15 +95,15 @@ class SupportsInstanceValues(Protocol):
                 return {
                     "id": self.id,
                     "status": self.status,
-                    # Hide internal fields by not including them
                 }
     """
 
     def __instance_values__(self) -> dict[str, Any]:
-        """Return instance values for documentation.
+        """Return current instance values for documentation and formatting.
 
         Returns:
-            Dictionary mapping field names to their current values.
-            Fields not in the dict will use their default values.
+            Dictionary mapping field names to their current values. In
+            ``doc()``, omitted fields retain their type-level defaults; in
+            ``pformat()``, omitted fields are not rendered.
         """
         ...

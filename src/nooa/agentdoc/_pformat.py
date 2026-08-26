@@ -81,18 +81,16 @@ def _resolve_field_type_by_name(type_name: str, context_obj: type | None) -> typ
     return None
 
 
-def _collect_referenced_types_transitive(
+def _collect_referenced_types(
     seed_types: set[type],
+    *,
     exclude: type | None = None,
+    max_depth: int,
 ) -> list[type]:
-    """Collect all referenced types transitively via BFS, deduplicated and sorted.
+    """Collect referenced types with bounded breadth-first traversal.
 
-    Args:
-        seed_types: Initial set of types to start from (already filtered).
-        exclude: Primary type to exclude from results (avoid self-reference).
-
-    Returns:
-        Sorted list of all reachable custom types (no duplicates).
+    ``seed_types`` are the direct references (depth 1). Each subsequent level
+    follows references from the preceding level until ``max_depth`` is reached.
     """
     from nooa.agentdoc._discover import discover_referenced_types
 
@@ -101,15 +99,21 @@ def _collect_referenced_types_transitive(
     # own method signatures (common, e.g. DataFrame methods returning DataFrame) must
     # not list itself under "Referenced Types".
     frontier = {t for t in seed_types if t is not exclude}
-    while frontier:
+    for _ in range(max_depth):
+        if not frontier:
+            break
         all_types.update(frontier)
         next_frontier: set[type] = set()
-        for t in frontier:
-            for new_t in discover_referenced_types(t):
-                if new_t not in all_types and not is_expand_false(new_t) and new_t is not exclude:
-                    next_frontier.add(new_t)
+        for ref_type in frontier:
+            for new_type in discover_referenced_types(ref_type):
+                if (
+                    new_type not in all_types
+                    and not is_expand_false(new_type)
+                    and new_type is not exclude
+                ):
+                    next_frontier.add(new_type)
         frontier = next_frontier
-    return sorted(all_types, key=lambda t: t.__name__)
+    return sorted(all_types, key=lambda type_: type_.__name__)
 
 
 def _field_type_docstring(
@@ -213,7 +217,14 @@ def _pformat(
                 from nooa.agentdoc._structured import extract_module_info
 
                 module_info = extract_module_info(_object)
-            _stream.write(_format_module_info(module_info, concise=concise, indent=_indent))
+            _stream.write(
+                _format_module_info(
+                    module_info,
+                    concise=concise,
+                    concise_members=bool(getattr(_object, "__agentdoc_concise_members__", False)),
+                    indent=_indent,
+                )
+            )
         case _ if inspect.isfunction(_object) or inspect.ismethod(_object):
             from nooa.agentdoc._structured import extract_callable_info
 
@@ -227,19 +238,21 @@ def _pformat(
                     context_obj=_object,  # Pass the function/method for type discovery
                 )
             )
-        case _ if _is_structured_instance(_object):
-            # Instance of a structured type
+        case _ if _is_structured_instance(_object, respect_custom_repr=instance_mode != "type"):
+            # Instance of a structured type. doc() deliberately ignores a custom
+            # __repr__: documentation must retain the type's API contract.
             if instance_mode == "type":
                 # Show type structure with runtime values (for doc())
                 from nooa.agentdoc._structured import extract_type_info
                 from nooa.agentdoc._visibility import is_hidden_field
-                from nooa.agentdoc.protocols import SupportsInstanceValues
                 from nooa.agentdoc.registry import get_type_info_extractor
 
                 obj_type = type(_object)
                 # Check if instance has spec() overrides that could unhide class-hidden fields.
                 # spec(self, "field", hidden=False) in __init__ → per-instance opt-in.
-                _instance_fields_meta = vars(_object).get("_agentdoc_fields_docs") or {}
+                _instance_fields_meta = (_instance_dict(_object) or {}).get(
+                    "_agentdoc_fields_docs"
+                ) or {}
                 _has_instance_overrides = any(
                     meta.get("hidden") is False for meta in _instance_fields_meta.values()
                 )
@@ -300,6 +313,17 @@ def _pformat(
                         type_info = extract_type_info(obj_type)
                     values = _extract_instance_values(_object, type_info)
 
+                # Apply per-instance visibility in every extraction branch.
+                # This handles both hidden=False opt-ins and hidden=True overrides
+                # on fields already present in the type-level contract.
+                type_info = TypeInfo(
+                    name=type_info.name,
+                    base=type_info.base,
+                    fields=[f for f in type_info.fields if not is_hidden_field(_object, f.name)],
+                    methods=type_info.methods,
+                    docstring=type_info.docstring,
+                )
+
                 _stream.write(
                     _format_type_info(
                         type_info,
@@ -309,6 +333,7 @@ def _pformat(
                         indent=_indent,
                         context_obj=obj_type,
                         instance_values=values,
+                        visibility_obj=_object,
                     )
                 )
             else:
@@ -367,7 +392,16 @@ def _pformat_to_str(
     return stream.getvalue()
 
 
-def _is_structured_instance(obj: Any) -> bool:
+def _instance_dict(obj: Any) -> dict[str, Any] | None:
+    """Return an instance ``__dict__`` without invoking ``__getattr__``."""
+    try:
+        value = object.__getattribute__(obj, "__dict__")
+    except AttributeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _is_structured_instance(obj: Any, *, respect_custom_repr: bool = True) -> bool:
     """Check if object is an instance that should be formatted with type info.
 
     Returns True for:
@@ -376,6 +410,11 @@ def _is_structured_instance(obj: Any) -> bool:
     - NamedTuples
     - attrs classes
     - Any custom class instance with __dict__ (not built-in types)
+
+    Args:
+        obj: Candidate instance.
+        respect_custom_repr: If true, plain classes with custom ``__repr__``
+            are treated as values. ``doc()`` disables this to retain type docs.
 
     Returns False for:
     - Types (classes themselves)
@@ -431,16 +470,21 @@ def _is_structured_instance(obj: Any) -> bool:
     if obj_type.__module__ == "builtins":
         return False
 
-    # If the class defines its own __repr__ (not inherited from object),
-    # trust the library author's representation over field extraction.
-    for klass in obj_type.__mro__:
-        if klass is object:
-            break
-        if "__repr__" in klass.__dict__:
-            return False
+    # pformat() respects a custom __repr__, while doc() always renders the
+    # type-level API contract and augments it with runtime instance fields.
+    if respect_custom_repr:
+        for klass in obj_type.__mro__:
+            if klass is object:
+                break
+            if "__repr__" in klass.__dict__:
+                return False
 
-    # __slots__-only classes have no __dict__ but do have public slots
-    if not hasattr(obj, "__dict__"):
+    # In doc mode, every non-builtin instance is documentable even when an
+    # empty/private-only __slots__ leaves it with no runtime values. pformat()
+    # still requires a public slot before choosing structured value rendering.
+    if _instance_dict(obj) is None:
+        if not respect_custom_repr:
+            return True
         return any(
             slot
             for klass in obj_type.__mro__
@@ -462,6 +506,7 @@ def _format_type_info(
     indent: int,
     context_obj: type | None = None,
     instance_values: dict[str, Any] | None = None,
+    visibility_obj: Any = None,
 ) -> str:
     """Format TypeInfo as Python class syntax.
 
@@ -482,6 +527,7 @@ def _format_type_info(
         instance_values: Runtime instance values to show instead of static defaults.
             When provided, field values come from this dict (current state)
             rather than from field.default (source code defaults).
+        visibility_obj: Instance whose field-level visibility overrides apply.
 
     Returns:
         Python-style class definition string
@@ -551,8 +597,6 @@ def _format_type_info(
         # Skip fields marked repr=False (Pydantic field parameter — intentionally hidden)
         if not field.repr:
             continue
-        if instance_values is not None and field.name not in instance_values:
-            continue
         line = f"{ind}    {field.name}: {field.type}"
         if instance_values is not None and field.name in instance_values:
             default_str = _format_value_to_str(
@@ -565,7 +609,7 @@ def _format_type_info(
                 indent=0,
             )
             line += f" = {default_str}"
-        elif instance_values is None and field.default is not ...:
+        elif field.default is not ...:
             default_str = _format_value_to_str(
                 field.default,
                 max_length=3,
@@ -596,7 +640,8 @@ def _format_type_info(
                 continue
             if name.startswith("_"):
                 continue
-            if context_obj is not None and _is_hidden_field(context_obj, name):
+            visibility_target = visibility_obj if visibility_obj is not None else context_obj
+            if visibility_target is not None and _is_hidden_field(visibility_target, name):
                 continue
             # Skip callables unless they're classes
             if callable(value) and not isinstance(value, type):
@@ -660,9 +705,16 @@ def _format_type_info(
             discover_referenced_types,
         )
         from nooa.agentdoc._structured import extract_type_info
+        from nooa.agentdoc._visibility import is_hidden_field as _is_hidden_field
 
+        visible_field_names = {field.name for field in info.fields}
         seed_set: set[type] = {
-            t for t in discover_referenced_types(context_obj) if not is_expand_false(t)
+            t
+            for t in discover_referenced_types(
+                context_obj,
+                field_names=visible_field_names if visibility_obj is not None else None,
+            )
+            if not is_expand_false(t)
         }
 
         # Also discover types from extra instance attributes
@@ -671,6 +723,8 @@ def _format_type_info(
 
             for name, value in instance_values.items():
                 if name.startswith("_"):
+                    continue
+                if visibility_obj is not None and _is_hidden_field(visibility_obj, name):
                     continue
                 # Skip callables unless they're classes
                 if callable(value) and not isinstance(value, type):
@@ -690,8 +744,10 @@ def _format_type_info(
                 if _is_custom_type(extra_type) and not is_expand_false(extra_type):
                     seed_set.add(extra_type)
 
-        # Collect all referenced types transitively (BFS), render flat
-        referenced_types = _collect_referenced_types_transitive(seed_set, exclude=context_obj)
+        # Collect referenced types to the requested depth, then render them flat.
+        referenced_types = _collect_referenced_types(
+            seed_set, exclude=context_obj, max_depth=type_depth
+        )
         if referenced_types:
             lines.append(f"{ind}## Referenced Types")
 
@@ -777,7 +833,9 @@ def _format_callable_info(
         from nooa.agentdoc._structured import extract_type_info
 
         seed_set = {t for t in discover_referenced_types(context_obj) if not is_expand_false(t)}
-        referenced_types = _collect_referenced_types_transitive(seed_set, exclude=context_obj)
+        referenced_types = _collect_referenced_types(
+            seed_set, exclude=context_obj, max_depth=type_depth
+        )
 
         if referenced_types:
             lines.append("")
@@ -799,12 +857,19 @@ def _format_callable_info(
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).rstrip("\n")
 
 
-def _format_module_info(info: ModuleInfo, *, concise: bool, indent: int) -> str:
+def _format_module_info(
+    info: ModuleInfo,
+    *,
+    concise: bool,
+    concise_members: bool = False,
+    indent: int,
+) -> str:
     """Format ModuleInfo as Python module syntax.
 
     Args:
         info: ModuleInfo to format
-        concise: If True, show first-line docstrings only
+        concise: If True, show only the first line of every docstring
+        concise_members: If True, keep the module docstring but shorten member docs
         indent: Indentation level
 
     Returns:
@@ -871,7 +936,9 @@ def _format_module_info(info: ModuleInfo, *, concise: bool, indent: int) -> str:
                 lines.append("")
                 in_value_run = False
             func = func_map[sym_name]
-            func_lines = _format_callable_info(func, concise=concise, indent=indent)
+            func_lines = _format_callable_info(
+                func, concise=concise or concise_members, indent=indent
+            )
             lines.append(func_lines)
             lines.append("")
         elif sym_name in val_map:
@@ -1043,7 +1110,7 @@ def _format_instance_repr(
         if field.name in values:
             value = values[field.name]
         else:
-            _obj_dict = getattr(obj, "__dict__", None)
+            _obj_dict = _instance_dict(obj)
             if _obj_dict is not None and field.name in _obj_dict:
                 value = _obj_dict[field.name]
             else:
@@ -1077,7 +1144,7 @@ def _format_instance_repr(
         field_count += 1
 
     # Add non-field attributes from __dict__ (skip hidden so they are not re-added)
-    if hasattr(obj, "__dict__"):
+    if _instance_dict(obj) is not None:
         from nooa.agentdoc._visibility import is_hidden_field as _is_hidden_field
 
         for name, value in sorted(values.items()):
@@ -1154,7 +1221,7 @@ def _extract_instance_values(obj: Any, type_info: TypeInfo) -> dict[str, Any]:
             if getattr(field_info, "exclude", False)
         }
 
-    obj_dict = getattr(obj, "__dict__", None) or {}
+    obj_dict = _instance_dict(obj) or {}
 
     # Collect slot names for __slots__-based classes (no __dict__)
     _slots: set[str] = set()
@@ -1172,11 +1239,15 @@ def _extract_instance_values(obj: Any, type_info: TypeInfo) -> dict[str, Any]:
         if field.name in obj_dict:
             values[field.name] = obj_dict[field.name]
         elif field.name in _slots:
-            # __slots__ values are safe to read — they're data, not descriptors.
-            try:
-                values[field.name] = object.__getattribute__(obj, field.name)
-            except AttributeError:
-                pass
+            # A subclass may replace an inherited slot with an arbitrary
+            # descriptor. Only invoke the concrete member descriptor found by
+            # static lookup; properties and custom descriptors are not safe.
+            slot_descriptor = inspect.getattr_static(obj_type, field.name, _MISSING)
+            if inspect.ismemberdescriptor(slot_descriptor):
+                try:
+                    values[field.name] = slot_descriptor.__get__(obj, obj_type)
+                except AttributeError:
+                    pass
         elif isinstance(obj, dict) and field.name in obj:
             # TypedDict instances are dicts
             values[field.name] = obj[field.name]
@@ -1192,18 +1263,33 @@ def _extract_instance_values(obj: Any, type_info: TypeInfo) -> dict[str, Any]:
             ):
                 values[field.name] = class_val
 
-    # Also include all __dict__ attributes (for instances without annotations)
-    if hasattr(obj, "__dict__"):
-        from nooa.agentdoc._visibility import is_hidden_field as _is_hidden_field
+    # Also include runtime-only attributes that are not declared type fields.
+    # Most objects store them in __dict__; Pydantic models with extra="allow"
+    # store them separately in __pydantic_extra__.
+    from nooa.agentdoc._visibility import is_hidden_field as _is_hidden_field
 
-        for name, value in obj.__dict__.items():
-            if (
-                name not in values
-                and not name.startswith("_")
-                and not callable(value)
-                and not _is_hidden_field(obj_type, name)
-                and name not in _excluded_fields
-            ):
+    def _include_dynamic(name: str, value: Any) -> bool:
+        return (
+            name not in values
+            and not name.startswith("_")
+            and not callable(value)
+            and not _is_hidden_field(obj, name)
+            and name not in _excluded_fields
+        )
+
+    for name, value in obj_dict.items():
+        if _include_dynamic(name, value):
+            values[name] = value
+
+    pydantic_extra = None
+    if hasattr(obj_type, "model_fields"):
+        try:
+            pydantic_extra = object.__getattribute__(obj, "__pydantic_extra__")
+        except AttributeError:
+            pass
+    if isinstance(pydantic_extra, dict):
+        for name, value in pydantic_extra.items():
+            if _include_dynamic(name, value):
                 values[name] = value
 
     return values

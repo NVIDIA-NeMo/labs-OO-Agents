@@ -172,7 +172,7 @@ def _bad_call_agentdoc(error: Exception) -> str | None:
             return None
         from nooa.agentdoc import doc
 
-        rendered = doc(target, concise=True)
+        rendered = doc(target, concise=True, inline_depth=0)
         return str(rendered).strip() or None
     except Exception:
         return None

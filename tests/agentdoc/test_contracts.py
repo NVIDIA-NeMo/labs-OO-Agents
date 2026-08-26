@@ -9,9 +9,9 @@ writing the fix is the correct workflow.
 Contracts covered:
 - @hidden/@spec on @classmethod/@staticmethod works regardless of decorator order
 - _private methods are hidden by default; @spec(hidden=False) opts them back in
-- Fields absent from instance.__dict__ do not appear in doc(instance)
-- Properties that succeed on a live instance appear in doc(instance)
-- Properties that raise on access are silently omitted from doc(instance)
+- doc(instance) preserves type-level fields and augments them with runtime values
+- Properties appear in doc(instance) without being evaluated
+- Properties that raise on access remain documented without being evaluated
 - with hidden: raises RuntimeError when used inside a function or class body
 - Class annotation + @property on same name does not leak <property object at 0x...>
 - doc(instance) produces at most one blank line between docstring and first method
@@ -64,10 +64,10 @@ class TestHiddenOnProperty:
                 return "hi"
 
         assert "secret" not in doc(MyClass())
-        # Properties no longer show on instance formatting (only on Type).
-        # Instance formatting reads __dict__ only to avoid blocking I/O.
-        assert "visible" not in doc(MyClass())
-        # But properties DO show on the class (type introspection, no execution):
+        # Instance documentation retains type-level property metadata without
+        # invoking the descriptor.
+        assert "visible" in doc(MyClass())
+        # Properties also show on the class (type introspection, no execution):
         assert "visible" in doc(MyClass)
 
 
@@ -228,24 +228,21 @@ class TestPrivateMethodVisibility:
 
 
 # ---------------------------------------------------------------------------
-# 3. Instance fields: absent from __dict__ → absent from doc(instance)
+# 3. Instance fields: type declarations are preserved and runtime values augment them
 # ---------------------------------------------------------------------------
 
 
 class TestInstanceFieldAbsence:
-    """Fields not present in instance.__dict__ must not appear in doc(instance).
-    Showing them with no value would imply they are required/unset, which is wrong.
-    doc(Type) always shows class-level defaults regardless.
-    """
+    """doc(instance) retains type fields and overlays available runtime values."""
 
-    def test_absent_field_not_shown_in_instance_doc(self):
-        # Annotation-only (no class-level default) — getattr raises AttributeError
-        # on a bare __new__ instance, so it won't be in instance_values.
+    def test_absent_field_preserved_in_instance_doc(self):
+        # Annotation-only fields remain documented even when a bare instance
+        # has no corresponding runtime value.
         class MyClass:
             x: int  # no class-level default; only set in __init__
 
         inst = MyClass.__new__(MyClass)
-        assert "x" not in doc(inst)
+        assert "x: int" in doc(inst)
 
     def test_present_field_shown_in_instance_doc(self):
         class MyClass:
@@ -277,8 +274,8 @@ class TestInstanceFieldAbsence:
         assert "x" in out
         assert "y" in out
 
-    def test_partial_fields_shown(self):
-        """Only the fields actually accessible on the instance are shown."""
+    def test_partial_runtime_fields_preserve_type_contract(self):
+        """Missing runtime values do not remove declared type fields."""
 
         class MyClass:
             x: int  # annotation only — absent unless set
@@ -288,9 +285,9 @@ class TestInstanceFieldAbsence:
         inst = MyClass.__new__(MyClass)
         inst.y = 99
         out = doc(inst)
-        assert "x" not in out
-        assert "y" in out
-        assert "z" not in out
+        assert "x: int" in out
+        assert "y: int = 99" in out
+        assert "z: int" in out
 
 
 # ---------------------------------------------------------------------------
@@ -299,11 +296,9 @@ class TestInstanceFieldAbsence:
 
 
 class TestPropertyInInstanceDoc:
-    """Properties on live instances must appear in doc(instance).
-    Properties that raise on access must be silently omitted (not crash).
-    """
+    """Properties remain documented on instances without descriptor execution."""
 
-    def test_working_property_not_shown_on_instance(self):
+    def test_working_property_shown_without_evaluation(self):
         # Properties no longer execute on instance formatting (prevents blocking I/O).
         class MyClass:
             @property
@@ -312,11 +307,11 @@ class TestPropertyInInstanceDoc:
                 return "hello"
 
         out = doc(MyClass())
-        assert "value" not in out
-        # But they DO show on the type:
+        assert "value" in out
+        # The instance keeps the same property documentation as the type.
         assert "value" in doc(MyClass)
 
-    def test_property_value_not_included_on_instance(self):
+    def test_property_value_not_evaluated_on_instance(self):
         # Property values are not computed during instance formatting.
         class MyClass:
             @property
@@ -327,7 +322,7 @@ class TestPropertyInInstanceDoc:
         out = doc(MyClass())
         assert "42" not in out
 
-    def test_raising_property_silently_omitted(self):
+    def test_raising_property_remains_documented(self):
         class MyClass:
             @property
             def broken(self) -> str:
@@ -335,7 +330,7 @@ class TestPropertyInInstanceDoc:
                 raise RuntimeError("not initialised")
 
         out = doc(MyClass())
-        assert "broken" not in out
+        assert "broken" in out
 
     def test_raising_property_does_not_crash(self):
         class MyClass:
@@ -760,19 +755,19 @@ class TestPropertyContract:
         out = doc(PropClass)
         assert "hidden_inner" not in out
 
-    def test_doc_instance_omits_computed_property(self):
+    def test_doc_instance_documents_computed_property(self):
         """doc(instance): computed properties are not executed (prevents blocking I/O)."""
         PropClass = self._make_class()
         obj = PropClass(5)
         out = doc(obj)
-        assert "computed" not in out
+        assert "computed" in out
 
-    def test_doc_instance_omits_raising_property(self):
-        """doc(instance): raising property is silently omitted."""
+    def test_doc_instance_documents_raising_property(self):
+        """doc(instance): raising properties are documented without evaluation."""
         PropClass = self._make_class()
         obj = PropClass(5)
         out = doc(obj)
-        assert "raises_always" not in out
+        assert "raises_always" in out
 
     def test_doc_instance_hides_hidden_outer(self):
         """doc(instance): @hidden @property hides the property."""
@@ -815,12 +810,12 @@ class TestPropertyContract:
         out = doc(PropClass)
         assert "@property" not in out
 
-    def test_doc_instance_omits_property_docstring(self):
-        """doc(instance): properties are not shown (prevents blocking I/O)."""
+    def test_doc_instance_includes_property_docstring(self):
+        """doc(instance): property docs are shown without accessing the property."""
         PropClass = self._make_class()
         obj = PropClass(5)
         out = doc(obj)
-        assert "# A computed value." not in out
+        assert "# A computed value." in out
 
     def test_doc_instance_no_at_property_prefix(self):
         """doc(instance) must not prefix property descriptions with '@property —'."""
@@ -888,14 +883,14 @@ class TestCachedPropertyContract:
         out = doc(CP)
         assert "hidden_inner" not in out
 
-    def test_doc_instance_omits_uncached_property(self):
+    def test_doc_instance_documents_uncached_property(self):
         # cached_property only shows if already cached (in __dict__).
         # First access caches it; before that, it's a descriptor.
         CP = self._make_class()
         obj = CP(5)
-        # Before accessing .expensive, it's not in __dict__
+        # Before accessing .expensive, its type-level declaration is still shown.
         out = doc(obj)
-        assert "expensive" not in out
+        assert "expensive" in out
         # After access, it's cached in __dict__ and WILL show:
         _ = obj.expensive
         out2 = doc(obj)
