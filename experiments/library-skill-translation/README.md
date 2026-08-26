@@ -131,6 +131,9 @@ Development set status:
 - Slim translator dev rerun at `a84fb256`: 7/10 scoreable. All tasks recorded
   activated LibrarySkills, `agent_return_code=0`, no agent errors, and no
   verifier infrastructure errors.
+- Post-review hardened slim rerun at `934b0f93`: 6/10 scoreable. All tasks
+  recorded activated LibrarySkills, `agent_return_code=0`, no agent errors, and
+  no verifier infrastructure errors.
 
 Frozen protocol dev rerun:
 
@@ -173,6 +176,25 @@ Slim run artifact root:
 
 - `jobs/nooa-skillsbench-library-dev-slim-a84fb256/`
 
+Post-review hardened slim rerun:
+
+| Task | Hardened Slim LibrarySkill `934b0f93` |
+|---|---:|
+| `fix-visual-stability` | 1.0 |
+| `fix-erlang-ssh-cve` | 1.0 |
+| `video-silence-remover` | 0.0 |
+| `dynamic-object-aware-egomotion` | 0.0 |
+| `manufacturing-fjsp-optimization` | 0.0 |
+| `llm-prefix-cache-replay` | 1.0 |
+| `dapt-intrusion-detection` | 1.0 |
+| `offer-letter-generator` | 1.0 |
+| `parallel-tfidf-search` | 1.0 |
+| `reserves-at-risk-calc` | 0.0 |
+
+Hardened slim artifact root:
+
+- `jobs/nooa-skillsbench-library-dev-934b0f93/`
+
 Current interpretation:
 
 - LibrarySkill parity is possible on the 10-task dev set when activation-time
@@ -185,4 +207,8 @@ Current interpretation:
   translator gain.
 - The slim translator preserved the 7/10 dev-set aggregate while removing the
   argparse/CLI synthesis path from the evaluated translation layer.
+- The post-review hardening rerun was 6/10 because
+  `dynamic-object-aware-egomotion` flipped back to failure. The run had no
+  infrastructure failures, so this reinforces treating that task as marginal
+  rather than using it as a stable translator signal.
 - The held-out test set has not been run under the frozen protocol.

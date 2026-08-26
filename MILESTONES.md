@@ -615,3 +615,68 @@ Current result:
   removing argparse/CLI script synthesis from the evaluated translation layer.
 - `dynamic-object-aware-egomotion` passed in this run but should still be
   treated as a marginal/flaky dev task because it has alternated across reruns.
+
+## 2026-08-26 — Hardened Slim LibrarySkill Dev Rerun
+
+Status: complete scoreable dev rerun.
+
+Committed post-review slim translator hardening:
+`934b0f93 fix: harden slim skill translation boundary`.
+
+Changes in this hardening pass:
+- Guidance rewriting is aware of omitted scripts and no longer invents
+  "corresponding LibrarySkill API" text for scripts that slim intentionally
+  skipped.
+- Python sibling helper scripts imported by public function-backed scripts are
+  bundled as private implementation modules instead of being dropped or exposed
+  as public APIs.
+- Function-backed slim scripts no longer probe the argparse renderer.
+- Generated context expressions use normalized skill attribute names.
+- Regression tests cover omitted-script guidance, private helper packaging,
+  registry-name normalization, and argparse-probe avoidance.
+
+Validation:
+- `uv run pytest tests/tools/test_slim_skill_translator.py tests/tools/test_skill_translator.py packages/nooa-bench/tests/test_bench_agent.py packages/nooa-bench/tests/test_runner.py packages/nooa-bench/tests/test_skillsbench_runner.py -q`
+  - `71 passed`
+- `uv run ruff check src/nooa/tools/slim_skill_translator.py src/nooa/tools/skill_translator.py tests/tools/test_slim_skill_translator.py`
+  - passed
+
+Reran the frozen 10-task dev split with:
+- SkillsBench checkout:
+  `/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench`
+- Credentials file:
+  `/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/.env`
+- NOOA model: `openai/openai/openai/gpt-5.5`
+- Sandbox: Docker
+- Condition: `library_skill`
+- Translator: `SlimTextSkillTranslator`
+- Artifact root:
+  `jobs/nooa-skillsbench-library-dev-934b0f93/`
+
+Results:
+
+| Task | Hardened Slim LibrarySkill dev rerun |
+|---|---:|
+| `fix-visual-stability` | 1.0 |
+| `fix-erlang-ssh-cve` | 1.0 |
+| `video-silence-remover` | 0.0 |
+| `dynamic-object-aware-egomotion` | 0.0 |
+| `manufacturing-fjsp-optimization` | 0.0 |
+| `llm-prefix-cache-replay` | 1.0 |
+| `dapt-intrusion-detection` | 1.0 |
+| `offer-letter-generator` | 1.0 |
+| `parallel-tfidf-search` | 1.0 |
+| `reserves-at-risk-calc` | 0.0 |
+
+Current result:
+- Hardened slim LibrarySkill dev rerun aggregate: 6/10 scoreable.
+- All task summaries recorded `agent_return_code=0`, activated LibrarySkills,
+  no agent error, and no verifier infrastructure error.
+- Translation summaries recorded `SlimTextSkillTranslator` for every generated
+  package.
+- 30/30 generated packages validated.
+- 3 scripts were omitted by slim policy, all under the
+  `fix-erlang-ssh-cve` `senior-security` skill; that task still passed.
+- `dynamic-object-aware-egomotion` flipped back to failure after passing in the
+  `a84fb256` slim run, reinforcing that it is a marginal/flaky dev task rather
+  than a stable translator-quality signal.
