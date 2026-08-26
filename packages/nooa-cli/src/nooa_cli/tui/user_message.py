@@ -27,22 +27,28 @@ def render_user_bar(text: str, cols: int, colors: dict[str, str]) -> str:
     width = max(int(cols), 1)
     foreground = _hex_to_ansi256(colors["text"])
     background = _hex_to_ansi256(colors["surface2"])
+    terminal_background = _hex_to_ansi256(colors["base"])
     style_on = f"\x1b[38;5;{foreground};48;5;{background}m"
+    edge_style = f"\x1b[38;5;{terminal_background};48;5;{background}m"
     style_off = "\x1b[0m"
 
     def styled_row(content: str = "") -> str:
         return f"{style_on}{set_cell_size(content, width)}{style_off}"
 
-    # Keep one full-width, same-background blank row above and below every
-    # accepted message so the padding survives both live output and replay.
-    rows: list[str] = [styled_row()]
+    def edge_row(glyph: str) -> str:
+        return f"{edge_style}{glyph * width}{style_off}"
+
+    # One-eighth block elements draw a subtle terminal-background edge while
+    # preserving nearly a full row of highlighted breathing room. Consecutive
+    # user messages therefore retain a narrow visual seam between their bars.
+    rows: list[str] = [edge_row("▔")]
     for index, line in enumerate(sanitize_live_text(text).split("\n")):
         shown = f" ❯ {line} " if index == 0 else f" {line} "
         # Rich's cell helpers preserve grapheme clusters and measure wide
         # glyphs correctly. Every row is exactly the safe content width.
         chunks = chop_cells(shown, width) or [""]
         rows.extend(styled_row(chunk) for chunk in chunks)
-    rows.append(styled_row())
+    rows.append(edge_row("▁"))
     return "\n".join(rows) + "\n"
 
 
