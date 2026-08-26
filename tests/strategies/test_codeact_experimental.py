@@ -57,7 +57,10 @@ async def test_explicit_return_completes_with_only_python_cell_tool():
     assert "execute_python" not in system_prompt
     assert "python_cell()" in system_prompt
     tool = (fake_llm.last_tools or [])[0]
-    assert "persistent Python session" in tool.description
+    assert "current method call's Python session" in tool.description
+    normalized_description = " ".join(tool.description.split())
+    assert "Cell locals are discarded when the method call ends" in normalized_description
+    assert "call `cd` only when intentionally changing directories" in normalized_description
     assert "Already available without import" in tool.description
     for name in (
         "self",
@@ -196,7 +199,10 @@ async def test_python_cell_state_summarizes_initial_state():
     )
     state_block = rendered_context.split("## Python cell state", 1)[1]
     assert "Previous cell outputs" not in state_block
-    assert "Cell locals (includes method inputs): prior_value (int), question (str)" in state_block
+    assert (
+        "Cell locals (current call only; includes method inputs; reuse unchanged values): "
+        "prior_value (int), question (str)" in state_block
+    )
     assert "self.v" not in state_block
 
 
@@ -222,7 +228,8 @@ async def test_python_cell_state_lists_user_created_locals():
     )
     state_block = rendered_context.split("## Python cell state", 1)[1]
     assert (
-        "Cell locals (includes method inputs): question (str), working_value (str)" in state_block
+        "Cell locals (current call only; includes method inputs; reuse unchanged values): "
+        "question (str), working_value (str)" in state_block
     )
     assert "Previous cell outputs" not in state_block
 
@@ -270,8 +277,11 @@ async def test_python_cell_state_context_escapes_cwd_markup():
     assert "</python_cell_state>" not in rendered
     assert "&lt;/python_cell_state&gt;&lt;attack&gt;\\n`forged`" in rendered
     assert "\n`forged`" not in rendered
-    assert len(rendered) < 300
-    assert "Cell locals (includes method inputs): message (str)" in rendered
+    assert len(rendered) < 500
+    assert (
+        "Cell locals (current call only; includes method inputs; reuse unchanged values): "
+        "message (str)" in rendered
+    )
 
 
 @pytest.mark.asyncio
@@ -302,7 +312,8 @@ async def test_python_cell_state_omits_inputs_outputs_and_framework_objects():
     assert "ResultType" not in rendered
     assert "helper" not in rendered
     assert (
-        "Cell locals (includes method inputs): large_text (str), notification (dict), working_path (str)"
+        "Cell locals (current call only; includes method inputs; reuse unchanged values): "
+        "large_text (str), notification (dict), working_path (str)"
         in rendered
     )
     assert "x" * 100 not in rendered
@@ -352,11 +363,11 @@ async def test_python_cell_state_uses_bounded_agent_cwd_fallback_and_local_names
 
     rendered = await strategy_instance.python_cell_state_context(runtime)
 
-    assert "`self.cwd`: /fallback/" in rendered
+    assert "Working directory (persists across cells and turns): /fallback/" in rendered
     assert "`self.shell.cwd`" not in rendered
     assert "\nforged" not in rendered
     assert "\\nforged" not in rendered  # truncated before the injected suffix
-    assert len(rendered) < 400
+    assert len(rendered) < 500
 
 
 @pytest.mark.asyncio
@@ -380,7 +391,7 @@ async def test_python_cell_state_context_lists_import_aliases_without_module_rep
 
     assert "Cell imports: json_alias → json, path_module → pathlib" in rendered
     assert "<module " not in rendered
-    assert "Cell locals (includes method inputs): none" in rendered
+    assert "Cell locals (current call only; includes method inputs): none" in rendered
 
 
 @pytest.mark.asyncio
