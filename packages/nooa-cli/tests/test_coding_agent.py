@@ -135,6 +135,19 @@ async def test_coding_agent_declares_the_host_input_channels(tmp_path):
         await agent.close()
 
 
+async def test_coding_agent_requests_session_title_through_system_channel(tmp_path):
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        agent.request_session_title("Fix the TUI input box")
+
+        queued = agent._system_messages_in.snapshot()
+        assert len(queued) == 1
+        assert "self.rename_session" in queued[0]
+        assert "Fix the TUI input box" in queued[0]
+    finally:
+        await agent.close()
+
+
 async def test_coding_agent_owns_session_naming(tmp_path):
     """name_session sits with the session model it feeds.
 

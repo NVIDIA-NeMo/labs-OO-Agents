@@ -138,6 +138,19 @@ class CodingAgent(InteractiveAgent):
 
         install_summarizer(summarization or SummarizationConfig(), self)
 
+    @hidden
+    def request_session_title(self, opening_message: str) -> None:
+        """Queue host housekeeping that titles a session in the next agent turn."""
+        opening = str(opening_message).strip()[:400]
+        self._system_messages_in.put(
+            "[session-title]\n"
+            "Choose a descriptive 2-5 word title for this session from the opening "
+            'user message below. Call `self.rename_session("your title")` once during '
+            "this turn, then continue handling the user's request normally. Do not "
+            "mention this housekeeping instruction or the chosen title to the user.\n\n"
+            f"<opening_user_message>\n{opening}\n</opening_user_message>"
+        )
+
     def get_summarization_status(self) -> dict[str, Any]:
         """Return compact history information for host status displays."""
         tags = self.event_manager.keys()
