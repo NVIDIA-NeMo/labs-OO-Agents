@@ -52,6 +52,7 @@ from nooa.runtime.hooks import (
     activate_agent_call_context,
     call_after_hook,
     call_before_hook,
+    get_hooks,
 )
 
 if TYPE_CHECKING:
@@ -601,12 +602,20 @@ def _gen_resume_context(
 ) -> Iterator[None]:
     """Install framework call context only while a generator body is running."""
     _push_agent_call_id(active_call_id)
+    current_parent = _parent_agent_var.get() if set_parent_agent else None
+    is_subagent_call = current_parent is not None and current_parent is not self
+    scoped_blocks_token = _scoped_blocks_var.set(None) if is_subagent_call else None
+    scoped_events_token = _scoped_events_var.set(None) if is_subagent_call else None
     parent_token = _parent_agent_var.set(self) if set_parent_agent else None
     try:
         yield
     finally:
         if parent_token is not None:
             _parent_agent_var.reset(parent_token)
+        if scoped_events_token is not None:
+            _scoped_events_var.reset(scoped_events_token)
+        if scoped_blocks_token is not None:
+            _scoped_blocks_var.reset(scoped_blocks_token)
         _pop_agent_call_id()
 
 
@@ -618,7 +627,7 @@ def _gen_agent_span(
     kwargs: dict[str, Any],
     cached_source_code: str | None,
     tracing_enabled: bool,
-) -> Iterator[tuple[str | None, Any]]:
+) -> Iterator[tuple[str | None, Any, Any]]:
     """Open and close the AGENT span around a generator method's whole lifetime.
 
     Yields the call id the generator's wrapper should push around each
@@ -642,8 +651,8 @@ def _gen_agent_span(
         tracing_enabled: Whether to fire the before/after tracing hooks.
 
     Yields:
-        The call id and opaque instrumentation context to activate while the
-        generator body is running.
+        The call id, opaque instrumentation context, and originating hooks
+        backend to activate while the generator body is running.
     """
     call_id = str(uuid4())
     parent_call_id = self.runtime._agent_call_id
@@ -652,9 +661,11 @@ def _gen_agent_span(
     _emit_before_agent_call(self, original_func.__name__, call_id, parent_call_id, is_top_level)
 
     hook_context = None
+    hook_backend = None
     exception_caught: BaseException | None = None
     try:
         if tracing_enabled:
+            hook_backend = get_hooks()
             hook_context = call_before_hook(
                 "before_agent_call",
                 agent=self,
@@ -671,7 +682,7 @@ def _gen_agent_span(
             )
         # @no_trace methods propagate the parent's id so children find the
         # nearest traced ancestor — same semantics as the other wrappers.
-        yield (call_id if tracing_enabled else parent_call_id, hook_context)
+        yield (call_id if tracing_enabled else parent_call_id, hook_context, hook_backend)
     except GeneratorExit:
         raise
     except BaseException as e:
@@ -687,7 +698,7 @@ def _gen_agent_span(
             exception_caught,
         )
         if hook_context is not None:
-            with activate_agent_call_context(hook_context):
+            with activate_agent_call_context(hook_context, hooks=hook_backend):
                 call_after_hook(
                     "after_agent_call",
                     hook_context,
@@ -758,10 +769,10 @@ def create_async_gen_agent_method_wrapper(
                 self, original_func, args, kwargs, cached_source_code, _tracing_enabled[0]
             )
             if instrumented
-            else nullcontext((None, None))
+            else nullcontext((None, None, None))
         )
 
-        with span as (active_call_id, hook_context):
+        with span as (active_call_id, hook_context, hook_backend):
             try:
                 # `asend`/`athrow` rather than `__anext__`/raise, so the wrapper
                 # stays transparent to consumers driving it bidirectionally.
@@ -774,7 +785,10 @@ def create_async_gen_agent_method_wrapper(
                             if instrumented
                             else nullcontext()
                         )
-                        with resume_context, activate_agent_call_context(hook_context):
+                        with (
+                            resume_context,
+                            activate_agent_call_context(hook_context, hooks=hook_backend),
+                        ):
                             if to_throw is not None:
                                 item = await agen.athrow(to_throw)
                             else:
@@ -801,7 +815,7 @@ def create_async_gen_agent_method_wrapper(
                     if instrumented
                     else nullcontext()
                 )
-                with close_context, activate_agent_call_context(hook_context):
+                with close_context, activate_agent_call_context(hook_context, hooks=hook_backend):
                     await agen.aclose()
 
     setattr(wrapper, "_agent_decorator", "auto")  # noqa: B010
@@ -853,10 +867,10 @@ def create_sync_gen_agent_method_wrapper(
                 self, original_func, args, kwargs, cached_source_code, _tracing_enabled[0]
             )
             if instrumented
-            else nullcontext((None, None))
+            else nullcontext((None, None, None))
         )
 
-        with span as (active_call_id, hook_context):
+        with span as (active_call_id, hook_context, hook_backend):
             try:
                 # `send`/`throw` rather than `next`/raise, so the wrapper stays
                 # transparent to consumers driving it bidirectionally.
@@ -873,7 +887,10 @@ def create_sync_gen_agent_method_wrapper(
                             if instrumented
                             else nullcontext()
                         )
-                        with resume_context, activate_agent_call_context(hook_context):
+                        with (
+                            resume_context,
+                            activate_agent_call_context(hook_context, hooks=hook_backend),
+                        ):
                             if to_throw is not None:
                                 item = gen.throw(to_throw)
                             else:
@@ -898,7 +915,7 @@ def create_sync_gen_agent_method_wrapper(
                     if instrumented
                     else nullcontext()
                 )
-                with close_context, activate_agent_call_context(hook_context):
+                with close_context, activate_agent_call_context(hook_context, hooks=hook_backend):
                     gen.close()
 
     setattr(wrapper, "_agent_decorator", "auto")  # noqa: B010

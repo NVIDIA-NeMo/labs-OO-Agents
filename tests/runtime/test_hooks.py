@@ -206,6 +206,31 @@ class TestAgentCallContextActivation:
             with activate_agent_call_context({}):
                 raise ValueError("application failure")
 
+    def test_originating_backend_is_installed_for_the_resumed_slice(self):
+        calls = []
+
+        class Manager:
+            def __enter__(self):
+                calls.append("enter")
+
+            def __exit__(self, exc_type, exc, traceback):
+                calls.append("exit")
+
+        class Hooks:
+            def activate_agent_call(self, context):
+                calls.append(("activate", context))
+                return Manager()
+
+        originating_hooks = Hooks()
+        consumer_hooks = Hooks()
+        set_hooks(consumer_hooks)
+
+        with activate_agent_call_context({"span": "opaque"}, hooks=originating_hooks):  # type: ignore[arg-type]
+            assert get_hooks() is originating_hooks
+
+        assert get_hooks() is consumer_hooks
+        assert calls == [("activate", {"span": "opaque"}), "enter", "exit"]
+
 
 class MockHooks:
     """Mock hooks implementation for testing hook call sites."""

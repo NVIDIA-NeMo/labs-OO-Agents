@@ -425,40 +425,50 @@ def call_after_hook(hook_name: str, context: Any, **kwargs: Any) -> None:
 
 
 @contextmanager
-def activate_agent_call_context(context: Any) -> Iterator[None]:
+def activate_agent_call_context(
+    context: Any, *, hooks: InstrumentationHooks | None = None
+) -> Iterator[None]:
     """Activate an optional native tracing context during a method resumption.
 
     Generator methods can resume in a task other than the one that started
     them. Instrumentation backends may implement ``activate_agent_call`` to
     restore their task-local context for each slice of generator execution.
-    Activation remains optional and defensive, like the other hook calls.
+    When the originating ``hooks`` backend is supplied, it is also installed
+    for the slice so nested calls use the same trace even if the resuming task
+    has an independently rooted :mod:`contextvars` context. Activation remains
+    optional and defensive, like the other hook calls.
     """
-    hooks = get_hooks()
-    if not isinstance(hooks, AgentCallContextActivator) or context is None:
-        yield
-        return
-
+    hooks_token = _instrumentation_hooks_var.set(hooks) if hooks is not None else None
     try:
-        manager = hooks.activate_agent_call(context)
-        manager.__enter__()
-    except Exception:
-        logger.warning("Hook activate_agent_call failed", exc_info=True)
-        yield
-        return
+        active_hooks = hooks if hooks is not None else get_hooks()
+        if not isinstance(active_hooks, AgentCallContextActivator) or context is None:
+            yield
+            return
 
-    try:
-        yield
-    except BaseException:
         try:
-            manager.__exit__(*sys.exc_info())
+            manager = active_hooks.activate_agent_call(context)
+            manager.__enter__()
         except Exception:
-            logger.warning("Hook activate_agent_call cleanup failed", exc_info=True)
-        raise
-    else:
+            logger.warning("Hook activate_agent_call failed", exc_info=True)
+            yield
+            return
+
         try:
-            manager.__exit__(None, None, None)
-        except Exception:
-            logger.warning("Hook activate_agent_call cleanup failed", exc_info=True)
+            yield
+        except BaseException:
+            try:
+                manager.__exit__(*sys.exc_info())
+            except Exception:
+                logger.warning("Hook activate_agent_call cleanup failed", exc_info=True)
+            raise
+        else:
+            try:
+                manager.__exit__(None, None, None)
+            except Exception:
+                logger.warning("Hook activate_agent_call cleanup failed", exc_info=True)
+    finally:
+        if hooks_token is not None:
+            _instrumentation_hooks_var.reset(hooks_token)
 
 
 __all__ = [

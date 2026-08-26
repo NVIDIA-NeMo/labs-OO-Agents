@@ -15,19 +15,19 @@ So this file asserts the exported spans directly.
 """
 
 import asyncio
+import contextvars
 
 import pytest
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
 from nooa import Agent
-from nooa.runtime.hooks import set_hooks
+from nooa.runtime.hooks import get_hooks
 from nooa.unifiedllm import FakeLLMClient
 
 
 @pytest.fixture
-def in_memory_spans():
-    from opentelemetry import trace
+def in_memory_spans(monkeypatch):
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
@@ -36,15 +36,20 @@ def in_memory_spans():
 
     from nooa.tracing import NemoOOAgentsInstrumentor
 
+    # Keep Agent.__init__ from replacing this fixture-local backend with the
+    # automatically discovered dev-viewer backend on the first instantiation.
+    monkeypatch.setattr("nooa.agent._auto_tracing_attempted", True)
+
     exporter = InMemorySpanExporter()
-    provider = trace.get_tracer_provider()
-    if not hasattr(provider, "add_span_processor"):
-        provider = TracerProvider()
-        trace.set_tracer_provider(provider)
+    provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    NemoOOAgentsInstrumentor().instrument(tracer_provider=provider)
-    yield exporter
-    set_hooks(None)
+    instrumentor = NemoOOAgentsInstrumentor()
+    instrumentor.instrument(tracer_provider=provider)
+    try:
+        yield exporter
+    finally:
+        instrumentor.uninstrument()
+        provider.shutdown()
 
 
 class _GeneratorAgent(Agent):
@@ -190,6 +195,39 @@ async def test_generator_span_reactivates_across_tasks(in_memory_spans):
     assert consumer.parent is None
     assert produce.status.status_code is StatusCode.OK
     assert not [event for event in produce.events if event.name == "exception"]
+
+
+@pytest.mark.asyncio
+async def test_generator_span_reactivates_in_independently_rooted_task_context(in_memory_spans):
+    """The originating hooks survive a resume in a task that inherited no hooks."""
+    from nooa.tracing._hooks_impl import _get_active_spans
+
+    agent = _GeneratorAgent(llm=FakeLLMClient())
+    stream = agent.produce(2)
+
+    assert await anext(stream) == 0
+    assert len(_get_active_spans()) == 1
+
+    async def resume_once():
+        item = await anext(stream)
+        return item, get_hooks()
+
+    item, consumer_hooks = await asyncio.create_task(resume_once(), context=contextvars.Context())
+    assert item == 1
+    assert consumer_hooks is None
+
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.create_task(anext(stream), context=contextvars.Context())
+
+    spans = in_memory_spans.get_finished_spans()
+    parent_name = _parent_namer(spans)
+    [produce] = [span for span in spans if span.name == "method.produce"]
+    children = [span for span in spans if span.name == "method.in_body"]
+
+    assert len(children) == 2
+    assert all(parent_name(span) == "method.produce" for span in children)
+    assert produce.status.status_code is StatusCode.OK
+    assert not _get_active_spans()
 
 
 @pytest.mark.asyncio
