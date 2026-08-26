@@ -101,20 +101,14 @@ def test_rename_session_preserves_user_selected_title(agent):
     assert agent.rename_session("Automatic title") == "My chosen title"
 
 
-def test_request_session_title_queues_system_instruction(agent):
-    agent.request_session_title("Fix the TUI input box")
-
-    queued = agent._system_messages_in.snapshot()
-    assert len(queued) == 1
-    assert "self.rename_session" in queued[0]
-    assert "Fix the TUI input box" in queued[0]
-    assert not hasattr(agent, "name_session")
-
-
 def test_rename_session_is_model_visible_but_request_helper_is_hidden(agent):
     rendered = str(doc(agent))
     assert "rename_session" in rendered
     assert "request_session_title" not in rendered
+
+
+def test_session_title_request_is_not_a_core_agent_concern(agent):
+    assert not hasattr(agent, "request_session_title")
 
 
 def test_respond_result_requires_explanation():

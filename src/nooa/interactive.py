@@ -501,19 +501,6 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         return normalized
 
     @hidden
-    def request_session_title(self, opening_message: str) -> None:
-        """Queue host housekeeping that titles a session in the next agent turn."""
-        opening = str(opening_message).strip()[:400]
-        self._system_messages_in.put(
-            "[session-title]\n"
-            "Choose a descriptive 2-5 word title for this session from the opening "
-            'user message below. Call `self.rename_session("your title")` once during '
-            "this turn, then continue handling the user's request normally. Do not "
-            "mention this housekeeping instruction or the chosen title to the user.\n\n"
-            f"<opening_user_message>\n{opening}\n</opening_user_message>"
-        )
-
-    @hidden
     @strategy(CodeActStrategy())
     async def handle(
         self,
