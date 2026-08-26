@@ -13,7 +13,7 @@ import urllib.request
 
 import click
 
-from nooa.tracing._viewer_auth import apply_viewer_auth
+from ._otlp_helpers import OtlpRequestError, _viewer_headers, check_endpoint_reachable
 
 NAME = "delete-traces"
 
@@ -44,21 +44,19 @@ def command(batch_id: str, endpoint: str):
     """Delete all traces belonging to a batch."""
     _validate_endpoint(endpoint)
 
-    # Verify endpoint is reachable
     try:
-        request = urllib.request.Request(
-            f"{endpoint.rstrip('/')}/api/version",
-            headers=apply_viewer_auth({}),
-            method="GET",
-        )
-        with urllib.request.urlopen(request, timeout=5):
-            pass
-    except Exception:
-        click.echo(f"Cannot reach viewer at {endpoint}. Is it running?")
+        reachable = check_endpoint_reachable(endpoint)
+    except OtlpRequestError as error:
+        click.echo(f"Viewer at {endpoint} rejected the request: {error}")
+        if error.status_code in (401, 403):
+            click.echo("Check NOOA_VIEWER_AUTH_TOKEN and try again.")
         raise SystemExit(1) from None
+    if not reachable:
+        click.echo(f"Cannot reach viewer at {endpoint}. Is it running?")
+        raise SystemExit(1)
 
     url = f"{endpoint.rstrip('/')}/api/traces?batch_id={urllib.parse.quote(batch_id, safe='')}"
-    req = urllib.request.Request(url, headers=apply_viewer_auth({}), method="DELETE")
+    req = urllib.request.Request(url, headers=_viewer_headers({}), method="DELETE")
 
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:

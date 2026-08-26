@@ -23,6 +23,7 @@ from pathlib import Path
 import click
 
 from ._otlp_helpers import (
+    OtlpRequestError,
     check_endpoint_reachable,
     get_journal_record,
     inject_resource_attrs,
@@ -437,7 +438,14 @@ def command(
 
     validate_endpoint(endpoint)
 
-    if not check_endpoint_reachable(endpoint):
+    try:
+        reachable = check_endpoint_reachable(endpoint)
+    except OtlpRequestError as error:
+        click.echo(f"Viewer at {endpoint} rejected the request: {error}")
+        if error.status_code in (401, 403):
+            click.echo("Check NOOA_VIEWER_AUTH_TOKEN and try again.")
+        raise SystemExit(1) from None
+    if not reachable:
         click.echo(f"Cannot reach viewer at {endpoint}. Is it running?")
         raise SystemExit(1)
 

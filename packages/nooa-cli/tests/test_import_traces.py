@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
-from nooa_cli.commands import _otlp_helpers, delete_traces, import_traces
+from nooa_cli.commands import _otlp_helpers, delete_traces, import_harbor, import_traces
 
 
 def _otlp_body(index: int) -> dict:
@@ -41,12 +41,21 @@ def _write_trace(path: Path, count: int, *extra_records: dict) -> None:
     path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
 
 
-def _patch_viewer_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+def _patch_viewer_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stored_span_count: int = 1,
+) -> None:
     monkeypatch.setattr(import_traces, "check_endpoint_reachable", lambda _endpoint: True)
     monkeypatch.setattr(
         import_traces,
         "session_exists",
         lambda _endpoint, _session_id: False,
+    )
+    monkeypatch.setattr(
+        import_traces,
+        "get_session_span_count",
+        lambda _endpoint, _session_id: stored_span_count,
     )
 
 
@@ -115,6 +124,51 @@ def test_post_trace_exposes_http_status_and_response_body(monkeypatch: pytest.Mo
     assert "after 1 attempt" in message
 
 
+def test_post_trace_does_not_replay_ambiguous_transport_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls = 0
+    sleeps: list[float] = []
+
+    def urlopen(_request, *, timeout):
+        nonlocal calls
+        calls += 1
+        raise urllib.error.URLError(TimeoutError("response lost"))
+
+    monkeypatch.setattr(_otlp_helpers.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(_otlp_helpers.time, "sleep", sleeps.append)
+
+    with pytest.raises(_otlp_helpers.OtlpRequestError) as exc_info:
+        _otlp_helpers.post_trace_with_retry(
+            "http://viewer:5001",
+            _otlp_body(1),
+            max_retries=5,
+        )
+
+    assert calls == 1
+    assert sleeps == []
+    assert "after 1 attempt" in str(exc_info.value)
+
+
+def test_endpoint_probe_exposes_authentication_failure(monkeypatch: pytest.MonkeyPatch):
+    def urlopen(request, *, timeout):
+        raise urllib.error.HTTPError(
+            request.full_url,
+            401,
+            "Unauthorized",
+            {},
+            io.BytesIO(b'{"detail":"viewer authorization required"}'),
+        )
+
+    monkeypatch.setattr(_otlp_helpers.urllib.request, "urlopen", urlopen)
+
+    with pytest.raises(_otlp_helpers.OtlpRequestError) as exc_info:
+        _otlp_helpers.check_endpoint_reachable("http://viewer:5001")
+
+    assert exc_info.value.status_code == 401
+    assert "viewer authorization required" in str(exc_info.value)
+
+
 def test_remote_import_requests_use_configured_viewer_auth(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -173,6 +227,51 @@ def test_remote_cleanup_requests_use_configured_viewer_auth(
     )
 
 
+def test_remote_cleanup_reports_authentication_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def fail_probe(_endpoint):
+        raise _otlp_helpers.OtlpRequestError(
+            "HTTP 401 Unauthorized",
+            status_code=401,
+        )
+
+    monkeypatch.setattr(delete_traces, "check_endpoint_reachable", fail_probe)
+
+    result = CliRunner().invoke(
+        delete_traces.command,
+        ["--batch-id", "batch-1", "--endpoint", "http://viewer:5001"],
+    )
+
+    assert result.exit_code == 1
+    assert "HTTP 401 Unauthorized" in result.output
+    assert "Check NOOA_VIEWER_AUTH_TOKEN" in result.output
+    assert "Is it running?" not in result.output
+
+
+def test_harbor_import_reports_authentication_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def fail_probe(_endpoint):
+        raise _otlp_helpers.OtlpRequestError(
+            "HTTP 403 Forbidden",
+            status_code=403,
+        )
+
+    monkeypatch.setattr(import_harbor, "check_endpoint_reachable", fail_probe)
+
+    result = CliRunner().invoke(
+        import_harbor.command,
+        [str(tmp_path), "--endpoint", "http://viewer:5001"],
+    )
+
+    assert result.exit_code == 1
+    assert "HTTP 403 Forbidden" in result.output
+    assert "Check NOOA_VIEWER_AUTH_TOKEN" in result.output
+    assert "Is it running?" not in result.output
+
+
 def test_import_batches_179_records_and_syncs_before_annotations(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -180,7 +279,7 @@ def test_import_batches_179_records_and_syncs_before_annotations(
     annotation_record = {"annotations": [{"session_id": "session", "label": "good"}]}
     trace_file = tmp_path / "session.jsonl"
     _write_trace(trace_file, 179, annotation_record)
-    _patch_viewer_preflight(monkeypatch)
+    _patch_viewer_preflight(monkeypatch, stored_span_count=179)
 
     batch_sizes: list[int] = []
     events: list[str] = []
@@ -227,7 +326,12 @@ def test_import_injects_batch_and_session_attributes(
     monkeypatch: pytest.MonkeyPatch,
 ):
     trace_file = tmp_path / "my-session.nooa.jsonl"
-    _write_trace(trace_file, 1)
+    body = _otlp_body(1)
+    body["resourceSpans"][0]["resource"]["attributes"] = [
+        {"key": "batch_id", "value": {"stringValue": "old-batch"}},
+        {"key": "session.id", "value": {"stringValue": "old-session"}},
+    ]
+    trace_file.write_text(json.dumps(body) + "\n")
     _patch_viewer_preflight(monkeypatch)
     posted: list[dict] = []
 
@@ -247,6 +351,121 @@ def test_import_injects_batch_and_session_attributes(
     values = {attribute["key"]: attribute["value"] for attribute in attributes}
     assert values["batch_id"] == {"stringValue": "batch-1"}
     assert values["session.id"] == {"stringValue": "my-session"}
+
+
+def test_import_flushes_before_crossing_batch_byte_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    records = [_otlp_body(1), _otlp_body(2)]
+    serialized = [json.dumps(record) for record in records]
+    trace_file = tmp_path / "session.jsonl"
+    trace_file.write_text("\n".join(serialized) + "\n")
+    _patch_viewer_preflight(monkeypatch, stored_span_count=2)
+    batch_sizes: list[int] = []
+
+    def post_batch(_endpoint, bodies, *, max_retries):
+        batch_sizes.append(len(bodies))
+
+    monkeypatch.setattr(import_traces, "post_traces_batch_with_retry", post_batch)
+    monkeypatch.setattr(import_traces, "sync_ingest", lambda _endpoint: None)
+
+    result = CliRunner().invoke(
+        import_traces.command,
+        [
+            str(trace_file),
+            "--batch-id",
+            "batch-1",
+            "--batch-bytes",
+            str(len(serialized[0].encode("utf-8")) + 1),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert batch_sizes == [1, 1]
+
+
+def test_import_exits_nonzero_when_stored_span_count_is_incomplete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    trace_file = tmp_path / "session.jsonl"
+    _write_trace(trace_file, 2)
+    _patch_viewer_preflight(monkeypatch, stored_span_count=1)
+    monkeypatch.setattr(
+        import_traces,
+        "post_traces_batch_with_retry",
+        lambda _endpoint, _bodies, *, max_retries: None,
+    )
+    monkeypatch.setattr(import_traces, "sync_ingest", lambda _endpoint: None)
+
+    result = CliRunner().invoke(
+        import_traces.command,
+        [str(trace_file), "--batch-id", "batch-1"],
+    )
+
+    assert result.exit_code == 1
+    assert "viewer stored 1/2 spans" in result.output
+    assert "Import incomplete" in result.output
+
+
+def test_annotation_only_file_is_imported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    trace_file = tmp_path / "session.jsonl"
+    trace_file.write_text(
+        json.dumps({"annotations": [{"session_id": "session", "name": "quality"}]}) + "\n"
+    )
+    _patch_viewer_preflight(monkeypatch)
+    monkeypatch.setattr(
+        import_traces,
+        "post_annotations",
+        lambda _endpoint, annotations: len(annotations),
+    )
+
+    result = CliRunner().invoke(
+        import_traces.command,
+        [str(trace_file), "--batch-id", "batch-1"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "1 imported, 0 skipped" in result.output
+    assert "1 annotation(s) imported" in result.output
+
+
+def test_journal_only_file_is_imported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    trace_file = tmp_path / "session.nooa.jsonl"
+    trace_file.write_text(
+        json.dumps(
+            {
+                "nooaJournal": {
+                    "format": "nooa.message_journal",
+                    "version": 1,
+                    "type": "blocks",
+                    "blocks": [],
+                }
+            }
+        )
+        + "\n"
+    )
+    _patch_viewer_preflight(monkeypatch)
+    monkeypatch.setattr(
+        import_traces,
+        "post_journal_record",
+        lambda _endpoint, _record, _session_id: True,
+    )
+
+    result = CliRunner().invoke(
+        import_traces.command,
+        [str(trace_file), "--batch-id", "batch-1"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "1 imported, 0 skipped" in result.output
 
 
 def test_import_exits_nonzero_and_prints_cleanup_on_batch_failure(

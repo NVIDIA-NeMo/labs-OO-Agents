@@ -110,6 +110,35 @@ def test_import_179_records_stores_every_span(fresh_viewer, tmp_path):
     assert trace_count["event_count"] == 179
 
 
+def test_import_reports_viewer_ingest_failure(fresh_viewer, tmp_path):
+    """Queue drain is not success when the viewer rejected the queued payload."""
+    from click.testing import CliRunner
+    from nooa_cli.commands.import_traces import command
+
+    good_body = _otlp_body(1)
+    malformed_body = _otlp_body(2)
+    malformed_body["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["startTimeUnixNano"] = (
+        "not-an-integer"
+    )
+    trace_file = tmp_path / "failed-ingest.jsonl"
+    trace_file.write_text(f"{json.dumps(good_body)}\n{json.dumps(malformed_body)}\n")
+
+    result = CliRunner().invoke(
+        command,
+        [
+            str(trace_file),
+            "--endpoint",
+            fresh_viewer,
+            "--batch-id",
+            "failed-ingest-regression",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "failed to verify viewer ingest" in result.output
+    assert "Import incomplete" in result.output
+
+
 @pytest.mark.asyncio
 async def test_save_then_import_then_download_preserves_messages(fresh_viewer):
     """A JSONL written by the file exporter, then re-imported into a fresh

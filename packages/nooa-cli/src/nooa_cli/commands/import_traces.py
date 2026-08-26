@@ -11,6 +11,7 @@ Usage:
 import json
 import shlex
 import urllib.parse
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -21,6 +22,7 @@ from ._otlp_helpers import (
     OtlpRequestError,
     check_endpoint_reachable,
     get_journal_record,
+    get_session_span_count,
     inject_resource_attrs,
     post_annotations,
     post_journal_record,
@@ -71,6 +73,43 @@ def _session_id_from_filename(path: Path) -> str:
     return path.stem
 
 
+def _count_otlp_spans(body: dict) -> int:
+    """Count spans in a validated OTLP envelope."""
+    count = 0
+    for resource_spans in body.get("resourceSpans", []):
+        if not isinstance(resource_spans, dict):
+            continue
+        scope_spans = resource_spans.get("scopeSpans", [])
+        if not isinstance(scope_spans, list):
+            continue
+        for scope in scope_spans:
+            if not isinstance(scope, dict):
+                continue
+            spans = scope.get("spans", [])
+            if isinstance(spans, list):
+                count += len(spans)
+    return count
+
+
+@dataclass
+class _TraceBatch:
+    """Mutable state for one bounded OTLP request."""
+
+    bodies: list[dict] = field(default_factory=list)
+    input_bytes: int = 0
+    first_line: int = 0
+    last_line: int = 0
+    attempted: bool = False
+    accepted: bool = False
+
+    def clear(self) -> None:
+        """Reset buffered request data while preserving aggregate status."""
+        self.bodies = []
+        self.input_bytes = 0
+        self.first_line = 0
+        self.last_line = 0
+
+
 def _post_batch(
     endpoint: str,
     bodies: list[dict],
@@ -91,6 +130,31 @@ def _post_batch(
     except OtlpRequestError as error:
         return f"{file_name}:{line_range}: {error}"
     return None
+
+
+def _flush_batch(
+    endpoint: str,
+    state: _TraceBatch,
+    *,
+    max_retries: int,
+    file_name: str,
+) -> str | None:
+    """Post and clear buffered trace bodies, returning a user-facing error."""
+    if not state.bodies:
+        return None
+    state.attempted = True
+    error = _post_batch(
+        endpoint,
+        state.bodies,
+        max_retries=max_retries,
+        file_name=file_name,
+        first_line=state.first_line,
+        last_line=state.last_line,
+    )
+    state.clear()
+    if error is None:
+        state.accepted = True
+    return error
 
 
 @click.command()
@@ -148,8 +212,14 @@ def command(
     if batch_id is None:
         batch_id = f"import_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
 
-    # Verify endpoint is reachable
-    if not check_endpoint_reachable(endpoint):
+    try:
+        reachable = check_endpoint_reachable(endpoint)
+    except OtlpRequestError as error:
+        click.echo(f"Viewer at {endpoint} rejected the request: {error}")
+        if error.status_code in (401, 403):
+            click.echo("Check NOOA_VIEWER_AUTH_TOKEN and try again.")
+        raise SystemExit(1) from None
+    if not reachable:
         click.echo(f"Cannot reach viewer at {endpoint}. Is it running?")
         raise SystemExit(1)
 
@@ -177,14 +247,11 @@ def command(
         inject_attrs = {"batch_id": batch_id, "session.id": session_id}
 
         file_errors: list[str] = []
-        trace_post_attempted = False
-        trace_batch_accepted = False
+        file_imported = False
+        expected_span_count = 0
         is_legacy = False
         deferred_annotations: list[dict] = []
-        batch: list[dict] = []
-        batch_input_bytes = 0
-        batch_first_line = 0
-        batch_last_line = 0
+        batch = _TraceBatch()
 
         with open(file) as f:
             for line_num, raw_line in enumerate(f, 1):
@@ -202,6 +269,8 @@ def command(
                 if journal_record is not None:
                     if not post_journal_record(endpoint, journal_record, session_id):
                         file_errors.append(f"{file.name}:{line_num}: failed to post journal record")
+                    else:
+                        file_imported = True
                     continue
 
                 # Handle annotation lines from exported traces
@@ -231,67 +300,82 @@ def command(
                 if not resource_spans:
                     continue
 
-                inject_resource_attrs(body, inject_attrs)
-                if not batch:
-                    batch_first_line = line_num
-                batch_last_line = line_num
-                batch.append(body)
-                batch_input_bytes += len(raw_line.encode("utf-8"))
-
-                if len(batch) >= batch_lines or batch_input_bytes >= batch_bytes:
-                    trace_post_attempted = True
-                    batch_error = _post_batch(
+                raw_line_bytes = len(raw_line.encode("utf-8"))
+                if batch.bodies and batch.input_bytes + raw_line_bytes > batch_bytes:
+                    batch_error = _flush_batch(
                         endpoint,
                         batch,
                         max_retries=max_retries,
                         file_name=file.name,
-                        first_line=batch_first_line,
-                        last_line=batch_last_line,
                     )
-                    batch = []
-                    batch_input_bytes = 0
                     if batch_error:
                         file_errors.append(batch_error)
                         break
-                    trace_batch_accepted = True
 
-            else:
-                if batch:
-                    trace_post_attempted = True
-                    batch_error = _post_batch(
+                inject_resource_attrs(body, inject_attrs, overwrite=True)
+                if not batch.bodies:
+                    batch.first_line = line_num
+                batch.last_line = line_num
+                batch.bodies.append(body)
+                batch.input_bytes += raw_line_bytes
+                expected_span_count += _count_otlp_spans(body)
+
+                if len(batch.bodies) >= batch_lines or batch.input_bytes >= batch_bytes:
+                    batch_error = _flush_batch(
                         endpoint,
                         batch,
                         max_retries=max_retries,
                         file_name=file.name,
-                        first_line=batch_first_line,
-                        last_line=batch_last_line,
                     )
                     if batch_error:
                         file_errors.append(batch_error)
-                    else:
-                        trace_batch_accepted = True
+                        break
+
+            else:
+                batch_error = _flush_batch(
+                    endpoint,
+                    batch,
+                    max_retries=max_retries,
+                    file_name=file.name,
+                )
+                if batch_error:
+                    file_errors.append(batch_error)
 
         # A 200 from /v1/traces only means queued. Wait for durable processing
         # before importing annotations or reporting success.
-        if trace_post_attempted:
+        if batch.attempted:
             try:
                 sync_ingest(endpoint)
             except OtlpRequestError as error:
                 file_errors.append(f"{file.name}: failed to sync viewer ingest: {error}")
 
-        if not file_errors and trace_batch_accepted:
-            if deferred_annotations:
-                count = post_annotations(endpoint, deferred_annotations)
-                annotations_imported += count
-                if count != len(deferred_annotations):
+        if not file_errors and batch.accepted:
+            try:
+                stored_span_count = get_session_span_count(endpoint, session_id)
+            except OtlpRequestError as error:
+                file_errors.append(f"{file.name}: failed to verify viewer ingest: {error}")
+            else:
+                if stored_span_count != expected_span_count:
                     file_errors.append(
-                        f"{file.name}: imported {count}/{len(deferred_annotations)} annotations"
+                        f"{file.name}: viewer stored {stored_span_count}/{expected_span_count} spans"
                     )
+                else:
+                    file_imported = True
+
+        if not file_errors and deferred_annotations:
+            count = post_annotations(endpoint, deferred_annotations)
+            annotations_imported += count
+            if count != len(deferred_annotations):
+                file_errors.append(
+                    f"{file.name}: imported {count}/{len(deferred_annotations)} annotations"
+                )
+            else:
+                file_imported = True
 
         if file_errors:
             failed += 1
             errors.extend(file_errors)
-        elif trace_batch_accepted:
+        elif file_imported:
             imported += 1
         elif not is_legacy:
             skipped += 1
