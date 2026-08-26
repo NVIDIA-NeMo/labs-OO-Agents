@@ -20,6 +20,7 @@ nooa --help
 nooa start-dev            # launch the trace viewer
 nooa eval ...             # eval pipeline runner
 nooa traces ...           # inspect/manage trace files
+nooa run "inspect this"   # one non-interactive coding-agent turn
 nooa tui                  # interactive coding agent
 ```
 
@@ -32,6 +33,51 @@ export NOOA_MODEL=nvidia_nim/nvidia/nemotron-3-super-120b-a12b
 export NVIDIA_API_KEY=nvapi-...
 uv run nooa-acp
 ```
+
+
+## Headless coding-agent runs
+
+Use `nooa run` in scripts and CI without launching a terminal UI:
+
+```bash
+nooa run "Fix the failing tests"
+printf '%s' "Summarize this repository" | nooa run -
+nooa run --format json "Review the current diff"
+nooa run --format jsonl "Run the test suite" > events.jsonl
+```
+
+A positional prompt and piped stdin may be combined; stdin is appended as
+additional context. Text mode writes only agent messages to stdout and writes
+the resumable session ID to stderr. `--format json` emits one result document
+with `schema_version`, `session_id`, `status`, ordered `messages`, `explanation`,
+`usage`, and `error` fields. `--format jsonl` streams one versioned object per
+line with `type`, `timestamp`, and `session_id`; event types include
+`session.started`, `turn.started`, `agent.message`, `usage.updated`, and exactly
+one terminal `turn.completed`, `turn.blocked`, `turn.cancelled`, or
+`turn.failed`. Use `-o/--output PATH` to also write the final agent response to
+a file, and `--quiet` to suppress session diagnostics on stderr.
+
+Runs are durable by default:
+
+```bash
+nooa run --continue "Now update the docs"       # latest session in this workspace
+nooa run --resume 7d3a91c2 "Try the other fix"  # unique session ID prefix
+nooa run --ephemeral "One-off review"            # no session database
+```
+
+`--continue` is scoped to the selected `--working-dir`. An ambiguous or missing
+`--resume` prefix is an error rather than silently creating a new session.
+
+Headless execution never waits for terminal input. An agent request for human
+input, or an MCP server that still requires approval, emits the available
+message/result and exits with status 3 so automation can resume the saved
+session later. Exit 0 means completed, 1 means runtime failure, 2 means invalid
+CLI usage, and 130 means interrupted.
+
+> **Security:** headless shell and file tools currently have the same authority
+> as the TUI within the selected workspace. Run untrusted tasks inside a
+> container or another real isolation boundary. `nooa run` intentionally does
+> not advertise a sandbox flag until NOOA can enforce one centrally.
 
 ## TUI configuration
 
