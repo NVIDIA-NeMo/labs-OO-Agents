@@ -108,6 +108,11 @@ def test_user_bar_is_control_safe_cell_aware_and_reserves_final_column() -> None
     assert styled_lines[0] == edge_style + "▔" * 9 + "\x1b[0m"
     assert styled_lines[-1] == edge_style + "▁" * 9 + "\x1b[0m"
 
+    from prompt_toolkit.formatted_text import ANSI, to_formatted_text
+
+    parsed_edge_style = to_formatted_text(ANSI(styled_lines[0]))[0][0]
+    assert parsed_edge_style == "#5f5f5f bg:ansidefault reverse"
+
 
 def test_hyperlink_target_length_is_bounded() -> None:
     prefix = "https://example.test/"
