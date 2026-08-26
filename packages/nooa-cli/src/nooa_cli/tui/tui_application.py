@@ -3223,10 +3223,10 @@ class TUIApplication:
             represented_handoff = handoff[:represented]
             combined = "\n".join(represented_handoff)
             if tail == combined:
-                return pending[:-1] + handoff
+                return pending[:-1] + handoff_display
             suffix = f"\n{combined}"
             if tail.endswith(suffix):
-                return pending[:-1] + [tail[: -len(suffix)]] + handoff
+                return pending[:-1] + [tail[: -len(suffix)]] + handoff_display
 
         for represented in range(len(handoff), 0, -1):
             represented_handoff = handoff[-represented:]
