@@ -3601,6 +3601,76 @@ def test_copyable_markdown_preserves_long_list_item_for_fullscreen_reflow() -> N
     assert any(row.endswith(" ") for row in rows[:-1])
 
 
+@pytest.mark.parametrize(
+    "markup",
+    [
+        "ordinary prose {suffix}",
+        "## heading text {suffix}",
+        "- bullet text {suffix}",
+        "1. numbered text {suffix}",
+        "> quoted text {suffix}",
+        "| key | value |\n| --- | --- |\n| row | table text {suffix} |",
+    ],
+)
+def test_copyable_markdown_preserves_long_structural_text(markup: str) -> None:
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+
+    suffix = "finalword"
+    _renderable, ansi = _copyable_markdown_ansi(
+        markup.format(suffix=("word " * 12) + suffix),
+        width=24,
+    )
+
+    assert suffix in strip_safe_ansi(ansi)
+
+
+def test_copyable_markdown_wraps_complete_block_quotes_without_cropping() -> None:
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+    from rich.cells import cell_len
+
+    sentence = (
+        "Before changing anything, inspect the relevant context and applicable "
+        "repository instructions. Preserve unrelated work. Verify outcomes."
+    )
+    _renderable, ansi = _copyable_markdown_ansi(f"> {sentence}", width=30)
+    lines = [line for line in strip_safe_ansi(ansi).splitlines() if line]
+
+    assert "".join(line.removeprefix("▌ ").rstrip() + " " for line in lines).split() == (
+        sentence.split()
+    )
+    assert len(lines) > 1
+    assert all(line.startswith("▌ ") for line in lines)
+    assert all(cell_len(line) <= 30 for line in lines)
+
+
+def test_copyable_markdown_preserves_a_long_list_nested_in_a_quote() -> None:
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+
+    suffix = "complete-end"
+    _renderable, ansi = _copyable_markdown_ansi(
+        "> - " + "word " * 20 + suffix,
+        width=20,
+    )
+    plain = strip_safe_ansi(ansi)
+
+    assert suffix in plain
+    assert all(line.startswith("▌ ") for line in plain.splitlines() if line)
+
+
+@pytest.mark.parametrize("width", [1, 2, 3, 5, 10, 21])
+def test_copyable_markdown_keeps_quotes_within_pathological_widths(width: int) -> None:
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+    from rich.cells import cell_len
+
+    _renderable, ansi = _copyable_markdown_ansi("> - alpha beta END", width=width)
+    plain = strip_safe_ansi(ansi)
+
+    lines = plain.splitlines()
+    content = "".join(line.removeprefix("▌ ") for line in lines)
+    assert "".join(content.split()) == "•alphabetaEND"
+    assert all(cell_len(line) <= width for line in lines)
+
+
 def test_copyable_markdown_preserves_safe_markdown_links() -> None:
     from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
     from nooa_cli.tui.terminal_safety import safe_hyperlink_spans, strip_safe_ansi
