@@ -50,9 +50,13 @@ class ExperimentalCodingWorker(CodingWorker):
 
     Complete only the bounded objective supplied by the controller. Use the shared
     working tree carefully, report concise evidence, and leave planning, integration,
-    and final verification to the controller. Store durable task-specific artifacts,
-    findings, and checkpoints on the supplied Todo's ``v`` proxy, not on ``self.v``;
-    keep transient scratch data in cell locals.
+    and final verification to the controller. Each ``investigate()`` call gets fresh
+    cell locals; reuse them within the call, but do not expect them to survive after
+    returning. ``self.shell`` keeps its cwd, so use relative paths and call ``cd`` only
+    when intentionally changing directories. When a Todo is supplied, store durable
+    task-specific artifacts, findings, and checkpoints on that Todo's ``v`` proxy.
+    Plain-string delegations have no Todo-backed durable task state. Do not use
+    ``self.v``; keep transient scratch data in cell locals.
     """
 
     @strategy(
@@ -74,11 +78,13 @@ class ExperimentalCodingWorker(CodingWorker):
         delegated Todo, ``supplied_context`` is either that Todo or a mapping with
         ``"todo"`` and supplemental ``"context"`` entries. In the mapping form, use
         ``todo = supplied_context["todo"]`` for Todo operations and inspect
-        ``supplied_context["context"]`` separately. Keep that Todo's title and
-        description aligned with the current understanding. Record material findings,
-        decisions, completed steps, and verification with ``self.todo.comment(...)``,
-        not routine narration. Return concise findings or changes rather than a raw
-        transcript.
+        ``supplied_context["context"]`` separately. When a Todo is present, keep its
+        title and description aligned with the current understanding; record material
+        findings, decisions, completed steps, and verification with
+        ``self.todo.comment(todo, ...)`` (not routine narration), and store durable
+        task values on ``todo.v``. For a plain-string objective, ``supplied_context`` is
+        optional context rather than a Todo; do not call Todo APIs. Return concise
+        findings or changes rather than a raw transcript.
         """
         ...
 
@@ -112,6 +118,9 @@ class ExperimentalTUIAgent(CodingAgent):
     ``self.v``. Store task-specific plans, findings, artifacts, and checkpoints on that
     Todo's ``v`` proxy. Keep transient scratch data in cell locals; do not use either
     persistent store as an uncurated dump.
+    Each ``handle()`` call gets fresh cell locals; reuse them within the call, but do
+    not expect them to survive the turn. ``self.shell`` keeps its cwd across turns, so
+    use relative paths and call ``cd`` only when intentionally changing directories.
     Work until the newest request is complete or genuinely needs user input. Use
     as many Python cells as necessary, inspect
     each result, and never claim a check passed without running it. Send each
