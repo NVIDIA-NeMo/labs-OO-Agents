@@ -539,20 +539,6 @@ class SkillRegistry(Skill):
             return "assigned directly by the agent"
         return None
 
-    def _protected_conflict(self, name: str, attr: str, skill: Any = None) -> str | None:
-        """Describe why *name* may not take over a protected agent attribute."""
-        protected = getattr(type(self._agent), "__protected_skill_attrs__", frozenset())
-        if attr not in protected:
-            return None
-        owner = next(
-            (held for held, held_attr in self._attr_map.items() if held_attr == attr), None
-        )
-        if owner is not None:
-            return None if owner == name else f"already provided by {owner!r}"
-        if hasattr(self._agent, attr) and getattr(self._agent, attr, None) is not skill:
-            return "assigned directly by the agent"
-        return None
-
     def register(
         self, name: str, skill_or_cls: "Skill | type[Skill] | None" = None, /, **kwargs
     ) -> None:
@@ -885,7 +871,9 @@ class SkillRegistry(Skill):
                 return result
 
             previous_name = source.module_name
-            previous_module = self._python_modules.pop(previous_name, None)
+            previous_module = (
+                self._python_modules.pop(previous_name, None) if previous_name is not None else None
+            )
             if previous_name is not None and sys.modules.get(previous_name) is previous_module:
                 sys.modules.pop(previous_name, None)
             self._python_modules[module_name] = sys.modules[module_name]
