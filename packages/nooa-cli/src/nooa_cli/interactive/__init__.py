@@ -1,5 +1,6 @@
 """Python-native interactive agent API."""
 
+from .dispatcher import InteractiveSessionDispatcher
 from .local_agent import LocalAgentRunner
 from .runtime import AgentRuntime, JobSnapshot
 from .state import (
@@ -23,6 +24,7 @@ __all__ = [
     "AgentWorkspaceState",
     "CancellationState",
     "InteractiveAgent",
+    "InteractiveSessionDispatcher",
     "JobSnapshot",
     "LocalAgentRunner",
     "Observation",
