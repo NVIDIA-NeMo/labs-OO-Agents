@@ -4,8 +4,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from nooa_cli.coding import CodingAgent
@@ -81,6 +83,11 @@ class _CleanupFailingAgent(_ResultAgent):
         raise RuntimeError("cleanup exploded")
 
 
+class _CancelledAgent(CodingAgent):
+    async def handle(self, notification: dict[str, list[Any]]) -> RespondResult:
+        raise asyncio.CancelledError
+
+
 class _FailingAgent(CodingAgent):
     async def handle(self, notification: dict[str, list[Any]]) -> RespondResult:
         raise RuntimeError("tool exploded")
@@ -124,7 +131,8 @@ async def test_run_headless_collects_messages_and_terminal_status(
         agent_cls=agent_cls,
     )
 
-    assert result.session_id is not None
+    assert result.session_id is None
+    assert result.run_id
     assert result.status == status
     assert result.messages == messages
 
@@ -251,7 +259,8 @@ async def test_run_headless_streams_ordered_terminal_events(tmp_path):
         "agent.message",
         "turn.completed",
     ]
-    assert len({event["session_id"] for event in events}) == 1
+    assert {event["session_id"] for event in events} == {None}
+    assert len({event["run_id"] for event in events}) == 1
     assert all(event["schema_version"] == 1 for event in events)
     assert all("timestamp" in event for event in events)
 
@@ -307,7 +316,8 @@ async def test_run_headless_returns_correlated_failure_event(tmp_path):
     assert result.status == "failed"
     assert result.error == {"type": "RuntimeError", "message": "tool exploded"}
     assert events[-1]["type"] == "turn.failed"
-    assert events[-1]["session_id"] == result.session_id
+    assert events[-1]["session_id"] is None
+    assert events[-1]["run_id"] == result.run_id
 
 
 async def test_run_headless_persists_blocked_turn(tmp_path):
@@ -366,3 +376,43 @@ async def test_run_headless_emits_one_failed_terminal_after_cleanup_error(tmp_pa
     assert result.status == "failed"
     assert result.explanation == "Resource cleanup failed: cleanup exploded"
     assert [event["type"] for event in terminal] == ["turn.failed"]
+
+
+async def test_run_headless_emits_cancelled_terminal_and_propagates_cancellation(tmp_path):
+    events = []
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_headless(
+            "cancel it",
+            config=_config(tmp_path),
+            ephemeral=True,
+            llm=FakeLLMClient(),
+            agent_cls=_CancelledAgent,
+            on_event=events.append,
+        )
+
+    terminal = [
+        event
+        for event in events
+        if event["type"].startswith("turn.") and event["type"] != "turn.started"
+    ]
+    assert [event["type"] for event in terminal] == ["turn.cancelled"]
+
+
+async def test_run_headless_uses_run_id_for_ephemeral_trace_correlation(tmp_path):
+    trace_sessions = []
+    with patch(
+        "nooa_cli.tui.bootstrap._enable_tracing",
+        return_value=(True, trace_sessions.append),
+    ):
+        result = await run_headless(
+            "trace it",
+            config=_config(tmp_path),
+            ephemeral=True,
+            llm=FakeLLMClient(),
+            agent_cls=_ResultAgent,
+        )
+
+    assert result.session_id is None
+    assert len(trace_sessions) == 1
+    assert trace_sessions[0].endswith(result.run_id[:8])

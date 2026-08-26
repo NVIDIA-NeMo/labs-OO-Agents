@@ -40,6 +40,7 @@ class HeadlessResult:
     status: Literal["done", "blocked", "cancelled", "failed"]
     messages: list[str]
     explanation: str
+    run_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     usage: HeadlessUsage = field(default_factory=HeadlessUsage)
     error: dict[str, str] | None = None
     schema_version: int = 1
@@ -80,7 +81,7 @@ def resolve_session(
         session_id = next(
             (
                 info.id
-                for info in store.list(limit=1000)
+                for info in store.list(limit=None)
                 if Path(info.working_directory).expanduser().resolve() == workspace
                 and info.turn_count > 0
             ),
@@ -188,7 +189,8 @@ async def run_headless(
     workspace = Path(config.agent.working_dir).expanduser().resolve()
     handle: SessionHandle | None = None
     resumed = False
-    session_id: str | None = str(uuid.uuid4()) if ephemeral else None
+    session_id: str | None = None
+    run_id = str(uuid.uuid4())
     storage: Any = InMemoryStorageManager()
     agent: Any | None = None
     dispatcher: InteractiveSessionDispatcher | None = None
@@ -196,6 +198,7 @@ async def run_headless(
     usage = HeadlessUsage()
     unsubscribers: list[Any] = []
     final: HeadlessResult | None = None
+    cancellation: asyncio.CancelledError | None = None
 
     def emit(event_type: str, **payload: Any) -> None:
         if on_event is not None:
@@ -205,6 +208,7 @@ async def run_headless(
                     "type": event_type,
                     "timestamp": datetime.now(UTC).isoformat(),
                     "session_id": session_id,
+                    "run_id": run_id,
                     **payload,
                 }
             )
@@ -233,7 +237,7 @@ async def run_headless(
 
         _tracing_enabled, set_trace_session = _enable_tracing(config, [])
         if set_trace_session is not None:
-            set_trace_session(_make_trace_session_name(session_id))
+            set_trace_session(_make_trace_session_name(session_id or run_id))
         agent = _instantiate_agent(agent_cls, config=config, llm=llm, storage=storage)
         _configure_skills(agent, config)
         if handle is not None:
@@ -262,8 +266,8 @@ async def run_headless(
                 agent.event_manager.on("LLMComplete", on_usage),
             )
         )
-        assert session_id is not None
-        agent.event_manager.add(SessionResumed(session_id=session_id, restored=resumed))
+        if session_id is not None:
+            agent.event_manager.add(SessionResumed(session_id=session_id, restored=resumed))
         if handle is not None:
             handle.record_user_message(prompt)
 
@@ -277,6 +281,7 @@ async def run_headless(
             messages.append(str(exc))
             blocked_result = HeadlessResult(
                 session_id=session_id,
+                run_id=run_id,
                 status="blocked",
                 messages=messages,
                 explanation="MCP approval required",
@@ -290,6 +295,7 @@ async def run_headless(
         if result is None:
             final = HeadlessResult(
                 session_id=session_id,
+                run_id=run_id,
                 status="cancelled",
                 messages=messages,
                 explanation="cancelled",
@@ -299,6 +305,7 @@ async def run_headless(
         blocked = result.kind in {RespondReason.NEED_INPUT, RespondReason.GET_USER_INPUT}
         final = HeadlessResult(
             session_id=session_id,
+            run_id=run_id,
             status="blocked" if blocked else "done",
             messages=messages,
             explanation=result.explanation,
@@ -307,9 +314,11 @@ async def run_headless(
         raise _TurnFinished(final)
     except _TurnFinished as finished:
         final = finished.result
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as exc:
+        cancellation = exc
         final = HeadlessResult(
             session_id=session_id,
+            run_id=run_id,
             status="cancelled",
             messages=messages,
             explanation="cancelled",
@@ -318,6 +327,7 @@ async def run_headless(
     except Exception as exc:
         final = HeadlessResult(
             session_id=session_id,
+            run_id=run_id,
             status="failed",
             messages=messages,
             explanation=str(exc),
@@ -357,9 +367,10 @@ async def run_headless(
             except Exception as exc:
                 capture_cleanup_error(exc)
 
-        if cleanup_error is not None:
+        if cleanup_error is not None and cancellation is None:
             final = HeadlessResult(
                 session_id=session_id,
+                run_id=run_id,
                 status="failed",
                 messages=messages,
                 explanation=f"Resource cleanup failed: {cleanup_error}",
@@ -378,6 +389,8 @@ async def run_headless(
         "failed": "turn.failed",
     }[final.status]
     emit(terminal_type, result=final.to_dict())
+    if cancellation is not None:
+        raise cancellation
     return final
 
 
