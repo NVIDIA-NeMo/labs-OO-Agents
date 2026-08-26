@@ -123,7 +123,7 @@ class BenchAgent(
         self.todo = TodoManager()
         self.methodwriting = MethodWriting()
         self.methodwriting.attach(self)
-        self.context_manager["python_tools"] = Context(
+        self.context_manager["python_cell_tools"] = Context(
             doc(ShellTools, RepoTools, TodoManager, MethodWriting), prefix=True
         )
         install_summarizer(summarization or SummarizationConfig(), self)
