@@ -91,20 +91,22 @@ def test_user_bar_is_control_safe_cell_aware_and_reserves_final_column() -> None
         def transcript_columns() -> int:
             return 9  # ten physical columns, with one deliberately reserved
 
-    colors = {"text": "#cdd6f4", "surface2": "#585b70"}
+    colors = {"text": "#cdd6f4", "surface2": "#585b70", "base": "#1e1e2e"}
     bar = _build_user_bar("wide 界\x1b[2J\r", _App(), colors)  # type: ignore[arg-type]
-    assert bar.startswith("\x1b[38;5;189;48;5;59m")
+    assert bar.startswith("\x1b[38;5;16;48;5;59m" + "▔" * 9)
+    assert "\x1b[38;5;189;48;5;59m" in bar
 
     assert "\x1b[2J" not in bar
     visible_lines = strip_safe_ansi(sanitize_transcript_ansi(bar)).splitlines()
     assert len(visible_lines) >= 3
-    assert visible_lines[0] == visible_lines[-1] == " " * 9
+    assert visible_lines[0] == "▔" * 9
+    assert visible_lines[-1] == "▁" * 9
     assert all(cell_len(line) == 9 for line in visible_lines)
 
     styled_lines = bar.splitlines()
-    assert styled_lines[0] == styled_lines[-1] == (
-        "\x1b[38;5;189;48;5;59m" + " " * 9 + "\x1b[0m"
-    )
+    edge_style = "\x1b[38;5;16;48;5;59m"
+    assert styled_lines[0] == edge_style + "▔" * 9 + "\x1b[0m"
+    assert styled_lines[-1] == edge_style + "▁" * 9 + "\x1b[0m"
 
 
 def test_hyperlink_target_length_is_bounded() -> None:
