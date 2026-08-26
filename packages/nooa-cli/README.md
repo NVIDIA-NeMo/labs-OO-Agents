@@ -49,9 +49,11 @@ nooa run --format jsonl "Run the test suite" > events.jsonl
 A positional prompt and piped stdin may be combined; stdin is appended as
 additional context. Text mode writes only agent messages to stdout and writes
 the resumable session ID to stderr. `--format json` emits one result document
-with `schema_version`, `session_id`, `status`, ordered `messages`, `explanation`,
-`usage`, and `error` fields. `--format jsonl` streams one versioned object per
-line with `type`, `timestamp`, and `session_id`; event types include
+with `schema_version`, `session_id`, `run_id`, `status`, ordered `messages`,
+`explanation`, `usage`, and `error` fields. Durable runs expose both a resumable
+`session_id` and per-invocation `run_id`; ephemeral runs leave `session_id` null.
+`--format jsonl` streams one versioned object per line with `type`, `timestamp`,
+`session_id`, and `run_id`; event types include
 `session.started`, `turn.started`, `agent.message`, `usage.updated`, and exactly
 one terminal `turn.completed`, `turn.blocked`, `turn.cancelled`, or
 `turn.failed`. Use `-o/--output PATH` to also write the final agent response to
