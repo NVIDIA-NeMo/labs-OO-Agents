@@ -13,7 +13,7 @@ from typing import Literal
 
 from nooa.paths import get_project_dir
 from nooa.sessions import SessionHandle, SessionInfo, SessionStore
-from nooa.storage.sqlite import delete_sqlite_database
+from nooa.storage.sqlite import delete_sqlite_database, is_sqlite_database_active
 
 SESSIONS_DIR = get_project_dir("sessions")
 
@@ -144,7 +144,7 @@ class SessionManager:
         return "\n---\n\n".join(lines)
 
     @classmethod
-    def list_sessions(cls, limit: int = 20) -> list[SessionMeta]:
+    def list_sessions(cls, limit: int | None = 20) -> list[SessionMeta]:
         return [
             SessionMeta.from_info(info) for info in SessionStore(SESSIONS_DIR).list(limit=limit)
         ]
@@ -162,6 +162,10 @@ class SessionManager:
             Turn(role=turn.role, content=turn.content, ts=turn.timestamp)
             for turn in SessionStore(SESSIONS_DIR).load_turns(session_id)
         ]
+
+    @classmethod
+    def is_active(cls, session_id: str) -> bool:
+        return is_sqlite_database_active(SessionStore(SESSIONS_DIR).path_for(session_id))
 
     @classmethod
     def find_by_prefix(cls, prefix: str) -> list[str]:

@@ -26,6 +26,7 @@ def test_builtin_command_surface_is_explicit_and_pruned():
         "quit",
         "reasoning",
         "reflection",
+        "resume",
         "session",
         "show-diffs",
         "show-python",
