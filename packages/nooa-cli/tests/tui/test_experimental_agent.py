@@ -97,9 +97,18 @@ async def test_experimental_tui_agent_uses_only_python_cell(tmp_path):
             "</python_cell_state>", 1
         )[0]
         assert "Cell imports:" not in state_block
-        assert "Cell locals (includes method inputs): notification (dict)" in state_block
+        assert (
+            "Cell locals (current call only; includes method inputs; reuse unchanged "
+            "values): notification (dict)" in state_block
+        )
         assert "`self.v`: none" in rendered_context
-        assert f"`self.shell.cwd`: {tmp_path}" in rendered_context
+        assert (
+            "Working directory (already active for `self.shell`; persists across cells "
+            f"and turns): {tmp_path}" in rendered_context
+        )
+        assert "Use relative paths; call `cd` only to intentionally change directories." in (
+            rendered_context
+        )
         completion_events = [
             event
             for event in agent.event_manager.values()
@@ -126,6 +135,30 @@ async def test_experimental_tui_agent_module_capabilities_execute_without_import
         result = await agent.handle({"user_messages": ["exercise module capabilities"]})
         assert result.kind is RespondReason.DONE
         assert result.explanation == '{"columns": ["x"]}'
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_experimental_tui_agent_discards_cell_locals_between_handle_calls(tmp_path):
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _response(
+                "temporary_value = 'discard me'\n"
+                "return_result(RespondResult(kind=RespondReason.DONE, explanation='first'))"
+            ),
+            _response(
+                "return_result(RespondResult(kind=RespondReason.DONE, "
+                "explanation=str('temporary_value' in python_cell_state()['cell_locals'])))"
+            ),
+        ]
+    )
+    agent = ExperimentalTUIAgent(llm=llm, cwd=tmp_path)
+    try:
+        first = await agent.handle({"user_messages": ["first turn"]})
+        second = await agent.handle({"user_messages": ["second turn"]})
+        assert first.explanation == "first"
+        assert second.explanation == "False"
     finally:
         await agent.close()
 

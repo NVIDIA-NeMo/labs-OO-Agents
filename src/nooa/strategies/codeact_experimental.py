@@ -141,9 +141,22 @@ class CodeActExperimental(CodeActStrategy):
         lines = ["## Python cell state"]
         shell = getattr(agent, "shell", None)
         if shell is not None and (cwd := getattr(shell, "cwd", None)) is not None:
-            lines.extend(("", f"`self.shell.cwd`: {self._python_cell_state_label(cwd)}"))
+            lines.extend(
+                (
+                    "",
+                    "Working directory (already active for `self.shell`; persists across "
+                    f"cells and turns): {self._python_cell_state_label(cwd)}",
+                    "Use relative paths; call `cd` only to intentionally change directories.",
+                )
+            )
         elif (cwd := getattr(agent, "cwd", None)) is not None:
-            lines.extend(("", f"`self.cwd`: {self._python_cell_state_label(cwd)}"))
+            lines.extend(
+                (
+                    "",
+                    "Working directory (persists across cells and turns): "
+                    f"{self._python_cell_state_label(cwd)}",
+                )
+            )
 
         persistent_vars = getattr(agent, "vars", None)
         if persistent_vars:
@@ -183,9 +196,15 @@ class CodeActExperimental(CodeActStrategy):
                 f"({self._python_cell_state_label(type_name, max_chars=80)})"
                 for name, type_name in visible
             )
-            lines.extend(("", f"Cell locals (includes method inputs): {items}{suffix}"))
+            lines.extend(
+                (
+                    "",
+                    "Cell locals (current call only; includes method inputs; reuse unchanged "
+                    f"values): {items}{suffix}",
+                )
+            )
         else:
-            lines.extend(("", "Cell locals (includes method inputs): none"))
+            lines.extend(("", "Cell locals (current call only; includes method inputs): none"))
         return "\n".join(lines)
 
     def _build_builtins(self, runtime: RuntimeServices, call: "CurrentCall") -> dict[str, Any]:
@@ -239,10 +258,15 @@ class CodeActExperimental(CodeActStrategy):
     def _build_execute_python_tool(self) -> Any:
         """Build the sole provider tool, including its complete operating contract."""
         tool = super()._build_execute_python_tool()
-        tool.description = """Execute one cell in a persistent Python session.
+        tool.description = """Execute one cell in the current method call's Python session.
 
-Parameters are pre-loaded as locals, and names defined in one cell remain available
-in later cells. Already available without import: `self`, `print()`, `pprint()`,
+Parameters are pre-loaded as locals. Names defined in one cell remain available in
+later cells of this call; reuse them instead of recreating unchanged values. Cell
+locals are discarded when the method call ends—use `self.v` or the active Todo's
+`v` proxy only for state that must survive later calls. `self.shell` keeps its working
+directory across cells and method calls; use relative paths and call `cd` only when
+intentionally changing directories. Already available without import: `self`,
+`print()`, `pprint()`,
 `doc()`, `python_cell_state()`, `return_result()`, `asyncio`, and `typing`. Use
 `await` directly. This is your only provider tool: call it on every turn because
 plain-text replies do not execute work or finish the task.
