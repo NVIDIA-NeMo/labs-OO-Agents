@@ -3671,6 +3671,29 @@ def test_copyable_markdown_keeps_quotes_within_pathological_widths(width: int) -
     assert all(cell_len(line) <= width for line in lines)
 
 
+@pytest.mark.parametrize(
+    "markup",
+    [
+        "> plain prose alpha beta END",
+        "> | heading |\n> | --- |\n> | cell-END |",
+        "> ```text\n> code-END\n> ```",
+    ],
+)
+@pytest.mark.parametrize("width", [1, 2, 3, 4, 10])
+def test_copyable_markdown_preserves_nested_quote_content_at_narrow_widths(
+    markup: str, width: int
+) -> None:
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+    from rich.cells import cell_len
+
+    _renderable, ansi = _copyable_markdown_ansi(markup, width=width)
+    plain = strip_safe_ansi(ansi)
+
+    content = "".join(line.removeprefix("▌ ") for line in plain.splitlines())
+    assert "END" in content
+    assert all(cell_len(line) <= width for line in plain.splitlines())
+
+
 def test_copyable_markdown_preserves_safe_markdown_links() -> None:
     from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
     from nooa_cli.tui.terminal_safety import safe_hyperlink_spans, strip_safe_ansi
