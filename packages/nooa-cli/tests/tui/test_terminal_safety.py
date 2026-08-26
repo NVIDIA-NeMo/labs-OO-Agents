@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import pytest
 from nooa_cli.tui.session import _build_user_bar
 from nooa_cli.tui.terminal_safety import (
     hyperlink_at_plain_offset,
@@ -112,6 +113,115 @@ def test_user_bar_is_control_safe_cell_aware_and_reserves_final_column() -> None
 
     parsed_edge_style = to_formatted_text(ANSI(styled_lines[0]))[0][0]
     assert parsed_edge_style == "#5f5f5f bg:ansidefault reverse"
+
+
+def test_user_bar_wraps_words_with_symmetric_content_insets() -> None:
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+    from nooa_cli.tui.user_message import render_user_bar
+
+    colors = {"text": "#cdd6f4", "surface2": "#585b70"}
+    bar = render_user_bar("alpha betaword omega", 16, colors)
+    lines = strip_safe_ansi(bar).splitlines()
+
+    assert lines == [
+        "▔" * 16,
+        " ❯ alpha        ",
+        " betaword omega ",
+        "▁" * 16,
+    ]
+    assert all(line.startswith(" ") and line.endswith(" ") for line in lines[1:-1])
+
+
+def test_user_bar_folds_only_words_too_wide_for_a_content_row() -> None:
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+    from nooa_cli.tui.user_message import render_user_bar
+
+    colors = {"text": "#cdd6f4", "surface2": "#585b70"}
+    lines = strip_safe_ansi(render_user_bar("abcdefghijklmno", 10, colors)).splitlines()
+
+    assert lines[1:-1] == [" ❯ abcdef ", " ghijklmn ", " o        "]
+    assert all(cell_len(line) == 10 for line in lines)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_rows"),
+    [
+        ("  lead", [" ❯     ", " lead  "]),
+        ("a  b", [" ❯ a   ", " b     "]),
+        ("trail  ", [" ❯     ", " trail ", "       "]),
+    ],
+)
+def test_user_bar_preserves_source_whitespace_while_wrapping(
+    text: str,
+    expected_rows: list[str],
+) -> None:
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+    from nooa_cli.tui.user_message import render_user_bar
+
+    colors = {"text": "#cdd6f4", "surface2": "#585b70"}
+    lines = strip_safe_ansi(render_user_bar(text, 7, colors)).splitlines()
+
+    assert lines[1:-1] == expected_rows
+    assert all(cell_len(line) == 7 for line in lines)
+
+
+def test_user_bar_treats_unicode_whitespace_as_a_word_boundary() -> None:
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+    from nooa_cli.tui.user_message import render_user_bar
+
+    colors = {"text": "#cdd6f4", "surface2": "#585b70"}
+    lines = strip_safe_ansi(render_user_bar("abcdefg x", 10, colors)).splitlines()
+
+    assert lines == ["▔" * 10, " ❯        ", " abcdefg  ", " x        ", "▁" * 10]
+    assert all(cell_len(line) == 10 for line in lines)
+
+
+def test_user_bar_moves_a_word_that_only_fits_after_the_prompt() -> None:
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+    from nooa_cli.tui.user_message import render_user_bar
+
+    colors = {"text": "#cdd6f4", "surface2": "#585b70"}
+    lines = strip_safe_ansi(render_user_bar("abcdefg", 10, colors)).splitlines()
+
+    assert lines == ["▔" * 10, " ❯        ", " abcdefg  ", "▁" * 10]
+    assert all(cell_len(line) == 10 for line in lines)
+
+
+def test_user_bar_moves_wide_grapheme_past_narrow_prompt_without_replacing_it() -> None:
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+    from nooa_cli.tui.user_message import render_user_bar
+
+    colors = {"text": "#cdd6f4", "surface2": "#585b70"}
+    lines = strip_safe_ansi(render_user_bar("界ab", 5, colors)).splitlines()
+
+    assert lines == ["▔" * 5, " ❯   ", " 界a ", " b   ", "▁" * 5]
+    assert all(cell_len(line) == 5 for line in lines)
+
+
+@pytest.mark.parametrize("text", ["🇺🇸x", "́界", "\u200d", "a\u200d", "\u200d\u200d\u2003🇺"])
+def test_user_bar_handles_edge_unicode_as_indivisible_visible_cells(text: str) -> None:
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+    from nooa_cli.tui.user_message import render_user_bar
+
+    colors = {"text": "#cdd6f4", "surface2": "#585b70"}
+    lines = strip_safe_ansi(render_user_bar(text, 5, colors)).splitlines()
+
+    assert all(cell_len(line) == 5 for line in lines)
+    if text.startswith("🇺🇸"):
+        assert any("🇺🇸" in line for line in lines)
+    if text.startswith("́"):
+        assert any("́界" in line for line in lines)
+
+
+def test_user_bar_replaces_a_grapheme_wider_than_the_content_row() -> None:
+    from nooa_cli.tui.terminal_safety import strip_safe_ansi
+    from nooa_cli.tui.user_message import render_user_bar
+
+    colors = {"text": "#cdd6f4", "surface2": "#585b70"}
+    lines = strip_safe_ansi(render_user_bar("界", 3, colors)).splitlines()
+
+    assert lines == ["▔" * 3, " … ", "▁" * 3]
+    assert all(cell_len(line) == 3 for line in lines)
 
 
 def test_hyperlink_target_length_is_bounded() -> None:

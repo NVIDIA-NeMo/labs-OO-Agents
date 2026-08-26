@@ -10,7 +10,7 @@ from typing import Any
 from markdown_it import MarkdownIt
 from rich.cells import cell_len, split_graphemes
 from rich.console import Console, ConsoleOptions, RenderResult
-from rich.markdown import CodeBlock, ListItem, Markdown
+from rich.markdown import BlockQuote, CodeBlock, ListItem, Markdown
 from rich.segment import Segment
 from rich.syntax import Syntax
 from rich.text import Text
@@ -179,6 +179,47 @@ class _CopyableCodeBlock(CodeBlock):
         yield from console.render(syntax, options.update(no_wrap=False, overflow="fold"))
 
 
+class _SemanticBlockQuote(BlockQuote):
+    """Render complete quoted prose instead of cropping it under soft-wrap."""
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        # The outer soft-wrap keeps semantic source reflowable in fullscreen,
+        # but Rich's stock BlockQuote combines it with render_lines(), which
+        # crops long children. Wrap quote children here and repeat the marker.
+        # Avoid ``render_lines`` here: nested semantic list items deliberately
+        # emit complete logical lines, which another width-cropping pass would
+        # truncate. Convert each complete styled line to Text and word-wrap it
+        # before adding the quote marker to every resulting visual row.
+        prefix_text = "▌ " if options.max_width >= 3 else ""
+        content_width = max(options.max_width - cell_len(prefix_text), 1)
+        rendered = console.render(
+            self.elements,
+            options.update(
+                width=max(options.max_width, 80),
+                height=None,
+                no_wrap=False,
+                overflow="fold",
+            ),
+        )
+        logical_lines = list(Segment.split_lines(Segment.apply_style(rendered, self.style))) or [[]]
+        prefix = Segment(prefix_text, self.style)
+        for logical_line in logical_lines:
+            text = Text()
+            for segment in logical_line:
+                if not segment.control:
+                    text.append(segment.text, segment.style)
+            wrapped = text.wrap(
+                console,
+                content_width,
+                overflow="fold",
+                no_wrap=False,
+            ) or [Text()]
+            for line in wrapped:
+                yield prefix
+                yield from line.render(console)
+                yield Segment.line()
+
+
 class _SemanticListItem(ListItem):
     """Render complete list-item text for renderer-owned wrapping.
 
@@ -225,6 +266,7 @@ class CopyableMarkdown(TerminalMarkdown):
         **Markdown.elements,
         "fence": _CopyableCodeBlock,
         "code_block": _CopyableCodeBlock,
+        "blockquote_open": _SemanticBlockQuote,
         "list_item_open": _SemanticListItem,
     }
 
