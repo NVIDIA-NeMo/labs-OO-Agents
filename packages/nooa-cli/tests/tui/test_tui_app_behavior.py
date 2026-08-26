@@ -553,24 +553,24 @@ async def test_large_paste_thresholds_use_utf8_bytes_or_line_count():
     from nooa_cli.tui.tui_application import TUIApplication
 
     app = TUIApplication(display_mode="native-replay")
-    app._insert_bracketed_paste(app.input_buffer, "é" * 2047 + "x")
-    assert len(app.input_buffer.text) == 2048
+    app._insert_bracketed_paste(app.input_buffer, "é" * 1023 + "x")
+    assert len(app.input_buffer.text) == 1024
 
     app.input_buffer.reset()
-    app._insert_bracketed_paste(app.input_buffer, "é" * 2048)
+    app._insert_bracketed_paste(app.input_buffer, "é" * 1024)
     assert len(app.input_buffer.text) == 1
-    assert app._resolve_paste_attachments(app.input_buffer.text) == "é" * 2048
+    assert app._resolve_paste_attachments(app.input_buffer.text) == "é" * 1024
 
     app.input_buffer.reset()
-    nineteen_lines = "\n".join("x" for _ in range(19))
-    app._insert_bracketed_paste(app.input_buffer, nineteen_lines)
-    assert app.input_buffer.text == nineteen_lines
+    nine_lines = "\n".join("x" for _ in range(9))
+    app._insert_bracketed_paste(app.input_buffer, nine_lines)
+    assert app.input_buffer.text == nine_lines
 
     app.input_buffer.reset()
-    twenty_lines = "\n".join("x" for _ in range(20))
-    app._insert_bracketed_paste(app.input_buffer, twenty_lines)
+    ten_lines = "\n".join("x" for _ in range(10))
+    app._insert_bracketed_paste(app.input_buffer, ten_lines)
     assert len(app.input_buffer.text) == 1
-    assert app._resolve_paste_attachments(app.input_buffer.text) == twenty_lines
+    assert app._resolve_paste_attachments(app.input_buffer.text) == ten_lines
 
 
 async def test_reserved_private_use_input_cannot_alias_an_attachment():
