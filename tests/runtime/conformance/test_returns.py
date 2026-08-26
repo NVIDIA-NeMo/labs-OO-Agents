@@ -38,6 +38,21 @@ async def test_statement_only_cell_has_no_value(codeact_agent):
     events = outputs(agent)
     assert len(events) == 1
     assert events[0].value is None
+    assert events[0].explicit_return is False
+
+
+async def test_explicit_none_return_sets_the_discriminator(codeact_agent):
+    """An explicit `return None` carries the opposite discriminator to an absent value.
+
+    An explicit return also auto-completes the task, so no further cell runs.
+    """
+    agent = codeact_agent([resp("", tool_calls=[cell("return None", call_id="c1")])])
+    assert await agent.run() is None
+
+    events = outputs(agent)
+    assert len(events) == 1
+    assert events[0].value is None
+    assert events[0].explicit_return is True
 
 
 async def test_runtime_error_reports_error_status(codeact_agent):
@@ -69,3 +84,4 @@ async def test_blocked_import_reports_error_status(codeact_agent):
     events = outputs(agent)
     assert len(events) == 1
     assert events[0].execution_status is ResultStatus.ERROR
+    assert "subprocess" in events[0].error

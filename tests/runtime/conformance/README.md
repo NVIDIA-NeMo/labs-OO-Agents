@@ -11,7 +11,7 @@ pytest node ID, e.g. `test_stdout_is_captured[sandbox]`.
 
 | Contract | Observable via | Notes |
 | --- | --- | --- |
-| Implicit and explicit returns | `PythonOutput.value`, `.explicit_return` | |
+| Implicit and explicit returns | `PythonOutput.value`, `.explicit_return` | Explicit return also auto-completes the task on both backends |
 | stdout capture | `PythonOutput.stdout` | |
 | stderr capture | `PythonOutput.stderr` | |
 | Namespace persistence across cells | cell 2 reads cell 1's binding | |
