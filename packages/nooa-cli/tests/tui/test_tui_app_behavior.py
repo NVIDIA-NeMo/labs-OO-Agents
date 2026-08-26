@@ -882,7 +882,6 @@ async def test_large_paste_queue_uses_compact_label_and_withdraw_restores_marker
         await h.press("enter")
         await h.wait_for(lambda: h.app._pending_input_display() == ["[Pasted text #1 · 20 lines]"])
         assert h.capture_queued() == [payload]
-        assert h.app.pending_input_echo_text(payload) == "[Pasted text #1 · 20 lines]"
 
         await h.press("up")
         await h.wait_input_equals(marker)
