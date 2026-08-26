@@ -36,7 +36,8 @@ try:
 except ImportError:
     pass
 
-from nooa import hidden, strategy
+from nooa import Context, hidden, strategy
+from nooa.agentdoc import doc  # noqa: F401 — used by dynamic context expressions
 from nooa.config import CodeActConfig
 from nooa.interactive import RespondResult
 from nooa.strategies import CodeActExperimental
@@ -67,7 +68,11 @@ class ExperimentalCodingWorker(CodingWorker):
                 prefill=SafeDelegationPrefill(),
             )
         ),
-        context={"state": None, "execution_context": None},
+        context={
+            "state": None,
+            "execution_context": None,
+            "self": Context(expr="doc(type(self), concise=True)", prefix=True),
+        },
     )
     async def investigate(self, objective: str, supplied_context: Any = None) -> str:
         """Complete one bounded coding subtask and return a concise report.
@@ -138,9 +143,16 @@ class ExperimentalTUIAgent(CodingAgent):
     @hidden
     @strategy(
         CodeActExperimental(config=CodeActConfig(cell_timeout=1800.0)),
-        context={"state": None, "execution_context": None},
+        context={
+            "state": None,
+            "execution_context": None,
+            "context_usage": None,
+            "self": Context(expr="doc(type(self), concise=True)", prefix=True),
+        },
     )
-    async def handle(self, notification: dict[str, list[Any]]) -> RespondResult: ...
+    async def handle(self, notification: dict[str, list[Any]]) -> RespondResult:
+        """Handle the newest user request and any completed background work."""
+        ...
 
 
 __all__ = ["ExperimentalCodingWorker", "ExperimentalTUIAgent"]
