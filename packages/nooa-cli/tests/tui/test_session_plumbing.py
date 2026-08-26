@@ -60,7 +60,7 @@ def test_session_emission_uses_only_resolved_display_mode_for_replay(monkeypatch
         app.complete_pending_input_handoff.assert_called_once_with("hello")
 
 
-def test_user_message_ui_uses_compact_pending_echo_text(monkeypatch) -> None:
+def test_user_message_ui_renders_resolved_paste_text_in_scrollback(monkeypatch) -> None:
     from types import SimpleNamespace
     from unittest.mock import Mock
 
@@ -72,7 +72,6 @@ def test_user_message_ui_uses_compact_pending_echo_text(monkeypatch) -> None:
     monkeypatch.setattr(session_module, "_build_user_bar", build_user_bar)
     app = SimpleNamespace(
         display_mode=DisplayMode.NATIVE_REPLAY,
-        pending_input_echo_text=lambda text: "[Pasted text #1 · 20 lines]",
         emit_block=Mock(),
         complete_pending_input_handoff=Mock(),
     )
@@ -80,10 +79,11 @@ def test_user_message_ui_uses_compact_pending_echo_text(monkeypatch) -> None:
     session._app = app
     session._renderer = Mock()
 
-    session._on_user_message_ui("full payload")
+    resolved_text = "full pasted payload\nwith every line"
+    session._on_user_message_ui(resolved_text)
 
-    assert build_user_bar.call_args.args[0] == "[Pasted text #1 · 20 lines]"
-    app.complete_pending_input_handoff.assert_called_once_with("full payload")
+    assert build_user_bar.call_args.args[0] == resolved_text
+    app.complete_pending_input_handoff.assert_called_once_with(resolved_text)
 
 
 def test_stale_user_message_ui_callback_is_ignored_after_session_swap() -> None:
