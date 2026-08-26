@@ -173,9 +173,7 @@ def safe_hyperlink_target(value: str | None) -> str | None:
         if (
             decoded_path.startswith("//")
             or "\\" in decoded_path
-            or any(
-                ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in decoded_path
-            )
+            or any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in decoded_path)
         ):
             return None
         return urlunsplit(("file", authority, local_path, parsed.query, parsed.fragment))

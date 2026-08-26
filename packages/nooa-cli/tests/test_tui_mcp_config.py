@@ -65,9 +65,7 @@ async def test_mcp_add_rejects_unsafe_name_before_persisting(monkeypatch, tmp_pa
     path = _project_settings(monkeypatch, tmp_path)
     registry = MCPRegistry(approval_path=tmp_path / "approvals.json")
 
-    result = await _command(registry).execute(
-        ["add", "evil\x1b[2J", "https://docs.example/mcp"]
-    )
+    result = await _command(registry).execute(["add", "evil\x1b[2J", "https://docs.example/mcp"])
 
     assert result.success is False
     assert not path.exists()

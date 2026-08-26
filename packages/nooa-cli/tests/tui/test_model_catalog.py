@@ -485,9 +485,7 @@ async def test_connect_anthropic_writes_native_provider_alias(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_connect_anthropic_reprompts_for_rejected_saved_secret(
-    tmp_path, monkeypatch
-) -> None:
+async def test_connect_anthropic_reprompts_for_rejected_saved_secret(tmp_path, monkeypatch) -> None:
     project_dir = tmp_path / ".nooa"
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "stale-value")
@@ -687,9 +685,7 @@ async def test_connect_cancel_after_secret_prompt_does_not_save_secret(
 
 
 @pytest.mark.asyncio
-async def test_connect_cancel_alias_replacement_does_not_save_secret(
-    tmp_path, monkeypatch
-) -> None:
+async def test_connect_cancel_alias_replacement_does_not_save_secret(tmp_path, monkeypatch) -> None:
     project_dir = tmp_path / ".nooa"
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
     monkeypatch.delenv("NVIDIA_INFERENCE_API_KEY", raising=False)
