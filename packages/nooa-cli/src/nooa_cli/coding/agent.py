@@ -156,7 +156,7 @@ class CodingAgent(InteractiveAgent):
             self.skills.discover_skills_dirs(skills_dirs)
 
         self.context["python_cell_tools"] = Context(
-            doc(RepoTools, ActivityShellTools),
+            doc(RepoTools, ActivityShellTools, concise=True),
             prefix=True,
         )
         self.context["todo_status"] = Context(expr="self.todo.status()")

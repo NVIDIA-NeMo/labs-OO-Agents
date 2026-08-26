@@ -52,7 +52,7 @@ class CodingWorker(
         self.repo = RepoTools(root=str(cwd), session=self.shell.session)
         self.todo = todo or TodoManager()
         self.context_manager["python_cell_tools"] = Context(
-            doc(RepoTools, ShellTools, TodoManager), prefix=True
+            doc(RepoTools, ShellTools, TodoManager, concise=True), prefix=True
         )
         instructions = render_agent_instructions(cwd)
         if instructions:
