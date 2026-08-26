@@ -392,6 +392,10 @@ class Completer:
     def _statusbar_item_completions(self, text: str) -> list[CompletionItem]:
         from .statusbar import StatusbarRegistry
 
+        statusbar = getattr(self._registry, "statusbar_registry", None)
+        if not isinstance(statusbar, StatusbarRegistry):
+            statusbar = StatusbarRegistry(getattr(self._registry, "agent", None))
+            self._registry.statusbar_registry = statusbar
         prefix = "/toolbar set " if text.lower().startswith("/toolbar set ") else "/statusbar set "
         selected, _, partial = text[len(prefix) :].rpartition(" ")
         selected_items = selected.split() if selected else []
@@ -402,7 +406,7 @@ class Completer:
                 display=name,
                 description="Statusbar item",
             )
-            for name in StatusbarRegistry().names()
+            for name in statusbar.names()
             if name not in selected_items and name.lower().startswith(partial.lower())
         ]
 

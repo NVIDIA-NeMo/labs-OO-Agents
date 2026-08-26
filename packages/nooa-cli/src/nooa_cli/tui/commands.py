@@ -1673,9 +1673,8 @@ class StatusbarCommand(Command):
         return True, None
 
     async def execute(self, args: list[str]) -> "CommandResult":
-        from .statusbar import StatusbarRegistry
-
-        available = StatusbarRegistry().names()
+        registry = self._registry.statusbar_registry
+        available = registry.names()
         if not args:
             active = " · ".join(self.config.statusbar_items)
             return CommandResult.ok(
@@ -1692,10 +1691,14 @@ class StatusbarCommand(Command):
             )
 
         requested = args[1:] if args[0].lower() == "set" else args
-        requested = list(dict.fromkeys(item.lower() for item in requested))
+        # Provider names are case-insensitive, but safe self.* paths must retain
+        # their exact spelling for Python attribute resolution.
+        requested = list(
+            dict.fromkeys(item if item.startswith("self.") else item.lower() for item in requested)
+        )
         if not requested:
             return CommandResult.err("Usage: /statusbar set <item> [item ...]")
-        unknown = [item for item in requested if item not in available]
+        unknown = [item for item in requested if not registry.accepts(item)]
         if unknown:
             return CommandResult.err(
                 f"Unknown statusbar item(s): {', '.join(unknown)}. Available: {', '.join(available)}"
@@ -2543,9 +2546,13 @@ class CommandRegistry:
         self._root_config = root_config
         self.startup_info: Output | None = None  # set by main after bootstrap
         self.blocking_llm_health: Any | None = None
+        from .statusbar import StatusbarRegistry
+
+        self.statusbar_registry = StatusbarRegistry(agent)
         self._bind_mcp_oauth_prompt()
         self._commands: dict[str, Command] = self._register()
         self._discover_directory_skills()
+        self.statusbar_registry.refresh_skills()
         self._user_skills: dict[str, _UserSkill] = self._discover_user_skills()
 
     def _register(self) -> dict[str, Command]:
@@ -2831,6 +2838,7 @@ class CommandRegistry:
         # preserve text-skill entries (SKILL.md, _method is None).
         self._user_skills = {k: v for k, v in self._user_skills.items() if v._method is None}
         self._user_skills.update(fresh)
+        self.statusbar_registry.refresh_skills()
 
     @classmethod
     def get_all_command_classes(cls) -> dict[str, type[Command]]:

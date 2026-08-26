@@ -305,9 +305,7 @@ class Session:
         self.registry = registry
         self._handler = CommandHandler(registry=registry, frontend=frontend)
         self._session_manager = session_manager
-        from .statusbar import StatusbarRegistry
-
-        self._statusbar = StatusbarRegistry()
+        self._statusbar = registry.statusbar_registry
         self._initial_outputs = list(initial_outputs or [])
         self._session_title_requested = False
         # Invalidates user-message UI callbacks queued before a session swap.

@@ -1,27 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Structured, extensible statusbar items for the terminal UI.
-
-Plugins expose a callable through the ``nooa_cli.tui.statusbar_items`` entry-point
-group. The entry-point name is the item name and the callable receives a
-:class:`StatusbarContext`; it returns display text or ``None`` to hide itself.
-"""
+"""Structured statusbar items, including capabilities supplied by loaded skills."""
 
 from __future__ import annotations
 
 import datetime
 import logging
-from collections.abc import Callable, Iterable
+import re
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
-
-STATUSBAR_ENTRY_POINT = "nooa_cli.tui.statusbar_items"
-LEGACY_TOOLBAR_ENTRY_POINT = "nooa_cli.tui.toolbar_items"
-StatusbarProvider = Callable[["StatusbarContext"], str | None]
+StatusbarProvider = Callable[["StatusbarContext"], Any]
+_SELF_PATH = re.compile(r"self(?:\.[A-Za-z][A-Za-z0-9_]*)+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,18 +30,12 @@ class StatusbarContext:
 
 
 class StatusbarRegistry:
-    """Registry of named built-in and installed statusbar providers."""
+    """Registry of built-ins and statusbar capabilities from loaded skills."""
 
-    def __init__(self, *, load_plugins: bool = True) -> None:
-        self._providers: dict[str, StatusbarProvider] = {
-            "time": lambda _: datetime.datetime.now().strftime("%H:%M"),
-            "model": lambda context: _short_model_name(context.model),
-            "cwd": lambda context: context.working_directory.name or str(context.working_directory),
-            "context": lambda context: context.context_usage,
-            "session": _session_label,
-        }
-        if load_plugins:
-            self._load_plugins()
+    def __init__(self, agent: Any = None) -> None:
+        self._agent = agent
+        self._providers: dict[str, StatusbarProvider] = {}
+        self.refresh_skills()
 
     def register(self, name: str, provider: StatusbarProvider) -> None:
         """Register *provider* under a case-insensitive, whitespace-free name."""
@@ -59,42 +46,83 @@ class StatusbarRegistry:
             raise TypeError(f"Statusbar provider {name!r} must be callable")
         self._providers[normalized] = provider
 
+    def refresh_skills(self) -> None:
+        """Rebuild providers from built-ins and all currently loaded skills."""
+        self._providers = {
+            "time": lambda _: datetime.datetime.now().strftime("%H:%M"),
+            "model": lambda context: _short_model_name(context.model),
+            "cwd": lambda context: context.working_directory.name or str(context.working_directory),
+            "context": lambda context: context.context_usage,
+            "session": _session_label,
+        }
+        skills = getattr(self._agent, "skills", None)
+        if skills is None or not callable(getattr(skills, "loaded", None)):
+            return
+        for skill_name in skills.loaded():
+            try:
+                skill = skills[skill_name]
+                items = getattr(skill, "statusbar_items", None)
+            except Exception:
+                logger.debug(
+                    "Could not inspect statusbar capability for %r", skill_name, exc_info=True
+                )
+                continue
+            if not isinstance(items, Mapping):
+                continue
+            for item_name, value in items.items():
+                try:
+                    self.register(str(item_name), _skill_provider(skill, value))
+                except (TypeError, ValueError):
+                    logger.warning("Invalid statusbar item %r from skill %r", item_name, skill_name)
+
     def names(self) -> tuple[str, ...]:
         """Return available item names in stable order."""
         return tuple(sorted(self._providers))
 
+    def accepts(self, name: str) -> bool:
+        """Whether a configured name is a provider or a safe ``self.x`` path."""
+        return name.lower() in self._providers or _SELF_PATH.fullmatch(name) is not None
+
     def render(self, names: Iterable[str], context: StatusbarContext) -> str:
-        """Render configured providers, isolating missing or broken plugins."""
+        """Render configured providers, isolating missing or broken capabilities."""
         values: list[str] = []
-        for name in names:
+        for raw_name in names:
+            name = raw_name.lower()
             provider = self._providers.get(name)
-            if provider is None:
-                continue
             try:
-                value = provider(context)
+                if provider is not None:
+                    value = provider(context)
+                elif _SELF_PATH.fullmatch(raw_name):
+                    value = _resolve_self_path(context.agent, raw_name)
+                else:
+                    continue
             except Exception:
-                logger.debug("Statusbar item %r failed", name, exc_info=True)
+                logger.debug("Statusbar item %r failed", raw_name, exc_info=True)
                 continue
-            if value:
+            if value is not None and value != "":
                 values.append(str(value))
         return " · ".join(values)
 
-    def _load_plugins(self) -> None:
-        # Load the deprecated group first so the current group deterministically
-        # replaces providers with the same normalized name.
-        for group in (LEGACY_TOOLBAR_ENTRY_POINT, STATUSBAR_ENTRY_POINT):
-            try:
-                plugins = entry_points(group=group)
-            except Exception:
-                logger.debug("Statusbar entry-point discovery failed for %r", group, exc_info=True)
-                continue
-            for plugin in plugins:
-                try:
-                    self.register(plugin.name, plugin.load())
-                except Exception:
-                    logger.warning(
-                        "Statusbar provider %r could not be loaded", plugin.name, exc_info=True
-                    )
+
+def _skill_provider(skill: Any, value: Any) -> StatusbarProvider:
+    if callable(value):
+        # Skill capability callbacks are intentionally simple and synchronous.
+        return value
+    if isinstance(value, str) and _SELF_PATH.fullmatch(value):
+        return lambda context: _resolve_self_path(context.agent, value)
+    raise TypeError("skill statusbar values must be callables or safe self.<attribute> paths")
+
+
+def _resolve_self_path(agent: Any, path: str) -> Any:
+    """Resolve a public dotted agent attribute without evaluating expressions."""
+    if agent is None or _SELF_PATH.fullmatch(path) is None:
+        raise ValueError(f"Unsafe statusbar attribute path {path!r}")
+    value = agent
+    for segment in path.split(".")[1:]:
+        if segment.startswith("_"):
+            raise ValueError(f"Private statusbar attribute path {path!r}")
+        value = getattr(value, segment)
+    return value
 
 
 def _short_model_name(model: str) -> str:

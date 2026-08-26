@@ -157,30 +157,15 @@ The TUI passes `llm`, durable `storage`, `cwd`, and `skills_dirs` when those
 parameters are declared by the custom class. Installed Python skills should be
 published through the `nooa.skills` entry-point group.
 
-### Statusbar plugins
+### Skill statusbar capabilities
 
-A package can add a named statusbar item through the
-`nooa_cli.tui.statusbar_items` entry-point group:
-
-```toml
-[project.entry-points."nooa_cli.tui.statusbar_items"]
-git-branch = "my_package.statusbar:git_branch"
-```
-
-The target is a callable that accepts the read-only `StatusbarContext` and
-returns text, or `None` to omit the item for the current render:
-
-```python
-from nooa_cli.tui.statusbar import StatusbarContext
-
-
-def git_branch(context: StatusbarContext) -> str | None:
-    return branch_for(context.working_directory)
-```
-
-Use `/statusbar` to list available items and `/statusbar set git-branch model`
-to select and order them. Provider failures are isolated so they cannot stop
-the TUI. The old `/toolbar` spelling remains as a deprecated command alias.
+A loaded Python skill can expose statusbar items with a ``statusbar_items`` mapping.
+Values are provider callables accepting ``StatusbarContext``, or safe dotted agent
+attribute paths such as ``"self.agent_mesh.name"``. Use `/statusbar` to list items
+and `/statusbar set mesh model` to select and order them. You can also configure a
+safe path directly, for example `/statusbar set self.agent_mesh.name model`.
+Provider failures are isolated so they cannot stop the TUI. The old `/toolbar`
+spelling remains as a deprecated command alias.
 
 Keep-going mode is an explicit opt-in. It audits a completed turn with a
 separate judge model and sends an internal continuation only when autonomous
