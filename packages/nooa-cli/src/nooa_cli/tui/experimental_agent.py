@@ -36,7 +36,7 @@ try:
 except ImportError:
     pass
 
-from nooa import DynamicContext, hidden, strategy
+from nooa import hidden, strategy
 from nooa.config import CodeActConfig
 from nooa.interactive import RespondResult
 from nooa.strategies import CodeActExperimental
@@ -63,10 +63,7 @@ class ExperimentalCodingWorker(CodingWorker):
                 prefill=SafeDelegationPrefill(),
             )
         ),
-        context={
-            "state": DynamicContext("pformat(self, max_length=50, max_string=500, max_depth=4)"),
-            "execution_context": DynamicContext("strategy.execution_context(runtime)"),
-        },
+        context={"state": None, "execution_context": None},
     )
     async def investigate(self, objective: str, supplied_context: Any = None) -> str:
         """Complete one bounded coding subtask and return a concise report.
