@@ -77,6 +77,9 @@ async def test_experimental_tui_agent_uses_only_python_cell(tmp_path):
         assert result.kind is RespondReason.DONE
         assert result.explanation == "request completed"
         assert [tool.name for tool in llm.last_tools or []] == ["python_cell"]
+        assert "Handle the newest user request and any completed background work." in (
+            "\n".join(str(message.get("content", "")) for message in llm.last_messages)
+        )
         system_prompt = "\n".join(
             str(message.get("content", ""))
             for message in llm.last_messages
@@ -86,6 +89,11 @@ async def test_experimental_tui_agent_uses_only_python_cell(tmp_path):
         assert "<execution_context" not in system_prompt
         assert "<python_cell_tools" in system_prompt
         assert "<python_tools" not in system_prompt
+        assert len(system_prompt) < 20_000
+        assert (
+            system_prompt.count("Inspect repository instructions and relevant code before editing.")
+            == 1
+        )
         assert "<python_cell_context" in system_prompt
         assert "Module capabilities already in scope:" in system_prompt
         assert "`json`" in system_prompt
@@ -94,6 +102,7 @@ async def test_experimental_tui_agent_uses_only_python_cell(tmp_path):
         rendered_context = "\n".join(
             str(message.get("content", "")) for message in llm.last_messages
         )
+        assert "<context_usage" not in rendered_context
         assert "<python_cell_state" in rendered_context
         state_block = rendered_context.split("<python_cell_state", 1)[1].split(
             "</python_cell_state>", 1
