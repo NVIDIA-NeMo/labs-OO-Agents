@@ -75,6 +75,7 @@ def test_run_json_is_one_clean_document() -> None:
     assert result.exit_code == 0
     assert result.stderr == "Session: abc123\n"
     payload = json.loads(result.stdout)
+    assert payload.pop("run_id")
     assert payload == {
         "schema_version": 1,
         "session_id": "abc123",
@@ -114,7 +115,15 @@ def test_run_runtime_failure_is_machine_readable() -> None:
     assert result.stderr == ""
     payload = json.loads(result.stdout)
     assert payload["status"] == "failed"
+    assert payload["run_id"]
     assert payload["error"] == {"type": "RuntimeError", "message": "provider unavailable"}
+    assert payload["usage"] == {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0.0,
+    }
 
 
 def test_run_rejects_conflicting_session_options() -> None:
@@ -211,3 +220,40 @@ def test_run_jsonl_keyboard_interrupt_emits_cancelled_terminal() -> None:
     assert result.exit_code == 130
     events = [json.loads(line) for line in result.stdout.splitlines()]
     assert [event["type"] for event in events] == ["turn.cancelled"]
+
+
+def test_run_jsonl_interrupt_does_not_duplicate_runtime_terminal() -> None:
+    async def interrupted(_text, **kwargs):
+        kwargs["on_event"]({"schema_version": 1, "type": "turn.cancelled"})
+        raise KeyboardInterrupt
+
+    with (
+        patch("nooa.llm_config.llm_config_chain", return_value=[]),
+        patch("nooa.secrets.load_secrets_into_env"),
+        patch("nooa.unifiedllm.reload_registry"),
+        patch("nooa_cli.headless.run_headless", interrupted),
+        patch("nooa_cli.tui.config.Config.load", return_value=SimpleNamespace()),
+    ):
+        result = CliRunner().invoke(command, ["--format", "jsonl", "task"])
+
+    assert result.exit_code == 130
+    assert [json.loads(line)["type"] for line in result.stdout.splitlines()] == ["turn.cancelled"]
+
+
+def test_run_json_keyboard_interrupt_emits_cancelled_document() -> None:
+    mocked = AsyncMock(side_effect=KeyboardInterrupt)
+    with (
+        patch("nooa.llm_config.llm_config_chain", return_value=[]),
+        patch("nooa.secrets.load_secrets_into_env"),
+        patch("nooa.unifiedllm.reload_registry"),
+        patch("nooa_cli.headless.run_headless", mocked),
+        patch("nooa_cli.tui.config.Config.load", return_value=SimpleNamespace()),
+    ):
+        result = CliRunner().invoke(command, ["--format", "json", "task"])
+
+    assert result.exit_code == 130
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "cancelled"
+    assert payload["session_id"] is None
+    assert payload["run_id"]
+    assert payload["usage"]["prompt_tokens"] == 0

@@ -233,8 +233,9 @@ class SessionStore:
             raise SessionNotFoundError(f"Session {session_id!r} was not found or is invalid")
         return info
 
-    def list(self, *, limit: int = 20) -> list[SessionInfo]:
-        if limit < 0:
+    def list(self, *, limit: int | None = 20) -> list[SessionInfo]:
+        """Return newest sessions, or all sessions when *limit* is ``None``."""
+        if limit is not None and limit < 0:
             raise ValueError("limit must be non-negative")
         if limit == 0 or not self.root.exists():
             return []
@@ -245,7 +246,7 @@ class SessionStore:
             if (info := self._read_info(path)) is not None
         ]
         sessions.sort(key=lambda info: info.last_active, reverse=True)
-        return sessions[:limit]
+        return sessions if limit is None else sessions[:limit]
 
     def load_turns(self, session_id: str) -> list[SessionTurn]:
         path = self.path_for(session_id)
