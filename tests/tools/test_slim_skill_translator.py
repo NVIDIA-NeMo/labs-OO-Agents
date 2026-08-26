@@ -15,6 +15,7 @@ from nooa import Agent
 from nooa.agentdoc import doc
 from nooa.context_blocks import DynamicContext
 from nooa.skill_registry import SkillRegistry
+from nooa.tools import skill_translator
 from nooa.tools.slim_skill_translator import SlimTextSkillTranslator
 
 
@@ -22,14 +23,19 @@ class _Agent:
     pass
 
 
-def _write_skill_md(skill_dir: Path, *, name: str = "slim-skill") -> None:
+def _write_skill_md(
+    skill_dir: Path,
+    *,
+    name: str = "slim-skill",
+    body: str = "Use this skill to test slim translation.\n",
+) -> None:
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(
         "---\n"
         f"name: {name}\n"
         "description: Slim translator test\n"
         "---\n"
-        "Use this skill to test slim translation.\n",
+        f"{body}",
         encoding="utf-8",
     )
 
@@ -69,6 +75,107 @@ def test_slim_translator_omits_argparse_scripts(tmp_path):
     generated_text = (result.package_dir / "src" / "search_skill" / "__init__.py").read_text()
     assert "def search(" not in generated_text
     assert "run_resource_script" not in generated_text
+
+
+def test_slim_translator_does_not_advertise_omitted_scripts(tmp_path):
+    skill_dir = tmp_path / "search-skill"
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir(parents=True)
+    _write_skill_md(
+        skill_dir,
+        name="search-skill",
+        body=(
+            "Use this skill to answer search questions.\n"
+            "Run `scripts/search.py` with the requested query.\n"
+        ),
+    )
+    (scripts_dir / "search.py").write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('--query', required=True)\n"
+        "args = parser.parse_args()\n"
+        "print(args.query)\n",
+        encoding="utf-8",
+    )
+
+    result = SlimTextSkillTranslator().translate(skill_dir, tmp_path / "libs")
+
+    generated_text = (result.package_dir / "src" / "search_skill" / "__init__.py").read_text()
+    assert "scripts/search.py" not in generated_text
+    assert "search()" not in generated_text
+    assert "corresponding LibrarySkill API" not in generated_text
+    assert "the relevant LibrarySkill guidance" in generated_text
+
+
+def test_slim_translator_does_not_probe_argparse_for_function_scripts(tmp_path, monkeypatch):
+    skill_dir = tmp_path / "calc-skill"
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir(parents=True)
+    _write_skill_md(skill_dir, name="calc-skill")
+    (scripts_dir / "math_tools.py").write_text(
+        "def scale(value: int) -> int:\n"
+        "    return value * 2\n",
+        encoding="utf-8",
+    )
+
+    def fail_on_argparse_probe(*args, **kwargs):
+        raise AssertionError("slim function translation should not probe argparse")
+
+    monkeypatch.setattr(skill_translator, "_native_argparse_execution", fail_on_argparse_probe)
+
+    result = SlimTextSkillTranslator().translate(skill_dir, tmp_path / "libs")
+
+    assert "src/calc_skill/_impl/_scripts_math_tools.py" in result.files_written
+
+
+def test_slim_translator_normalizes_default_registry_name(tmp_path):
+    skill_dir = tmp_path / "odd-skill"
+    _write_skill_md(skill_dir, name="Odd Skill!!")
+
+    result = SlimTextSkillTranslator().translate(skill_dir, tmp_path / "libs")
+
+    assert result.registry_name == "local.odd-skill"
+
+
+@pytest.mark.asyncio
+async def test_slim_translator_preserves_private_sibling_helpers(tmp_path):
+    skill_dir = tmp_path / "calc-skill"
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir(parents=True)
+    _write_skill_md(skill_dir, name="calc-skill")
+    (scripts_dir / "helpers.py").write_text(
+        "FACTOR = 3\n"
+        "\n"
+        "def _offset() -> int:\n"
+        "    return 1\n",
+        encoding="utf-8",
+    )
+    (scripts_dir / "math_tools.py").write_text(
+        "from helpers import FACTOR, _offset\n"
+        "\n"
+        "def scale(value: int) -> int:\n"
+        "    return value * FACTOR + _offset()\n",
+        encoding="utf-8",
+    )
+    translator = SlimTextSkillTranslator()
+
+    result = translator.translate(skill_dir, tmp_path / "libs")
+    generated_tests = _run_generated_tests(result.package_dir)
+
+    assert generated_tests.returncode == 0, generated_tests.stdout + generated_tests.stderr
+    assert "src/calc_skill/_impl/_scripts_helpers.py" in result.files_written
+    assert [script.script_path for script in result.omitted_scripts] == []
+
+    registry = SkillRegistry(_Agent())
+    registry.discover_libs(result.package_dir.parent)
+    try:
+        skill = registry[result.registry_name]
+        visible_doc = doc(skill)
+        assert skill.scale(4) == 13
+        assert "helpers" not in visible_doc
+        assert "impl_scripts_helpers" not in visible_doc
+    finally:
+        await registry.aclose()
 
 
 @pytest.mark.asyncio

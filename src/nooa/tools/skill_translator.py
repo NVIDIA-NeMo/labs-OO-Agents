@@ -105,6 +105,7 @@ class ScriptMethodPlan(BaseModel):
     api_method_name: str | None = None
     arguments: list[ScriptArgumentPlan] = Field(default_factory=list)
     function_methods: list[ScriptFunctionPlan] = Field(default_factory=list)
+    implementation_only: bool = False
 
 
 class OmittedScriptPlan(BaseModel):
@@ -311,7 +312,7 @@ class TextSkillTranslator(Skill):
                 )
             )
         resource_methods = _resource_method_plans(inventory, used_api_names)
-        docstring = _build_docstring(inventory, script_methods, resource_methods)
+        docstring = _build_docstring(inventory, script_methods, resource_methods, omitted_scripts)
 
         return ConversionPlan(
             source_dir=inventory.source_dir,
@@ -362,7 +363,11 @@ class TextSkillTranslator(Skill):
             for method in implementation_modules:
                 _write(
                     package_src / "_impl" / f"{_implementation_module_name(method.script_path)}.py",
-                    _render_implementation_module(plan.source_dir, method.script_path),
+                    _render_implementation_module(
+                        plan.source_dir,
+                        method.script_path,
+                        enable_native_argparse=bool(method.api_method_name),
+                    ),
                     package_dir,
                     written,
                 )
@@ -1008,6 +1013,7 @@ def _build_docstring(
     inventory: TextSkillInventory,
     script_methods: list[ScriptMethodPlan],
     resource_methods: list[ResourceMethodPlan],
+    omitted_scripts: list[OmittedScriptPlan] | None = None,
 ) -> str:
     title = inventory.description.strip() or inventory.skill_name
     lines = [
@@ -1041,7 +1047,12 @@ def _build_docstring(
                 f"- {resource.method_name}() -> {resource.return_annotation}: "
                 f"returns `{resource.resource_path}` from package data."
             )
-    adapted_guidance = _adapt_skill_guidance(inventory.body, script_methods, resource_methods)
+    adapted_guidance = _adapt_skill_guidance(
+        inventory.body,
+        script_methods,
+        resource_methods,
+        omitted_scripts or [],
+    )
     if adapted_guidance:
         lines.extend(["", "Guidance:", adapted_guidance])
     return "\n".join(lines)
@@ -1051,6 +1062,7 @@ def _adapt_skill_guidance(
     body: str,
     script_methods: list[ScriptMethodPlan],
     resource_methods: list[ResourceMethodPlan],
+    omitted_scripts: list[OmittedScriptPlan],
 ) -> str:
     """Render source guidance as LibrarySkill-native instructions.
 
@@ -1066,15 +1078,11 @@ def _adapt_skill_guidance(
     guidance = re.sub(r"\bthis skill\b", "this LibrarySkill", guidance)
     guidance = re.sub(r"\bthe skill\b", "the LibrarySkill", guidance)
     guidance = re.sub(r"\bSKILL\.md\b", "this LibrarySkill guidance", guidance)
-    guidance = re.sub(
-        r"\b(run|execute|invoke)\s+(?:the\s+)?(?:script\s+)?`?scripts/",
-        "call the corresponding LibrarySkill API `scripts/",
-        guidance,
-        flags=re.IGNORECASE,
-    )
 
     replacements: list[tuple[str, str]] = []
     for method in script_methods:
+        if method.implementation_only:
+            continue
         public_names = _script_public_api_names(method)
         if not public_names:
             continue
@@ -1090,7 +1098,15 @@ def _adapt_skill_guidance(
     for old, new in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
         guidance = _replace_reference(guidance, old, new)
 
-    return re.sub(r"`?scripts/[^`\s),.;:]+" + "`?", "the corresponding LibrarySkill API", guidance)
+    omitted_replacements: list[tuple[str, str]] = []
+    for omitted in omitted_scripts:
+        replacement = "the relevant LibrarySkill guidance"
+        omitted_replacements.append((omitted.script_path, replacement))
+        omitted_replacements.append((Path(omitted.script_path).name, replacement))
+    for old, new in sorted(omitted_replacements, key=lambda item: len(item[0]), reverse=True):
+        guidance = _replace_reference(guidance, old, new)
+
+    return re.sub(r"`?scripts/[^`\s),.;:]+" + "`?", "the relevant LibrarySkill guidance", guidance)
 
 
 def _script_public_api_names(method: ScriptMethodPlan) -> list[str]:
@@ -1109,6 +1125,8 @@ def _replace_reference(text: str, old: str, new: str) -> str:
 def _public_method_guidance(script_methods: list[ScriptMethodPlan]) -> list[str]:
     lines: list[str] = []
     for method in script_methods:
+        if method.implementation_only:
+            continue
         if method.api_method_name:
             parameters = ", ".join(_guidance_argument(argument) for argument in method.arguments)
             lines.append(f"- {method.api_method_name}({parameters}) -> str: returns captured text output.")
@@ -1187,9 +1205,13 @@ def _render_readme(plan: ConversionPlan) -> str:
 def _implementation_modules(plan: ConversionPlan) -> list[ScriptMethodPlan]:
     methods: list[ScriptMethodPlan] = []
     for method in plan.script_methods:
-        execution = _native_argparse_execution(plan.source_dir / method.script_path)
-        if method.function_methods or (execution is not None and execution.needs_module):
+        if method.implementation_only or method.function_methods:
             methods.append(method)
+            continue
+        if method.api_method_name:
+            execution = _native_argparse_execution(plan.source_dir / method.script_path)
+            if execution is not None and execution.needs_module:
+                methods.append(method)
     return methods
 
 
@@ -1197,13 +1219,18 @@ def _implementation_module_name(script_path: str) -> str:
     return f"_{_normalize_identifier(Path(script_path).with_suffix('').as_posix())}"
 
 
-def _render_implementation_module(source_dir: Path, script_path: str) -> str:
+def _render_implementation_module(
+    source_dir: Path,
+    script_path: str,
+    *,
+    enable_native_argparse: bool = True,
+) -> str:
     path = source_dir / script_path
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     except (OSError, SyntaxError, UnicodeDecodeError) as exc:
         raise ValueError(f"Cannot render implementation module for {path}: {exc}") from exc
-    execution = _native_argparse_execution(path)
+    execution = _native_argparse_execution(path) if enable_native_argparse else None
     if execution is not None and execution.needs_module and execution.implementation_body is not None:
         body = execution.implementation_body
         extra_used_names = _loaded_names(execution.statements)
@@ -1350,7 +1377,7 @@ def _render_init(plan: ConversionPlan) -> str:
         methods = "\n" + methods
     docstring = textwrap.indent(_triple_quoted(plan.docstring), "    ")
     context_key = f"skill:{plan.registry_name}"
-    attr_name = plan.registry_name.split(".")[-1].replace("-", "_")
+    attr_name = _normalize_identifier(plan.registry_name.split(".")[-1])
     resource_methods_tuple = repr(
         tuple(
             (resource.method_name, resource.resource_path, resource.return_annotation, resource.size_bytes)
@@ -1860,7 +1887,7 @@ def _render_argument_append(argument: ScriptArgumentPlan) -> list[str]:
 
 
 def _render_tests(plan: ConversionPlan) -> str:
-    attr_name = plan.registry_name.split(".")[-1].replace("-", "_")
+    attr_name = _normalize_identifier(plan.registry_name.split(".")[-1])
     lines = [
         "from pathlib import Path",
         "",
