@@ -8,7 +8,7 @@ import pytest
 from nooa_cli.tui.config import load_agent_class
 from nooa_cli.tui.experimental_agent import ExperimentalCodingWorker, ExperimentalTUIAgent
 
-from nooa.context_blocks import DynamicContext, ToolCallEvent
+from nooa.context_blocks import ToolCallEvent
 from nooa.interactive import RespondReason
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
@@ -169,8 +169,8 @@ async def test_experimental_tui_agent_delegates_to_experimental_worker(tmp_path)
     try:
         assert agent._worker_type is ExperimentalCodingWorker
         worker_context = ExperimentalCodingWorker.investigate._strategy_context
-        assert isinstance(worker_context["state"], DynamicContext)
-        assert isinstance(worker_context["execution_context"], DynamicContext)
+        assert worker_context["state"] is None
+        assert worker_context["execution_context"] is None
         assert not hasattr(ExperimentalCodingWorker, "delegate")
         assert not hasattr(ExperimentalCodingWorker, "spawn")
         assert (ExperimentalTUIAgent.__doc__ or "").startswith(
