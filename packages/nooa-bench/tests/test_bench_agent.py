@@ -107,7 +107,7 @@ def test_bench_agent_context_is_minimal_and_automatic():
     keys = list(agent.context_manager.keys())
 
     assert "todo_status" in keys
-    assert "python_tools" in keys
+    assert "python_cell_tools" in keys
     assert "task" not in keys
     assert "todo" not in keys
     assert "context_usage" not in keys
@@ -241,11 +241,11 @@ def test_bench_agent_python_tools_follow_agent_attribute_order():
     agent = BenchAgent(llm=FakeLLMClient())
 
     keys = list(agent.context_manager.keys())
-    assert "python_tools" in keys
+    assert "python_cell_tools" in keys
     assert "todo_status" in keys
     assert "todo" not in keys
 
-    python_tools_doc = agent.context_manager["python_tools"]
+    python_tools_doc = agent.context_manager["python_cell_tools"]
     assert "class ShellTools" in python_tools_doc
     assert "def run(" in python_tools_doc
     assert "class RepoTools" in python_tools_doc
