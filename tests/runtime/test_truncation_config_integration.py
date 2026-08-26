@@ -245,7 +245,7 @@ class TestConfigMergeEdgeCases:
 
 
 class TestTokenBudgetIntegration:
-    """Tests for token budget fields (max_context_tokens, max_event_tokens)."""
+    """Tests for enforced and reserved token-budget settings."""
 
     @pytest.mark.asyncio
     async def test_max_context_tokens_does_not_crash_on_generation(self):
@@ -272,8 +272,11 @@ class TestTokenBudgetIntegration:
         assert result == "done"
 
     @pytest.mark.asyncio
-    async def test_max_event_tokens_does_not_crash_on_generation(self):
-        """Agent with max_event_tokens set should not raise ValueError during generation."""
+    async def test_event_budget_settings_are_accepted_but_inert(self):
+        """Reserved event-budget settings do not evict prior events."""
+        import json
+
+        from nooa.events import Message
         from nooa.unifiedllm import FakeLLMClient
 
         llm = FakeLLMClient.with_tool_call("return_result", {"result": "summary"})
@@ -281,13 +284,18 @@ class TestTokenBudgetIntegration:
         class TestAgent(
             Agent,
             llm=llm,
-            truncation=TruncationConfig(max_event_tokens=50_000),
+            truncation=TruncationConfig(max_event_tokens=1, min_preserved_events=0),
         ):
             async def summarize(self) -> str: ...
 
         agent = TestAgent()
+        prior_event = "prior event exceeds the reserved one-token budget"
+        agent.event_manager.add(Message(content=prior_event))
+
         result = await agent.summarize()
+
         assert result == "summary"
+        assert prior_event in json.dumps(llm.last_messages)
 
     @pytest.mark.asyncio
     async def test_token_limits_with_llm_that_cannot_count_still_works(self):

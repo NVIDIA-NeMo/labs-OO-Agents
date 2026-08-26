@@ -5,7 +5,7 @@
 Two layers of bounds:
 
 1. **Whole-context token budget** (optional, applied at assembly):
-   ``max_context_tokens``, ``max_event_tokens``.
+   ``max_context_tokens``.
 2. **Sub-configs by mechanism**:
    - ``capture`` (head/tail truncation of raw text streams via
      ``TruncatingStringIO`` — used for execute_python's stdout / stderr /
@@ -25,6 +25,10 @@ Two layers of bounds:
      intentionally by the author, often large (e.g. ``doc(self)``,
      formatted state). Defaults to fully unlimited; whole-block eviction
      handles overflow at the assembly step.
+
+``max_event_tokens`` and ``min_preserved_events`` are retained for
+configuration compatibility, but are not currently enforced because events
+are not evicted separately. Use ``max_context_tokens`` for an enforced budget.
 """
 
 from typing import Annotated
@@ -181,13 +185,23 @@ class TruncationConfig(BaseModel):
     max_context_tokens: Annotated[int | None, Field(description="Total context token budget")] = (
         None
     )
-    max_event_tokens: Annotated[int | None, Field(description="Total event token budget")] = None
-    # L4 eviction: never evict fewer than this many recent events. Guarantees
-    # the model always sees its current Task + recent reasoning even when older
-    # events get evicted to fit the budget.
+    max_event_tokens: Annotated[
+        int | None,
+        Field(
+            description=(
+                "Reserved for compatibility; not currently enforced because events "
+                "are not evicted separately. Use max_context_tokens for an enforced budget."
+            )
+        ),
+    ] = None
     min_preserved_events: Annotated[
         int,
-        Field(description="Minimum number of recent events preserved during eviction"),
+        Field(
+            description=(
+                "Reserved for compatibility; not currently enforced because events "
+                "are not evicted separately. Use max_context_tokens for an enforced budget."
+            )
+        ),
     ] = 5
     # Output-token planning reserve. When a call sets ``max_tokens``
     # explicitly, THAT value is reserved out of the model window (the provider
