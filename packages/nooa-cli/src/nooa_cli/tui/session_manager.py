@@ -164,6 +164,12 @@ class SessionManager:
         ]
 
     @classmethod
+    def first_user_message(cls, session_id: str) -> str:
+        """Return the first user message using a single-row store query."""
+        turn = SessionStore(SESSIONS_DIR).load_first_user_turn(session_id)
+        return turn.content if turn is not None else ""
+
+    @classmethod
     def is_active(cls, session_id: str) -> bool:
         return is_sqlite_database_active(SessionStore(SESSIONS_DIR).path_for(session_id))
 
