@@ -581,15 +581,14 @@ async def test_reserved_private_use_input_cannot_alias_an_attachment():
     app._insert_bracketed_paste(app.input_buffer, payload)
     marker = app.input_buffer.text
 
-    app.input_buffer.reset()
+    escaped = f"\\U{ord(marker):08x}"
     app.input_buffer.insert_text(marker)
-    assert app.input_buffer.text == f"\\U{ord(marker):08x}"
-    assert app._resolve_paste_attachments(app.input_buffer.text) == app.input_buffer.text
+    assert app.input_buffer.text == marker + escaped
+    assert app._resolve_paste_attachments(app.input_buffer.text) == payload + escaped
 
-    app.input_buffer.reset()
     app._insert_bracketed_paste(app.input_buffer, marker)
-    assert app.input_buffer.text == f"\\U{ord(marker):08x}"
-    assert app._resolve_paste_attachments(app.input_buffer.text) == app.input_buffer.text
+    assert app.input_buffer.text == marker + escaped + escaped
+    assert app._resolve_paste_attachments(app.input_buffer.text) == payload + escaped + escaped
 
 
 async def test_reserved_private_use_prefill_is_escaped_with_cursor_at_end():
@@ -615,6 +614,23 @@ async def test_deleted_large_paste_releases_its_payload():
 
     assert app._paste_attachments == {}
     assert app._paste_attachment_bytes == 0
+
+
+async def test_large_paste_replaces_the_active_selection():
+    from prompt_toolkit.selection import SelectionType
+
+    payload = "\n".join(f"replacement {index}" for index in range(10))
+    async with TUIHarness() as h:
+        await h.type_keys("replace me")
+        await h.wait_input_equals("replace me")
+        h.app.input_buffer.cursor_position = 0
+        h.app.input_buffer.start_selection(selection_type=SelectionType.CHARACTERS)
+        h.app.input_buffer.cursor_position = len("replace me")
+
+        await h.paste(payload)
+        await h.wait_for(lambda: len(h.capture_input()) == 1)
+
+        assert h.app._resolve_paste_attachments(h.capture_input()) == payload
 
 
 async def test_large_bracketed_paste_is_one_atomic_composer_character():
@@ -689,6 +705,25 @@ async def test_attachment_boundary_does_not_create_a_mention_boundary(tmp_path):
     assert app._resolve_composer_submission(
         f"{marker} @secret.txt", mention_base=tmp_path
     ).endswith(f" [secret.txt](<{mentioned.resolve()}>)")
+
+    app.input_buffer.reset()
+    nonspace_payload = "X" * 2048
+    app._insert_bracketed_paste(app.input_buffer, nonspace_payload)
+    nonspace_marker = app.input_buffer.text
+    guarded = tmp_path / "secret.txtx"
+    guarded.write_text("guard collision")
+    assert (
+        app._resolve_composer_submission(f"@secret.txt{nonspace_marker}", mention_base=tmp_path)
+        == f"@secret.txt{nonspace_payload}"
+    )
+
+    app.input_buffer.reset()
+    whitespace_payload = " " + "X" * 2047
+    app._insert_bracketed_paste(app.input_buffer, whitespace_payload)
+    whitespace_marker = app.input_buffer.text
+    assert app._resolve_composer_submission(
+        f"@secret.txt{whitespace_marker}", mention_base=tmp_path
+    ).startswith(f"[secret.txt](<{mentioned.resolve()}>) ")
 
 
 async def test_large_whitespace_only_paste_is_not_submitted():

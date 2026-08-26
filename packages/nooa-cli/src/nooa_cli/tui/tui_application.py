@@ -555,7 +555,9 @@ class _ComposerBuffer(Buffer):
             self._after_reset()
 
     def insert_attachment_marker(self, marker: str) -> None:
-        """Insert one marker allocated by the owning application."""
+        """Replace any active selection with one application-owned marker."""
+        if self.selection_state is not None:
+            self.cut_selection()
         super().insert_text(marker)
 
     def insert_trusted_draft(self, text: str) -> None:
@@ -2784,6 +2786,8 @@ class TUIApplication:
         if not should_attach:
             buffer.insert_text(normalized)
             return
+        if buffer.selection_state is not None:
+            buffer.cut_selection()
         self._make_paste_attachment_room(byte_count)
         if self._paste_attachment_bytes + byte_count > _PASTE_ATTACHMENT_MAX_TOTAL_BYTES:
             buffer.insert_text(normalized)
@@ -2822,6 +2826,8 @@ class TUIApplication:
 
     def _reclaim_paste_attachments(self) -> None:
         """Release payloads no longer reachable from editable UI state."""
+        if not self._paste_attachments:
+            return
         referenced = set(self.input_buffer.text)
         referenced.update("".join(self._history))
         referenced.update("".join(item.draft_text or "" for item in self._pending_input_handoff))
@@ -2879,10 +2885,12 @@ class TUIApplication:
             # never scan the opaque payload itself for mentions.
             prefix_guard = "x" if result and result[-1] and not result[-1][-1].isspace() else ""
             suffix_guard = "x" if following and not following[0].isspace() else ""
-            expanded = expand_mentions(
-                f"{prefix_guard}{text_segment}{suffix_guard}",
-                base_dir=mention_base,
-            )
+            guarded = f"{prefix_guard}{text_segment}{suffix_guard}"
+            expanded = expand_mentions(guarded, base_dir=mention_base)
+            if suffix_guard and not expanded.endswith(suffix_guard):
+                # The guard became part of a resolved mention token. That token
+                # crosses the attachment boundary and must remain literal.
+                expanded = guarded
             end = len(expanded) - len(suffix_guard) if suffix_guard else len(expanded)
             result.append(expanded[len(prefix_guard) : end])
             literal.clear()
