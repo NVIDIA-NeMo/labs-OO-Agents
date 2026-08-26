@@ -253,7 +253,7 @@ def _skill_dirs(skills_root: Path) -> list[Path]:
 
 def _translate_task_library_skills(task_dir: Path, output_dir: Path) -> list[dict[str, Any]]:
     """Translate task-bundled TextSkills into package-backed LibrarySkills."""
-    from nooa.tools.skill_translator import TextSkillTranslator
+    from nooa.tools.slim_skill_translator import SlimTextSkillTranslator
 
     source_skills_dir = task_dir / "environment" / "skills"
     skill_dirs = _skill_dirs(source_skills_dir)
@@ -264,12 +264,13 @@ def _translate_task_library_skills(task_dir: Path, output_dir: Path) -> list[dic
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True)
 
-    translator = TextSkillTranslator()
+    translator = SlimTextSkillTranslator()
     summaries: list[dict[str, Any]] = []
     for skill_dir in skill_dirs:
         result = translator.translate(skill_dir, output_dir)
         report = translator.validate_package(result.package_dir)
         summary = {
+            "translator": translator.__class__.__name__,
             "source_dir": str(skill_dir),
             "package_dir": str(result.package_dir),
             "package_name": result.package_name,

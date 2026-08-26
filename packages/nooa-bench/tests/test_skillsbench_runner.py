@@ -162,6 +162,7 @@ def test_translate_task_library_skills_writes_valid_packages(tmp_path):
         "citation-helper"
     ]
     assert len(summaries) == 1
+    assert summaries[0]["translator"] == "SlimTextSkillTranslator"
     assert summaries[0]["registry_name"] == "local.citation-helper"
     assert summaries[0]["validation"]["ok"] is True
     assert (output_dir / "citation-helper" / "pyproject.toml").is_file()

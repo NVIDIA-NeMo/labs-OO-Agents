@@ -30,7 +30,17 @@ Conditions:
 - `no_skill`: NOOA with no task skills.
 - `text_skill`: NOOA with the original task-bundled TextSkills.
 - `library_skill`: NOOA with task-bundled TextSkills translated to package
-  LibrarySkills by the frozen translator.
+  LibrarySkills by `SlimTextSkillTranslator`.
+
+Candidate translation layer:
+
+- `SlimTextSkillTranslator` is the held-out candidate once frozen.
+- It reuses the existing package writer, validator, context-block generation,
+  guidance rewriting, and resource method rendering.
+- It narrows script translation to import-safe Python functions only.
+- It deliberately omits argparse and CLI-shaped script synthesis; omitted
+  scripts are recorded in the host-side translation summary, outside the
+  generated package.
 
 Default run configuration:
 
@@ -56,6 +66,8 @@ Translator invariants before running held-out test:
 - Resource docstrings include only small previews.
 - Generated packages import, discover through `SkillRegistry`, activate, and
   pass generated smoke tests.
+- Argparse or CLI-shaped scripts are not converted unless they also contain
+  import-safe public Python functions that can be exposed directly.
 
 ## Key Metrics
 
@@ -114,6 +126,8 @@ Development set status:
 - Frozen protocol dev rerun at `b5c04755`: 6/10 scoreable, using a single
   scoreable rerun for `manufacturing-fjsp-optimization` after the first attempt
   timed out before verifier scoring.
+- Slim translator dev preflight: 30/30 generated dev-set packages validated;
+  3 scripts were omitted by policy.
 
 Frozen protocol dev rerun:
 

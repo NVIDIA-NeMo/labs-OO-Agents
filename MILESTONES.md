@@ -537,3 +537,34 @@ Current result:
   `dynamic-object-aware-egomotion` pass from the resource-preview run, so that
   dev task should be treated as flaky or marginal.
 - No held-out test task has been run under this frozen protocol.
+
+## 2026-08-26 — Slim LibrarySkill Translator Candidate
+
+Status: translation layer extracted; dev agent rerun pending.
+
+Added `SlimTextSkillTranslator` as the candidate translation policy for
+SkillsBench LibrarySkill evaluation. The slim translator reuses the existing
+package writer, validation, guidance/context-block generation, and resource
+method rendering, but narrows script planning to only import-safe Python
+functions. It deliberately omits argparse and CLI-shaped script synthesis.
+
+Updated the SkillsBench `library_skill` condition to use
+`SlimTextSkillTranslator` and record the translator class in
+`translation_summary.json`.
+
+Validation:
+- `uv run pytest tests/tools/test_slim_skill_translator.py tests/tools/test_skill_translator.py packages/nooa-bench/tests/test_bench_agent.py packages/nooa-bench/tests/test_runner.py packages/nooa-bench/tests/test_skillsbench_runner.py -q`
+  - `67 passed`
+- `uv run ruff check src/nooa/tools/slim_skill_translator.py src/nooa/tools/__init__.py packages/nooa-bench/src/nooa_bench/skillsbench_runner.py packages/nooa-bench/tests/test_skillsbench_runner.py tests/tools/test_slim_skill_translator.py`
+  - passed
+
+Translation-only dev preflight:
+- 30/30 dev-set packages validated.
+- 3 scripts omitted by slim policy, all in `fix-erlang-ssh-cve`.
+- No agent rollouts were run during this preflight.
+
+Rationale:
+- This is a principled reduction rather than a dev-set-specific change.
+- The old `TextSkillTranslator` remains available for comparison, but the
+  held-out candidate should be the slimmer translator after the dev rerun is
+  checked for mechanical regressions.
