@@ -568,3 +568,50 @@ Rationale:
 - The old `TextSkillTranslator` remains available for comparison, but the
   held-out candidate should be the slimmer translator after the dev rerun is
   checked for mechanical regressions.
+
+## 2026-08-26 — Slim LibrarySkill Dev Rerun
+
+Status: complete scoreable dev rerun.
+
+Committed slim translator candidate:
+`a84fb256 feat: add slim library skill translator`.
+
+Reran the frozen 10-task dev split with:
+- SkillsBench checkout:
+  `/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/skillsbench`
+- Credentials file:
+  `/Users/adevoto/.herdr/worktrees/nemo_oo_agents/worktree-silver-river-5d47/.env`
+- NOOA model: `openai/openai/openai/gpt-5.5`
+- Sandbox: Docker
+- Condition: `library_skill`
+- Translator: `SlimTextSkillTranslator`
+- Artifact root:
+  `jobs/nooa-skillsbench-library-dev-slim-a84fb256/`
+
+Results:
+
+| Task | Slim LibrarySkill dev rerun |
+|---|---:|
+| `fix-visual-stability` | 1.0 |
+| `fix-erlang-ssh-cve` | 1.0 |
+| `video-silence-remover` | 0.0 |
+| `dynamic-object-aware-egomotion` | 1.0 |
+| `manufacturing-fjsp-optimization` | 0.0 |
+| `llm-prefix-cache-replay` | 1.0 |
+| `dapt-intrusion-detection` | 1.0 |
+| `offer-letter-generator` | 1.0 |
+| `parallel-tfidf-search` | 1.0 |
+| `reserves-at-risk-calc` | 0.0 |
+
+Current result:
+- Slim LibrarySkill dev rerun aggregate: 7/10 scoreable.
+- All task summaries recorded `agent_return_code=0`, activated LibrarySkills,
+  no agent error, and no verifier infrastructure error.
+- Translation summaries recorded `SlimTextSkillTranslator` for every generated
+  package.
+- 3 scripts were omitted by slim policy, all under the
+  `fix-erlang-ssh-cve` `senior-security` skill; that task still passed.
+- The slim translator matches the best observed dev-set aggregate while
+  removing argparse/CLI script synthesis from the evaluated translation layer.
+- `dynamic-object-aware-egomotion` passed in this run but should still be
+  treated as a marginal/flaky dev task because it has alternated across reruns.

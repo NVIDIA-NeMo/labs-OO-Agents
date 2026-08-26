@@ -128,6 +128,9 @@ Development set status:
   timed out before verifier scoring.
 - Slim translator dev preflight: 30/30 generated dev-set packages validated;
   3 scripts were omitted by policy.
+- Slim translator dev rerun at `a84fb256`: 7/10 scoreable. All tasks recorded
+  activated LibrarySkills, `agent_return_code=0`, no agent errors, and no
+  verifier infrastructure errors.
 
 Frozen protocol dev rerun:
 
@@ -151,6 +154,25 @@ Run artifacts:
 - Manufacturing scoreable rerun:
   `jobs/nooa-skillsbench-library-dev-b5c04755-scoreable-reruns/`
 
+Slim translator dev rerun:
+
+| Task | Slim LibrarySkill `a84fb256` |
+|---|---:|
+| `fix-visual-stability` | 1.0 |
+| `fix-erlang-ssh-cve` | 1.0 |
+| `video-silence-remover` | 0.0 |
+| `dynamic-object-aware-egomotion` | 1.0 |
+| `manufacturing-fjsp-optimization` | 0.0 |
+| `llm-prefix-cache-replay` | 1.0 |
+| `dapt-intrusion-detection` | 1.0 |
+| `offer-letter-generator` | 1.0 |
+| `parallel-tfidf-search` | 1.0 |
+| `reserves-at-risk-calc` | 0.0 |
+
+Slim run artifact root:
+
+- `jobs/nooa-skillsbench-library-dev-slim-a84fb256/`
+
 Current interpretation:
 
 - LibrarySkill parity is possible on the 10-task dev set when activation-time
@@ -161,4 +183,6 @@ Current interpretation:
   `dynamic-object-aware-egomotion` pass from the resource-preview rerun. Treat
   that task as dev-set flaky or marginal rather than evidence of a stable
   translator gain.
+- The slim translator preserved the 7/10 dev-set aggregate while removing the
+  argparse/CLI synthesis path from the evaluated translation layer.
 - The held-out test set has not been run under the frozen protocol.
