@@ -1,4 +1,6 @@
 import asyncio
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -27,6 +29,28 @@ def test_model_fuzzy_ranks_and_blocks_attached() -> None:
     assert blocked.current.id == "2"
 
 
+def test_filter_sort_and_preview_title_policy() -> None:
+    meta = SimpleNamespace(
+        id="preview",
+        name="Untitled session",
+        user_named=False,
+        model="m",
+        agent="A",
+        working_dir=str(Path.cwd()),
+        last_active=20,
+        started_at=10,
+        turn_count=1,
+    )
+    preview_row = ResumePickerRow.from_meta(meta, preview="first user turn collapsed")
+    other = ResumePickerRow("other", "Other", "m", "A", "/elsewhere", 30, 1, created_at=5)
+    model = ResumePickerModel([preview_row, other], cwd=str(Path.cwd()))
+    assert [match.row.preview for match in model.matches] == ["first user turn collapsed"]
+    model.toggle_filter()
+    assert [match.row.id for match in model.matches] == ["other", "preview"]
+    model.toggle_sort()
+    assert [match.row.id for match in model.matches] == ["preview", "other"]
+
+
 def test_casefold_expansion_maps_highlights_to_original_source() -> None:
     result = fuzzy_match("ss", "Maße")
     assert result is not None
@@ -46,16 +70,16 @@ def test_picker_control_marks_fuzzy_match_fragments() -> None:
     app.output.get_size.return_value = MagicMock(columns=80, rows=20)
     picker = ResumePicker([row("1", "resume")], app)
     picker.buffer.text = "rsm"
-    fragments = picker.container.body.body.children[1].content.text()
+    fragments = picker.container.children[1].content.text()
     assert any("class:resume-picker.match" in style for style, _ in fragments)
 
 
 def test_rendered_frames_are_responsive_and_truthful() -> None:
     model = ResumePickerModel([row("12345678-full", "migration", current=True)])
-    assert "provider/model" in render_resume_picker(model, 80, 16)
-    assert "3 turns" in render_resume_picker(model, 60, 12)
+    assert "Resume a previous session" in render_resume_picker(model, 80, 16)
+    assert "migration [current]" in render_resume_picker(model, 60, 12)
     assert "provider/model" not in render_resume_picker(model, 50, 10)
-    assert "at least 40 columns" in render_resume_picker(model, 39, 9)
+    assert "Need 48 x 10" in render_resume_picker(model, 47, 9)
 
 
 def test_clip_uses_terminal_cells_and_preserves_graphemes() -> None:
@@ -88,15 +112,14 @@ def test_semantic_states_survive_combination() -> None:
 def test_required_terminal_frames_have_readable_floor() -> None:
     model = ResumePickerModel([row("needle-id", "会議 👩‍💻 é session")])
     model.set_query("needle")
-    for width, height in ((100, 30), (80, 24), (60, 20), (40, 10)):
+    for width, height in ((120, 30), (80, 24), (60, 20), (48, 10)):
         frame = render_resume_picker(model, width, height)
         assert "Search:" not in frame
         assert "needle-id" in frame
         assert len(frame.splitlines()) <= height - 3
-    assert render_resume_picker(model, 39, 9).splitlines() == [
+    assert render_resume_picker(model, 47, 9).splitlines() == [
         "Terminal too small",
-        "Need at least 40 columns",
-        "and 10 rows; now 39 x 9",
+        "Need 48 x 10; now 47 x 9",
     ]
 
 
@@ -129,7 +152,7 @@ def test_actual_prompt_toolkit_screen_frames_and_semantic_cells() -> None:
     app = MagicMock()
     picker = ResumePicker(rows, app)
     picker.buffer.text = "id"
-    for width, height in ((100, 30), (80, 24), (60, 20), (40, 10), (39, 9)):
+    for width, height in ((120, 30), (80, 24), (60, 20), (48, 10), (47, 9)):
         screen = _screen_for(picker, width, height)
         visible = [
             "".join(screen.data_buffer[y][x].char for x in range(width)).rstrip()
@@ -139,14 +162,13 @@ def test_actual_prompt_toolkit_screen_frames_and_semantic_cells() -> None:
         assert all(
             cell.width >= 0 for line in screen.data_buffer.values() for cell in line.values()
         )
-        if (width, height) == (39, 9):
-            assert visible[:3] == [
+        if (width, height) == (47, 9):
+            assert visible[:2] == [
                 "Terminal too small",
-                "Need at least 40 columns",
-                "and 10 rows; now 39 x 9",
+                "Need 48 x 10; now 47 x 9",
             ]
         else:
-            assert "sessions" in visible[0]
+            assert "Resume a previous session" in visible[0]
             assert any("Esc cancel" in line for line in visible)
 
     screen = _screen_for(picker, 80, 24)
@@ -201,21 +223,21 @@ async def test_picker_excludes_empty_sessions(monkeypatch) -> None:
 
     from .tui_app_harness import TUIHarness
 
-    empty = MagicMock(
+    empty = SimpleNamespace(
         id="empty",
         name="empty",
         model="m",
         agent="A",
-        working_dir="/w",
+        working_dir=str(Path.cwd()),
         last_active=1,
         turn_count=0,
     )
-    resumable = MagicMock(
+    resumable = SimpleNamespace(
         id="resumable",
         name="kept",
         model="m",
         agent="A",
-        working_dir="/w",
+        working_dir=str(Path.cwd()),
         last_active=2,
         turn_count=1,
     )
@@ -223,6 +245,11 @@ async def test_picker_excludes_empty_sessions(monkeypatch) -> None:
         sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: [empty, resumable])
     )
     monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
+    monkeypatch.setattr(
+        sm.SessionManager,
+        "first_user_message",
+        classmethod(lambda cls, value: f"preview for {value}"),
+    )
     async with TUIHarness() as harness:
         opened = asyncio.create_task(harness.app.open_session_resume_dialog())
         await harness.wait_for(lambda: harness.app._resume_picker is not None)
@@ -237,24 +264,52 @@ async def test_real_prompt_toolkit_routes_search_navigation_and_cancel(monkeypat
 
     from .tui_app_harness import TUIHarness
 
-    meta = MagicMock(
-        id="session-1",
-        name="qjk",
-        model="m",
-        agent="A",
-        working_dir="/w",
-        last_active=1,
-        turn_count=1,
-    )
+    sessions = [
+        SimpleNamespace(
+            id="session-1",
+            name="qjk",
+            model="m",
+            agent="A",
+            working_dir=str(Path.cwd()),
+            started_at=1,
+            last_active=2,
+            turn_count=1,
+        ),
+        SimpleNamespace(
+            id="session-2",
+            name="other",
+            model="m",
+            agent="A",
+            working_dir="/another/project",
+            started_at=3,
+            last_active=1,
+            turn_count=1,
+        ),
+    ]
     monkeypatch.setattr(
-        sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: [meta])
+        sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: sessions)
     )
     monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
+    monkeypatch.setattr(
+        sm.SessionManager,
+        "first_user_message",
+        classmethod(lambda cls, value: f"preview for {value}"),
+    )
     async with TUIHarness() as harness:
         opened = asyncio.create_task(harness.app.open_session_resume_dialog())
         await harness.wait_for(lambda: harness.app._resume_picker is not None)
         await harness.type_keys("qjk")
         await harness.wait_for(lambda: harness.app._resume_picker.model.query == "qjk")
+        picker = harness.app._resume_picker
+        assert [match.row.id for match in picker.model.matches] == ["session-1"]
+        picker.buffer.text = ""
+        await harness.wait_for(lambda: picker.model.query == "")
+        await harness.press("tab")
+        await harness.wait_for(lambda: not picker.model.filter_cwd)
+        assert {match.row.id for match in picker.model.matches} == {"session-1", "session-2"}
+        await harness.press("f6")
+        await harness.wait_for(lambda: not picker.model.sort_updated)
+        assert [match.row.id for match in picker.model.matches] == ["session-2", "session-1"]
         await harness.press("escape")
         assert await asyncio.wait_for(opened, 1) is None
 
@@ -262,7 +317,7 @@ async def test_real_prompt_toolkit_routes_search_navigation_and_cancel(monkeypat
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("width", "height", "usable"),
-    [(80, 24, True), (60, 20, True), (40, 10, True), (39, 9, False)],
+    [(120, 30, True), (80, 24, True), (60, 20, True), (48, 10, True), (47, 9, False)],
 )
 async def test_full_application_screen_keeps_picker_help_visible(
     monkeypatch, width: int, height: int, usable: bool
@@ -273,13 +328,14 @@ async def test_full_application_screen_keeps_picker_help_visible(
     from .tui_app_harness import MutableRecordingOutput, TUIHarness
 
     sessions = [
-        MagicMock(
+        SimpleNamespace(
             id=f"session-{index}",
             name=f"Populated session {index:02d}",
             model="provider/model",
             agent="Agent",
-            working_dir="/work",
-            last_active=index + 1,
+            working_dir=str(Path.cwd()),
+            started_at=1_700_000_000 + index,
+            last_active=1_700_000_100 + index,
             turn_count=index + 1,
         )
         for index in range(20)
@@ -288,6 +344,11 @@ async def test_full_application_screen_keeps_picker_help_visible(
         sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: sessions)
     )
     monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
+    monkeypatch.setattr(
+        sm.SessionManager,
+        "first_user_message",
+        classmethod(lambda cls, value: f"preview for {value}"),
+    )
     output = MutableRecordingOutput(columns=width, rows=height)
     async with TUIHarness(output=output, full_screen=True) as harness:
         opened = asyncio.create_task(harness.app.open_session_resume_dialog())
@@ -309,8 +370,17 @@ async def test_full_application_screen_keeps_picker_help_visible(
             for y in range(height)
         ]
         if usable:
-            assert any("20 sessions" in line for line in visible)
+            joined = "\n".join(visible)
+            assert "20 sessions" in joined
+            assert "Search" in joined
+            if width >= 60:
+                assert "Filter: Cwd" in joined and "Sort: Updated" in joined
+            else:
+                assert "Cwd · Updated" in joined
+            assert "preview for session-19" in joined
+            assert "❯" in joined and "y ago" in joined
             assert any("Enter resume" in line and "Esc cancel" in line for line in visible)
+            assert all(len(line) <= width for line in visible)
         else:
             assert any("Terminal too small" in line for line in visible)
         await harness.press("escape")

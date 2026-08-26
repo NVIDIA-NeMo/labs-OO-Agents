@@ -1702,6 +1702,10 @@ class TUIApplication:
             return bool(getattr(view, "mouse_support", True))
 
         resume_float = Float(
+            left=0,
+            right=0,
+            top=0,
+            bottom=0,
             content=ConditionalContainer(
                 DynamicContainer(
                     lambda: (
@@ -1800,17 +1804,28 @@ class TUIApplication:
 
         if self._resume_picker_done is not None and not self._resume_picker_done.done():
             return None
-        rows = [
-            ResumePickerRow.from_meta(
-                meta,
-                attached=SessionManager.is_active(meta.id),
-                current=meta.id == active_session_id,
-            )
-            for meta in SessionManager.list_sessions(limit=None)
-            if meta.turn_count > 0
-        ]
+
+        # Session discovery touches many SQLite files and lock files. Keep it
+        # bounded and off prompt_toolkit's event loop so opening remains responsive.
+        def load_rows() -> list[ResumePickerRow]:
+            result = []
+            for meta in SessionManager.list_sessions(limit=100):
+                if meta.turn_count <= 0:
+                    continue
+                preview = " ".join(SessionManager.first_user_message(meta.id).split())
+                result.append(
+                    ResumePickerRow.from_meta(
+                        meta,
+                        attached=SessionManager.is_active(meta.id),
+                        current=meta.id == active_session_id,
+                        preview=preview,
+                    )
+                )
+            return result
+
+        rows = await asyncio.to_thread(load_rows)
         self._cancel_fullscreen_drag()
-        self._resume_picker = ResumePicker(rows, self._app)
+        self._resume_picker = ResumePicker(rows, self._app, cwd=os.getcwd())
         loop = asyncio.get_running_loop()
         self._resume_picker_done = loop.create_future()
         previous = self._app.layout.current_control
@@ -2455,6 +2470,18 @@ class TUIApplication:
         def _(event):
             if self._resume_picker is not None:
                 self._resume_picker.move(1)
+                event.app.invalidate()
+
+        @kb.add("tab", filter=resume_picker_active, eager=True)
+        def _(event):
+            if self._resume_picker is not None:
+                self._resume_picker.toggle_filter()
+                event.app.invalidate()
+
+        @kb.add("f6", filter=resume_picker_active, eager=True)
+        def _(event):
+            if self._resume_picker is not None:
+                self._resume_picker.toggle_sort()
                 event.app.invalidate()
 
         input_selection_active = (
