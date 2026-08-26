@@ -21,7 +21,7 @@ from nooa.paths import get_project_dir
 from nooa.runtime.channels import JobHandle, _ChannelReader
 from nooa.skill_registry import SkillRegistry
 from nooa.storage.markers import nosnapshot
-from nooa.strategies import CodeActStrategy
+from nooa.strategies import CodeActStrategy, PredictStrategy
 from nooa.tools import MethodWriting, SkillWriting, Todo, TodoManager
 from nooa.tools.shell_tools import ShellTools
 from nooa_cli.coding.activity import ActivityShellTools
