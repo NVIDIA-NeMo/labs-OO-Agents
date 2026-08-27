@@ -5,20 +5,17 @@
 from __future__ import annotations
 
 import ast
-import hashlib
 import json
 import keyword
 import re
 import shutil
 import textwrap
 import threading
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-import yaml
-from pydantic import BaseModel, Field
-
-from nooa.skill import Skill
+from nooa.skill import Skill, _find_skill_md, _parse_frontmatter
 
 _RESOURCE_DOCSTRING_INLINE_LIMIT = 1000
 _RESERVED_METHOD_NAMES = {
@@ -27,77 +24,61 @@ _RESERVED_METHOD_NAMES = {
     "list_resources",
     "format_guidance",
     "_resource_root",
-    "_list_resources",
-    "_read_resource",
-    "_read_resource_bytes",
-    "_format_resource_index",
-    "_RESOURCE_METHODS",
     *(name for name in dir(Skill) if not name.startswith("_")),
 }
 
 
-class TextSkillFile(BaseModel):
-    """One file found inside a TextSkill directory."""
-
+@dataclass(frozen=True)
+class SkillFile:
     path: str
-    kind: Literal["skill", "script", "resource"]
     size_bytes: int
-    sha256: str
 
 
-class TextSkillInventory(BaseModel):
-    """Parsed inventory for a SKILL.md TextSkill directory."""
-
+@dataclass(frozen=True)
+class TextSkillInventory:
     source_dir: Path
     skill_name: str
     description: str
-    frontmatter: dict[str, str] = Field(default_factory=dict)
     body: str
-    files: list[TextSkillFile] = Field(default_factory=list)
-
-    @property
-    def scripts(self) -> list[TextSkillFile]:
-        return [file for file in self.files if file.kind == "script"]
+    scripts: list[SkillFile] = field(default_factory=list)
+    resources: list[SkillFile] = field(default_factory=list)
 
 
-class FunctionParameterPlan(BaseModel):
-    """One inferred Python function parameter for a generated API."""
-
+@dataclass(frozen=True)
+class FunctionParameterPlan:
     param_name: str
     annotation: str = "object"
     required: bool = True
     default: str | int | float | bool | None = None
 
 
-class ScriptFunctionPlan(BaseModel):
-    """Plan for one generated wrapper around a Python function."""
-
+@dataclass(frozen=True)
+class ScriptFunctionPlan:
     function_name: str
     method_name: str
-    parameters: list[FunctionParameterPlan] = Field(default_factory=list)
+    parameters: list[FunctionParameterPlan] = field(default_factory=list)
     return_annotation: str = "object"
     docstring: str = ""
 
 
-class ScriptMethodPlan(BaseModel):
-    """Plan for one Python script implementation module."""
-
+@dataclass(frozen=True)
+class ScriptMethodPlan:
     script_path: str
-    method_name: str
-    function_methods: list[ScriptFunctionPlan] = Field(default_factory=list)
+    function_methods: list[ScriptFunctionPlan] = field(default_factory=list)
     implementation_only: bool = False
 
 
-class OmittedScriptPlan(BaseModel):
-    """One script intentionally left out of the generated package API."""
-
+@dataclass(frozen=True)
+class OmittedScriptPlan:
     script_path: str
     reason: str
 
+    def model_dump(self, *args, **kwargs) -> dict[str, str]:
+        return {"script_path": self.script_path, "reason": self.reason}
 
-class ResourceMethodPlan(BaseModel):
-    """Plan for one named method exposing a bundled non-script resource."""
 
+@dataclass(frozen=True)
+class ResourceMethodPlan:
     resource_path: str
     method_name: str
     return_annotation: Literal["str", "bytes"]
@@ -105,9 +86,8 @@ class ResourceMethodPlan(BaseModel):
     docstring: str
 
 
-class ConversionPlan(BaseModel):
-    """Deterministic plan for converting a TextSkill into a LibrarySkill package."""
-
+@dataclass(frozen=True)
+class ConversionPlan:
     source_dir: Path
     package_name: str
     project_name: str
@@ -115,55 +95,46 @@ class ConversionPlan(BaseModel):
     class_name: str
     description: str
     docstring: str
-    script_methods: list[ScriptMethodPlan] = Field(default_factory=list)
-    omitted_scripts: list[OmittedScriptPlan] = Field(default_factory=list)
-    resource_methods: list[ResourceMethodPlan] = Field(default_factory=list)
+    script_methods: list[ScriptMethodPlan] = field(default_factory=list)
+    omitted_scripts: list[OmittedScriptPlan] = field(default_factory=list)
+    resource_methods: list[ResourceMethodPlan] = field(default_factory=list)
     resource_prefix: str = "resources"
 
 
-class PackageTranslationResult(BaseModel):
-    """Result of writing a package skill to disk."""
-
+@dataclass(frozen=True)
+class PackageTranslationResult:
     package_dir: Path
     package_name: str
     registry_name: str
     class_name: str
     files_written: list[str]
-    omitted_scripts: list[OmittedScriptPlan] = Field(default_factory=list)
+    omitted_scripts: list[OmittedScriptPlan] = field(default_factory=list)
 
 
-class ValidationReport(BaseModel):
-    """Validation outcome for a generated package skill."""
-
+@dataclass(frozen=True)
+class ValidationReport:
     ok: bool
     package_dir: Path
     registry_name: str | None = None
     loaded: bool = False
     importable: bool = False
-    errors: list[str] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
 
-    def __str__(self) -> str:
-        status = "OK" if self.ok else "ERROR"
-        details = [status]
-        if self.registry_name:
-            details.append(f"registry_name={self.registry_name}")
-        details.extend(f"error: {error}" for error in self.errors)
-        details.extend(f"warning: {warning}" for warning in self.warnings)
-        return "\n".join(details)
+    def model_dump(self, *args, mode: str | None = None, **kwargs) -> dict[str, object]:
+        package_dir: str | Path = str(self.package_dir) if mode == "json" else self.package_dir
+        return {
+            "ok": self.ok,
+            "package_dir": package_dir,
+            "registry_name": self.registry_name,
+            "loaded": self.loaded,
+            "importable": self.importable,
+            "errors": list(self.errors),
+        }
 
 
 class SlimTextSkillTranslator(Skill):
-    """Translate TextSkills using a small, LibrarySkill-native policy.
-
-    The standalone slim translator exposes only import-safe public Python
-    functions as methods, bundles required sibling Python helpers privately,
-    exposes non-script resources through named methods, and omits CLI-shaped
-    scripts instead of synthesizing command wrappers.
-    """
-
+    """Translate TextSkills with a small, LibrarySkill-native policy."""
     def inspect_text_skill(self, path: str | Path) -> TextSkillInventory:
-        """Parse a TextSkill directory into structured metadata and file inventory."""
         source_dir = Path(path).resolve()
         skill_md = _find_skill_md(source_dir)
         if skill_md is None:
@@ -175,32 +146,25 @@ class SlimTextSkillTranslator(Skill):
         if "description" not in frontmatter_raw:
             raise ValueError("Missing required frontmatter field: description")
 
-        files: list[TextSkillFile] = []
+        scripts: list[SkillFile] = []
+        resources: list[SkillFile] = []
         for file_path in _iter_skill_files(source_dir):
             rel = file_path.relative_to(source_dir).as_posix()
             if file_path == skill_md:
-                kind: Literal["skill", "script", "resource"] = "skill"
-            elif rel.startswith("scripts/"):
-                kind = "script"
+                continue
+            file = SkillFile(path=rel, size_bytes=file_path.stat().st_size)
+            if rel.startswith("scripts/"):
+                scripts.append(file)
             else:
-                kind = "resource"
-            files.append(
-                TextSkillFile(
-                    path=rel,
-                    kind=kind,
-                    size_bytes=file_path.stat().st_size,
-                    sha256=_sha256(file_path),
-                )
-            )
+                resources.append(file)
 
-        frontmatter = {str(key): _stringify_frontmatter_value(value) for key, value in frontmatter_raw.items()}
         return TextSkillInventory(
             source_dir=source_dir,
-            skill_name=frontmatter["name"].strip(),
-            description=frontmatter["description"].strip(),
-            frontmatter=frontmatter,
+            skill_name=str(frontmatter_raw["name"]).strip(),
+            description=str(frontmatter_raw["description"]).strip(),
             body=body,
-            files=files,
+            scripts=scripts,
+            resources=resources,
         )
 
     def plan_conversion(
@@ -211,13 +175,11 @@ class SlimTextSkillTranslator(Skill):
         registry_name: str | None = None,
         class_name: str | None = None,
     ) -> ConversionPlan:
-        """Create a compact package-skill conversion plan from an inventory."""
         package = _normalize_identifier(package_name or inventory.skill_name)
         project = package.replace("_", "-")
         registry = registry_name or f"local.{project}"
         cls_name = class_name or _class_name(package)
 
-        used_script_names: set[str] = set()
         used_api_names: set[str] = set()
         script_methods: list[ScriptMethodPlan] = []
         script_methods_by_path: dict[str, ScriptMethodPlan] = {}
@@ -244,7 +206,6 @@ class SlimTextSkillTranslator(Skill):
 
             script_method = ScriptMethodPlan(
                 script_path=file.path,
-                method_name=_implementation_method_name(file.path, used_script_names),
                 function_methods=function_methods,
             )
             script_methods.append(script_method)
@@ -259,7 +220,6 @@ class SlimTextSkillTranslator(Skill):
             script_methods.append(
                 ScriptMethodPlan(
                     script_path=script_path,
-                    method_name=_implementation_method_name(script_path, used_script_names),
                     implementation_only=True,
                 )
             )
@@ -293,7 +253,6 @@ class SlimTextSkillTranslator(Skill):
         *,
         overwrite: bool = False,
     ) -> PackageTranslationResult:
-        """Write the planned package skill under output_dir and copy resources."""
         root = Path(output_dir).resolve()
         _validate_identifier(plan.package_name, "package_name")
         _validate_class_name(plan.class_name)
@@ -305,13 +264,10 @@ class SlimTextSkillTranslator(Skill):
 
         package_src = _safe_child(package_dir / "src", plan.package_name)
         resources_dir = _safe_child(package_src, plan.resource_prefix)
-        tests_dir = package_dir / "tests"
         resources_dir.mkdir(parents=True)
-        tests_dir.mkdir(parents=True)
 
         written: list[str] = []
         _write(package_dir / "pyproject.toml", _render_pyproject(plan), package_dir, written)
-        _write(package_dir / "README.md", _render_readme(plan), package_dir, written)
         if plan.script_methods:
             (package_src / "_impl").mkdir(parents=True, exist_ok=True)
             _write(package_src / "_impl" / "__init__.py", "", package_dir, written)
@@ -323,7 +279,6 @@ class SlimTextSkillTranslator(Skill):
                     written,
                 )
         _write(package_src / "__init__.py", _render_init(plan), package_dir, written)
-        _write(tests_dir / f"test_{plan.package_name}.py", _render_tests(plan), package_dir, written)
 
         for source_file in _iter_package_resource_files(plan):
             rel = source_file.relative_to(plan.source_dir)
@@ -351,7 +306,6 @@ class SlimTextSkillTranslator(Skill):
         class_name: str | None = None,
         overwrite: bool = False,
     ) -> PackageTranslationResult:
-        """Inspect, plan, and write a LibrarySkill package in one deterministic call."""
         inventory = self.inspect_text_skill(text_skill_dir)
         plan = self.plan_conversion(
             inventory,
@@ -362,7 +316,6 @@ class SlimTextSkillTranslator(Skill):
         return self.write_package(plan, output_dir, overwrite=overwrite)
 
     def validate_package(self, package_dir: str | Path) -> ValidationReport:
-        """Validate that a generated package imports and loads through SkillRegistry."""
         package_path = Path(package_dir).resolve()
         errors: list[str] = []
         registry_name = _read_registry_name(package_path)
@@ -398,40 +351,6 @@ class SlimTextSkillTranslator(Skill):
         )
 
 
-def _find_skill_md(skill_dir: Path) -> Path | None:
-    if not skill_dir.is_dir():
-        return None
-    matches = {entry.name: entry for entry in skill_dir.iterdir() if entry.name in {"SKILL.md", "skill.md"}}
-    return matches.get("SKILL.md") or matches.get("skill.md")
-
-
-def _parse_frontmatter(content: str) -> tuple[dict[str, object], str]:
-    if not content.startswith("---"):
-        raise ValueError("SKILL.md must start with YAML frontmatter (---)")
-    parts = content.split("---", 2)
-    if len(parts) < 3:
-        raise ValueError("SKILL.md frontmatter not properly closed with ---")
-    fm_text = parts[1]
-    body = parts[2].strip()
-    try:
-        meta = yaml.safe_load(fm_text) or {}
-        if not isinstance(meta, dict):
-            raise ValueError("SKILL.md frontmatter must be a YAML mapping")
-    except yaml.YAMLError:
-        meta = {}
-        for line in fm_text.splitlines():
-            match = re.match(r"^([a-zA-Z][a-zA-Z0-9_-]*):\s*(.+)$", line)
-            if match is None:
-                continue
-            key, raw = match.group(1), match.group(2).strip()
-            try:
-                parsed = yaml.safe_load(raw)
-                meta[key] = str(parsed) if isinstance(parsed, list) else parsed
-            except yaml.YAMLError:
-                meta[key] = raw
-    return dict(meta), body
-
-
 def _iter_skill_files(root: Path) -> list[Path]:
     return sorted(
         path
@@ -451,20 +370,6 @@ def _iter_package_resource_files(plan: ConversionPlan) -> list[Path]:
             continue
         resources.append(path)
     return resources
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _stringify_frontmatter_value(value: object) -> str:
-    if isinstance(value, str):
-        return value
-    return json.dumps(value, sort_keys=True)
 
 
 def _normalize_identifier(value: str) -> str:
@@ -505,35 +410,18 @@ def _class_name(value: str) -> str:
     return name
 
 
-def _implementation_method_name(script_path: str, used_names: set[str]) -> str:
-    name = f"impl_{_normalize_identifier(Path(script_path).with_suffix('').as_posix())}"
-    base = name
-    index = 2
-    while name in used_names:
-        name = f"{base}_{index}"
-        index += 1
-    used_names.add(name)
-    return name
-
-
 def _function_method_name(function_name: str, used_names: set[str]) -> str:
-    name = _normalize_identifier(function_name)
-    if name in _RESERVED_METHOD_NAMES:
-        name = f"{name}_function"
-    base = name
-    index = 2
-    while name in used_names:
-        name = f"{base}_{index}"
-        index += 1
-    used_names.add(name)
-    return name
+    return _unique_name(_normalize_identifier(function_name), used_names, suffix="function")
 
 
 def _resource_method_name(resource_path: str, used_names: set[str]) -> str:
     rel = Path(resource_path)
-    name = _normalize_identifier(rel.with_suffix("").as_posix())
+    return _unique_name(_normalize_identifier(rel.with_suffix("").as_posix()), used_names, suffix="resource")
+
+
+def _unique_name(name: str, used_names: set[str], *, suffix: str) -> str:
     if name in _RESERVED_METHOD_NAMES:
-        name = f"{name}_resource"
+        name = f"{name}_{suffix}"
     base = name
     index = 2
     while name in used_names:
@@ -545,9 +433,7 @@ def _resource_method_name(resource_path: str, used_names: set[str]) -> str:
 
 def _resource_method_plans(inventory: TextSkillInventory, used_names: set[str]) -> list[ResourceMethodPlan]:
     methods: list[ResourceMethodPlan] = []
-    for file in inventory.files:
-        if file.kind != "resource":
-            continue
+    for file in inventory.resources:
         path = inventory.source_dir / file.path
         text = _read_resource_text_for_docstring(path)
         return_annotation: Literal["str", "bytes"] = "str" if text is not None else "bytes"
@@ -648,43 +534,37 @@ def _is_module_docstring(node: ast.AST) -> bool:
 
 
 def _is_main_guard(node: ast.AST) -> bool:
-    if not isinstance(node, ast.If):
-        return False
-    test = node.test
-    if not isinstance(test, ast.Compare):
-        return False
-    if not isinstance(test.left, ast.Name) or test.left.id != "__name__":
-        return False
-    if len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq):
-        return False
-    if len(test.comparators) != 1:
-        return False
-    comparator = test.comparators[0]
-    return isinstance(comparator, ast.Constant) and comparator.value == "__main__"
+    test = node.test if isinstance(node, ast.If) else None
+    return (
+        isinstance(test, ast.Compare)
+        and isinstance(test.left, ast.Name)
+        and test.left.id == "__name__"
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.Eq)
+        and len(test.comparators) == 1
+        and isinstance(test.comparators[0], ast.Constant)
+        and test.comparators[0].value == "__main__"
+    )
 
 
 def _literal_container(node: ast.AST | None) -> bool:
     if node is None:
         return True
-    if isinstance(node, ast.Constant):
-        return isinstance(node.value, (str, int, float, bool, type(None)))
-    if isinstance(node, (ast.UnaryOp, ast.BinOp)) and _literal_number(node) is not None:
-        return True
-    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-        return all(_literal_container(item) for item in node.elts)
-    if isinstance(node, ast.Dict):
-        return all(_literal_container(key) and _literal_container(value) for key, value in node.items)
-    return False
-
-
-def _literal_number(node: ast.AST) -> int | float | None:
     try:
         value = ast.literal_eval(node)
     except (ValueError, TypeError):
-        return None
-    if isinstance(value, (int, float)):
-        return value
-    return None
+        return False
+    return _literal_value(value)
+
+
+def _literal_value(value: object) -> bool:
+    if isinstance(value, (str, int, float, bool, type(None))):
+        return True
+    if isinstance(value, (list, tuple, set)):
+        return all(_literal_value(item) for item in value)
+    if isinstance(value, dict):
+        return all(_literal_value(key) and _literal_value(item) for key, item in value.items())
+    return False
 
 
 def _function_parameters(node: ast.FunctionDef) -> list[FunctionParameterPlan] | None:
@@ -733,9 +613,7 @@ def _safe_annotation(node: ast.AST | None) -> str:
         rendered = ast.unparse(node).strip()
     except Exception:
         return "object"
-    if not rendered or "\n" in rendered:
-        return "object"
-    return rendered
+    return rendered if rendered and "\n" not in rendered else "object"
 
 
 def _sibling_dependency_closure(source_dir: Path, roots: set[str], script_paths: set[str]) -> set[str]:
@@ -888,9 +766,9 @@ def _guidance_parameter(parameter: FunctionParameterPlan) -> str:
 def _render_pyproject(plan: ConversionPlan) -> str:
     return textwrap.dedent(f"""\
         [project]
-        name = {_toml_string(plan.project_name)}
+        name = {json.dumps(plan.project_name)}
         version = "0.1.0"
-        description = {_toml_string(plan.description)}
+        description = {json.dumps(plan.description)}
         dependencies = ["nooa"]
 
         [build-system]
@@ -904,23 +782,7 @@ def _render_pyproject(plan: ConversionPlan) -> str:
         {plan.package_name} = ["resources/**"]
 
         [project.entry-points."nooa.skills"]
-        {_toml_string(plan.registry_name)} = {_toml_string(f"{plan.package_name}:{plan.class_name}")}
-    """)
-
-
-def _render_readme(plan: ConversionPlan) -> str:
-    return textwrap.dedent(f"""\
-        # {plan.project_name}
-
-        NOOA LibrarySkill package.
-
-        Registry name: `{plan.registry_name}`
-
-        Use the public Python APIs exposed by the Skill class.
-
-        ## LibrarySkill-native guidance
-
-        {textwrap.indent(plan.docstring, "        ")}
+        {json.dumps(plan.registry_name)} = {json.dumps(f"{plan.package_name}:{plan.class_name}")}
     """)
 
 
@@ -1005,19 +867,12 @@ def _render_init(plan: ConversionPlan) -> str:
     methods = "\n".join(part for part in (resource_methods, function_methods) if part)
     if methods:
         methods = "\n" + methods
-    docstring = textwrap.indent(_triple_quoted(plan.docstring), "    ")
+    docstring = textwrap.indent(repr(plan.docstring), "    ")
     context_key = f"skill:{plan.registry_name}"
     attr_name = _normalize_identifier(plan.registry_name.split(".")[-1])
-    resource_methods_tuple = repr(
-        tuple(
-            (resource.method_name, resource.resource_path, resource.return_annotation, resource.size_bytes)
-            for resource in plan.resource_methods
-        )
-    )
     template = textwrap.dedent(f'''\
         from __future__ import annotations
 
-        from importlib import resources
         from pathlib import Path
 
         from nooa.agentdoc import hidden
@@ -1028,47 +883,14 @@ def _render_init(plan: ConversionPlan) -> str:
         __DOCSTRING__
 
             context_block = ({context_key!r}, "self.{attr_name}.format_guidance()")
-            _RESOURCE_METHODS = {resource_methods_tuple}
 
             def _resource_root(self):
-                return resources.files(__package__) / "{plan.resource_prefix}"
-
-            def _list_resources(self) -> list[str]:
-                """Return all bundled resource paths."""
-                root = self._resource_root()
-                return sorted(
-                    path.relative_to(root).as_posix()
-                    for path in Path(root).rglob("*")
-                    if path.is_file()
-                )
-
-            def _read_resource(self, path: str) -> str:
-                """Read a bundled resource as text."""
-                return self._read_resource_bytes(path).decode()
-
-            def _read_resource_bytes(self, path: str) -> bytes:
-                """Read a bundled resource as bytes."""
-                root = Path(self._resource_root()).resolve()
-                resolved = (root / path).resolve()
-                if not resolved.is_relative_to(root):
-                    raise ValueError(f"Path {{path!r}} escapes package resources")
-                if not resolved.is_file():
-                    raise FileNotFoundError(path)
-                return resolved.read_bytes()
+                return Path(__file__).parent / "{plan.resource_prefix}"
 
             @hidden
             def format_guidance(self) -> str:
-                """Return the LibrarySkill-native guidance and bundled resource API index."""
-                resource_index = self._format_resource_index()
-                if resource_index:
-                    return type(self).__doc__ + "\\n\\nBundled resource APIs:\\n" + resource_index
+                """Return the LibrarySkill-native guidance."""
                 return type(self).__doc__ or ""
-
-            def _format_resource_index(self) -> str:
-                return "\\n".join(
-                    f"- {{method}}() -> {{kind}}: {{path}} ({{size}} bytes)"
-                    for method, path, kind, size in self._RESOURCE_METHODS
-                )
 
         __METHODS__
     ''')
@@ -1077,13 +899,13 @@ def _render_init(plan: ConversionPlan) -> str:
 
 def _render_resource_method(resource: ResourceMethodPlan) -> str:
     body = (
-        f"return self._read_resource({resource.resource_path!r})"
+        f"return (self._resource_root() / {resource.resource_path!r}).read_text(encoding='utf-8')"
         if resource.return_annotation == "str"
-        else f"return self._read_resource_bytes({resource.resource_path!r})"
+        else f"return (self._resource_root() / {resource.resource_path!r}).read_bytes()"
     )
     lines = [
         f"def {resource.method_name}(self) -> {resource.return_annotation}:",
-        f"    {_triple_quoted(resource.docstring)}",
+        f"    {resource.docstring!r}",
         f"    {body}",
         "",
     ]
@@ -1096,10 +918,16 @@ def _render_function_method(method: ScriptMethodPlan, function: ScriptFunctionPl
     if signature:
         signature = f", {signature}"
     call_args = ", ".join(f"{parameter.param_name}={parameter.param_name}" for parameter in function.parameters)
-    docstring = function.docstring.strip() or _method_return_guidance(function)
+    docstring = function.docstring.strip()
+    if not docstring:
+        docstring = (
+            "Return the Python value from the library implementation."
+            if function.return_annotation == "object"
+            else f"Return `{function.return_annotation}` from the library implementation."
+        )
     lines = [
         f"def {function.method_name}(self{signature}) -> {function.return_annotation}:",
-        f"    {_triple_quoted(docstring)}",
+        f"    {docstring!r}",
         f"    from ._impl import {_implementation_module_name(method.script_path)} as module",
         f"    return module.{function.function_name}({call_args})",
         "",
@@ -1113,113 +941,10 @@ def _render_function_parameter(parameter: FunctionParameterPlan) -> str:
     return f"{parameter.param_name}: {parameter.annotation} = {parameter.default!r}"
 
 
-def _method_return_guidance(function: ScriptFunctionPlan) -> str:
-    if function.return_annotation == "object":
-        return "Return the Python value from the library implementation."
-    return f"Return `{function.return_annotation}` from the library implementation."
-
-
-def _render_tests(plan: ConversionPlan) -> str:
-    attr_name = _normalize_identifier(plan.registry_name.split(".")[-1])
-    lines = [
-        "from pathlib import Path",
-        "",
-        "from nooa import Agent",
-        "from nooa.agentdoc import doc",
-        "from nooa.context_blocks import DynamicContext",
-        "from nooa.skill_registry import SkillRegistry",
-        "",
-        "",
-        "def test_skill_imports_and_exposes_expected_methods():",
-        f"    from {plan.package_name} import {plan.class_name}",
-        "",
-        f"    skill = {plan.class_name}()",
-        "    visible_doc = doc(skill)",
-        f"    assert {plan.class_name!r} in repr(type(skill))",
-        "    assert 'run_resource_script' not in visible_doc",
-        "    assert isinstance(skill.format_guidance(), str)",
-    ]
-    for resource in plan.resource_methods:
-        lines.extend(
-            [
-                f"    assert hasattr(skill, {resource.method_name!r})",
-                f"    assert {resource.method_name!r} in visible_doc",
-                f"    assert {resource.resource_path!r} in visible_doc",
-            ]
-        )
-        if resource.return_annotation == "str":
-            lines.append(f"    assert isinstance(skill.{resource.method_name}(), str)")
-        else:
-            lines.append(f"    assert isinstance(skill.{resource.method_name}(), bytes)")
-    for method in plan.script_methods:
-        lines.extend(_test_assertions(method))
-    if not plan.script_methods:
-        lines.append("    assert isinstance(skill._list_resources(), list)")
-    lines.extend(
-        [
-            "",
-            "",
-            "def test_skill_registry_loads_package():",
-            "    class Agent:",
-            "        pass",
-            "",
-            "    package_dir = Path(__file__).resolve().parents[1]",
-            "    registry = SkillRegistry(Agent())",
-            "    try:",
-            "        registry.discover_libs(package_dir.parent)",
-            f"        assert {plan.registry_name!r} in registry.loaded()",
-            "    finally:",
-            "        registry.close()",
-            "",
-            "",
-            "def test_skill_registry_activation_registers_context_block():",
-            "    package_dir = Path(__file__).resolve().parents[1]",
-            "    agent = Agent(llm=object())",
-            "    registry = SkillRegistry(agent)",
-            "    try:",
-            "        registry.discover_libs(package_dir.parent)",
-            f"        registry.activate([{plan.registry_name!r}])",
-            f"        context_key = {f'skill:{plan.registry_name}'!r}",
-            "        assert context_key in agent.context_manager",
-            "        raw_block = dict(agent.context_manager._raw_items())[context_key]",
-            "        assert isinstance(raw_block, DynamicContext)",
-            f"        assert raw_block.expr == {f'self.{attr_name}.format_guidance()'!r}",
-            "    finally:",
-            "        registry.close()",
-        ]
-    )
-    return "\n".join(lines) + "\n"
-
-
-def _test_assertions(method: ScriptMethodPlan) -> list[str]:
-    assertions = [
-        f"    assert {method.script_path!r} not in skill._list_resources()",
-        f"    assert {method.method_name!r} not in visible_doc",
-    ]
-    if method.implementation_only:
-        return assertions
-    for function in method.function_methods:
-        assertions.extend(
-            [
-                f"    assert hasattr(skill, {function.method_name!r})",
-                f"    assert {function.method_name!r} in visible_doc",
-            ]
-        )
-    return assertions
-
-
 def _write(path: Path, content: str, package_dir: Path, written: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     written.append(path.relative_to(package_dir).as_posix())
-
-
-def _toml_string(value: str) -> str:
-    return json.dumps(value)
-
-
-def _triple_quoted(value: str) -> str:
-    return repr(value)
 
 
 def _read_registry_name(package_dir: Path) -> str | None:
@@ -1262,7 +987,6 @@ def _validate_registry_load(package_path: Path, registry_name: str) -> tuple[boo
 
 def _validate_registry_load_sync(package_path: Path, registry_name: str) -> tuple[bool, list[str]]:
     from nooa.skill_registry import SkillRegistry
-
     class Agent:
         pass
 

@@ -5,9 +5,6 @@
 from __future__ import annotations
 
 import inspect
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -37,18 +34,6 @@ def _write_skill_md(
         "---\n"
         f"{body}",
         encoding="utf-8",
-    )
-
-
-def _run_generated_tests(package_dir: Path) -> subprocess.CompletedProcess[str]:
-    env = dict(os.environ)
-    env["PYTHONPATH"] = f"{package_dir / 'src'}:{env.get('PYTHONPATH', '')}"
-    return subprocess.run(
-        [sys.executable, "-m", "pytest", str(package_dir / "tests"), "-q"],
-        text=True,
-        capture_output=True,
-        timeout=60,
-        env=env,
     )
 
 
@@ -163,9 +148,8 @@ async def test_slim_translator_preserves_private_sibling_helpers(tmp_path):
     translator = SlimTextSkillTranslator()
 
     result = translator.translate(skill_dir, tmp_path / "libs")
-    generated_tests = _run_generated_tests(result.package_dir)
 
-    assert generated_tests.returncode == 0, generated_tests.stdout + generated_tests.stderr
+    assert translator.validate_package(result.package_dir).ok
     assert "src/calc_skill/_impl/_scripts_helpers.py" in result.files_written
     assert [script.script_path for script in result.omitted_scripts] == []
 
@@ -202,10 +186,8 @@ async def test_slim_translator_keeps_functions_resources_and_context(tmp_path):
 
     result = translator.translate(skill_dir, tmp_path / "libs")
     report = translator.validate_package(result.package_dir)
-    generated_tests = _run_generated_tests(result.package_dir)
 
     assert report.ok
-    assert generated_tests.returncode == 0, generated_tests.stdout + generated_tests.stderr
     assert "src/calc_skill/_impl/_scripts_math_tools.py" in result.files_written
     assert "src/calc_skill/resources/scripts/math_tools.py" not in result.files_written
 

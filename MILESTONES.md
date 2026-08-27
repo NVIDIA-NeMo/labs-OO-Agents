@@ -696,7 +696,7 @@ The standalone slim translator now owns:
 - Private sibling helper script closure detection.
 - LibrarySkill-native guidance rendering.
 - Named resource method planning and rendering.
-- Package writing, generated smoke tests, and package validation.
+- Package writing and package validation.
 
 The legacy `TextSkillTranslator` remains in the tree for comparison and older
 callers, but `library_skill` SkillsBench translation uses the standalone slim
@@ -711,8 +711,13 @@ Validation:
   - passed
 
 Notes:
-- `src/nooa/tools/slim_skill_translator.py` is now about 1.3k LOC. This is
-  larger than the previous 169-line policy shim, but it is no longer a thin mask
-  over the 2k-line legacy translator.
+- `src/nooa/tools/slim_skill_translator.py` is now 999 LOC. This is larger than
+  the previous 169-line policy shim, but it is no longer a thin mask over the
+  2k-line legacy translator.
+- The slim path no longer emits generated pytest files or package READMEs for
+  each translated skill; repo-level tests and package validation cover import,
+  activation, resource, and API behavior.
 - A regression test asserts that the slim translator source does not import
   `nooa.tools.skill_translator` and does not subclass `TextSkillTranslator`.
+- Translation-only dev preflight validated 30/30 packages and omitted the same
+  3 scripts as the previous slim runs, all under `fix-erlang-ssh-cve`.

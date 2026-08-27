@@ -65,7 +65,7 @@ Translator invariants before running held-out test:
 - Named public resource methods expose copied non-script resources.
 - Resource docstrings include only small previews.
 - Generated packages import, discover through `SkillRegistry`, activate, and
-  pass generated smoke tests.
+  pass repo-level smoke tests.
 - Argparse or CLI-shaped scripts are not converted unless they also contain
   import-safe public Python functions that can be exposed directly.
 
