@@ -164,10 +164,12 @@ class SessionManager:
         ]
 
     @classmethod
-    def first_user_message(cls, session_id: str) -> str:
-        """Return the first user message using a single-row store query."""
-        turn = SessionStore(SESSIONS_DIR).load_first_user_turn(session_id)
-        return turn.content if turn is not None else ""
+    def recent_turns(cls, session_id: str, *, limit: int = 12) -> list[Turn]:
+        """Return a bounded tail of the conversation for resume previews."""
+        return [
+            Turn(role=turn.role, content=turn.content, ts=turn.timestamp)
+            for turn in SessionStore(SESSIONS_DIR).load_recent_turns(session_id, limit=limit)
+        ]
 
     @classmethod
     def is_active(cls, session_id: str) -> bool:

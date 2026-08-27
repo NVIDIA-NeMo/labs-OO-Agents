@@ -268,3 +268,22 @@ def test_reads_legacy_tui_session_events(tmp_path):
         ("user", "old user"),
         ("agent", "old agent"),
     ]
+
+
+def test_load_recent_turns_is_bounded_and_chronological(tmp_path):
+    store = SessionStore(tmp_path)
+    handle = store.create(session_id="recent", working_directory=str(tmp_path))
+    handle.record_user_message("first")
+    handle.events.add(AgentMessage(content="middle"))
+    handle.record_user_message("last")
+    handle.close()
+
+    turns = store.load_recent_turns("recent", limit=2)
+
+    assert [(turn.role, turn.content) for turn in turns] == [
+        ("agent", "middle"),
+        ("user", "last"),
+    ]
+    assert store.load_recent_turns("recent", limit=0) == []
+    with pytest.raises(ValueError, match="non-negative"):
+        store.load_recent_turns("recent", limit=-1)
