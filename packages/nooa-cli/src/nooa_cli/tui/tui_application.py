@@ -1807,6 +1807,12 @@ class TUIApplication:
         if self._resume_picker_done is not None and not self._resume_picker_done.done():
             return None
 
+        # Reserve the dialog before session discovery so concurrent requests cannot
+        # race and install competing pickers while the worker thread is loading.
+        loop = asyncio.get_running_loop()
+        done: asyncio.Future[str | None] = loop.create_future()
+        self._resume_picker_done = done
+
         # Session discovery touches many SQLite files and lock files. Keep it
         # bounded and off prompt_toolkit's event loop so opening remains responsive.
         def load_rows() -> list[ResumePickerRow]:
@@ -1828,26 +1834,25 @@ class TUIApplication:
                 )
             return result
 
-        rows = await asyncio.to_thread(load_rows)
-        self._cancel_fullscreen_drag()
-        shell = getattr(self._agent, "shell", None)
-        picker_cwd = str(getattr(shell, "cwd", os.getcwd()))
-        self._resume_picker = ResumePicker(rows, self._app, cwd=picker_cwd)
-        loop = asyncio.get_running_loop()
-        self._resume_picker_done = loop.create_future()
         previous = self._app.layout.current_control
-        self._resume_picker.focus_initial()
-        self._app.invalidate()
         try:
-            return await self._resume_picker_done
-        finally:
-            self._resume_picker = None
-            self._resume_picker_done = None
-            try:
-                self._app.layout.focus(previous)
-            except Exception:
-                self._app.layout.focus(self._input_window)
+            rows = await asyncio.to_thread(load_rows)
+            self._cancel_fullscreen_drag()
+            shell = getattr(self._agent, "shell", None)
+            picker_cwd = str(getattr(shell, "cwd", os.getcwd()))
+            self._resume_picker = ResumePicker(rows, self._app, cwd=picker_cwd)
+            self._resume_picker.focus_initial()
             self._app.invalidate()
+            return await done
+        finally:
+            if self._resume_picker_done is done:
+                self._resume_picker = None
+                self._resume_picker_done = None
+                try:
+                    self._app.layout.focus(previous)
+                except ValueError:
+                    self._app.layout.focus(self._input_window)
+                self._app.invalidate()
 
     def _finish_resume_picker(self, value: str | None) -> None:
         done = self._resume_picker_done
@@ -2546,7 +2551,11 @@ class TUIApplication:
         def _(event):
             self._jump_fullscreen_to_tail()
 
-        @kb.add("f6", filter=Condition(lambda: self._is_fullscreen), eager=True)
+        @kb.add(
+            "f6",
+            filter=Condition(lambda: self._is_fullscreen) & ~resume_picker_active,
+            eager=True,
+        )
         def _(event):
             self._fullscreen_mouse_navigation = not self._fullscreen_mouse_navigation
             if not self._fullscreen_mouse_navigation:
