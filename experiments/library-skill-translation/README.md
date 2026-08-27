@@ -35,8 +35,8 @@ Conditions:
 Candidate translation layer:
 
 - `SlimTextSkillTranslator` is the held-out candidate once frozen.
-- It reuses the existing package writer, validator, context-block generation,
-  guidance rewriting, and resource method rendering.
+- It owns a standalone package writer, validator, context-block generator,
+  guidance renderer, function-script planner, and resource method renderer.
 - It narrows script translation to import-safe Python functions only.
 - It deliberately omits argparse and CLI-shaped script synthesis; omitted
   scripts are recorded in the host-side translation summary, outside the

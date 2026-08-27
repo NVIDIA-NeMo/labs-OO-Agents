@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import subprocess
 import sys
@@ -15,7 +16,6 @@ from nooa import Agent
 from nooa.agentdoc import doc
 from nooa.context_blocks import DynamicContext
 from nooa.skill_registry import SkillRegistry
-from nooa.tools import skill_translator
 from nooa.tools.slim_skill_translator import SlimTextSkillTranslator
 
 
@@ -107,7 +107,15 @@ def test_slim_translator_does_not_advertise_omitted_scripts(tmp_path):
     assert "the relevant LibrarySkill guidance" in generated_text
 
 
-def test_slim_translator_does_not_probe_argparse_for_function_scripts(tmp_path, monkeypatch):
+def test_slim_translator_does_not_depend_on_legacy_translator():
+    source = Path(inspect.getsourcefile(SlimTextSkillTranslator) or "")
+    text = source.read_text(encoding="utf-8")
+
+    assert "nooa.tools.skill_translator" not in text
+    assert "class SlimTextSkillTranslator(TextSkillTranslator)" not in text
+
+
+def test_slim_translator_ignores_argparse_for_function_scripts(tmp_path):
     skill_dir = tmp_path / "calc-skill"
     scripts_dir = skill_dir / "scripts"
     scripts_dir.mkdir(parents=True)
@@ -117,11 +125,6 @@ def test_slim_translator_does_not_probe_argparse_for_function_scripts(tmp_path, 
         "    return value * 2\n",
         encoding="utf-8",
     )
-
-    def fail_on_argparse_probe(*args, **kwargs):
-        raise AssertionError("slim function translation should not probe argparse")
-
-    monkeypatch.setattr(skill_translator, "_native_argparse_execution", fail_on_argparse_probe)
 
     result = SlimTextSkillTranslator().translate(skill_dir, tmp_path / "libs")
 

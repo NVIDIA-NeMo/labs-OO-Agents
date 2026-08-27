@@ -680,3 +680,39 @@ Current result:
 - `dynamic-object-aware-egomotion` flipped back to failure after passing in the
   `a84fb256` slim run, reinforcing that it is a marginal/flaky dev task rather
   than a stable translator-quality signal.
+
+## 2026-08-27 — Standalone Slim LibrarySkill Translator
+
+Status: implementation complete; dev agent rerun not yet repeated on this
+standalone refactor.
+
+Refactored `SlimTextSkillTranslator` so the evaluated LibrarySkill translation
+path no longer subclasses `TextSkillTranslator` and no longer imports helpers
+from `nooa.tools.skill_translator`.
+
+The standalone slim translator now owns:
+- TextSkill inspection and file inventory.
+- Import-safe public Python function planning.
+- Private sibling helper script closure detection.
+- LibrarySkill-native guidance rendering.
+- Named resource method planning and rendering.
+- Package writing, generated smoke tests, and package validation.
+
+The legacy `TextSkillTranslator` remains in the tree for comparison and older
+callers, but `library_skill` SkillsBench translation uses the standalone slim
+translator path.
+
+Validation:
+- `uv run pytest tests/tools/test_slim_skill_translator.py -q`
+  - `7 passed`
+- `uv run pytest tests/tools/test_slim_skill_translator.py tests/tools/test_skill_translator.py packages/nooa-bench/tests/test_bench_agent.py packages/nooa-bench/tests/test_runner.py packages/nooa-bench/tests/test_skillsbench_runner.py -q`
+  - `72 passed`
+- `uv run ruff check src/nooa/tools/slim_skill_translator.py tests/tools/test_slim_skill_translator.py packages/nooa-bench/src/nooa_bench/skillsbench_runner.py`
+  - passed
+
+Notes:
+- `src/nooa/tools/slim_skill_translator.py` is now about 1.3k LOC. This is
+  larger than the previous 169-line policy shim, but it is no longer a thin mask
+  over the 2k-line legacy translator.
+- A regression test asserts that the slim translator source does not import
+  `nooa.tools.skill_translator` and does not subclass `TextSkillTranslator`.
