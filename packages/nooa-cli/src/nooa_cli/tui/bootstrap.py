@@ -58,6 +58,7 @@ class BootstrapResult:
     session_id: str | None
     messages: list[Output] = field(default_factory=list)
     blocking_llm_health: HealthCheckResult | None = None
+    startup_info: Output | None = None
 
 
 def _scaffold_settings(config: Config) -> None:
@@ -304,7 +305,7 @@ async def bootstrap(
     blocking_llm_health = None
     llm = None
     try:
-        from nooa.unifiedllm import FakeLLMClient, MODELS
+        from nooa.unifiedllm import MODELS, FakeLLMClient
 
         if config.tui.default_model == DEFAULT_MODEL and DEFAULT_MODEL not in MODELS:
             from .health_check import no_models_configured_health
@@ -544,6 +545,60 @@ def build_startup_info(result: BootstrapResult) -> Output:
     )
 
 
+def build_initial_outputs(
+    result: BootstrapResult,
+    splash_outputs: list[Output],
+    *,
+    continue_last: bool = False,
+) -> list[Output]:
+    """Build the ordered startup transcript for a bootstrapped session."""
+    from .output import TextOutput, _RichReplayPayload
+    from .session_manager import SESSIONS_DIR, build_resume_outputs
+
+    startup_info = result.startup_info or build_startup_info(result)
+    result.startup_info = startup_info
+    initial_outputs = [*splash_outputs, *result.messages, startup_info]
+
+    # Show resumed session history (interleaved with any rich content). Terminal
+    # text/markdown outputs are deferred until Session.run(), after the frontend
+    # console is redirected through TUIApplication.emit_block; that makes them
+    # part of fullscreen resize replay instead of one-off pre-app writes.
+    if result.resumed and result.session_id is not None:
+        import os as _os
+
+        in_nemo_term = bool(_os.environ.get("NEMO_OO_RICH_URL"))
+        db_path = SESSIONS_DIR / f"{result.session_id}.db"
+        resume_outputs = build_resume_outputs(
+            db_path, result.session_id, in_nemo_term=in_nemo_term
+        )
+        if resume_outputs:
+            rich_url = _os.environ.get("NEMO_OO_RICH_URL") if in_nemo_term else None
+            for item in resume_outputs:
+                if isinstance(item, _RichReplayPayload):
+                    if rich_url:
+                        try:
+                            import httpx as _httpx
+
+                            _httpx.post(
+                                rich_url,
+                                json={**item.payload, "_replay": True},
+                                timeout=5.0,
+                            )
+                        except Exception:
+                            pass
+                else:
+                    initial_outputs.append(item)
+            initial_outputs.append(
+                TextOutput(f"Session {result.session_id[:8]} resumed.", "status")
+            )
+        else:
+            initial_outputs.append(TextOutput("No previous session with turns found.", "info"))
+    elif continue_last:
+        initial_outputs.append(TextOutput("No previous session with turns found.", "info"))
+
+    return initial_outputs
+
+
 def build_registry(result: BootstrapResult, frontend: Frontend) -> CommandRegistry:
     from .commands import CommandRegistry
     from .mcp_registry import MCPRegistry
@@ -621,6 +676,8 @@ def build_registry(result: BootstrapResult, frontend: Frontend) -> CommandRegist
         session_manager=result.session_manager,
         root_config=result.config,
     )
+    registry.startup_info = result.startup_info or build_startup_info(result)
+    result.startup_info = registry.startup_info
     registry.blocking_llm_health = result.blocking_llm_health
     result.agent._command_registry = registry  # type: ignore[attr-defined]
     return registry

@@ -28,8 +28,9 @@ CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
 
 # `completion` just emits a shell script and doesn't need the ~1.5s core
-# import cost or secrets preload.
-_SKIP_SECRETS_PRELOAD = {"completion"}
+# import cost or secrets preload. `tui` starts its own deferred bootstrap,
+# which loads secrets after the terminal has painted.
+_SKIP_SECRETS_PRELOAD = {"completion", "tui"}
 
 
 @click.group(context_settings=CONTEXT_SETTINGS)

@@ -43,16 +43,27 @@ class DisplayMode(StrEnum):
     FULLSCREEN = "fullscreen"
 
 
-# SummarizationConfig moved to core with the interactive-agent base;
-# re-exported here so existing ``nooa_cli.tui.config`` imports keep working.
-from nooa.interactive import SummarizationConfig as SummarizationConfig  # noqa: E402
+class LazySummarizationConfig(BaseModel):
+    """Pre-paint copy of core interactive summarization settings.
+
+    The TUI loads this before importing the agent stack. Convert it to
+    ``nooa.interactive.SummarizationConfig`` during agent construction.
+    """
+
+    policy: Literal["token_budget", "none"] = "token_budget"
+    max_tokens: int | None = None
+    preserve_recent: int = 10
+    target_chars: int = 4000
+
+
+SummarizationConfig = LazySummarizationConfig
 
 
 class AgentConfig(BaseModel):
     """Configuration for the TUI agent's behavior."""
 
     # History summarization settings
-    summarization: SummarizationConfig = Field(default_factory=SummarizationConfig)
+    summarization: LazySummarizationConfig = Field(default_factory=LazySummarizationConfig)
 
     # Working directory for bash commands. Stored as a string (downstream
     # always str()s it); a Path is accepted and coerced for ergonomics.

@@ -14,9 +14,18 @@ type keeps working as long as ``to_json()`` is defined.
 
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
-from nooa.agentdoc import hidden
+
+def hidden(obj: Any) -> Any:
+    """Local agentdoc-compatible hidden marker without importing core NOOA."""
+    try:
+        obj._agentdoc_hidden = True
+    except AttributeError:
+        fget = getattr(obj, "fget", None)
+        if fget is not None:
+            fget._agentdoc_hidden = True
+    return obj
 
 _STOP_REASON_ESCAPE_SEQUENCE_RE = re.compile(
     "\x1b(?:[@-Z\\-_]|\\[[0-?]*[ -/]*[@-~]|\\][^\x07\x1b]*(?:\x07|\x1b\\\\)?)"

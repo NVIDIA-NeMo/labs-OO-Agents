@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .agent import BaseTUIAgent, TUIAgent
-    from .config import AgentConfig, Config, SummarizationConfig, TUIConfig
+    from .config import AgentConfig, Config, LazySummarizationConfig, SummarizationConfig, TUIConfig
     from .console import TUIConsole
     from .input_handler import TUIInputHandler
     from .theme import CATPPUCCIN_THEME, COLORS
@@ -18,6 +18,7 @@ _EXPORTS = {
     "TUIAgent": ".agent",
     "AgentConfig": ".config",
     "Config": ".config",
+    "LazySummarizationConfig": ".config",
     "SummarizationConfig": ".config",
     "TUIConfig": ".config",
     "TUIConsole": ".console",
@@ -44,6 +45,7 @@ __all__ = [
     "AgentConfig",
     "BaseTUIAgent",
     "Config",
+    "LazySummarizationConfig",
     "SummarizationConfig",
     "TUIAgent",
     "TUIConfig",

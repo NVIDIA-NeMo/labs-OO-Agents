@@ -22,6 +22,7 @@ import traceback
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from rich.console import Console as RichConsole
@@ -297,6 +298,72 @@ def _short_model_name(full_name: str) -> str:
     return part
 
 
+_DEFERRED_STARTUP_STATUS = "booting the NOOA runtime..."
+
+
+def _startup_command_result(message: str, *, exit: bool = False) -> Any:
+    from .output import TextOutput
+
+    return SimpleNamespace(
+        success=True,
+        outputs=[TextOutput(message, "status" if exit else "info")],
+        exit=exit,
+        new_session_manager=None,
+        compact_done=False,
+        input_prefill=None,
+        agent_message=None,
+        slash_result=None,
+        post_session_swap=None,
+    )
+
+
+def _run_coro_in_thread(coro_factory: Callable[[], Awaitable[Any]]) -> Any:
+    """Run an async factory on a worker thread with its own event loop."""
+    return asyncio.run(coro_factory())
+
+
+class _StartupCommandRegistry:
+    """Minimal registry used before deferred bootstrap installs real commands."""
+
+    agent = None
+    startup_info = None
+    blocking_llm_health = None
+
+    def commands(self) -> list[Any]:
+        return []
+
+    def get_user_skill(self, _name: str) -> None:
+        return None
+
+    def get_command(self, _name: str) -> None:
+        return None
+
+    def get_all_command_classes(self) -> dict[str, Any]:
+        return {}
+
+    def get_completions(self) -> dict[str, str]:
+        return {}
+
+
+class _StartupCommandHandler:
+    """Slash-command handler while the real agent is still bootstrapping."""
+
+    def __init__(self, frontend: "Frontend") -> None:
+        self.frontend = frontend
+        self._agent_run_async = None
+
+    async def handle(self, input_text: str, *, render_outputs: bool = True) -> Any:
+        text = input_text.strip().lower()
+        if text in {"/exit", "/quit"}:
+            result = _startup_command_result("Goodbye! Stay vibing.", exit=True)
+        else:
+            result = _startup_command_result("The TUI is still starting. Try again in a moment.")
+        if render_outputs:
+            for output in result.outputs:
+                await self.frontend.render(output)
+        return result
+
+
 # ---------------------------------------------------------------------------
 # Session
 # ---------------------------------------------------------------------------
@@ -319,24 +386,32 @@ class Session:
     def __init__(
         self,
         frontend: "Frontend",
-        agent: "Agent",
+        agent: "Agent | None",
         config: "Config",
-        registry: "CommandRegistry",
+        registry: "CommandRegistry | None",
         session_manager: "SessionManager | None" = None,
         initial_outputs: list[Any] | None = None,
     ) -> None:
-        from .commands import CommandHandler
-
         self.frontend = frontend
         self.agent = agent
         self.config = config
-        self.registry = registry
-        self._handler = CommandHandler(registry=registry, frontend=frontend)
-        self._session_manager = session_manager
-        from .toolbar import ToolbarRegistry
+        self.registry = registry if registry is not None else _StartupCommandRegistry()
+        if registry is None:
+            self._handler = _StartupCommandHandler(frontend)
+        else:
+            from .commands import CommandHandler
 
-        self._toolbar = ToolbarRegistry()
+            self._handler = CommandHandler(registry=registry, frontend=frontend)
+        self._session_manager = session_manager
+        self._toolbar = None
+        if registry is not None:
+            from .toolbar import ToolbarRegistry
+
+            self._toolbar = ToolbarRegistry()
         self._initial_outputs = list(initial_outputs or [])
+        self._deferred_bootstrap: Callable[[], Awaitable[Any]] | None = None
+        self._deferred_splash_outputs: list[Any] = []
+        self._deferred_continue_last = False
         self._session_title_requested = False
         # Invalidates user-message UI callbacks queued before a session swap.
         self._session_generation = 0
@@ -461,7 +536,6 @@ class Session:
         ``_on_user_message_ui``, ``_emit_text``, ``_loud_handler``, …);
         ``run`` is just the wiring.
         """
-        from .agent_event_renderer import AgentEventRenderer
         from .input_handler import SlashCommandCompleter
         from .output import TextOutput
         from .theme import create_theme
@@ -478,8 +552,6 @@ class Session:
         except (ImportError, OSError):
             pass
 
-        from nooa_cli.interactive import LocalAgentRunner
-
         from .config import DisplayMode, resolve_display_mode
         from .tui_application import DispatcherExit
 
@@ -489,15 +561,19 @@ class Session:
             if app_ref:
                 app_ref[0].emit_block(text)
 
-        agent_runner = LocalAgentRunner(
-            self.agent,
-            emit_text=_emit_from_agent_runner,
-            agent_id=f"local-{id(self.agent):x}",
-            # Startup below performs substantial renderer/frontend wiring.
-            # Acquire single-subscriber agent callbacks only once that work is
-            # complete and covered by the teardown finally.
-            bind_callbacks=False,
-        )
+        agent_runner: Any | None = None
+        if self.agent is not None:
+            from nooa_cli.interactive import LocalAgentRunner
+
+            agent_runner = LocalAgentRunner(
+                self.agent,
+                emit_text=_emit_from_agent_runner,
+                agent_id=f"local-{id(self.agent):x}",
+                # Startup below performs substantial renderer/frontend wiring.
+                # Acquire single-subscriber agent callbacks only once that work is
+                # complete and covered by the teardown finally.
+                bind_callbacks=False,
+            )
         self._local_agent_runner = agent_runner
         policy_ref: list[Any] = []
 
@@ -517,12 +593,15 @@ class Session:
                 await _shutdown_turn_policy()
             except Exception:
                 logger.debug("turn-policy pre-drain shutdown failed", exc_info=True)
-            try:
-                await agent_runner.shutdown()
-            except Exception:
-                logger.debug("agent runner pre-drain shutdown failed", exc_info=True)
+            if agent_runner is not None:
+                try:
+                    await agent_runner.shutdown()
+                except Exception:
+                    logger.debug("agent runner pre-drain shutdown failed", exc_info=True)
 
         async def _todo_view() -> Any:
+            if agent_runner is None:
+                raise RuntimeError("The TUI is still starting.")
             from .todo_explorer import TodoExplorerView, build_todo_rows
 
             rows = await agent_runner.run_async(
@@ -531,6 +610,8 @@ class Session:
             return TodoExplorerView(rows)
 
         async def _memory_view() -> Any:
+            if agent_runner is None:
+                raise RuntimeError("The TUI is still starting.")
             from .memory_explorer import (
                 MemoryExplorerView,
                 build_memory_rows,
@@ -586,8 +667,13 @@ class Session:
                     active_ids.add(str(event_id))
             return active_ids, active_ranges
 
-        reflection = getattr(self.agent, "_tui_reflection_runner", None)
-        auxiliary_status = None if reflection is None else reflection.indicator_frame
+        reflection_ref = [getattr(self.agent, "_tui_reflection_runner", None)]
+
+        def _auxiliary_status() -> str | None:
+            reflection = reflection_ref[0]
+            if reflection is None:
+                return None
+            return reflection.indicator_frame()
 
         self._app = TUIApplication(
             agent=agent_runner,
@@ -596,7 +682,7 @@ class Session:
                 open_memory_view=_memory_view,
                 record_stray_output=_record_stray_output,
                 replay_identity=_replay_identity,
-                auxiliary_status=auxiliary_status,
+                auxiliary_status=_auxiliary_status,
                 before_output_drain=_quiesce_output_producers,
             ),
             on_command=self._on_command,
@@ -612,45 +698,62 @@ class Session:
         )
         app_ref.append(self._app)
 
-        from .local_turn_policy import LocalTurnPolicy
-
-        turn_policy = LocalTurnPolicy(
-            self.agent,
-            agent_runner,
-            self.config,
-            emit_output=self._on_app_output,
-            invalidate=self._app.invalidate,
-        )
-        policy_ref.append(turn_policy)
-        self._local_turn_policy = turn_policy
-        agent_runner.set_dispatch_hooks(
-            on_state_change=self._app.runtime_state_changed,
-            on_before_handle=turn_policy.before_handle,
-            on_after_handle=turn_policy.after_handle,
-            on_notification=lambda notification: (
-                turn_policy.on_notification(notification),
-                self._app.runtime_notification_received(),
-            ),
-            dispatcher_exit=DispatcherExit,
-            on_cancelled=self._app.runtime_cancelled,
-        )
         bind_app = getattr(self.frontend, "bind_app", None)
         if callable(bind_app):
             bind_app(self._app)
-        # The composition root—not the renderer—owns host execution. Commands
-        # receive the concrete runner dispatchers directly.
-        self._handler._agent_run_async = agent_runner.run_async
-        for cmd in self.registry.commands():
-            cmd._agent_run = agent_runner.run
-            cmd._agent_run_async = agent_runner.run_async
-        # Wire the user-bar render + SessionUserMessage log on the channel's
-        # on_get hook so the echo fires when the dispatcher (or agent
-        # code mid-turn) actually dequeues the message — symmetric across
-        # both consumer paths, which is why the hook lives on the queue
-        # and not on the dispatcher loop. self.agent is typed as Agent;
-        # the queue is on BaseTUIAgent. getattr matches the existing
-        # convention in tui_application.py for the same lookup.
-        if agent_runner is not None:
+
+        def _ensure_agent_runner():
+            nonlocal agent_runner
+            if agent_runner is not None:
+                return agent_runner
+            if self.agent is None:
+                raise RuntimeError("Cannot attach TUI runtime before agent bootstrap completes")
+            from nooa_cli.interactive import LocalAgentRunner
+
+            agent_runner = LocalAgentRunner(
+                self.agent,
+                emit_text=_emit_from_agent_runner,
+                agent_id=f"local-{id(self.agent):x}",
+                bind_callbacks=False,
+            )
+            self._local_agent_runner = agent_runner
+            return agent_runner
+
+        def _attach_agent_runtime() -> None:
+            runner = _ensure_agent_runner()
+            if self._app is None:
+                raise RuntimeError("Cannot attach TUI runtime before app construction")
+
+            from .agent_event_renderer import AgentEventRenderer
+            from .local_turn_policy import LocalTurnPolicy
+
+            reflection_ref[0] = getattr(self.agent, "_tui_reflection_runner", None)
+            turn_policy = LocalTurnPolicy(
+                self.agent,
+                runner,
+                self.config,
+                emit_output=self._on_app_output,
+                invalidate=self._app.invalidate,
+            )
+            policy_ref.append(turn_policy)
+            self._local_turn_policy = turn_policy
+            runner.set_dispatch_hooks(
+                on_state_change=self._app.runtime_state_changed,
+                on_before_handle=turn_policy.before_handle,
+                on_after_handle=turn_policy.after_handle,
+                on_notification=lambda notification: (
+                    turn_policy.on_notification(notification),
+                    self._app.runtime_notification_received(),
+                ),
+                dispatcher_exit=DispatcherExit,
+                on_cancelled=self._app.runtime_cancelled,
+            )
+            # The composition root owns host execution. Commands receive the
+            # concrete runner dispatchers directly.
+            self._handler._agent_run_async = runner.run_async
+            for cmd in self.registry.commands():
+                cmd._agent_run = runner.run
+                cmd._agent_run_async = runner.run_async
 
             def _on_user_message_hook(text: str) -> None:
                 generation = self._session_generation
@@ -699,7 +802,19 @@ class Session:
                         )
                     )
 
-            agent_runner.set_user_message_accepted_callback(_on_user_message_hook)
+            runner.set_user_message_accepted_callback(_on_user_message_hook)
+            self._renderer = AgentEventRenderer(
+                agent=self.agent,
+                emit_text=self._emit_text,
+                show_python=lambda: self.show_python,
+                show_diffs=lambda: self.show_diffs,
+                pending_code=self._pending_code,
+                colors=self._colors,
+            )
+            runner.bind()
+            runner.activate(asyncio.get_running_loop())
+            self._renderer.attach()
+            self._app.agent = runner
 
         # Swap the frontend's Rich Console for one that writes through
         # our block queue, so slash-command output (e.g. /help tables)
@@ -728,14 +843,6 @@ class Session:
                 await self.frontend.render(output)
             self._initial_outputs.clear()
 
-        self._renderer = AgentEventRenderer(
-            agent=self.agent,
-            emit_text=self._emit_text,
-            show_python=lambda: self.show_python,
-            show_diffs=lambda: self.show_diffs,
-            pending_code=self._pending_code,
-            colors=self._colors,
-        )
         # Replace Python's default asyncio exception handler with one
         # that surfaces every swallowed task exception into the TUI.
         # Without this, any coroutine we schedule (spinner, commands,
@@ -748,10 +855,59 @@ class Session:
         # Subscribe inside the try so any exception between attach and
         # ``app.run_async`` completion still fires ``renderer.detach``
         # in the finally.
+        app_task: asyncio.Task[None] | None = None
         try:
-            agent_runner.bind()
-            agent_runner.activate(asyncio.get_running_loop())
-            self._renderer.attach()
+            deferred_bootstrap = getattr(self, "_deferred_bootstrap", None)
+            if deferred_bootstrap is not None:
+                app_task = asyncio.create_task(self._app.run_async())
+                # Let TUIApplication capture its owner loop before arming the
+                # startup status. Otherwise _ensure_spinner_task() sees no
+                # running UI loop and the startup indicator is a
+                # static first frame until later bootstrap statuses replace it.
+                await asyncio.sleep(0)
+                self._app.set_llm_probe_status(_DEFERRED_STARTUP_STATUS)
+                await asyncio.sleep(0)
+                try:
+                    result = await asyncio.to_thread(_run_coro_in_thread, deferred_bootstrap)
+                except Exception as exc:
+                    self._app.set_llm_probe_status("")
+                    await self.frontend.render(
+                        TextOutput(f"Failed to start TUI agent: {exc}", "error")
+                    )
+                    await app_task
+                    return
+
+                self._app.set_llm_probe_status("")
+                self.agent = result.agent
+                self.config = result.config
+                self._session_manager = result.session_manager
+                if app_task.done():
+                    return
+
+                from .bootstrap import build_initial_outputs, build_registry
+                from .commands import CommandHandler
+                from .toolbar import ToolbarRegistry
+
+                self._initial_outputs.extend(
+                    build_initial_outputs(
+                        result,
+                        getattr(self, "_deferred_splash_outputs", []),
+                        continue_last=getattr(self, "_deferred_continue_last", False),
+                    )
+                )
+                self.registry = build_registry(result, self.frontend)
+                self._handler = CommandHandler(registry=self.registry, frontend=self.frontend)
+                self._toolbar = ToolbarRegistry()
+                init_input = getattr(self.frontend, "init_input", None)
+                if callable(init_input):
+                    init_input(self.registry)
+                self._app.set_completer(SlashCommandCompleter(self.registry))
+                for output in self._initial_outputs:
+                    await self.frontend.render(output)
+                self._initial_outputs.clear()
+
+            if getattr(self, "_renderer", None) is None:
+                _attach_agent_runtime()
             # Event-driven activity tracking: LLMCallStart/LLMCallEnd "on"
             # hooks feed get_activity() (and /activity) without inferring
             # model-wait state from cell boundaries.
@@ -769,7 +925,10 @@ class Session:
                 if asyncio.iscoroutine(auto_connect_result):
                     self._fire_and_forget(auto_connect_result)
             self._start_llm_health_check()
-            await self._app.run_async()
+            if app_task is None:
+                await self._app.run_async()
+            else:
+                await app_task
         except (KeyboardInterrupt, EOFError):
             await self.frontend.render(
                 TextOutput("Interrupted by the user. Exiting TUI...", "warning")
@@ -795,8 +954,12 @@ class Session:
 
             # Order matters: detach presentation before lifecycle awaits, then
             # stop producers before releasing persistence and terminal state.
-            await _teardown_phase("renderer detach", self._renderer.detach)
-            await _teardown_phase("agent observation close", self._app.close_agent_observation)
+            renderer = getattr(self, "_renderer", None)
+            if renderer is not None:
+                await _teardown_phase("renderer detach", renderer.detach)
+            app = getattr(self, "_app", None)
+            if app is not None:
+                await _teardown_phase("agent observation close", app.close_agent_observation)
 
             if self._unsub_activity is not None:
                 unsubscribe = self._unsub_activity
@@ -806,7 +969,8 @@ class Session:
             await _teardown_phase("turn-policy shutdown", _shutdown_turn_policy)
             # Idempotent and essential when renderer observation or runner
             # activation failed before the application entered its own guard.
-            await _teardown_phase("agent runner shutdown", agent_runner.shutdown)
+            if agent_runner is not None:
+                await _teardown_phase("agent runner shutdown", agent_runner.shutdown)
             await _teardown_phase("background task cancellation", self._cancel_background_tasks)
 
             if self._bang_shell is not None:
@@ -823,7 +987,7 @@ class Session:
 
                     async def _save_snapshot() -> None:
                         app = getattr(self, "_app", None)
-                        if app is not None:
+                        if app is not None and agent_runner is not None:
                             await agent_runner.run_async(lambda: storage.save_snapshot(self.agent))
                         else:
                             storage.save_snapshot(self.agent)
@@ -1243,7 +1407,7 @@ class Session:
                     assert self._app is not None
                     _new = _swap_req.new_agent
                     await self._local_agent_runner.seed_and_swap(_new, _swap_req.seed_prompt)
-                    self._app.agent = _new
+                    self._app.agent = self._local_agent_runner
 
                 return _render_and_swap
 
@@ -1307,6 +1471,11 @@ class Session:
 
     def _session_label(self) -> str:
         """Render configured toolbar items on the rule above the input."""
+        if getattr(self, "_toolbar", None) is None:
+            model = _short_model_name(str(getattr(self.config.tui, "default_model", "")))
+            cwd = Path(getattr(self.config.agent, "working_dir", ".")).resolve().name
+            parts = [part for part in (model, cwd, "starting") if part]
+            return " · ".join(parts)
         from .toolbar import ToolbarContext
 
         model = self.config.tui.default_model
@@ -1729,3 +1898,34 @@ class Session:
             if str(self._bang_shell.cwd) != agent_cwd:
                 await self._bang_shell.run(f"cd {shlex.quote(agent_cwd)}")
         return self._bang_shell
+
+
+async def run_deferred_bootstrap(
+    *,
+    frontend: "Frontend",
+    config: "Config",
+    splash_outputs: list[Any] | None = None,
+    continue_last: bool = False,
+    resume_session_id: str | None = None,
+) -> None:
+    """Run the terminal app before constructing the default TUI agent."""
+    session = Session(
+        frontend=frontend,
+        agent=None,
+        config=config,
+        registry=None,
+        initial_outputs=list(splash_outputs or []),
+    )
+    session._deferred_continue_last = continue_last
+
+    async def _bootstrap() -> Any:
+        from .bootstrap import bootstrap
+
+        return await bootstrap(
+            config,
+            continue_last=continue_last,
+            resume_session_id=resume_session_id,
+        )
+
+    session._deferred_bootstrap = _bootstrap
+    await session.run()

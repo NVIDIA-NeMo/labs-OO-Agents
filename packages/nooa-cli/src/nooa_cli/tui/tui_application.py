@@ -2917,6 +2917,9 @@ class TUIApplication:
         resolved = self._resolve_composer_submission(text, mention_base=mention_base)
         if not resolved.strip():
             return False
+        if state is None and not text.startswith(("/", "!")):
+            self.emit_block("\x1b[33mNOOA is still booting; your message is still in the composer.\x1b[0m\n")
+            return True
         self._jump_fullscreen_to_tail()
         if not self._history or self._history[-1] != text:
             self._history.append(text)
@@ -3893,6 +3896,32 @@ class TUIApplication:
     @property
     def is_running(self) -> bool:
         return self._app.is_running
+
+    @property
+    def agent(self) -> InteractiveAgent | None:
+        """Currently observed interactive agent boundary, if any."""
+        return self._agent
+
+    @agent.setter
+    def agent(self, agent: InteractiveAgent | None) -> None:
+        """Replace the observed agent after the application has started."""
+        self._agent = agent
+        if agent is None:
+            self.close_agent_observation()
+            return
+        if self._agent_controller.state is None:
+            self.observe_agent()
+        else:
+            self._agent_controller.observe(agent)
+        self.invalidate()
+
+    def set_completer(self, completer: Completer) -> None:
+        """Install the real command/path completer after deferred bootstrap."""
+        self._completer = completer
+        self.input_buffer.completer = completer
+        if self.input_buffer.complete_state is not None:
+            self.input_buffer.cancel_completion()
+        self.invalidate()
 
     def close_agent_observation(self) -> None:
         """Stop presentation delivery without owning or stopping the agent."""

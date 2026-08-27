@@ -4,8 +4,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call
@@ -36,6 +39,383 @@ def test_tui_package_import_does_not_import_agent_stack() -> None:
         text=True,
     )
     assert result.stdout.splitlines() == ["False", "False"]
+
+
+def test_interactive_state_exports_do_not_import_core_agent_stack() -> None:
+    code = (
+        "import sys\n"
+        "from nooa_cli.interactive import AgentLifecycle, AgentState\n"
+        "print(AgentLifecycle.IDLE.value)\n"
+        "print(AgentState.__name__)\n"
+        "print('nooa' in sys.modules)\n"
+        "print(any(name.startswith('nooa.') for name in sys.modules))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.splitlines() == ["idle", "AgentState", "False", "False"]
+
+
+def test_config_load_does_not_import_core_agent_stack(tmp_path) -> None:
+    code = (
+        "import sys\n"
+        "from nooa_cli.tui.config import Config\n"
+        "Config.load(no_splash=True)\n"
+        "print('nooa' in sys.modules)\n"
+        "print(any(name.startswith('nooa.') for name in sys.modules))\n"
+    )
+    env = os.environ | {
+        "NEMO_OO_PROJECT_DIR": str(tmp_path / "project" / ".nooa"),
+        "NEMO_OO_USER_DIR": str(tmp_path / "user"),
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+    assert result.stdout.splitlines() == ["False", "False"]
+
+
+def test_config_load_uses_cwd_project_settings_without_core_import(tmp_path) -> None:
+    project_dir = tmp_path / ".nooa"
+    project_dir.mkdir()
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
+    (project_dir / "settings.yaml").write_text("tui:\n  default_model: cwd-model\n")
+    code = (
+        "import sys\n"
+        "from nooa_cli.tui.config import Config\n"
+        "cfg = Config.load(no_splash=True)\n"
+        "print(cfg.tui.default_model)\n"
+        "print('nooa' in sys.modules)\n"
+    )
+    env = os.environ.copy()
+    for name in ("NEMO_OO_PROJECT_DIR", "NEMO_OO_USER_DIR", "NEMO_OO_SETTINGS"):
+        env.pop(name, None)
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        text=True,
+    )
+    assert result.stdout.splitlines() == ["cwd-model", "False"]
+
+
+def test_frontend_import_does_not_import_core_agent_stack() -> None:
+    code = (
+        "import sys\n"
+        "import nooa_cli.tui.frontend\n"
+        "print('nooa' in sys.modules)\n"
+        "print(any(name.startswith('nooa.') for name in sys.modules))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.splitlines() == ["False", "False"]
+
+
+@pytest.mark.asyncio
+async def test_deferred_bootstrap_starts_app_before_agent_construction(monkeypatch):
+    import nooa_cli.interactive as interactive_module
+    import nooa_cli.tui.bootstrap as bootstrap_module
+    import nooa_cli.tui.tui_application as app_module
+    from nooa_cli.tui.config import Config, DisplayMode
+    from nooa_cli.tui.session import Session
+
+    events: list[str] = []
+    app_started = asyncio.Event()
+    agent_attached = asyncio.Event()
+    loop_progressed_during_bootstrap = asyncio.Event()
+
+    class FakeFrontend:
+        console = None
+
+        async def render(self, output) -> None:
+            events.append(f"render:{getattr(output, 'content', type(output).__name__)}")
+
+        def close(self) -> None:
+            events.append("frontend.close")
+
+    class FakeApp:
+        display_mode = DisplayMode.FULLSCREEN
+
+        def __init__(self, **_kwargs) -> None:
+            self._running = False
+            events.append("app.init")
+
+        @property
+        def is_running(self) -> bool:
+            return self._running
+
+        async def run_async(self) -> None:
+            self._running = True
+            events.append("app.run_async")
+            app_started.set()
+            await agent_attached.wait()
+            self._running = False
+
+        def set_llm_probe_status(self, text: str) -> None:
+            events.append(f"status:{text}")
+
+        def set_completer(self, _completer) -> None:
+            events.append("completer.set")
+
+        def invalidate(self) -> None:
+            pass
+
+        def close_agent_observation(self) -> None:
+            events.append("app.close_agent_observation")
+
+        def runtime_state_changed(self) -> None:
+            pass
+
+        def runtime_notification_received(self) -> None:
+            pass
+
+        def runtime_cancelled(self) -> None:
+            pass
+
+        @property
+        def agent(self):
+            return None
+
+        @agent.setter
+        def agent(self, _agent) -> None:
+            events.append("agent.attached")
+            agent_attached.set()
+
+    class FakeRunner:
+        def __init__(self, *_args, **_kwargs) -> None:
+            events.append("runner.init")
+
+        def set_dispatch_hooks(self, **_kwargs) -> None:
+            pass
+
+        def set_user_message_accepted_callback(self, _callback) -> None:
+            pass
+
+        def bind(self) -> None:
+            events.append("runner.bind")
+
+        def activate(self, _loop) -> None:
+            events.append("runner.activate")
+
+        async def shutdown(self) -> None:
+            events.append("runner.shutdown")
+
+        def run(self, fn):
+            return fn()
+
+        async def run_async(self, fn):
+            result = fn()
+            if hasattr(result, "__await__"):
+                return await result
+            return result
+
+    class FakePolicy:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def before_handle(self, _agent) -> None:
+            pass
+
+        async def after_handle(self, _agent, _result) -> None:
+            pass
+
+        def on_notification(self, _notification) -> None:
+            pass
+
+        def invalidate_keep_going(self) -> None:
+            pass
+
+        async def shutdown(self) -> None:
+            events.append("policy.shutdown")
+
+    class FakeRenderer:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def attach(self) -> None:
+            events.append("renderer.attach")
+
+        def detach(self) -> None:
+            events.append("renderer.detach")
+
+    class FakeRegistry:
+        blocking_llm_health = None
+        startup_info = SimpleNamespace(llm_ready=True, llm_status="ready")
+
+        def commands(self):
+            return []
+
+    cfg = Config()
+    result = SimpleNamespace(
+        agent=SimpleNamespace(event_manager=None),
+        config=cfg,
+        session_manager=None,
+        resumed=False,
+        restored=False,
+        session_id=None,
+        messages=[],
+        tracing_enabled=False,
+        blocking_llm_health=None,
+        startup_info=None,
+    )
+
+    async def deferred_bootstrap():
+        assert app_started.is_set()
+        time.sleep(0.05)
+        assert loop_progressed_during_bootstrap.is_set()
+        events.append("bootstrap")
+        return result
+
+    async def mark_loop_progress() -> None:
+        await asyncio.sleep(0.01)
+        events.append("loop.tick")
+        loop_progressed_during_bootstrap.set()
+
+    monkeypatch.setattr(app_module, "TUIApplication", FakeApp)
+    monkeypatch.setattr(interactive_module, "LocalAgentRunner", FakeRunner)
+    monkeypatch.setattr("nooa_cli.tui.local_turn_policy.LocalTurnPolicy", FakePolicy)
+    monkeypatch.setattr("nooa_cli.tui.agent_event_renderer.AgentEventRenderer", FakeRenderer)
+    monkeypatch.setattr(bootstrap_module, "build_initial_outputs", lambda *_a, **_k: [])
+    monkeypatch.setattr(bootstrap_module, "build_registry", lambda *_a, **_k: FakeRegistry())
+
+    session = Session(
+        frontend=FakeFrontend(),
+        agent=None,
+        config=cfg,
+        registry=None,
+        initial_outputs=[],
+    )
+    session._deferred_bootstrap = deferred_bootstrap
+    session._dump_exit_diagnostics = lambda: None
+    session._restore_terminal = lambda: None
+    session._print_exit_message = lambda: None
+
+    asyncio.create_task(mark_loop_progress())
+    await session.run()
+
+    assert events.index("app.run_async") < events.index("bootstrap")
+    assert events.index("app.run_async") < events.index("status:booting the NOOA runtime...")
+    assert events.index("status:booting the NOOA runtime...") < events.index("bootstrap")
+    assert events.index("app.run_async") < events.index("loop.tick") < events.index("bootstrap")
+    assert events.index("bootstrap") < events.index("runner.init")
+    assert events.index("runner.bind") < events.index("agent.attached")
+
+
+@pytest.mark.asyncio
+async def test_deferred_bootstrap_exit_closes_bootstrapped_session(monkeypatch):
+    import nooa_cli.tui.tui_application as app_module
+    from nooa_cli.tui.config import Config, DisplayMode
+    from nooa_cli.tui.session import Session
+
+    class FakeFrontend:
+        console = None
+
+        def close(self) -> None:
+            pass
+
+        async def render(self, _output) -> None:
+            pass
+
+    class FakeApp:
+        display_mode = DisplayMode.FULLSCREEN
+
+        def __init__(self, **_kwargs) -> None:
+            self._running = False
+
+        @property
+        def is_running(self) -> bool:
+            return self._running
+
+        async def run_async(self) -> None:
+            self._running = True
+            await asyncio.sleep(0)
+            self._running = False
+
+        def set_llm_probe_status(self, _text: str) -> None:
+            pass
+
+        def close_agent_observation(self) -> None:
+            pass
+
+        def invalidate(self) -> None:
+            pass
+
+    session_manager = Mock()
+    result = SimpleNamespace(
+        agent=SimpleNamespace(),
+        config=Config(),
+        session_manager=session_manager,
+    )
+
+    async def deferred_bootstrap():
+        await asyncio.sleep(0.01)
+        return result
+
+    monkeypatch.setattr(app_module, "TUIApplication", FakeApp)
+
+    session = Session(
+        frontend=FakeFrontend(),
+        agent=None,
+        config=Config(),
+        registry=None,
+        initial_outputs=[],
+    )
+    session._deferred_bootstrap = deferred_bootstrap
+    session._dump_exit_diagnostics = lambda: None
+    session._restore_terminal = lambda: None
+    session._print_exit_message = lambda: None
+
+    await session.run()
+
+    assert session.agent is result.agent
+    session_manager.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_deferred_startup_status_animates_while_active():
+    from .tui_app_harness import TUIHarness
+
+    async with TUIHarness() as h:
+        h.app.set_llm_probe_status("booting the NOOA runtime...")
+        await h.wait_for(lambda: "booting the NOOA runtime..." in h.app.status_text())
+        first = h.app.status_text()
+
+        await h.wait_for(
+            lambda: "booting the NOOA runtime..." in h.app.status_text()
+            and h.app.status_text() != first
+        )
+
+
+def test_plain_message_before_agent_ready_stays_in_composer():
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    app = TUIApplication.__new__(TUIApplication)
+    app._agent_controller = SimpleNamespace(state=None)
+    app._resolve_composer_submission = lambda text, *, mention_base=None: text
+    app._jump_fullscreen_to_tail = Mock()
+    app._history = []
+    app._history_cursor = None
+    app._commands_dispatched = []
+    emitted: list[str] = []
+    app.emit_block = emitted.append
+
+    keep_text = TUIApplication._accept_handler(app, SimpleNamespace(text="hello"))
+
+    assert keep_text is True
+    assert app._history == []
+    assert "NOOA is still booting" in emitted[0]
 
 
 @pytest.mark.asyncio

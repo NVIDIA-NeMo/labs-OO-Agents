@@ -1,8 +1,5 @@
 """Python-native interactive agent API."""
 
-from .dispatcher import InteractiveSessionDispatcher
-from .local_agent import LocalAgentRunner
-from .runtime import AgentRuntime, JobSnapshot
 from .state import (
     AgentJobState,
     AgentJobSummary,
@@ -14,6 +11,13 @@ from .state import (
     Observation,
     UIScheduler,
 )
+
+_LAZY_EXPORTS = {
+    "AgentRuntime": (".runtime", "AgentRuntime"),
+    "InteractiveSessionDispatcher": (".dispatcher", "InteractiveSessionDispatcher"),
+    "JobSnapshot": (".runtime", "JobSnapshot"),
+    "LocalAgentRunner": (".local_agent", "LocalAgentRunner"),
+}
 
 __all__ = [
     "AgentJobState",
@@ -30,3 +34,14 @@ __all__ = [
     "Observation",
     "UIScheduler",
 ]
+
+
+def __getattr__(name: str):
+    if name not in _LAZY_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+
+    module_name, attr_name = _LAZY_EXPORTS[name]
+    value = getattr(importlib.import_module(module_name, __name__), attr_name)
+    globals()[name] = value
+    return value

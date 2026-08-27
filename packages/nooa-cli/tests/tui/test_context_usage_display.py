@@ -102,14 +102,21 @@ def test_tui_agent_installs_context_usage_dynamic_block():
     # minimum-viable config.
     from pathlib import Path
 
-    from nooa_cli.tui.agent import TUIAgent
-    from nooa_cli.tui.config import AgentConfig, SummarizationConfig
+    from nooa_cli.tui.agent import TUIAgent, _to_core_summarization_config
+    from nooa_cli.tui.config import AgentConfig, LazySummarizationConfig
 
+    from nooa.interactive import SummarizationConfig
     from nooa.unifiedllm import FakeLLMClient
+
+    lazy_summarization = LazySummarizationConfig(policy="none", preserve_recent=3)
+    core_summarization = _to_core_summarization_config(lazy_summarization)
+    assert isinstance(lazy_summarization, LazySummarizationConfig)
+    assert isinstance(core_summarization, SummarizationConfig)
+    assert core_summarization.preserve_recent == 3
 
     agent_cfg = AgentConfig(
         working_dir=Path(os.getcwd()),
-        summarization=SummarizationConfig(policy="none"),
+        summarization=lazy_summarization,
     )
     agent = TUIAgent(llm=FakeLLMClient(), config=agent_cfg)
 

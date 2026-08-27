@@ -5,7 +5,7 @@
 This is the TUI half of the project's "one config story": TUI settings
 live in ``settings.yaml`` next to ``llm_config.yaml`` and ``secrets.yaml``,
 share the same directories, and are discovered through the same
-:func:`nooa.layered_config.load_layered_yaml` helper.
+layered YAML rules used by core NOOA config files.
 
 The file is a direct serialisation of the :class:`Config` model tree
 (``tui:`` / ``agent:`` sections, Pydantic field names), so it
@@ -24,14 +24,17 @@ CLI flags are layered on top of this by :meth:`Config.load`.
 .. note::
    This module lives in the CLI package rather than core because it
    binds to :class:`Config`/:class:`TUIConfig`, which are defined here;
-   core cannot import them without a circular dependency. The *generic*
-   layered-loading machinery is in
-   :mod:`nooa.layered_config`.
+   core cannot import them without a circular dependency. It intentionally
+   keeps a small local copy of the path and YAML merge helpers so
+   ``nooa tui`` can load display settings before importing heavy core
+   modules such as the LLM registry.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+from collections.abc import Iterable, Mapping
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -90,9 +93,7 @@ def load_settings(cfg: Config) -> Config:
     ``null`` deletes) and sets matching config fields. Unknown keys
     are warned about and skipped so a stale file never crashes startup.
     """
-    from nooa.layered_config import load_layered_yaml
-
-    data = load_layered_yaml(SETTINGS_FILENAME, SETTINGS_ENV_VAR)
+    data = _load_layered_yaml(SETTINGS_FILENAME, SETTINGS_ENV_VAR)
     for section in ("tui", "agent"):
         sect = data.get(section)
         if isinstance(sect, dict):
@@ -165,20 +166,151 @@ def dump_settings(cfg: Config) -> str:
 
 def settings_present() -> bool:
     """True if a ``settings.yaml`` exists in any layer (user/project/env)."""
-    from nooa.layered_config import layered_paths
-
-    return bool(layered_paths(SETTINGS_FILENAME, SETTINGS_ENV_VAR))
+    return bool(_layered_paths(SETTINGS_FILENAME, SETTINGS_ENV_VAR))
 
 
 def settings_path(scope: Literal["project", "user"] = "project") -> Path:
     """Return the writable ``settings.yaml`` path for *scope*."""
-    from nooa.paths import get_project_dir, get_user_dir
-
     if scope == "project":
-        return get_project_dir(SETTINGS_FILENAME)
+        return _get_project_dir(SETTINGS_FILENAME)
     if scope == "user":
-        return get_user_dir(SETTINGS_FILENAME)
+        return _get_user_dir(SETTINGS_FILENAME)
     raise ValueError(f"Unknown settings scope: {scope!r}")
+
+
+def _find_project_root() -> Path:
+    """Find the active project root without importing core nooa."""
+    from nooa_cli._common import find_project_root
+
+    return find_project_root()
+
+
+def _get_user_dir(*parts: str) -> Path:
+    override = os.environ.get("NEMO_OO_USER_DIR")
+    if override:
+        base = Path(override)
+    else:
+        xdg = os.environ.get("XDG_CONFIG_HOME")
+        config_home = Path(xdg) if xdg else Path.home() / ".config"
+        base = config_home / "nooa"
+    return base.joinpath(*parts) if parts else base
+
+
+def _get_project_dir(*parts: str) -> Path:
+    base_str = os.environ.get("NEMO_OO_PROJECT_DIR")
+    base = Path(base_str) if base_str else _find_project_root() / ".nooa"
+    return base.joinpath(*parts) if parts else base
+
+
+def _resolved_if_exists(path: Path) -> Path | None:
+    try:
+        if path.exists():
+            return path.resolve()
+    except OSError:
+        return None
+    return None
+
+
+def _env_paths(env_var: str) -> list[tuple[Path, Path | None]]:
+    raw = os.environ.get(env_var, "").strip()
+    if not raw:
+        return []
+    out: list[tuple[Path, Path | None]] = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        path = Path(entry).expanduser()
+        out.append((path, _resolved_if_exists(path)))
+    return out
+
+
+def _layered_paths(
+    filename: str,
+    env_var: str | None = None,
+    *,
+    prepend: Iterable[Path] = (),
+    project_dir: Path | None = None,
+) -> list[Path]:
+    """Return existing config paths in the same priority order as core NOOA."""
+    chain: list[Path] = []
+    seen: dict[Path, int] = {}
+
+    def _push(resolved: Path) -> None:
+        if resolved in seen:
+            chain.pop(seen[resolved])
+            for path, index in list(seen.items()):
+                if index > seen[resolved]:
+                    seen[path] = index - 1
+            seen.pop(resolved)
+        seen[resolved] = len(chain)
+        chain.append(resolved)
+
+    for path in prepend:
+        resolved = _resolved_if_exists(path)
+        if resolved is not None:
+            _push(resolved)
+
+    user = _resolved_if_exists(_get_user_dir(filename))
+    if user is not None:
+        _push(user)
+
+    project_path = project_dir / filename if project_dir is not None else _get_project_dir(filename)
+    project = _resolved_if_exists(project_path)
+    if project is not None:
+        _push(project)
+
+    if env_var is not None:
+        for raw, resolved in _env_paths(env_var):
+            if resolved is None:
+                logger.warning("%s path does not exist: %s", env_var, raw)
+                continue
+            _push(resolved)
+
+    return chain
+
+
+def _deep_merge(base: dict[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
+    for key, value in overlay.items():
+        if value is None:
+            base.pop(key, None)
+        elif isinstance(value, Mapping) and isinstance(base.get(key), dict):
+            base[key] = _deep_merge(base[key], value)
+        elif isinstance(value, Mapping):
+            base[key] = _deep_merge({}, value)
+        else:
+            base[key] = value
+    return base
+
+
+def _load_layered_yaml(
+    filename: str,
+    env_var: str | None = None,
+    *,
+    prepend: Iterable[Path] = (),
+    project_dir: Path | None = None,
+) -> dict[str, Any]:
+    import yaml
+
+    merged: dict[str, Any] = {}
+    for path in _layered_paths(
+        filename,
+        env_var,
+        prepend=prepend,
+        project_dir=project_dir,
+    ):
+        try:
+            data = yaml.safe_load(path.read_text())
+        except (OSError, UnicodeError, yaml.YAMLError) as exc:
+            logger.warning("Failed to load config file %s: %s", path, exc)
+            continue
+        if data is None:
+            continue
+        if not isinstance(data, dict):
+            logger.warning("Config file %s is not a YAML mapping; skipping", path)
+            continue
+        merged = _deep_merge(merged, data)
+    return merged
 
 
 def write_settings_updates(
