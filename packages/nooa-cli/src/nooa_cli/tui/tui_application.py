@@ -2452,12 +2452,6 @@ class TUIApplication:
             picker = self._resume_picker
             if picker is None:
                 return
-            if picker.active_control == "search":
-                picker.activate_control("list")
-                return
-            if picker.active_control == "filters":
-                picker.change_active_control()
-                return
             if picker.active_control in {"list", "preview"}:
                 selected = picker.selected_id()
                 if selected is not None:
@@ -2502,10 +2496,18 @@ class TUIApplication:
             picker = self._resume_picker
             if picker is None:
                 return
-            if picker.active_control == "search":
+            if picker.active_control == "list":
                 picker.buffer.insert_text(" ")
-            elif picker.active_control == "filters":
-                picker.change_active_control()
+
+        @kb.add("f5", filter=resume_picker_active, eager=True)
+        def _(event):
+            if self._resume_picker is not None:
+                self._resume_picker.cycle_filter()
+
+        @kb.add("f6", filter=resume_picker_active, eager=True)
+        def _(event):
+            if self._resume_picker is not None:
+                self._resume_picker.toggle_sort()
 
         @kb.add("pageup", filter=resume_picker_active, eager=True)
         def _(event):
