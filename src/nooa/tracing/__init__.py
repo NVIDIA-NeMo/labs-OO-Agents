@@ -211,6 +211,7 @@ def enable_tracing(
     *,
     experiment: str | None = None,
     extra_resource_attrs: dict[str, Any] | None = None,
+    quiet: bool = False,
 ) -> None:
     """Configure tracing with one or more exporters.
 
@@ -239,6 +240,9 @@ def enable_tracing(
             resource attribute.  Defaults to ``TRACE_EXPERIMENT`` env var.
         extra_resource_attrs: Optional dict of additional resource attributes
             stored with traces (e.g. ``{"eval.model": "gpt-4o"}``).
+        quiet: Suppress the stdout/stderr trace-target report.  Hosts that own
+            the terminal (the TUI) surface the same information in their own
+            chrome; a raw ``print`` from here would land in their scrollback.
     """
     global _enabled, _provider, _probe_failed, _hooks
 
@@ -249,14 +253,15 @@ def enable_tracing(
             return
         if _probe_failed:
             return
-        exporters = _default_exporters()
+        exporters = _default_exporters(quiet=quiet)
         if exporters is None:
             return
 
     # --- Already enabled: replace exporters on existing provider -----------
     if _enabled and _provider is not None:
         _replace_exporters(_provider, exporters)
-        _print_trace_target(exporters, experiment or os.getenv("TRACE_EXPERIMENT"))
+        if not quiet:
+            _print_trace_target(exporters, experiment or os.getenv("TRACE_EXPERIMENT"))
         # Re-register hooks in the current async context.
         # Hooks are stored in a ContextVar; loop.run_until_complete() creates a fresh
         # Task context from the calling thread each time, so hooks set in a previous
@@ -337,7 +342,8 @@ def enable_tracing(
     _instrument_litellm(tracer_provider)
 
     # Print trace target
-    _print_trace_target(exporters, experiment)
+    if not quiet:
+        _print_trace_target(exporters, experiment)
 
     _enabled = True
 
@@ -411,10 +417,11 @@ def _replace_exporters(provider: TracerProvider, exporters: list[SpanExporter]) 
     _add_exporters(provider, exporters)
 
 
-def _default_exporters() -> list[SpanExporter] | None:
+def _default_exporters(*, quiet: bool = False) -> list[SpanExporter] | None:
     """Select default exporters: OTLP if viewer is running, else silently disable.
 
-    When ``OTLP_ENDPOINT`` is explicitly set the user opted in — warn on failure.
+    When ``OTLP_ENDPOINT`` is explicitly set the user opted in — warn on failure
+    unless *quiet* (the caller owns the terminal and reports failures itself).
     When using the default endpoint, stay silent so tracing is invisible until
     ``nooa start-dev`` is running.
     """
@@ -428,7 +435,7 @@ def _default_exporters() -> list[SpanExporter] | None:
 
     _probe_failed = True
 
-    if explicit_endpoint is not None:
+    if explicit_endpoint is not None and not quiet:
         print(
             f"OTLP_ENDPOINT ({endpoint}) is not reachable — tracing disabled.",
             file=sys.stderr,

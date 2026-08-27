@@ -19,10 +19,20 @@ Shell completion:
     eval "$(_NOOA_COMPLETE=zsh_source nooa)"     # zsh
 """
 
+import logging as _logging
+
 import click
 
 from .commands import discover_commands
 from .completion import completion
+
+# Library logging: mirror the NullHandler that ``nooa`` installs on its own
+# root logger. Without it, ``logging.lastResort`` prints every WARNING from
+# any ``nooa_cli.*`` logger straight to stderr with no level or logger name —
+# e.g. RepoTools' tree-sitter fallback notice, which the TUI then captures
+# into its scrollback. Callers that want these records configure a handler
+# (``nooa.enable_logging()``) explicitly.
+_logging.getLogger(__name__).addHandler(_logging.NullHandler())
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 

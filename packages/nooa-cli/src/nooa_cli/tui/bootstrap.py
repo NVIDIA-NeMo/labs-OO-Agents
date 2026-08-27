@@ -253,6 +253,10 @@ def _enable_tracing(config: Config, messages: list[Output]):
         from nooa.paths import find_project_root, get_project_dir
         from nooa.tracing import enable_tracing, exporters, set_session
 
+        # quiet=True: bootstrap now runs *after* the app paints and installs
+        # the stray-stream forwarder, so enable_tracing's raw print would be
+        # captured into the transcript. StartupInfo already reports tracing
+        # state and trace_dir, so the line is redundant noise.
         trace_dir = config.tui.trace_dir
         if trace_dir is not None:
             if str(trace_dir) == ":project:":
@@ -260,9 +264,12 @@ def _enable_tracing(config: Config, messages: list[Output]):
             elif not trace_dir.is_absolute():
                 trace_dir = find_project_root() / trace_dir
             trace_dir.mkdir(parents=True, exist_ok=True)
-            enable_tracing(exporters=[exporters.jsonl(trace_dir), exporters.journal()])
+            enable_tracing(
+                exporters=[exporters.jsonl(trace_dir), exporters.journal()],
+                quiet=True,
+            )
         else:
-            enable_tracing()
+            enable_tracing(quiet=True)
         return True, set_session
     except ImportError:
         messages.append(
