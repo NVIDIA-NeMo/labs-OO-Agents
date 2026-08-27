@@ -1825,7 +1825,9 @@ class TUIApplication:
         try:
             rows = await asyncio.to_thread(load_rows)
             self._cancel_fullscreen_drag()
-            self._resume_picker = ResumePicker(rows, self._app)
+            self._resume_picker = ResumePicker(
+                rows, self._app, selection_copy_callback=self._start_fullscreen_selection_copy
+            )
             self._resume_picker.focus_initial()
             self._app.invalidate()
             return await done
@@ -2442,7 +2444,14 @@ class TUIApplication:
         )
         subview_inactive = ~subview_active & ~resume_picker_active
 
-        @kb.add("escape", filter=resume_picker_active, eager=True)
+        @kb.add("escape", "backspace", filter=resume_picker_active, eager=True)
+        def _(event):
+            picker = self._resume_picker
+            if picker is not None and picker.active_control == "list":
+                count = picker.buffer.document.find_previous_word_beginning()
+                picker.buffer.delete_before_cursor(count=abs(count or -1))
+
+        @kb.add("escape", filter=resume_picker_active)
         @kb.add("c-c", filter=resume_picker_active, eager=True)
         def _(event):
             self._finish_resume_picker(None)
@@ -2452,7 +2461,9 @@ class TUIApplication:
             picker = self._resume_picker
             if picker is None:
                 return
-            if picker.active_control in {"list", "preview"}:
+            if picker.active_control in {"filter", "sort"}:
+                picker.activate_selected_control()
+            else:
                 selected = picker.selected_id()
                 if selected is not None:
                     self._finish_resume_picker(selected)
@@ -2498,16 +2509,8 @@ class TUIApplication:
                 return
             if picker.active_control == "list":
                 picker.buffer.insert_text(" ")
-
-        @kb.add("f5", filter=resume_picker_active, eager=True)
-        def _(event):
-            if self._resume_picker is not None:
-                self._resume_picker.cycle_filter()
-
-        @kb.add("f6", filter=resume_picker_active, eager=True)
-        def _(event):
-            if self._resume_picker is not None:
-                self._resume_picker.toggle_sort()
+            elif picker.active_control in {"filter", "sort"}:
+                picker.activate_selected_control()
 
         @kb.add("pageup", filter=resume_picker_active, eager=True)
         def _(event):
