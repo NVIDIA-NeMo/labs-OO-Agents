@@ -2449,11 +2449,21 @@ class TUIApplication:
         @kb.add("escape", "backspace", filter=resume_picker_active, eager=True)
         def _(event):
             picker = self._resume_picker
-            if picker is not None and picker.active_control == "list":
+            if (
+                picker is not None
+                and picker.active_control == "list"
+                and picker.option_cursor is None
+            ):
                 count = picker.buffer.document.find_previous_word_beginning()
                 picker.buffer.delete_before_cursor(count=abs(count or -1))
 
         @kb.add("escape", filter=resume_picker_active)
+        def _(event):
+            picker = self._resume_picker
+            if picker is not None and picker.close_options():
+                return
+            self._finish_resume_picker(None)
+
         @kb.add("c-c", filter=resume_picker_active, eager=True)
         def _(event):
             self._finish_resume_picker(None)
@@ -2462,6 +2472,9 @@ class TUIApplication:
         def _(event):
             picker = self._resume_picker
             if picker is None:
+                return
+            if picker.option_cursor is not None:
+                picker.close_options()
                 return
             selected = picker.selected_id()
             if selected is not None:
@@ -2506,18 +2519,15 @@ class TUIApplication:
             picker = self._resume_picker
             if picker is None:
                 return
-            if picker.active_control == "list":
+            if picker.option_cursor is not None:
+                picker.change_option()
+            elif picker.active_control == "list":
                 picker.buffer.insert_text(" ")
-
-        @kb.add("escape", "f", filter=resume_picker_active, eager=True)
-        def _(event):
-            if self._resume_picker is not None:
-                self._resume_picker.cycle_filter()
 
         @kb.add("c-o", filter=resume_picker_active, eager=True)
         def _(event):
             if self._resume_picker is not None:
-                self._resume_picker.toggle_sort()
+                self._resume_picker.toggle_options()
 
         @kb.add("pageup", filter=resume_picker_active, eager=True)
         def _(event):
