@@ -976,6 +976,12 @@ class _ResizeReplayQueueItem:
     transcript_epoch: int
 
 
+@dataclass(frozen=True)
+class _NativeTranscriptReplayQueueItem:
+    transcript_blocks: tuple[TranscriptBlock, ...]
+    transcript_epoch: int
+
+
 @dataclass(frozen=True, slots=True)
 class _PasteAttachment:
     """Immutable payload represented by one private-use composer character."""
@@ -1295,7 +1301,12 @@ class TUIApplication:
         # direct run_in_terminal in _render_message, etc.) now funnels
         # through this one queue — no races.
         self._block_queue: (
-            asyncio.Queue[TranscriptBlock | _ResizeReplayQueueItem | _ClearTranscriptQueueItem]
+            asyncio.Queue[
+                TranscriptBlock
+                | _ResizeReplayQueueItem
+                | _NativeTranscriptReplayQueueItem
+                | _ClearTranscriptQueueItem
+            ]
             | None
         ) = None
         self._consumer_task: asyncio.Task | None = None
@@ -3550,8 +3561,29 @@ class TUIApplication:
             self._app.invalidate()
         elif changed:
             self._replace_output_buffer_blocks(native_replacements)
-            self.invalidate()
+            if not self._enqueue_native_transcript_replay():
+                self.invalidate()
         return changed
+
+    def _enqueue_native_transcript_replay(self) -> bool:
+        """Queue a native scrollback rewrite for refreshed replayable blocks."""
+        queue = self._block_queue
+        if (
+            not self.full_screen
+            or self._is_fullscreen
+            or queue is None
+            or not self._resize_replays_enabled
+            or self._active_subview is not None
+        ):
+            return False
+        self._prune_transcript_blocks_for_active_events()
+        queue.put_nowait(
+            _NativeTranscriptReplayQueueItem(
+                transcript_blocks=tuple(self._transcript_blocks),
+                transcript_epoch=self._transcript_epoch,
+            )
+        )
+        return True
 
     def _note_unseen_agent_message(self, block: TranscriptBlock) -> None:
         """Show a notice when agent prose arrives outside the anchored viewport."""
@@ -3827,6 +3859,8 @@ class TUIApplication:
                             out.flush()
 
                     await run_in_terminal(_write)
+                elif isinstance(item, _NativeTranscriptReplayQueueItem):
+                    await self._consume_native_transcript_replay(item)
                 elif isinstance(item, _ResizeReplayQueueItem):
                     await self._consume_resize_replay(item)
                 else:
@@ -4209,6 +4243,45 @@ class TUIApplication:
         from prompt_toolkit.application import run_in_terminal
 
         await run_in_terminal(lambda: self._clear_terminal_if_current(item))
+
+    async def _consume_native_transcript_replay(
+        self, item: _NativeTranscriptReplayQueueItem
+    ) -> None:
+        if (
+            not self._resize_replays_enabled
+            or item.transcript_epoch != self._transcript_epoch
+            or self._active_subview is not None
+            or self._app._running_in_terminal
+        ):
+            return
+        try:
+            self._app.run_atomic_native_replay(
+                lambda output: self._replay_native_transcript_if_current(item, output=output)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("Could not replay refreshed native transcript", exc_info=True)
+
+    def _replay_native_transcript_if_current(
+        self,
+        item: _NativeTranscriptReplayQueueItem,
+        *,
+        output: Any | None = None,
+    ) -> bool:
+        if (
+            not self._resize_replays_enabled
+            or self._active_subview is not None
+            or item.transcript_epoch != self._transcript_epoch
+        ):
+            return False
+        return self._replay_fullscreen_transcript(
+            item.transcript_blocks,
+            clear_even_if_empty=True,
+            output=output,
+            flush=False,
+            count_invalidation=False,
+        )
 
     def _clear_terminal_if_current(self, item: _ClearTranscriptQueueItem) -> bool:
         if not self._resize_replays_enabled or item.transcript_epoch != self._transcript_epoch:
