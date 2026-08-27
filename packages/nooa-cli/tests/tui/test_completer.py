@@ -20,9 +20,7 @@ def mock_registry():
     _completions = {
         "/help": "Show all commands",
         "/edit": "Edit a file",
-        "/session resume": "Resume a session",
-        "/session delete": "Delete a session",
-        "/session list": "List sessions",
+        "/session <new|resume|delete|export|rename>": "Manage sessions",
         "/show-python [status|on|off]": "Configure Python display",
         "/exit": "Exit",
     }
@@ -60,10 +58,43 @@ def test_slash_partial_filters(completer):
 
 def test_slash_session_partial(completer):
     items = completer.complete("/session ")
-    texts = [i.text for i in items]
-    assert "/session resume" in texts
-    assert "/session delete" in texts
-    assert "/session list" in texts
+    assert [item.text for item in items] == [
+        "/session new",
+        "/session resume",
+        "/session delete",
+        "/session export",
+        "/session rename",
+    ]
+
+
+def test_slash_session_subcommands_filter_partial(completer):
+    assert [item.text for item in completer.complete("/session re")] == [
+        "/session resume",
+        "/session rename",
+    ]
+    assert completer.complete("/session list") == []
+
+
+def test_session_id_completion_excludes_empty_sessions(completer, monkeypatch):
+    from nooa_cli.tui.session_manager import SessionManager, SessionMeta
+
+    monkeypatch.setattr(
+        SessionManager,
+        "list_sessions",
+        classmethod(
+            lambda cls, limit=50: [
+                SessionMeta("empty-session", "model", "Agent", 1.0, 2.0, turn_count=0),
+                SessionMeta("used-session", "model", "Agent", 1.0, 2.0, turn_count=2),
+            ]
+        ),
+    )
+
+    assert [item.text for item in completer.complete("/session resume ")] == [
+        "/session resume used-ses"
+    ]
+    assert [item.text for item in completer.complete("/session delete ")] == [
+        "/session delete used-ses"
+    ]
 
 
 def test_slash_case_insensitive(completer):

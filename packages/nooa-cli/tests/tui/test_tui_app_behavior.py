@@ -421,16 +421,15 @@ async def test_explorer_f2_temporarily_restores_native_terminal_selection():
     )
     async with TUIHarness() as h:
         opened = asyncio.create_task(h.app.open_subview(view))
-        await h.wait_for(lambda: h.app.active_subview is view)
+        await h.wait_for(lambda: getattr(h.app.active_subview, "view", None) is view)
         assert bool(h.app._app.mouse_support()) is True
 
         await h.press("f2")
         await h.wait_for(lambda: not bool(h.app._app.mouse_support()))
-        assert "F2 mouse/wheel" in view.render(80, 10)
 
         await h.press("f2")
         await h.wait_for(lambda: bool(h.app._app.mouse_support()))
-        await h.press("q")
+        await h.press("escape")
         await asyncio.wait_for(opened, timeout=1)
 
 

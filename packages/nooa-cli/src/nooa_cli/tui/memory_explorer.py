@@ -146,6 +146,9 @@ def last_reflection_summary(manager: Any) -> str | None:
 class MemoryExplorerView(ExplorerView):
     """In-app subview for browsing and curating long-term memories."""
 
+    item_name = "item"
+    list_heading = "  type/status  importance  usage   title"
+
     def __init__(
         self,
         rows: list[MemoryExplorerRow],
@@ -172,6 +175,39 @@ class MemoryExplorerView(ExplorerView):
             },
         )
         super().__init__(model, config)
+        importance_rank = {
+            "CRITICAL": 5,
+            "HIGH": 4,
+            "MEDIUM": 3,
+            "LOW": 2,
+            "TRIVIAL": 1,
+        }
+        self.configure_row_options(
+            filters=(
+                ("all", "All", lambda _row: True),
+                ("memory", "Memories", lambda row: row.type != "todo"),
+                (
+                    "todo-open",
+                    "Open todos",
+                    lambda row: row.type == "todo" and row.status == "open",
+                ),
+                (
+                    "todo-done",
+                    "Done todos",
+                    lambda row: row.type == "todo" and row.status == "done",
+                ),
+            ),
+            sorts=(
+                ("created", "Created", lambda row: row.created_at, True),
+                ("accessed", "Accessed", lambda row: row.last_accessed_at, True),
+                (
+                    "importance",
+                    "Importance",
+                    lambda row: (importance_rank.get(row.importance, 0), row.created_at),
+                    True,
+                ),
+            ),
+        )
 
     def format_row(self, row: MemoryExplorerRow, width: int) -> str:
         glyph = (
@@ -251,5 +287,6 @@ class MemoryExplorerView(ExplorerView):
             old_tag = f"todo:{row.status}"
             row.status = "done"
             row.search_text = row.search_text.replace(old_tag, "todo:done", 1)
+            self.model.set_query(self.model.query)
             return "handled"
         return "ignored"
