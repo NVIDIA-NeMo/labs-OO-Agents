@@ -29,8 +29,8 @@ The proposed end state is:
 1. `nooa` outside `nooa.unifiedllm._anyllm` imports neither `any_llm` nor provider SDK response/exception types.
 2. Public NOOA objects contain only NOOA/Python/Pydantic types. There is no public `raw_response` escape hatch.
 3. Public model configuration is provider-neutral and validated. Backend-specific options are quarantined under an explicit `provider_options` mapping.
-4. NOOA performs **no local tokenization, token estimation, token calibration, or input-context decisions based on tokens**. Context policy is character-bounded plus provider-error-driven recovery. Provider-native output limits such as `max_output_tokens` remain request controls; they tell the provider how much it may generate and are not token counting by NOOA.
-5. Provider-reported usage and provider-declared `context_window` metadata may be copied into passive observability fields, but are never used for sizing, eviction, summarization, retry, scoring, or other control flow. This is observation, not NOOA token counting.
+4. There are exactly two token-related paths: **(a)** copy token usage reported by a successful provider response into passive telemetry, and **(b)** when the provider returns a normalized context-limit error, recover by evicting input based on character size and retry. NOOA does not tokenize, estimate, calibrate, or proactively size context in tokens.
+5. Provider-native output limits such as `max_output_tokens` remain request parameters, not token counting. Provider-reported usage and provider-declared `context_window` metadata never drive sizing, eviction, summarization, retry, scoring, or other control flow.
 6. Tracing and message journaling use NOOA's own call lifecycle, not LiteLLM callbacks or AnyLLM internals.
 7. NVIDIA inference is configured as an OpenAI-compatible endpoint inside the private adapter and is covered by credential-gated live tests.
 
@@ -157,9 +157,23 @@ This lifecycle sits **above the transport adapter**, in the public UnifiedLLM/ru
 
 Hooks are `before_llm_call(snapshot)`, `before_llm_attempt(snapshot)`, `on_llm_chunk(snapshot)`, and `after_llm_call(snapshot)`. Snapshots deep-copy JSON-safe messages/options, apply the existing secret scrubber before dispatch to exporters, cap diagnostic strings/containers, and never retain mutable caller objects. Cancellation always emits exactly one cancelled terminal event and re-raises. The existing content-addressed journal builder consumes these snapshots, and the NOOA OpenInference hook emits the LLM span beneath the active generation span. Cost is retained only when supplied by the endpoint/gateway as an authoritative value; local model-price calculation is removed.
 
-## 5. Token counting removal
+## 5. Token handling: exact final state
 
-“Token counting is deprecated” is interpreted as a hard architectural rule: **NOOA will not locally tokenize, estimate, calibrate, or make input-context decisions from token counts.** Provider-native output limits remain request controls. Provider-reported usage and provider-declared context metadata may remain passive telemetry, because copying an API observation is not counting; neither may influence sizing, eviction, summarization, retry, scoring, or other control flow.
+You are right that the intended architecture has only two token-related paths. The baseline has already removed full-payload pre-call tokenization from `_build_messages()`, but the cleanup is incomplete. The remaining active legacy paths are:
+
+- `UnifiedLLM.count_tokens()` plus the process-global `TokenCalibration` still call `litellm.token_counter` (`unifiedllm.py:1045-1150,1299-1313`).
+- Summarization still probes `llm.count_tokens()` and falls back to a character-to-token approximation (`agents/summarization.py:464,491-503`).
+- Runtime still learns `_tokens_per_char` from response usage and uses that estimate for proactive eviction (`runtime/actor.py:631-635,1177-1197,3031-3057`).
+- `TruncationConfig` and `ContextStats` still expose token budgets/utilization, and ACP, interactive summaries, benchmarks, and trace views consume them.
+
+Those are leftovers from the older design, not capabilities to reproduce with AnyLLM.
+
+### Final invariant
+
+1. **After a successful call:** copy provider-reported usage into `LLMResponse.reported_usage` and observability. Do not derive, calibrate, infer, or act on it.
+2. **After a context-limit error:** catch normalized `LLMContextLengthError`, evict a deterministic character-sized portion of the oldest eligible history, rebuild the request, and retry a bounded number of times. Do not parse token numbers from error strings and do not calculate a target token budget.
+
+Provider-native `max_output_tokens` remains a request setting. Existing capture/render character caps remain as data-size safety controls. We do **not** add proactive `max_context_chars`, `max_event_chars`, or `response_reserve_chars` model-context budgeting.
 
 ### Remove
 
@@ -169,17 +183,18 @@ Hooks are `before_llm_call(snapshot)`, `before_llm_attempt(snapshot)`, `on_llm_c
 - `nooa.char_approximate_token_counter`, `src/nooa/token_counter.py`, and root export (`src/nooa/__init__.py:82,173`).
 - Summarizer probing of `llm.count_tokens` and `_input_token_counter` (`src/nooa/agents/summarization.py:464,491-503`).
 - Runtime `tokens_per_char` calibration and the local `count_tokens` closure (`src/nooa/runtime/actor.py:631-635,1177-1197,3031-3057`).
-- `max_context_tokens`, `max_event_tokens`, and `response_reserve_tokens` as active controls; token-derived context statistics and token-based truncation callbacks.
+- `max_context_tokens`, `max_event_tokens`, and `response_reserve_tokens`; token-derived context statistics, utilization, and token-based truncation callbacks.
+- Parsing prompt/context token numbers from context-error text and reducing `max_output_tokens` by token arithmetic.
 - The task-token accumulator as a runtime service (`src/nooa/runtime/token_usage.py`) and any benchmark **scoring/control** based on token totals. Bench may aggregate passive `reported_usage` for reporting only.
 - Token totals in context utilization UI/trace explorer/ACP as control or capacity fields. Passive provider usage can be shown under `reported_usage`, clearly labeled as provider-reported and possibly absent.
 
-### Replace with
+### Keep or replace
 
-- Existing deterministic character caps for captured and formatted values.
-- New `max_context_chars`, `max_event_chars`, and `response_reserve_chars` configuration, with no model-specific claim of equivalence.
-- Character-only context stats (`context_chars`, `event_chars`, dropped counts).
-- Error-driven context recovery: catch normalized `LLMContextLengthError`, archive a deterministic character-sized batch of the oldest eligible events, rebuild, and retry with a bounded attempt count. The retry may reduce the provider-native `max_output_tokens` only when the error provides a structured maximum/required delta; that is provider-error remediation, not local counting. If no structured values exist, retain the output limit and reduce input by characters.
-- Summarization input bounded by `max_input_chars`, configured directly. There is no model-window-derived default.
+- Keep existing deterministic character caps for captured/formatted values; these bound data structures and logs, not model context.
+- Add no proactive character analogue of the removed token budgets.
+- On a normalized context-limit error only, archive a fixed character-sized batch (or fixed oldest-event batch), rebuild, and retry with an explicit small attempt cap. Each failure makes deterministic progress; exhaustion surfaces the normalized error.
+- Remove the summarizer's token-derived input budget without replacing it with model-window arithmetic. Existing per-value rendering caps remain; the same provider-error recovery handles overflow.
+- Keep `max_output_tokens` as a caller-selected provider output limit; context recovery does not derive or reduce it from token figures.
 
 For one release, old token config keys can raise a targeted migration error rather than being silently ignored. The removed callable APIs should fail at import/access with a clear changelog entry; they are deprecated by product decision and should not retain behavior behind aliases.
 
@@ -339,7 +354,7 @@ class LLMClient(Protocol):
 
 The full protocol also includes `stream`, `astream`, `__enter__`, `__exit__`, `__aenter__`, and `__aexit__`; the abbreviated listing emphasizes the common calls. `UnifiedLLM` remains the standard implementation/base for source compatibility. `CompletionClient`, `ReasoningCompletionClient`, `ResponsesClient`, and `FakeLLMClient` remain public and satisfy `LLMClient`. No AnyLLM class appears in signatures, fields, exceptions, or docs outside the backend implementation section.
 
-`context_window` is retained only as provider-declared metadata for display and diagnostics. Remove its control reads from `interactive.py`, summarization, ACP capacity events, and runtime budgeting/recovery. `get_model_info()` is removed; `.config` becomes a read-only provider-neutral `ModelConfig` snapshot. Context-manager methods are compatibility-guaranteed.
+`context_window` is retained only as provider-declared metadata for diagnostics. Remove its control reads from `interactive.py`, summarization, ACP capacity events, and runtime budgeting/recovery. `get_model_info()` is removed; `.config` becomes a read-only provider-neutral `ModelConfig` snapshot. Context-manager methods are compatibility-guaranteed.
 
 ### 6.5 Compatibility and precedence matrix
 
@@ -357,7 +372,7 @@ The full protocol also includes `stream`, `astream`, `__enter__`, `__exit__`, `_
 | `tool_calls` list → tuple and frozen response | Deferred. Keep the current mutable/list shape during this migration to avoid an unrelated source break. |
 | `.config` | One-release read-only mapping view of the typed config, then removal. |
 | `get_model_info()` | Hard removal; explicit registry metadata replaces backend lookup. |
-| `context_window` | Retained provider-declared metadata for display/diagnostics only; never read by control code. |
+| `context_window` | Retained provider-declared diagnostic metadata only; never read by control or utilization-display code. |
 | Mutable raw `MODELS` values | Internal break. Migrate CLI, eval, resolved config, and viewer readers in the same phase before values become typed snapshots. |
 
 Concrete common option types:
@@ -455,16 +470,77 @@ The YAML loader still layers raw files, but validation happens before entries en
 
 Migration warnings identify exact renamed/removed keys. Secrets remain environment-variable references; logs never emit values.
 
-## 9. Tracing/observability migration
+## 9. OTLP tracing and trace-viewer migration
 
-1. Add a provider-neutral LLM span in NOOA's existing `OpenInferenceHooks` beneath the generation span. Populate standardized model, input/output message, tool, finish, error, and passive reported-usage attributes.
-2. Move content-addressed message journal capture from LiteLLM callbacks to the same lifecycle. The runtime already publishes final rendered messages through `set_journal_payload_from_messages`; consume that sideband at `before_llm_call` and pair it by NOOA call ID.
-3. Replace `_litellm_journal.py` with `_llm_journal.py`; delete `_litellm_patch.py` after porting only backend-neutral output/tool-call attribute behavior.
-4. Remove `LiteLLMInstrumentor`, callback-list scans, `litellm_call_id`, and LiteLLM callback reset fixtures.
-5. Record cost only when the endpoint reports it. Do not estimate from a local model/cost table.
-6. Rename trace documentation and assertions from a nested `litellm.acompletion` span to a NOOA-owned `llm.call` span.
+### 9.1 What LiteLLM does today
 
-This is part of the provider replacement, not a later cleanup: otherwise changing transport silently removes production traces and journals.
+NOOA tracing is already partly native. `NemoOOAgentsInstrumentor` and `OpenInferenceHooks` create the AGENT, CHAIN (`generation`), TOOL, context-snapshot, and other framework spans. The standard OTel `TracerProvider`, `SessionSpanProcessor`, secret-scrubbing processors, OTLP HTTP/file exporters, and viewer ingestion/storage are also NOOA-owned.
+
+LiteLLM supplies only the provider-call portion:
+
+- `openinference-instrumentation-litellm` creates the nested `acompletion` LLM span and fills OpenInference `llm.*` attributes;
+- `_litellm_patch.py` patches missing tool-call IDs/reasoning/cost behavior;
+- `_litellm_journal.py` receives LiteLLM callbacks to associate input/output messages with that span and post the content-addressed journal sideband.
+
+Therefore OTLP itself does **not** go away with LiteLLM. We replace the one auto-instrumented LLM-span producer and callback bridge; the exporter and collector stack remains.
+
+### 9.2 After the switch
+
+Add provider-neutral call hooks above the AnyLLM adapter. `OpenInferenceHooks.before_llm_call()` starts a child span named `llm.call` under the active `generation` span, attaches it to the OTel context for the duration of the async call/stream, and sets:
+
+- `openinference.span.kind = LLM`;
+- `nooa.viewer.plugin = llm_call`;
+- `llm.model_name` and normalized provider identity;
+- OpenInference input messages/tools/invocation parameters;
+- on completion, OpenInference output messages/tool calls, normalized finish status, reasoning, and passive provider-reported usage;
+- on failure/cancellation, standard OTel status plus bounded/redacted error attributes.
+
+`after_llm_call()` always detaches and ends the span in `finally`. Retries produce attempt events/attributes under one logical LLM span; a rebuilt prompt after context recovery gets a new span. This preserves the current hierarchy:
+
+```text
+method.* (AGENT)
+  └─ generation (CHAIN)
+       ├─ llm.call (LLM)       # now emitted by NOOA, not LiteLLM
+       └─ code_execution (TOOL)
+```
+
+The existing `TracerProvider`, batch/simple span processors, `SecretScrubSpanProcessor`, OTLP JSON HTTP exporter, JSONL exporter, session IDs, force-flush, and shutdown code stay. Remove only `_instrument_litellm()`, `LiteLLMInstrumentor`, and `_litellm_patch.py`. OpenInference semantic-convention constants remain dependencies because NOOA writes the standard attributes itself; `openinference-instrumentation-litellm` is removed.
+
+### 9.3 Message journal
+
+Keep the current content-addressed journal wire/storage format (`/v1/journal/blocks`, `/v1/journal/calls`, `msg_blocks`, `llm_calls`) to avoid a viewer database migration. Move production of those records from the LiteLLM `CustomLogger` callback into the NOOA call lifecycle:
+
+1. `before_llm_call` consumes the already-built journal sideband for the exact final request and writes new blocks plus the input skeleton, keyed by NOOA `call_id` and LLM `span_id`.
+2. `after_llm_call` adds normalized output messages and passive reported usage, then writes the call record.
+3. Failure/cancellation writes a terminal record without fabricating output.
+4. HTTP and file journal sinks retain their existing flush/refcount semantics, but become ordinary NOOA sinks rather than entries in global LiteLLM callback lists.
+
+The OTLP span exporter continues stripping large `llm.input_messages.*` / `llm.output_messages.*` attributes when journal mode is enabled. The viewer continues reconstructing them from the sideband by `span_id`, so exported/downloaded traces remain complete and OpenInference-compatible.
+
+### 9.4 Trace viewer changes
+
+The **OTLP receiver and SQLite span store require no schema change**: they ingest generic OTLP spans already, identify LLM spans by `openinference.span.kind = LLM`, and reconstruct journal messages by span ID.
+
+Required code changes are at assumptions around the producer:
+
+1. **Parser:** `trace_explorer` currently recognizes only a span literally named `acompletion`. Recognize any `LLM`-kind span, prefer `nooa.viewer.plugin = llm_call`, and retain `acompletion` as legacy-trace compatibility.
+2. **React plugin registration:** add `span.llm.call` (or normalize it to `span.llm_call`) for `LLMCallPlugin`; retain registrations for `span.acompletion`, `span.completion`, and `span.responses` so old traces still render.
+3. **LLM card:** continue reading standard OpenInference message/tool/model attributes. Relabel token figures as **provider-reported usage**, make them optional, and never derive `total` by summing absent fields. Existing old `llm.token_count.*` traces still display.
+4. **Journal reconstruction:** keep the current database and reconstruction contract; update tests so a NOOA-created `llm.call` span joins the same call record and blocks correctly.
+5. **Playground:** replace its direct `litellm.acompletion` call/stream collector with UnifiedLLM `astream`/normalized responses. Keep its input/output model independent of AnyLLM classes and report usage as optional provider data.
+6. **Tests/assets:** update parser, plugin, tree-order, journal reconstruction, file export, error/cancellation, and legacy-trace fixtures; rebuild the checked-in frontend distribution if this repository's release process requires it.
+
+No redesign of the viewer is needed. The key compatibility contract is the existing OpenInference attribute shape plus `LLM` span kind, not LiteLLM's class names. We intentionally emit that shape ourselves.
+
+### 9.5 Observability acceptance checks
+
+- Exactly one `llm.call` LLM span per logical call, correctly parented to `generation`.
+- Complete input/output/tool/reasoning fields after journal reconstruction.
+- Passive reported usage appears when supplied and is absent—not zero/fabricated—when the provider omits it.
+- Retry attempts do not duplicate calls or usage; context-rebuilt requests form distinct calls.
+- Error and cancellation spans always end and flush.
+- HTTP journal, journal-file export, downloaded OTLP, trace explorer, and React viewer render both new and legacy traces.
+- No `litellm`, `litellm_call_id`, callback-list, or LiteLLM instrumentor dependency remains.
 
 ## 10. Implementation sequence
 
@@ -474,10 +550,10 @@ This is part of the provider replacement, not a later cleanup: otherwise changin
 - Adapt `FakeLLMClient` and consumer tests first.
 - Move runtime, CodeAct, Relay, and event emission off `raw_response` and loose usage.
 
-### Phase B — remove token counting and change context policy
+### Phase B — finish removing token counting
 
-- Delete token-count APIs, calibration, and runtime token estimators.
-- Introduce explicit character budgets and error-driven context recovery.
+- Delete token-count APIs, calibration, runtime token estimators, and token-budget configuration/statistics.
+- Do not introduce a proactive character-budget replacement. Keep existing capture/render size caps and use character-based eviction only after a provider context-limit error.
 - Update summarization, context rendering/stats, bench, ACP, trace explorer, docs, and tests.
 - Keep provider-reported usage passive and optional.
 
