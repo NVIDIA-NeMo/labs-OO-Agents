@@ -121,6 +121,7 @@ class ResumePickerModel:
         self.sort_updated = True
         self.selected = self.list_offset = 0
         self.preview_offset = 10**9
+        self._query_matches: list[tuple[int, str, tuple[int, ...]] | None] = []
         self._matches: list[FieldMatch] = []
         self.set_query("")
 
@@ -155,6 +156,24 @@ class ResumePickerModel:
     def set_query(self, query: str) -> None:
         previous_id = self.current.id if self.current else None
         self.query = query
+        normalized_query = query.strip()
+        if normalized_query:
+            query_matches: list[tuple[int, str, tuple[int, ...]] | None] = []
+            for fields in self._search_fields:
+                candidates = []
+                for field, value in fields.items():
+                    result = fuzzy_match(normalized_query, value)
+                    if result is not None:
+                        candidates.append((result[0], field, result[1]))
+                query_matches.append(
+                    max(candidates, key=lambda item: item[0]) if candidates else None
+                )
+            self._query_matches = query_matches
+        else:
+            self._query_matches = [(0, "", ()) for _row in self.rows]
+        self._rebuild_matches(previous_id)
+
+    def _rebuild_matches(self, previous_id: str | None = None) -> None:
         ranked = []
         for index, row in enumerate(self.rows):
             attached = row.attached or row.current
@@ -162,23 +181,19 @@ class ResumePickerModel:
                 continue
             if self.state_filter == "attached" and not attached:
                 continue
-            fields = self._search_fields[index]
-            candidates = []
-            for field, value in fields.items():
-                result = fuzzy_match(query, value)
-                if result is not None:
-                    candidates.append((result[0], field, result[1]))
-            if candidates:
-                score, field, positions = max(candidates, key=lambda item: item[0])
-                stamp = row.last_active if self.sort_updated else row.created_at
-                ranked.append(
-                    (
-                        -score if query.strip() else 0,
-                        -stamp,
-                        index,
-                        FieldMatch(row, field if query.strip() else None, positions),
-                    )
+            query_match = self._query_matches[index]
+            if query_match is None:
+                continue
+            score, field, positions = query_match
+            stamp = row.last_active if self.sort_updated else row.created_at
+            ranked.append(
+                (
+                    -score if self.query.strip() else 0,
+                    -stamp,
+                    index,
+                    FieldMatch(row, field or None, positions),
                 )
+            )
         ranked.sort(key=lambda item: item[:3])
         self._matches = [item[3] for item in ranked]
         ids = [match.row.id for match in self._matches]
@@ -194,7 +209,7 @@ class ResumePickerModel:
         )
         self.state_filter = filters[(filters.index(self.state_filter) + delta) % len(filters)]
         self.selected = self.list_offset = 0
-        self.set_query(self.query)
+        self._rebuild_matches()
 
     def toggle_filter(self) -> None:
         self.cycle_filter()
@@ -202,7 +217,7 @@ class ResumePickerModel:
     def toggle_sort(self) -> None:
         self.sort_updated = not self.sort_updated
         self.selected = self.list_offset = 0
-        self.set_query(self.query)
+        self._rebuild_matches()
 
     def move(self, delta: int) -> None:
         if not self._matches or not delta:
@@ -508,8 +523,7 @@ class _PickerSearchControl(BufferControl):
 
     def mouse_handler(self, mouse_event: MouseEvent):
         if mouse_event.event_type is MouseEventType.MOUSE_DOWN:
-            self.picker.active_control = "search"
-            self.picker.invalidate()
+            self.picker.activate_control("list")
         return super().mouse_handler(mouse_event)
 
 
@@ -520,7 +534,7 @@ class _PickerButtonControl(FormattedTextControl):
         super().__init__(self._text, focusable=True, show_cursor=False)
 
     def _text(self):
-        focused = self.picker.active_control == "filters" and self.picker.filter_option == self.kind
+        focused = self.picker.active_control == "list"
         style = "class:resume-picker.control" + (
             " class:resume-picker.control-focused" if focused else ""
         )
@@ -539,22 +553,24 @@ class _PickerButtonControl(FormattedTextControl):
             mouse_event.event_type is MouseEventType.MOUSE_DOWN
             and mouse_event.button is MouseButton.LEFT
         ):
-            self.picker.filter_option = self.kind
-            self.picker.activate_control("filters")
-            self.picker.change_active_control()
+            self.picker.activate_control("list")
+            if self.kind == "filter":
+                self.picker.model.toggle_filter()
+            else:
+                self.picker.model.toggle_sort()
+            self.picker.invalidate()
             return None
         return NotImplemented
 
 
 class ResumePicker:
-    CONTROL_ORDER = ("search", "filters", "list", "preview")
+    CONTROL_ORDER = ("list", "preview")
 
     def __init__(self, rows: list[ResumePickerRow], app: Any):
         self.app = app
         self.model = ResumePickerModel(rows)
         self._preview_models: dict[tuple[str, int], Any] = {}
-        self.active_control = "search"
-        self.filter_option: Literal["filter", "sort"] = "filter"
+        self.active_control = "list"
         self.buffer = Buffer(multiline=False)
         self.buffer.on_text_changed += lambda _: self._query_changed()
         self.query_control = _PickerSearchControl(self, self.buffer)
@@ -563,7 +579,7 @@ class ResumePicker:
             width=Dimension(min=4, weight=1),
             height=1,
             style=lambda: (
-                "class:resume-picker.control-focused" if self.active_control == "search" else ""
+                "class:resume-picker.control-focused" if self.active_control == "list" else ""
             ),
         )
         self.filter_control = _PickerButtonControl(self, "filter")
@@ -580,10 +596,14 @@ class ResumePicker:
         )
         selectors = VSplit(
             [
-                Window(self.filter_control, width=Dimension(min=24, preferred=24), height=1),
+                Window(self.filter_control, width=Dimension(min=17, preferred=20), height=1),
                 Window(FormattedTextControl(" "), width=1, height=1),
-                Window(self.sort_control, width=Dimension(min=22, preferred=22), height=1),
+                Window(self.sort_control, width=Dimension(min=10, preferred=18), height=1),
             ],
+            padding=0,
+        )
+        controls = VSplit(
+            [search, Window(FormattedTextControl(" "), width=1, height=1), selectors],
             padding=0,
         )
         self.list_control = _PickerControl(self, "list")
@@ -610,10 +630,7 @@ class ResumePicker:
         self.preview_header_control = FormattedTextControl(self._preview_header)
         title = Window(self.title_control, height=1)
         help_line = Window(
-            FormattedTextControl(
-                " Tab · arrows · Space · ↵ resume · Esc cancel",
-                style="class:resume-picker.footer",
-            ),
+            FormattedTextControl(self._help_text, style="class:resume-picker.footer"),
             height=1,
         )
         list_header = Window(self.list_header_control, height=1)
@@ -630,11 +647,11 @@ class ResumePicker:
         self._main_container = HSplit(
             [
                 title,
-                area("search", search),
                 help_line,
-                area("filters", selectors),
-                separator(),
-                area("list", HSplit([list_header, self.list_window], padding=0)),
+                area(
+                    "list",
+                    HSplit([controls, list_header, self.list_window], padding=0),
+                ),
                 separator(),
                 area("preview", HSplit([preview_header, self.preview_window], padding=0)),
                 separator(),
@@ -675,13 +692,13 @@ class ResumePicker:
 
     def _search_label(self):
         style = "class:resume-picker.search-label"
-        if self.active_control == "search":
+        if self.active_control == "list":
             style += " class:resume-picker.control-focused"
         return [(style, "[Search: ")]
 
     def _search_close(self):
         style = "class:resume-picker.search-label"
-        if self.active_control == "search":
+        if self.active_control == "list":
             style += " class:resume-picker.control-focused"
         return [(style, "]")]
 
@@ -692,6 +709,14 @@ class ResumePicker:
             else "class:resume-picker.active-rail"
         )
         return [(style, "▌" if self.active_control == area else "│")]
+
+    def _help_text(self):
+        columns = self.app.output.get_size().columns
+        if columns < 72:
+            return "Tab next · Shift-Tab back · ↵ resume · Esc"
+        return (
+            "Tab next · Shift-Tab back · ↑↓ navigate · F5 filter · F6 sort · ↵ resume · Esc cancel"
+        )
 
     def _title(self):
         count = len(self.model.matches)
@@ -737,17 +762,16 @@ class ResumePicker:
 
     def focus_initial(self) -> None:
         size = self.app.output.get_size()
-        target = (
-            self.query_control if size.columns >= 48 and size.rows >= 13 else self.small_control
-        )
-        self.app.layout.focus(target)
+        if size.columns >= 48 and size.rows >= 13:
+            self.active_control = "list"
+            self.app.layout.focus(self.query_control)
+        else:
+            self.app.layout.focus(self.small_control)
 
     def activate_control(self, name: str) -> None:
         self.active_control = name
         controls = {
-            "search": self.query_control,
-            "filters": self.filter_control if self.filter_option == "filter" else self.sort_control,
-            "list": self.list_control,
+            "list": self.query_control,
             "preview": self.preview_control,
         }
         self.app.layout.focus(controls[name])
@@ -762,37 +786,26 @@ class ResumePicker:
         self.activate_control(self.CONTROL_ORDER[index])
 
     def move_horizontal(self, delta: int) -> None:
-        if not delta:
+        if self.active_control != "list" or not delta:
             return
-        if self.active_control == "search":
-            if delta < 0:
-                self.buffer.cursor_left(count=1)
-            else:
-                self.buffer.cursor_right(count=1)
-            return
-        if self.active_control == "filters":
-            self.filter_option = "sort" if delta > 0 else "filter"
-            self.activate_control("filters")
-
-    def change_active_control(self) -> None:
-        if self.active_control == "filters":
-            if self.filter_option == "filter":
-                self.model.toggle_filter()
-            else:
-                self.model.toggle_sort()
-        self.invalidate()
+        if delta < 0:
+            self.buffer.cursor_left(count=1)
+        else:
+            self.buffer.cursor_right(count=1)
 
     def navigate_vertical(self, delta: int) -> None:
         if self.active_control == "list":
             self.move(delta)
         elif self.active_control == "preview":
             self.scroll_preview(delta)
-        elif self.active_control == "filters":
-            if self.filter_option == "filter":
-                self.model.cycle_filter(delta)
-            else:
-                self.model.toggle_sort()
-            self.invalidate()
+
+    def cycle_filter(self) -> None:
+        self.model.toggle_filter()
+        self.invalidate()
+
+    def toggle_sort(self) -> None:
+        self.model.toggle_sort()
+        self.invalidate()
 
     def page(self, delta: int) -> None:
         if self.active_control == "list":
