@@ -1808,7 +1808,7 @@ class EditCommand(Command):
 
 
 class SessionCommand(Command):
-    """List, resume, and manage conversation sessions."""
+    """Resume and manage conversation sessions."""
 
     @property
     def name(self) -> str:
@@ -1817,7 +1817,6 @@ class SessionCommand(Command):
     @classmethod
     def help_text(cls) -> dict[str, str]:
         return {
-            "/session list": "Open the session explorer",
             "/session new": "Start a new session (current history cleared)",
             "/session resume [id]": "Search for or resume a past session",
             "/session delete <id>": "Delete a session",
@@ -1827,8 +1826,8 @@ class SessionCommand(Command):
 
     def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
         if not args:
-            return False, "Usage: /session <list|new|resume|delete|export|rename>"
-        if args[0].lower() not in ("list", "new", "resume", "delete", "export", "rename"):
+            return False, "Usage: /session <new|resume|delete|export|rename>"
+        if args[0].lower() not in ("new", "resume", "delete", "export", "rename"):
             return False, f"Unknown subcommand `{args[0]}`"
         if args[0].lower() == "delete" and len(args) < 2:
             return False, "/session delete <session_id>"
@@ -1840,36 +1839,6 @@ class SessionCommand(Command):
 
     async def execute(self, args: list[str]) -> "CommandResult":
         subcmd = args[0].lower()
-
-        if subcmd == "list":
-            open_explorer = getattr(self.frontend, "open_session_explorer", None)
-            has_real_explorer = getattr(
-                type(self.frontend), "open_session_explorer", None
-            ) is not None or "open_session_explorer" in getattr(self.frontend, "__dict__", {})
-            if has_real_explorer and callable(open_explorer):
-                try:
-                    await open_explorer()
-                except Exception as exc:
-                    return CommandResult.err(f"Session explorer failed: {exc}")
-                return CommandResult.ok(TextOutput("Session explorer closed.", "status"))
-
-            sessions = [s for s in SessionManager.list_sessions() if s.turn_count > 0]
-            if not sessions:
-                return CommandResult.ok(TextOutput("No sessions found.", "info"))
-            rows = []
-            for s in sessions:
-                dt = datetime.datetime.fromtimestamp(s.last_active).strftime("%m/%d %H:%M")
-                name_display = s.name[:28] if s.name else ""
-                rows.append(
-                    [s.id[:8], dt, s.model.split("/")[-1][:20], str(s.turn_count), name_display]
-                )
-            return CommandResult.ok(
-                TableOutput(
-                    title="Recent Sessions",
-                    columns=["ID", "Last Active", "Model", "Turns", "Name"],
-                    rows=rows,
-                )
-            )
 
         if subcmd == "export":
             if self.session_manager is None:
@@ -1900,7 +1869,7 @@ class SessionCommand(Command):
             session_id = args[1]
             matches = SessionManager.find_by_prefix(session_id)
             if not matches:
-                return CommandResult.err(f"Session '{session_id}' not found. Use /session list.")
+                return CommandResult.err(f"Session '{session_id}' not found. Use /session resume.")
             if len(matches) > 1:
                 ids = ", ".join(m[:8] for m in matches)
                 return CommandResult.err(f"Ambiguous session prefix '{session_id}' matches: {ids}")

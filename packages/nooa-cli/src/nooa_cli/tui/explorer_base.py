@@ -22,39 +22,37 @@ from __future__ import annotations
 
 import re
 import textwrap
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from .subapp import SubviewKeyResult
-from .theme import get_syntax_theme
+from .theme import COLORS, create_theme, get_syntax_theme
 
 # ─── ANSI styling primitives ─────────────────────────────────────────────────
 
-BAR_STYLE = "\x1b[48;5;236;38;5;252m"
-FTS_ACTIVE_STYLE = "\x1b[1;38;2;255;255;255;48;2;95;28;75m"
+
+def _rgb(hex_color: str) -> str:
+    value = hex_color.lstrip("#")
+    return ";".join(str(int(value[index : index + 2], 16)) for index in (0, 2, 4))
+
+
+def bar_style_code() -> str:
+    """Return explorer chrome colors for the active TUI theme."""
+    return f"\x1b[48;2;{_rgb(COLORS['surface0'])};38;2;{_rgb(COLORS['text'])}m"
+
+
+def highlight_style_code(*, current: bool = False) -> str:
+    """Return search-match colors for the active TUI theme."""
+    background = COLORS["sky"] if current else COLORS["yellow"]
+    return f"\x1b[38;2;{_rgb(COLORS['crust'])};48;2;{_rgb(background)}m"
 
 
 def style_bar(text: str, *, ansi: bool) -> str:
-    """Style a header/footer bar line."""
+    """Style a header/footer bar line using the active TUI theme."""
     if not ansi:
         return text
-    return f"{BAR_STYLE}{text}\x1b[0m"
-
-
-def style_mode_label(text: str, *, active: bool, ansi: bool) -> str:
-    """Style the mode indicator (FTS/BROWSE)."""
-    if not ansi:
-        return text
-    if active:
-        return f"{FTS_ACTIVE_STYLE}{text}\x1b[0m"
-    return f"\x1b[1;30;46m{text}\x1b[0m"
-
-
-def style_fts_prompt(text: str, *, active: bool, ansi: bool) -> str:
-    """Style the search prompt in the divider."""
-    if not ansi or not active:
-        return text
-    return f"{FTS_ACTIVE_STYLE}{text}\x1b[0m"
+    return f"{bar_style_code()}{text}\x1b[0m"
 
 
 # ─── Text utilities ──────────────────────────────────────────────────────────
@@ -89,26 +87,8 @@ def highlight_terms(text: str, terms: list[str], *, current: bool = False) -> st
     pattern = re.compile(
         "|".join(re.escape(t) for t in sorted(terms, key=len, reverse=True)), re.IGNORECASE
     )
-    color = "30;106" if current else "30;43"
-    return pattern.sub(lambda m: f"\x1b[{color}m{m.group(0)}\x1b[0m", text)
-
-
-def display_line(
-    text: str, width: int, terms: list[str], *, ansi: bool, current_match: bool = False
-) -> str:
-    """Fit a plain line to width, then optionally highlight search terms."""
-    plain = text.ljust(width)[:width]
-    if ansi and terms:
-        return highlight_terms(plain, terms, current=current_match)
-    return plain
-
-
-def detail_match_lines(lines: list[str], terms: list[str]) -> list[int]:
-    """Return line indices that contain any search term."""
-    if not terms:
-        return []
-    lowered = [t.lower() for t in terms]
-    return [i for i, line in enumerate(lines) if any(t in line.lower() for t in lowered)]
+    style = highlight_style_code(current=current)
+    return pattern.sub(lambda match: f"{style}{match.group(0)}\x1b[0m", text)
 
 
 def render_markdown_lines(markdown: str, width: int) -> list[str]:
@@ -125,6 +105,7 @@ def render_markdown_lines(markdown: str, width: int) -> list[str]:
             file=buf,
             force_terminal=True,
             color_system="256",
+            theme=create_theme(),
             width=render_width,
             _environ={"COLUMNS": str(render_width), "LINES": "25"},
         )
@@ -135,6 +116,85 @@ def render_markdown_lines(markdown: str, width: int) -> list[str]:
         for line in markdown.splitlines() or [""]:
             lines.extend(wrap_plain_line(line, width))
         return lines or [""]
+
+
+@dataclass
+class ExplorerOption:
+    """One choice row in the shared transient explorer options mode."""
+
+    key: str
+    label: str
+    choices: tuple[tuple[str, str], ...]
+    value: str
+    on_change: Callable[[str], None]
+
+    @property
+    def display_value(self) -> str:
+        return dict(self.choices).get(self.value, self.value)
+
+    def move(self, delta: int) -> None:
+        if not self.choices or not delta:
+            return
+        values = [value for value, _label in self.choices]
+        self.value = values[(values.index(self.value) + delta) % len(values)]
+        self.on_change(self.value)
+
+    def activate(self) -> None:
+        self.move(1)
+
+
+@dataclass
+class ExplorerChecklistOption:
+    """Multi-select dropdown option rendered with checkboxes."""
+
+    key: str
+    label: str
+    choices: tuple[tuple[str, str], ...]
+    checked: set[str]
+    on_change: Callable[[set[str]], None]
+    choice_cursor: int = 0
+    dropdown: bool = True
+    multi_select: bool = True
+    all_value: str | None = None
+
+    @property
+    def selectable_values(self) -> set[str]:
+        return {value for value, _label in self.choices if value != self.all_value}
+
+    def is_checked(self, value: str) -> bool:
+        if value == self.all_value:
+            values = self.selectable_values
+            return bool(values) and values <= self.checked
+        return value in self.checked
+
+    @property
+    def display_value(self) -> str:
+        values = self.selectable_values
+        if not values:
+            return "None"
+        if values <= self.checked:
+            return "All"
+        return f"{len(self.checked & values)}/{len(values)}"
+
+    def move(self, delta: int) -> None:
+        if self.choices and delta:
+            self.choice_cursor = (self.choice_cursor + delta) % len(self.choices)
+
+    def activate(self) -> None:
+        if not self.choices:
+            return
+        value = self.choices[self.choice_cursor][0]
+        if value == self.all_value:
+            values = self.selectable_values
+            self.checked = set() if values <= self.checked else set(values)
+        elif value in self.checked:
+            self.checked.remove(value)
+        else:
+            self.checked.add(value)
+        self.on_change(set(self.checked))
+
+
+ExplorerOptionItem = ExplorerOption | ExplorerChecklistOption
 
 
 # ─── Generic Explorer Model ──────────────────────────────────────────────────
@@ -160,6 +220,9 @@ class ExplorerModel:
         self._last_detail_visible_lines = 0
         self._last_detail_match_lines: list[int] = []
         self._last_divider_y = 0
+        self._filter_predicate: Callable[[Any], bool] = lambda _row: True
+        self._sort_key: Callable[[Any], Any] | None = None
+        self._sort_reverse = False
 
     @property
     def current_index(self) -> int | None:
@@ -177,17 +240,41 @@ class ExplorerModel:
         """Update search query and refilter matches."""
         self.query = query
         words = [w.lower() for w in query.split() if w.strip()]
-        if not words:
-            self.matches = list(range(len(self.rows)))
-        else:
-            self.matches = [
-                i
-                for i, row in enumerate(self.rows)
-                if all(word in row.search_text.lower() for word in words)
-            ]
+        self.matches = [
+            i
+            for i, row in enumerate(self.rows)
+            if self._filter_predicate(row)
+            and (not words or all(word in row.search_text.lower() for word in words))
+        ]
+        if self._sort_key is not None:
+            self.matches.sort(
+                key=lambda index: self._sort_key(self.rows[index]),
+                reverse=self._sort_reverse,
+            )
         self.cursor = 0
         self.detail_offset = 0
         self.search_line_cursor = 0
+
+    def set_view(
+        self,
+        *,
+        predicate: Callable[[Any], bool] | None = None,
+        sort_key: Callable[[Any], Any] | None = None,
+        reverse: bool = False,
+    ) -> None:
+        """Apply non-search filtering and ordering, then rebuild matches."""
+        current = self.current
+        self._filter_predicate = predicate or (lambda _row: True)
+        self._sort_key = sort_key
+        self._sort_reverse = reverse
+        self.set_query(self.query)
+        if current is not None:
+            current_index = next(
+                (i for i, row_index in enumerate(self.matches) if self.rows[row_index] is current),
+                None,
+            )
+            if current_index is not None:
+                self.cursor = current_index
 
     def edit_query(self, text: str) -> None:
         self.set_query(text)
@@ -273,10 +360,63 @@ class ExplorerConfig:
 
 
 class ExplorerInteraction:
-    """Shared mouse and native-selection behavior for explorer subviews."""
+    """Shared model/options configuration for full-screen browser views."""
 
+    use_fullscreen_browser = True
     detail_focus = "detail"
     native_selection = False
+    options: tuple[ExplorerOptionItem, ...] = ()
+    option_cursor: int | None = None
+    _options_y = 1
+    _option_hit_boxes: list[tuple[int, int]] = []
+
+    def configure_options(self, *options: ExplorerOptionItem) -> None:
+        self.options = tuple(options)
+        self.option_cursor = None
+
+    @property
+    def options_active(self) -> bool:
+        return self.option_cursor is not None
+
+    def toggle_options(self) -> None:
+        if not self.options:
+            return
+        self.model.search_active = False
+        self.option_cursor = 0 if self.option_cursor is None else None
+
+    def close_options(self) -> bool:
+        if self.option_cursor is None:
+            return False
+        self.option_cursor = None
+        return True
+
+    def handle_options_action(self, action: str) -> SubviewKeyResult:
+        if action == "options":
+            self.toggle_options()
+            return "handled"
+        if self.option_cursor is None:
+            if action == "space" and self.model.search_active:
+                self.model.edit_query(self.model.query + " ")
+                return "handled"
+            return "ignored"
+        if action == "quit":
+            return "ignored"
+        if action in {"escape", "enter"}:
+            self.option_cursor = None
+        elif action == "left":
+            self.option_cursor = (self.option_cursor - 1) % len(self.options)
+        elif action == "right":
+            self.option_cursor = (self.option_cursor + 1) % len(self.options)
+        elif action == "up":
+            self.options[self.option_cursor].move(-1)
+        elif action == "down":
+            self.options[self.option_cursor].move(1)
+        elif action == "space":
+            self.options[self.option_cursor].activate()
+        elif action == "tab":
+            self.option_cursor = None
+            return "ignored"
+        return "handled"
 
     @property
     def mouse_support(self) -> bool:
@@ -284,6 +424,9 @@ class ExplorerInteraction:
         return not self.native_selection
 
     def handle_interaction_action(self, action: str) -> SubviewKeyResult:
+        option_result = self.handle_options_action(action)
+        if option_result != "ignored":
+            return option_result
         if action != "native_selection":
             return "ignored"
         self.native_selection = not self.native_selection
@@ -291,8 +434,20 @@ class ExplorerInteraction:
 
     def handle_mouse(self, action: str, _x: int, y: int) -> SubviewKeyResult:
         """Route wheel input to the pane under the pointer."""
+        if action == "click":
+            if y != self._options_y:
+                return "ignored"
+            for index, (start, stop) in enumerate(self._option_hit_boxes):
+                if start <= _x < stop:
+                    self.option_cursor = index
+                    self.options[index].activate()
+                    self.option_cursor = None
+                    return "handled"
+            return "ignored"
         if action not in {"scroll_up", "scroll_down"}:
             return "ignored"
+        if self.options_active:
+            return "handled"
         delta = -3 if action == "scroll_up" else 3
         if y <= getattr(self.model, "_last_divider_y", 0):
             self.model.focus = "list"
@@ -324,6 +479,43 @@ class ExplorerView(ExplorerInteraction):
         self.title = config.title
         self.pending_input: str | None = None
 
+    def configure_row_options(
+        self,
+        *,
+        filters: tuple[tuple[str, str, Callable[[Any], bool]], ...],
+        sorts: tuple[tuple[str, str, Callable[[Any], Any], bool], ...],
+    ) -> None:
+        """Attach the standard grouped Filter/Sort controls to this explorer."""
+        filter_map = {value: predicate for value, _label, predicate in filters}
+        sort_map = {value: (key, reverse) for value, _label, key, reverse in sorts}
+
+        def apply_filter(value: str) -> None:
+            key, reverse = sort_map[sort_option.value]
+            self.model.set_view(predicate=filter_map[value], sort_key=key, reverse=reverse)
+
+        def apply_sort(value: str) -> None:
+            key, reverse = sort_map[value]
+            self.model.set_view(
+                predicate=filter_map[filter_option.value], sort_key=key, reverse=reverse
+            )
+
+        filter_option = ExplorerOption(
+            "filter",
+            "Filter",
+            tuple((value, label) for value, label, _predicate in filters),
+            filters[0][0],
+            apply_filter,
+        )
+        sort_option = ExplorerOption(
+            "sort",
+            "Sort",
+            tuple((value, label) for value, label, _key, _reverse in sorts),
+            sorts[0][0],
+            apply_sort,
+        )
+        self.configure_options(filter_option, sort_option)
+        apply_filter(filter_option.value)
+
     def format_row(self, row: Any, width: int) -> str:
         """Format a single row for the list. Override in subclasses."""
         return str(row)[:width]
@@ -335,9 +527,6 @@ class ExplorerView(ExplorerInteraction):
     def handle_action(self, action: str, row: Any) -> SubviewKeyResult:
         """Handle a custom action on the current row. Override for custom behavior."""
         return "ignored"
-
-    def render(self, width: int, height: int) -> str:
-        return render_explorer(self, width, height, ansi=True)
 
     def handle_key(self, action: str, value: str = "") -> SubviewKeyResult:
         model = self.model
@@ -423,172 +612,3 @@ class ExplorerView(ExplorerInteraction):
 
 
 # ─── Generic Explorer Renderer ───────────────────────────────────────────────
-
-
-def render_explorer(view: ExplorerView, width: int, height: int, *, ansi: bool = True) -> str:
-    """Render an explorer view to a string frame.
-
-    This is the shared layout engine. Concrete explorers customize via
-    their ExplorerConfig, format_row(), and detail_lines() methods.
-    """
-    width = max(int(width), 40)
-    height = max(int(height), 1)
-    model = view.model
-    config = view.config
-
-    row = model.current
-    match_count = len(model.matches)
-    total = len(model.rows)
-
-    # ── Header ──
-    pos = f" {model.cursor + 1}/{match_count}" if match_count else " 0/0"
-    match_label = f" match {model.cursor + 1}/{match_count}" if model.query and match_count else ""
-    query_display = f" search={model.query!r}" if model.query else ""
-    header = style_bar(
-        f" {config.title}{pos} of {total}{match_label}{query_display} ".ljust(width, "\u2500")[
-            :width
-        ],
-        ansi=ansi,
-    )
-
-    # ── Footer ──
-    pane_label = "list" if model.focus == "list" else config.detail_pane_name
-    if model.search_active:
-        mode_text = "FTS MODE"
-        search_prompt = f"FTS: {model.query}"
-        enter_hint = "enter exit FTS"
-    else:
-        mode_text = "BROWSE MODE"
-        search_prompt = "/ FTS"
-        enter_hint = ""
-    focus_label = f"{mode_text} \u00b7 pane={pane_label}"
-    footer_parts = [
-        focus_label,
-        "\u2191/\u2193 nav/scroll",
-        view.selection_hint(),
-        "tab switch pane",
-        search_prompt,
-        enter_hint,
-        "esc clear",
-        "q close",
-    ]
-    # Add custom action hints
-    for _action_name, hint in config.actions.items():
-        footer_parts.append(hint)
-
-    footer_plain = (" " + "  ".join(part for part in footer_parts if part) + " ").ljust(
-        width, "\u2500"
-    )[:width]
-    if ansi:
-        before_mode, after_mode = footer_plain.split(mode_text, 1)
-        styled_mode = style_mode_label(mode_text, active=model.search_active, ansi=True)
-        footer = f"{BAR_STYLE}{before_mode}{styled_mode}{BAR_STYLE}{after_mode}\x1b[0m"
-    else:
-        footer = footer_plain
-
-    # ── Body ──
-    body_height = max(height - 2, 0)
-    model._last_divider_y = 0
-
-    if not total:
-        body = [config.empty_message]
-    elif row is None:
-        body = [config.no_match_message.format(query=model.query)]
-    else:
-        # List pane
-        list_count = max(3, min(int(body_height * config.list_ratio), body_height - 4))
-        half = list_count // 2
-        start = max(0, model.cursor - half)
-        end = min(match_count, start + list_count)
-        start = max(0, end - list_count)
-        terms = search_terms(model.query)
-
-        body = []
-        for visible_i in range(start, end):
-            row_i = model.matches[visible_i]
-            item = model.rows[row_i]
-            marker = (
-                "\u276f"
-                if visible_i == model.cursor and model.focus == "list"
-                else "\u2022"
-                if visible_i == model.cursor
-                else " "
-            )
-            row_text = view.format_row(item, width - 2)
-            line = f"{marker} {row_text}"
-            body.append(display_line(line, width, terms, ansi=ansi))
-
-        # Divider
-        divider_label = (
-            f"[FTS: {model.query}] " if model.search_active or model.query else "[/: FTS] "
-        )
-        divider_plain = divider_label.ljust(width, "\u2500")[:width]
-        if ansi and (model.search_active or model.query):
-            divider = style_fts_prompt(divider_label, active=model.search_active, ansi=True)
-            divider += "\u2500" * max(width - len(divider_label), 0)
-            body.append(divider)
-        else:
-            body.append(divider_plain)
-        # Screen row of the divider: one header row plus the zero-based body
-        # row. Because ``body`` already includes the divider, ``len(body)`` is
-        # exactly that absolute row number.
-        model._last_divider_y = len(body)
-
-        # Detail pane
-        available = max(body_height - len(body), 0)
-        # Reserve 1 line for scroll indicator when detail overflows
-        detail_lines_list = view.detail_lines(row, width)
-        model._last_detail_line_count = len(detail_lines_list)
-        needs_indicator = len(detail_lines_list) > available
-        detail_visible = max(available - (1 if needs_indicator else 0), 0)
-        model._last_detail_visible_lines = detail_visible
-
-        # Update match lines for search navigation
-        terms_for_detail = search_terms(model.query)
-        model._last_detail_match_lines = detail_match_lines(detail_lines_list, terms_for_detail)
-
-        # Auto-center on match when searching
-        if model.search_active and model._last_detail_match_lines:
-            count = len(model._last_detail_match_lines)
-            model.search_line_cursor = min(max(model.search_line_cursor, 0), count - 1)
-            line = model._last_detail_match_lines[model.search_line_cursor]
-            visible = max(detail_visible, 1)
-            if not (model.detail_offset <= line < model.detail_offset + visible):
-                model.detail_offset = max(line - visible // 2, 0)
-
-        model.clamp_detail_offset(detail_visible)
-        visible_slice = detail_lines_list[
-            model.detail_offset : model.detail_offset + detail_visible
-        ]
-
-        # Highlight search terms in detail
-        if ansi and terms_for_detail:
-            current_match_line = (
-                model._last_detail_match_lines[model.search_line_cursor]
-                if model._last_detail_match_lines
-                else None
-            )
-            highlighted = []
-            for i, dl in enumerate(visible_slice):
-                abs_line = model.detail_offset + i
-                is_current = abs_line == current_match_line
-                highlighted.append(
-                    display_line(dl, width, terms_for_detail, ansi=True, current_match=is_current)
-                )
-            visible_slice = highlighted
-
-        # Scroll indicator
-        if model._last_detail_line_count > detail_visible and detail_visible > 0:
-            remaining = model._last_detail_line_count - model.detail_offset - detail_visible
-            if remaining > 0:
-                indicator = f"  \u2193 {remaining} more lines"
-                visible_slice.append(indicator[:width])
-
-        body.extend(visible_slice)
-
-    # Pad to fill height
-    while len(body) < body_height:
-        body.append("")
-
-    lines = [header] + body[:body_height] + [footer]
-    return "\n".join(lines)

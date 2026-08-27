@@ -12,17 +12,10 @@ from rich.console import Console as RichConsole
 from rich.table import Table
 from rich.text import Text
 
+from .explorer_base import style_bar
 from .output import CodeExecution, Output, TableOutput, TextOutput
 from .subapp import SubviewKeyResult
-from .theme import COLORS, ThemeSyntax
-
-_BAR_STYLE = "\x1b[48;5;236;38;5;252m"
-
-
-def _style_bar(text: str, *, ansi: bool) -> str:
-    if not ansi:
-        return text
-    return f"{_BAR_STYLE}{text}\x1b[0m"
+from .theme import COLORS, ThemeSyntax, create_theme
 
 
 def _plain_wrap(text: str, width: int) -> list[str]:
@@ -52,6 +45,7 @@ def _render_rich_lines(renderables: Iterable[object], width: int) -> list[str]:
         file=buf,
         force_terminal=True,
         color_system="256",
+        theme=create_theme(),
         width=render_width,
         _environ={"COLUMNS": str(render_width), "LINES": "25"},
     )
@@ -201,8 +195,8 @@ def render_activity_overlay(
 ) -> str:
     width = max(int(width), 40)
     height = max(int(height), 1)
-    header = _style_bar(" Activity ".ljust(width, "─")[:width], ansi=ansi)
-    footer = _style_bar(
+    header = style_bar(" Activity ".ljust(width, "─")[:width], ansi=ansi)
+    footer = style_bar(
         " ↑/↓ scroll  PgUp/PgDn page  Home/End  Enter/Esc/q close ".ljust(width, "─")[:width],
         ansi=ansi,
     )

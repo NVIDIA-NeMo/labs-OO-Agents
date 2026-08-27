@@ -10,17 +10,17 @@ from dataclasses import dataclass
 from typing import Any
 
 from .explorer_base import (
-    BAR_STYLE,
-    ExplorerInteraction,
+    ExplorerChecklistOption,
+    ExplorerConfig,
+    ExplorerOption,
+    ExplorerView,
+    highlight_style_code,
     highlight_terms,
     search_terms,
-    style_bar,
-    style_fts_prompt,
-    style_mode_label,
     wrap_plain_line,
 )
 from .subapp import SubviewKeyResult
-from .theme import ThemeSyntax, get_syntax_theme
+from .theme import ThemeSyntax, create_theme, get_syntax_theme
 
 
 def highlight_terms_with_current(
@@ -39,10 +39,10 @@ def highlight_terms_with_current(
     def replace(match: re.Match[str]) -> str:
         nonlocal seen
         seen += 1
-        color = (
-            "30;106" if current_occurrence is not None and seen == current_occurrence else "30;43"
+        style = highlight_style_code(
+            current=current_occurrence is not None and seen == current_occurrence
         )
-        return f"\x1b[{color}m{match.group(0)}\x1b[0m"
+        return f"{style}{match.group(0)}\x1b[0m"
 
     return pattern.sub(replace, text)
 
@@ -75,6 +75,8 @@ class EventExplorerModel:
         self._last_detail_match_lines: list[int] = []
         self._last_detail_match_occurrences: list[tuple[int, int]] = []
         self._last_detail_visible_lines = 0
+        self.enabled_types = {row.event_type for row in rows}
+        self.sort_mode = "recorded"
 
     @property
     def empty(self) -> bool:
@@ -95,17 +97,25 @@ class EventExplorerModel:
     def set_query(self, query: str) -> None:
         self.query = query
         words = [w.lower() for w in query.split() if w.strip()]
-        if not words:
-            self.matches = list(range(len(self.rows)))
-        else:
-            self.matches = [
-                i
-                for i, row in enumerate(self.rows)
-                if all(word in row.search_text.lower() for word in words)
-            ]
+        self.matches = [
+            i
+            for i, row in enumerate(self.rows)
+            if row.event_type in self.enabled_types
+            and (not words or all(word in row.search_text.lower() for word in words))
+        ]
+        if self.sort_mode == "type":
+            self.matches.sort(key=lambda index: (self.rows[index].event_type, index))
         self.cursor = 0
         self.detail_offset = 0
         self.search_line_cursor = 0
+
+    def set_enabled_types(self, enabled: set[str]) -> None:
+        self.enabled_types = set(enabled)
+        self.set_query(self.query)
+
+    def set_sort_mode(self, mode: str) -> None:
+        self.sort_mode = mode
+        self.set_query(self.query)
 
     def edit_query(self, text: str) -> None:
         self.set_query(text)
@@ -189,23 +199,50 @@ class EventExplorerModel:
         self.detail_offset = min(max(self.detail_offset, 0), max_offset)
 
 
-class EventExplorerView(ExplorerInteraction):
-    """In-app subview wrapper for browsing recorded events."""
+class EventExplorerView(ExplorerView):
+    """Event-specific configuration for the shared full-screen browser."""
 
-    title = "events"
-    detail_focus = "detail"
+    item_name = "event"
+    list_heading = "  id       event type              summary"
 
     def __init__(self, event_manager: Any) -> None:
-        self.model = EventExplorerModel(build_event_rows(event_manager))
-
-    def render(self, width: int, height: int) -> str:
-        return render_event_explorer(
-            self.model,
-            width,
-            height,
-            ansi=True,
-            selection_hint=self.selection_hint(),
+        super().__init__(
+            EventExplorerModel(build_event_rows(event_manager)),
+            ExplorerConfig(
+                title="Event Explorer",
+                detail_pane_name="event detail",
+                empty_message="No events recorded.",
+                no_match_message="No events matching {query!r}.",
+            ),
         )
+        event_types = tuple(sorted(self.model.enabled_types, key=str.casefold))
+
+        self.configure_options(
+            ExplorerChecklistOption(
+                "event-types",
+                "Event types",
+                (("__all__", "All"), *((event_type, event_type) for event_type in event_types)),
+                set(event_types),
+                self.model.set_enabled_types,
+                all_value="__all__",
+            ),
+            ExplorerOption(
+                "sort",
+                "Sort",
+                (("recorded", "Recorded"), ("type", "Event type")),
+                "recorded",
+                self.model.set_sort_mode,
+            ),
+        )
+
+    def format_row(self, row: EventExplorerRow, width: int) -> str:
+        return f"{row.tag:<8} {row.event_type:<22} {row.summary}"[:width]
+
+    def detail_lines(self, row: EventExplorerRow, width: int) -> list[str]:
+        return highlighted_detail_lines(row, width, self.model.query)
+
+    def handle_action(self, action: str, row: Any) -> SubviewKeyResult:
+        return "ignored"
 
     def handle_key(self, action: str, value: str = "") -> SubviewKeyResult:
         model = self.model
@@ -580,6 +617,31 @@ def _append_section(lines: list[str], title: str, body: str) -> None:
     lines.extend(["", f"## {title}", "", body])
 
 
+def _append_compact_field(lines: list[str], title: str, body: str) -> None:
+    """Render short metadata on one line instead of as a spacious section."""
+    body = body.strip()
+    if not body:
+        return
+    lines.extend(["", f"**{title}:** {body}"])
+
+
+def _is_compact_event_field(field: str, value: Any) -> bool:
+    """Return whether a field is short metadata rather than substantive content."""
+    if field in _MARKDOWN_FIELDS or isinstance(value, dict | list | tuple):
+        return False
+    return "\n" not in str(value) and len(_safe_inline(value)) <= 80
+
+
+def _append_event_field(
+    lines: list[str], field: str, value: Any, *, language: str | None = None
+) -> None:
+    title = _field_title(field)
+    if language is None and _is_compact_event_field(field, value):
+        _append_compact_field(lines, title, f"`{_safe_inline(value)}`")
+    else:
+        _append_section(lines, title, _event_field_markdown(value, language=language))
+
+
 def _event_markdown(tag: str, event: Any, event_type: str) -> str | None:
     data = _event_to_mapping(event)
     lines = [_event_header_line(tag, event_type, data)]
@@ -621,7 +683,7 @@ def _event_markdown(tag: str, event: Any, event_type: str) -> str | None:
     elif event_type == "ToolCallEvent":
         name = str(data.get("name", "tool"))
         args = data.get("arguments", {})
-        _append_section(lines, "Tool", f"`{_safe_inline(name)}`")
+        _append_compact_field(lines, "Tool", f"`{_safe_inline(name)}`")
         if name == "execute_python" and isinstance(args, dict) and args.get("code"):
             _append_section(lines, "Python", _markdown_code_block(str(args["code"]), "python"))
             extras = {k: v for k, v in args.items() if k != "code" and not _is_empty_event_field(v)}
@@ -631,12 +693,12 @@ def _event_markdown(tag: str, event: Any, event_type: str) -> str | None:
             _append_section(lines, "Arguments", _json_block(args))
         result = data.get("result")
         if not _is_empty_event_field(result):
-            _append_section(lines, "Result", _event_field_markdown(result))
+            _append_event_field(lines, "result", result)
 
     elif event_type == "PythonOutput":
         status = _safe_inline(data.get("execution_status", ""))
         if status:
-            _append_section(lines, "Status", f"`{status}`")
+            _append_compact_field(lines, "Status", f"`{status}`")
         for field, language in _CODE_EVENT_FIELDS["PythonOutput"].items():
             value = data.get(field)
             if not _is_empty_event_field(value):
@@ -645,7 +707,7 @@ def _event_markdown(tag: str, event: Any, event_type: str) -> str | None:
                 )
         value = data.get("value")
         if not _is_empty_event_field(value):
-            _append_section(lines, "Value", _event_field_markdown(value))
+            _append_event_field(lines, "value", value)
 
     elif event_type == "LLMOutput":
         content = data.get("content")
@@ -672,10 +734,11 @@ def _event_markdown(tag: str, event: Any, event_type: str) -> str | None:
                 continue
             language = _CODE_EVENT_FIELDS.get(event_type, {}).get(field)
             if field in _MARKDOWN_FIELDS and language is None and isinstance(value, str):
-                body = _escape_terminal_controls(value.rstrip())
+                _append_section(
+                    lines, _field_title(field), _escape_terminal_controls(value.rstrip())
+                )
             else:
-                body = _event_field_markdown(value, language=language)
-            _append_section(lines, _field_title(field), body)
+                _append_event_field(lines, field, value, language=language)
 
     rendered_fields = "\n".join(lines)
     # Fallback: if no content sections were added (only the header line exists),
@@ -684,7 +747,7 @@ def _event_markdown(tag: str, event: Any, event_type: str) -> str | None:
         for field, value in data.items():
             if field == "event_type" or field in _NOISE_FIELDS or _is_empty_event_field(value):
                 continue
-            _append_section(lines, _field_title(field), _event_field_markdown(value))
+            _append_event_field(lines, field, value)
     _append_metadata_footer(lines, data)
     return "\n".join(lines)
 
@@ -783,6 +846,7 @@ def _highlight_syntax(text: str, width: int, language: str = "python") -> str:
             file=buf,
             force_terminal=True,
             color_system="256",
+            theme=create_theme(),
             width=render_width,
             _environ={"COLUMNS": str(render_width), "LINES": "25"},
         )
@@ -816,6 +880,7 @@ def _render_markdown(markdown: str, width: int) -> str:
             file=buf,
             force_terminal=True,
             color_system="256",
+            theme=create_theme(),
             width=render_width,
             _environ={"COLUMNS": str(render_width), "LINES": "25"},
         )
@@ -894,151 +959,3 @@ def highlighted_detail_lines(
     rendered = _highlight_syntax(row.detail, width, "python")
     lines.extend(rendered.splitlines() or [""])
     return lines
-
-
-def render_event_explorer(
-    model: EventExplorerModel,
-    width: int,
-    height: int,
-    *,
-    ansi: bool = False,
-    selection_hint: str = "F2 select/copy",
-) -> str:
-    """Render the current explorer state as text/ANSI."""
-    width = max(int(width), 40)
-    height = max(int(height), 1)
-    row = model.current
-    match_count = len(model.matches)
-    total = len(model.rows)
-    title = "Event Explorer"
-    query = f" search={model.query!r}" if model.query else ""
-    pos = f" {model.cursor + 1}/{match_count}" if match_count else " 0/0"
-    match_label = f" match {model.cursor + 1}/{match_count}" if model.query and match_count else ""
-    header = style_bar(
-        f" {title}{pos} of {total}{match_label}{query} ".ljust(width, "─")[:width], ansi=ansi
-    )
-    pane_label = "events" if model.focus == "list" else "event text"
-    if model.search_active:
-        mode_text = "FTS MODE"
-        search_prompt = f"FTS: {model.query}"
-        nav_hint = "↑/↓ next match" if model.focus == "list" else "↑/↓ scroll text"
-        enter_hint = "enter exit FTS"
-    else:
-        mode_text = "BROWSE MODE"
-        search_prompt = "/ FTS"
-        nav_hint = "↑/↓ matches/scroll"
-        enter_hint = ""
-    focus_label = f"{mode_text} · pane={pane_label}"
-    footer_parts = [
-        focus_label,
-        nav_hint,
-        selection_hint,
-        "tab switch pane",
-        search_prompt,
-        enter_hint,
-        "esc clear",
-        "q close",
-    ]
-    footer_plain = (" " + "  ".join(part for part in footer_parts if part) + " ").ljust(width, "─")[
-        :width
-    ]
-    if ansi:
-        before_mode, after_mode = footer_plain.split(mode_text, 1)
-        styled_mode = style_mode_label(mode_text, active=model.search_active, ansi=True)
-        footer = f"{BAR_STYLE}{before_mode}{styled_mode}{BAR_STYLE}{after_mode}\x1b[0m"
-    else:
-        footer = footer_plain
-    body_height = max(height - 2, 0)
-    model._last_divider_y = 0
-    if not total:
-        body = ["No events recorded."]
-    elif row is None:
-        body = [f"No matches for {model.query!r}."]
-    else:
-        list_count = min(8, max(3, body_height // 3))
-        half = list_count // 2
-        start = max(0, model.cursor - half)
-        end = min(match_count, start + list_count)
-        start = max(0, end - list_count)
-        body = []
-        for visible_i in range(start, end):
-            row_i = model.matches[visible_i]
-            item = model.rows[row_i]
-            marker = (
-                "❯"
-                if visible_i == model.cursor and model.focus == "list"
-                else "•"
-                if visible_i == model.cursor
-                else " "
-            )
-            line = f"{marker} {item.tag:<8} {item.event_type:<22} {item.summary}"
-            line = line[:width]
-            body.append(highlight_terms(line, search_terms(model.query)) if ansi else line)
-        divider_label = (
-            f"[FTS: {model.query}] " if model.search_active or model.query else "[/: FTS] "
-        )
-        divider_plain = divider_label.ljust(width, "─")[:width]
-        if ansi and (model.search_active or model.query):
-            divider = style_fts_prompt(divider_label, active=model.search_active, ansi=True)
-            divider += "─" * max(width - len(divider_label), 0)
-            body.append(divider)
-        else:
-            body.append(divider_plain)
-        model._last_divider_y = len(body)
-        available = max(body_height - len(body), 0)
-        model._last_detail_match_lines = detail_match_lines(row, width, model.query)
-        model._last_detail_match_occurrences = detail_match_occurrences(row, width, model.query)
-        current_match_line = None
-        current_match_occurrence = None
-        match_count_in_detail = len(model._last_detail_match_occurrences) or len(
-            model._last_detail_match_lines
-        )
-        if match_count_in_detail:
-            if model.search_line_cursor >= match_count_in_detail:
-                model.search_line_cursor = match_count_in_detail - 1
-            if model._last_detail_match_occurrences:
-                current_match_line, current_match_occurrence = model._last_detail_match_occurrences[
-                    model.search_line_cursor
-                ]
-            else:
-                current_match_line = model._last_detail_match_lines[model.search_line_cursor]
-
-        else:
-            model.search_line_cursor = 0
-        detail_lines = (
-            highlighted_detail_lines(
-                row,
-                width,
-                model.query,
-                current_match_line=current_match_line,
-                current_match_occurrence=current_match_occurrence,
-            )
-            if ansi
-            else wrapped_detail_lines(row, width)
-        )
-        model._last_detail_line_count = len(detail_lines)
-        detail_visible = (
-            max(available - 1, 0) if model._last_detail_line_count > available else available
-        )
-        model._last_detail_visible_lines = detail_visible
-        if (
-            model.search_active
-            and model.focus == "list"
-            and current_match_line is not None
-            and detail_visible > 0
-        ):
-            model.center_detail_on_line(current_match_line, detail_visible)
-        else:
-            model.clamp_detail_offset(detail_visible)
-        if model._last_detail_line_count > available:
-            scroll_label = (
-                f"{'❯ ' if model.focus == 'detail' else ''}event lines {model.detail_offset + 1}-"
-                f"{min(model.detail_offset + detail_visible, model._last_detail_line_count)}"
-                f"/{model._last_detail_line_count}"
-            )
-            body.append(scroll_label[:width])
-        for line in detail_lines[model.detail_offset : model.detail_offset + detail_visible]:
-            body.append(line if ansi else line[:width])
-    body = body[:body_height]
-    body.extend("" for _ in range(body_height - len(body)))
-    return "\n".join([header, *body, footer])

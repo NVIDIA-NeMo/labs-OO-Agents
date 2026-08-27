@@ -10,12 +10,13 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.layout import BufferControl, DynamicContainer, HSplit, VSplit, Window
+from prompt_toolkit.layout import BufferControl, VSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
 from rich.cells import cell_len, split_graphemes
 
+from .fullscreen_browser import build_fullscreen_browser
 from .terminal_safety import sanitize_live_text
 
 
@@ -286,7 +287,7 @@ def _field_fragments(
 ) -> list[tuple[str, str]]:
     matched = set(positions)
     return [
-        (base + (" class:resume-picker.match" if i in matched else ""), char)
+        (base + (" class:fullscreen-browser.match" if i in matched else ""), char)
         for i, char in enumerate(text)
     ]
 
@@ -336,7 +337,9 @@ def _row_fragments(
 ) -> list[list[tuple[str, str]]]:
     """Render one compact row: age, resumability, title, and latest agent text."""
     row = match.row
-    base = "class:resume-picker.row" + (" class:resume-picker.selected" if selected else "")
+    base = "class:fullscreen-browser.row" + (
+        " class:fullscreen-browser.selected" if selected else ""
+    )
     attached = row.current or row.attached
     timestamp = row.last_active if sort_updated else row.created_at
     state = "✗" if attached else "✓"
@@ -346,7 +349,7 @@ def _row_fragments(
     title = _clip_fragments(
         _field_fragments(
             title_text,
-            base + (" class:resume-picker.unavailable" if attached else ""),
+            base + (" class:fullscreen-browser.unavailable" if attached else ""),
             match.positions if match.field == "title" else (),
         ),
         title_width,
@@ -361,7 +364,7 @@ def _row_fragments(
                 *title,
                 *_field_fragments(
                     row.preview,
-                    base + " class:resume-picker.meta",
+                    base + " class:fullscreen-browser.meta",
                     preview_positions,
                 ),
             ],
@@ -373,31 +376,31 @@ def _row_fragments(
 def _preview_lines(row: ResumePickerRow | None, width: int) -> list[list[tuple[str, str]]]:
     """Render transcript turns using the same visual language as live scrollback."""
     if row is None:
-        return [[("class:resume-picker.empty", "No session selected")]]
+        return [[("class:fullscreen-browser.empty", "No session selected")]]
     if not row.turns:
-        return [[("class:resume-picker.empty", "No conversation preview")]]
+        return [[("class:fullscreen-browser.empty", "No conversation preview")]]
     lines: list[list[tuple[str, str]]] = []
     width = max(1, width)
     for turn in row.turns:
         if turn.role == "user":
             edge = "▔" * width
-            lines.append([("class:resume-picker.preview-user-edge", edge)])
+            lines.append([("class:fullscreen-browser.preview-user-edge", edge)])
             for index, text in enumerate(_wrap(turn.content, max(1, width - 4))):
                 prompt = "❯ " if index == 0 else "  "
                 content = _clip(f" {prompt}{text}", width)
                 lines.append(
                     [
                         (
-                            "class:resume-picker.preview-user",
+                            "class:fullscreen-browser.preview-user",
                             content + " " * max(0, width - cell_len(content)),
                         )
                     ]
                 )
-            lines.append([("class:resume-picker.preview-user-edge", "▁" * width)])
+            lines.append([("class:fullscreen-browser.preview-user-edge", "▁" * width)])
         else:
-            lines.append([("class:resume-picker.preview-agent", "OO:")])
+            lines.append([("class:fullscreen-browser.preview-agent", "OO:")])
             lines.extend(
-                [("class:resume-picker.preview", text)] for text in _wrap(turn.content, width)
+                [("class:fullscreen-browser.preview", text)] for text in _wrap(turn.content, width)
             )
             lines.append([])
     if lines and not lines[-1]:
@@ -487,7 +490,7 @@ class _PickerControl(FormattedTextControl):
                         output.append(("", "\n"))
                     output.extend(row_line)
             if not output:
-                output = [("class:resume-picker.empty", "No matching sessions")]
+                output = [("class:fullscreen-browser.empty", "No matching sessions")]
             return output
 
         return self.picker.preview_text(width, height)
@@ -556,8 +559,8 @@ class _PickerButtonControl(FormattedTextControl):
 
     def _text(self):
         focused = self.picker.option_cursor == self.kind
-        style = "class:resume-picker.control" + (
-            " class:resume-picker.control-focused" if focused else ""
+        style = "class:fullscreen-browser.control" + (
+            " class:fullscreen-browser.control-focused" if focused else ""
         )
         if self.kind == "filter":
             value = {
@@ -610,7 +613,7 @@ class ResumePicker:
             width=Dimension(min=4, weight=1),
             height=1,
             style=lambda: (
-                "class:resume-picker.control-focused"
+                "class:fullscreen-browser.control-focused"
                 if self.active_control == "list" and self.option_cursor is None
                 else ""
             ),
@@ -642,79 +645,33 @@ class ResumePicker:
         self.list_control = _PickerControl(self, "list")
         self.preview_control = _PickerControl(self, "preview")
 
-        def separator() -> Window:
-            return Window(char="─", height=1, style="class:resume-picker.separator")
-
-        def area(name: str, body: Any) -> VSplit:
-            return VSplit(
-                [
-                    Window(
-                        FormattedTextControl(lambda: self._active_rail(name)),
-                        width=1,
-                        style="class:resume-picker.active-rail",
-                    ),
-                    body,
-                ],
-                padding=0,
-            )
-
         self.title_control = FormattedTextControl(self._title)
         self.list_header_control = FormattedTextControl(self._list_header)
         self.preview_header_control = FormattedTextControl(self._preview_header)
-        title = Window(self.title_control, height=1)
-        help_line = Window(
-            FormattedTextControl(self._help_text, style="class:resume-picker.footer"),
-            height=1,
-        )
-        list_header = Window(self.list_header_control, height=1)
-        preview_header = Window(self.preview_header_control, height=1)
-        self.list_window = Window(
-            self.list_control, height=Dimension(min=1, preferred=4, max=5), wrap_lines=False
-        )
-        self.preview_window = Window(
-            self.preview_control,
-            height=Dimension(min=2, weight=1),
-            wrap_lines=False,
-            right_margins=[],
-        )
-        self._main_container = HSplit(
-            [
-                title,
-                help_line,
-                area(
-                    "list",
-                    HSplit([controls, list_header, self.list_window], padding=0),
-                ),
-                separator(),
-                area("preview", HSplit([preview_header, self.preview_window], padding=0)),
-                separator(),
-            ],
-            padding=0,
-        )
         self.small_control = FormattedTextControl(
-            [("class:resume-picker.too-small", "Terminal too small")], focusable=True
+            [("class:fullscreen-browser.too-small", "Terminal too small")], focusable=True
         )
-        self._small_container = HSplit(
-            [
-                Window(self.small_control, height=1),
-                Window(FormattedTextControl(self._small_text), height=1),
-            ]
-        )
-        self.container = DynamicContainer(self._responsive_container)
-
-    def _responsive_container(self):
-        size = self.app.output.get_size()
-        return (
-            self._main_container
-            if size.columns >= 48 and size.rows >= 13
-            else self._small_container
+        self.container = build_fullscreen_browser(
+            app=self.app,
+            title_control=self.title_control,
+            help_control=FormattedTextControl(
+                self._help_text, style="class:fullscreen-browser.footer"
+            ),
+            controls=controls,
+            list_header_control=self.list_header_control,
+            list_control=self.list_control,
+            preview_header_control=self.preview_header_control,
+            preview_control=self.preview_control,
+            active_rail=self._active_rail,
+            small_control=self.small_control,
+            small_text=self._small_text,
         )
 
     def _small_text(self):
         size = self.app.output.get_size()
         return [
             (
-                "class:resume-picker.muted",
+                "class:fullscreen-browser.muted",
                 f"Need 48 x 13; now {size.columns} x {size.rows}",
             )
         ]
@@ -725,23 +682,23 @@ class ResumePicker:
         self.invalidate()
 
     def _search_label(self):
-        style = "class:resume-picker.search-label"
+        style = "class:fullscreen-browser.search-label"
         if self.active_control == "list" and self.option_cursor is None:
-            style += " class:resume-picker.control-focused"
+            style += " class:fullscreen-browser.control-focused"
         return [(style, "[Search: ")]
 
     def _search_close(self):
-        style = "class:resume-picker.search-label"
+        style = "class:fullscreen-browser.search-label"
         if self.active_control == "list" and self.option_cursor is None:
-            style += " class:resume-picker.control-focused"
+            style += " class:fullscreen-browser.control-focused"
         return [(style, "]")]
 
     def _active_rail(self, area: str):
         active = self.active_control == area
         style = (
-            "class:resume-picker.active-rail-active"
+            "class:fullscreen-browser.active-rail-active"
             if active
-            else "class:resume-picker.active-rail"
+            else "class:fullscreen-browser.active-rail"
         )
         glyph = "▌" if active else "│"
         return [(style, "\n".join([glyph] * max(1, self.app.output.get_size().rows)))]
@@ -760,7 +717,7 @@ class ResumePicker:
         count = len(self.model.matches)
         return [
             (
-                "class:resume-picker.title",
+                "class:fullscreen-browser.title",
                 f"Resume a previous session · {count} session{'s' if count != 1 else ''}",
             )
         ]
@@ -771,7 +728,7 @@ class ResumePicker:
         title_width = _row_title_width(width)
         return [
             (
-                "class:resume-picker.heading",
+                "class:fullscreen-browser.heading",
                 f"  {age:>8}  st {'title':<{title_width}}  last agent message",
             )
         ]
@@ -783,7 +740,7 @@ class ResumePicker:
         suffix = f" · match {position[0]}/{position[1]}" if position[1] else ""
         return [
             (
-                "class:resume-picker.heading",
+                "class:fullscreen-browser.heading",
                 _clip(
                     f"Conversation preview · {title}{suffix}",
                     self.app.output.get_size().columns,
@@ -973,12 +930,12 @@ class ResumePicker:
     def preview_text(self, width: int, height: int):
         row = self.model.current
         if row is None:
-            return [("class:resume-picker.empty", "No session selected")]
+            return [("class:fullscreen-browser.empty", "No session selected")]
         if not row.turns:
-            return [("class:resume-picker.empty", "No conversation preview")]
+            return [("class:fullscreen-browser.empty", "No conversation preview")]
         transcript = self._preview_model(width)
         if transcript is None:
-            return [("class:resume-picker.empty", "Preparing conversation preview…")]
+            return [("class:fullscreen-browser.empty", "Preparing conversation preview…")]
         transcript.set_search(self.model.query, width=max(1, width), height=max(1, height))
         return transcript.formatted_text(width=max(1, width), height=max(1, height))
 
