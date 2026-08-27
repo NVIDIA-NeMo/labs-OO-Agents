@@ -155,9 +155,16 @@ registry layers that were discovered.
 
 The TUI passes `llm`, durable `storage`, `cwd`, and `skills_dirs` when those
 parameters are declared by the custom class. Installed Python skills should be
-published through the `nooa.skills` entry-point group. Toolbar extensions can
-similarly publish named providers through `nooa_cli.tui.toolbar_items`; users
-select their order with `/toolbar set <item> ...`.
+published through the `nooa.skills` entry-point group.
+
+### Skill statusbar capabilities
+
+A loaded Python skill can expose statusbar items with a ``statusbar_items`` mapping.
+Values are provider callables accepting ``StatusbarContext``, or safe dotted agent
+attribute paths such as ``"self.agent_mesh.name"``. Use `/statusbar` to list items
+and `/statusbar set mesh model` to select and order them. You can also configure a
+safe path directly, for example `/statusbar set self.agent_mesh.name model`.
+Provider failures are isolated so they cannot stop the TUI.
 
 Keep-going mode is an explicit opt-in. It audits a completed turn with a
 separate judge model and sends an internal continuation only when autonomous

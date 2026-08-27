@@ -151,9 +151,9 @@ class TUIConfig(BaseModel):
     full_screen: bool = True
     _display_mode_warning_emitted: bool = PrivateAttr(default=False)
 
-    # Ordered, structured toolbar providers. Third-party packages can register
-    # additional providers through the ``nooa_cli.tui.toolbar_items`` group.
-    toolbar_items: list[str] = Field(
+    # Ordered statusbar providers. Loaded Python skills may contribute additional
+    # providers through a ``statusbar_items`` mapping.
+    statusbar_items: list[str] = Field(
         default_factory=lambda: ["time", "model", "context", "session"]
     )
 

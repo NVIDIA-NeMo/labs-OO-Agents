@@ -1658,50 +1658,53 @@ class KeepGoingCommand(Command):
         return model or None
 
 
-class ToolbarCommand(Command):
-    """Configure ordered, named toolbar items."""
+class StatusbarCommand(Command):
+    """Configure ordered, named statusbar items."""
 
     @property
     def name(self) -> str:
-        return "toolbar"
+        return "statusbar"
 
     @classmethod
     def help_text(cls) -> dict[str, str]:
-        return {"/toolbar [reset|set <items...>]": "Show or configure toolbar items"}
+        return {"/statusbar [reset|set <items...>]": "Show or configure statusbar items"}
 
     def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
         return True, None
 
     async def execute(self, args: list[str]) -> "CommandResult":
-        from .toolbar import ToolbarRegistry
-
-        available = ToolbarRegistry().names()
+        registry = self._registry.statusbar_registry
+        available = registry.names()
         if not args:
-            active = " · ".join(self.config.toolbar_items)
+            active = " · ".join(self.config.statusbar_items)
             return CommandResult.ok(
                 TextOutput(
-                    f"Toolbar: {active}\nAvailable items: {', '.join(available)}",
+                    f"Statusbar: {active}\nAvailable items: {', '.join(available)}",
                     "info",
                 )
             )
 
         if args[0].lower() == "reset":
-            self.config.toolbar_items = ["time", "model", "context", "session"]
+            self.config.statusbar_items = ["time", "model", "context", "session"]
             return CommandResult.ok(
-                TextOutput("Toolbar reset to time · model · context · session.", "success")
+                TextOutput("Statusbar reset to time · model · context · session.", "success")
             )
 
         requested = args[1:] if args[0].lower() == "set" else args
-        requested = list(dict.fromkeys(item.lower() for item in requested))
+        # Provider names are case-insensitive, but safe self.* paths must retain
+        # their exact spelling for Python attribute resolution.
+        requested = list(
+            dict.fromkeys(item if item.startswith("self.") else item.lower() for item in requested)
+        )
         if not requested:
-            return CommandResult.err("Usage: /toolbar set <item> [item ...]")
-        unknown = [item for item in requested if item not in available]
+            return CommandResult.err("Usage: /statusbar set <item> [item ...]")
+        unknown = [item for item in requested if not registry.accepts(item)]
         if unknown:
             return CommandResult.err(
-                f"Unknown toolbar item(s): {', '.join(unknown)}. Available: {', '.join(available)}"
+                f"Unknown statusbar item(s): {', '.join(unknown)}. Available: {', '.join(available)}"
             )
-        self.config.toolbar_items = requested
-        return CommandResult.ok(TextOutput(f"Toolbar set to: {' · '.join(requested)}", "success"))
+        self.config.statusbar_items = requested
+        return CommandResult.ok(TextOutput(f"Statusbar set to: {' · '.join(requested)}", "success"))
 
 
 # ---------------------------------------------------------------------------
@@ -2518,7 +2521,7 @@ class CommandRegistry:
         "todos": TodosCommand,
         "mcp": MCPCommand,
         "trace-url": TraceUrlCommand,
-        "toolbar": ToolbarCommand,
+        "statusbar": StatusbarCommand,
         "activity": ActivityCommand,
         "reasoning": ReasoningCommand,
     }
@@ -2542,9 +2545,13 @@ class CommandRegistry:
         self._root_config = root_config
         self.startup_info: Output | None = None  # set by main after bootstrap
         self.blocking_llm_health: Any | None = None
+        from .statusbar import StatusbarRegistry
+
+        self.statusbar_registry = StatusbarRegistry(agent)
         self._bind_mcp_oauth_prompt()
         self._commands: dict[str, Command] = self._register()
         self._discover_directory_skills()
+        self.statusbar_registry.refresh_skills()
         self._user_skills: dict[str, _UserSkill] = self._discover_user_skills()
 
     def _register(self) -> dict[str, Command]:
@@ -2830,6 +2837,7 @@ class CommandRegistry:
         # preserve text-skill entries (SKILL.md, _method is None).
         self._user_skills = {k: v for k, v in self._user_skills.items() if v._method is None}
         self._user_skills.update(fresh)
+        self.statusbar_registry.refresh_skills()
 
     @classmethod
     def get_all_command_classes(cls) -> dict[str, type[Command]]:

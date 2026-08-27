@@ -875,7 +875,9 @@ class SkillRegistry(Skill):
                 return result
 
             previous_name = source.module_name
-            previous_module = self._python_modules.pop(previous_name, None)
+            previous_module = (
+                self._python_modules.pop(previous_name, None) if previous_name is not None else None
+            )
             if previous_name is not None and sys.modules.get(previous_name) is previous_module:
                 sys.modules.pop(previous_name, None)
             self._python_modules[module_name] = sys.modules[module_name]
@@ -1219,6 +1221,7 @@ class SkillRegistry(Skill):
         self._attr_map.clear()
         self._load_order.clear()
         self._sources.clear()
+        self._refresh_host_commands()
 
         for module_name, module in tuple(self._python_modules.items()):
             if sys.modules.get(module_name) is module:

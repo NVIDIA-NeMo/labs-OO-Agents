@@ -57,7 +57,7 @@ class TestRoundTrip:
         original.tui.default_model = "my-model"
         original.tui.vi_mode = True
         original.tui.theme = "vslight"
-        original.tui.toolbar_items = ["model", "cwd", "session"]
+        original.tui.statusbar_items = ["model", "cwd", "session"]
         original.tui.active_skills = ["nvzurich.agent_mesh"]
         original.tui.inactive_skills = ["nemo.repo"]
         original.agent.working_dir = "/tmp"
@@ -67,7 +67,7 @@ class TestRoundTrip:
         assert loaded.tui.default_model == "my-model"
         assert loaded.tui.vi_mode is True
         assert loaded.tui.theme == "vslight"
-        assert loaded.tui.toolbar_items == ["model", "cwd", "session"]
+        assert loaded.tui.statusbar_items == ["model", "cwd", "session"]
         assert loaded.tui.active_skills == ["nvzurich.agent_mesh"]
         assert loaded.tui.inactive_skills == ["nemo.repo"]
         assert loaded.agent.working_dir == "/tmp"
@@ -131,12 +131,12 @@ class TestPresence:
         parsed = yaml.safe_load(text)
         assert "tui" in parsed and "agent" in parsed
 
-    def test_toolbar_items_round_trip(self, user_dir, project_dir):
+    def test_statusbar_items_round_trip(self, user_dir, project_dir):
         original = Config()
-        original.tui.toolbar_items = ["cwd", "model"]
+        original.tui.statusbar_items = ["cwd", "model"]
         (user_dir / "settings.yaml").write_text(dump_settings(original))
         loaded = load_settings(Config())
-        assert loaded.tui.toolbar_items == ["cwd", "model"]
+        assert loaded.tui.statusbar_items == ["cwd", "model"]
 
     def test_keep_going_round_trip(self, user_dir, project_dir):
         original = Config()

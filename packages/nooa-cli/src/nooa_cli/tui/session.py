@@ -305,9 +305,7 @@ class Session:
         self.registry = registry
         self._handler = CommandHandler(registry=registry, frontend=frontend)
         self._session_manager = session_manager
-        from .toolbar import ToolbarRegistry
-
-        self._toolbar = ToolbarRegistry()
+        self._statusbar = registry.statusbar_registry
         self._initial_outputs = list(initial_outputs or [])
         self._session_title_requested = False
         # Invalidates user-message UI callbacks queued before a session swap.
@@ -1278,15 +1276,15 @@ class Session:
         await self._get_command_runner().run(kind="bang", text=text, work=_work)
 
     def _session_label(self) -> str:
-        """Render configured toolbar items on the rule above the input."""
-        from .toolbar import ToolbarContext
+        """Render configured statusbar items on the rule above the input."""
+        from .statusbar import StatusbarContext
 
         manager = self._session_manager
         shell = getattr(self.agent, "shell", None)
         cwd = Path(getattr(shell, "cwd", self.config.agent.working_dir)).resolve()
-        return self._toolbar.render(
-            self.config.tui.toolbar_items,
-            ToolbarContext(
+        return self._statusbar.render(
+            self.config.tui.statusbar_items,
+            StatusbarContext(
                 model=self.config.tui.default_model,
                 working_directory=cwd,
                 context_usage=self._context_usage_label(),

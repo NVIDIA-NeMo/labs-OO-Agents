@@ -321,8 +321,8 @@ tui:
   # Write trace files here (relative to project root, or ":project:").
   # trace_dir: .nooa/traces
 
-  # Ordered toolbar items. Built-ins: time, model, cwd, context, session.
-  # toolbar_items: [time, model, context, session]
+  # Ordered statusbar items. Built-ins: time, model, cwd, context, session.
+  # statusbar_items: [time, model, context, session]
 
   # MCP servers, declared inline (preferred over a separate .mcp.json).
   # Keep secrets in the host environment. The TUI resolves ${VAR} only after

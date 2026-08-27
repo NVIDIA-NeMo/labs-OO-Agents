@@ -129,9 +129,9 @@ class Completer:
                 base_dir=self._agent_working_dir(),
             )
 
-        # Toolbar item completion after the `set` action.
-        if lower.startswith("/toolbar set "):
-            return self._toolbar_item_completions(text)
+        # Statusbar item completion after the `set` action.
+        if lower.startswith("/statusbar set "):
+            return self._statusbar_item_completions(text)
 
         if lower.startswith("/keep-going "):
             prefix = "/keep-going "
@@ -185,9 +185,9 @@ class Completer:
                 "medium": "Use medium reasoning effort",
                 "high": "Use high reasoning effort",
             },
-            "/toolbar ": {
-                "reset": "Restore the default toolbar items",
-                "set": "Choose the toolbar items to display",
+            "/statusbar ": {
+                "reset": "Restore the default statusbar items",
+                "set": "Choose the statusbar items to display",
             },
             "/mcp ": {
                 "list": "Show configured, approved, and connected MCP servers",
@@ -385,10 +385,14 @@ class Completer:
             )
         return items
 
-    def _toolbar_item_completions(self, text: str) -> list[CompletionItem]:
-        from .toolbar import ToolbarRegistry
+    def _statusbar_item_completions(self, text: str) -> list[CompletionItem]:
+        from .statusbar import StatusbarRegistry
 
-        prefix = "/toolbar set "
+        statusbar = getattr(self._registry, "statusbar_registry", None)
+        if not isinstance(statusbar, StatusbarRegistry):
+            statusbar = StatusbarRegistry(getattr(self._registry, "agent", None))
+            self._registry.statusbar_registry = statusbar
+        prefix = "/statusbar set "
         selected, _, partial = text[len(prefix) :].rpartition(" ")
         selected_items = selected.split() if selected else []
         replacement_prefix = prefix + (selected + " " if selected else "")
@@ -396,9 +400,9 @@ class Completer:
             CompletionItem(
                 text=replacement_prefix + name,
                 display=name,
-                description="Toolbar item",
+                description="Statusbar item",
             )
-            for name in ToolbarRegistry().names()
+            for name in statusbar.names()
             if name not in selected_items and name.lower().startswith(partial.lower())
         ]
 
