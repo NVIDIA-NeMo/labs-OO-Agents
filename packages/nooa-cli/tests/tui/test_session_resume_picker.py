@@ -11,7 +11,7 @@ from nooa_cli.tui.resume_picker import (
     ResumePickerTurn,
     _clip,
     _row_fragments,
-    fuzzy_match,
+    literal_match,
     render_resume_picker,
 )
 from prompt_toolkit.data_structures import Point
@@ -50,11 +50,27 @@ def test_model_searches_title_and_full_recent_conversation() -> None:
             row("3", "ransom"),
         ]
     )
-    model.set_query("rsm")
+    model.set_query("resume")
     assert model.matches[0].row.title == "resume feature"
-    assert fuzzy_match("rsm", "resume feature") is not None
+    assert literal_match("RESUME", "resume feature") is not None
+    assert literal_match("rsm", "resume feature") is None
     model.set_query("deep needle")
     assert [match.row.id for match in model.matches] == ["2"]
+
+
+def test_search_excludes_noncontiguous_and_hidden_metadata_matches() -> None:
+    model = ResumePickerModel(
+        [
+            row("hidden", "ordinary", working_directory="/work/grep-project"),
+            row("scattered", "g___r___e___p"),
+            row("visible", "grep results"),
+        ]
+    )
+
+    model.set_query("grep")
+
+    assert [match.row.id for match in model.matches] == ["visible"]
+    assert model.matches[0].field == "title"
 
 
 def test_filter_and_sort_reuse_cached_query_matches(monkeypatch) -> None:
@@ -66,7 +82,7 @@ def test_filter_and_sort_reuse_cached_query_matches(monkeypatch) -> None:
     def unexpected_match(query: str, value: str):
         raise AssertionError("filter/sort must not rescan transcript search fields")
 
-    monkeypatch.setattr(picker_module, "fuzzy_match", unexpected_match)
+    monkeypatch.setattr(picker_module, "literal_match", unexpected_match)
     model.toggle_filter()
     model.toggle_sort()
     model.toggle_filter()
@@ -99,7 +115,7 @@ def test_sort_labels_explain_updated_versus_created() -> None:
 
 def test_creation_date_sort_is_primary_with_a_search_query() -> None:
     older_exact = row("old", "needle", last_active=30, created_at=1)
-    newer_weaker = row("new", "n-e-e-d-l-e", last_active=20, created_at=10)
+    newer_weaker = row("new", "prefix needle", last_active=20, created_at=10)
     model = ResumePickerModel([older_exact, newer_weaker])
     model.set_query("needle")
 
@@ -155,14 +171,20 @@ def test_tab_cycles_only_list_and_preview() -> None:
     assert picker.active_control == "preview"
 
 
-def test_filter_and_sort_actions_update_unified_list() -> None:
+def test_options_mode_selects_and_changes_filter_and_sort() -> None:
     app = MagicMock()
     app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
     picker = ResumePicker([row("1", "one")], app)
-    picker.cycle_filter()
+    picker.toggle_options()
+    assert picker.option_cursor == "filter"
+    picker.change_option()
     assert picker.model.state_filter == "attached"
-    picker.toggle_sort()
+    picker.move_option(1)
+    assert picker.option_cursor == "sort"
+    picker.change_option()
     assert picker.model.sort_updated is False
+    assert picker.close_options()
+    assert picker.option_cursor is None
     assert picker.active_control == "list"
 
 
@@ -181,12 +203,21 @@ def test_search_text_and_brackets_share_active_highlight() -> None:
     assert picker.query_window.style() == ""
 
 
-def test_filter_and_sort_are_not_highlighted_with_list_area() -> None:
+def test_only_selected_option_is_highlighted_in_options_mode() -> None:
     app = MagicMock()
     app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
     picker = ResumePicker([row("1", "one")], app)
     assert "control-focused" not in picker.filter_control._text()[0][0]
     assert "control-focused" not in picker.sort_control._text()[0][0]
+    picker.toggle_options()
+    assert "control-focused" not in picker._search_label()[0][0]
+    assert "control-focused" not in picker._search_close()[0][0]
+    assert "control-focused" not in picker.query_window.style()
+    assert "control-focused" in picker.filter_control._text()[0][0]
+    assert "control-focused" not in picker.sort_control._text()[0][0]
+    picker.move_option(1)
+    assert "control-focused" not in picker.filter_control._text()[0][0]
+    assert "control-focused" in picker.sort_control._text()[0][0]
 
 
 def test_active_rail_marks_only_current_area() -> None:
@@ -590,17 +621,64 @@ async def test_real_prompt_toolkit_routes_search_navigation_and_cancel(monkeypat
         await harness.wait_for(lambda: picker.active_control == "list")
         picker.buffer.text = ""
         await harness.wait_for(lambda: picker.model.query == "")
-        await harness.press("option-f")
+        await harness.press("c-o")
+        await harness.wait_for(lambda: picker.option_cursor == "filter")
+        await harness.type_keys("x")
+        await harness.press("option-backspace")
+        await asyncio.sleep(0)
+        assert picker.model.query == ""
+        await harness.press("down")
         await harness.wait_for(lambda: picker.model.state_filter == "attached")
         assert picker.model.matches == []
-        await harness.press("option-f")
+        await harness.press("down")
         await harness.wait_for(lambda: picker.model.state_filter == "all")
         assert {match.row.id for match in picker.model.matches} == {"session-1", "session-2"}
-        await harness.press("c-o")
+        await harness.press("right")
+        await harness.wait_for(lambda: picker.option_cursor == "sort")
+        await harness.type_keys(" ")
         await harness.wait_for(lambda: not picker.model.sort_updated)
+        await harness.press("enter")
+        await harness.wait_for(lambda: picker.option_cursor is None)
         assert [match.row.id for match in picker.model.matches] == ["session-2", "session-1"]
         await harness.press("escape")
         assert await asyncio.wait_for(opened, 1) is None
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_cancels_picker_while_options_are_open(monkeypatch) -> None:
+    from nooa_cli.tui import session_manager as sm
+
+    from .tui_app_harness import TUIHarness
+
+    sessions = [
+        SimpleNamespace(
+            id="session-1",
+            name="one",
+            model="m",
+            agent="A",
+            working_dir=str(Path.cwd()),
+            started_at=1,
+            last_active=2,
+            turn_count=1,
+        )
+    ]
+    monkeypatch.setattr(
+        sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: sessions)
+    )
+    monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
+    monkeypatch.setattr(
+        sm.SessionManager,
+        "load_turns",
+        classmethod(lambda cls, value, limit=12: []),
+    )
+    async with TUIHarness() as harness:
+        opened = asyncio.create_task(harness.app.open_session_resume_dialog())
+        await harness.wait_for(lambda: harness.app._resume_picker is not None)
+        await harness.press("c-o")
+        await harness.wait_for(lambda: harness.app._resume_picker.option_cursor == "filter")
+        await harness.press("c-c")
+        assert await asyncio.wait_for(opened, 1) is None
+        assert harness.app._resume_picker is None
 
 
 @pytest.mark.asyncio
@@ -778,6 +856,13 @@ async def test_full_application_screen_keeps_picker_help_visible(
     async with TUIHarness(output=output, full_screen=True) as harness:
         opened = asyncio.create_task(harness.app.open_session_resume_dialog())
         await harness.wait_for(lambda: harness.app._resume_picker is not None)
+        if usable:
+            await harness.wait_for(
+                lambda: any(
+                    session_id == "session-19"
+                    for session_id, _width in harness.app._resume_picker._preview_models
+                )
+            )
         harness.app._app.invalidate()
         await harness.wait_for(
             lambda: (
@@ -801,7 +886,7 @@ async def test_full_application_screen_keeps_picker_help_visible(
             assert "Filter:" in joined and "✓" in joined
             assert "Sort:" in joined
             assert "Conversation preview" in joined
-            assert "Alt-F" in joined and "Ctrl-O" in joined
+            assert "Ctrl-O" in joined and "options" in joined
             assert joined.count("─") >= width * 2
             assert "preview for session-19" in joined
             assert "❯" in joined and "y ago" in joined
