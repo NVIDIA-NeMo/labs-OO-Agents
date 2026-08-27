@@ -42,10 +42,17 @@ def test_package_logger_has_null_handler():
 
 
 def test_importing_a_submodule_installs_the_handler():
-    """Importing ``nooa_cli.tools.repo_tools`` imports the package root first."""
+    """Importing ``nooa_cli.tools.repo_tools`` imports the package root first.
+
+    ``hasHandlers()`` walks to the root logger, which pytest populates — so the
+    check only means anything with the application's handlers stripped. That is
+    exactly the condition ``Logger.callHandlers`` uses to reach for
+    ``lastResort``.
+    """
     import nooa_cli.tools.repo_tools  # noqa: F401
 
-    assert logging.getLogger("nooa_cli.tools.repo_tools").hasHandlers()
+    with _no_application_logging(io.StringIO()):
+        assert logging.getLogger("nooa_cli.tools.repo_tools").hasHandlers()
 
 
 def test_repo_tools_tree_sitter_notice_stays_off_stderr(monkeypatch):

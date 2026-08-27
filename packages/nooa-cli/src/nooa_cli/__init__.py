@@ -31,7 +31,8 @@ from .completion import completion
 # any ``nooa_cli.*`` logger straight to stderr with no level or logger name —
 # e.g. RepoTools' tree-sitter fallback notice, which the TUI then captures
 # into its scrollback. Callers that want these records configure a handler
-# (``nooa.enable_logging()``) explicitly.
+# explicitly — note ``nooa_cli`` is a sibling of ``nooa``, not a child, so it
+# needs ``nooa.enable_logging(name="nooa_cli")`` rather than the bare call.
 _logging.getLogger(__name__).addHandler(_logging.NullHandler())
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}

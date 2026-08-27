@@ -231,7 +231,8 @@ def enable_tracing(
     2. If reachable → send spans via OTLP HTTP to the viewer.
     3. If unreachable → print a warning and disable tracing entirely.
 
-    A log message is printed in both cases so you always know where traces go.
+    A log message is printed in both cases so you always know where traces go,
+    unless *quiet* is set.
 
     Args:
         exporters: List of :class:`SpanExporter` instances.  When ``None`` the
