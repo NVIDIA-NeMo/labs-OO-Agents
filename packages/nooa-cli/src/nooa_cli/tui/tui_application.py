@@ -872,6 +872,7 @@ class _SubviewControl(FormattedTextControl):
         ):
             return NotImplemented
         action = {
+            MouseEventType.MOUSE_UP: "click" if mouse_event.button is MouseButton.LEFT else None,
             MouseEventType.SCROLL_UP: "scroll_up",
             MouseEventType.SCROLL_DOWN: "scroll_down",
         }.get(mouse_event.event_type)
@@ -1691,7 +1692,10 @@ class TUIApplication:
         )
 
         def _root_container():
-            return subview_window if self._active_subview is not None else main_container
+            view = self._active_subview
+            if view is not None:
+                return getattr(view, "container", subview_window)
+            return main_container
 
         def _subview_mouse_enabled() -> bool:
             if self._resume_picker is not None:
@@ -1792,12 +1796,6 @@ class TUIApplication:
         from .event_explorer import EventExplorerView
 
         await self.open_subview(EventExplorerView(event_manager))
-
-    async def open_session_explorer(self) -> None:
-        """Open the session explorer as an in-app subview."""
-        from .session_explorer import SessionExplorerView
-
-        await self.open_subview(SessionExplorerView())
 
     async def open_session_resume_dialog(self, active_session_id: str | None = None) -> str | None:
         """Choose a resumable session in a modal owned by this Application."""
@@ -2067,12 +2065,16 @@ class TUIApplication:
         """
         if self._active_subview_done is not None and not self._active_subview_done.done():
             return
+        if getattr(view, "use_fullscreen_browser", False) and not hasattr(view, "container"):
+            from .fullscreen_browser import ExplorerBrowser
+
+            view = ExplorerBrowser(view, self._app)
         self._cancel_fullscreen_drag()
         self._active_subview = view
         loop = asyncio.get_running_loop()
         self._active_subview_done = loop.create_future()
         view.on_open()
-        if self._subview_control is not None:
+        if self._subview_control is not None and not hasattr(view, "container"):
             self._app.layout.focus(self._subview_control)
         if self._app.is_running:
             self._app.invalidate()
@@ -2660,9 +2662,29 @@ class TUIApplication:
         def _(event):
             self._subview_key(event, "native_selection")
 
+        @kb.add("c-o", filter=subview_active, eager=True)
+        def _(event):
+            self._subview_key(event, "options")
+
+        @kb.add("left", filter=subview_active, eager=True)
+        def _(event):
+            self._subview_key(event, "left")
+
+        @kb.add("right", filter=subview_active, eager=True)
+        def _(event):
+            self._subview_key(event, "right")
+
+        @kb.add(" ", filter=subview_active, eager=True)
+        def _(event):
+            self._subview_key(event, "space")
+
         @kb.add("tab", filter=subview_active, eager=True)
         def _(event):
             self._subview_key(event, "tab")
+
+        @kb.add("s-tab", filter=subview_active, eager=True)
+        def _(event):
+            self._subview_key(event, "s-tab")
 
         @kb.add("down", filter=subview_active, eager=True)
         def _(event):

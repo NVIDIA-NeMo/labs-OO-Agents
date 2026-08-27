@@ -63,6 +63,9 @@ def build_job_rows(snapshots: Iterable[JobProjection] | None) -> list[JobExplore
 class JobExplorerView(ExplorerView):
     """In-app subview for browsing background jobs."""
 
+    item_name = "job"
+    list_heading = "  st channel              state      output"
+
     def __init__(self, snapshots: Iterable[JobProjection]) -> None:
         rows = build_job_rows(snapshots)
         model = ExplorerModel(rows)
@@ -75,6 +78,17 @@ class JobExplorerView(ExplorerView):
             actions={},
         )
         super().__init__(model, config)
+        self.configure_row_options(
+            filters=(
+                ("all", "All", lambda _row: True),
+                ("running", "Running", lambda row: row.state == "running"),
+                ("finished", "Finished", lambda row: row.state != "running"),
+            ),
+            sorts=(
+                ("channel", "Channel", lambda row: row.channel.casefold(), False),
+                ("state", "State", lambda row: (row.state, row.channel.casefold()), False),
+            ),
+        )
 
     def format_row(self, row: JobExplorerRow, width: int) -> str:
         state_icon = {

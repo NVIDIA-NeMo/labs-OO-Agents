@@ -197,7 +197,7 @@ def test_search_text_and_brackets_share_active_highlight() -> None:
     close_style = picker._search_close()[0][0]
     assert "control-focused" in label_style
     assert "control-focused" in close_style
-    assert picker.query_window.style() == "class:resume-picker.control-focused"
+    assert picker.query_window.style() == "class:fullscreen-browser.control-focused"
     picker.activate_control("preview")
     assert "control-focused" not in picker._search_label()[0][0]
     assert picker.query_window.style() == ""
@@ -347,7 +347,7 @@ def test_live_preview_reports_empty_conversation() -> None:
     app = MagicMock()
     app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
     picker = ResumePicker([row("empty", "Empty", turns=())], app)
-    assert picker.preview_text(40, 5) == [("class:resume-picker.empty", "No conversation preview")]
+    assert picker.preview_text(40, 5) == [("class:fullscreen-browser.empty", "No conversation preview")]
 
 
 def test_preview_uses_live_scrollback_visual_language() -> None:
@@ -406,6 +406,9 @@ def test_resume_commands_reject_extra_ids() -> None:
     assert SessionCommand(frontend, MagicMock(), MagicMock()).validate_args(
         ["resume", "one", "two"]
     ) == (False, "Usage: /session resume [session_id]")
+    session = SessionCommand(frontend, MagicMock(), MagicMock())
+    assert session.validate_args(["list"]) == (False, "Unknown subcommand `list`")
+    assert "/session list" not in session.help_text()
     assert ResumeCommand(frontend, MagicMock(), MagicMock()).validate_args(["one", "two"]) == (
         False,
         "Usage: /resume [session_id]",

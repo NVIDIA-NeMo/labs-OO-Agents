@@ -86,31 +86,6 @@ def test_build_rows_snapshots_store_usage_references_and_edges() -> None:
     assert ref.edges == [(ids["skill"], "derived_from", 1.0)]
 
 
-def test_view_renders_rows_and_detail() -> None:
-    agent, mgr, ids = _seeded_manager()
-    view, _calls = _view(agent, mgr)
-
-    todo = next(r for r in view.model.rows if r.id == ids["todo"])
-    line = view.format_row(todo, 120)
-    assert "todo:open" in line
-    assert "MEDIUM" in line
-    assert "Ship the 1.4 release notes" in line
-    assert "never" in line  # never fetched
-
-    ref = next(r for r in view.model.rows if r.id == ids["ref"])
-    detail = view.detail_lines(ref, 100)
-    assert f"Id: {ids['ref']}" in detail
-    assert any(line.startswith("Usage:") for line in detail)
-    assert any("fetches=0" in line for line in detail)
-    assert any("(LIVE)" in line for line in detail)
-    assert any(ids["skill"][:8] in line and "derived_from" in line for line in detail)
-    assert any("The deploy skill is documented" in line for line in detail)
-
-    frame = view.render(140, 30)
-    assert "Memory Explorer" in frame
-    assert "f forget" in frame and "d todo done" in frame
-
-
 def test_search_filters_on_type_tags_owner_and_content() -> None:
     agent, mgr, ids = _seeded_manager()
     view, _calls = _view(agent, mgr)

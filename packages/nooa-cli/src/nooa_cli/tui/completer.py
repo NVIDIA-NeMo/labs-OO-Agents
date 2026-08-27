@@ -152,6 +152,13 @@ class Completer:
             ]
 
         action_sets = {
+            "/session ": {
+                "new": "Start a new session",
+                "resume": "Search for or resume a past session",
+                "delete": "Delete a session",
+                "export": "Export the current session as Markdown",
+                "rename": "Rename the current session",
+            },
             "/memory ": {
                 "on": "Use project-wide memory",
                 "local": "Use memory only for this session",
@@ -448,6 +455,8 @@ class Completer:
 
         items: list[CompletionItem] = []
         for meta in sessions:
+            if meta.turn_count <= 0:
+                continue
             sid = meta.id
             short = sid[:8]
             if partial and not short.startswith(partial) and not sid.startswith(partial):
