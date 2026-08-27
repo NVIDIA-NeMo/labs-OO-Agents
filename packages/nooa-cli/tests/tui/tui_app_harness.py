@@ -55,7 +55,7 @@ _KEY_SEQUENCES: dict[str, str] = {
     "option-]": "\x1b]",
     "option-backspace": "\x1b\x7f",
     "option-f": "\x1bf",
-    "option-s": "\x1bs",
+    "c-o": "\x0f",
     "q": "q",
     "tab": "\t",
     "backspace": "\x7f",
