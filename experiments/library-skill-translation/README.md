@@ -134,6 +134,10 @@ Development set status:
 - Post-review hardened slim rerun at `934b0f93`: 6/10 scoreable. All tasks
   recorded activated LibrarySkills, `agent_return_code=0`, no agent errors, and
   no verifier infrastructure errors.
+- Standalone resource-tail slim rerun: 6/10 scoreable. Resource APIs are now
+  listed after the adapted guidance, old `<path-to-this-skill>/<resource>`
+  command examples are rewritten into LibrarySkill-native file-writing
+  guidance, and the translator is 997 LOC.
 
 Frozen protocol dev rerun:
 
@@ -195,6 +199,25 @@ Hardened slim artifact root:
 
 - `jobs/nooa-skillsbench-library-dev-934b0f93/`
 
+Standalone resource-tail slim rerun:
+
+| Task | Resource-tail Slim LibrarySkill |
+|---|---:|
+| `fix-visual-stability` | 1.0 |
+| `fix-erlang-ssh-cve` | 1.0 |
+| `video-silence-remover` | 0.0 |
+| `dynamic-object-aware-egomotion` | 0.0 |
+| `manufacturing-fjsp-optimization` | 0.0 |
+| `llm-prefix-cache-replay` | 1.0 |
+| `dapt-intrusion-detection` | 1.0 |
+| `offer-letter-generator` | 1.0 |
+| `parallel-tfidf-search` | 1.0 |
+| `reserves-at-risk-calc` | 0.0 |
+
+Resource-tail slim artifact root:
+
+- `jobs/nooa-skillsbench-library-dev-slim-resource-tail/`
+
 Current interpretation:
 
 - LibrarySkill parity is possible on the 10-task dev set when activation-time
@@ -211,4 +234,8 @@ Current interpretation:
   `dynamic-object-aware-egomotion` flipped back to failure. The run had no
   infrastructure failures, so this reinforces treating that task as marginal
   rather than using it as a stable translator signal.
+- The standalone resource-tail rerun preserved the 6/10 hardened aggregate
+  after removing the legacy translator dependency. The first standalone rerun
+  exposed timeout-prone visual/manufacturing rollouts; the accepted rerun
+  produced scoreable summaries for all 10 dev tasks.
 - The held-out test set has not been run under the frozen protocol.

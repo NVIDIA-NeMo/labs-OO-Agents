@@ -31,7 +31,6 @@ _RESERVED_METHOD_NAMES = {
 @dataclass(frozen=True)
 class SkillFile:
     path: str
-    size_bytes: int
 
 
 @dataclass(frozen=True)
@@ -82,7 +81,6 @@ class ResourceMethodPlan:
     resource_path: str
     method_name: str
     return_annotation: Literal["str", "bytes"]
-    size_bytes: int
     docstring: str
 
 
@@ -152,7 +150,7 @@ class SlimTextSkillTranslator(Skill):
             rel = file_path.relative_to(source_dir).as_posix()
             if file_path == skill_md:
                 continue
-            file = SkillFile(path=rel, size_bytes=file_path.stat().st_size)
+            file = SkillFile(path=rel)
             if rel.startswith("scripts/"):
                 scripts.append(file)
             else:
@@ -442,11 +440,9 @@ def _resource_method_plans(inventory: TextSkillInventory, used_names: set[str]) 
                 resource_path=file.path,
                 method_name=_resource_method_name(file.path, used_names),
                 return_annotation=return_annotation,
-                size_bytes=file.size_bytes,
                 docstring=_resource_method_docstring(
                     resource_path=file.path,
                     return_annotation=return_annotation,
-                    size_bytes=file.size_bytes,
                     text=text,
                 ),
             )
@@ -468,11 +464,10 @@ def _resource_method_docstring(
     *,
     resource_path: str,
     return_annotation: Literal["str", "bytes"],
-    size_bytes: int,
     text: str | None,
 ) -> str:
     if return_annotation == "bytes":
-        return f"Return bundled binary resource `{resource_path}` as bytes.\n\nSize: {size_bytes} bytes."
+        return f"Return bundled binary resource `{resource_path}` as bytes."
     assert text is not None
     if len(text) <= _RESOURCE_DOCSTRING_INLINE_LIMIT:
         content = text
@@ -682,16 +677,16 @@ def _build_docstring(
         )
     else:
         lines.extend(["", "Use the guidance and bundled resource APIs when relevant."])
+    adapted_guidance = _adapt_skill_guidance(inventory.body, script_methods, resource_methods, omitted_scripts)
+    if adapted_guidance:
+        lines.extend(["", "Guidance:", adapted_guidance])
     if resource_methods:
-        lines.extend(["", "Bundled resource APIs:"])
+        lines.extend(["", "Bundled resource APIs:", "Resource methods return bundled file contents; write script text to a workspace file before running it."])
         for resource in resource_methods:
             lines.append(
                 f"- {resource.method_name}() -> {resource.return_annotation}: "
                 f"returns `{resource.resource_path}` from package data."
             )
-    adapted_guidance = _adapt_skill_guidance(inventory.body, script_methods, resource_methods, omitted_scripts)
-    if adapted_guidance:
-        lines.extend(["", "Guidance:", adapted_guidance])
     return "\n".join(lines)
 
 
@@ -723,6 +718,9 @@ def _adapt_skill_guidance(
 
     for resource in resource_methods:
         replacement = f"`{resource.method_name}()`"
+        file_replacement = f"a file containing the text returned by {replacement}"
+        replacements.append((f"<path-to-this-skill>/{resource.resource_path}", file_replacement))
+        replacements.append((f"<path-to-this-skill>/{Path(resource.resource_path).name}", file_replacement))
         replacements.append((resource.resource_path, replacement))
         replacements.append((Path(resource.resource_path).name, replacement))
 

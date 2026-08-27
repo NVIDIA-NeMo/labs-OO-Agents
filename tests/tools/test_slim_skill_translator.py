@@ -92,6 +92,26 @@ def test_slim_translator_does_not_advertise_omitted_scripts(tmp_path):
     assert "the relevant LibrarySkill guidance" in generated_text
 
 
+def test_slim_translator_adapts_resource_script_path_guidance(tmp_path):
+    skill_dir = tmp_path / "browser-skill"
+    _write_skill_md(
+        skill_dir,
+        name="browser-skill",
+        body=(
+            "Run `npx ts-node <path-to-this-skill>/measure-cls.ts http://localhost:3000` "
+            "before and after the fix.\n"
+        ),
+    )
+    (skill_dir / "measure-cls.ts").write_text("console.log('cls')\n", encoding="utf-8")
+
+    result = SlimTextSkillTranslator().translate(skill_dir, tmp_path / "libs")
+
+    generated_text = (result.package_dir / "src" / "browser_skill" / "__init__.py").read_text()
+    assert "<path-to-this-skill>" not in generated_text
+    assert "write script text to a workspace file before running it" in generated_text
+    assert "a file containing the text returned by `measure_cls()`" in generated_text
+
+
 def test_slim_translator_does_not_depend_on_legacy_translator():
     source = Path(inspect.getsourcefile(SlimTextSkillTranslator) or "")
     text = source.read_text(encoding="utf-8")

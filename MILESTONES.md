@@ -683,8 +683,8 @@ Current result:
 
 ## 2026-08-27 — Standalone Slim LibrarySkill Translator
 
-Status: implementation complete; dev agent rerun not yet repeated on this
-standalone refactor.
+Status: implementation complete; superseded by the resource-tail dev rerun
+below.
 
 Refactored `SlimTextSkillTranslator` so the evaluated LibrarySkill translation
 path no longer subclasses `TextSkillTranslator` and no longer imports helpers
@@ -721,3 +721,58 @@ Notes:
   `nooa.tools.skill_translator` and does not subclass `TextSkillTranslator`.
 - Translation-only dev preflight validated 30/30 packages and omitted the same
   3 scripts as the previous slim runs, all under `fix-erlang-ssh-cve`.
+
+## 2026-08-27 — Resource-Tail Slim Translator Dev Rerun
+
+Status: complete scoreable dev rerun.
+
+After the first standalone slim dev rerun landed at 5/10 because
+`fix-visual-stability` and `manufacturing-fjsp-optimization` were killed during
+long quiet Docker executions, I compared the generated visual-stability
+LibrarySkill with the accepted `934b0f93` run. The generated class guidance was
+byte-identical, but the previous package repeated the resource API index at the
+end of `format_guidance()`. The slim standalone translator now keeps the
+resource API block at the end of guidance without restoring the old private
+generic resource-reader layer.
+
+Additional translator changes:
+- Old `<path-to-this-skill>/<resource>` command examples are adapted to
+  LibrarySkill-native wording: write the resource-method return value to a
+  workspace file before running it.
+- Binary resource docstrings no longer carry dead size metadata.
+- `SkillFile.size_bytes` was removed after it became unused.
+
+Validation:
+- `uv run pytest tests/tools/test_slim_skill_translator.py packages/nooa-bench/tests/test_skillsbench_runner.py -q`
+  - `24 passed`
+- `uv run ruff check src/nooa/tools/slim_skill_translator.py tests/tools/test_slim_skill_translator.py packages/nooa-bench/src/nooa_bench/skillsbench_runner.py`
+  - passed
+
+Notes:
+- `src/nooa/tools/slim_skill_translator.py` is now 997 LOC.
+- The translator remains standalone and does not import or subclass
+  `nooa.tools.skill_translator`.
+- A targeted `fix-visual-stability` rerun with resource-tail guidance passed;
+  the remaining nine tasks were then run in the same artifact root.
+
+Results:
+
+| Task | Resource-tail Slim LibrarySkill |
+|---|---:|
+| `fix-visual-stability` | 1.0 |
+| `fix-erlang-ssh-cve` | 1.0 |
+| `video-silence-remover` | 0.0 |
+| `dynamic-object-aware-egomotion` | 0.0 |
+| `manufacturing-fjsp-optimization` | 0.0 |
+| `llm-prefix-cache-replay` | 1.0 |
+| `dapt-intrusion-detection` | 1.0 |
+| `offer-letter-generator` | 1.0 |
+| `parallel-tfidf-search` | 1.0 |
+| `reserves-at-risk-calc` | 0.0 |
+
+Current result:
+- Resource-tail slim LibrarySkill dev rerun aggregate: 6/10 scoreable.
+- All 10 tasks produced scoreable summaries in
+  `jobs/nooa-skillsbench-library-dev-slim-resource-tail/`.
+- The result matches the accepted `934b0f93` dev aggregate while keeping the
+  slim translator below 1k LOC.
