@@ -299,6 +299,23 @@ async def test_refresh_transcript_blocks_preserves_trimmed_native_visible_histor
     assert app.output_buffer.text.count("\n") == before.count("\n")
 
 
+async def test_refresh_transcript_blocks_replaces_tagged_native_span_by_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    monkeypatch.setattr("sys.stdout", io.StringIO())
+    app = TUIApplication(display_mode="native-replay")
+    value = {"text": "duplicate\n"}
+
+    app.emit_block("duplicate\n")
+    app.emit_block(value["text"], replay=lambda: value["text"], tags={"startup-info"})
+    value["text"] = "updated\n"
+
+    assert app.refresh_transcript_blocks("startup-info") is True
+    assert app.output_buffer.text == "duplicate\nupdated\n"
+
+
 async def test_input_composer_has_blank_row_above_and_below_input():
     """The default composer is three rows and expands for multiline input."""
     async with TUIHarness() as h:
