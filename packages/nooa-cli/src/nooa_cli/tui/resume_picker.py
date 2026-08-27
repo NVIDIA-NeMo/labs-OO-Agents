@@ -189,8 +189,8 @@ class ResumePickerModel:
             stamp = row.last_active if self.sort_updated else row.created_at
             ranked.append(
                 (
-                    -score if self.query.strip() else 0,
                     -stamp,
+                    -score if self.query.strip() else 0,
                     index,
                     FieldMatch(row, field or None, positions),
                 )
@@ -754,8 +754,8 @@ class ResumePicker:
     def _help_text(self):
         columns = self.app.output.get_size().columns
         if columns < 72:
-            return "Tab/Shift-Tab · Alt-F · Alt-S · ↵ resume · Esc"
-        return "Tab/Shift-Tab panes · ↑↓ matches · Alt-F filter · Alt-S sort · ↵ resume · Esc"
+            return "Tab/Shift-Tab · Alt-F · Ctrl-O · ↵ resume · Esc"
+        return "Tab/Shift-Tab panes · ↑↓ matches · Alt-F filter · Ctrl-O sort · ↵ resume · Esc"
 
     def _title(self):
         count = len(self.model.matches)
