@@ -2452,26 +2452,40 @@ class TUIApplication:
             picker = self._resume_picker
             if picker is None:
                 return
-            if picker.active_control != "search":
+            if picker.active_control == "search":
+                picker.activate_control("list")
+                return
+            if picker.active_control == "filters":
                 picker.change_active_control()
                 return
-            selected = picker.selected_id()
-            if selected is not None:
-                self._finish_resume_picker(selected)
+            if picker.active_control in {"list", "preview"}:
+                selected = picker.selected_id()
+                if selected is not None:
+                    self._finish_resume_picker(selected)
 
         @kb.add("up", filter=resume_picker_active, eager=True)
         @kb.add("c-p", filter=resume_picker_active, eager=True)
         def _(event):
             if self._resume_picker is not None:
-                self._resume_picker.move(-1)
+                self._resume_picker.navigate_vertical(-1)
                 event.app.invalidate()
 
         @kb.add("down", filter=resume_picker_active, eager=True)
         @kb.add("c-n", filter=resume_picker_active, eager=True)
         def _(event):
             if self._resume_picker is not None:
-                self._resume_picker.move(1)
+                self._resume_picker.navigate_vertical(1)
                 event.app.invalidate()
+
+        @kb.add("left", filter=resume_picker_active, eager=True)
+        def _(event):
+            if self._resume_picker is not None:
+                self._resume_picker.move_horizontal(-1)
+
+        @kb.add("right", filter=resume_picker_active, eager=True)
+        def _(event):
+            if self._resume_picker is not None:
+                self._resume_picker.move_horizontal(1)
 
         @kb.add("tab", filter=resume_picker_active, eager=True)
         def _(event):
@@ -2490,18 +2504,18 @@ class TUIApplication:
                 return
             if picker.active_control == "search":
                 picker.buffer.insert_text(" ")
-            else:
+            elif picker.active_control == "filters":
                 picker.change_active_control()
 
         @kb.add("pageup", filter=resume_picker_active, eager=True)
         def _(event):
             if self._resume_picker is not None:
-                self._resume_picker.scroll_preview(-5)
+                self._resume_picker.page(-1)
 
         @kb.add("pagedown", filter=resume_picker_active, eager=True)
         def _(event):
             if self._resume_picker is not None:
-                self._resume_picker.scroll_preview(5)
+                self._resume_picker.page(1)
 
         input_selection_active = (
             Condition(lambda: self.input_buffer.selection_state is not None) & subview_inactive
