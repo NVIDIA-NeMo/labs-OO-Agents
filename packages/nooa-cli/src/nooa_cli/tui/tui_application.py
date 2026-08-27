@@ -1694,6 +1694,8 @@ class TUIApplication:
             return subview_window if self._active_subview is not None else main_container
 
         def _subview_mouse_enabled() -> bool:
+            if self._resume_picker is not None:
+                return True
             view = self._active_subview
             if view is None:
                 return self._is_fullscreen and self._fullscreen_mouse_navigation
@@ -1799,7 +1801,7 @@ class TUIApplication:
 
     async def open_session_resume_dialog(self, active_session_id: str | None = None) -> str | None:
         """Choose a resumable session in a modal owned by this Application."""
-        from .resume_picker import ResumePicker, ResumePickerRow
+        from .resume_picker import ResumePicker, ResumePickerRow, ResumePickerTurn
         from .session_manager import SessionManager
 
         if self._resume_picker_done is not None and not self._resume_picker_done.done():
@@ -1812,24 +1814,29 @@ class TUIApplication:
             for meta in SessionManager.list_sessions(limit=100):
                 if meta.turn_count <= 0:
                     continue
-                preview = " ".join(SessionManager.first_user_message(meta.id).split())
+                turns = tuple(
+                    ResumePickerTurn(turn.role, turn.content)
+                    for turn in SessionManager.recent_turns(meta.id, limit=12)
+                )
                 result.append(
                     ResumePickerRow.from_meta(
                         meta,
                         attached=SessionManager.is_active(meta.id),
                         current=meta.id == active_session_id,
-                        preview=preview,
+                        turns=turns,
                     )
                 )
             return result
 
         rows = await asyncio.to_thread(load_rows)
         self._cancel_fullscreen_drag()
-        self._resume_picker = ResumePicker(rows, self._app, cwd=os.getcwd())
+        shell = getattr(self._agent, "shell", None)
+        picker_cwd = str(getattr(shell, "cwd", os.getcwd()))
+        self._resume_picker = ResumePicker(rows, self._app, cwd=picker_cwd)
         loop = asyncio.get_running_loop()
         self._resume_picker_done = loop.create_future()
         previous = self._app.layout.current_control
-        self._app.layout.focus(self._resume_picker.query_control)
+        self._resume_picker.focus_initial()
         self._app.invalidate()
         try:
             return await self._resume_picker_done
@@ -2453,10 +2460,14 @@ class TUIApplication:
         @kb.add("enter", filter=resume_picker_active, eager=True)
         def _(event):
             picker = self._resume_picker
-            if picker is not None:
-                selected = picker.selected_id()
-                if selected is not None:
-                    self._finish_resume_picker(selected)
+            if picker is None:
+                return
+            if picker.active_control != "search":
+                picker.change_active_control()
+                return
+            selected = picker.selected_id()
+            if selected is not None:
+                self._finish_resume_picker(selected)
 
         @kb.add("up", filter=resume_picker_active, eager=True)
         @kb.add("c-p", filter=resume_picker_active, eager=True)
@@ -2475,14 +2486,32 @@ class TUIApplication:
         @kb.add("tab", filter=resume_picker_active, eager=True)
         def _(event):
             if self._resume_picker is not None:
-                self._resume_picker.toggle_filter()
-                event.app.invalidate()
+                self._resume_picker.focus_next()
 
-        @kb.add("f6", filter=resume_picker_active, eager=True)
+        @kb.add("s-tab", filter=resume_picker_active, eager=True)
         def _(event):
             if self._resume_picker is not None:
-                self._resume_picker.toggle_sort()
-                event.app.invalidate()
+                self._resume_picker.focus_previous()
+
+        @kb.add(" ", filter=resume_picker_active, eager=True)
+        def _(event):
+            picker = self._resume_picker
+            if picker is None:
+                return
+            if picker.active_control == "search":
+                picker.buffer.insert_text(" ")
+            else:
+                picker.change_active_control()
+
+        @kb.add("pageup", filter=resume_picker_active, eager=True)
+        def _(event):
+            if self._resume_picker is not None:
+                self._resume_picker.scroll_preview(-5)
+
+        @kb.add("pagedown", filter=resume_picker_active, eager=True)
+        def _(event):
+            if self._resume_picker is not None:
+                self._resume_picker.scroll_preview(5)
 
         input_selection_active = (
             Condition(lambda: self.input_buffer.selection_state is not None) & subview_inactive

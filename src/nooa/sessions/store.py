@@ -238,36 +238,43 @@ class SessionStore:
         sessions.sort(key=lambda info: info.last_active, reverse=True)
         return sessions if limit is None else sessions[:limit]
 
-    def load_first_user_turn(self, session_id: str) -> SessionTurn | None:
-        """Load only the first user turn, without materializing session history."""
+    def load_turns(self, session_id: str) -> list[SessionTurn]:
+        path = self.path_for(session_id)
+        return self._decode_turn_rows(path, self._read_rows(path, event_types=_TURN_EVENT_TYPES))
+
+    def load_recent_turns(self, session_id: str, *, limit: int = 12) -> list[SessionTurn]:
+        """Load the newest turns in chronological order with a bounded query."""
+        if limit < 0:
+            raise ValueError("limit must be non-negative")
+        if limit == 0:
+            return []
         path = self.path_for(session_id)
         if not path.exists():
-            return None
+            return []
         try:
             connection = sqlite3.connect(str(path))
             try:
-                placeholders = ", ".join("?" for _ in _USER_EVENT_TYPES)
-                row = connection.execute(
-                    "SELECT data FROM events "
-                    f"WHERE event_type IN ({placeholders}) ORDER BY insertion_order LIMIT 1",
-                    tuple(_USER_EVENT_TYPES),
-                ).fetchone()
+                placeholders = ", ".join("?" for _ in _TURN_EVENT_TYPES)
+                rows = connection.execute(
+                    "SELECT event_type, data FROM events "
+                    f"WHERE event_type IN ({placeholders}) "
+                    "ORDER BY insertion_order DESC LIMIT ?",
+                    (*_TURN_EVENT_TYPES, limit),
+                ).fetchall()
             finally:
                 connection.close()
         except (OSError, sqlite3.Error):
-            logger.debug("Could not read first user turn from %s", path, exc_info=True)
-            return None
-        if row is None or (raw := self._decode_data(row[0], path)) is None:
-            return None
-        return SessionTurn(
-            role="user",
-            content=str(raw.get("content", raw.get("text", ""))),
-            timestamp=self._timestamp(raw, fallback=time.time()),
-        )
+            logger.debug("Could not read recent turns from %s", path, exc_info=True)
+            return []
+        decoded = []
+        for event_type, data in reversed(rows):
+            if (raw := self._decode_data(data, path)) is not None:
+                decoded.append((event_type, raw))
+        return self._decode_turn_rows(path, decoded)
 
-    def load_turns(self, session_id: str) -> list[SessionTurn]:
-        path = self.path_for(session_id)
-        rows = self._read_rows(path, event_types=_TURN_EVENT_TYPES)
+    def _decode_turn_rows(
+        self, path: Path, rows: list[tuple[str, dict[str, object]]]
+    ) -> list[SessionTurn]:
         turns: list[SessionTurn] = []
         for event_type, raw in rows:
             try:
