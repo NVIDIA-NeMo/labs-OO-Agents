@@ -164,8 +164,7 @@ Values are provider callables accepting ``StatusbarContext``, or safe dotted age
 attribute paths such as ``"self.agent_mesh.name"``. Use `/statusbar` to list items
 and `/statusbar set mesh model` to select and order them. You can also configure a
 safe path directly, for example `/statusbar set self.agent_mesh.name model`.
-Provider failures are isolated so they cannot stop the TUI. The old `/toolbar`
-spelling remains as a deprecated command alias.
+Provider failures are isolated so they cannot stop the TUI.
 
 Keep-going mode is an explicit opt-in. It audits a completed turn with a
 separate judge model and sends an internal continuation only when autonomous

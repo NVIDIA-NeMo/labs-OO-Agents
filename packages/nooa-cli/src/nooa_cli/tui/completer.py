@@ -130,7 +130,7 @@ class Completer:
             )
 
         # Statusbar item completion after the `set` action.
-        if lower.startswith("/statusbar set ") or lower.startswith("/toolbar set "):
+        if lower.startswith("/statusbar set "):
             return self._statusbar_item_completions(text)
 
         if lower.startswith("/keep-going "):
@@ -188,10 +188,6 @@ class Completer:
             "/statusbar ": {
                 "reset": "Restore the default statusbar items",
                 "set": "Choose the statusbar items to display",
-            },
-            "/toolbar ": {
-                "reset": "Deprecated alias for /statusbar reset",
-                "set": "Deprecated alias for /statusbar set",
             },
             "/mcp ": {
                 "list": "Show configured, approved, and connected MCP servers",
@@ -396,7 +392,7 @@ class Completer:
         if not isinstance(statusbar, StatusbarRegistry):
             statusbar = StatusbarRegistry(getattr(self._registry, "agent", None))
             self._registry.statusbar_registry = statusbar
-        prefix = "/toolbar set " if text.lower().startswith("/toolbar set ") else "/statusbar set "
+        prefix = "/statusbar set "
         selected, _, partial = text[len(prefix) :].rpartition(" ")
         selected_items = selected.split() if selected else []
         replacement_prefix = prefix + (selected + " " if selected else "")

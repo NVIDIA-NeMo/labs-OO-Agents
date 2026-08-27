@@ -103,7 +103,6 @@ def test_slash_case_insensitive(completer):
             ],
         ),
         ("/statusbar ", ["/statusbar reset", "/statusbar set"]),
-        ("/toolbar ", ["/toolbar reset", "/toolbar set"]),
         ("/memory ", ["/memory on", "/memory local", "/memory off"]),
         (
             "/reflection ",
@@ -192,10 +191,6 @@ def test_statusbar_set_completes_unselected_items(completer):
     remaining = completer.complete(f"/statusbar set {selected} ")
     assert all(item.text.startswith(f"/statusbar set {selected} ") for item in remaining)
     assert all(item.text != f"/statusbar set {selected} {selected}" for item in remaining)
-
-
-def test_toolbar_set_completion_remains_as_deprecated_alias(completer):
-    assert completer.complete("/toolbar set ")
 
 
 # ---------------------------------------------------------------------------

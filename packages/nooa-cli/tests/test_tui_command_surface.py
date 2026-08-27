@@ -33,6 +33,5 @@ def test_builtin_command_surface_is_explicit_and_pruned():
         "statusbar",
         "theme",
         "todos",
-        "toolbar",  # Deprecated alias.
         "trace-url",
     }

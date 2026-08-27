@@ -138,11 +138,6 @@ class TestPresence:
         loaded = load_settings(Config())
         assert loaded.tui.statusbar_items == ["cwd", "model"]
 
-    def test_legacy_toolbar_items_are_migrated(self, user_dir, project_dir):
-        (user_dir / "settings.yaml").write_text("tui:\n  toolbar_items: [cwd, model]\n")
-        loaded = load_settings(Config())
-        assert loaded.tui.statusbar_items == ["cwd", "model"]
-
     def test_keep_going_round_trip(self, user_dir, project_dir):
         original = Config()
         original.tui.keep_going = True

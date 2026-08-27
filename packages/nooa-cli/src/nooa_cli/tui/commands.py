@@ -2522,7 +2522,6 @@ class CommandRegistry:
         "mcp": MCPCommand,
         "trace-url": TraceUrlCommand,
         "statusbar": StatusbarCommand,
-        "toolbar": StatusbarCommand,  # Deprecated command alias.
         "activity": ActivityCommand,
         "reasoning": ReasoningCommand,
     }

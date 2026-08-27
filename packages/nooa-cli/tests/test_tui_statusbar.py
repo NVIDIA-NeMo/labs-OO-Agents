@@ -146,14 +146,6 @@ def test_statusbar_command_preserves_case_in_self_paths():
     assert statusbar.render(config.statusbar_items, context(agent)) == "example · Alpha"
 
 
-def test_deprecated_toolbar_imports_alias_statusbar_types():
-    from nooa_cli.tui.toolbar import ToolbarContext, ToolbarProvider, ToolbarRegistry
-
-    assert ToolbarContext is StatusbarContext
-    assert ToolbarRegistry is StatusbarRegistry
-    assert ToolbarProvider is not None
-
-
 class _StatusSkill(Skill):
     statusbar_items = {"lifecycle": lambda _: "registered"}
 
