@@ -561,10 +561,10 @@ class _PickerButtonControl(FormattedTextControl):
     def __init__(self, picker: ResumePicker, kind: Literal["filter", "sort"]):
         self.picker = picker
         self.kind = kind
-        super().__init__(self._text, focusable=True, show_cursor=False)
+        super().__init__(self._text, focusable=False, show_cursor=False)
 
     def _text(self):
-        focused = self.picker.active_control == self.kind
+        focused = False
         style = "class:resume-picker.control" + (
             " class:resume-picker.control-focused" if focused else ""
         )
@@ -583,18 +583,16 @@ class _PickerButtonControl(FormattedTextControl):
             mouse_event.event_type is MouseEventType.MOUSE_DOWN
             and mouse_event.button is MouseButton.LEFT
         ):
-            self.picker.activate_control(self.kind)
             if self.kind == "filter":
-                self.picker.model.toggle_filter()
+                self.picker.cycle_filter()
             else:
-                self.picker.model.toggle_sort()
-            self.picker.invalidate()
+                self.picker.toggle_sort()
             return None
         return NotImplemented
 
 
 class ResumePicker:
-    CONTROL_ORDER = ("list", "filter", "sort", "preview")
+    CONTROL_ORDER = ("list", "preview")
 
     def __init__(
         self,
@@ -607,6 +605,7 @@ class ResumePicker:
         self.model = ResumePickerModel(rows)
         self._selection_copy_callback = selection_copy_callback
         self._preview_models: dict[tuple[str, int], Any] = {}
+        self._preview_tasks: dict[tuple[str, int], Any] = {}
         self.active_control = "list"
         self.buffer = Buffer(multiline=False)
         self.buffer.on_text_changed += lambda _: self._query_changed()
@@ -725,6 +724,7 @@ class ResumePicker:
 
     def _query_changed(self) -> None:
         self.model.set_query(self.buffer.text)
+        self._prepare_current_preview()
         self.invalidate()
 
     def _search_label(self):
@@ -754,8 +754,8 @@ class ResumePicker:
     def _help_text(self):
         columns = self.app.output.get_size().columns
         if columns < 72:
-            return "Tab next · Shift-Tab back · ↵ act · Esc"
-        return "Tab/Shift-Tab focus · ↑↓ navigate/matches · Space/↵ activate · Esc cancel"
+            return "Tab/Shift-Tab · Alt-F · Alt-S · ↵ resume · Esc"
+        return "Tab/Shift-Tab panes · ↑↓ matches · Alt-F filter · Alt-S sort · ↵ resume · Esc"
 
     def _title(self):
         count = len(self.model.matches)
@@ -816,8 +816,6 @@ class ResumePicker:
         self.active_control = name
         controls = {
             "list": self.query_control,
-            "filter": self.filter_control,
-            "sort": self.sort_control,
             "preview": self.preview_control,
         }
         self.app.layout.focus(controls[name])
@@ -852,18 +850,14 @@ class ResumePicker:
             else:
                 self.invalidate()
 
-    def activate_selected_control(self) -> None:
-        if self.active_control == "filter":
-            self.cycle_filter()
-        elif self.active_control == "sort":
-            self.toggle_sort()
-
     def cycle_filter(self) -> None:
         self.model.toggle_filter()
+        self._prepare_current_preview()
         self.invalidate()
 
     def toggle_sort(self) -> None:
         self.model.toggle_sort()
+        self._prepare_current_preview()
         self.invalidate()
 
     def page(self, delta: int) -> None:
@@ -872,27 +866,69 @@ class ResumePicker:
         elif self.active_control == "preview":
             self.scroll_preview(delta * max(1, self.preview_control.viewport[1]))
 
-    def _preview_model(self, width: int):
+    @staticmethod
+    def _build_preview_model(row: ResumePickerRow, width: int, height: int):
         from .frontend import render_history_replay_to_ansi
         from .fullscreen_transcript import FullscreenTranscriptModel
         from .output import HistoryReplay, HistoryTurn
 
+        replay = HistoryReplay(
+            turns=[HistoryTurn(turn.role, turn.content) for turn in row.turns],
+            session_id=row.id[:8],
+            show_header=False,
+            show_footer=False,
+        )
+        transcript = FullscreenTranscriptModel(show_trailing_blank=False)
+        transcript.append(render_history_replay_to_ansi(replay, width))
+        # Projection is the dominant first-render cost for long histories.
+        transcript.formatted_text(width=width, height=max(1, height))
+        return transcript
+
+    def _preview_model(self, width: int):
         row = self.model.current
         if row is None:
             return None
         key = (row.id, max(1, width))
         transcript = self._preview_models.get(key)
-        if transcript is None:
-            replay = HistoryReplay(
-                turns=[HistoryTurn(turn.role, turn.content) for turn in row.turns],
-                session_id=row.id[:8],
-                show_header=False,
-                show_footer=False,
-            )
-            transcript = FullscreenTranscriptModel(show_trailing_blank=False)
-            transcript.append(render_history_replay_to_ansi(replay, key[1]))
+        if transcript is not None:
+            return transcript
+        self._prepare_current_preview()
+        # Synchronous callers (primarily deterministic unit tests) have no event
+        # loop in which to schedule preparation, so retain a direct fallback.
+        if key not in self._preview_tasks:
+            transcript = self._build_preview_model(row, key[1], self.preview_control.viewport[1])
             self._preview_models[key] = transcript
-        return transcript
+            return transcript
+        return None
+
+    def _prepare_current_preview(self) -> None:
+        import asyncio
+
+        row = self.model.current
+        if row is None or not row.turns:
+            return
+        width, height = self.preview_control.viewport
+        key = (row.id, max(1, width))
+        if key in self._preview_models or key in self._preview_tasks:
+            return
+
+        async def prepare() -> None:
+            try:
+                transcript = await asyncio.to_thread(
+                    self._build_preview_model, row, key[1], max(1, height)
+                )
+            except Exception:
+                return
+            finally:
+                self._preview_tasks.pop(key, None)
+            self._preview_models.setdefault(key, transcript)
+            self.invalidate()
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._preview_tasks[key] = loop.create_task(prepare())
 
     def preview_text(self, width: int, height: int):
         row = self.model.current
@@ -901,14 +937,17 @@ class ResumePicker:
         if not row.turns:
             return [("class:resume-picker.empty", "No conversation preview")]
         transcript = self._preview_model(width)
-        if transcript is None:  # Defensive: the selected row changed during rendering.
-            return [("class:resume-picker.empty", "No session selected")]
+        if transcript is None:
+            return [("class:resume-picker.empty", "Preparing conversation preview…")]
         transcript.set_search(self.model.query, width=max(1, width), height=max(1, height))
         return transcript.formatted_text(width=max(1, width), height=max(1, height))
 
     def preview_search_position(self) -> tuple[int, int]:
         width, height = self.preview_control.viewport
-        transcript = self._preview_model(width)
+        row = self.model.current
+        if row is None:
+            return 0, 0
+        transcript = self._preview_models.get((row.id, max(1, width)))
         if transcript is None:
             return 0, 0
         transcript.set_search(self.model.query, width=max(1, width), height=max(1, height))
@@ -953,6 +992,7 @@ class ResumePicker:
         self.model.ensure_selection_visible(self.list_control.viewport[1])
         if self.model.current and self.model.current.id != before:
             self._reset_preview()
+            self._prepare_current_preview()
         self.invalidate()
 
     def select(self, index: int) -> None:
@@ -961,6 +1001,7 @@ class ResumePicker:
         self.model.ensure_selection_visible(self.list_control.viewport[1])
         if self.model.current and self.model.current.id != before:
             self._reset_preview()
+            self._prepare_current_preview()
         self.invalidate()
 
     def scroll_preview(self, delta: int) -> None:
@@ -976,6 +1017,12 @@ class ResumePicker:
             self.invalidate()
         else:
             self.scroll_preview(delta)
+
+    def close(self) -> None:
+        """Cancel preview preparation when the picker is dismissed."""
+        for task in self._preview_tasks.values():
+            task.cancel()
+        self._preview_tasks.clear()
 
     def selected_id(self) -> str | None:
         return self.model.current.id if self.model.can_select and self.model.current else None

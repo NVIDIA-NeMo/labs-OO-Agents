@@ -1846,6 +1846,8 @@ class TUIApplication:
             return await done
         finally:
             if self._resume_picker_done is done:
+                if self._resume_picker is not None:
+                    self._resume_picker.close()
                 self._resume_picker = None
                 self._resume_picker_done = None
                 try:
@@ -2474,12 +2476,9 @@ class TUIApplication:
             picker = self._resume_picker
             if picker is None:
                 return
-            if picker.active_control in {"filter", "sort"}:
-                picker.activate_selected_control()
-            else:
-                selected = picker.selected_id()
-                if selected is not None:
-                    self._finish_resume_picker(selected)
+            selected = picker.selected_id()
+            if selected is not None:
+                self._finish_resume_picker(selected)
 
         @kb.add("up", filter=resume_picker_active, eager=True)
         @kb.add("c-p", filter=resume_picker_active, eager=True)
@@ -2522,8 +2521,16 @@ class TUIApplication:
                 return
             if picker.active_control == "list":
                 picker.buffer.insert_text(" ")
-            elif picker.active_control in {"filter", "sort"}:
-                picker.activate_selected_control()
+
+        @kb.add("escape", "f", filter=resume_picker_active, eager=True)
+        def _(event):
+            if self._resume_picker is not None:
+                self._resume_picker.cycle_filter()
+
+        @kb.add("escape", "s", filter=resume_picker_active, eager=True)
+        def _(event):
+            if self._resume_picker is not None:
+                self._resume_picker.toggle_sort()
 
         @kb.add("pageup", filter=resume_picker_active, eager=True)
         def _(event):
