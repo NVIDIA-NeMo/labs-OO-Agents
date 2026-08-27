@@ -3,6 +3,7 @@
 """Agent base class."""
 
 import logging
+import os
 from typing import TYPE_CHECKING, Annotated, Any, cast
 from uuid import uuid4
 
@@ -38,6 +39,8 @@ def _try_auto_enable_tracing() -> None:
     if _auto_tracing_attempted:
         return
     _auto_tracing_attempted = True
+    if os.getenv("NOOA_DISABLE_AUTO_TRACING") or os.getenv("NEMO_OO_DISABLE_AUTO_TRACING"):
+        return
     try:
         from nooa.tracing import enable_tracing
 

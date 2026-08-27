@@ -122,6 +122,8 @@ def local_otlp(
 
 def journal(
     endpoint: str | None = None,
+    *,
+    defer_litellm_callback: bool = False,
 ) -> SpanExporter:
     """Content-addressed journal exporter for the local nooa viewer.
 
@@ -142,7 +144,7 @@ def journal(
     base = endpoint or os.getenv("OTLP_ENDPOINT", "http://localhost:5001/v1/traces")
     parsed = urlparse(base)
     base_url = f"{parsed.scheme}://{parsed.netloc}"
-    return JournalExporter(base_url)
+    return JournalExporter(base_url, defer_litellm_callback=defer_litellm_callback)
 
 
 def console() -> SpanExporter:

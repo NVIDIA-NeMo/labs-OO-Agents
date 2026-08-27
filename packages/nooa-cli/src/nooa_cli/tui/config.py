@@ -18,7 +18,9 @@ Usage:
     config = Config.load()
 """
 
+import asyncio
 import logging
+import threading
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
@@ -33,6 +35,112 @@ if TYPE_CHECKING:
 DEFAULT_MODEL = "claude-opus-4-8"
 
 logger = logging.getLogger(__name__)
+
+
+class LazyRegistryLLMClient:
+    """Delay real provider-client construction until the first LLM operation."""
+
+    _CLIENT_CONFIG_KEYS = frozenset(
+        {
+            "api_key",
+            "api_base",
+            "base_url",
+            "temperature",
+            "top_p",
+            "max_tokens",
+            "reasoning",
+            "reasoning_effort",
+            "allowed_openai_params",
+            "additional_drop_params",
+            "extra_body",
+            "drop_params",
+            "cache_control_injection_points",
+        }
+    )
+
+    def __init__(self, name: str, registry_config: dict[str, Any]) -> None:
+        self.name = name
+        self._registry_config = dict(registry_config)
+        self.model = str(self._registry_config.get("model_name", name))
+        self.client_type = str(self._registry_config.get("client_type", "completion"))
+        self._config = {
+            key: value
+            for key, value in self._registry_config.items()
+            if key in self._CLIENT_CONFIG_KEYS
+        }
+        self._client: Any | None = None
+        self._client_lock = threading.Lock()
+
+    @property
+    def config(self) -> dict[str, Any]:
+        client = self._client
+        if client is not None:
+            return client.config
+        return self._config
+
+    @property
+    def context_window(self) -> int | None:
+        client = self._client
+        if client is not None:
+            return getattr(client, "context_window", None)
+        value = self._registry_config.get("context_window")
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+        return None
+
+    def _real_client(self) -> Any:
+        client = self._client
+        if client is None:
+            with self._client_lock:
+                client = self._client
+                if client is not None:
+                    return client
+                from nooa.unifiedllm import get_llm_client
+
+                client_type = str(self._config.get("client_type", self.client_type))
+                overrides = {
+                    key: value
+                    for key, value in self._config.items()
+                    if key in self._CLIENT_CONFIG_KEYS
+                }
+                client = get_llm_client(self.name, client_type=client_type, **overrides)
+                self._client = client
+        return client
+
+    def count_tokens(self, text: str) -> int:
+        client = self._client
+        if client is None:
+            from nooa.token_counter import char_approximate_token_counter
+
+            return char_approximate_token_counter(text)
+        return client.count_tokens(text)
+
+    async def acall(self, *args: Any, **kwargs: Any) -> Any:
+        client = self._client
+        if client is None:
+            client = await asyncio.to_thread(self._real_client)
+        return await client.acall(*args, **kwargs)
+
+    def call(self, *args: Any, **kwargs: Any) -> Any:
+        return self._real_client().call(*args, **kwargs)
+
+    async def aclose(self) -> None:
+        client = self._client
+        if client is None:
+            return
+        close = getattr(client, "aclose", None)
+        if close is not None:
+            await close()
+
+    def close(self) -> None:
+        client = self._client
+        if client is None:
+            return
+        close = getattr(client, "close", None)
+        if close is not None:
+            close()
 
 
 class DisplayMode(StrEnum):
@@ -361,15 +469,17 @@ class UnresolvedModelError(ValueError):
 
 def get_llm_for_model(model_name: str) -> "CompletionClient":
     """Build a client after validating aliases/provider routing without noisy output."""
-    from nooa.unifiedllm import MODELS, CompletionClient, get_llm_client
+    from nooa.unifiedllm import MODELS
 
     if model_name in MODELS:
-        return get_llm_client(model_name)
+        return LazyRegistryLLMClient(model_name, MODELS[model_name])
 
     from .health_check import _detect_provider
 
     if _detect_provider(model_name) is None:
         raise UnresolvedModelError(model_name)
+    from nooa.unifiedllm import CompletionClient
+
     return CompletionClient(model=model_name)
 
 

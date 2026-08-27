@@ -80,7 +80,7 @@ from nooa.strategy_validation import (  # noqa: E402
     MethodPrecondition,
 )
 from nooa.token_counter import char_approximate_token_counter  # noqa: E402
-from nooa.unifiedllm import LLMResponse  # noqa: E402
+from nooa.unifiedllm.types import LLMResponse  # noqa: E402
 
 
 # Lazy re-export of llm_config_chain — defer importing the llm_config /

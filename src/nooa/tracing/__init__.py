@@ -63,6 +63,7 @@ from nooa.tracing._session_processor import SessionSpanProcessor
 _enabled: bool = False
 _provider: TracerProvider | None = None
 _hooks: OpenInferenceHooks | None = None  # retained so we can re-register per-Task
+_litellm_instrumented: bool = False
 
 
 class _IsolatedIdGenerator(RandomIdGenerator):
@@ -339,8 +340,12 @@ def enable_tracing(
             "NemoOOAgentsInstrumentor.instrument() should have called set_hooks()"
         )
 
-    # Instrument litellm if available
-    _instrument_litellm(tracer_provider)
+    # Instrument LiteLLM only if it is already imported. Otherwise
+    # nooa.unifiedllm.unifiedllm calls ensure_litellm_instrumented() after its
+    # own LiteLLM import, keeping startup paths that only configure tracing from
+    # paying the provider-client import cost.
+    if "litellm" in sys.modules:
+        ensure_litellm_instrumented()
 
     # Print trace target
     if not quiet:
@@ -432,7 +437,7 @@ def _default_exporters(*, quiet: bool = False) -> list[SpanExporter] | None:
     endpoint = explicit_endpoint or "http://localhost:5001/v1/traces"
 
     if probe_otlp_endpoint(endpoint):
-        return [exporters_mod.journal(endpoint=endpoint)]
+        return [exporters_mod.journal(endpoint=endpoint, defer_litellm_callback=True)]
 
     _probe_failed = True
 
@@ -443,6 +448,18 @@ def _default_exporters(*, quiet: bool = False) -> list[SpanExporter] | None:
         )
 
     return None
+
+
+def ensure_litellm_instrumented() -> None:
+    """Install LiteLLM instrumentation once tracing and LiteLLM are both loaded."""
+    global _litellm_instrumented
+    if _litellm_instrumented or _provider is None:
+        return
+    _instrument_litellm(_provider)
+    from nooa.tracing._journal_exporter import JournalExporter
+
+    JournalExporter.install_pending_litellm_callbacks()
+    _litellm_instrumented = True
 
 
 def _instrument_litellm(tracer_provider: TracerProvider) -> None:
@@ -519,6 +536,7 @@ __all__ = [
     "OtlpJsonHttpExporter",
     "enable_tracing",
     "end_active_spans",
+    "ensure_litellm_instrumented",
     "exporters",
     "probe_otlp_endpoint",
     "set_session",

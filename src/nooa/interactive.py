@@ -21,7 +21,7 @@ interactive hosts such as the TUI and ACP.
 """
 
 from enum import StrEnum
-from typing import Annotated, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -85,7 +85,7 @@ try:
 except ImportError:
     pass
 
-with hidden:
+if TYPE_CHECKING:
     from nooa.unifiedllm import UnifiedLLM
 
 
@@ -229,14 +229,16 @@ class SummarizationConfig(BaseModel):
 DEFAULT_MODEL = "claude-opus-4-8"
 
 with hidden:
-    try:
-        from nooa.unifiedllm import get_llm_client
 
-        _DEFAULT_LLM = get_llm_client(DEFAULT_MODEL)
-    except Exception:
-        from nooa.unifiedllm import FakeLLMClient
+    def _get_default_llm():
+        try:
+            from nooa.unifiedllm import get_llm_client
 
-        _DEFAULT_LLM = FakeLLMClient()
+            return get_llm_client(DEFAULT_MODEL)
+        except Exception:
+            from nooa.unifiedllm import FakeLLMClient
+
+            return FakeLLMClient()
 
 
 # Summarizer trigger as a fraction of the LLM's context window. This is the
@@ -346,7 +348,7 @@ class AgentVars:
 
 
 @hidden
-class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
+class InteractiveAgent(Agent):
     """Base class for agents driven by an outer dispatcher (TUI, harness, ...).
 
     Subclass this and implement ``handle()`` to build a custom interactive
@@ -387,7 +389,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     vars: SnapshotVars
 
     def __init__(self, llm=None, **kwargs):
-        super().__init__(llm=llm or _DEFAULT_LLM, **kwargs)
+        super().__init__(llm=llm or _get_default_llm(), **kwargs)
         self._render_message = None
         self._session_manager = None
         self.vars = SnapshotVars()

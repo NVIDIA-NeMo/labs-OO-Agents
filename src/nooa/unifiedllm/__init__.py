@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-from nooa.unifiedllm.fake import FakeLLMClient
-from nooa.unifiedllm.http_config import HttpConfig
+"""Unified LLM client package.
+
+Keep this package import light: strategies and agent classes import protocol
+types during class definition, while LiteLLM-backed clients are only needed
+when a real model client is constructed or called.
+"""
+
 from nooa.unifiedllm.registry import (
     MODELS,
     ensure_loaded,
@@ -10,23 +15,11 @@ from nooa.unifiedllm.registry import (
     reload_registry,
     resolve_api_key_from_config,
 )
-from nooa.unifiedllm.retry import (
-    EmptyContentError,
-    RetryingWrapper,
-    sync_retry,
-    with_retry,
-)
-from nooa.unifiedllm.retry_config import RetryConfig
-from nooa.unifiedllm.unifiedllm import (
-    CompletionClient,
+from nooa.unifiedllm.types import (
     LLMResponse,
-    ReasoningCompletionClient,
-    ResponsesClient,
     Tool,
     ToolCall,
-    UnifiedLLM,
     create_tool_from_callable,
-    extract_and_parse_json,
 )
 
 __all__ = [
@@ -61,3 +54,33 @@ __all__ = [
     # Utilities
     "extract_and_parse_json",
 ]
+
+_CLIENT_EXPORTS = {
+    "CompletionClient",
+    "ReasoningCompletionClient",
+    "ResponsesClient",
+    "UnifiedLLM",
+    "extract_and_parse_json",
+}
+_RETRY_EXPORTS = {"EmptyContentError", "RetryingWrapper", "sync_retry", "with_retry"}
+
+
+def __getattr__(name: str):
+    if name in _CLIENT_EXPORTS:
+        from nooa.unifiedllm import unifiedllm as _clients
+
+        value = getattr(_clients, name)
+    elif name == "FakeLLMClient":
+        from nooa.unifiedllm.fake import FakeLLMClient as value
+    elif name == "HttpConfig":
+        from nooa.unifiedllm.http_config import HttpConfig as value
+    elif name == "RetryConfig":
+        from nooa.unifiedllm.retry_config import RetryConfig as value
+    elif name in _RETRY_EXPORTS:
+        from nooa.unifiedllm import retry as _retry
+
+        value = getattr(_retry, name)
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    globals()[name] = value
+    return value

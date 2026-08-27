@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -248,6 +249,7 @@ def _load_llm_registry(messages: list[Output], explicit_paths: list[Path] | None
 
 def _enable_tracing(config: Config, messages: list[Output]):
     if config.no_trace:
+        os.environ["NOOA_DISABLE_AUTO_TRACING"] = "1"
         return False, None
     try:
         from nooa.paths import find_project_root, get_project_dir
@@ -311,14 +313,18 @@ async def bootstrap(
 
     blocking_llm_health = None
     llm = None
+    llm_is_fake = False
     try:
-        from nooa.unifiedllm import MODELS, FakeLLMClient
+        from nooa.unifiedllm import MODELS
 
         if config.tui.default_model == DEFAULT_MODEL and DEFAULT_MODEL not in MODELS:
+            from nooa.unifiedllm import FakeLLMClient
+
             from .health_check import no_models_configured_health
 
             blocking_llm_health = no_models_configured_health()
             llm = FakeLLMClient()
+            llm_is_fake = True
     except Exception:
         logger.debug("Could not inspect loaded LLM registry", exc_info=True)
 
@@ -340,6 +346,7 @@ async def bootstrap(
             if blocking_llm_health.fix_hint:
                 messages.append(TextOutput(blocking_llm_health.fix_hint, "info"))
         llm = FakeLLMClient()
+        llm_is_fake = True
     except Exception as exc:
         from nooa.unifiedllm import FakeLLMClient
 
@@ -357,10 +364,9 @@ async def bootstrap(
         messages.append(TextOutput(f"⚠️  {blocking_llm_health.error_message}", "error"))
         messages.append(TextOutput(blocking_llm_health.fix_hint, "info"))
         llm = FakeLLMClient()
+        llm_is_fake = True
 
-    from nooa.unifiedllm import FakeLLMClient
-
-    if not isinstance(llm, FakeLLMClient):
+    if not llm_is_fake:
         from .health_check import HealthCheckResult
 
         blocking_llm_health = HealthCheckResult(

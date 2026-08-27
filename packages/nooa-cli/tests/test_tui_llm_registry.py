@@ -78,7 +78,7 @@ def test_get_llm_uses_registry_alias(monkeypatch) -> None:
 
     def fake_get_llm_client(name: str, **kwargs):
         calls.append((name, kwargs))
-        return SimpleNamespace(_registry_config=None)
+        return SimpleNamespace(_registry_config=None, config={}, call=lambda *_args, **_kwargs: None)
 
     monkeypatch.setattr(
         unifiedllm,
@@ -90,6 +90,74 @@ def test_get_llm_uses_registry_alias(monkeypatch) -> None:
     config = Config()
     config.tui.default_model = "alias"
 
-    get_llm(config)
+    llm = get_llm(config)
 
-    assert calls == [("alias", {})]
+    assert type(llm).__name__ == "LazyRegistryLLMClient"
+    assert calls == []
+
+    llm.call([])
+    assert calls == [
+        (
+            "alias",
+            {
+                "api_base": "https://old.example/v1",
+                "client_type": "completion",
+            },
+        )
+    ]
+
+
+def test_lazy_registry_alias_forwards_config_mutations(monkeypatch) -> None:
+    from nooa_cli.tui.config import LazyRegistryLLMClient
+
+    calls = []
+
+    def fake_get_llm_client(name: str, **kwargs):
+        calls.append((name, kwargs))
+        return SimpleNamespace(_registry_config=None, config=dict(kwargs), call=lambda *_: None)
+
+    monkeypatch.setattr(unifiedllm, "get_llm_client", fake_get_llm_client)
+
+    llm = LazyRegistryLLMClient(
+        "alias",
+        {
+            "model_name": "openai/provider/model",
+            "api_base": "https://old.example/v1",
+            "client_type": "responses",
+            "reasoning": {"effort": "low"},
+        },
+    )
+    llm.config["reasoning"] = {"effort": "high"}
+
+    llm.call([])
+
+    assert calls == [
+        (
+            "alias",
+            {
+                "api_base": "https://old.example/v1",
+                "client_type": "responses",
+                "reasoning": {"effort": "high"},
+            },
+        )
+    ]
+
+
+def test_lazy_responses_alias_selects_responses_formatter_without_materializing() -> None:
+    from nooa_cli.tui.config import LazyRegistryLLMClient
+
+    from nooa.context_blocks.formatter import OpenAIProviderFormatter, ResponsesProviderFormatter
+    from nooa.runtime.actor import _resolve_provider_formatter
+
+    llm = LazyRegistryLLMClient(
+        "alias",
+        {
+            "model_name": "openai/provider/model",
+            "client_type": "responses",
+        },
+    )
+
+    formatter = _resolve_provider_formatter(llm, OpenAIProviderFormatter())
+
+    assert isinstance(formatter, ResponsesProviderFormatter)
+    assert llm._client is None

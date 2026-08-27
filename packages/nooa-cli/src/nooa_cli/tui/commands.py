@@ -967,7 +967,9 @@ class ReasoningCommand(Command):
         from nooa.unifiedllm.unifiedllm import ResponsesClient
 
         llm = self.agent.llm
-        is_responses = isinstance(llm, ResponsesClient)
+        is_responses = (
+            getattr(llm, "client_type", None) == "responses" or isinstance(llm, ResponsesClient)
+        )
         client_type = "responses" if is_responses else "completion"
 
         if is_responses:
@@ -986,7 +988,9 @@ class ReasoningCommand(Command):
         from nooa.unifiedllm.unifiedllm import ResponsesClient
 
         llm = self.agent.llm
-        is_responses = isinstance(llm, ResponsesClient)
+        is_responses = (
+            getattr(llm, "client_type", None) == "responses" or isinstance(llm, ResponsesClient)
+        )
 
         if level == "off":
             if is_responses:

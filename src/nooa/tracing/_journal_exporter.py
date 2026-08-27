@@ -25,6 +25,7 @@ Usage::
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -43,7 +44,9 @@ class JournalExporter(SpanExporter):
     wire payload.  The litellm callback handles message delivery separately.
     """
 
-    def __init__(self, base_url: str) -> None:
+    _instances: list[JournalExporter] = []
+
+    def __init__(self, base_url: str, *, defer_litellm_callback: bool = False) -> None:
         from nooa.tracing._otlp_http_exporter import (
             OtlpJsonHttpExporter,
         )
@@ -53,7 +56,21 @@ class JournalExporter(SpanExporter):
             endpoint=f"{self._base_url}/v1/traces",
             strip_llm_messages=True,
         )
-        self._callback = self._install()
+        self._callback: MessageJournalCallback | None = None
+        self._instances.append(self)
+        if not defer_litellm_callback:
+            self.ensure_litellm_callback()
+
+    @classmethod
+    def install_pending_litellm_callbacks(cls) -> None:
+        """Install LiteLLM journal callbacks for every live journal exporter."""
+        for exporter in list(cls._instances):
+            exporter.ensure_litellm_callback()
+
+    def ensure_litellm_callback(self) -> None:
+        """Install this exporter's LiteLLM callback once LiteLLM is loaded."""
+        if self._callback is None:
+            self._callback = self._install()
 
     def _install(self) -> MessageJournalCallback:
         """Register this exporter's base URL on the shared journal callback.
@@ -107,24 +124,28 @@ class JournalExporter(SpanExporter):
         about-to-hit-zero, decide to install a fresh callback, while we're
         still in the middle of the rewrite).
         """
-        import litellm
+        callback = self._callback
+        if callback is not None:
+            import litellm
 
-        from nooa.tracing._litellm_journal import _INSTALL_LOCK, flush_pending
+            from nooa.tracing._litellm_journal import _INSTALL_LOCK, flush_pending
 
-        # Join the journal callback's daemon-thread POSTs before tearing
-        # down. OTel's built-in atexit hook calls ``TracerProvider.shutdown``
-        # → ``BatchSpanProcessor.shutdown`` → ``self.shutdown``; without this
-        # join, short-lived processes exit with in-flight journal POSTs
-        # killed mid-request, so the viewer receives spans with no message
-        # content (issue #168).
-        flush_pending(timeout=30.0)
+            # Join the journal callback's daemon-thread POSTs before tearing
+            # down. OTel's built-in atexit hook calls ``TracerProvider.shutdown``
+            # → ``BatchSpanProcessor.shutdown`` → ``self.shutdown``; without this
+            # join, short-lived processes exit with in-flight journal POSTs
+            # killed mid-request, so the viewer receives spans with no message
+            # content (issue #168).
+            flush_pending(timeout=30.0)
 
-        with _INSTALL_LOCK:
-            self._callback.remove_destination(self._base_url)
-            if not self._callback.has_destinations():
-                litellm.callbacks = [c for c in litellm.callbacks if c is not self._callback]
+            with _INSTALL_LOCK:
+                callback.remove_destination(self._base_url)
+                if not callback.has_destinations():
+                    litellm.callbacks = [c for c in litellm.callbacks if c is not callback]
 
         self._span_exporter.shutdown()
+        with contextlib.suppress(ValueError):
+            self._instances.remove(self)
 
     def force_flush(self, timeout_millis: int = 30_000) -> bool:
         # Flush both halves of the wire:
@@ -133,9 +154,10 @@ class JournalExporter(SpanExporter):
         # Without (2) the eval pipeline's process-exit race truncates
         # in-flight POSTs at the receiver -- the call record never lands
         # and the viewer download can't reconstruct messages for that span.
-        from nooa.tracing._litellm_journal import flush_pending
+        if self._callback is not None:
+            from nooa.tracing._litellm_journal import flush_pending
 
-        flush_pending(timeout=timeout_millis / 1000.0)
+            flush_pending(timeout=timeout_millis / 1000.0)
         return self._span_exporter.force_flush(timeout_millis)
 
     def describe(self) -> str:

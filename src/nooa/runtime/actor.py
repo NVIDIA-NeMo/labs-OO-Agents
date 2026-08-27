@@ -206,6 +206,13 @@ def _resolve_provider_formatter(llm_client: Any, default_formatter: Any) -> Any:
     works), but the Responses API has a fundamentally different wire shape
     that LiteLLM does not translate, requiring its own formatter.
     """
+    if getattr(llm_client, "client_type", None) == "responses":
+        from nooa.context_blocks.formatter import ResponsesProviderFormatter
+
+        return ResponsesProviderFormatter()
+    if getattr(llm_client, "client_type", None) is not None:
+        return default_formatter
+
     from nooa.unifiedllm import ResponsesClient
 
     if isinstance(llm_client, ResponsesClient):

@@ -67,7 +67,7 @@ from nooa.strategy_validation import (
     run_postconditions,
     run_preconditions,
 )
-from nooa.unifiedllm import Tool, ToolCall
+from nooa.unifiedllm.types import Tool, ToolCall
 
 if TYPE_CHECKING:
     from nooa.config.strategy_config import CodeActConfig
