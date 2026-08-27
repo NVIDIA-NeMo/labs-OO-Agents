@@ -2527,7 +2527,7 @@ class TUIApplication:
             if self._resume_picker is not None:
                 self._resume_picker.cycle_filter()
 
-        @kb.add("escape", "s", filter=resume_picker_active, eager=True)
+        @kb.add("c-o", filter=resume_picker_active, eager=True)
         def _(event):
             if self._resume_picker is not None:
                 self._resume_picker.toggle_sort()
