@@ -964,6 +964,7 @@ class TranscriptBlock:
     replay_cache: dict[int, str] = field(default_factory=dict)
     fullscreen_rendered: str | None = None
     native_visible_text: str | None = None
+    native_visible_start: int | None = None
     code_copy_actions: dict[str, str] = field(default_factory=dict)
     agent_message: bool = False
 
@@ -3356,7 +3357,10 @@ class TUIApplication:
                 self._note_unseen_agent_message(block)
                 self._app.invalidate()
                 return
-            block.native_visible_text = self._append_stripped_to_buffer(rendered)
+            (
+                block.native_visible_text,
+                block.native_visible_start,
+            ) = self._append_stripped_to_buffer(rendered)
             import sys as _sys
 
             try:
@@ -3494,7 +3498,10 @@ class TUIApplication:
             self._note_unseen_agent_message(block)
             self._app.invalidate()
             return
-        block.native_visible_text = self._append_stripped_to_buffer(rendered)
+        (
+            block.native_visible_text,
+            block.native_visible_start,
+        ) = self._append_stripped_to_buffer(rendered)
         if queue is not None:
             queue.put_nowait(block)
             return
@@ -3515,11 +3522,12 @@ class TUIApplication:
     def refresh_transcript_blocks(self, tag: str) -> bool:
         """Refresh retained replayable transcript blocks carrying *tag*."""
         changed = False
-        native_replacements: list[tuple[str, str]] = []
+        native_replacements: list[tuple[TranscriptBlock, int, str, str]] = []
         for block in self._transcript_blocks:
             if tag not in block.tags or block.replay is None:
                 continue
             old_native_text = block.native_visible_text
+            old_native_start = block.native_visible_start
             try:
                 source = block.replay()
             except Exception:
@@ -3531,8 +3539,10 @@ class TUIApplication:
             if old_native_text is not None:
                 rendered = self._render_transcript_source(source)
                 new_native_text = _strip_ansi(rendered)
-                native_replacements.append((old_native_text, new_native_text))
-                block.native_visible_text = new_native_text
+                if old_native_start is not None:
+                    native_replacements.append(
+                        (block, old_native_start, old_native_text, new_native_text)
+                    )
             changed = True
 
         if changed and self._is_fullscreen:
@@ -3550,7 +3560,7 @@ class TUIApplication:
         elif block.agent_message:
             self._has_unseen_agent_message = True
 
-    def _append_stripped_to_buffer(self, text: str) -> str:
+    def _append_stripped_to_buffer(self, text: str) -> tuple[str, int | None]:
         """Append the ANSI-stripped transcript text to ``output_buffer``.
 
         Runs on the event loop thread (either because ``emit_block``
@@ -3560,21 +3570,54 @@ class TUIApplication:
         stripped = _strip_ansi(text)
         existing = self.output_buffer.text
         appended = stripped if not existing or existing.endswith("\n") else "\n" + stripped
+        visible_start = len(existing) + (len(appended) - len(stripped)) if stripped else None
         joined = existing + appended
         self.output_buffer.document = Document(text=joined, cursor_position=len(joined))
-        return stripped
+        return stripped, visible_start
 
-    def _replace_output_buffer_blocks(self, replacements: list[tuple[str, str]]) -> None:
+    def _replace_output_buffer_blocks(
+        self,
+        replacements: list[tuple[TranscriptBlock, int, str, str]],
+    ) -> None:
         """Replace refreshed native transcript blocks without rebuilding history."""
         text = self.output_buffer.text
-        for old, new in replacements:
+        changed = False
+        for block, start, old, new in sorted(replacements, key=lambda item: item[1], reverse=True):
             if not old or old == new:
+                block.native_visible_text = new
+                block.native_visible_start = start
                 continue
-            index = text.find(old)
-            if index < 0:
+            end = start + len(old)
+            if start < 0 or text[start:end] != old:
+                logger.debug(
+                    "Could not refresh native transcript block at stale span %s:%s",
+                    start,
+                    end,
+                )
                 continue
-            text = text[:index] + new + text[index + len(old) :]
-        self.output_buffer.document = Document(text=text, cursor_position=len(text))
+            text = text[:start] + new + text[end:]
+            block.native_visible_text = new
+            block.native_visible_start = start
+            delta = len(new) - len(old)
+            if delta:
+                self._shift_native_visible_starts(start, delta, changed_block=block)
+            changed = True
+        if changed:
+            self.output_buffer.document = Document(text=text, cursor_position=len(text))
+
+    def _shift_native_visible_starts(
+        self,
+        changed_start: int,
+        delta: int,
+        *,
+        changed_block: TranscriptBlock,
+    ) -> None:
+        """Keep native spans aligned after replacing one retained block."""
+        for block in self._transcript_blocks:
+            if block is changed_block or block.native_visible_start is None:
+                continue
+            if block.native_visible_start > changed_start:
+                block.native_visible_start += delta
 
     # ── surface the harness (and real callers) rely on ----------------
 
