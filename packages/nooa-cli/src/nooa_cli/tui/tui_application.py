@@ -1809,7 +1809,7 @@ class TUIApplication:
                     continue
                 turns = tuple(
                     ResumePickerTurn(turn.role, turn.content)
-                    for turn in SessionManager.recent_turns(meta.id, limit=12)
+                    for turn in SessionManager.load_turns(meta.id)
                 )
                 result.append(
                     ResumePickerRow.from_meta(
@@ -1825,9 +1825,7 @@ class TUIApplication:
         try:
             rows = await asyncio.to_thread(load_rows)
             self._cancel_fullscreen_drag()
-            shell = getattr(self._agent, "shell", None)
-            picker_cwd = str(getattr(shell, "cwd", os.getcwd()))
-            self._resume_picker = ResumePicker(rows, self._app, cwd=picker_cwd)
+            self._resume_picker = ResumePicker(rows, self._app)
             self._resume_picker.focus_initial()
             self._app.invalidate()
             return await done
