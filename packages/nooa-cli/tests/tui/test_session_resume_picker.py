@@ -131,15 +131,11 @@ def test_selection_can_inspect_attached_but_cannot_resume_it() -> None:
     assert "✓  other" in render_resume_picker(model, 80, 20)
 
 
-def test_tab_cycles_individual_controls_and_preview() -> None:
+def test_tab_cycles_only_list_and_preview() -> None:
     app = MagicMock()
     app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
     picker = ResumePicker([row("1", "one")], app)
     assert picker.active_control == "list"
-    picker.focus_next()
-    assert picker.active_control == "filter"
-    picker.focus_next()
-    assert picker.active_control == "sort"
     picker.focus_next()
     assert picker.active_control == "preview"
     picker.focus_next()
@@ -174,17 +170,12 @@ def test_search_text_and_brackets_share_active_highlight() -> None:
     assert picker.query_window.style() == ""
 
 
-def test_only_individually_focused_filter_or_sort_is_highlighted() -> None:
+def test_filter_and_sort_are_not_highlighted_with_list_area() -> None:
     app = MagicMock()
     app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
     picker = ResumePicker([row("1", "one")], app)
     assert "control-focused" not in picker.filter_control._text()[0][0]
-    picker.activate_control("filter")
-    assert "control-focused" in picker.filter_control._text()[0][0]
     assert "control-focused" not in picker.sort_control._text()[0][0]
-    picker.activate_control("sort")
-    assert "control-focused" not in picker.filter_control._text()[0][0]
-    assert "control-focused" in picker.sort_control._text()[0][0]
 
 
 def test_active_rail_marks_only_current_area() -> None:
@@ -452,6 +443,37 @@ async def test_picker_excludes_empty_sessions(monkeypatch) -> None:
         assert await asyncio.wait_for(opened, 1) is None
 
 
+@pytest.mark.asyncio
+async def test_filter_change_prepares_new_preview_without_blocking(monkeypatch) -> None:
+    import threading
+
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row("attached", "attached", attached=True)], app)
+    picker.preview_control.viewport = (40, 5)
+    started = threading.Event()
+    release = threading.Event()
+
+    def build_preview(selected, width, height):
+        from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+        started.set()
+        assert release.wait(timeout=1)
+        return FullscreenTranscriptModel(show_trailing_blank=False)
+
+    monkeypatch.setattr(ResumePicker, "_build_preview_model", staticmethod(build_preview))
+    picker.cycle_filter()
+
+    key = ("attached", 40)
+    assert key in picker._preview_tasks
+    assert key not in picker._preview_models
+    await asyncio.wait_for(asyncio.to_thread(started.wait), 1)
+    assert not picker._preview_tasks[key].done()
+    release.set()
+    await picker._preview_tasks[key]
+    assert key in picker._preview_models
+
+
 def test_preview_search_highlights_and_cycles_transcript_matches() -> None:
     app = MagicMock()
     app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
@@ -552,20 +574,18 @@ async def test_real_prompt_toolkit_routes_search_navigation_and_cancel(monkeypat
         picker = harness.app._resume_picker
         assert [match.row.id for match in picker.model.matches] == ["session-1"]
         await harness.press("tab")
-        await harness.wait_for(lambda: picker.active_control == "filter")
+        await harness.wait_for(lambda: picker.active_control == "preview")
         await harness.press("s-tab")
         await harness.wait_for(lambda: picker.active_control == "list")
         picker.buffer.text = ""
         await harness.wait_for(lambda: picker.model.query == "")
-        await harness.press("tab")
-        await harness.type_keys(" ")
+        await harness.press("option-f")
         await harness.wait_for(lambda: picker.model.state_filter == "attached")
         assert picker.model.matches == []
-        await harness.type_keys(" ")
+        await harness.press("option-f")
         await harness.wait_for(lambda: picker.model.state_filter == "all")
         assert {match.row.id for match in picker.model.matches} == {"session-1", "session-2"}
-        await harness.press("tab")
-        await harness.press("enter")
+        await harness.press("option-s")
         await harness.wait_for(lambda: not picker.model.sort_updated)
         assert [match.row.id for match in picker.model.matches] == ["session-2", "session-1"]
         await harness.press("escape")
@@ -633,8 +653,6 @@ async def test_enter_resumes_selected_session_from_preview(monkeypatch) -> None:
     async with TUIHarness() as harness:
         opened = asyncio.create_task(harness.app.open_session_resume_dialog())
         await harness.wait_for(lambda: harness.app._resume_picker is not None)
-        await harness.press("tab")
-        await harness.press("tab")
         await harness.press("tab")
         await harness.wait_for(
             lambda: (
@@ -772,6 +790,7 @@ async def test_full_application_screen_keeps_picker_help_visible(
             assert "Filter:" in joined and "✓" in joined
             assert "Sort:" in joined
             assert "Conversation preview" in joined
+            assert "Alt-F" in joined and "Alt-S" in joined
             assert joined.count("─") >= width * 2
             assert "preview for session-19" in joined
             assert "❯" in joined and "y ago" in joined
