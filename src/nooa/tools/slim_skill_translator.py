@@ -27,20 +27,14 @@ _RESERVED_METHOD_NAMES = {
     *(name for name in dir(Skill) if not name.startswith("_")),
 }
 
-
-@dataclass(frozen=True)
-class SkillFile:
-    path: str
-
-
 @dataclass(frozen=True)
 class TextSkillInventory:
     source_dir: Path
     skill_name: str
     description: str
     body: str
-    scripts: list[SkillFile] = field(default_factory=list)
-    resources: list[SkillFile] = field(default_factory=list)
+    scripts: list[str] = field(default_factory=list)
+    resources: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -71,9 +65,6 @@ class ScriptMethodPlan:
 class OmittedScriptPlan:
     script_path: str
     reason: str
-
-    def model_dump(self, *args, **kwargs) -> dict[str, str]:
-        return {"script_path": self.script_path, "reason": self.reason}
 
 
 @dataclass(frozen=True)
@@ -118,17 +109,6 @@ class ValidationReport:
     importable: bool = False
     errors: list[str] = field(default_factory=list)
 
-    def model_dump(self, *args, mode: str | None = None, **kwargs) -> dict[str, object]:
-        package_dir: str | Path = str(self.package_dir) if mode == "json" else self.package_dir
-        return {
-            "ok": self.ok,
-            "package_dir": package_dir,
-            "registry_name": self.registry_name,
-            "loaded": self.loaded,
-            "importable": self.importable,
-            "errors": list(self.errors),
-        }
-
 
 class SlimTextSkillTranslator(Skill):
     """Translate TextSkills with a small, LibrarySkill-native policy."""
@@ -144,17 +124,16 @@ class SlimTextSkillTranslator(Skill):
         if "description" not in frontmatter_raw:
             raise ValueError("Missing required frontmatter field: description")
 
-        scripts: list[SkillFile] = []
-        resources: list[SkillFile] = []
+        scripts: list[str] = []
+        resources: list[str] = []
         for file_path in _iter_skill_files(source_dir):
             rel = file_path.relative_to(source_dir).as_posix()
             if file_path == skill_md:
                 continue
-            file = SkillFile(path=rel)
             if rel.startswith("scripts/"):
-                scripts.append(file)
+                scripts.append(rel)
             else:
-                resources.append(file)
+                resources.append(rel)
 
         return TextSkillInventory(
             source_dir=source_dir,
@@ -182,37 +161,37 @@ class SlimTextSkillTranslator(Skill):
         script_methods: list[ScriptMethodPlan] = []
         script_methods_by_path: dict[str, ScriptMethodPlan] = {}
         omitted_scripts: list[OmittedScriptPlan] = []
-        for file in inventory.scripts:
-            if not file.path.lower().endswith(".py"):
+        for script_path in inventory.scripts:
+            if not script_path.lower().endswith(".py"):
                 omitted_scripts.append(
                     OmittedScriptPlan(
-                        script_path=file.path,
+                        script_path=script_path,
                         reason="No import-safe Python API could be inferred.",
                     )
                 )
                 continue
 
-            function_methods = _infer_script_functions(inventory.source_dir / file.path, used_api_names)
+            function_methods = _infer_script_functions(inventory.source_dir / script_path, used_api_names)
             if not function_methods:
                 omitted_scripts.append(
                     OmittedScriptPlan(
-                        script_path=file.path,
+                        script_path=script_path,
                         reason="No import-safe public Python functions could be inferred.",
                     )
                 )
                 continue
 
             script_method = ScriptMethodPlan(
-                script_path=file.path,
+                script_path=script_path,
                 function_methods=function_methods,
             )
             script_methods.append(script_method)
-            script_methods_by_path[file.path] = script_method
+            script_methods_by_path[script_path] = script_method
 
         implementation_only_paths = _sibling_dependency_closure(
             inventory.source_dir,
             set(script_methods_by_path),
-            {file.path for file in inventory.scripts},
+            set(inventory.scripts),
         ) - set(script_methods_by_path)
         for script_path in sorted(implementation_only_paths):
             script_methods.append(
@@ -278,8 +257,9 @@ class SlimTextSkillTranslator(Skill):
                 )
         _write(package_src / "__init__.py", _render_init(plan), package_dir, written)
 
-        for source_file in _iter_package_resource_files(plan):
-            rel = source_file.relative_to(plan.source_dir)
+        for resource in plan.resource_methods:
+            rel = Path(resource.resource_path)
+            source_file = plan.source_dir / rel
             dest = resources_dir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_file, dest)
@@ -360,16 +340,6 @@ def _iter_skill_files(root: Path) -> list[Path]:
     )
 
 
-def _iter_package_resource_files(plan: ConversionPlan) -> list[Path]:
-    resources: list[Path] = []
-    for path in _iter_skill_files(plan.source_dir):
-        rel = path.relative_to(plan.source_dir).as_posix()
-        if rel == "SKILL.md" or rel == "skill.md" or rel.startswith("scripts/"):
-            continue
-        resources.append(path)
-    return resources
-
-
 def _normalize_identifier(value: str) -> str:
     normalized = re.sub(r"\W+", "_", value.strip().lower()).strip("_")
     if not normalized:
@@ -408,15 +378,6 @@ def _class_name(value: str) -> str:
     return name
 
 
-def _function_method_name(function_name: str, used_names: set[str]) -> str:
-    return _unique_name(_normalize_identifier(function_name), used_names, suffix="function")
-
-
-def _resource_method_name(resource_path: str, used_names: set[str]) -> str:
-    rel = Path(resource_path)
-    return _unique_name(_normalize_identifier(rel.with_suffix("").as_posix()), used_names, suffix="resource")
-
-
 def _unique_name(name: str, used_names: set[str], *, suffix: str) -> str:
     if name in _RESERVED_METHOD_NAMES:
         name = f"{name}_{suffix}"
@@ -431,17 +392,21 @@ def _unique_name(name: str, used_names: set[str], *, suffix: str) -> str:
 
 def _resource_method_plans(inventory: TextSkillInventory, used_names: set[str]) -> list[ResourceMethodPlan]:
     methods: list[ResourceMethodPlan] = []
-    for file in inventory.resources:
-        path = inventory.source_dir / file.path
+    for resource_path in inventory.resources:
+        path = inventory.source_dir / resource_path
         text = _read_resource_text_for_docstring(path)
         return_annotation: Literal["str", "bytes"] = "str" if text is not None else "bytes"
         methods.append(
             ResourceMethodPlan(
-                resource_path=file.path,
-                method_name=_resource_method_name(file.path, used_names),
+                resource_path=resource_path,
+                method_name=_unique_name(
+                    _normalize_identifier(Path(resource_path).with_suffix("").as_posix()),
+                    used_names,
+                    suffix="resource",
+                ),
                 return_annotation=return_annotation,
                 docstring=_resource_method_docstring(
-                    resource_path=file.path,
+                    resource_path=resource_path,
                     return_annotation=return_annotation,
                     text=text,
                 ),
@@ -501,7 +466,7 @@ def _infer_script_functions(path: Path, used_names: set[str]) -> list[ScriptFunc
         methods.append(
             ScriptFunctionPlan(
                 function_name=node.name,
-                method_name=_function_method_name(node.name, used_names),
+                method_name=_unique_name(_normalize_identifier(node.name), used_names, suffix="function"),
                 parameters=parameters,
                 return_annotation=_safe_annotation(node.returns),
                 docstring=ast.get_docstring(node) or "",
@@ -681,7 +646,13 @@ def _build_docstring(
     if adapted_guidance:
         lines.extend(["", "Guidance:", adapted_guidance])
     if resource_methods:
-        lines.extend(["", "Bundled resource APIs:", "Resource methods return bundled file contents; write script text to a workspace file before running it."])
+        lines.extend(
+            [
+                "",
+                "Bundled resource APIs:",
+                "Resource methods return bundled file contents; when a command needs a path, write the returned contents to a workspace file before running it.",
+            ]
+        )
         for resource in resource_methods:
             lines.append(
                 f"- {resource.method_name}() -> {resource.return_annotation}: "
@@ -718,7 +689,7 @@ def _adapt_skill_guidance(
 
     for resource in resource_methods:
         replacement = f"`{resource.method_name}()`"
-        file_replacement = f"a file containing the text returned by {replacement}"
+        file_replacement = f"a workspace file created from the contents returned by {replacement}"
         replacements.append((f"<path-to-this-skill>/{resource.resource_path}", file_replacement))
         replacements.append((f"<path-to-this-skill>/{Path(resource.resource_path).name}", file_replacement))
         replacements.append((resource.resource_path, replacement))
@@ -735,11 +706,15 @@ def _adapt_skill_guidance(
     for old, new in sorted(omitted_replacements, key=lambda item: len(item[0]), reverse=True):
         guidance = _replace_reference(guidance, old, new)
 
-    return re.sub(r"`?scripts/[^`\s),.;:]+" + "`?", "the relevant LibrarySkill guidance", guidance)
+    return re.sub(
+        r"(?<![\w./-])`?scripts/[^`\s),.;:]+`?(?![\w./-])",
+        "the relevant LibrarySkill guidance",
+        guidance,
+    )
 
 
 def _replace_reference(text: str, old: str, new: str) -> str:
-    return re.sub(rf"`?{re.escape(old)}`?", new, text)
+    return re.sub(rf"(?<![\w./-])`?{re.escape(old)}`?(?![\w./-])", new, text)
 
 
 def _public_method_guidance(script_methods: list[ScriptMethodPlan]) -> list[str]:
@@ -748,17 +723,12 @@ def _public_method_guidance(script_methods: list[ScriptMethodPlan]) -> list[str]
         if method.implementation_only:
             continue
         for function in method.function_methods:
-            parameters = ", ".join(_guidance_parameter(parameter) for parameter in function.parameters)
+            parameters = ", ".join(_render_function_parameter(parameter) for parameter in function.parameters)
             lines.append(
                 f"- {function.method_name}({parameters}) -> {function.return_annotation}: "
                 "returns the Python value from the library implementation."
             )
     return lines
-
-
-def _guidance_parameter(parameter: FunctionParameterPlan) -> str:
-    suffix = "" if parameter.required else f" = {parameter.default!r}"
-    return f"{parameter.param_name}: {parameter.annotation}{suffix}"
 
 
 def _render_pyproject(plan: ConversionPlan) -> str:

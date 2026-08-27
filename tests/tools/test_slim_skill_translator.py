@@ -108,8 +108,28 @@ def test_slim_translator_adapts_resource_script_path_guidance(tmp_path):
 
     generated_text = (result.package_dir / "src" / "browser_skill" / "__init__.py").read_text()
     assert "<path-to-this-skill>" not in generated_text
-    assert "write script text to a workspace file before running it" in generated_text
-    assert "a file containing the text returned by `measure_cls()`" in generated_text
+    assert "write the returned contents to a workspace file before running it" in generated_text
+    assert "a workspace file created from the contents returned by `measure_cls()`" in generated_text
+
+
+def test_slim_translator_does_not_rewrite_embedded_resource_basenames(tmp_path):
+    skill_dir = tmp_path / "resource-skill"
+    _write_skill_md(
+        skill_dir,
+        name="resource-skill",
+        body=(
+            "Read `data.json` when explicit seed data is needed.\n"
+            "Do not confuse it with metadata.json or predata.json.\n"
+        ),
+    )
+    (skill_dir / "data.json").write_text('{"items": []}\n', encoding="utf-8")
+
+    result = SlimTextSkillTranslator().translate(skill_dir, tmp_path / "libs")
+
+    generated_text = (result.package_dir / "src" / "resource_skill" / "__init__.py").read_text()
+    assert "`data()`" in generated_text
+    assert "metadata.json" in generated_text
+    assert "predata.json" in generated_text
 
 
 def test_slim_translator_does_not_depend_on_legacy_translator():

@@ -15,7 +15,7 @@ import sys
 import tempfile
 import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -277,8 +277,8 @@ def _translate_task_library_skills(task_dir: Path, output_dir: Path) -> list[dic
             "registry_name": result.registry_name,
             "class_name": result.class_name,
             "files_written": result.files_written,
-            "omitted_scripts": [item.model_dump() for item in result.omitted_scripts],
-            "validation": report.model_dump(mode="json"),
+            "omitted_scripts": [asdict(item) for item in result.omitted_scripts],
+            "validation": {**asdict(report), "package_dir": str(report.package_dir)},
         }
         summaries.append(summary)
         if not report.ok:
