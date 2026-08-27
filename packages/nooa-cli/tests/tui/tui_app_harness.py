@@ -54,8 +54,6 @@ _KEY_SEQUENCES: dict[str, str] = {
     "option-[": "\x1b[",
     "option-]": "\x1b]",
     "option-backspace": "\x1b\x7f",
-    "option-f": "\x1bf",
-    "c-o": "\x0f",
     "q": "q",
     "tab": "\t",
     "backspace": "\x7f",
@@ -79,6 +77,7 @@ _KEY_SEQUENCES: dict[str, str] = {
     "c-d": "\x04",
     "c-x": "\x18",
     "c-j": "\n",  # bare LF — used by prompt_toolkit as "Shift+Enter"
+    "c-o": "\x0f",
     "c-u": "\x15",
     "c-y": "\x19",
     "f2": "\x1bOQ",
