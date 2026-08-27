@@ -345,10 +345,18 @@ async def test_connect_workflow_writes_local_registry(tmp_path, monkeypatch) -> 
     )
     frontend = _WorkflowFrontend()
     _stub_successful_model_switch(monkeypatch)
+    startup_info = SimpleNamespace(
+        model="not connected",
+        short_model="No LLM",
+        llm_ready=False,
+        llm_status="not_connected",
+    )
+    registry = SimpleNamespace(blocking_llm_health=object(), startup_info=startup_info)
     command = ConnectCommand(
         frontend,
         TUIConfig(),
         MagicMock(),
+        registry=registry,
         root_config=SimpleNamespace(llm_config_paths=[]),
     )
     command._reload_model_registry = MagicMock()
@@ -363,6 +371,12 @@ async def test_connect_workflow_writes_local_registry(tmp_path, monkeypatch) -> 
         "api_base": "http://localhost:8000/v1",
     }
     assert any("Switched to model: org/model" in output.content for output in result.outputs)
+    assert registry.blocking_llm_health is None
+    assert startup_info.model == "org/model"
+    assert startup_info.short_model == "model"
+    assert startup_info.llm_ready is True
+    assert startup_info.llm_status == "ready"
+    assert startup_info not in result.outputs
 
 
 @pytest.mark.asyncio
@@ -428,6 +442,81 @@ async def test_connect_workflow_reuses_model_catalog_setup(tmp_path, monkeypatch
     saved = yaml.safe_load((project_dir / "llm_config.yaml").read_text())
     assert saved["models"]["org/model"]["api_base"] == "http://localhost:8000/v1"
     assert frontend.text_prompts == []
+
+
+@pytest.mark.asyncio
+async def test_connect_without_url_prompts_for_endpoint(tmp_path, monkeypatch) -> None:
+    project_dir = tmp_path / ".nooa"
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
+    monkeypatch.setattr(
+        "nooa_cli.tui.model_catalog.fetch_model_catalog",
+        lambda *_args, **_kwargs: (
+            "http://localhost:8000/v1",
+            [CatalogModel(id="org/model")],
+        ),
+    )
+    monkeypatch.setattr(
+        "nooa_cli.tui.model_catalog.lookup_model_token_limits",
+        lambda *_args: (None, None),
+    )
+    frontend = _WorkflowFrontend()
+    frontend.text_answers = ["http://localhost:8000/v1"]
+    frontend.choice_answers = ["Custom OpenAI-compatible endpoint...", "org/model"]
+    _stub_successful_model_switch(monkeypatch)
+    command = ConnectCommand(
+        frontend,
+        TUIConfig(),
+        MagicMock(),
+        root_config=SimpleNamespace(llm_config_paths=[]),
+    )
+    command._reload_model_registry = MagicMock()
+
+    result = await command.execute([])
+
+    assert result.success is True
+    assert frontend.choice_prompts[0][0] == "Connect model backend"
+    assert frontend.choice_prompts[0][2] == [
+        "OpenAI",
+        "Anthropic",
+        "Ollama local",
+        "Custom OpenAI-compatible endpoint...",
+    ]
+    assert frontend.text_prompts[0][0] == "Custom model endpoint"
+    assert any("Switched to model: org/model" in output.content for output in result.outputs)
+
+
+@pytest.mark.asyncio
+async def test_connect_without_url_can_use_standard_endpoint_preset(tmp_path, monkeypatch) -> None:
+    project_dir = tmp_path / ".nooa"
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
+    calls = []
+
+    def fake_fetch(server_url, *_args, **_kwargs):
+        calls.append(server_url)
+        return ("http://localhost:11434/v1", [CatalogModel(id="qwen3:1.7b")])
+
+    monkeypatch.setattr("nooa_cli.tui.model_catalog.fetch_model_catalog", fake_fetch)
+    monkeypatch.setattr(
+        "nooa_cli.tui.model_catalog.lookup_model_token_limits",
+        lambda *_args: (None, None),
+    )
+    frontend = _WorkflowFrontend()
+    frontend.choice_answers = ["Ollama local", "qwen3:1.7b"]
+    _stub_successful_model_switch(monkeypatch)
+    command = ConnectCommand(
+        frontend,
+        TUIConfig(),
+        MagicMock(),
+        root_config=SimpleNamespace(llm_config_paths=[]),
+    )
+    command._reload_model_registry = MagicMock()
+
+    result = await command.execute([])
+
+    assert result.success is True
+    assert calls == ["http://localhost:11434"]
+    assert frontend.text_prompts == []
+    assert any("Switched to model: qwen3-1.7b" in output.content for output in result.outputs)
 
 
 @pytest.mark.asyncio

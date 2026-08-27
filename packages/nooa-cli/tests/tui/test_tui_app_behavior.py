@@ -257,6 +257,92 @@ async def test_no_active_identity_preserves_tagged_blocks_but_caps_untagged(
     assert len(app._transcript_blocks) == app._untagged_replay_tail + 1
 
 
+async def test_refresh_transcript_blocks_updates_tagged_replayable_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    monkeypatch.setattr("sys.stdout", io.StringIO())
+    app = TUIApplication(display_mode="native-replay")
+    value = {"text": "before\n"}
+
+    app.emit_block(value["text"], replay=lambda: value["text"], tags={"startup-info"})
+    value["text"] = "after\n"
+
+    assert app.refresh_transcript_blocks("startup-info") is True
+    assert app._transcript_blocks[0].source == "after\n"
+    assert app.output_buffer.text == "after\n"
+
+
+async def test_refresh_transcript_blocks_preserves_trimmed_native_visible_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    monkeypatch.setattr("sys.stdout", io.StringIO())
+    app = TUIApplication(display_mode="native-replay")
+    value = {"text": "before\n"}
+
+    app.emit_block(value["text"], replay=lambda: value["text"], tags={"startup-info"})
+    for index in range(app._untagged_replay_tail + 5):
+        app.emit_block(f"line-{index}\n")
+    before = app.output_buffer.text
+    assert "line-0\n" in before
+    assert before.count("\n") == app._untagged_replay_tail + 6
+
+    value["text"] = "after\n"
+
+    assert app.refresh_transcript_blocks("startup-info") is True
+    assert "before\n" not in app.output_buffer.text
+    assert "after\n" in app.output_buffer.text
+    assert "line-0\n" in app.output_buffer.text
+    assert app.output_buffer.text.count("\n") == before.count("\n")
+
+
+async def test_refresh_transcript_blocks_replaces_tagged_native_span_by_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    monkeypatch.setattr("sys.stdout", io.StringIO())
+    app = TUIApplication(display_mode="native-replay")
+    value = {"text": "duplicate\n"}
+
+    app.emit_block("duplicate\n")
+    app.emit_block(value["text"], replay=lambda: value["text"], tags={"startup-info"})
+    value["text"] = "updated\n"
+
+    assert app.refresh_transcript_blocks("startup-info") is True
+    assert app.output_buffer.text == "duplicate\nupdated\n"
+
+
+async def test_refresh_transcript_blocks_replays_native_terminal_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = MutableRecordingOutput()
+    capture = io.StringIO()
+    monkeypatch.setattr("sys.__stdout__", capture)
+    async with TUIHarness(full_screen=True, output=output) as h:
+        value = {"text": "before\n"}
+
+        h.app.emit_block(value["text"], replay=lambda: value["text"], tags={"startup-info"})
+        assert h.app._block_queue is not None
+        await h.app._block_queue.join()
+        capture.seek(0)
+        capture.truncate()
+
+        value["text"] = "after\n"
+
+        assert h.app.refresh_transcript_blocks("startup-info") is True
+        await h.app._block_queue.join()
+
+    physical = capture.getvalue()
+    assert "\x1b[3J" in physical
+    assert "after\n" in physical
+    assert "before\n" not in physical
+    assert h.app.output_buffer.text == "after\n"
+
+
 async def test_input_composer_has_blank_row_above_and_below_input():
     """The default composer is three rows and expands for multiline input."""
     async with TUIHarness() as h:

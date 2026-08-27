@@ -299,20 +299,38 @@ async def bootstrap(
     _load_llm_registry(messages, config.llm_config_paths)
     tracing_enabled, set_trace_session = _enable_tracing(config, messages)
 
-    from .config import UnresolvedModelError, get_llm
+    from .config import DEFAULT_MODEL, UnresolvedModelError, get_llm
 
     blocking_llm_health = None
+    llm = None
     try:
-        llm = get_llm(config)
+        from nooa.unifiedllm import FakeLLMClient, MODELS
+
+        if config.tui.default_model == DEFAULT_MODEL and DEFAULT_MODEL not in MODELS:
+            from .health_check import no_models_configured_health
+
+            blocking_llm_health = no_models_configured_health()
+            llm = FakeLLMClient()
+    except Exception:
+        logger.debug("Could not inspect loaded LLM registry", exc_info=True)
+
+    try:
+        if llm is None:
+            llm = get_llm(config)
     except UnresolvedModelError as exc:
         from nooa.unifiedllm import FakeLLMClient
 
         from .health_check import unresolved_model_health
 
-        blocking_llm_health = unresolved_model_health(exc.model)
-        messages.append(TextOutput(f"⚠️  {blocking_llm_health.error_message}", "error"))
-        if blocking_llm_health.fix_hint:
-            messages.append(TextOutput(blocking_llm_health.fix_hint, "info"))
+        if exc.model == DEFAULT_MODEL:
+            from .health_check import no_models_configured_health
+
+            blocking_llm_health = no_models_configured_health()
+        else:
+            blocking_llm_health = unresolved_model_health(exc.model)
+            messages.append(TextOutput(f"⚠️  {blocking_llm_health.error_message}", "error"))
+            if blocking_llm_health.fix_hint:
+                messages.append(TextOutput(blocking_llm_health.fix_hint, "info"))
         llm = FakeLLMClient()
     except Exception as exc:
         from nooa.unifiedllm import FakeLLMClient
@@ -486,8 +504,13 @@ def build_startup_info(result: BootstrapResult) -> Output:
     config = result.config
     agent = result.agent
     health = result.blocking_llm_health
+    from .health_check import is_no_models_configured_health
+
+    no_models_configured = is_no_models_configured_health(health)
     if health is None:
         llm_status = "ready"
+    elif no_models_configured:
+        llm_status = "not_connected"
     elif getattr(health, "pending", False):
         llm_status = "checking"
     else:
@@ -499,8 +522,10 @@ def build_startup_info(result: BootstrapResult) -> Output:
         configured = config.tui.trace_dir
         trace_dir = str(get_project_dir("traces") if str(configured) == ":project:" else configured)
     return StartupInfo(
-        model=config.tui.default_model,
-        short_model=_short_model_name(config.tui.default_model),
+        model="run /connect to configure one" if no_models_configured else config.tui.default_model,
+        short_model="No LLM connected"
+        if no_models_configured
+        else _short_model_name(config.tui.default_model),
         working_dir=str(config.agent.working_dir),
         vi_mode=config.tui.vi_mode,
         history_policy=(config.agent.summarization.policy if isinstance(agent, TUIAgent) else None),
