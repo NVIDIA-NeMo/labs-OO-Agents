@@ -250,6 +250,8 @@ def create_prompt_style() -> Style:
             "input-area": COLORS["text"],
             "paste-attachment": f"bg:{COLORS['surface0']} {COLORS['subtext1']} italic",
             "selected": f"bg:{COLORS['surface2']} {COLORS['text']}",
+            "transcript-search-match": f"bg:{COLORS['surface1']} {COLORS['yellow']}",
+            "transcript-search-current": f"bg:{COLORS['yellow']} {COLORS['base']} bold",
             "return-to-tail": f"bg:{COLORS['surface1']} {COLORS['blue']} bold",
             # Session resume picker: semantic roles compose for selected,
             # unavailable, and fuzzy-match states without relying on color alone.

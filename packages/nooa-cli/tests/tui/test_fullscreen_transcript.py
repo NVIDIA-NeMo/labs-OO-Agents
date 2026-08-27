@@ -4380,3 +4380,52 @@ async def test_native_replay_theme_refresh_requests_same_width_replay() -> None:
     assert queued.request.required is True
     assert queued.request.width == 80
     app._cancel_resize_replay_work()
+
+
+def test_transcript_search_highlights_all_matches_and_reveals_first() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+    model = FullscreenTranscriptModel(show_trailing_blank=False)
+    model.append("zero\none\nNeedle first\nthree\nfour\nneedle second\nsix")
+    model.set_search("NEEDLE", width=20, height=2)
+
+    assert model.search_position == (1, 2)
+    assert model.top_row(width=20, height=2) == 2
+    fragments = model.formatted_text(width=20, height=2)
+    assert "Needle" in "".join(text for _style, text in fragments)
+    assert any("transcript-search-current" in style for style, text in fragments if text.strip())
+
+    assert model.move_search_match(1, width=20, height=2)
+    assert model.search_position == (2, 2)
+    assert model.top_row(width=20, height=2) == 5
+    assert model.move_search_match(1, width=20, height=2)
+    assert model.search_position == (1, 2)
+
+
+def test_transcript_search_distinguishes_current_and_other_matches() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+    model = FullscreenTranscriptModel(show_trailing_blank=False)
+    model.append("needle and needle")
+    model.set_search("needle", width=40, height=2)
+    fragments = model.formatted_text(width=40, height=2)
+
+    assert any("transcript-search-current" in style for style, text in fragments if "n" in text)
+    assert any("transcript-search-match" in style for style, text in fragments if "n" in text)
+
+
+def test_transcript_search_clear_returns_to_tail() -> None:
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+    model = FullscreenTranscriptModel(show_trailing_blank=False)
+    model.append("needle\nline\nline\ntail")
+    model.set_search("needle", width=10, height=2)
+    assert not model.viewport.follows_tail
+
+    model.set_search("", width=10, height=2)
+
+    assert model.search_position == (0, 0)
+    assert model.viewport.follows_tail
+    assert not any(
+        "transcript-search" in style for style, _text in model.formatted_text(width=10, height=2)
+    )
