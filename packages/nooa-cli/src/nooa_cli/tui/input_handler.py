@@ -267,6 +267,8 @@ def create_prompt_style() -> Style:
             "resume-picker.control-focused": f"bg:{COLORS['surface2']} {COLORS['lavender']} bold",
             "resume-picker.heading": f"{COLORS['subtext1']} bold",
             "resume-picker.separator": COLORS["surface2"],
+            "resume-picker.active-rail": COLORS["surface1"],
+            "resume-picker.active-rail-active": f"{COLORS['lavender']} bold",
             "resume-picker.preview": COLORS["subtext0"],
             "resume-picker.preview-user": f"bg:{COLORS['surface2']} {COLORS['text']}",
             "resume-picker.preview-user-edge": COLORS["surface2"],

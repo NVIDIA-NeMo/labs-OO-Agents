@@ -186,15 +186,18 @@ class ResumePickerModel:
         self.list_offset = min(self.list_offset, self.selected)
         self.preview_offset = 10**9
 
-    def toggle_filter(self) -> None:
+    def cycle_filter(self, delta: int = 1) -> None:
         filters: tuple[Literal["detached", "attached", "all"], ...] = (
             "detached",
             "attached",
             "all",
         )
-        self.state_filter = filters[(filters.index(self.state_filter) + 1) % len(filters)]
+        self.state_filter = filters[(filters.index(self.state_filter) + delta) % len(filters)]
         self.selected = self.list_offset = 0
         self.set_query(self.query)
+
+    def toggle_filter(self) -> None:
+        self.cycle_filter()
 
     def toggle_sort(self) -> None:
         self.sort_updated = not self.sort_updated
@@ -226,6 +229,11 @@ class ResumePickerModel:
             (index, self._matches[index])
             for index in range(self.list_offset, min(len(self._matches), self.list_offset + rows))
         ]
+
+    def scroll_list(self, delta: int, rows: int) -> None:
+        """Scroll the list viewport without changing the selected session."""
+        maximum = max(0, len(self._matches) - max(1, rows))
+        self.list_offset = min(maximum, max(0, self.list_offset + delta))
 
     def scroll_preview(self, delta: int, line_count: int, height: int) -> None:
         maximum = max(0, line_count - max(1, height))
@@ -311,29 +319,48 @@ def _relative(ts: float, now: float | None = None) -> str:
     return f"{seconds // (86400 * 365)}y ago"
 
 
+def _row_title_width(width: int) -> int:
+    # Marker (2), age (8), separators (4), and a two-cell emoji state.
+    return min(30, max(10, max(0, width - 16) // 3))
+
+
 def _row_fragments(
     match: FieldMatch, selected: bool, width: int, *, sort_updated: bool = True
 ) -> list[list[tuple[str, str]]]:
+    """Render one compact row: age, resumability, title, and latest agent text."""
     row = match.row
     base = "class:resume-picker.row" + (" class:resume-picker.selected" if selected else "")
-    state = "attached" if row.current or row.attached else "detached"
+    attached = row.current or row.attached
     timestamp = row.last_active if sort_updated else row.created_at
-    prefix = ("❯ " if selected else "  ") + f"{_relative(timestamp):>8}  {state:<8}  "
-    title = _field_fragments(
-        _single_line(row.title),
-        base + (" class:resume-picker.unavailable" if state == "attached" else ""),
-        match.positions if match.field == "title" else (),
+    state = "❌" if attached else "✅"
+    prefix = ("❯ " if selected else "  ") + f"{_relative(timestamp):>8}  {state}  "
+    title_width = _row_title_width(width)
+    title_text = _single_line(row.title)
+    title = _clip_fragments(
+        _field_fragments(
+            title_text,
+            base + (" class:resume-picker.unavailable" if attached else ""),
+            match.positions if match.field == "title" else (),
+        ),
+        title_width,
     )
-    first = _clip_fragments([(base, prefix), *title], width)
+    title_cells = cell_len("".join(text for _style, text in title))
+    title.append((base, " " * max(0, title_width - title_cells) + "  "))
     preview_positions = match.positions if match.field == "preview" else ()
-    second = _clip_fragments(
-        [
-            (base + " class:resume-picker.meta", "    "),
-            *_field_fragments(row.preview, base + " class:resume-picker.meta", preview_positions),
-        ],
-        width,
-    )
-    return [first, second]
+    return [
+        _clip_fragments(
+            [
+                (base, prefix),
+                *title,
+                *_field_fragments(
+                    row.preview,
+                    base + " class:resume-picker.meta",
+                    preview_positions,
+                ),
+            ],
+            width,
+        )
+    ]
 
 
 def _preview_lines(row: ResumePickerRow | None, width: int) -> list[list[tuple[str, str]]]:
@@ -376,16 +403,24 @@ def render_resume_picker(model: ResumePickerModel, width: int, height: int) -> s
     if width < 48 or height < 13:
         return f"Terminal too small\nNeed 48 x 13; now {width} x {height}"
     separator = "─" * width
-    filt = {"detached": "Not attached", "attached": "Attached", "all": "All"}[model.state_filter]
+    filt = {
+        "detached": "✅ Not attached",
+        "attached": "❌ Attached",
+        "all": "✅/❌ All",
+    }[model.state_filter]
     sort = "Recent activity" if model.sort_updated else "Creation date"
     lines = [
         _clip(f"Resume a previous session · {len(model.matches)} sessions", width),
         _clip(f"[Search: {model.query}] [Filter: {filt}] [Sort: {sort}]", width),
+        _clip(
+            "Tab · arrows · Space · ↵ resume · Esc cancel",
+            width,
+        ),
         separator,
     ]
-    list_height = max(1, (height - 8) // 2)
-    model.ensure_selection_visible(max(1, list_height // 2))
-    for index, match in model.visible(max(1, list_height // 2)):
+    list_height = min(5, max(1, height - 10))
+    model.ensure_selection_visible(list_height)
+    for index, match in model.visible(list_height):
         lines.extend(
             "".join(text for _, text in row)
             for row in _row_fragments(
@@ -411,10 +446,6 @@ def render_resume_picker(model: ResumePickerModel, width: int, height: int) -> s
     lines.extend(
         [
             separator,
-            _clip(
-                "Tab field · Space change · ↑↓ select · PgUp/PgDn preview · Enter resume · Esc cancel",
-                width,
-            ),
         ]
     )
     return "\n".join(lines[:height])
@@ -425,7 +456,7 @@ class _PickerControl(FormattedTextControl):
         self.picker = picker
         self.kind = kind
         self.viewport = (1, 1)
-        super().__init__(self._text, focusable=False, show_cursor=False)
+        super().__init__(self._text, focusable=True, show_cursor=False)
 
     def create_content(self, width: int, height: int):
         self.viewport = (max(1, width), max(1, height or 1))
@@ -436,7 +467,7 @@ class _PickerControl(FormattedTextControl):
         width, height = self.viewport
         if self.kind == "list":
             output = []
-            for index, match in self.picker.model.visible(max(1, height // 2)):
+            for index, match in self.picker.model.visible(height):
                 for row_line in _row_fragments(
                     match,
                     index == self.picker.model.selected,
@@ -460,11 +491,12 @@ class _PickerControl(FormattedTextControl):
             self.picker.mouse_scroll(self.kind, 3)
             return None
         if (
-            self.kind == "list"
-            and mouse_event.event_type is MouseEventType.MOUSE_DOWN
+            mouse_event.event_type is MouseEventType.MOUSE_DOWN
             and mouse_event.button is MouseButton.LEFT
         ):
-            self.picker.select(self.picker.model.list_offset + mouse_event.position.y // 2)
+            self.picker.activate_control(self.kind)
+            if self.kind == "list":
+                self.picker.select(self.picker.model.list_offset + mouse_event.position.y)
             return None
         return NotImplemented
 
@@ -488,15 +520,15 @@ class _PickerButtonControl(FormattedTextControl):
         super().__init__(self._text, focusable=True, show_cursor=False)
 
     def _text(self):
-        focused = self.picker.active_control == self.kind
+        focused = self.picker.active_control == "filters" and self.picker.filter_option == self.kind
         style = "class:resume-picker.control" + (
             " class:resume-picker.control-focused" if focused else ""
         )
         if self.kind == "filter":
             value = {
-                "detached": "Not attached",
-                "attached": "Attached",
-                "all": "All",
+                "detached": "✅ Not attached",
+                "attached": "❌ Attached",
+                "all": "✅/❌ All",
             }[self.picker.model.state_filter]
             return [(style, f"[Filter: {value}]")]
         value = "Recent activity" if self.picker.model.sort_updated else "Creation date"
@@ -507,36 +539,42 @@ class _PickerButtonControl(FormattedTextControl):
             mouse_event.event_type is MouseEventType.MOUSE_DOWN
             and mouse_event.button is MouseButton.LEFT
         ):
-            self.picker.activate_control(self.kind)
+            self.picker.filter_option = self.kind
+            self.picker.activate_control("filters")
             self.picker.change_active_control()
             return None
         return NotImplemented
 
 
 class ResumePicker:
-    CONTROL_ORDER = ("search", "filter", "sort")
+    CONTROL_ORDER = ("search", "filters", "list", "preview")
 
     def __init__(self, rows: list[ResumePickerRow], app: Any):
         self.app = app
         self.model = ResumePickerModel(rows)
         self._preview_models: dict[tuple[str, int], Any] = {}
         self.active_control = "search"
+        self.filter_option: Literal["filter", "sort"] = "filter"
         self.buffer = Buffer(multiline=False)
         self.buffer.on_text_changed += lambda _: self._query_changed()
         self.query_control = _PickerSearchControl(self, self.buffer)
-        self.query_window = Window(self.query_control, width=Dimension(min=4, weight=1), height=1)
+        self.query_window = Window(
+            self.query_control,
+            width=Dimension(min=4, weight=1),
+            height=1,
+            style=lambda: (
+                "class:resume-picker.control-focused" if self.active_control == "search" else ""
+            ),
+        )
         self.filter_control = _PickerButtonControl(self, "filter")
         self.sort_control = _PickerButtonControl(self, "sort")
         self.search_label_control = FormattedTextControl(self._search_label)
+        self.search_close_control = FormattedTextControl(self._search_close)
         search = VSplit(
             [
-                Window(
-                    self.search_label_control,
-                    width=9,
-                    height=1,
-                ),
+                Window(self.search_label_control, width=9, height=1),
                 self.query_window,
-                Window(FormattedTextControl("]"), width=1, height=1),
+                Window(self.search_close_control, width=1, height=1),
             ],
             padding=0,
         )
@@ -544,16 +582,9 @@ class ResumePicker:
             [
                 Window(self.filter_control, width=Dimension(min=24, preferred=24), height=1),
                 Window(FormattedTextControl(" "), width=1, height=1),
-                Window(self.sort_control, width=Dimension(min=23, preferred=23), height=1),
+                Window(self.sort_control, width=Dimension(min=22, preferred=22), height=1),
             ],
             padding=0,
-        )
-        wide_controls = VSplit(
-            [search, Window(FormattedTextControl(" "), width=1, height=1), selectors], padding=0
-        )
-        narrow_controls = HSplit([search, selectors], padding=0)
-        controls = DynamicContainer(
-            lambda: wide_controls if self.app.output.get_size().columns >= 80 else narrow_controls
         )
         self.list_control = _PickerControl(self, "list")
         self.preview_control = _PickerControl(self, "preview")
@@ -561,52 +592,52 @@ class ResumePicker:
         def separator() -> Window:
             return Window(char="─", height=1, style="class:resume-picker.separator")
 
+        def area(name: str, body: Any) -> VSplit:
+            return VSplit(
+                [
+                    Window(
+                        FormattedTextControl(lambda: self._active_rail(name)),
+                        width=1,
+                        style="class:resume-picker.active-rail",
+                    ),
+                    body,
+                ],
+                padding=0,
+            )
+
         self.title_control = FormattedTextControl(self._title)
         self.list_header_control = FormattedTextControl(self._list_header)
         self.preview_header_control = FormattedTextControl(self._preview_header)
         title = Window(self.title_control, height=1)
+        help_line = Window(
+            FormattedTextControl(
+                " Tab · arrows · Space · ↵ resume · Esc cancel",
+                style="class:resume-picker.footer",
+            ),
+            height=1,
+        )
         list_header = Window(self.list_header_control, height=1)
         preview_header = Window(self.preview_header_control, height=1)
-        footer = HSplit(
-            [
-                Window(
-                    FormattedTextControl(
-                        "Tab focus · Space change · ↑↓ select",
-                        style="class:resume-picker.footer",
-                    ),
-                    height=1,
-                ),
-                Window(
-                    FormattedTextControl(
-                        "PgUp/Dn preview · Enter resume · Esc cancel",
-                        style="class:resume-picker.footer",
-                    ),
-                    height=1,
-                ),
-            ],
-            padding=0,
-        )
         self.list_window = Window(
-            self.list_control, height=Dimension(min=2, weight=3), wrap_lines=False
+            self.list_control, height=Dimension(min=1, preferred=4, max=5), wrap_lines=False
         )
         self.preview_window = Window(
             self.preview_control,
-            height=Dimension(min=1, weight=2),
+            height=Dimension(min=2, weight=1),
             wrap_lines=False,
             right_margins=[],
         )
         self._main_container = HSplit(
             [
                 title,
-                controls,
+                area("search", search),
+                help_line,
+                area("filters", selectors),
                 separator(),
-                list_header,
-                self.list_window,
+                area("list", HSplit([list_header, self.list_window], padding=0)),
                 separator(),
-                preview_header,
-                self.preview_window,
+                area("preview", HSplit([preview_header, self.preview_window], padding=0)),
                 separator(),
-                footer,
             ],
             padding=0,
         )
@@ -648,6 +679,20 @@ class ResumePicker:
             style += " class:resume-picker.control-focused"
         return [(style, "[Search: ")]
 
+    def _search_close(self):
+        style = "class:resume-picker.search-label"
+        if self.active_control == "search":
+            style += " class:resume-picker.control-focused"
+        return [(style, "]")]
+
+    def _active_rail(self, area: str):
+        style = (
+            "class:resume-picker.active-rail-active"
+            if self.active_control == area
+            else "class:resume-picker.active-rail"
+        )
+        return [(style, "▌" if self.active_control == area else "│")]
+
     def _title(self):
         count = len(self.model.matches)
         return [
@@ -659,7 +704,14 @@ class ResumePicker:
 
     def _list_header(self):
         age = "updated" if self.model.sort_updated else "created"
-        return [("class:resume-picker.heading", f"  {age:>8}  {'state':<8}  title")]
+        width = max(1, self.app.output.get_size().columns - 1)
+        title_width = _row_title_width(width)
+        return [
+            (
+                "class:resume-picker.heading",
+                f"  {age:>8}  {'st':<2}  {'title':<{title_width}}  last agent message",
+            )
+        ]
 
     def _preview_header(self):
         row = self.model.current
@@ -677,6 +729,7 @@ class ResumePicker:
         self.filter_control._fragment_cache.clear()
         self.sort_control._fragment_cache.clear()
         self.search_label_control._fragment_cache.clear()
+        self.search_close_control._fragment_cache.clear()
         self.title_control._fragment_cache.clear()
         self.list_header_control._fragment_cache.clear()
         self.preview_header_control._fragment_cache.clear()
@@ -693,8 +746,9 @@ class ResumePicker:
         self.active_control = name
         controls = {
             "search": self.query_control,
-            "filter": self.filter_control,
-            "sort": self.sort_control,
+            "filters": self.filter_control if self.filter_option == "filter" else self.sort_control,
+            "list": self.list_control,
+            "preview": self.preview_control,
         }
         self.app.layout.focus(controls[name])
         self.invalidate()
@@ -707,12 +761,44 @@ class ResumePicker:
         index = (self.CONTROL_ORDER.index(self.active_control) - 1) % len(self.CONTROL_ORDER)
         self.activate_control(self.CONTROL_ORDER[index])
 
+    def move_horizontal(self, delta: int) -> None:
+        if not delta:
+            return
+        if self.active_control == "search":
+            if delta < 0:
+                self.buffer.cursor_left(count=1)
+            else:
+                self.buffer.cursor_right(count=1)
+            return
+        if self.active_control == "filters":
+            self.filter_option = "sort" if delta > 0 else "filter"
+            self.activate_control("filters")
+
     def change_active_control(self) -> None:
-        if self.active_control == "filter":
-            self.model.toggle_filter()
-        elif self.active_control == "sort":
-            self.model.toggle_sort()
+        if self.active_control == "filters":
+            if self.filter_option == "filter":
+                self.model.toggle_filter()
+            else:
+                self.model.toggle_sort()
         self.invalidate()
+
+    def navigate_vertical(self, delta: int) -> None:
+        if self.active_control == "list":
+            self.move(delta)
+        elif self.active_control == "preview":
+            self.scroll_preview(delta)
+        elif self.active_control == "filters":
+            if self.filter_option == "filter":
+                self.model.cycle_filter(delta)
+            else:
+                self.model.toggle_sort()
+            self.invalidate()
+
+    def page(self, delta: int) -> None:
+        if self.active_control == "list":
+            self.move(delta * max(1, self.list_control.viewport[1]))
+        elif self.active_control == "preview":
+            self.scroll_preview(delta * max(1, self.preview_control.viewport[1]))
 
     def _preview_model(self, width: int):
         from .frontend import render_history_replay_to_ansi
@@ -757,7 +843,7 @@ class ResumePicker:
     def move(self, delta: int) -> None:
         before = self.model.current.id if self.model.current else None
         self.model.move(delta)
-        self.model.ensure_selection_visible(max(1, self.list_control.viewport[1] // 2))
+        self.model.ensure_selection_visible(self.list_control.viewport[1])
         if self.model.current and self.model.current.id != before:
             self._reset_preview()
         self.invalidate()
@@ -765,7 +851,7 @@ class ResumePicker:
     def select(self, index: int) -> None:
         before = self.model.current.id if self.model.current else None
         self.model.select(index)
-        self.model.ensure_selection_visible(max(1, self.list_control.viewport[1] // 2))
+        self.model.ensure_selection_visible(self.list_control.viewport[1])
         if self.model.current and self.model.current.id != before:
             self._reset_preview()
         self.invalidate()
@@ -779,7 +865,8 @@ class ResumePicker:
 
     def mouse_scroll(self, pane: Literal["list", "preview"], delta: int) -> None:
         if pane == "list":
-            self.move(1 if delta > 0 else -1)
+            self.model.scroll_list(delta, self.list_control.viewport[1])
+            self.invalidate()
         else:
             self.scroll_preview(delta)
 
