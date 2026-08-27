@@ -66,6 +66,23 @@ def test_default_scope_is_all_and_filter_label_is_explicit() -> None:
     assert "Filter: This directory" in render_resume_picker(model, 80, 20)
 
 
+def test_filter_uses_cached_resolved_directories(monkeypatch) -> None:
+    calls: list[str] = []
+    original = __import__("os").path.realpath
+
+    def tracked(path):
+        calls.append(str(path))
+        return original(path)
+
+    monkeypatch.setattr("nooa_cli.tui.resume_picker.os.path.realpath", tracked)
+    model = ResumePickerModel([row("one", "One"), row("two", "Two")], cwd="/work")
+    initial_calls = len(calls)
+    model.filter_cwd = True
+    model.set_query("o")
+    model.set_query("on")
+    assert len(calls) == initial_calls
+
+
 def test_sort_labels_explain_updated_versus_created() -> None:
     older_created = row("updated", "Recently active", last_active=30, created_at=1)
     newer_created = row("created", "Recently created", last_active=20, created_at=10)
@@ -241,6 +258,33 @@ def test_resume_commands_reject_extra_ids() -> None:
         False,
         "Usage: /resume [session_id]",
     )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_picker_open_is_rejected_while_rows_load(monkeypatch) -> None:
+    import threading
+
+    from nooa_cli.tui import session_manager as sm
+
+    from .tui_app_harness import TUIHarness
+
+    loading = threading.Event()
+    release = threading.Event()
+
+    def slow_list(cls, limit=None):
+        loading.set()
+        release.wait(timeout=1)
+        return []
+
+    monkeypatch.setattr(sm.SessionManager, "list_sessions", classmethod(slow_list))
+    async with TUIHarness() as harness:
+        first = asyncio.create_task(harness.app.open_session_resume_dialog())
+        await asyncio.to_thread(loading.wait, 1)
+        assert await harness.app.open_session_resume_dialog() is None
+        release.set()
+        await harness.wait_for(lambda: harness.app._resume_picker is not None)
+        await harness.press("escape")
+        assert await asyncio.wait_for(first, 1) is None
 
 
 @pytest.mark.asyncio

@@ -117,6 +117,9 @@ class ResumePickerModel:
     def __init__(self, rows: list[ResumePickerRow], cwd: str | None = None) -> None:
         self.rows = rows
         self.cwd = os.path.realpath(cwd or os.getcwd())
+        self._resolved_directories = {
+            row.id: os.path.realpath(row.working_directory) for row in rows
+        }
         self.query = ""
         self.filter_cwd = False
         self.sort_updated = True
@@ -146,12 +149,12 @@ class ResumePickerModel:
         self.query = query
         ranked = []
         for index, row in enumerate(self.rows):
-            if self.filter_cwd and os.path.realpath(row.working_directory) != self.cwd:
+            if self.filter_cwd and self._resolved_directories[row.id] != self.cwd:
                 continue
             fields = {
                 "title": _single_line(row.title),
                 "preview": row.preview,
-                "conversation": "\n".join(turn.content for turn in row.turns),
+                "conversation": "\n".join(sanitize_live_text(turn.content) for turn in row.turns),
                 "id": row.id,
                 "model": row.model,
                 "agent": row.agent,
@@ -506,10 +509,11 @@ class ResumePicker:
         self.query_window = Window(self.query_control, width=Dimension(min=4, weight=1), height=1)
         self.filter_control = _PickerButtonControl(self, "filter")
         self.sort_control = _PickerButtonControl(self, "sort")
+        self.search_label_control = FormattedTextControl(self._search_label)
         search = VSplit(
             [
                 Window(
-                    FormattedTextControl(self._search_label),
+                    self.search_label_control,
                     width=9,
                     height=1,
                 ),
@@ -539,9 +543,12 @@ class ResumePicker:
         def separator() -> Window:
             return Window(char="─", height=1, style="class:resume-picker.separator")
 
-        title = Window(FormattedTextControl(self._title), height=1)
-        list_header = Window(FormattedTextControl(self._list_header), height=1)
-        preview_header = Window(FormattedTextControl(self._preview_header), height=1)
+        self.title_control = FormattedTextControl(self._title)
+        self.list_header_control = FormattedTextControl(self._list_header)
+        self.preview_header_control = FormattedTextControl(self._preview_header)
+        title = Window(self.title_control, height=1)
+        list_header = Window(self.list_header_control, height=1)
+        preview_header = Window(self.preview_header_control, height=1)
         footer = HSplit(
             [
                 Window(
@@ -651,6 +658,10 @@ class ResumePicker:
         self.preview_control._fragment_cache.clear()
         self.filter_control._fragment_cache.clear()
         self.sort_control._fragment_cache.clear()
+        self.search_label_control._fragment_cache.clear()
+        self.title_control._fragment_cache.clear()
+        self.list_header_control._fragment_cache.clear()
+        self.preview_header_control._fragment_cache.clear()
         self.app.invalidate()
 
     def focus_initial(self) -> None:
