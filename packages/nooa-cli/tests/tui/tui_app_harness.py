@@ -53,6 +53,7 @@ _KEY_SEQUENCES: dict[str, str] = {
     "escape": "\x1b",
     "option-[": "\x1b[",
     "option-]": "\x1b]",
+    "option-backspace": "\x1b\x7f",
     "q": "q",
     "tab": "\t",
     "backspace": "\x7f",
@@ -64,6 +65,7 @@ _KEY_SEQUENCES: dict[str, str] = {
     "s-down": "\x1b[1;2B",
     "s-right": "\x1b[1;2C",
     "s-left": "\x1b[1;2D",
+    "s-tab": "\x1b[Z",
     "home": "\x1b[H",
     "end": "\x1b[F",
     "pageup": "\x1b[5~",
@@ -75,9 +77,11 @@ _KEY_SEQUENCES: dict[str, str] = {
     "c-d": "\x04",
     "c-x": "\x18",
     "c-j": "\n",  # bare LF — used by prompt_toolkit as "Shift+Enter"
+    "c-o": "\x0f",
     "c-u": "\x15",
     "c-y": "\x19",
     "f2": "\x1bOQ",
+    "f5": "\x1b[15~",
     "f6": "\x1b[17~",
     "s-enter": "\x1b\r",  # Alt+Enter / Esc+Enter — prompt_toolkit treats as newline
 }

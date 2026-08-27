@@ -1808,7 +1808,7 @@ class EditCommand(Command):
 
 
 class SessionCommand(Command):
-    """List, resume, and manage conversation sessions."""
+    """Resume and manage conversation sessions."""
 
     @property
     def name(self) -> str:
@@ -1817,9 +1817,8 @@ class SessionCommand(Command):
     @classmethod
     def help_text(cls) -> dict[str, str]:
         return {
-            "/session list": "Open the session explorer",
             "/session new": "Start a new session (current history cleared)",
-            "/session resume <id>": "Resume a past session (injects history as context)",
+            "/session resume [id]": "Search for or resume a past session",
             "/session delete <id>": "Delete a session",
             "/session export": "Export current session as Markdown",
             "/session rename <name>": "Rename the current session",
@@ -1827,47 +1826,19 @@ class SessionCommand(Command):
 
     def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
         if not args:
-            return False, "Usage: /session <list|new|resume|delete|export|rename>"
-        if args[0].lower() not in ("list", "new", "resume", "delete", "export", "rename"):
+            return False, "Usage: /session <new|resume|delete|export|rename>"
+        if args[0].lower() not in ("new", "resume", "delete", "export", "rename"):
             return False, f"Unknown subcommand `{args[0]}`"
-        if args[0].lower() in ("resume", "delete") and len(args) < 2:
-            return False, f"Usage: /session {args[0]} <session_id>"
+        if args[0].lower() == "delete" and len(args) < 2:
+            return False, "/session delete <session_id>"
+        if args[0].lower() == "resume" and len(args) > 2:
+            return False, "Usage: /session resume [session_id]"
         if args[0].lower() == "rename" and len(args) < 2:
             return False, "Usage: /session rename <name>"
         return True, None
 
     async def execute(self, args: list[str]) -> "CommandResult":
         subcmd = args[0].lower()
-
-        if subcmd == "list":
-            open_explorer = getattr(self.frontend, "open_session_explorer", None)
-            has_real_explorer = getattr(
-                type(self.frontend), "open_session_explorer", None
-            ) is not None or "open_session_explorer" in getattr(self.frontend, "__dict__", {})
-            if has_real_explorer and callable(open_explorer):
-                try:
-                    await open_explorer()
-                except Exception as exc:
-                    return CommandResult.err(f"Session explorer failed: {exc}")
-                return CommandResult.ok(TextOutput("Session explorer closed.", "status"))
-
-            sessions = [s for s in SessionManager.list_sessions() if s.turn_count > 0]
-            if not sessions:
-                return CommandResult.ok(TextOutput("No sessions found.", "info"))
-            rows = []
-            for s in sessions:
-                dt = datetime.datetime.fromtimestamp(s.last_active).strftime("%m/%d %H:%M")
-                name_display = s.name[:28] if s.name else ""
-                rows.append(
-                    [s.id[:8], dt, s.model.split("/")[-1][:20], str(s.turn_count), name_display]
-                )
-            return CommandResult.ok(
-                TableOutput(
-                    title="Recent Sessions",
-                    columns=["ID", "Last Active", "Model", "Turns", "Name"],
-                    rows=rows,
-                )
-            )
 
         if subcmd == "export":
             if self.session_manager is None:
@@ -1881,10 +1852,24 @@ class SessionCommand(Command):
                 return CommandResult.ok(TextOutput(f"Export failed: {e}\n\n{md[:500]}", "warning"))
 
         if subcmd == "resume":
+            if len(args) < 2:
+                open_picker = getattr(self.frontend, "open_session_resume_dialog", None)
+                if not callable(open_picker):
+                    return CommandResult.err("Session picker is unavailable in this frontend.")
+                active_id = (
+                    self.session_manager.session_id if self.session_manager is not None else None
+                )
+                try:
+                    selected = await open_picker(active_session_id=active_id)
+                except Exception as exc:
+                    return CommandResult.err(f"Session picker failed: {exc}")
+                if not selected:
+                    return CommandResult.ok(TextOutput("Session resume cancelled.", "status"))
+                args = ["resume", selected]
             session_id = args[1]
             matches = SessionManager.find_by_prefix(session_id)
             if not matches:
-                return CommandResult.err(f"Session '{session_id}' not found. Use /session list.")
+                return CommandResult.err(f"Session '{session_id}' not found. Use /session resume.")
             if len(matches) > 1:
                 ids = ", ".join(m[:8] for m in matches)
                 return CommandResult.err(f"Ambiguous session prefix '{session_id}' matches: {ids}")
@@ -2529,6 +2514,29 @@ class MCPCommand(Command):
         )
 
 
+class ResumeCommand(SessionCommand):
+    """Short alias for ``/session resume``."""
+
+    @property
+    def name(self) -> str:
+        return "resume"
+
+    @classmethod
+    def help_text(cls) -> dict[str, str]:
+        return {"/resume [id]": "Search for or resume a past session"}
+
+    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
+        if len(args) > 1:
+            return False, "Usage: /resume [session_id]"
+        return True, None
+
+    async def execute(self, args: list[str]) -> "CommandResult":
+        valid, error = self.validate_args(args)
+        if not valid:
+            return CommandResult.err(error or "Invalid resume command.")
+        return await super().execute(["resume", *args])
+
+
 class CommandRegistry:
     """Registry of command instances."""
 
@@ -2552,6 +2560,7 @@ class CommandRegistry:
         "memories": MemoriesCommand,
         "reflection": ReflectionCommand,
         "session": SessionCommand,
+        "resume": ResumeCommand,
         "jobs": JobsCommand,
         "events": EventsCommand,
         "todos": TodosCommand,

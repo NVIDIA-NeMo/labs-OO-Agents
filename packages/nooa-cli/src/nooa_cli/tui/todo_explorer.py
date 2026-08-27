@@ -77,6 +77,9 @@ def build_todo_rows(todo_manager: Any) -> list[TodoExplorerRow]:
 class TodoExplorerView(ExplorerView):
     """In-app subview for browsing and interacting with todos."""
 
+    item_name = "todo"
+    list_heading = "  st id        title"
+
     def __init__(self, rows: Iterable[TodoExplorerRow]) -> None:
         model = ExplorerModel(list(rows))
         config = ExplorerConfig(
@@ -88,6 +91,18 @@ class TodoExplorerView(ExplorerView):
             actions={},
         )
         super().__init__(model, config)
+        self.configure_row_options(
+            filters=(
+                ("all", "All", lambda _row: True),
+                ("open", "Open", lambda row: row.status == "open"),
+                ("done", "Done", lambda row: row.status == "done"),
+                ("blocked", "Blocked", lambda row: row.status == "blocked"),
+            ),
+            sorts=(
+                ("newest", "Newest", lambda row: row.created_at, True),
+                ("oldest", "Oldest", lambda row: row.created_at, False),
+            ),
+        )
 
     def format_row(self, row: TodoExplorerRow, width: int) -> str:
         status_icon = {

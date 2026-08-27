@@ -40,6 +40,8 @@ from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import (
     ConditionalContainer,
     DynamicContainer,
+    Float,
+    FloatContainer,
     HSplit,
     Layout,
     VSplit,
@@ -870,6 +872,7 @@ class _SubviewControl(FormattedTextControl):
         ):
             return NotImplemented
         action = {
+            MouseEventType.MOUSE_UP: "click" if mouse_event.button is MouseButton.LEFT else None,
             MouseEventType.SCROLL_UP: "scroll_up",
             MouseEventType.SCROLL_DOWN: "scroll_down",
         }.get(mouse_event.event_type)
@@ -1235,6 +1238,8 @@ class TUIApplication:
         self._active_subview: InAppSubview | None = None
         self._active_subview_done: asyncio.Future[None] | None = None
         self._subview_control: FormattedTextControl | None = None
+        self._resume_picker: Any | None = None
+        self._resume_picker_done: asyncio.Future[str | None] | None = None
 
         # Input window: where user keystrokes land. A caller (Session)
         # passes the real CommandRegistry-backed completer; otherwise
@@ -1687,9 +1692,14 @@ class TUIApplication:
         )
 
         def _root_container():
-            return subview_window if self._active_subview is not None else main_container
+            view = self._active_subview
+            if view is not None:
+                return getattr(view, "container", subview_window)
+            return main_container
 
         def _subview_mouse_enabled() -> bool:
+            if self._resume_picker is not None:
+                return True
             view = self._active_subview
             if view is None:
                 return self._is_fullscreen and self._fullscreen_mouse_navigation
@@ -1697,9 +1707,34 @@ class TUIApplication:
                 return False
             return bool(getattr(view, "mouse_support", True))
 
+        resume_float = Float(
+            left=0,
+            right=0,
+            top=0,
+            bottom=0,
+            content=ConditionalContainer(
+                DynamicContainer(
+                    lambda: (
+                        self._resume_picker.container
+                        if self._resume_picker is not None
+                        else Window()
+                    )
+                ),
+                filter=Condition(lambda: self._resume_picker is not None),
+            ),
+        )
+        resume_root = FloatContainer(
+            content=DynamicContainer(_root_container), floats=[resume_float]
+        )
+
+        def _layout_root():
+            if self._resume_picker is not None:
+                return resume_root
+            return _root_container()
+
         self._app = _ResizeAwareApplication(
             layout=Layout(
-                DynamicContainer(_root_container),
+                DynamicContainer(_layout_root),
                 focused_element=input_window,
             ),
             key_bindings=kb,
@@ -1762,11 +1797,67 @@ class TUIApplication:
 
         await self.open_subview(EventExplorerView(event_manager))
 
-    async def open_session_explorer(self) -> None:
-        """Open the session explorer as an in-app subview."""
-        from .session_explorer import SessionExplorerView
+    async def open_session_resume_dialog(self, active_session_id: str | None = None) -> str | None:
+        """Choose a resumable session in a modal owned by this Application."""
+        from .resume_picker import ResumePicker, ResumePickerRow, ResumePickerTurn
+        from .session_manager import SessionManager
 
-        await self.open_subview(SessionExplorerView())
+        if self._resume_picker_done is not None and not self._resume_picker_done.done():
+            return None
+
+        # Reserve the dialog before session discovery so concurrent requests cannot
+        # race and install competing pickers while the worker thread is loading.
+        loop = asyncio.get_running_loop()
+        done: asyncio.Future[str | None] = loop.create_future()
+        self._resume_picker_done = done
+
+        # Session discovery touches many SQLite files and lock files. Keep it
+        # bounded and off prompt_toolkit's event loop so opening remains responsive.
+        def load_rows() -> list[ResumePickerRow]:
+            result = []
+            for meta in SessionManager.list_sessions(limit=100):
+                if meta.turn_count <= 0:
+                    continue
+                turns = tuple(
+                    ResumePickerTurn(turn.role, turn.content)
+                    for turn in SessionManager.load_turns(meta.id)
+                )
+                result.append(
+                    ResumePickerRow.from_meta(
+                        meta,
+                        attached=SessionManager.is_active(meta.id),
+                        current=meta.id == active_session_id,
+                        turns=turns,
+                    )
+                )
+            return result
+
+        previous = self._app.layout.current_control
+        try:
+            rows = await asyncio.to_thread(load_rows)
+            self._cancel_fullscreen_drag()
+            self._resume_picker = ResumePicker(
+                rows, self._app, selection_copy_callback=self._start_fullscreen_selection_copy
+            )
+            self._resume_picker.focus_initial()
+            self._app.invalidate()
+            return await done
+        finally:
+            if self._resume_picker_done is done:
+                if self._resume_picker is not None:
+                    self._resume_picker.close()
+                self._resume_picker = None
+                self._resume_picker_done = None
+                try:
+                    self._app.layout.focus(previous)
+                except ValueError:
+                    self._app.layout.focus(self._input_window)
+                self._app.invalidate()
+
+    def _finish_resume_picker(self, value: str | None) -> None:
+        done = self._resume_picker_done
+        if done is not None and not done.done():
+            done.set_result(value)
 
     async def open_activity_overlay(self, outputs: list[Any]) -> None:
         """Open the activity snapshot as an in-app subview."""
@@ -1974,12 +2065,16 @@ class TUIApplication:
         """
         if self._active_subview_done is not None and not self._active_subview_done.done():
             return
+        if getattr(view, "use_fullscreen_browser", False) and not hasattr(view, "container"):
+            from .fullscreen_browser import ExplorerBrowser
+
+            view = ExplorerBrowser(view, self._app)
         self._cancel_fullscreen_drag()
         self._active_subview = view
         loop = asyncio.get_running_loop()
         self._active_subview_done = loop.create_future()
         view.on_open()
-        if self._subview_control is not None:
+        if self._subview_control is not None and not hasattr(view, "container"):
             self._app.layout.focus(self._subview_control)
         if self._app.is_running:
             self._app.invalidate()
@@ -2360,8 +2455,105 @@ class TUIApplication:
         legacy = _legacy_kb(vi_mode=False)
 
         kb = KeyBindings()
-        subview_active = Condition(lambda: self._active_subview is not None)
-        subview_inactive = ~subview_active
+        resume_picker_active = Condition(lambda: self._resume_picker is not None)
+        subview_active = Condition(
+            lambda: self._active_subview is not None and self._resume_picker is None
+        )
+        subview_inactive = ~subview_active & ~resume_picker_active
+
+        @kb.add("escape", "backspace", filter=resume_picker_active, eager=True)
+        def _(event):
+            picker = self._resume_picker
+            if (
+                picker is not None
+                and picker.active_control == "list"
+                and picker.option_cursor is None
+            ):
+                count = picker.buffer.document.find_previous_word_beginning()
+                picker.buffer.delete_before_cursor(count=abs(count or -1))
+
+        @kb.add("escape", filter=resume_picker_active)
+        def _(event):
+            picker = self._resume_picker
+            if picker is not None and picker.close_options():
+                return
+            self._finish_resume_picker(None)
+
+        @kb.add("c-c", filter=resume_picker_active, eager=True)
+        def _(event):
+            self._finish_resume_picker(None)
+
+        @kb.add("enter", filter=resume_picker_active, eager=True)
+        def _(event):
+            picker = self._resume_picker
+            if picker is None:
+                return
+            if picker.option_cursor is not None:
+                picker.close_options()
+                return
+            selected = picker.selected_id()
+            if selected is not None:
+                self._finish_resume_picker(selected)
+
+        @kb.add("up", filter=resume_picker_active, eager=True)
+        @kb.add("c-p", filter=resume_picker_active, eager=True)
+        def _(event):
+            if self._resume_picker is not None:
+                self._resume_picker.navigate_vertical(-1)
+                event.app.invalidate()
+
+        @kb.add("down", filter=resume_picker_active, eager=True)
+        @kb.add("c-n", filter=resume_picker_active, eager=True)
+        def _(event):
+            if self._resume_picker is not None:
+                self._resume_picker.navigate_vertical(1)
+                event.app.invalidate()
+
+        @kb.add("left", filter=resume_picker_active, eager=True)
+        def _(event):
+            if self._resume_picker is not None:
+                self._resume_picker.move_horizontal(-1)
+
+        @kb.add("right", filter=resume_picker_active, eager=True)
+        def _(event):
+            if self._resume_picker is not None:
+                self._resume_picker.move_horizontal(1)
+
+        @kb.add("tab", filter=resume_picker_active, eager=True)
+        def _(event):
+            if self._resume_picker is not None:
+                self._resume_picker.focus_next()
+
+        @kb.add("s-tab", filter=resume_picker_active, eager=True)
+        def _(event):
+            if self._resume_picker is not None:
+                self._resume_picker.focus_previous()
+
+        @kb.add(" ", filter=resume_picker_active, eager=True)
+        def _(event):
+            picker = self._resume_picker
+            if picker is None:
+                return
+            if picker.option_cursor is not None:
+                picker.change_option()
+            elif picker.active_control == "list":
+                picker.buffer.insert_text(" ")
+
+        @kb.add("c-o", filter=resume_picker_active, eager=True)
+        def _(event):
+            if self._resume_picker is not None:
+                self._resume_picker.toggle_options()
+
+        @kb.add("pageup", filter=resume_picker_active, eager=True)
+        def _(event):
+            if self._resume_picker is not None:
+                self._resume_picker.page(-1)
+
+        @kb.add("pagedown", filter=resume_picker_active, eager=True)
+        def _(event):
+            if self._resume_picker is not None:
+                self._resume_picker.page(1)
+
         input_selection_active = (
             Condition(lambda: self.input_buffer.selection_state is not None) & subview_inactive
         )
@@ -2395,7 +2587,11 @@ class TUIApplication:
         def _(event):
             self._jump_fullscreen_to_tail()
 
-        @kb.add("f6", filter=Condition(lambda: self._is_fullscreen), eager=True)
+        @kb.add(
+            "f6",
+            filter=Condition(lambda: self._is_fullscreen) & ~resume_picker_active,
+            eager=True,
+        )
         def _(event):
             self._fullscreen_mouse_navigation = not self._fullscreen_mouse_navigation
             if not self._fullscreen_mouse_navigation:
@@ -2466,9 +2662,29 @@ class TUIApplication:
         def _(event):
             self._subview_key(event, "native_selection")
 
+        @kb.add("c-o", filter=subview_active, eager=True)
+        def _(event):
+            self._subview_key(event, "options")
+
+        @kb.add("left", filter=subview_active, eager=True)
+        def _(event):
+            self._subview_key(event, "left")
+
+        @kb.add("right", filter=subview_active, eager=True)
+        def _(event):
+            self._subview_key(event, "right")
+
+        @kb.add(" ", filter=subview_active, eager=True)
+        def _(event):
+            self._subview_key(event, "space")
+
         @kb.add("tab", filter=subview_active, eager=True)
         def _(event):
             self._subview_key(event, "tab")
+
+        @kb.add("s-tab", filter=subview_active, eager=True)
+        def _(event):
+            self._subview_key(event, "s-tab")
 
         @kb.add("down", filter=subview_active, eager=True)
         def _(event):
