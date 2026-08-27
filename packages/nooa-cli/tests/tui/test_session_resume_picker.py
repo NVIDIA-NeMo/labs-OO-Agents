@@ -97,6 +97,17 @@ def test_sort_labels_explain_updated_versus_created() -> None:
     assert "Sort: Creation date" in render_resume_picker(model, 80, 20)
 
 
+def test_creation_date_sort_is_primary_with_a_search_query() -> None:
+    older_exact = row("old", "needle", last_active=30, created_at=1)
+    newer_weaker = row("new", "n-e-e-d-l-e", last_active=20, created_at=10)
+    model = ResumePickerModel([older_exact, newer_weaker])
+    model.set_query("needle")
+
+    assert [match.row.id for match in model.matches] == ["old", "new"]
+    model.toggle_sort()
+    assert [match.row.id for match in model.matches] == ["new", "old"]
+
+
 def test_rows_are_one_line_with_state_title_and_latest_agent_message() -> None:
     model = ResumePickerModel(
         [
@@ -585,7 +596,7 @@ async def test_real_prompt_toolkit_routes_search_navigation_and_cancel(monkeypat
         await harness.press("option-f")
         await harness.wait_for(lambda: picker.model.state_filter == "all")
         assert {match.row.id for match in picker.model.matches} == {"session-1", "session-2"}
-        await harness.press("option-s")
+        await harness.press("c-o")
         await harness.wait_for(lambda: not picker.model.sort_updated)
         assert [match.row.id for match in picker.model.matches] == ["session-2", "session-1"]
         await harness.press("escape")
@@ -790,7 +801,7 @@ async def test_full_application_screen_keeps_picker_help_visible(
             assert "Filter:" in joined and "✓" in joined
             assert "Sort:" in joined
             assert "Conversation preview" in joined
-            assert "Alt-F" in joined and "Alt-S" in joined
+            assert "Alt-F" in joined and "Ctrl-O" in joined
             assert joined.count("─") >= width * 2
             assert "preview for session-19" in joined
             assert "❯" in joined and "y ago" in joined
