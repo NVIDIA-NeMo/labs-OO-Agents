@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import os
 import time
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -114,15 +113,11 @@ def fuzzy_match(query: str, text: str) -> tuple[int, tuple[int, ...]] | None:
 
 
 class ResumePickerModel:
-    def __init__(self, rows: list[ResumePickerRow], cwd: str | None = None) -> None:
+    def __init__(self, rows: list[ResumePickerRow]) -> None:
         self.rows = rows
-        self.cwd = os.path.realpath(cwd or os.getcwd())
-        self._resolved_directories = {
-            row.id: os.path.realpath(row.working_directory) for row in rows
-        }
         self._search_fields = [self._fields_for(row) for row in rows]
         self.query = ""
-        self.filter_cwd = False
+        self.state_filter: Literal["detached", "attached", "all"] = "detached"
         self.sort_updated = True
         self.selected = self.list_offset = 0
         self.preview_offset = 10**9
@@ -162,7 +157,10 @@ class ResumePickerModel:
         self.query = query
         ranked = []
         for index, row in enumerate(self.rows):
-            if self.filter_cwd and self._resolved_directories[row.id] != self.cwd:
+            attached = row.attached or row.current
+            if self.state_filter == "detached" and attached:
+                continue
+            if self.state_filter == "attached" and not attached:
                 continue
             fields = self._search_fields[index]
             candidates = []
@@ -189,7 +187,12 @@ class ResumePickerModel:
         self.preview_offset = 10**9
 
     def toggle_filter(self) -> None:
-        self.filter_cwd = not self.filter_cwd
+        filters: tuple[Literal["detached", "attached", "all"], ...] = (
+            "detached",
+            "attached",
+            "all",
+        )
+        self.state_filter = filters[(filters.index(self.state_filter) + 1) % len(filters)]
         self.selected = self.list_offset = 0
         self.set_query(self.query)
 
@@ -209,12 +212,16 @@ class ResumePickerModel:
             self.selected = index
             self.preview_offset = 10**9
 
-    def visible(self, rows: int) -> list[tuple[int, FieldMatch]]:
+    def ensure_selection_visible(self, rows: int) -> None:
         rows = max(1, rows)
         if self.selected < self.list_offset:
             self.list_offset = self.selected
         elif self.selected >= self.list_offset + rows:
             self.list_offset = self.selected - rows + 1
+
+    def visible(self, rows: int) -> list[tuple[int, FieldMatch]]:
+        """Return visible rows without mutating state during layout measurement."""
+        rows = max(1, rows)
         return [
             (index, self._matches[index])
             for index in range(self.list_offset, min(len(self._matches), self.list_offset + rows))
@@ -319,14 +326,9 @@ def _row_fragments(
     )
     first = _clip_fragments([(base, prefix), *title], width)
     preview_positions = match.positions if match.field == "preview" else ()
-    preview_role = next(
-        ("Agent" for turn in reversed(row.turns) if turn.role == "agent"),
-        "You" if row.turns else "",
-    )
-    preview_prefix = f"    {preview_role}: " if preview_role else "    "
     second = _clip_fragments(
         [
-            (base + " class:resume-picker.meta", preview_prefix),
+            (base + " class:resume-picker.meta", "    "),
             *_field_fragments(row.preview, base + " class:resume-picker.meta", preview_positions),
         ],
         width,
@@ -335,23 +337,38 @@ def _row_fragments(
 
 
 def _preview_lines(row: ResumePickerRow | None, width: int) -> list[list[tuple[str, str]]]:
+    """Render transcript turns using the same visual language as live scrollback."""
     if row is None:
         return [[("class:resume-picker.empty", "No session selected")]]
     if not row.turns:
         return [[("class:resume-picker.empty", "No conversation preview")]]
     lines: list[list[tuple[str, str]]] = []
+    width = max(1, width)
     for turn in row.turns:
-        label = "You" if turn.role == "user" else "Agent"
-        style = (
-            "class:resume-picker.preview-user"
-            if turn.role == "user"
-            else "class:resume-picker.preview-agent"
-        )
-        wrapped = _wrap(turn.content, max(1, width - 2))
-        lines.append([(style, f"{label}:")])
-        lines.extend([("class:resume-picker.preview", "  " + line)] for line in wrapped)
-        lines.append([])
-    return lines[:-1]
+        if turn.role == "user":
+            edge = "▔" * width
+            lines.append([("class:resume-picker.preview-user-edge", edge)])
+            for index, text in enumerate(_wrap(turn.content, max(1, width - 4))):
+                prompt = "❯ " if index == 0 else "  "
+                content = _clip(f" {prompt}{text}", width)
+                lines.append(
+                    [
+                        (
+                            "class:resume-picker.preview-user",
+                            content + " " * max(0, width - cell_len(content)),
+                        )
+                    ]
+                )
+            lines.append([("class:resume-picker.preview-user-edge", "▁" * width)])
+        else:
+            lines.append([("class:resume-picker.preview-agent", "OO:")])
+            lines.extend(
+                [("class:resume-picker.preview", text)] for text in _wrap(turn.content, width)
+            )
+            lines.append([])
+    if lines and not lines[-1]:
+        lines.pop()
+    return lines
 
 
 def render_resume_picker(model: ResumePickerModel, width: int, height: int) -> str:
@@ -359,7 +376,7 @@ def render_resume_picker(model: ResumePickerModel, width: int, height: int) -> s
     if width < 48 or height < 13:
         return f"Terminal too small\nNeed 48 x 13; now {width} x {height}"
     separator = "─" * width
-    filt = "This directory" if model.filter_cwd else "All sessions"
+    filt = {"detached": "Not attached", "attached": "Attached", "all": "All"}[model.state_filter]
     sort = "Recent activity" if model.sort_updated else "Creation date"
     lines = [
         _clip(f"Resume a previous session · {len(model.matches)} sessions", width),
@@ -367,6 +384,7 @@ def render_resume_picker(model: ResumePickerModel, width: int, height: int) -> s
         separator,
     ]
     list_height = max(1, (height - 8) // 2)
+    model.ensure_selection_visible(max(1, list_height // 2))
     for index, match in model.visible(max(1, list_height // 2)):
         lines.extend(
             "".join(text for _, text in row)
@@ -432,16 +450,7 @@ class _PickerControl(FormattedTextControl):
                 output = [("class:resume-picker.empty", "No matching sessions")]
             return output
 
-        lines = _preview_lines(self.picker.model.current, width)
-        maximum = max(0, len(lines) - height)
-        start = min(self.picker.model.preview_offset, maximum)
-        self.picker.model.preview_offset = start
-        output = []
-        for line in lines[start : start + height]:
-            if output:
-                output.append(("", "\n"))
-            output.extend(line)
-        return output
+        return self.picker.preview_text(width, height)
 
     def mouse_handler(self, mouse_event: MouseEvent):
         if mouse_event.event_type is MouseEventType.SCROLL_UP:
@@ -455,8 +464,7 @@ class _PickerControl(FormattedTextControl):
             and mouse_event.event_type is MouseEventType.MOUSE_DOWN
             and mouse_event.button is MouseButton.LEFT
         ):
-            self.picker.model.select(self.picker.model.list_offset + mouse_event.position.y // 2)
-            self.picker.invalidate()
+            self.picker.select(self.picker.model.list_offset + mouse_event.position.y // 2)
             return None
         return NotImplemented
 
@@ -485,7 +493,11 @@ class _PickerButtonControl(FormattedTextControl):
             " class:resume-picker.control-focused" if focused else ""
         )
         if self.kind == "filter":
-            value = "This directory" if self.picker.model.filter_cwd else "All sessions"
+            value = {
+                "detached": "Not attached",
+                "attached": "Attached",
+                "all": "All",
+            }[self.picker.model.state_filter]
             return [(style, f"[Filter: {value}]")]
         value = "Recent activity" if self.picker.model.sort_updated else "Creation date"
         return [(style, f"[Sort: {value}]")]
@@ -504,9 +516,10 @@ class _PickerButtonControl(FormattedTextControl):
 class ResumePicker:
     CONTROL_ORDER = ("search", "filter", "sort")
 
-    def __init__(self, rows: list[ResumePickerRow], app: Any, cwd: str | None = None):
+    def __init__(self, rows: list[ResumePickerRow], app: Any):
         self.app = app
-        self.model = ResumePickerModel(rows, cwd)
+        self.model = ResumePickerModel(rows)
+        self._preview_models: dict[tuple[str, int], Any] = {}
         self.active_control = "search"
         self.buffer = Buffer(multiline=False)
         self.buffer.on_text_changed += lambda _: self._query_changed()
@@ -558,7 +571,7 @@ class ResumePicker:
             [
                 Window(
                     FormattedTextControl(
-                        "Tab focus · Space change · ↑↓ sessions",
+                        "Tab focus · Space change · ↑↓ select",
                         style="class:resume-picker.footer",
                     ),
                     height=1,
@@ -646,7 +659,7 @@ class ResumePicker:
 
     def _list_header(self):
         age = "updated" if self.model.sort_updated else "created"
-        return [("class:resume-picker.heading", f"Sessions  ·  {age:<7}   state     title")]
+        return [("class:resume-picker.heading", f"  {age:>8}  {'state':<8}  title")]
 
     def _preview_header(self):
         row = self.model.current
@@ -701,14 +714,67 @@ class ResumePicker:
             self.model.toggle_sort()
         self.invalidate()
 
+    def _preview_model(self, width: int):
+        from .frontend import render_history_replay_to_ansi
+        from .fullscreen_transcript import FullscreenTranscriptModel
+        from .output import HistoryReplay, HistoryTurn
+
+        row = self.model.current
+        if row is None:
+            return None
+        key = (row.id, max(1, width))
+        transcript = self._preview_models.get(key)
+        if transcript is None:
+            replay = HistoryReplay(
+                turns=[HistoryTurn(turn.role, turn.content) for turn in row.turns],
+                session_id=row.id[:8],
+                show_header=False,
+                show_footer=False,
+            )
+            transcript = FullscreenTranscriptModel(show_trailing_blank=False)
+            transcript.append(render_history_replay_to_ansi(replay, key[1]))
+            self._preview_models[key] = transcript
+        return transcript
+
+    def preview_text(self, width: int, height: int):
+        row = self.model.current
+        if row is None:
+            return [("class:resume-picker.empty", "No session selected")]
+        if not row.turns:
+            return [("class:resume-picker.empty", "No conversation preview")]
+        transcript = self._preview_model(width)
+        if transcript is None:  # Defensive: the selected row changed during rendering.
+            return [("class:resume-picker.empty", "No session selected")]
+        return transcript.formatted_text(width=max(1, width), height=max(1, height))
+
+    def _reset_preview(self) -> None:
+        row = self.model.current
+        if row is not None:
+            for (session_id, _width), transcript in self._preview_models.items():
+                if session_id == row.id:
+                    transcript.jump_to_tail()
+
     def move(self, delta: int) -> None:
+        before = self.model.current.id if self.model.current else None
         self.model.move(delta)
+        self.model.ensure_selection_visible(max(1, self.list_control.viewport[1] // 2))
+        if self.model.current and self.model.current.id != before:
+            self._reset_preview()
+        self.invalidate()
+
+    def select(self, index: int) -> None:
+        before = self.model.current.id if self.model.current else None
+        self.model.select(index)
+        self.model.ensure_selection_visible(max(1, self.list_control.viewport[1] // 2))
+        if self.model.current and self.model.current.id != before:
+            self._reset_preview()
         self.invalidate()
 
     def scroll_preview(self, delta: int) -> None:
         width, height = self.preview_control.viewport
-        lines = _preview_lines(self.model.current, width)
-        self.model.scroll_preview(delta, len(lines), height)
+        transcript = self._preview_model(width)
+        if transcript is not None:
+            transcript.scroll_visual_lines(delta, width=max(1, width), height=max(1, height))
         self.invalidate()
 
     def mouse_scroll(self, pane: Literal["list", "preview"], delta: int) -> None:
