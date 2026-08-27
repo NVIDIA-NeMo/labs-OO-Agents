@@ -10,6 +10,7 @@ from nooa_cli.tui.resume_picker import (
     ResumePickerRow,
     ResumePickerTurn,
     _clip,
+    _row_fragments,
     fuzzy_match,
     render_resume_picker,
 )
@@ -55,32 +56,18 @@ def test_model_searches_title_and_full_recent_conversation() -> None:
     assert [match.row.id for match in model.matches] == ["2"]
 
 
-def test_default_scope_is_all_and_filter_label_is_explicit() -> None:
-    local = row("local", "Local", working_directory=str(Path.cwd()))
-    other = row("other", "Other", working_directory="/elsewhere", last_active=30, created_at=5)
-    model = ResumePickerModel([local, other], cwd=str(Path.cwd()))
-    assert {match.row.id for match in model.matches} == {"local", "other"}
-    assert "Filter: All sessions" in render_resume_picker(model, 80, 20)
+def test_state_filter_defaults_to_detached_and_cycles_all_states() -> None:
+    detached = row("detached", "Detached")
+    attached = row("attached", "Attached", attached=True, last_active=30)
+    model = ResumePickerModel([detached, attached])
+    assert [match.row.id for match in model.matches] == ["detached"]
+    assert "Filter: Not attached" in render_resume_picker(model, 80, 20)
     model.toggle_filter()
-    assert [match.row.id for match in model.matches] == ["local"]
-    assert "Filter: This directory" in render_resume_picker(model, 80, 20)
-
-
-def test_filter_uses_cached_resolved_directories(monkeypatch) -> None:
-    calls: list[str] = []
-    original = __import__("os").path.realpath
-
-    def tracked(path):
-        calls.append(str(path))
-        return original(path)
-
-    monkeypatch.setattr("nooa_cli.tui.resume_picker.os.path.realpath", tracked)
-    model = ResumePickerModel([row("one", "One"), row("two", "Two")], cwd="/work")
-    initial_calls = len(calls)
-    model.filter_cwd = True
-    model.set_query("o")
-    model.set_query("on")
-    assert len(calls) == initial_calls
+    assert [match.row.id for match in model.matches] == ["attached"]
+    assert "Filter: Attached" in render_resume_picker(model, 80, 20)
+    model.toggle_filter()
+    assert {match.row.id for match in model.matches} == {"detached", "attached"}
+    assert "Filter: All" in render_resume_picker(model, 80, 20)
 
 
 def test_sort_labels_explain_updated_versus_created() -> None:
@@ -105,15 +92,20 @@ def test_rows_are_two_lines_and_keep_state_and_title_on_first_line() -> None:
             )
         ]
     )
+    model.state_filter = "all"
+    model.set_query("")
     frame = render_resume_picker(model, 60, 16).splitlines()
     title_line = next(line for line in frame if "Important title" in line)
     assert "attached" in title_line
     assert "a very long reply" not in title_line
-    assert any("Agent: a very long reply" in line for line in frame)
+    assert any("a very long reply" in line for line in frame)
 
 
 def test_selection_can_inspect_attached_but_cannot_resume_it() -> None:
     model = ResumePickerModel([row("1", "active", attached=True), row("2", "other")])
+    model.state_filter = "all"
+    model.set_query("")
+    model.select(next(index for index, match in enumerate(model.matches) if match.row.id == "1"))
     assert model.current.id == "1"
     assert model.can_select is False
     assert "attached  active" in render_resume_picker(model, 80, 20)
@@ -131,7 +123,7 @@ def test_tab_cycles_controls_and_space_changes_only_selected_control() -> None:
     picker.focus_next()
     assert picker.active_control == "filter"
     picker.change_active_control()
-    assert picker.model.filter_cwd is True
+    assert picker.model.state_filter == "attached"
     picker.focus_next()
     assert picker.active_control == "sort"
     picker.change_active_control()
@@ -161,10 +153,13 @@ def test_mouse_wheel_routes_to_list_and_preview_separately() -> None:
     picker.list_control.mouse_handler(down)
     assert picker.model.selected == 1
     picker.preview_control.viewport = (30, 3)
-    picker.model.preview_offset = 0
-    picker.preview_control.mouse_handler(down)
+    transcript = picker._preview_model(30)
+    assert transcript is not None and transcript.viewport.follows_tail
+    picker.preview_control.mouse_handler(
+        MouseEvent(Point(0, 0), MouseEventType.SCROLL_UP, MouseButton.NONE, frozenset())
+    )
     assert picker.model.selected == 1
-    assert picker.model.preview_offset > 0
+    assert transcript.viewport.follows_tail is False
 
 
 def test_mouse_click_maps_two_line_rows_to_session() -> None:
@@ -200,13 +195,62 @@ def test_row_metadata_is_sanitized_without_breaking_two_line_layout() -> None:
     frame = render_resume_picker(model, 80, 20)
     assert "\x1b" not in frame
     assert "Title with controls" in frame
-    assert r"Agent: Reply\rwith\x1b[2J controls" in frame
+    assert r"Reply\rwith\x1b[2J controls" in frame
 
 
 def test_clip_uses_terminal_cells_and_preserves_graphemes() -> None:
     assert _clip("界界界", 5) == "界界…"
     assert _clip("ééé", 3) == "ééé"
     assert _clip("👩‍💻👩‍💻", 3) == "👩‍💻…"
+
+
+def test_header_columns_align_with_row_columns() -> None:
+    model = ResumePickerModel([row("one", "Aligned title")])
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker(model.rows, app)
+    header = "".join(text for _style, text in picker._list_header())
+    first = "".join(text for _style, text in _row_fragments(picker.model.matches[0], True, 80)[0])
+    assert header.index("updated") == 3
+    assert header.index("state") == first.index("detached")
+    assert header.index("title") == first.index("Aligned title")
+
+
+def test_selection_marker_moves_before_viewport_scrolls() -> None:
+    model = ResumePickerModel([row(str(index), f"title {index}") for index in range(5)])
+    first = [
+        "".join(text for _style, text in line)
+        for _, match in model.visible(3)
+        for line in _row_fragments(match, match.row.id == model.current.id, 80)
+    ]
+    model.move(1)
+    second = [
+        "".join(text for _style, text in line)
+        for _, match in model.visible(3)
+        for line in _row_fragments(match, match.row.id == model.current.id, 80)
+    ]
+    assert first[0].startswith("❯")
+    assert second[0].startswith("  ")
+    assert second[2].startswith("❯")
+    assert model.list_offset == 0
+
+
+def test_live_preview_reports_empty_conversation() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row("empty", "Empty", turns=())], app)
+    assert picker.preview_text(40, 5) == [("class:resume-picker.empty", "No conversation preview")]
+
+
+def test_preview_uses_live_scrollback_visual_language() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row("one", "One")], app)
+    plain = "".join(text for _style, text, *_ in picker.preview_text(40, 12))
+    assert "❯ question for one" in plain
+    assert "OO:" in plain
+    assert "You:" not in plain
+    assert "Agent:" not in plain
 
 
 def test_required_terminal_frames_have_truthful_floor() -> None:
@@ -317,7 +361,7 @@ async def test_picker_excludes_empty_sessions(monkeypatch) -> None:
     monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
     monkeypatch.setattr(
         sm.SessionManager,
-        "recent_turns",
+        "load_turns",
         classmethod(
             lambda cls, value, limit=12: [
                 SimpleNamespace(role="user", content=f"question for {value}"),
@@ -367,7 +411,7 @@ async def test_real_prompt_toolkit_routes_search_navigation_and_cancel(monkeypat
     monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
     monkeypatch.setattr(
         sm.SessionManager,
-        "recent_turns",
+        "load_turns",
         classmethod(
             lambda cls, value, limit=12: [
                 SimpleNamespace(role="user", content=f"question for {value}"),
@@ -387,13 +431,74 @@ async def test_real_prompt_toolkit_routes_search_navigation_and_cancel(monkeypat
         await harness.press("tab")
         await harness.wait_for(lambda: picker.active_control == "filter")
         await harness.type_keys(" ")
-        await harness.wait_for(lambda: picker.model.filter_cwd)
-        assert [match.row.id for match in picker.model.matches] == ["session-1"]
+        await harness.wait_for(lambda: picker.model.state_filter == "attached")
+        assert picker.model.matches == []
+        await harness.type_keys(" ")
+        await harness.wait_for(lambda: picker.model.state_filter == "all")
+        assert {match.row.id for match in picker.model.matches} == {"session-1", "session-2"}
         await harness.press("tab")
         await harness.wait_for(lambda: picker.active_control == "sort")
         await harness.type_keys(" ")
         await harness.wait_for(lambda: not picker.model.sort_updated)
-        assert [match.row.id for match in picker.model.matches] == ["session-1"]
+        assert [match.row.id for match in picker.model.matches] == ["session-2", "session-1"]
+        await harness.press("escape")
+        assert await asyncio.wait_for(opened, 1) is None
+
+
+@pytest.mark.asyncio
+async def test_full_application_selection_marker_moves_down_the_visible_list(monkeypatch) -> None:
+    from nooa_cli.tui import session_manager as sm
+
+    from .tui_app_harness import MutableRecordingOutput, TUIHarness
+
+    sessions = [
+        SimpleNamespace(
+            id=f"session-{index}",
+            name=f"Session {index}",
+            model="m",
+            agent="A",
+            working_dir=str(Path.cwd()),
+            started_at=index,
+            last_active=100 - index,
+            turn_count=1,
+        )
+        for index in range(5)
+    ]
+    monkeypatch.setattr(
+        sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: sessions)
+    )
+    monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
+    monkeypatch.setattr(
+        sm.SessionManager,
+        "load_turns",
+        classmethod(
+            lambda cls, value: [
+                SimpleNamespace(role="user", content=f"question for {value}"),
+                SimpleNamespace(role="agent", content=f"answer for {value}"),
+            ]
+        ),
+    )
+    output = MutableRecordingOutput(columns=80, rows=24)
+    async with TUIHarness(output=output, full_screen=True) as harness:
+        opened = asyncio.create_task(harness.app.open_session_resume_dialog())
+        await harness.wait_for(lambda: harness.app._resume_picker is not None)
+
+        def marker_row() -> int:
+            screen = harness.app._app.renderer.last_rendered_screen
+            return next(
+                y
+                for y in range(24)
+                if "❯" in "".join(screen.data_buffer[y][x].char for x in range(80))
+                and "detached" in "".join(screen.data_buffer[y][x].char for x in range(80))
+            )
+
+        await harness.wait_for(lambda: harness.app._app.renderer.last_rendered_screen is not None)
+        before = marker_row()
+        await harness.press("down")
+        await harness.wait_for(lambda: harness.app._resume_picker.model.selected == 1)
+        await harness.wait_for(lambda: marker_row() > before)
+        assert marker_row() == before + 2
+        assert harness.app._resume_picker.model.list_offset == 0
         await harness.press("escape")
         assert await asyncio.wait_for(opened, 1) is None
 
@@ -430,7 +535,7 @@ async def test_full_application_screen_keeps_picker_help_visible(
     monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
     monkeypatch.setattr(
         sm.SessionManager,
-        "recent_turns",
+        "load_turns",
         classmethod(
             lambda cls, value, limit=12: [
                 SimpleNamespace(role="user", content=f"question for {value}"),
@@ -462,7 +567,7 @@ async def test_full_application_screen_keeps_picker_help_visible(
             joined = "\n".join(visible)
             assert "20 sessions" in joined
             assert "Search" in joined
-            assert "Filter: All sessions" in joined
+            assert "Filter: Not attached" in joined
             assert "Sort: Recent activity" in joined
             assert "Conversation preview" in joined
             assert joined.count("─") >= width * 3
