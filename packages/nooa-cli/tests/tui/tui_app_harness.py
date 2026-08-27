@@ -64,6 +64,7 @@ _KEY_SEQUENCES: dict[str, str] = {
     "s-down": "\x1b[1;2B",
     "s-right": "\x1b[1;2C",
     "s-left": "\x1b[1;2D",
+    "s-tab": "\x1b[Z",
     "home": "\x1b[H",
     "end": "\x1b[F",
     "pageup": "\x1b[5~",
@@ -78,6 +79,7 @@ _KEY_SEQUENCES: dict[str, str] = {
     "c-u": "\x15",
     "c-y": "\x19",
     "f2": "\x1bOQ",
+    "f5": "\x1b[15~",
     "f6": "\x1b[17~",
     "s-enter": "\x1b\r",  # Alt+Enter / Esc+Enter — prompt_toolkit treats as newline
 }
