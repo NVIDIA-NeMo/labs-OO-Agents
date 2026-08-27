@@ -88,29 +88,24 @@ def _single_line(text: str) -> str:
     return " ".join(sanitize_live_text(text).split())
 
 
-def fuzzy_match(query: str, text: str) -> tuple[int, tuple[int, ...]] | None:
+def literal_match(query: str, text: str) -> tuple[int, tuple[int, ...]] | None:
+    """Find one case-insensitive contiguous match in original-text coordinates."""
     query = query.casefold().strip()
-    parts, source = [], []
-    for i, char in enumerate(text):
+    parts: list[str] = []
+    source: list[int] = []
+    for index, char in enumerate(text):
         folded = char.casefold()
         parts.append(folded)
-        source.extend([i] * len(folded))
+        source.extend([index] * len(folded))
     target = "".join(parts)
     if not query:
         return 0, ()
-    found, cursor = [], 0
-    for char in query:
-        pos = target.find(char, cursor)
-        if pos < 0:
-            return None
-        found.append(pos)
-        cursor = pos + 1
-    span = found[-1] - found[0] + 1
-    adjacency = sum(b == a + 1 for a, b in zip(found, found[1:], strict=False))
-    boundary = sum(p == 0 or not target[p - 1].isalnum() for p in found)
-    return adjacency * 20 + boundary * 8 - span - found[0], tuple(
-        dict.fromkeys(source[p] for p in found)
-    )
+    found = target.find(query)
+    if found < 0:
+        return None
+    stop = found + len(query)
+    positions = tuple(dict.fromkeys(source[found:stop]))
+    return -found, positions
 
 
 class ResumePickerModel:
@@ -132,10 +127,6 @@ class ResumePickerModel:
             "title": _single_line(row.title),
             "preview": row.preview,
             "conversation": "\n".join(sanitize_live_text(turn.content) for turn in row.turns),
-            "id": row.id,
-            "model": row.model,
-            "agent": row.agent,
-            "working_directory": row.working_directory,
         }
 
     @property
@@ -163,7 +154,7 @@ class ResumePickerModel:
             for fields in self._search_fields:
                 candidates = []
                 for field, value in fields.items():
-                    result = fuzzy_match(normalized_query, value)
+                    result = literal_match(normalized_query, value)
                     if result is not None:
                         candidates.append((result[0], field, result[1]))
                 query_matches.append(
@@ -564,7 +555,7 @@ class _PickerButtonControl(FormattedTextControl):
         super().__init__(self._text, focusable=False, show_cursor=False)
 
     def _text(self):
-        focused = False
+        focused = self.picker.option_cursor == self.kind
         style = "class:resume-picker.control" + (
             " class:resume-picker.control-focused" if focused else ""
         )
@@ -583,10 +574,13 @@ class _PickerButtonControl(FormattedTextControl):
             mouse_event.event_type is MouseEventType.MOUSE_DOWN
             and mouse_event.button is MouseButton.LEFT
         ):
+            self.picker.option_cursor = self.kind
             if self.kind == "filter":
                 self.picker.cycle_filter()
             else:
                 self.picker.toggle_sort()
+            self.picker.option_cursor = None
+            self.picker.invalidate()
             return None
         return NotImplemented
 
@@ -607,6 +601,7 @@ class ResumePicker:
         self._preview_models: dict[tuple[str, int], Any] = {}
         self._preview_tasks: dict[tuple[str, int], Any] = {}
         self.active_control = "list"
+        self.option_cursor: Literal["filter", "sort"] | None = None
         self.buffer = Buffer(multiline=False)
         self.buffer.on_text_changed += lambda _: self._query_changed()
         self.query_control = _PickerSearchControl(self, self.buffer)
@@ -615,7 +610,9 @@ class ResumePicker:
             width=Dimension(min=4, weight=1),
             height=1,
             style=lambda: (
-                "class:resume-picker.control-focused" if self.active_control == "list" else ""
+                "class:resume-picker.control-focused"
+                if self.active_control == "list" and self.option_cursor is None
+                else ""
             ),
         )
         self.filter_control = _PickerButtonControl(self, "filter")
@@ -729,20 +726,18 @@ class ResumePicker:
 
     def _search_label(self):
         style = "class:resume-picker.search-label"
-        if self.active_control == "list":
+        if self.active_control == "list" and self.option_cursor is None:
             style += " class:resume-picker.control-focused"
         return [(style, "[Search: ")]
 
     def _search_close(self):
         style = "class:resume-picker.search-label"
-        if self.active_control == "list":
+        if self.active_control == "list" and self.option_cursor is None:
             style += " class:resume-picker.control-focused"
         return [(style, "]")]
 
     def _active_rail(self, area: str):
-        active = self.active_control == area or (
-            area == "list" and self.active_control in {"filter", "sort"}
-        )
+        active = self.active_control == area
         style = (
             "class:resume-picker.active-rail-active"
             if active
@@ -753,9 +748,13 @@ class ResumePicker:
 
     def _help_text(self):
         columns = self.app.output.get_size().columns
+        if self.option_cursor is not None:
+            if columns < 72:
+                return "Options · ←→ select · ↑↓/Space change · Esc done"
+            return "Options · ←→ select · ↑↓/Space change · Enter/Esc done"
         if columns < 72:
-            return "Tab/Shift-Tab · Alt-F · Ctrl-O · ↵ resume · Esc"
-        return "Tab/Shift-Tab panes · ↑↓ matches · Alt-F filter · Ctrl-O sort · ↵ resume · Esc"
+            return "Type search · Ctrl-O options · ↵ resume · Esc"
+        return "Type search · Ctrl-O options · Tab panes · ↑↓ move · ↵ resume · Esc"
 
     def _title(self):
         count = len(self.model.matches)
@@ -821,15 +820,54 @@ class ResumePicker:
         self.app.layout.focus(controls[name])
         self.invalidate()
 
+    def toggle_options(self) -> None:
+        """Enter or leave the inline filter/sort options mode."""
+        self.active_control = "list"
+        if self.option_cursor is None:
+            self.option_cursor = "filter"
+            self.app.layout.focus(self.list_control)
+        else:
+            self.option_cursor = None
+            self.app.layout.focus(self.query_control)
+        self.invalidate()
+
+    def move_option(self, delta: int) -> None:
+        if self.option_cursor is None or not delta:
+            return
+        self.option_cursor = "sort" if delta > 0 else "filter"
+        self.invalidate()
+
+    def change_option(self, delta: int = 1) -> None:
+        if self.option_cursor == "filter":
+            self.model.cycle_filter(delta)
+            self._prepare_current_preview()
+        elif self.option_cursor == "sort" and delta:
+            self.model.toggle_sort()
+            self._prepare_current_preview()
+        self.invalidate()
+
+    def close_options(self) -> bool:
+        if self.option_cursor is None:
+            return False
+        self.option_cursor = None
+        self.app.layout.focus(self.query_control)
+        self.invalidate()
+        return True
+
     def focus_next(self) -> None:
+        self.option_cursor = None
         index = (self.CONTROL_ORDER.index(self.active_control) + 1) % len(self.CONTROL_ORDER)
         self.activate_control(self.CONTROL_ORDER[index])
 
     def focus_previous(self) -> None:
+        self.option_cursor = None
         index = (self.CONTROL_ORDER.index(self.active_control) - 1) % len(self.CONTROL_ORDER)
         self.activate_control(self.CONTROL_ORDER[index])
 
     def move_horizontal(self, delta: int) -> None:
+        if self.option_cursor is not None:
+            self.move_option(delta)
+            return
         if self.active_control != "list" or not delta:
             return
         if delta < 0:
@@ -838,7 +876,9 @@ class ResumePicker:
             self.buffer.cursor_right(count=1)
 
     def navigate_vertical(self, delta: int) -> None:
-        if self.active_control == "list":
+        if self.option_cursor is not None:
+            self.change_option(delta)
+        elif self.active_control == "list":
             self.move(delta)
         elif self.active_control == "preview":
             width, height = self.preview_control.viewport
