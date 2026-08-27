@@ -120,6 +120,7 @@ class ResumePickerModel:
         self._resolved_directories = {
             row.id: os.path.realpath(row.working_directory) for row in rows
         }
+        self._search_fields = [self._fields_for(row) for row in rows]
         self.query = ""
         self.filter_cwd = False
         self.sort_updated = True
@@ -127,6 +128,18 @@ class ResumePickerModel:
         self.preview_offset = 10**9
         self._matches: list[FieldMatch] = []
         self.set_query("")
+
+    @staticmethod
+    def _fields_for(row: ResumePickerRow) -> dict[str, str]:
+        return {
+            "title": _single_line(row.title),
+            "preview": row.preview,
+            "conversation": "\n".join(sanitize_live_text(turn.content) for turn in row.turns),
+            "id": row.id,
+            "model": row.model,
+            "agent": row.agent,
+            "working_directory": row.working_directory,
+        }
 
     @property
     def matches(self) -> list[FieldMatch]:
@@ -151,15 +164,7 @@ class ResumePickerModel:
         for index, row in enumerate(self.rows):
             if self.filter_cwd and self._resolved_directories[row.id] != self.cwd:
                 continue
-            fields = {
-                "title": _single_line(row.title),
-                "preview": row.preview,
-                "conversation": "\n".join(sanitize_live_text(turn.content) for turn in row.turns),
-                "id": row.id,
-                "model": row.model,
-                "agent": row.agent,
-                "working_directory": row.working_directory,
-            }
+            fields = self._search_fields[index]
             candidates = []
             for field, value in fields.items():
                 result = fuzzy_match(query, value)
