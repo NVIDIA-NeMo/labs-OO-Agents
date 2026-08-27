@@ -21,6 +21,18 @@ Before the first LLM turn, CodeAct runs up to two **synthetic `execute_python` c
 1. **The prefill plugin** (default `InspectInputsPrefill()`): generates code that prints the call signature, `pprint()`s each parameter under `truncation.prefill_format` limits (defaults `max_string=2000, max_length=25, max_depth=4`), auto-`show()`s `Media` parameters for multimodal perception, and prints `doc()` of a complex return type. Per-parameter limits come from `Annotated[T, spec(max_string=..., max_length=...)]` on the signature.
 2. **Pre-ellipsis code**: statements between the docstring and the `...` are extracted from the AST and run verbatim as the second prefill cell — with or without the plugin.
 
+Use `None` to disable one formatting limit for a specific parameter:
+
+```python
+async def analyze(
+    self,
+    document: Annotated[str, spec(max_string=None)],
+    samples: Annotated[list, spec(max_length=100, max_depth=6)],
+) -> Result:
+    """Analyze the document and samples."""
+    ...
+```
+
 ```python
 class Notifier(Agent, llm=llm):
     async def notify_stale(self) -> str:
@@ -71,6 +83,13 @@ Two independent mechanisms — set them separately:
 
 1. **Capture time** (`capture: CaptureConfig`) — per-cell stream caps with head/tail truncation: `max_stdout=50_000`, `max_stderr=2_000`, `max_error=10_000` chars; `tail=None` (half the budget); `file_backed=True` (default `False`) streams the *full* output to a temp file and puts its path in the truncation notice so the LLM can grep it.
 2. **Render time** (`FormatConfig` triplet = `pformat` bounds `max_string/max_length/max_depth`): `event_format` (event fields, every turn; defaults 10_000/200/5), `prefill_format` (parameter inspection; 2_000/25/4), `context_block_format` (non-string context values; unlimited — overflow handled by block eviction).
+
+Rendering precedence is framework defaults → agent class → agent instance →
+method `@strategy(..., truncation=...)` → the parameter's `spec()` metadata.
+`spec(max_string=None)` disables the formatting bound only for that parameter.
+Because the inspection prefill prints through stdout, `capture.max_stdout` still
+applies independently; raise it explicitly if the complete printed value can
+exceed the default 50,000-character capture budget.
 
 Context budget: `max_context_tokens` — or, when unset and the model exposes a context window, half the *usable* window (`(context_window - reserved_output) // 2`, where `reserved_output` is the call's `max_tokens`, else `TruncationConfig.response_reserve_tokens`, default 4096; setting `response_reserve_tokens=0` disables the auto-derived budget). Over-budget triggers **whole-block eviction** of SYSTEM context blocks — newest non-`static` user blocks first, marked `EVICTED: over context budget` in place. Static framework blocks (`system_prompt`, `self`) are never evicted. No token counter is required: eviction sizes blocks as `chars × ratio`, where the ratio is calibrated from each provider response's reported prompt tokens (cold-start ~4 chars/token before the first response). Inspect usage via `agent.context_stats` — token figures are provider-reported (`prompt_tokens`); the context-vs-events breakdown is attributed by character share and `ctx N%` is measured against the usable window.
 
