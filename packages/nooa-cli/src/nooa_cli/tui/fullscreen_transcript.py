@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import re
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -46,6 +46,15 @@ class ViewportState:
 
     follows_tail: bool = True
     anchor: ViewportAnchor | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _SearchMatch:
+    """One literal search occurrence in record-local plain-text coordinates."""
+
+    record_id: int
+    start: int
+    stop: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +124,9 @@ class FullscreenTranscriptModel:
         self._ends_newline = False
         self._selection_anchor: _SelectionHit | None = None
         self._selection_active: _SelectionHit | None = None
+        self._search_query = ""
+        self._search_matches: tuple[_SearchMatch, ...] = ()
+        self._search_cursor = 0
         self._record_index_cache: tuple[dict[int, _Record], dict[int, int]] | None = None
 
     @property
@@ -165,6 +177,65 @@ class FullscreenTranscriptModel:
         while len(self._formatted_cache) > 2 * _MAX_PROJECTED_WIDTHS:
             self._formatted_cache.popitem(last=False)
         return result
+
+    @property
+    def search_position(self) -> tuple[int, int]:
+        """Return the one-based current match index and total match count."""
+        if not self._search_matches:
+            return 0, 0
+        return self._search_cursor + 1, len(self._search_matches)
+
+    def set_search(self, query: str, *, width: int, height: int) -> None:
+        """Highlight literal matches and reveal the first occurrence."""
+        normalized = query.strip().casefold()
+        if normalized == self._search_query:
+            return
+        self._search_query = normalized
+        matches: list[_SearchMatch] = []
+        if normalized:
+            for record in self._records:
+                folded_parts: list[str] = []
+                source: list[int] = []
+                for index, char in enumerate(record.plain):
+                    folded = char.casefold()
+                    folded_parts.append(folded)
+                    source.extend([index] * len(folded))
+                folded_text = "".join(folded_parts)
+                cursor = 0
+                while (found := folded_text.find(normalized, cursor)) >= 0:
+                    stop = found + len(normalized)
+                    matches.append(
+                        _SearchMatch(record.record_id, source[found], source[stop - 1] + 1)
+                    )
+                    cursor = stop
+        self._search_matches = tuple(matches)
+        self._search_cursor = 0
+        if matches:
+            self._reveal_search_match(width=width, height=height)
+        else:
+            self.jump_to_tail()
+        self._formatted_cache.clear()
+
+    def move_search_match(self, delta: int, *, width: int, height: int) -> bool:
+        """Cycle transcript matches and reveal the selected occurrence."""
+        if not self._search_matches or not delta:
+            return False
+        self._search_cursor = (self._search_cursor + delta) % len(self._search_matches)
+        self._reveal_search_match(width=width, height=height)
+        self._formatted_cache.clear()
+        return True
+
+    def _reveal_search_match(self, *, width: int, height: int) -> None:
+        if not self._search_matches:
+            return
+        match = self._search_matches[self._search_cursor]
+        rows = self._display_rows(max(1, width))
+        for row in rows:
+            if row.anchor.record_id != match.record_id:
+                continue
+            if any(start < match.stop and stop > match.start for start, stop in row.source_spans):
+                self._viewport = ViewportState(False, row.anchor)
+                return
 
     def cursor_position(self, *, width: int, height: int = 1) -> Point:
         """Expose a cursor within the virtualized visible transcript."""
@@ -994,6 +1065,12 @@ class FullscreenTranscriptModel:
         for _ in range(top_padding):
             fragments.append(("", "\n"))
         selected = self._selection_bounds()
+        current_search = self._search_matches[self._search_cursor] if self._search_matches else None
+        search_by_record: dict[int, tuple[list[int], list[_SearchMatch]]] = {}
+        for match in self._search_matches:
+            starts, matches = search_by_record.setdefault(match.record_id, ([], []))
+            starts.append(match.start)
+            matches.append(match)
         records, record_bases = self._record_indexes()
         has_hyperlinks = any(row.hyperlinks for row in rows)
         for index, row in enumerate(rows):
@@ -1007,8 +1084,14 @@ class FullscreenTranscriptModel:
             display_spans = self._grapheme_spans(display_chars)
             base = record_bases[record.record_id]
             link_index = 0
+            record_search = search_by_record.get(record.record_id)
+            search_index = 0
+            if record_search and row.source_spans:
+                search_index = max(0, bisect_left(record_search[0], row.source_spans[0][0]) - 1)
             for offset, (start, stop, _cells) in enumerate(display_spans):
                 highlighted = False
+                search_match = False
+                current_match = False
                 link: str | None = None
                 if offset < len(row.source_spans):
                     source_start, source_stop = row.source_spans[offset]
@@ -1016,6 +1099,18 @@ class FullscreenTranscriptModel:
                         highlighted = (
                             base + source_start < selected[1] and base + source_stop > selected[0]
                         )
+                    if record_search:
+                        _starts, record_matches = record_search
+                        while (
+                            search_index < len(record_matches)
+                            and record_matches[search_index].stop <= source_start
+                        ):
+                            search_index += 1
+                        if search_index < len(record_matches):
+                            match = record_matches[search_index]
+                            if match.start < source_stop and match.stop > source_start:
+                                search_match = True
+                                current_match = match == current_search
                     while (
                         link_index < len(row.hyperlinks)
                         and row.hyperlinks[link_index][1] <= source_start
@@ -1033,6 +1128,13 @@ class FullscreenTranscriptModel:
                         # Alternating the bounded marker each frame forces OSC-8
                         # cells to repaint when only their target changes.
                         style = (f"{style} class:native-hyperlink-{hyperlink_marker}").strip()
+                    if search_match:
+                        search_style = (
+                            "class:transcript-search-current"
+                            if current_match
+                            else "class:transcript-search-match"
+                        )
+                        style = f"{style} {search_style}".strip()
                     if highlighted:
                         style = f"{style} class:selected".strip()
                     fragments.append((style, char))
