@@ -50,6 +50,54 @@ jobs:
       - name: Sandbox containment tests
         run: uv run pytest -q -m sandbox
 
+  # Every other job here is ubuntu-latest, so a module-level POSIX-only import
+  # (fcntl, resource, signal.SIGUSR2) reaches PyPI with nothing failing first.
+  # That is not hypothetical: 0.0.8 shipped unimportable on native Windows.
+  # See #84, #85, #92, #95.
+  #
+  # Deliberately import-only. The full suite cannot run on these hosts —
+  # BashSession needs bash and subprocess pass_fds, and the Landlock/seccomp/
+  # RLIMIT sandbox is Linux-only by design — but importability is the whole
+  # bug class that has actually escaped, and it costs seconds to gate.
+  #
+  # The macOS leg is future-proofing, not a detector of anything on main today:
+  # the import closure of `import nooa` is 133 modules, and the only
+  # platform-specific things in it are fcntl (#84) and signal.SIGUSR2 (#85),
+  # both of which macOS has. sandbox/guards.py — the `import resource` from
+  # #92 — is not in that closure at all; it loads on SandboxedExecutor
+  # construction. macOS earns its place by catching the other direction (a
+  # Linux-only /proc or landlock assumption reaching module scope) and because
+  # it is the platform contributors are most likely on after Linux.
+  import-smoke:
+    strategy:
+      # A Windows-only break must not cancel the macOS leg before it reports.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          # litellm publishes manylinux wheels only, so both of these legs
+          # resolve to its sdist — a pyo3/maturin Rust project that maturin
+          # compiles after silently bootstrapping a toolchain. Measured cold on
+          # an M1: 39s wall, 145s CPU, producing a 5.7 MB native extension.
+          # Without a cache every run pays that on the slowest runners we have.
+          enable-cache: true
+      # All four distributions the build job produces, not just nooa: each is
+      # published separately, so each can independently become unimportable.
+      # --no-project installs them as a consumer would rather than syncing the
+      # dev environment, which is what the failing user report exercised.
+      - name: Import every published distribution
+        run: >
+          uv run --no-project
+          --with . --with ./packages/nooa-cli
+          --with ./packages/nooa-memory --with ./packages/nooa-bench
+          python -c "import nooa, nooa_cli, nooa_memory, nooa_bench; print(nooa.__version__)"
+
   build:
     runs-on: ubuntu-latest
     steps:
