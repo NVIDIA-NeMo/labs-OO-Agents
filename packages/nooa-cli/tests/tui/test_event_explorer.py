@@ -392,6 +392,21 @@ def test_event_explorer_current_match_highlights_second_match_on_same_line() -> 
     )
 
 
+def test_event_explorer_view_highlights_selected_occurrence_on_same_line() -> None:
+    from nooa_cli.tui.event_explorer import EventExplorerView
+
+    manager = SimpleNamespace(
+        items=lambda: [("1", _FakeEvent("TUIUserInput", text="alpha beta alpha gamma"))]
+    )
+    view = EventExplorerView(manager)
+    view.model.set_query("alpha")
+    view.model.search_line_cursor = 1
+
+    lines = view.detail_lines(view.model.current, width=120)
+
+    assert "".join(lines).count(f"{highlight_style_code(current=True)}alpha\x1b[0m") == 1
+
+
 def test_event_explorer_search_highlights_matches_inside_detail_text() -> None:
     row = build_event_rows(
         SimpleNamespace(items=lambda: [("1", _FakeEvent("TUIUserInput", text="find alpha here"))])

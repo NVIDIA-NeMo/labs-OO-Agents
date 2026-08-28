@@ -293,21 +293,30 @@ class ExplorerModel:
 
     def move_or_scroll(self, delta: int) -> None:
         if self.search_active and self._last_detail_match_lines:
-            self._move_detail_match(delta)
+            if self._move_detail_match(delta):
+                return
+            old_cursor = self.cursor
+            self.move(delta)
+            if self.cursor != old_cursor:
+                self.search_line_cursor = 0 if delta > 0 else 10**9
         elif self.focus == "list":
             self.move(delta)
         else:
             self.scroll_detail(delta)
 
-    def _move_detail_match(self, delta: int) -> None:
+    def _move_detail_match(self, delta: int) -> bool:
         if not self._last_detail_match_lines:
-            return
+            return False
         count = len(self._last_detail_match_lines)
-        self.search_line_cursor = min(max(self.search_line_cursor + delta, 0), count - 1)
+        next_cursor = self.search_line_cursor + delta
+        if not 0 <= next_cursor < count:
+            return False
+        self.search_line_cursor = next_cursor
         line = self._last_detail_match_lines[self.search_line_cursor]
         visible = max(self._last_detail_visible_lines, 1)
         self.detail_offset = max(line - visible // 2, 0)
         self.clamp_detail_offset(visible)
+        return True
 
     def jump_home(self) -> None:
         self.cursor = 0

@@ -2619,10 +2619,14 @@ class TUIApplication:
 
         @kb.add(Keys.Vt100MouseEvent, filter=subview_active, eager=True)
         def _(event):
+            if self._is_fullscreen and not self._fullscreen_mouse_navigation:
+                return NotImplemented
             return vt100_mouse_handler(event)
 
         @kb.add(Keys.WindowsMouseEvent, filter=subview_active, eager=True)
         def _(event):
+            if self._is_fullscreen and not self._fullscreen_mouse_navigation:
+                return NotImplemented
             return windows_mouse_handler(event)
 
         @kb.add(Keys.Any, filter=subview_active, eager=True)
