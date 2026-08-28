@@ -384,7 +384,7 @@ class ExplorerBrowser:
 
     def _query_changed(self) -> None:
         self.model.edit_query(self.buffer.text)
-        self.model.search_active = False
+        self.model.search_active = bool(self.buffer.text.strip())
         self.list_offset = 0
         self._list_offset_detached = False
         self.invalidate()
@@ -570,9 +570,9 @@ class ExplorerBrowser:
             self.change_option(delta)
         elif self.active_control == "list":
             self._list_offset_detached = False
-            self.model.move(delta)
+            self.model.move_or_scroll(delta)
         else:
-            self.model.scroll_detail(delta)
+            self.model.move_or_scroll(delta)
         self.invalidate()
 
     def page(self, delta: int) -> None:
