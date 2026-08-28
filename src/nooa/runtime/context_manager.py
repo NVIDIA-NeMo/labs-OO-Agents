@@ -61,6 +61,16 @@ class ContextManager:
             return ExpressionContextBlock(key=key, expr=value.expr, prefix=prefix)
         return LiteralContextBlock(key=key, value=value, prefix=prefix)
 
+    @classmethod
+    def _make_context_block(cls, key: str, value: Context) -> ContextBlock:
+        """Normalize a public ``Context`` value into a canonical block record."""
+        if value.is_dynamic:
+            assert value.expr is not None
+            normalized: Any = DynamicContext(value.expr)
+        else:
+            normalized = value.value
+        return cls._make_block(key, normalized, prefix=value.prefix)
+
     def _store_block(self, block: ContextBlock, *, protected: bool = False) -> None:
         """Store a canonical block and refresh runtime-only bookkeeping."""
         self._blocks[block.key] = block
@@ -87,29 +97,20 @@ class ContextManager:
             value: Block value (str, Context, DynamicContext, None, or any pformat-able object).
 
         Raises:
-            ProtectedBlockError: If key is protected and value is not None/Context.
+            ProtectedBlockError: If key is protected and value is not None.
         """
         if value is None:
             self.disable(key)
             if key in self._blocks and key not in self.protected_keys:
                 del self._blocks[key]
             return
+        if key in self.protected_keys:
+            raise ProtectedBlockError(key, "modify")
         if isinstance(value, Context):
-            if value.is_dynamic:
-                assert value.expr is not None
-                normalized: Any = DynamicContext(value.expr)
-            else:
-                normalized = value.value
-            self._store_block(
-                self._make_block(key, normalized, prefix=value.prefix),
-                protected=key in self.protected_keys,
-            )
+            self._store_block(self._make_context_block(key, value))
             return
         if isinstance(value, DynamicContext):
-            self._store_block(
-                self._make_block(key, value, prefix=False),
-                protected=key in self.protected_keys,
-            )
+            self._store_block(self._make_block(key, value, prefix=False))
             return
         self.set_dynamic(key, value=value)
 
@@ -367,8 +368,10 @@ class ContextManager:
                 # (pop() would discard from disabled_keys, undoing the disable)
                 del self._blocks[key]
         elif isinstance(value, Context):
-            # Route through __setitem__ which handles all Context cases
-            self[key] = value
+            self._store_block(
+                self._make_context_block(key, value),
+                protected=is_protected,
+            )
         elif isinstance(value, DynamicContext):
             if is_protected:
                 if is_static_block:

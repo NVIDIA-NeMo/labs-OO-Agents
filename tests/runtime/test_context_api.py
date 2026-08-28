@@ -4,7 +4,7 @@
 
 import pytest
 
-from nooa import Agent
+from nooa import Agent, Context
 from nooa.context_blocks import DynamicContext, ExpressionContextBlock, LiteralContextBlock
 from nooa.context_blocks.exceptions import DynamicNotResolvedError, ProtectedBlockError
 from nooa.runtime.context import ContextApi
@@ -34,6 +34,31 @@ def test_setitem_raises_on_protected_key():
     ctx = _ctx()
     with pytest.raises(ProtectedBlockError):
         ctx["system_prompt"] = "overwrite"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        Context("overwrite", prefix=True),
+        Context(expr="'overwrite'", prefix=True),
+        DynamicContext("'overwrite'"),
+    ],
+)
+def test_setitem_rejects_typed_values_for_protected_key(value):
+    ctx = _ctx()
+    with pytest.raises(ProtectedBlockError):
+        ctx["system_prompt"] = value
+
+
+def test_apply_override_can_replace_protected_key_with_context():
+    ctx = _ctx()
+    ctx._context.apply_override("system_prompt", Context("override", prefix=True))
+
+    block = ctx._context._blocks["system_prompt"]
+    assert isinstance(block, LiteralContextBlock)
+    assert block.value == "override"
+    assert block.prefix is True
+    assert "system_prompt" in ctx._context.protected_keys
 
 
 def test_setitem_accepts_dynamic_context_value():
