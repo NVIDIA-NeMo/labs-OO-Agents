@@ -618,6 +618,67 @@ async def test_tui_app_event_explorer_fts_can_search_printable_navigation_and_qu
         await asyncio.wait_for(task, timeout=1)
 
 
+@pytest.mark.asyncio
+async def test_tui_app_event_explorer_routes_real_mouse_wheel_to_list() -> None:
+    from .tui_app_harness import FakeAgent, TUIHarness
+
+    agent = FakeAgent()
+    agent.event_manager = SimpleNamespace(
+        items=lambda: [
+            (str(index), _FakeEvent("TUIUserInput", text=f"event {index}")) for index in range(30)
+        ]
+    )
+    async with TUIHarness(agent=agent) as h:
+        task = asyncio.create_task(h.app.open_event_explorer(agent.event_manager))
+        await h.wait_for(lambda: h.app._event_explorer_model is not None)
+        browser = h.app.active_subview
+        assert browser is not None
+        await h.wait_for(lambda: browser.list_control.viewport[1] > 1)
+        await h.wait_for(lambda: browser.list_offset > 0)
+        initial_offset = browser.list_offset
+
+        # Xterm SGR wheel-up at column 10, row 8 (inside the list pane).
+        await h.type_keys("\x1b[<64;10;8M")
+        await h.wait_for(lambda: browser.list_offset < initial_offset)
+
+        assert browser.model.cursor == 29
+        await h.press("escape")
+        await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_tui_app_event_explorer_routes_real_mouse_wheel_to_detail() -> None:
+    from .tui_app_harness import FakeAgent, TUIHarness
+
+    agent = FakeAgent()
+    agent.event_manager = SimpleNamespace(
+        items=lambda: [
+            (
+                "1",
+                _FakeEvent(
+                    "TUIUserInput",
+                    text="\n".join(f"detail line {index}" for index in range(100)),
+                ),
+            )
+        ]
+    )
+    async with TUIHarness(agent=agent) as h:
+        task = asyncio.create_task(h.app.open_event_explorer(agent.event_manager))
+        await h.wait_for(lambda: h.app._event_explorer_model is not None)
+        browser = h.app.active_subview
+        assert browser is not None
+        await h.wait_for(lambda: browser.preview_control.viewport[1] > 1)
+        await h.wait_for(lambda: browser.model._last_detail_line_count > 20)
+
+        # Xterm SGR wheel-down at column 10, row 30 (inside the detail pane).
+        await h.type_keys("\x1b[<65;10;30M")
+        await h.wait_for(lambda: browser.model.detail_offset > 0)
+
+        assert browser.list_offset == 0
+        await h.press("escape")
+        await asyncio.wait_for(task, timeout=1)
+
+
 def test_event_explorer_has_in_app_mouse_scroll_bindings() -> None:
     source = Path("packages/nooa-cli/src/nooa_cli/tui/tui_application.py").read_text()
 
