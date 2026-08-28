@@ -776,3 +776,181 @@ Current result:
   `jobs/nooa-skillsbench-library-dev-slim-resource-tail/`.
 - The result matches the accepted `934b0f93` dev aggregate while keeping the
   slim translator below 1k LOC.
+
+## 2026-08-27 — Slim Translator Trim And Six-Pass Check
+
+Status: committed translator candidate validated on focused tests and the stable passing subset.
+
+Commit: `4e1d5e68 refactor: trim slim skill translator`.
+
+After an independent read-only subagent review of the standalone slim translator,
+I applied only generic, non-task-specific trims and hardening:
+- Replaced the internal `SkillFile` dataclass with plain relative path strings.
+- Copied package resources from the already-planned resource methods instead of
+  rewalking the TextSkill directory during package writing.
+- Removed Pydantic-style `model_dump()` shims from translator dataclasses; the
+  SkillsBench runner now serializes them with `dataclasses.asdict()`.
+- Reused one function-parameter renderer for guidance and Python signatures.
+- Constrained prompt reference replacement with path-token boundaries so
+  basenames like `data.json` are not rewritten inside `metadata.json`.
+- Changed generated resource guidance from text-only wording to content-neutral
+  wording that also fits binary resources.
+- Removed two tiny naming wrapper helpers and call the shared `_unique_name`
+  helper directly.
+
+Validation:
+- `uv run pytest tests/tools/test_slim_skill_translator.py packages/nooa-bench/tests/test_skillsbench_runner.py -q`
+  - `25 passed`
+- `uv run ruff check src/nooa/tools/slim_skill_translator.py packages/nooa-bench/src/nooa_bench/skillsbench_runner.py tests/tools/test_slim_skill_translator.py`
+  - passed
+
+Notes:
+- `src/nooa/tools/slim_skill_translator.py` is now 967 LOC, down from 997 LOC.
+- The trim does not add task names or SkillsBench-specific branches.
+- The bulky private sibling-helper/import-rewrite path is intentionally still
+  present because it preserves private script implementation logic without
+  exposing helper modules as public skill APIs.
+
+Six-pass subset check:
+
+| Task | Trim candidate | Final candidate |
+|---|---:|---:|
+| `fix-visual-stability` | 1.0 | inconclusive |
+| `fix-erlang-ssh-cve` | 1.0 | 1.0 |
+| `llm-prefix-cache-replay` | 1.0 | 1.0 |
+| `dapt-intrusion-detection` | 1.0 | 1.0 |
+| `offer-letter-generator` | 1.0 | 1.0 |
+| `parallel-tfidf-search` | 1.0 | 1.0 |
+
+Run artifacts:
+- First trim pass: `jobs/nooa-skillsbench-library-dev-slim-trim/`
+  - All six tasks passed with `agent_return_code=0` and no verifier errors.
+- Final candidate non-visual pass: `jobs/nooa-skillsbench-library-dev-slim-trim-final-five/`
+  - All five non-visual tasks passed with `agent_return_code=0` and no verifier
+    errors.
+- Final candidate visual attempt: `jobs/nooa-skillsbench-library-dev-slim-trim-final/`
+  - Interrupted after repeated task-shell deaths inside `fix-visual-stability`
+    while running browser/build commands, before any scoreable summary was
+    produced.
+  - Source-only diff of the generated visual LibrarySkill packages against the
+    first trim pass was empty, so the interruption is not evidence of a changed
+    translator output.
+
+## 2026-08-27 — Heldout Translation Validation And Stratified Smoke
+
+Status: heldout translation validation complete; 18-task LibrarySkill smoke
+mostly complete with one inconclusive long-running task.
+
+Translator commit: `4e1d5e68 refactor: trim slim skill translator`.
+
+Translation-only heldout validation:
+- Artifact root: `jobs/nooa-skillsbench-library-heldout-translation-only/`
+- Heldout split: `experiments/library-skill-translation/test_tasks.txt`
+- Result: 77/77 tasks translated and validated.
+- Package result: 202/202 translated LibrarySkill packages validated.
+
+Stratified heldout sample:
+- Sample file: `experiments/library-skill-translation/heldout_sample_tasks.txt`
+- Selection seed: `4e1d5e68-heldout-stratified-v1`
+- Bucket allocation: 2 single prose-only, 4 multi-skill prose-only, 4
+  resource-only, 3 script-only, 5 script-plus-resource.
+- Condition: `library_skill`
+- Model: `openai/openai/openai/gpt-5.5`
+- Sandbox: Docker
+- Combined summary: `jobs/nooa-skillsbench-library-heldout-sample-18/combined_summary.json`
+
+Results:
+
+| Task | Bucket | LibrarySkill | Notes |
+|---|---|---:|---|
+| `azure-bgp-oscillation-route-leak` | `prose_only_single` | 0.0 | scoreable |
+| `manufacturing-codebook-normalization` | `prose_only_single` | 1.0 | scoreable |
+| `energy-unit-commitment` | `multi_prose_only` | 0.0 | scoreable |
+| `hvac-control` | `multi_prose_only` | 1.0 | scoreable |
+| `manufacturing-equipment-maintenance` | `multi_prose_only` | 1.0 | scoreable |
+| `setup-fuzzing-py` | `multi_prose_only` | 0.0 | infra-suspect: agent rc 126, `/opt/nooa-bench-venv/bin/python: Permission denied` |
+| `quantum-numerical-simulation` | `resource_only` | inconclusive | interrupted after long/stalled agent execution; no summary |
+| `radar-vital-signs` | `resource_only` | 1.0 | scoreable |
+| `paper-anonymizer` | `resource_only` | 1.0 | scoreable |
+| `xlsx-recover-data` | `resource_only` | 0.0 | scoreable |
+| `civ6-adjacency-optimizer` | `script_only` | 0.0 | infra-suspect: agent rc 137, log contains `Killed` |
+| `energy-ac-optimal-power-flow` | `script_only` | 1.0 | scoreable |
+| `sec-financial-report` | `script_only` | 0.0 | scoreable |
+| `pptx-reference-formatting` | `script_and_resource` | 1.0 | scoreable |
+| `grid-dispatch-operator` | `script_and_resource` | 1.0 | scoreable |
+| `citation-check` | `script_and_resource` | 1.0 | scoreable |
+| `court-form-filling` | `script_and_resource` | 1.0 | scoreable |
+| `threejs-structure-parser` | `script_and_resource` | 1.0 | scoreable |
+
+Current result:
+- Scoreable aggregate: 11/17.
+- Full sample accounting: 11 passed, 6 failed, 1 inconclusive.
+- By bucket:
+  - `prose_only_single`: 1 pass, 1 fail.
+  - `multi_prose_only`: 2 pass, 2 fail.
+  - `resource_only`: 2 pass, 1 fail, 1 inconclusive.
+  - `script_only`: 1 pass, 2 fail.
+  - `script_and_resource`: 5 pass, 0 fail.
+
+Interpretation:
+- The translator generalizes mechanically on heldout: every heldout TextSkill
+  package generated and validated.
+- The first heldout LibrarySkill-only smoke has useful positive signal,
+  especially on script-plus-resource tasks, but it is not a fair TextSkill
+  comparison because `no_skill` and `text_skill` baselines were not run.
+- Do not tune translator behavior from individual heldout failures without
+  explicitly resetting the protocol; these should be treated as measurement
+  results unless a broad, task-independent bug is found.
+
+## 2026-08-27 — Heldout Sample TextSkill Comparison
+
+Status: TextSkill run complete on the same 18-task heldout sample, with two
+inconclusive interrupted/stalled TextSkill tasks.
+
+TextSkill artifact roots:
+- `jobs/nooa-skillsbench-text-heldout-sample-18/`
+- `jobs/nooa-skillsbench-text-heldout-sample-18-remainder/`
+- `jobs/nooa-skillsbench-text-heldout-sample-18-final-seven/`
+
+Comparison artifact:
+- `jobs/nooa-skillsbench-library-heldout-sample-18/text_vs_library_comparison.json`
+
+Results:
+
+| Task | Bucket | TextSkill | LibrarySkill | Delta |
+|---|---|---:|---:|---|
+| `azure-bgp-oscillation-route-leak` | `prose_only_single` | 0.0 | 0.0 | tie |
+| `manufacturing-codebook-normalization` | `prose_only_single` | 0.0 | 1.0 | LibrarySkill win |
+| `energy-unit-commitment` | `multi_prose_only` | inconclusive | 0.0 | n/a |
+| `hvac-control` | `multi_prose_only` | 1.0 | 1.0 | tie |
+| `manufacturing-equipment-maintenance` | `multi_prose_only` | 1.0 | 1.0 | tie |
+| `setup-fuzzing-py` | `multi_prose_only` | 0.0 | 0.0 | tie |
+| `quantum-numerical-simulation` | `resource_only` | 0.0 | inconclusive | n/a |
+| `radar-vital-signs` | `resource_only` | 0.0 | 1.0 | LibrarySkill win |
+| `paper-anonymizer` | `resource_only` | 1.0 | 1.0 | tie |
+| `xlsx-recover-data` | `resource_only` | 0.0 | 0.0 | tie |
+| `civ6-adjacency-optimizer` | `script_only` | inconclusive | 0.0 | n/a |
+| `energy-ac-optimal-power-flow` | `script_only` | 1.0 | 1.0 | tie |
+| `sec-financial-report` | `script_only` | 1.0 | 0.0 | TextSkill win |
+| `pptx-reference-formatting` | `script_and_resource` | 1.0 | 1.0 | tie |
+| `grid-dispatch-operator` | `script_and_resource` | 0.0 | 1.0 | LibrarySkill win |
+| `citation-check` | `script_and_resource` | 1.0 | 1.0 | tie |
+| `court-form-filling` | `script_and_resource` | 0.0 | 1.0 | LibrarySkill win |
+| `threejs-structure-parser` | `script_and_resource` | 1.0 | 1.0 | tie |
+
+Current result:
+- TextSkill scoreable aggregate: 8/16.
+- LibrarySkill scoreable aggregate on the same sample: 11/17.
+- On the 15 tasks scoreable in both conditions: 4 LibrarySkill wins, 1
+  TextSkill win, 10 ties.
+- Inconclusive condition-specific tasks:
+  - TextSkill `energy-unit-commitment`: interrupted after stalled log.
+  - TextSkill `civ6-adjacency-optimizer`: interrupted after stalled log.
+  - LibrarySkill `quantum-numerical-simulation`: interrupted after stalled log.
+
+Interpretation:
+- On this frozen heldout sample, LibrarySkill is not merely preserving TextSkill
+  behavior; it outperformed TextSkill on scoreable paired tasks.
+- This is still a single-run smoke sample, not a final statistical claim. The
+  next fair step is either rerunning inconclusive tasks or running `no_skill`
+  on the same sample so we can separate skill lift from base task difficulty.
