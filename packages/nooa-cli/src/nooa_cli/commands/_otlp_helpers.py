@@ -52,15 +52,28 @@ def _viewer_headers(headers: dict[str, str]) -> dict[str, str]:
 
 def inject_resource_attrs(
     body: dict,
-    attrs: dict[str, str | bool | int],
+    attrs: dict[str, str | bool | int | float],
     *,
     overwrite: bool = False,
+    overwrite_keys: set[str] | None = None,
 ) -> dict:
     """Inject additional resource attributes into an OTLP body.
 
-    Existing keys are preserved unless ``overwrite`` is true. Values are typed:
-    str → stringValue, bool → boolValue, int → intValue.
+    Existing keys are preserved unless ``overwrite`` is true or the key is in
+    ``overwrite_keys``. Values are typed: str → stringValue, bool →
+    boolValue, int → intValue, float → doubleValue.
     """
+    overwrite_keys = overwrite_keys or set()
+
+    def otlp_value(val: str | bool | int | float) -> dict:
+        if isinstance(val, bool):
+            return {"boolValue": val}
+        if isinstance(val, int):
+            return {"intValue": val}
+        if isinstance(val, float):
+            return {"doubleValue": val}
+        return {"stringValue": val}
+
     resource_spans = body.get("resourceSpans")
     if not isinstance(resource_spans, list):
         return body
@@ -80,17 +93,11 @@ def inject_resource_attrs(
             if isinstance(attribute, dict) and isinstance(attribute.get("key"), str)
         }
         for key, val in attrs.items():
-            if isinstance(val, bool):
-                otlp_val = {"boolValue": val}
-            elif isinstance(val, int):
-                otlp_val = {"intValue": val}
-            else:
-                otlp_val = {"stringValue": val}
             if key in existing_by_key:
-                if overwrite:
-                    existing_by_key[key]["value"] = otlp_val
+                if overwrite or key in overwrite_keys:
+                    existing_by_key[key]["value"] = otlp_value(val)
             else:
-                existing.append({"key": key, "value": otlp_val})
+                existing.append({"key": key, "value": otlp_value(val)})
     return body
 
 

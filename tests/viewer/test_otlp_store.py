@@ -6,6 +6,7 @@ Tests are isolated via tmp_path: each test gets its own SQLite file so
 there is no shared state between test functions.
 """
 
+import json
 import sqlite3
 
 import pytest
@@ -480,6 +481,38 @@ class TestIngestReIngest:
         store.ingest(_make_body(session_id="s1"))
         sessions = store.list_sessions()
         assert sessions[0]["span_count"] == 2
+
+    def test_deterministic_eval_span_is_refreshed_without_duplication(self):
+        def body(output: str, passed: bool | None) -> dict:
+            attributes = [
+                {"key": "eval.method", "value": {"stringValue": "harbor"}},
+                {"key": "eval.output", "value": {"stringValue": output}},
+            ]
+            if passed is not None:
+                attributes.append({"key": "eval.passed", "value": {"boolValue": passed}})
+            span = {
+                "traceId": "eval-trace",
+                "spanId": "eval-span",
+                "name": "eval",
+                "kind": 1,
+                "startTimeUnixNano": "1",
+                "endTimeUnixNano": "2",
+                "attributes": attributes,
+            }
+            return _make_body(session_id="s1", spans=[span])
+
+        first = store.ingest(body('{"version":1}', True))
+        second = store.ingest(body('{"version":2}', None))
+
+        assert first["span_count"] == 1
+        assert second["span_count"] == 0
+        session = store.list_sessions()[0]
+        assert session["span_count"] == 1
+        assert session["eval"]["passed"] is None
+        assert session["eval"]["output"] == {"version": 2}
+        spans = store.get_session_spans("s1")
+        assert len(spans) == 1
+        assert store.otlp_attrs_to_dict(spans[0]["attributes"])["eval.output"] == ('{"version":2}')
 
     def test_eval_metadata_merges(self):
         body1 = _make_body(eval_attrs={"eval.model": "claude"})
@@ -1022,6 +1055,53 @@ class TestStartupLockCheck:
 
 
 class TestExistingSessionEvalEnrichment:
+    def test_generic_harbor_verifier_fields_are_visible_in_session_and_trace(self):
+        from nooa_cli.commands import import_harbor
+
+        outcome = import_harbor.HarborVerifierOutcome(
+            result={
+                "status": "scored",
+                "levels_beaten": 3,
+                "rewards": {"progress": 0.3},
+                "details": {"api_calls": 18},
+            },
+            embedded_result=None,
+            reward=None,
+            reward_text=None,
+            score=0.3,
+            passed=False,
+            error=None,
+            source="verifier/result.json",
+        )
+        meta = {
+            "trial_name": "trial-1",
+            "task_name": "task-1",
+            "model_name": "model-1",
+            "agent_type": "",
+            "agent_name": "",
+            "source": "suite",
+            "harbor_eval": "suite",
+            "started_at": "2026-08-27T14:00:00Z",
+            "finished_at": "2026-08-27T14:05:00Z",
+            "score": 0.3,
+            "verifier": outcome,
+        }
+        resource_attrs = import_harbor._harbor_resource_attrs(meta, "experiment", "batch")
+        store.ingest(import_harbor._build_eval_only_body(resource_attrs, meta))
+
+        session = store.list_sessions(experiment="experiment", eval_only=True)[0]
+        assert session["eval"]["verifier.status"] == "scored"
+        assert session["eval"]["verifier.levels_beaten"] == 3
+        assert session["eval"]["verifier.rewards.progress"] == 0.3
+        assert session["eval"]["verifier.details.api_calls"] == 18
+        assert session["eval"]["output"] == outcome.result
+
+        spans = store.get_session_spans("trial-1")
+        assert len(spans) == 1
+        assert spans[0]["name"] == "eval"
+        span_attrs = store.otlp_attrs_to_dict(spans[0]["attributes"])
+        assert json.loads(span_attrs["eval.output"]) == outcome.result
+
     def test_existing_default_session_can_be_grouped_into_eval_experiment(self):
         store.ingest(_make_body(session_id="trial-1", experiment="default"))
 

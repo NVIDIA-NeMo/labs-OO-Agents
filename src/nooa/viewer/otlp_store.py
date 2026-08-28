@@ -598,10 +598,9 @@ def _ingest_one(body: dict, db: sqlite3.Connection) -> dict[str, Any]:
                     )
                 )
 
-    span_count = len(span_rows)
-    # Compute total payload size for the spans in this batch.
-    # Each span_row tuple has: ..., attributes(10), resource(11), events(12)
-    batch_size = sum(len(r[10]) + len(r[11]) + len(r[12]) for r in span_rows)
+    is_harbor_eval = eval_meta.get("method") == "harbor" and any(
+        row[4] == "eval" for row in span_rows
+    )
 
     existing = db.execute(
         """SELECT span_count, total_size, experiment, resource_attrs, eval_metadata
@@ -609,15 +608,66 @@ def _ingest_one(body: dict, db: sqlite3.Connection) -> dict[str, Any]:
         (session_id,),
     ).fetchone()
 
+    # Synthetic post-run eval spans use deterministic IDs. Reposting one should
+    # refresh its verifier details, not append another eval card to the trace.
+    # Other span kinds retain the existing append semantics used by streaming.
+    updated_eval_rows: list[tuple[tuple, int]] = []
+    updated_size_delta = 0
+    if existing and span_rows:
+        stored_eval_rows = db.execute(
+            """SELECT id, trace_id, span_id, attributes, resource, events
+               FROM spans WHERE session_id = ? AND name = 'eval'""",
+            (session_id,),
+        ).fetchall()
+        stored_by_identity = {
+            (row["trace_id"], row["span_id"]): row
+            for row in stored_eval_rows
+            if row["trace_id"] and row["span_id"]
+        }
+        new_rows: list[tuple] = []
+        for row in span_rows:
+            stored = (
+                stored_by_identity.get((row[1], row[2]))
+                if row[4] == "eval" and row[1] and row[2]
+                else None
+            )
+            if stored is None:
+                new_rows.append(row)
+                continue
+            old_size = sum(len(stored[key] or "") for key in ("attributes", "resource", "events"))
+            new_size = len(row[10]) + len(row[11]) + len(row[12])
+            updated_size_delta += new_size - old_size
+            updated_eval_rows.append((row, stored["id"]))
+        span_rows = new_rows
+
+    span_count = len(span_rows)
+    # Compute total payload size for newly inserted spans plus changes to
+    # deterministic eval spans refreshed above.
+    batch_size = sum(len(r[10]) + len(r[11]) + len(r[12]) for r in span_rows) + updated_size_delta
+
     if existing:
         new_count = existing["span_count"] + span_count
-        new_size = (existing["total_size"] or 0) + batch_size
+        new_size = max(0, (existing["total_size"] or 0) + batch_size)
         merged_meta = {}
         if existing["eval_metadata"]:
             try:
                 merged_meta = json.loads(existing["eval_metadata"])
             except (json.JSONDecodeError, TypeError):
                 pass
+        if is_harbor_eval:
+            replaceable_keys = {
+                "error",
+                "has_exception",
+                "output",
+                "score",
+                "verifier_source",
+                "weighted_score",
+            }
+            merged_meta = {
+                key: value
+                for key, value in merged_meta.items()
+                if key not in replaceable_keys and not key.startswith("verifier.")
+            }
         merged_meta.update(eval_meta)
 
         updates: dict[str, Any] = {
@@ -647,6 +697,22 @@ def _ingest_one(body: dict, db: sqlite3.Connection) -> dict[str, Any]:
                         existing_resource_attrs = json.loads(existing["resource_attrs"])
                     except (json.JSONDecodeError, TypeError):
                         pass
+                if is_harbor_eval:
+                    replaceable_resource_keys = {
+                        "eval.error",
+                        "eval.has_exception",
+                        "eval.output",
+                        "eval.passed",
+                        "eval.score",
+                        "eval.verifier_source",
+                        "eval.weighted_score",
+                    }
+                    existing_resource_attrs = {
+                        key: value
+                        for key, value in existing_resource_attrs.items()
+                        if key not in replaceable_resource_keys
+                        and not key.startswith("eval.verifier.")
+                    }
                 existing_resource_attrs.update(new_resource_attrs)
                 updates["resource_attrs"] = json.dumps(
                     existing_resource_attrs, separators=(",", ":")
@@ -654,6 +720,8 @@ def _ingest_one(body: dict, db: sqlite3.Connection) -> dict[str, Any]:
 
         if eval_passed is not None:
             updates["eval_passed"] = eval_passed
+        elif is_harbor_eval:
+            updates["eval_passed"] = None
         if merged_meta:
             updates["eval_metadata"] = json.dumps(merged_meta, separators=(",", ":"))
 
@@ -709,6 +777,20 @@ def _ingest_one(body: dict, db: sqlite3.Connection) -> dict[str, Any]:
             ),
         )
 
+    for row, row_id in updated_eval_rows:
+        db.execute(
+            """UPDATE spans SET
+               trace_id = ?, span_id = ?, parent_span_id = ?, name = ?, kind = ?,
+               start_time_ns = ?, end_time_ns = ?, status_code = ?, status_message = ?,
+               attributes = ?, resource = ?, events = ?
+               WHERE id = ?""",
+            (*row[1:], row_id),
+        )
+        db.execute(
+            "DELETE FROM spans_fts WHERE session_id = ? AND span_id = ?",
+            (row[0], row[2]),
+        )
+
     if span_rows:
         db.executemany(
             """INSERT INTO spans
@@ -719,9 +801,11 @@ def _ingest_one(body: dict, db: sqlite3.Connection) -> dict[str, Any]:
             span_rows,
         )
 
-        # Populate FTS index with searchable content from each span
+    # Populate or refresh FTS content for inserted and deterministic eval spans.
+    indexed_rows = span_rows + [row for row, _row_id in updated_eval_rows]
+    if indexed_rows:
         fts_rows = []
-        for row in span_rows:
+        for row in indexed_rows:
             # row: (session_id, trace_id, span_id, parent_span_id, name, kind,
             #        start_time_ns, end_time_ns, status_code, status_message,
             #        attributes, resource, events)

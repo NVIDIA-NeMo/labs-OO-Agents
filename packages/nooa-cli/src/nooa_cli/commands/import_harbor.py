@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Import NOOA OTLP or portable journal traces from Harbor into the viewer.
 
-Walks a Harbor job directory (or any directory containing one), finds all
-traces under ``artifacts/traces/*.jsonl``, enriches them with Harbor metadata
-(trial name, task name, reward score, experiment grouping), and posts them to
-the viewer.
+Walks a Harbor job directory (or any directory containing one), finds persisted
+trace JSONL files, enriches them with trial metadata and arbitrary verifier
+results, and posts them to the viewer. A synthetic ``eval`` span makes the
+verifier result visible in both experiment and trace detail views.
 
 Usage:
     nooa import-harbor ./jobs/my-job/
@@ -13,12 +13,17 @@ Usage:
     nooa import-harbor ./jobs/ --experiment my-eval --batch-id run-42
 """
 
+import hashlib
 import json
+import math
+import re
 import time
 import urllib.parse
 import urllib.request
-import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -36,67 +41,281 @@ from ._otlp_helpers import (
 
 NAME = "import-harbor"
 
+MAX_VERIFIER_FIELDS = 100
+MAX_VERIFIER_DEPTH = 4
+MAX_VERIFIER_SCALAR_CHARS = 1_000
+MAX_VERIFIER_OUTPUT_CHARS = 50_000
+
+OtlpScalar = str | bool | int | float
+
+
+@dataclass(frozen=True)
+class HarborVerifierOutcome:
+    """Benchmark-neutral data recovered from Harbor verifier artifacts."""
+
+    result: dict[str, Any] | None
+    embedded_result: dict[str, Any] | None
+    reward: dict[str, Any] | None
+    reward_text: str | None
+    score: float | None
+    passed: bool | None
+    error: str | None
+    source: str | None
+
+    def output(self) -> object | None:
+        """Return the complete verifier documents with their artifact provenance."""
+        if (
+            self.result is not None
+            and self.embedded_result is None
+            and self.reward is None
+            and self.reward_text is None
+            and self.error is None
+        ):
+            return self.result
+        if (
+            self.result is None
+            and self.embedded_result is None
+            and self.reward is not None
+            and self.reward_text is None
+            and self.error is None
+        ):
+            return self.reward
+
+        documents: dict[str, Any] = {}
+        if self.result is not None:
+            documents["result"] = self.result
+        if self.embedded_result is not None:
+            documents["embedded_result"] = self.embedded_result
+        if self.reward is not None:
+            documents["reward"] = self.reward
+        if self.reward_text is not None:
+            documents["reward_text"] = self.reward_text
+        if self.error is not None:
+            documents["harness_error"] = self.error
+        return documents or None
+
 
 def _find_harbor_traces(root: Path) -> list[Path]:
-    """Find all OTLP or portable journal trace files under Harbor artifacts.
+    """Find OTLP or portable journal traces under supported Harbor layouts.
 
-    Harbor copies the container's ``/logs/artifacts/`` to ``trial_dir/artifacts/``
-    on the host. The agent decides the layout within that directory — a common
-    convention is ``artifacts/traces/*.jsonl``, but we search the full subtree
-    to be robust to other layouts.
+    Older integrations wrote beneath ``trial_dir/artifacts``. Current Harbor
+    mounts ``/logs/agent`` at ``trial_dir/agent``, where Nooa writes ``traces``.
     """
-    return sorted(root.rglob("artifacts/**/*.jsonl"))
+    traces = set(root.rglob("artifacts/**/*.jsonl"))
+    # Current Harbor mounts /logs/agent directly at <trial>/agent, while older
+    # integrations copied /logs/artifacts to <trial>/artifacts.
+    traces.update(root.rglob("agent/traces/**/*.jsonl"))
+    return sorted(traces)
 
 
-def _read_json(path: Path) -> dict:
+def _read_json(path: Path) -> dict[str, Any]:
     """Read a JSON file, returning an empty dict on any failure."""
     try:
-        return json.loads(path.read_text())
+        value = json.loads(path.read_text())
     except Exception:
         return {}
+    return value if isinstance(value, dict) else {}
 
 
 def _coerce_float(value: object) -> float | None:
     """Coerce a value to float, returning None if it cannot be coerced."""
+    if isinstance(value, bool) or not isinstance(value, str | int | float):
+        return None
     try:
-        return float(value)  # type: ignore[arg-type]
+        number = float(value)
     except (TypeError, ValueError, OverflowError):
         return None
+    return number if math.isfinite(number) else None
 
 
-def _read_score(trial_dir: Path, trial_result: dict) -> float | None:
-    """Read the trial reward score, trying current Harbor result shapes in order.
+def _score_from_document(document: dict[str, Any] | None) -> float | None:
+    """Select a conventional score from an arbitrary verifier document."""
+    if not document:
+        return None
 
-    Different Harbor/BinPool versions write the scalar reward in different places.
-    Fallback order (first coercible float wins):
-
-    1. ``verifier/reward.json["score"]``
-    2. ``verifier/reward.json["reward"]``
-    3. ``result.json["verifier_result"]["rewards"]["score"]``
-    4. ``result.json["verifier_result"]["rewards"]["reward"]``
-    5. ``verifier/reward.txt`` (plain float string)
-
-    Explicit ``None`` checks (not truthiness) ensure a valid ``0.0`` is returned.
-    """
-    reward_json = _read_json(trial_dir / "verifier" / "reward.json")
     for key in ("score", "reward"):
-        score = _coerce_float(reward_json.get(key))
+        score = _coerce_float(document.get(key))
         if score is not None:
             return score
 
-    verifier_result = trial_result.get("verifier_result")
-    rewards = verifier_result.get("rewards") if isinstance(verifier_result, dict) else None
-    if isinstance(rewards, dict):
-        for key in ("score", "reward"):
-            score = _coerce_float(rewards.get(key))
-            if score is not None:
-                return score
+    rewards = document.get("rewards")
+    if not isinstance(rewards, dict):
+        return None
+    for key in ("score", "reward"):
+        score = _coerce_float(rewards.get(key))
+        if score is not None:
+            return score
 
-    reward_txt = trial_dir / "verifier" / "reward.txt"
-    if reward_txt.exists():
-        return _coerce_float(reward_txt.read_text().strip())
-
+    # Some validators give their single normalized metric a benchmark-specific
+    # name (for example "progress"). Counts and multiple metrics remain
+    # metadata rather than being guessed into the viewer's 0..1 score field.
+    numeric_rewards = [
+        score for value in rewards.values() if (score := _coerce_float(value)) is not None
+    ]
+    if len(numeric_rewards) == 1 and 0.0 <= numeric_rewards[0] <= 1.0:
+        return numeric_rewards[0]
     return None
+
+
+def _explicit_passed(*documents: dict[str, Any] | None) -> bool | None:
+    """Return the first explicit boolean pass result from verifier documents."""
+    for document in documents:
+        if document and isinstance(document.get("passed"), bool):
+            return document["passed"]
+    return None
+
+
+def _format_error(value: object) -> str | None:
+    if value in (None, "", {}):
+        return None
+    if isinstance(value, str):
+        return value[:MAX_VERIFIER_SCALAR_CHARS]
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)[
+            :MAX_VERIFIER_SCALAR_CHARS
+        ]
+    except (TypeError, ValueError):
+        return str(value)[:MAX_VERIFIER_SCALAR_CHARS]
+
+
+def _read_verifier_outcome(trial_dir: Path, trial_result: dict[str, Any]) -> HarborVerifierOutcome:
+    """Read Harbor verifier artifacts without assuming benchmark semantics."""
+    result_path = trial_dir / "verifier" / "result.json"
+    result = _read_json(result_path)
+    source: str | None = "verifier/result.json" if result else None
+
+    embedded = trial_result.get("verifier_result")
+    embedded_result = embedded if isinstance(embedded, dict) else None
+    if not result and embedded_result is not None:
+        result = embedded_result
+        embedded_result = None
+        source = "result.json:verifier_result"
+
+    reward = _read_json(trial_dir / "verifier" / "reward.json")
+    if source is None and reward:
+        source = "verifier/reward.json"
+    reward_text: str | None = None
+    reward_text_path = trial_dir / "verifier" / "reward.txt"
+    if reward_text_path.exists():
+        try:
+            reward_text = reward_text_path.read_text().strip()
+        except OSError:
+            reward_text = None
+    if source is None and reward_text is not None:
+        source = "verifier/reward.txt"
+
+    score = _score_from_document(reward)
+    if score is None:
+        score = _score_from_document(result)
+    if score is None and reward_text is not None:
+        score = _coerce_float(reward_text)
+
+    passed = _explicit_passed(result, reward)
+    if passed is None and score is not None and 0.0 <= score <= 1.0:
+        # Preserve Harbor's established 0/1 reward convention. Scores outside
+        # the normalized range are never assigned a guessed pass threshold.
+        passed = score >= 1.0
+
+    error = _format_error(
+        trial_result.get("exception_info")
+        or trial_result.get("error")
+        or trial_result.get("exception")
+    )
+
+    return HarborVerifierOutcome(
+        result=result or None,
+        embedded_result=embedded_result,
+        reward=reward or None,
+        reward_text=reward_text,
+        score=score,
+        passed=passed,
+        error=error,
+        source=source,
+    )
+
+
+def _read_score(trial_dir: Path, trial_result: dict) -> float | None:
+    """Compatibility wrapper returning the generic verifier outcome's score."""
+    return _read_verifier_outcome(trial_dir, trial_result).score
+
+
+def _attribute_segment(value: object) -> str:
+    """Make one arbitrary JSON key safe and readable in an OTLP attribute path."""
+    segment = re.sub(r"[^A-Za-z0-9_-]+", "_", str(value)).strip("_")[:80]
+    return segment or "field"
+
+
+def _flatten_verifier_fields(outcome: HarborVerifierOutcome) -> dict[str, OtlpScalar]:
+    """Flatten bounded scalar verifier leaves for dynamic experiment columns."""
+    flattened: dict[str, OtlpScalar] = {}
+
+    def walk(value: object, prefix: str, depth: int) -> None:
+        if len(flattened) >= MAX_VERIFIER_FIELDS:
+            return
+        if isinstance(value, bool):
+            flattened[prefix] = value
+        elif isinstance(value, int):
+            flattened[prefix] = value
+        elif isinstance(value, float) and math.isfinite(value):
+            flattened[prefix] = value
+        elif isinstance(value, str):
+            flattened[prefix] = value[:MAX_VERIFIER_SCALAR_CHARS]
+        elif isinstance(value, dict) and depth < MAX_VERIFIER_DEPTH:
+            for key in sorted(value, key=str):
+                walk(value[key], f"{prefix}.{_attribute_segment(key)}", depth + 1)
+
+    if outcome.result is not None:
+        walk(outcome.result, "eval.verifier", 0)
+    if outcome.reward is not None:
+        reward_prefix = "eval.verifier.reward_artifact" if outcome.result else "eval.verifier"
+        walk(outcome.reward, reward_prefix, 0)
+    if outcome.reward_text is not None:
+        flattened.setdefault(
+            "eval.verifier.reward_text", outcome.reward_text[:MAX_VERIFIER_SCALAR_CHARS]
+        )
+    if outcome.source:
+        flattened["eval.verifier_source"] = outcome.source
+    return flattened
+
+
+def _serialize_verifier_output(outcome: HarborVerifierOutcome) -> str | None:
+    """Serialize complete verifier artifacts into one bounded, valid JSON attribute."""
+    output = outcome.output()
+    if output is None:
+        return None
+    serialized = json.dumps(output, ensure_ascii=False, sort_keys=True, default=str)
+    if len(serialized) <= MAX_VERIFIER_OUTPUT_CHARS:
+        return serialized
+    return json.dumps(
+        {
+            "_truncated": True,
+            "original_chars": len(serialized),
+            # Leave ample headroom for JSON escaping inside the preview string.
+            "preview": serialized[: MAX_VERIFIER_OUTPUT_CHARS // 8],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _trial_dir_for_trace(jsonl_path: Path) -> Path:
+    """Resolve a trace file to its Harbor trial across supported host layouts."""
+    for parent in jsonl_path.parents:
+        if parent.name in {"artifacts", "agent"}:
+            return parent.parent
+    return jsonl_path.parent
+
+
+def _datetime_ns(value: object, fallback: int) -> int:
+    if not isinstance(value, str) or not value:
+        return fallback
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return fallback
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return max(0, int(parsed.timestamp() * 1_000_000_000))
 
 
 def _trial_meta(jsonl_path: Path) -> dict:
@@ -109,18 +328,12 @@ def _trial_meta(jsonl_path: Path) -> dict:
             <trial_name>/
                 result.json          ← trial_name, task_name, agent_info
                 verifier/
-                    reward.json      ← {"reward"|"score": <float>}  (or reward.txt)
-                artifacts/           ← copy of /logs/artifacts/ from container
-                    [traces/]        ← agent-defined layout; traces can be here
-                        <file>.jsonl ← this file
+                    result.json      ← arbitrary benchmark verifier result
+                    reward.json      ← optional scalar reward (or reward.txt)
+                artifacts/...        ← legacy trace layout
+                agent/traces/...     ← current persisted trace layout
     """
-    # Walk up from the JSONL file to find the 'artifacts' directory;
-    # trial_dir is its parent (works regardless of depth under artifacts/).
-    trial_dir = jsonl_path.parent
-    for parent in jsonl_path.parents:
-        if parent.name == "artifacts":
-            trial_dir = parent.parent
-            break
+    trial_dir = _trial_dir_for_trace(jsonl_path)
     job_dir = trial_dir.parent
 
     trial_result = _read_json(trial_dir / "result.json")
@@ -128,12 +341,15 @@ def _trial_meta(jsonl_path: Path) -> dict:
 
     trial_name = trial_result.get("trial_name") or trial_dir.name
     task_name = trial_result.get("task_name", "")
-    config = trial_result.get("config") if isinstance(trial_result.get("config"), dict) else {}
-    agent_config = config.get("agent") if isinstance(config.get("agent"), dict) else {}
-    task_config = config.get("task") if isinstance(config.get("task"), dict) else {}
-    agent_name = (trial_result.get("agent_info") or {}).get("name", "") or agent_config.get(
-        "name", ""
-    )
+    config_value = trial_result.get("config")
+    config: dict[str, Any] = config_value if isinstance(config_value, dict) else {}
+    agent_value = config.get("agent")
+    agent_config: dict[str, Any] = agent_value if isinstance(agent_value, dict) else {}
+    task_value = config.get("task")
+    task_config: dict[str, Any] = task_value if isinstance(task_value, dict) else {}
+    agent_info_value = trial_result.get("agent_info")
+    agent_info: dict[str, Any] = agent_info_value if isinstance(agent_info_value, dict) else {}
+    agent_name = agent_info.get("name", "") or agent_config.get("name", "")
     model_name = agent_config.get("model_name", "")
     agent_type = ""
     kwargs = agent_config.get("kwargs") if isinstance(agent_config.get("kwargs"), dict) else {}
@@ -141,8 +357,7 @@ def _trial_meta(jsonl_path: Path) -> dict:
         agent_type = str(kwargs.get("agent_type") or "")
     source = trial_result.get("source") or task_config.get("source") or ""
 
-    # Reward scalar lives in different places across Harbor versions; see _read_score.
-    score = _read_score(trial_dir, trial_result)
+    verifier = _read_verifier_outcome(trial_dir, trial_result)
 
     # Keep the Harbor eval key as metadata, but group viewer Evaluations by
     # Harbor job by default. The eval key is usually broad (for example,
@@ -162,16 +377,17 @@ def _trial_meta(jsonl_path: Path) -> dict:
         "source": source,
         "started_at": trial_result.get("started_at", ""),
         "finished_at": trial_result.get("finished_at", ""),
-        "score": score,
+        "score": verifier.score,
+        "verifier": verifier,
         "harbor_eval": harbor_eval,
         "experiment": job_dir.name or harbor_eval or "harbor",
         "job_name": job_dir.name,
     }
 
 
-def _harbor_resource_attrs(meta: dict, experiment: str, batch_id: str) -> dict[str, str | bool]:
+def _harbor_resource_attrs(meta: dict, experiment: str, batch_id: str) -> dict[str, OtlpScalar]:
     """Build viewer resource attrs that make a Harbor trial appear as an eval row."""
-    attrs: dict[str, str | bool] = {
+    attrs: dict[str, OtlpScalar] = {
         "session.id": meta["trial_name"],
         "experiment": experiment,
         "batch_id": batch_id,
@@ -193,12 +409,35 @@ def _harbor_resource_attrs(meta: dict, experiment: str, batch_id: str) -> dict[s
         attrs["eval.suite_name"] = str(meta["source"])
     if meta.get("harbor_eval"):
         attrs["eval.harbor_eval"] = str(meta["harbor_eval"])
-    if meta.get("score") is not None:
-        score = meta["score"]
-        attrs["eval.score"] = str(score)
-        attrs["eval.weighted_score"] = str(score)
-        attrs["eval.passed"] = score >= 1.0
+
+    verifier = meta.get("verifier")
+    if isinstance(verifier, HarborVerifierOutcome):
+        attrs.update(_flatten_verifier_fields(verifier))
+        attrs["eval.has_exception"] = verifier.error is not None
+        if verifier.error is not None:
+            attrs["eval.error"] = verifier.error
+        if verifier.score is not None:
+            attrs["eval.score"] = verifier.score
+            attrs["eval.weighted_score"] = verifier.score
+        if verifier.passed is not None:
+            attrs["eval.passed"] = verifier.passed
+    elif meta.get("score") is not None:
+        # Compatibility for callers constructing metadata directly.
+        score = float(meta["score"])
+        attrs["eval.score"] = score
+        attrs["eval.weighted_score"] = score
+        if 0.0 <= score <= 1.0:
+            attrs["eval.passed"] = score >= 1.0
     return attrs
+
+
+def _trace_resource_attrs(resource_attrs: dict[str, OtlpScalar]) -> dict[str, OtlpScalar]:
+    """Keep large verifier detail on the single eval span, not every trace envelope."""
+    return {
+        key: value
+        for key, value in resource_attrs.items()
+        if not key.startswith("eval.verifier") and key not in {"eval.error", "eval.has_exception"}
+    }
 
 
 def _find_matching_live_session(endpoint: str, meta: dict, experiment: str) -> str | None:
@@ -233,25 +472,62 @@ def _find_matching_live_session(endpoint: str, meta: dict, experiment: str) -> s
     return request_match("default") or request_match(experiment)
 
 
-def _build_eval_only_body(resource_attrs: dict[str, str | bool]) -> dict:
-    """Build a minimal OTLP payload that enriches/creates one viewer eval session."""
+def _build_eval_only_body(
+    resource_attrs: dict[str, OtlpScalar], meta: dict[str, Any] | None = None
+) -> dict:
+    """Build a deterministic OTLP eval span for regular or eval-only imports."""
     now_ns = time.time_ns()
-    passed = bool(resource_attrs.get("eval.passed", False))
-    score = resource_attrs.get("eval.score")
-    span_attrs: list[dict] = [{"key": "eval.passed", "value": {"boolValue": passed}}]
-    if score is not None:
-        try:
-            span_attrs.append({"key": "eval.score", "value": {"doubleValue": float(score)}})
-            span_attrs.append(
-                {"key": "eval.weighted_score", "value": {"doubleValue": float(score)}}
-            )
-        except (TypeError, ValueError):
-            span_attrs.append({"key": "eval.score", "value": {"stringValue": str(score)}})
+    start_ns = _datetime_ns(meta.get("started_at") if meta else None, now_ns)
+    end_ns = _datetime_ns(meta.get("finished_at") if meta else None, start_ns)
+    end_ns = max(start_ns, end_ns)
 
-    def value(v: str | bool) -> dict:
+    def value(v: OtlpScalar) -> dict:
         if isinstance(v, bool):
             return {"boolValue": v}
+        if isinstance(v, int):
+            return {"intValue": str(v)}
+        if isinstance(v, float):
+            return {"doubleValue": v}
         return {"stringValue": str(v)}
+
+    span_attrs: list[dict[str, Any]] = []
+    for key in (
+        "eval.test_id",
+        "eval.test_name",
+        "eval.display_name",
+        "eval.method",
+        "eval.model",
+        "eval.agent_class",
+        "eval.score",
+        "eval.weighted_score",
+        "eval.passed",
+        "eval.error",
+        "eval.has_exception",
+    ):
+        if key in resource_attrs:
+            span_attrs.append({"key": key, "value": value(resource_attrs[key])})
+
+    verifier = meta.get("verifier") if meta else None
+    serialized_output = (
+        _serialize_verifier_output(verifier)
+        if isinstance(verifier, HarborVerifierOutcome)
+        else None
+    )
+    if serialized_output is not None:
+        span_attrs.append({"key": "eval.output", "value": {"stringValue": serialized_output}})
+
+    trial_name = str(resource_attrs.get("eval.harbor_trial_name") or resource_attrs["session.id"])
+    digest = hashlib.sha256(
+        "\0".join(
+            (
+                str(resource_attrs.get("experiment", "")),
+                str(resource_attrs.get("batch_id", "")),
+                trial_name,
+                "harbor-eval-v1",
+            )
+        ).encode()
+    ).hexdigest()
+    error = verifier.error if isinstance(verifier, HarborVerifierOutcome) else None
 
     return {
         "resourceSpans": [
@@ -266,14 +542,14 @@ def _build_eval_only_body(resource_attrs: dict[str, str | bool]) -> dict:
                         "scope": {"name": "harbor-import"},
                         "spans": [
                             {
-                                "traceId": uuid.uuid4().hex,
-                                "spanId": uuid.uuid4().hex[:16],
+                                "traceId": digest[:32],
+                                "spanId": digest[32:48],
                                 "name": "eval",
                                 "kind": 1,
-                                "startTimeUnixNano": str(now_ns),
-                                "endTimeUnixNano": str(now_ns),
+                                "startTimeUnixNano": str(start_ns),
+                                "endTimeUnixNano": str(end_ns),
                                 "attributes": span_attrs,
-                                "status": {"code": 1 if passed else 2, "message": ""},
+                                "status": {"code": 2 if error else 1, "message": error or ""},
                             }
                         ],
                     }
@@ -310,7 +586,7 @@ def _trial_meta_from_dir(trial_dir: Path) -> dict:
 def _import_trace_file(
     endpoint: str,
     jsonl_path: Path,
-    resource_attrs: dict[str, str | bool | int],
+    resource_attrs: dict[str, OtlpScalar],
     batch_lines: int,
     batch_bytes: int,
 ) -> tuple[bool, list[str]]:
@@ -359,7 +635,11 @@ def _import_trace_file(
             if "resourceSpans" not in body:
                 continue
 
-            inject_resource_attrs(body, resource_attrs)
+            inject_resource_attrs(
+                body,
+                resource_attrs,
+                overwrite_keys={"session.id", "experiment", "batch_id"},
+            )
             batch.append(body)
             # Approximation: raw line length before injection; the re-serialized
             # POST body (with injected resource attrs) is slightly larger.
@@ -451,6 +731,7 @@ def command(
         raise SystemExit(1)
 
     imported = 0
+    enriched = 0
     skipped = 0
     already_exist = 0
     errors = []
@@ -470,7 +751,7 @@ def command(
             matched_session_id = _find_matching_live_session(endpoint, meta, exp)
             if matched_session_id:
                 resource_attrs["session.id"] = matched_session_id
-            body = _build_eval_only_body(resource_attrs)
+            body = _build_eval_only_body(resource_attrs, meta)
             if post_traces_batch(endpoint, [body]):
                 imported += 1
                 score_str = f"{meta['score']:.3f}" if meta["score"] is not None else "n/a"
@@ -484,38 +765,69 @@ def command(
     else:
         if not files:
             click.echo(f"No Harbor trace files found under {path}")
-            click.echo("Expected: <job>/<trial>/artifacts/traces/*.jsonl")
+            click.echo("Expected: <job>/<trial>/{artifacts/**,agent/traces/**}/*.jsonl")
             click.echo("Tip: use --eval-only to group Harbor result metadata without trace files")
             raise SystemExit(1)
 
-        click.echo(f"Found {len(files)} trace file(s)...")
-
+        files_by_trial: dict[Path, list[Path]] = {}
         for jsonl_path in files:
-            meta = _trial_meta(jsonl_path)
+            files_by_trial.setdefault(_trial_dir_for_trace(jsonl_path), []).append(jsonl_path)
+        click.echo(
+            f"Found {len(files)} trace file(s) across {len(files_by_trial)} Harbor trial(s)..."
+        )
+
+        for _trial_dir, trial_files in sorted(files_by_trial.items()):
+            meta = _trial_meta(trial_files[0])
             session_id = meta["trial_name"]
             exp = experiment or meta["experiment"]
             bid = batch_id or meta["job_name"]
-
-            if session_exists(endpoint, session_id):
-                click.echo(f"  ! {session_id}: already exists, skipping")
-                already_exist += 1
-                continue
-
             resource_attrs = _harbor_resource_attrs(meta, exp, bid)
 
-            file_imported, file_errors = _import_trace_file(
-                endpoint, jsonl_path, resource_attrs, batch_lines, batch_bytes
-            )
-            errors.extend(file_errors)
+            matched_session_id = _find_matching_live_session(endpoint, meta, exp)
+            target_session_id = matched_session_id or session_id
+            resource_attrs["session.id"] = target_session_id
 
-            if file_imported:
+            exists = session_exists(endpoint, target_session_id)
+            trace_imported = False
+            if exists:
+                already_exist += 1
+            else:
+                trace_resource_attrs = _trace_resource_attrs(resource_attrs)
+                for jsonl_path in trial_files:
+                    file_imported, file_errors = _import_trace_file(
+                        endpoint,
+                        jsonl_path,
+                        trace_resource_attrs,
+                        batch_lines,
+                        batch_bytes,
+                    )
+                    trace_imported = trace_imported or file_imported
+                    errors.extend(file_errors)
+
+            eval_imported = post_traces_batch(
+                endpoint, [_build_eval_only_body(resource_attrs, meta)]
+            )
+            if not eval_imported:
+                errors.append(f"{session_id}: failed to post eval metadata")
+
+            if exists and eval_imported:
+                enriched += 1
+                match_str = f" -> {target_session_id}" if matched_session_id else ""
+                click.echo(f"  ~ {session_id}{match_str}: evaluation metadata enriched")
+            elif trace_imported:
                 imported += 1
                 score_str = f"{meta['score']:.3f}" if meta["score"] is not None else "n/a"
-                click.echo(f"  + {session_id}  score={score_str}  task={meta['task_name']}")
+                match_str = f" -> {target_session_id}" if matched_session_id else ""
+                click.echo(
+                    f"  + {session_id}{match_str}  score={score_str}  task={meta['task_name']}"
+                )
             else:
                 skipped += 1
 
-    click.echo(f"\n{imported} imported, {skipped} skipped, {already_exist} already existed")
+    click.echo(
+        f"\n{imported} imported, {enriched} enriched, {skipped} skipped, "
+        f"{already_exist} already existed"
+    )
     if errors:
         for err in errors[:10]:
             click.echo(f"  ! {err}")
