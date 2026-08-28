@@ -8,7 +8,7 @@ Tests the dict-like ContextApi API and integration with Agent.
 import pytest
 
 from nooa.agent import Agent
-from nooa.context_blocks import DynamicContext
+from nooa.context_blocks import DynamicContext, LiteralContextBlock
 from nooa.unifiedllm import FakeLLMClient
 
 
@@ -315,7 +315,7 @@ class TestContextManager:
 
         agent = TestAgent()
         # Directly inject a block into _blocks AND mark as protected
-        agent.context_manager._blocks["guarded"] = "value"
+        agent.context_manager._blocks["guarded"] = LiteralContextBlock(key="guarded", value="value")
         agent.context_manager.protected_keys.add("guarded")
         with pytest.raises(ProtectedBlockError):
             agent.context_manager.pop("guarded")
