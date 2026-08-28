@@ -609,6 +609,7 @@ class Session:
             config=self.config,
             display_mode=resolve_display_mode(self.config.tui),
             submission_guard=self._llm_submission_error,
+            defer_submission=self._llm_submission_pending,
         )
         app_ref.append(self._app)
 
@@ -921,6 +922,10 @@ class Session:
                     startup_info.llm_ready = True
                     startup_info.llm_status = "ready"
                 self._set_llm_probe_status("")
+                app = getattr(self, "_app", None)
+                release = getattr(app, "release_deferred_messages", None)
+                if callable(release):
+                    release()
                 self._invalidate_app()
                 return
 
@@ -933,6 +938,10 @@ class Session:
                 startup_info.llm_ready = not result.blocking
                 startup_info.llm_status = "unavailable" if result.blocking else "ready"
             self._set_llm_probe_status("")
+            app = getattr(self, "_app", None)
+            reject = getattr(app, "reject_deferred_messages", None)
+            if callable(reject):
+                reject(self._llm_submission_error() or result.error_message or "Message rejected.")
             self._invalidate_app()
 
             level = "error" if result.blocking else "warning"
@@ -1331,25 +1340,22 @@ class Session:
             ),
         )
 
+    def _llm_submission_pending(self) -> bool:
+        """Return whether plain prompts should wait for the startup LLM probe."""
+        health = getattr(self.registry, "blocking_llm_health", None)
+        return bool(
+            health is not None
+            and getattr(health, "blocking", False) is True
+            and getattr(health, "pending", False) is True
+        )
+
     def _llm_submission_error(self) -> str | None:
-        """Explain why agent-bound input is disabled while LLM config is broken."""
+        """Explain why agent-bound input is disabled after LLM validation fails."""
         health = getattr(self.registry, "blocking_llm_health", None)
         if health is None or getattr(health, "blocking", False) is not True:
             return None
         if getattr(health, "pending", False) is True:
-            lines = [
-                "Cannot send this message because the configured LLM is still being checked.",
-            ]
-            if health.error_message:
-                lines.append(health.error_message)
-            lines.extend(
-                (
-                    "",
-                    "Slash commands and !shell commands still work.",
-                    "Prompts will be enabled automatically if the check succeeds.",
-                )
-            )
-            return "\n".join(lines)
+            return None
         lines = [
             "Cannot send this message because the configured LLM is unavailable.",
         ]
