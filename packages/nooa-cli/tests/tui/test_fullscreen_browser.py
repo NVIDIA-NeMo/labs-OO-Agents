@@ -211,3 +211,70 @@ async def test_remaining_explorers_are_wrapped_in_shared_fullscreen_browser(kind
 
         await harness.press("c-c")
         await asyncio.wait_for(opened, timeout=1)
+
+
+def test_explorer_browser_list_text_replaces_newlines_in_summary() -> None:
+    """Newlines in row summaries are replaced with spaces to prevent rendering corruption."""
+
+    class _MultiLineRow:
+        search_text = "line1\nline2"
+        title = "Multi-line Item"
+        tag = "1"
+
+    browser = _browser()
+    browser.model.rows.clear()
+    browser.model.rows.append(_MultiLineRow())
+    browser.view.format_row = lambda row, w: f"{row.tag} {row.title}"
+    browser.model.set_query("")
+    browser.list_control.viewport = (80, 4)
+
+    fragments = browser.list_text(80, 4)
+    joined = "".join(text for _style, text in fragments)
+
+    assert "\n" not in joined
+    assert "Multi-line Item" in joined
+
+
+def test_explorer_browser_has_separator_under_title() -> None:
+    """The browser layout includes separator lines under the title and list header."""
+    import inspect
+
+    from nooa_cli.tui.fullscreen_browser import build_fullscreen_browser
+
+    source = inspect.getsource(build_fullscreen_browser)
+    # Separators: after title, after list header, after preview header
+    assert source.count("separator()") >= 3
+
+
+def test_explorer_browser_handle_key_scroll_down_scrolls_list() -> None:
+    """scroll_down action routes to the active pane via handle_key."""
+    browser = _browser()
+    browser.model.rows.extend(
+        MagicMock(search_text=f"item {i}", title=f"Item {i}") for i in range(10)
+    )
+    browser.model.set_query("")
+    browser.list_control.viewport = (80, 4)
+    browser.active_control = "list"
+
+    browser.handle_key("scroll_down")
+
+    assert browser.list_offset > 0
+    assert browser.model.cursor == 0  # selection doesn't move
+
+
+def test_explorer_browser_handle_key_scroll_up_detail() -> None:
+    """scroll_up in the detail pane scrolls detail, not the list."""
+    browser = _browser()
+    browser.model.rows.extend(
+        MagicMock(search_text=f"item {i}", title=f"Item {i}") for i in range(3)
+    )
+    browser.model.set_query("")
+    browser.list_control.viewport = (80, 4)
+    browser.preview_control.viewport = (80, 4)
+    browser.active_control = "preview"
+    browser.model._last_detail_line_count = 20
+    browser.model.detail_offset = 10
+
+    browser.handle_key("scroll_up")
+
+    assert browser.model.detail_offset < 10
