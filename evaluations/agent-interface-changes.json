@@ -1,0 +1,325 @@
+{
+  "schema_version": 1,
+  "signal_catalog": "nooa_bench.behavior_analyzer:SIGNAL_DESCRIPTIONS",
+  "changes": [
+    {
+      "id": "event-summary-readable-collapse",
+      "status": "implemented",
+      "component": "event history",
+      "hypothesis": "Readable collapse labels and drill-down hints improve history recovery without corrupting tool pairing.",
+      "deterministic_checks": [
+        "tests/context_blocks/test_formatters.py summary rendering and tool pairing"
+      ],
+      "trace_expectations": [
+        {
+          "signal": "execution_error_rate",
+          "direction": "non_increasing"
+        }
+      ],
+      "benchmark_slices": [
+        "long-context",
+        "compaction"
+      ]
+    },
+    {
+      "id": "suppress-redundant-controller-context",
+      "status": "implemented",
+      "component": "controller prompt",
+      "hypothesis": "Suppressing generic state/execution/context-usage blocks reduces prompt noise while preserving tool-directed behavior.",
+      "deterministic_checks": [
+        "tests/runtime/test_context_builder.py suppression and cache-boundary tests"
+      ],
+      "trace_expectations": [
+        {
+          "signal": "self_reference_rate",
+          "direction": "non_decreasing"
+        },
+        {
+          "signal": "completion_rate",
+          "direction": "non_decreasing"
+        }
+      ],
+      "benchmark_slices": [
+        "all"
+      ]
+    },
+    {
+      "id": "hide-framework-expr-metadata",
+      "status": "implemented",
+      "component": "context rendering",
+      "hypothesis": "Only user-authored dynamic expressions should expose expr metadata; framework internals should remain readable.",
+      "deterministic_checks": [
+        "tests/context_blocks/test_formatters.py expression metadata tests"
+      ],
+      "trace_expectations": [
+        {
+          "signal": "execution_error_rate",
+          "direction": "non_increasing"
+        }
+      ],
+      "benchmark_slices": [
+        "interface-discovery"
+      ]
+    },
+    {
+      "id": "deduplicate-worker-todo-docs",
+      "status": "implemented",
+      "component": "worker prompt",
+      "hypothesis": "Removing duplicate TodoManager docs saves context without reducing structured task-state use.",
+      "deterministic_checks": [
+        "packages/nooa-cli/tests/tui/test_experimental_agent.py capability-size and discovery tests"
+      ],
+      "trace_expectations": [
+        {
+          "signal": "todo_state_uses",
+          "direction": "non_decreasing"
+        },
+        {
+          "signal": "todo_comments",
+          "direction": "non_decreasing"
+        }
+      ],
+      "benchmark_slices": [
+        "delegated-multistep"
+      ]
+    },
+    {
+      "id": "bounded-generic-execution-context",
+      "status": "implemented",
+      "component": "CodeAct execution context",
+      "hypothesis": "An 8000-character deterministic capability listing preserves discovery while preventing unbounded prompt growth.",
+      "deterministic_checks": [
+        "tests/strategies/test_execution_context_leaks.py aggregate-cap and namespace tests"
+      ],
+      "trace_expectations": [
+        {
+          "signal": "self_reference_rate",
+          "direction": "non_decreasing"
+        },
+        {
+          "signal": "execution_error_rate",
+          "direction": "non_increasing"
+        }
+      ],
+      "benchmark_slices": [
+        "large-agent-surface",
+        "all"
+      ]
+    },
+    {
+      "id": "bounded-experimental-capabilities",
+      "status": "implemented",
+      "component": "experimental python context",
+      "hypothesis": "Capping displayed modules and separating static imports from live locals reduces noise without hiding discoverability paths.",
+      "deterministic_checks": [
+        "tests/strategies/test_codeact_experimental.py compact-capability tests"
+      ],
+      "trace_expectations": [
+        {
+          "signal": "self_reference_rate",
+          "direction": "non_decreasing"
+        },
+        {
+          "signal": "execution_error_rate",
+          "direction": "non_increasing"
+        }
+      ],
+      "benchmark_slices": [
+        "large-agent-surface"
+      ]
+    },
+    {
+      "id": "safe-default-state-selection",
+      "status": "implemented",
+      "component": "generic state context",
+      "hypothesis": "An aggregate-bounded state display should prevent oversized prompts while retaining visible user state; nosnapshot must remain distinct from hidden.",
+      "deterministic_checks": [
+        "tests/utils/test_doc_utility.py aggregate prompt-state cap and unchanged small-state rendering",
+        "tests/utils/test_doc_utility.py nosnapshot/hidden marker independence",
+        "tests/runtime/test_context_integration.py explicit protected-block suppression"
+      ],
+      "trace_expectations": [
+        {
+          "signal": "persistent_state_uses",
+          "direction": "non_decreasing"
+        },
+        {
+          "signal": "execution_error_rate",
+          "direction": "non_increasing"
+        }
+      ],
+      "benchmark_slices": [
+        "large-state",
+        "persistent-state"
+      ]
+    },
+    {
+      "id": "compact-stateful-shell-state",
+      "status": "implemented",
+      "component": "tool state",
+      "hypothesis": "Compact shell cwd and repository root/session state let models orient after directory changes without exposing session internals.",
+      "deterministic_checks": [
+        "packages/nooa-bench/tests/test_bench_agent.py compact state tracks shell cwd and omits session internals"
+      ],
+      "trace_expectations": [
+        {
+          "signal": "shell_commands",
+          "direction": "non_decreasing"
+        },
+        {
+          "signal": "execution_error_rate",
+          "direction": "non_increasing"
+        }
+      ],
+      "benchmark_slices": [
+        "multi-directory",
+        "repository-navigation"
+      ]
+    },
+    {
+      "id": "clarify-python-shell-cwd-boundary",
+      "status": "implemented",
+      "component": "python cell state",
+      "hypothesis": "Explicitly distinguishing the persistent shell cwd from the host Python process cwd reduces misplaced relative Python file operations after shell cd.",
+      "deterministic_checks": [
+        "packages/nooa-cli/tests/tui/test_experimental_agent.py rendered prompt names self.shell-only cwd boundary",
+        "tests/strategies/test_codeact_experimental.py fallback cwd is explicitly informational"
+      ],
+      "trace_expectations": [
+        {
+          "signal": "execution_error_rate",
+          "direction": "non_increasing"
+        },
+        {
+          "signal": "shell_commands",
+          "direction": "non_decreasing"
+        }
+      ],
+      "benchmark_slices": [
+        "multi-directory",
+        "file-editing"
+      ]
+    },
+    {
+      "id": "argv-safe-shell-execution",
+      "status": "implemented",
+      "component": "shell tool",
+      "hypothesis": "Accepting argv sequences on the familiar run/run_stream methods reduces quoting and shell-injection mistakes while preserving persistent cwd and environment state.",
+      "deterministic_checks": [
+        "tests/tools/test_shell_tools_modern_behavior.py literal metacharacters, validation, persistence, and streaming",
+        "packages/nooa-cli/tests/test_coding_activity.py telemetry records normalized command"
+      ],
+      "trace_expectations": [
+        {
+          "signal": "shell_argv_commands",
+          "direction": "increase"
+        },
+        {
+          "signal": "execution_error_rate",
+          "direction": "decrease"
+        }
+      ],
+      "benchmark_slices": [
+        "argument-heavy-shell",
+        "paths-with-spaces",
+        "untrusted-input"
+      ]
+    },
+    {
+      "id": "structured-restricted-code-errors",
+      "status": "implemented",
+      "component": "code validation feedback",
+      "hypothesis": "Stable visible validator codes plus structured exception fields make restriction failures diagnosable and recovery measurable without adding traceback noise.",
+      "deterministic_checks": [
+        "tests/runtime/test_code_validator.py validates visible [E501], code, line_number, and fix_hint",
+        "tests/test_error_formatting.py preserves traceback-free validation errors"
+      ],
+      "trace_expectations": [
+        {
+          "signal": "restricted_code_errors",
+          "direction": "non_increasing"
+        },
+        {
+          "signal": "execution_error_rate",
+          "direction": "non_increasing"
+        }
+      ],
+      "benchmark_slices": [
+        "restricted-code-recovery",
+        "all"
+      ]
+    },
+    {
+      "id": "canonical-facades-and-structured-errors",
+      "status": "implemented",
+      "component": "coordination and validation feedback",
+      "hypothesis": "Canonical Todo ownership, capability-aware queue hints, and stable validator error codes reduce invalid API calls and improve recovery from rejected cells.",
+      "deterministic_checks": [
+        "tests/runtime/test_queue_status_cheat_sheet.py hides reader hints for host-owned channels",
+        "packages/nooa-cli/tests/test_coding_agent.py Todo skill owns todo_status",
+        "tests/runtime/test_code_validator.py exposes structured code/line/fix fields",
+        "packages/nooa-bench/tests/test_behavior_analyzer.py counts restriction errors and recovery"
+      ],
+      "trace_expectations": [
+        {
+          "signal": "restricted_code_errors",
+          "direction": "non_increasing"
+        },
+        {
+          "signal": "recovered_restricted_code_errors",
+          "direction": "increase"
+        },
+        {
+          "signal": "todo_state_uses",
+          "direction": "non_decreasing"
+        }
+      ],
+      "benchmark_slices": [
+        "restricted-code-recovery",
+        "delegated-multistep"
+      ]
+    },
+    {
+      "id": "structured-path-diagnostics",
+      "status": "implemented",
+      "component": "shell and repository tools",
+      "hypothesis": "Path errors that expose the requested path, resolved path, and actual resolution base reduce repeated wrong-directory operations.",
+      "deterministic_checks": [
+        "tests/tools/test_shell_tools_modern_behavior.py ShellTools read reports shell-cwd resolution",
+        "packages/nooa-cli/tests/test_repo_tools_diagnostics.py RepoTools returns repo-root diagnostic"
+      ],
+      "trace_expectations": [
+        {
+          "signal": "path_resolution_errors",
+          "direction": "decrease"
+        },
+        {
+          "signal": "execution_error_rate",
+          "direction": "non_increasing"
+        }
+      ],
+      "benchmark_slices": [
+        "multi-directory",
+        "missing-path-recovery"
+      ]
+    },
+    {
+      "id": "deterministic-interface-behavior-ledger",
+      "status": "implemented",
+      "component": "evaluation",
+      "hypothesis": "AST-derived trajectory signals make prompt/interface effects comparable across models and agent variants without an LLM judge.",
+      "deterministic_checks": [
+        "packages/nooa-bench/tests/test_behavior_analyzer.py end-to-end synthetic trajectory"
+      ],
+      "trace_expectations": [
+        {
+          "signal": "completion_rate",
+          "direction": "non_decreasing"
+        }
+      ],
+      "benchmark_slices": [
+        "all"
+      ]
+    }
+  ]
+}
