@@ -369,6 +369,127 @@ async def test_model_switch_clears_pending_startup_info(monkeypatch):
     command.frontend._app.invalidate.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_model_validation_exception_rejects_transferred_prompts(monkeypatch):
+    from nooa_cli.tui.commands import ModelCommand
+    from nooa_cli.tui.health_check import HealthCheckResult
+
+    candidate = SimpleNamespace(model="new/model")
+    agent = SimpleNamespace(llm=SimpleNamespace(model="old/model"))
+    registry = SimpleNamespace(
+        blocking_llm_health=HealthCheckResult(
+            ok=False,
+            error_message="Checking old model.",
+            blocking=True,
+            pending=True,
+        ),
+        startup_info=SimpleNamespace(llm_ready=False, llm_status="checking"),
+        llm_health_generation=0,
+    )
+    command = ModelCommand(
+        AsyncMock(),
+        SimpleNamespace(default_model="old/model"),
+        agent,
+        registry=registry,
+    )
+    command.frontend._app = SimpleNamespace(
+        set_llm_probe_status=Mock(),
+        reject_deferred_messages=Mock(),
+    )
+    monkeypatch.setattr("nooa_cli.tui.config.get_llm_for_model", lambda _model: candidate)
+    monkeypatch.setattr(
+        "nooa_cli.tui.health_check.probe_llm",
+        AsyncMock(side_effect=RuntimeError("validation crashed")),
+    )
+
+    result = await command.execute(["new/model"])
+
+    assert result.success is False
+    assert registry.llm_health_generation == 1
+    assert registry.blocking_llm_health.blocking is True
+    command.frontend._app.reject_deferred_messages.assert_called_once_with(
+        "Failed to switch model: validation crashed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_model_switch_owns_deferred_prompts_before_old_probe_finishes(monkeypatch):
+    import asyncio
+
+    from nooa_cli.tui.commands import ModelCommand
+    from nooa_cli.tui.health_check import HealthCheckResult
+    from nooa_cli.tui.session import Session
+
+    old_llm = SimpleNamespace(model="old/model")
+    candidate = SimpleNamespace(model="new/model")
+    old_result = asyncio.Future()
+    candidate_result = asyncio.Future()
+    agent = SimpleNamespace(
+        llm=old_llm,
+        set_llm=lambda llm: setattr(agent, "llm", llm),
+    )
+    registry = SimpleNamespace(
+        blocking_llm_health=HealthCheckResult(
+            ok=False,
+            error_message="Checking old model.",
+            blocking=True,
+            pending=True,
+        ),
+        startup_info=SimpleNamespace(llm_ready=False, llm_status="checking"),
+    )
+    app = SimpleNamespace(
+        invalidate=Mock(),
+        set_llm_probe_status=Mock(),
+        release_deferred_messages=Mock(),
+        reject_deferred_messages=Mock(),
+        refresh_transcript_blocks=Mock(return_value=True),
+    )
+    session = Session.__new__(Session)
+    session.agent = agent
+    session.registry = registry
+    session.frontend = SimpleNamespace(render=AsyncMock())
+    session._app = app
+    session._background_tasks = set()
+
+    async def probe(llm):
+        return await (old_result if llm is old_llm else candidate_result)
+
+    monkeypatch.setattr("nooa_cli.tui.health_check.probe_llm", probe)
+    monkeypatch.setattr("nooa_cli.tui.config.get_llm_for_model", lambda _model: candidate)
+    monkeypatch.setattr("nooa.interactive.apply_model_limits", lambda _agent: None)
+
+    session._start_llm_health_check()
+    await asyncio.sleep(0)
+
+    command = ModelCommand(
+        AsyncMock(),
+        SimpleNamespace(default_model="old/model"),
+        agent,
+        registry=registry,
+    )
+    command.frontend._app = app
+    command._persist_tui_setting = lambda _key, _value: Path("settings.yaml")
+    command._agent_run_async = lambda fn: asyncio.sleep(0, result=fn())
+    switch_task = asyncio.create_task(command.execute(["new/model"]))
+    await asyncio.sleep(0)
+
+    old_result.set_result(
+        HealthCheckResult(ok=False, error_message="Old model failed.", blocking=True)
+    )
+    await asyncio_wait_for_background_tasks(session)
+
+    app.release_deferred_messages.assert_not_called()
+    app.reject_deferred_messages.assert_not_called()
+
+    candidate_result.set_result(HealthCheckResult(ok=True))
+    result = await switch_task
+
+    assert result.success is True
+    assert agent.llm is candidate
+    app.release_deferred_messages.assert_called_once_with()
+    app.reject_deferred_messages.assert_not_called()
+
+
 async def asyncio_wait_for_background_tasks(session) -> None:
     import asyncio
 
