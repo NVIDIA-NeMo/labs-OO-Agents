@@ -455,6 +455,31 @@ class ModelCommand(Command):
             return False, "Usage: /model [name]"
         return True, None
 
+    def _begin_model_validation(self) -> None:
+        """Transfer pending startup-prompt ownership to this model check."""
+        health = None if self._registry is None else self._registry.blocking_llm_health
+        if getattr(health, "pending", False) is not True:
+            return
+        generation = getattr(self._registry, "llm_health_generation", 0)
+        self._registry.llm_health_generation = generation + 1
+        app = getattr(self.frontend, "_app", None)
+        set_probe_status = getattr(app, "set_llm_probe_status", None)
+        if callable(set_probe_status):
+            set_probe_status("")
+
+    def _mark_model_check_failed(self, health: Any) -> None:
+        """Reject transferred prompts and publish the failed candidate health."""
+        if self._registry is not None:
+            self._registry.blocking_llm_health = health if health.blocking else None
+            startup_info = getattr(self._registry, "startup_info", None)
+            if startup_info is not None:
+                startup_info.llm_ready = not health.blocking
+                startup_info.llm_status = "unavailable" if health.blocking else "ready"
+        app = getattr(self.frontend, "_app", None)
+        reject_deferred = getattr(app, "reject_deferred_messages", None)
+        if callable(reject_deferred):
+            reject_deferred(health.error_message or "Model validation failed.")
+
     def _mark_model_ready(self, selected: str) -> None:
         """Update shared model UI state after a successful switch."""
         if self._registry is not None:
@@ -486,10 +511,11 @@ class ModelCommand(Command):
                 TextOutput(f"Current model: {self.config.default_model}", "info")
             )
         selected = args[0]
+        model_validation_started = False
         try:
             from nooa.interactive import apply_model_limits
             from nooa_cli.tui.config import UnresolvedModelError, get_llm_for_model
-            from nooa_cli.tui.health_check import probe_llm
+            from nooa_cli.tui.health_check import HealthCheckResult, probe_llm
 
             try:
                 candidate = get_llm_for_model(selected)
@@ -507,8 +533,11 @@ class ModelCommand(Command):
                         TextOutput(health.fix_hint or "", "info"),
                     ],
                 )
+            self._begin_model_validation()
+            model_validation_started = True
             health = await probe_llm(candidate)
             if not health.ok:
+                self._mark_model_check_failed(health)
                 outputs = [
                     TextOutput(
                         f"Could not switch to model '{selected}': {health.error_message}", "error"
@@ -524,6 +553,14 @@ class ModelCommand(Command):
 
             await self.agent_run_async(_switch)
         except Exception as e:
+            if model_validation_started:
+                self._mark_model_check_failed(
+                    HealthCheckResult(
+                        ok=False,
+                        error_message=f"Failed to switch model: {e}",
+                        blocking=True,
+                    )
+                )
             return CommandResult.err(f"Failed to switch model: {e}")
         self.config.default_model = selected
         self._mark_model_ready(selected)
@@ -2593,6 +2630,7 @@ class CommandRegistry:
         self._root_config = root_config
         self.startup_info: Output | None = None  # set by main after bootstrap
         self.blocking_llm_health: Any | None = None
+        self.llm_health_generation = 0
         self._bind_mcp_oauth_prompt()
         self._commands: dict[str, Command] = self._register()
         self._discover_directory_skills()

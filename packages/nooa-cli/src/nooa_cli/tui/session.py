@@ -902,12 +902,15 @@ class Session:
             self._invalidate_app()
             return
         model_at_start = getattr(llm, "model", None)
+        probe_generation = getattr(self.registry, "llm_health_generation", 0)
 
         async def _probe() -> None:
             from .health_check import probe_llm
             from .output import TextOutput
 
             result = await probe_llm(llm)
+            if getattr(self.registry, "llm_health_generation", 0) != probe_generation:
+                return
             if getattr(self.agent, "llm", None) is not llm:
                 self._set_llm_probe_status("")
                 return
