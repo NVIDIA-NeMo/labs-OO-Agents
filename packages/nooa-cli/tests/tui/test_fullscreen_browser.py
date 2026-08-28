@@ -332,6 +332,8 @@ def test_explorer_browser_navigate_vertical_jumps_search_matches() -> None:
 
 def test_explorer_browser_search_match_boundary_moves_to_next_row() -> None:
     browser = _browser()
+    browser.model.rows.append(MagicMock(search_text="gamma", title="Gamma"))
+    browser.model.set_query("")
     browser.model.search_active = True
     browser.model._last_detail_match_lines = [1, 3]
     browser.model.search_line_cursor = 1
@@ -339,4 +341,9 @@ def test_explorer_browser_search_match_boundary_moves_to_next_row() -> None:
     browser.navigate_vertical(1)
 
     assert browser.model.cursor == 1
+    assert browser.model._last_detail_match_lines == []
     assert browser.model.search_line_cursor == 0
+
+    # A second move before rendering must not reuse the previous row's matches.
+    browser.navigate_vertical(1)
+    assert browser.model.cursor == 2

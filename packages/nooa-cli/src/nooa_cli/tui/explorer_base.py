@@ -298,6 +298,7 @@ class ExplorerModel:
             old_cursor = self.cursor
             self.move(delta)
             if self.cursor != old_cursor:
+                self._last_detail_match_lines = []
                 self.search_line_cursor = 0 if delta > 0 else 10**9
         elif self.focus == "list":
             self.move(delta)
