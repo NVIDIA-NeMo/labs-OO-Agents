@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+from unittest.mock import MagicMock
 
 import pytest
 from nooa_cli.tui.config import DisplayMode
@@ -3355,6 +3356,20 @@ async def test_fullscreen_alt_drag_is_not_consumed_by_composer_or_completion_men
         completion_control.mouse_handler(_mouse_event(MouseEventType.MOUSE_UP, x=0, y=0, alt=True))
         is NotImplemented
     )
+
+
+def test_subview_mouse_bindings_defer_when_native_selection_is_active() -> None:
+    from prompt_toolkit.keys import Keys
+
+    app = _make_fullscreen_app()
+    app._active_subview = object()  # Activate the subview-only mouse bindings.
+    app._fullscreen_mouse_navigation = False
+    bindings = app._app.key_bindings
+
+    for key in (Keys.Vt100MouseEvent, Keys.WindowsMouseEvent):
+        active = [binding for binding in bindings.get_bindings_for_keys((key,)) if binding.filter()]
+        assert active
+        assert active[-1].handler(MagicMock()) is NotImplemented
 
 
 def test_fullscreen_alt_mouse_is_not_consumed_by_subview_control() -> None:

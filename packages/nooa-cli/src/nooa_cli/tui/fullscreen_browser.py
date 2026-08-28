@@ -69,6 +69,7 @@ def build_fullscreen_browser(
     main_body = HSplit(
         [
             Window(title_control, height=1),
+            separator(),
             Window(help_control, height=1),
             area(
                 "list",
@@ -76,6 +77,7 @@ def build_fullscreen_browser(
                     [
                         controls,
                         Window(list_header_control, height=1),
+                        separator(),
                         Window(
                             list_control,
                             height=list_height or Dimension(min=1, preferred=4, max=5),
@@ -182,7 +184,11 @@ class _BrowserOptionControl(FormattedTextControl):
         style = "class:fullscreen-browser.control" + (
             " class:fullscreen-browser.control-focused" if focused else ""
         )
-        return [(style, f"[{option.label}: {option.display_value}]")]
+        fragments = []
+        if focused and getattr(option, "dropdown", False):
+            fragments.append(("[SetMenuPosition]", ""))
+        fragments.append((style, f"[{option.label}: {option.display_value}]"))
+        return fragments
 
     def mouse_handler(self, mouse_event: MouseEvent):
         if (
@@ -292,10 +298,13 @@ class ExplorerBrowser:
             _BrowserOptionControl(self, index) for index in range(len(view.options))
         ]
         option_windows: list[Any] = []
+        self.option_windows: list[Window] = []
         for index, control in enumerate(self.option_controls):
             if index:
                 option_windows.append(Window(FormattedTextControl(" "), width=1, height=1))
-            option_windows.append(Window(control, width=Dimension(min=12, preferred=22), height=1))
+            option_window = Window(control, width=Dimension(min=12, preferred=22), height=1)
+            self.option_windows.append(option_window)
+            option_windows.append(option_window)
         search = VSplit(
             [
                 Window(FormattedTextControl(self._search_label), width=9, height=1),
@@ -320,7 +329,6 @@ class ExplorerBrowser:
                 18,
                 min(44, max(len(label) for _value, label in option.choices) + 6),
             )
-            right = 23 * (len(view.options) - index - 1)
             dropdown_floats.append(
                 Float(
                     content=ConditionalContainer(
@@ -334,10 +342,11 @@ class ExplorerBrowser:
                         ),
                         filter=Condition(lambda index=index: self.option_cursor == index),
                     ),
-                    top=3,
-                    right=right,
                     width=menu_width,
                     height=lambda option=option: len(option.choices) + 2,
+                    xcursor=True,
+                    ycursor=True,
+                    attach_to_window=self.option_windows[index],
                     z_index=10,
                 )
             )
@@ -382,7 +391,7 @@ class ExplorerBrowser:
 
     def _query_changed(self) -> None:
         self.model.edit_query(self.buffer.text)
-        self.model.search_active = False
+        self.model.search_active = bool(self.buffer.text.strip())
         self.list_offset = 0
         self._list_offset_detached = False
         self.invalidate()
@@ -530,9 +539,8 @@ class ExplorerBrowser:
                 " class:fullscreen-browser.selected" if selected else ""
             )
             marker = "❯ " if selected else "  "
-            text = sanitize_live_text(
-                marker + self.view.format_row(self.model.rows[row_index], max(1, width - 2))
-            )[:width]
+            text = marker + self.view.format_row(self.model.rows[row_index], max(1, width - 2))
+            text = sanitize_live_text(text.replace("\n", " ").replace("\r", " "))[:width]
             query = self.buffer.text.casefold().strip()
             if not query:
                 output.append((base, text))
@@ -567,9 +575,9 @@ class ExplorerBrowser:
             self.change_option(delta)
         elif self.active_control == "list":
             self._list_offset_detached = False
-            self.model.move(delta)
+            self.model.move_or_scroll(delta)
         else:
-            self.model.scroll_detail(delta)
+            self.model.move_or_scroll(delta)
         self.invalidate()
 
     def page(self, delta: int) -> None:
@@ -659,6 +667,9 @@ class ExplorerBrowser:
         elif action == "end":
             self.model.jump_end()
             self.invalidate()
+        elif action in {"scroll_down", "scroll_up"}:
+            delta = 3 if action == "scroll_down" else -3
+            self.mouse_scroll(self.active_control, delta)
         elif action == "backspace":
             if self.active_control == "list":
                 self.buffer.delete_before_cursor()

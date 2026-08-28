@@ -108,6 +108,8 @@ class EventExplorerModel:
         self.cursor = 0
         self.detail_offset = 0
         self.search_line_cursor = 0
+        self._last_detail_match_lines = []
+        self._last_detail_match_occurrences = []
 
     def set_enabled_types(self, enabled: set[str]) -> None:
         self.enabled_types = set(enabled)
@@ -163,6 +165,8 @@ class EventExplorerModel:
         old_cursor = self.cursor
         self.move(delta)
         if self.cursor != old_cursor:
+            self._last_detail_match_lines = []
+            self._last_detail_match_occurrences = []
             self.search_line_cursor = 0 if delta > 0 else 10**9
 
     def move_or_scroll(self, delta: int) -> None:
@@ -239,7 +243,23 @@ class EventExplorerView(ExplorerView):
         return f"{row.tag:<8} {row.event_type:<22} {row.summary}"[:width]
 
     def detail_lines(self, row: EventExplorerRow, width: int) -> list[str]:
-        return highlighted_detail_lines(row, width, self.model.query)
+        self.model._last_detail_match_lines = detail_match_lines(row, width, self.model.query)
+        occurrences = detail_match_occurrences(row, width, self.model.query)
+        self.model._last_detail_match_occurrences = occurrences
+        current_line = None
+        current_occurrence = None
+        if occurrences:
+            self.model.search_line_cursor = min(
+                max(self.model.search_line_cursor, 0), len(occurrences) - 1
+            )
+            current_line, current_occurrence = occurrences[self.model.search_line_cursor]
+        return highlighted_detail_lines(
+            row,
+            width,
+            self.model.query,
+            current_match_line=current_line,
+            current_match_occurrence=current_occurrence,
+        )
 
     def handle_action(self, action: str, row: Any) -> SubviewKeyResult:
         return "ignored"

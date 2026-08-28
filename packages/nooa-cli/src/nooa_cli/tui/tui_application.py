@@ -35,6 +35,7 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI, AnyFormattedText
 from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
+from prompt_toolkit.key_binding.bindings.mouse import load_mouse_bindings
 from prompt_toolkit.key_binding.bindings.scroll import scroll_page_down, scroll_page_up
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import (
@@ -2607,6 +2608,26 @@ class TUIApplication:
                 else "Native terminal selection enabled (F6 to restore app mouse)"
             )
             event.app.invalidate()
+
+        mouse_bindings = load_mouse_bindings()
+        vt100_mouse_handler = mouse_bindings.get_bindings_for_keys((Keys.Vt100MouseEvent,))[
+            -1
+        ].handler
+        windows_mouse_handler = mouse_bindings.get_bindings_for_keys((Keys.WindowsMouseEvent,))[
+            -1
+        ].handler
+
+        @kb.add(Keys.Vt100MouseEvent, filter=subview_active, eager=True)
+        def _(event):
+            if self._is_fullscreen and not self._fullscreen_mouse_navigation:
+                return NotImplemented
+            return vt100_mouse_handler(event)
+
+        @kb.add(Keys.WindowsMouseEvent, filter=subview_active, eager=True)
+        def _(event):
+            if self._is_fullscreen and not self._fullscreen_mouse_navigation:
+                return NotImplemented
+            return windows_mouse_handler(event)
 
         @kb.add(Keys.Any, filter=subview_active, eager=True)
         def _(event):

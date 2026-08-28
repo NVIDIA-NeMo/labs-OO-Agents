@@ -62,6 +62,56 @@ def test_event_explorer_builds_rows_and_full_text_searches() -> None:
     assert [rows[i].tag for i in model.matches] == ["2", "3"]
 
 
+def test_event_explorer_search_boundary_clears_cached_occurrences() -> None:
+    rows = build_event_rows(
+        SimpleNamespace(
+            items=lambda: [
+                ("1", _FakeEvent("TUIUserInput", text="alpha alpha")),
+                ("2", _FakeEvent("TUIUserInput", text="alpha alpha")),
+                ("3", _FakeEvent("TUIUserInput", text="alpha alpha")),
+            ]
+        )
+    )
+    model = EventExplorerModel(rows)
+    model.set_query("alpha")
+    model.search_active = True
+    model._last_detail_match_lines = [0]
+    model._last_detail_match_occurrences = [(0, 0), (0, 1)]
+    model.search_line_cursor = 1
+
+    model.move_search_occurrence(1)
+
+    assert model.cursor == 1
+    assert model._last_detail_match_lines == []
+    assert model._last_detail_match_occurrences == []
+    assert model.search_line_cursor == 0
+
+    # A second move before rendering must not reuse the previous event's matches.
+    model.move_search_occurrence(1)
+    assert model.cursor == 2
+
+
+def test_event_explorer_query_change_clears_cached_occurrences() -> None:
+    rows = build_event_rows(
+        SimpleNamespace(
+            items=lambda: [
+                ("1", _FakeEvent("TUIUserInput", text="alpha beta")),
+                ("2", _FakeEvent("TUIUserInput", text="alpha beta")),
+            ]
+        )
+    )
+    model = EventExplorerModel(rows)
+    model._last_detail_match_lines = [0]
+    model._last_detail_match_occurrences = [(0, 0), (0, 1)]
+
+    model.edit_query("beta")
+
+    assert model._last_detail_match_lines == []
+    assert model._last_detail_match_occurrences == []
+    model.move_search_occurrence(1)
+    assert model.cursor == 1
+
+
 def test_event_explorer_renders_shared_session_events() -> None:
     rows = build_event_rows(
         SimpleNamespace(
@@ -392,6 +442,21 @@ def test_event_explorer_current_match_highlights_second_match_on_same_line() -> 
     )
 
 
+def test_event_explorer_view_highlights_selected_occurrence_on_same_line() -> None:
+    from nooa_cli.tui.event_explorer import EventExplorerView
+
+    manager = SimpleNamespace(
+        items=lambda: [("1", _FakeEvent("TUIUserInput", text="alpha beta alpha gamma"))]
+    )
+    view = EventExplorerView(manager)
+    view.model.set_query("alpha")
+    view.model.search_line_cursor = 1
+
+    lines = view.detail_lines(view.model.current, width=120)
+
+    assert "".join(lines).count(f"{highlight_style_code(current=True)}alpha\x1b[0m") == 1
+
+
 def test_event_explorer_search_highlights_matches_inside_detail_text() -> None:
     row = build_event_rows(
         SimpleNamespace(items=lambda: [("1", _FakeEvent("TUIUserInput", text="find alpha here"))])
@@ -618,6 +683,81 @@ async def test_tui_app_event_explorer_fts_can_search_printable_navigation_and_qu
         await asyncio.wait_for(task, timeout=1)
 
 
+@pytest.mark.asyncio
+async def test_tui_app_event_explorer_routes_real_mouse_wheel_to_list() -> None:
+    from .tui_app_harness import FakeAgent, TUIHarness
+
+    agent = FakeAgent()
+    agent.event_manager = SimpleNamespace(
+        items=lambda: [
+            (
+                str(index),
+                _FakeEvent(
+                    "TUIUserInput",
+                    text=(
+                        "\n".join(f"detail line {line}" for line in range(100))
+                        if index == 29
+                        else f"event {index}"
+                    ),
+                ),
+            )
+            for index in range(30)
+        ]
+    )
+    async with TUIHarness(agent=agent) as h:
+        task = asyncio.create_task(h.app.open_event_explorer(agent.event_manager))
+        await h.wait_for(lambda: h.app._event_explorer_model is not None)
+        browser = h.app.active_subview
+        assert browser is not None
+        await h.wait_for(lambda: browser.list_control.viewport[1] > 1)
+        await h.wait_for(lambda: browser.list_offset > 0)
+        await h.wait_for(lambda: browser.model._last_detail_line_count > 20)
+        initial_offset = browser.list_offset
+        initial_detail_offset = browser.model.detail_offset
+
+        # Xterm SGR wheel-up at column 10, row 8 (inside the list pane).
+        await h.type_keys("\x1b[<64;10;8M")
+        await h.wait_for(lambda: browser.list_offset < initial_offset)
+
+        assert browser.model.detail_offset == initial_detail_offset
+        assert browser.model.cursor == 29
+        await h.press("escape")
+        await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_tui_app_event_explorer_routes_real_mouse_wheel_to_detail() -> None:
+    from .tui_app_harness import FakeAgent, TUIHarness
+
+    agent = FakeAgent()
+    agent.event_manager = SimpleNamespace(
+        items=lambda: [
+            (
+                "1",
+                _FakeEvent(
+                    "TUIUserInput",
+                    text="\n".join(f"detail line {index}" for index in range(100)),
+                ),
+            )
+        ]
+    )
+    async with TUIHarness(agent=agent) as h:
+        task = asyncio.create_task(h.app.open_event_explorer(agent.event_manager))
+        await h.wait_for(lambda: h.app._event_explorer_model is not None)
+        browser = h.app.active_subview
+        assert browser is not None
+        await h.wait_for(lambda: browser.preview_control.viewport[1] > 1)
+        await h.wait_for(lambda: browser.model._last_detail_line_count > 20)
+
+        # Xterm SGR wheel-down at column 10, row 30 (inside the detail pane).
+        await h.type_keys("\x1b[<65;10;30M")
+        await h.wait_for(lambda: browser.model.detail_offset > 0)
+
+        assert browser.list_offset == 0
+        await h.press("escape")
+        await asyncio.wait_for(task, timeout=1)
+
+
 def test_event_explorer_has_in_app_mouse_scroll_bindings() -> None:
     source = Path("packages/nooa-cli/src/nooa_cli/tui/tui_application.py").read_text()
 
@@ -690,7 +830,13 @@ async def test_tui_app_routes_grouped_options_without_editing_prompt() -> None:
         assert len(browser.dropdown_floats) == 1
         event_type_menu = browser.dropdown_floats[0]
         assert event_type_menu.z_index == 10
-        assert event_type_menu.top == 3
+        assert event_type_menu.attach_to_window is browser.option_windows[0]
+        assert event_type_menu.xcursor is True
+        assert event_type_menu.ycursor is True
+        assert event_type_menu.top is None
+        assert event_type_menu.right is None
+        option_fragments = browser.option_controls[0]._text()
+        assert option_fragments[0] == ("[SetMenuPosition]", "")
         dropdown_text = "".join(text for _style, text in browser.dropdown_controls[0]._text())
         assert "☑ All" in dropdown_text
         assert "☑ PythonOutput" in dropdown_text
