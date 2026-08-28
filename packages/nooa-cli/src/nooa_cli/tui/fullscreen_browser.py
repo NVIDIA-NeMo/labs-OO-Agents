@@ -69,6 +69,7 @@ def build_fullscreen_browser(
     main_body = HSplit(
         [
             Window(title_control, height=1),
+            separator(),
             Window(help_control, height=1),
             area(
                 "list",
@@ -76,6 +77,7 @@ def build_fullscreen_browser(
                     [
                         controls,
                         Window(list_header_control, height=1),
+                        separator(),
                         Window(
                             list_control,
                             height=list_height or Dimension(min=1, preferred=4, max=5),
@@ -334,7 +336,7 @@ class ExplorerBrowser:
                         ),
                         filter=Condition(lambda index=index: self.option_cursor == index),
                     ),
-                    top=3,
+                    top=4,
                     right=right,
                     width=menu_width,
                     height=lambda option=option: len(option.choices) + 2,
@@ -532,7 +534,8 @@ class ExplorerBrowser:
             marker = "❯ " if selected else "  "
             text = sanitize_live_text(
                 marker + self.view.format_row(self.model.rows[row_index], max(1, width - 2))
-            )[:width]
+            )
+            text = text.replace("\n", " ").replace("\r", "")[:width]
             query = self.buffer.text.casefold().strip()
             if not query:
                 output.append((base, text))
@@ -659,6 +662,9 @@ class ExplorerBrowser:
         elif action == "end":
             self.model.jump_end()
             self.invalidate()
+        elif action in {"scroll_down", "scroll_up"}:
+            delta = 3 if action == "scroll_down" else -3
+            self.mouse_scroll(self.active_control, delta)
         elif action == "backspace":
             if self.active_control == "list":
                 self.buffer.delete_before_cursor()
