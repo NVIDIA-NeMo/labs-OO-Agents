@@ -44,5 +44,10 @@ async def test_multi_frame_error_carries_every_frame(codeact_agent):
     assert "Cell In[1], line 4, in <module>" in error
     assert "Cell In[1], line 2, in inner" in error
     assert "return None.strip()" in error
-    assert "^^^^^^^^^^" in error
     assert "AttributeError: 'NoneType' object has no attribute 'strip'" in error
+
+    lines = error.splitlines()
+    source_index = next(i for i, line in enumerate(lines) if "return None.strip()" in line)
+    caret_line = lines[source_index + 1]
+    assert caret_line.strip() == "^" * 10
+    assert caret_line.index("^") == lines[source_index].index("None.strip")
