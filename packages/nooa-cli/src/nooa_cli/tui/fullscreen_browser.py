@@ -184,7 +184,11 @@ class _BrowserOptionControl(FormattedTextControl):
         style = "class:fullscreen-browser.control" + (
             " class:fullscreen-browser.control-focused" if focused else ""
         )
-        return [(style, f"[{option.label}: {option.display_value}]")]
+        fragments = []
+        if focused and getattr(option, "dropdown", False):
+            fragments.append(("[SetMenuPosition]", ""))
+        fragments.append((style, f"[{option.label}: {option.display_value}]"))
+        return fragments
 
     def mouse_handler(self, mouse_event: MouseEvent):
         if (
@@ -294,10 +298,13 @@ class ExplorerBrowser:
             _BrowserOptionControl(self, index) for index in range(len(view.options))
         ]
         option_windows: list[Any] = []
+        self.option_windows: list[Window] = []
         for index, control in enumerate(self.option_controls):
             if index:
                 option_windows.append(Window(FormattedTextControl(" "), width=1, height=1))
-            option_windows.append(Window(control, width=Dimension(min=12, preferred=22), height=1))
+            option_window = Window(control, width=Dimension(min=12, preferred=22), height=1)
+            self.option_windows.append(option_window)
+            option_windows.append(option_window)
         search = VSplit(
             [
                 Window(FormattedTextControl(self._search_label), width=9, height=1),
@@ -322,7 +329,6 @@ class ExplorerBrowser:
                 18,
                 min(44, max(len(label) for _value, label in option.choices) + 6),
             )
-            right = 23 * (len(view.options) - index - 1)
             dropdown_floats.append(
                 Float(
                     content=ConditionalContainer(
@@ -336,10 +342,11 @@ class ExplorerBrowser:
                         ),
                         filter=Condition(lambda index=index: self.option_cursor == index),
                     ),
-                    top=4,
-                    right=right,
                     width=menu_width,
                     height=lambda option=option: len(option.choices) + 2,
+                    xcursor=True,
+                    ycursor=True,
+                    attach_to_window=self.option_windows[index],
                     z_index=10,
                 )
             )

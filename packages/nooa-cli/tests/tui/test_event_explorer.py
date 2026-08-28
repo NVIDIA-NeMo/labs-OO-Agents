@@ -751,7 +751,13 @@ async def test_tui_app_routes_grouped_options_without_editing_prompt() -> None:
         assert len(browser.dropdown_floats) == 1
         event_type_menu = browser.dropdown_floats[0]
         assert event_type_menu.z_index == 10
-        assert event_type_menu.top == 4
+        assert event_type_menu.attach_to_window is browser.option_windows[0]
+        assert event_type_menu.xcursor is True
+        assert event_type_menu.ycursor is True
+        assert event_type_menu.top is None
+        assert event_type_menu.right is None
+        option_fragments = browser.option_controls[0]._text()
+        assert option_fragments[0] == ("[SetMenuPosition]", "")
         dropdown_text = "".join(text for _style, text in browser.dropdown_controls[0]._text())
         assert "☑ All" in dropdown_text
         assert "☑ PythonOutput" in dropdown_text
