@@ -162,7 +162,7 @@ async def test_pending_llm_health_does_not_emit_durable_startup_status(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_pending_llm_health_blocks_prompts_until_background_probe_succeeds(monkeypatch):
+async def test_pending_llm_health_queues_prompts_until_background_probe_succeeds(monkeypatch):
     from nooa_cli.tui.health_check import HealthCheckResult
     from nooa_cli.tui.session import Session
 
@@ -181,7 +181,12 @@ async def test_pending_llm_health_blocks_prompts_until_background_probe_succeeds
     session.frontend = SimpleNamespace(
         render=AsyncMock(side_effect=lambda output: rendered.append(output))
     )
-    session._app = SimpleNamespace(invalidate=Mock(), set_llm_probe_status=Mock())
+    session._app = SimpleNamespace(
+        invalidate=Mock(),
+        set_llm_probe_status=Mock(),
+        release_deferred_messages=Mock(),
+        reject_deferred_messages=Mock(),
+    )
     session._background_tasks = set()
 
     monkeypatch.setattr(
@@ -189,7 +194,8 @@ async def test_pending_llm_health_blocks_prompts_until_background_probe_succeeds
         AsyncMock(return_value=HealthCheckResult(ok=True)),
     )
 
-    assert "still being checked" in session._llm_submission_error()
+    assert session._llm_submission_pending() is True
+    assert session._llm_submission_error() is None
 
     session._start_llm_health_check()
     await asyncio_wait_for_background_tasks(session)
@@ -201,6 +207,8 @@ async def test_pending_llm_health_blocks_prompts_until_background_probe_succeeds
         call("probing LLM endpoint..."),
         call(""),
     ]
+    session._app.release_deferred_messages.assert_called_once_with()
+    session._app.reject_deferred_messages.assert_not_called()
     session._app.invalidate.assert_called_once()
     assert rendered == []
     assert session._llm_submission_error() is None
@@ -226,7 +234,12 @@ async def test_pending_llm_health_keeps_blocking_on_auth_failure(monkeypatch):
     session.frontend = SimpleNamespace(
         render=AsyncMock(side_effect=lambda output: rendered.append(output))
     )
-    session._app = SimpleNamespace(invalidate=Mock(), set_llm_probe_status=Mock())
+    session._app = SimpleNamespace(
+        invalidate=Mock(),
+        set_llm_probe_status=Mock(),
+        release_deferred_messages=Mock(),
+        reject_deferred_messages=Mock(),
+    )
     session._background_tasks = set()
 
     failure = HealthCheckResult(
@@ -247,10 +260,55 @@ async def test_pending_llm_health_keeps_blocking_on_auth_failure(monkeypatch):
         call("probing LLM endpoint..."),
         call(""),
     ]
+    session._app.release_deferred_messages.assert_not_called()
+    session._app.reject_deferred_messages.assert_called_once()
+    assert "unavailable" in session._app.reject_deferred_messages.call_args.args[0]
     session._app.invalidate.assert_called_once()
     assert "unavailable" in session._llm_submission_error()
     assert any("Authentication failed" in output.content for output in rendered)
     assert any("export API_KEY" in output.content for output in rendered)
+
+
+@pytest.mark.asyncio
+async def test_pending_llm_health_rejects_queued_prompts_on_transient_failure(monkeypatch):
+    from nooa_cli.tui.health_check import HealthCheckResult
+    from nooa_cli.tui.session import Session
+
+    session = Session.__new__(Session)
+    session.agent = SimpleNamespace(llm=SimpleNamespace(model="model-a"))
+    session.registry = SimpleNamespace(
+        blocking_llm_health=HealthCheckResult(
+            ok=False,
+            error_message="Checking LLM endpoint for model 'model-a'.",
+            blocking=True,
+            pending=True,
+        ),
+        startup_info=SimpleNamespace(llm_ready=False, llm_status="checking"),
+    )
+    session.frontend = SimpleNamespace(render=AsyncMock())
+    session._app = SimpleNamespace(
+        invalidate=Mock(),
+        set_llm_probe_status=Mock(),
+        release_deferred_messages=Mock(),
+        reject_deferred_messages=Mock(),
+    )
+    session._background_tasks = set()
+    failure = HealthCheckResult(
+        ok=False,
+        error_message="Temporary endpoint failure.",
+        blocking=False,
+    )
+    monkeypatch.setattr("nooa_cli.tui.health_check.probe_llm", AsyncMock(return_value=failure))
+
+    session._start_llm_health_check()
+    await asyncio_wait_for_background_tasks(session)
+
+    assert session.registry.blocking_llm_health is None
+    assert session.registry.startup_info.llm_ready is True
+    session._app.release_deferred_messages.assert_not_called()
+    session._app.reject_deferred_messages.assert_called_once_with("Temporary endpoint failure.")
+    assert session._llm_submission_pending() is False
+    assert session._llm_submission_error() is None
 
 
 @pytest.mark.asyncio
@@ -281,6 +339,7 @@ async def test_model_switch_clears_pending_startup_info(monkeypatch):
     config = SimpleNamespace(default_model="old/model")
     command = ModelCommand(AsyncMock(), config, agent, registry=registry)
     command.frontend._app = SimpleNamespace(
+        release_deferred_messages=Mock(),
         refresh_transcript_blocks=Mock(return_value=True),
         invalidate=Mock(),
     )
@@ -305,6 +364,7 @@ async def test_model_switch_clears_pending_startup_info(monkeypatch):
     assert startup_info.short_model == "model"
     assert startup_info.llm_ready is True
     assert startup_info.llm_status == "ready"
+    command.frontend._app.release_deferred_messages.assert_called_once_with()
     command.frontend._app.refresh_transcript_blocks.assert_called_once_with("startup-info")
     command.frontend._app.invalidate.assert_not_called()
 

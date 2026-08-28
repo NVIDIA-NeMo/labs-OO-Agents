@@ -953,6 +953,89 @@ async def test_plain_input_is_blocked_by_actionable_submission_guard():
     assert "/model <name>" in app.output_buffer.text
 
 
+async def test_commands_bypass_plain_input_deferral():
+    agent = FakeAgent()
+    commands: list[str] = []
+    bangs: list[str] = []
+    app = make_local_tui_app(
+        agent,
+        defer_submission=lambda: True,
+        on_command=commands.append,
+        on_bang=bangs.append,
+    )
+
+    app.input_buffer.text = "/help"
+    app._accept_handler(app.input_buffer)
+    app.input_buffer.text = "!echo hi"
+    app._accept_handler(app.input_buffer)
+
+    assert commands == ["/help"]
+    assert bangs == ["echo hi"]
+    assert app._deferred_input_handoffs == []
+    assert agent._user_messages_in.qsize() == 0
+
+
+async def test_plain_input_is_deferred_until_submission_is_released():
+    agent = FakeAgent()
+    checking = True
+    app = make_local_tui_app(agent, defer_submission=lambda: checking)
+
+    app.submit_message("first")
+    app.submit_message("second")
+
+    assert agent._user_messages_in.qsize() == 0
+    assert app._pending_input_display() == ["first", "second"]
+
+    checking = False
+    app.release_deferred_messages()
+
+    assert agent._user_messages_in.qsize() == 1
+    assert app._pending_input_display() == ["first", "second"]
+    assert await agent._user_messages_in.get() == "first\nsecond"
+
+
+async def test_deferred_plain_input_can_be_withdrawn_for_editing():
+    agent = FakeAgent()
+    app = make_local_tui_app(agent, defer_submission=lambda: True)
+
+    app.submit_message("first")
+    app.submit_message("second")
+    withdrawn = app._deferred_input_handoffs.pop().text
+    draft = app._draft_for_withdrawn_input(withdrawn)
+    app.complete_pending_input_handoff(withdrawn)
+
+    assert withdrawn == "second"
+    assert draft == "second"
+    assert agent._user_messages_in.qsize() == 0
+    assert app._pending_input_display() == ["first"]
+
+
+async def test_deferred_plain_input_is_rejected_when_health_check_fails():
+    agent = FakeAgent()
+    app = make_local_tui_app(agent, defer_submission=lambda: True)
+
+    app.submit_message("first")
+    app.submit_message("second")
+    app.reject_deferred_messages("Configured LLM is unavailable.")
+
+    assert agent._user_messages_in.qsize() == 0
+    assert app._pending_input_display() == []
+    assert "Configured LLM is unavailable." in app.output_buffer.text
+
+
+async def test_failed_release_retires_deferred_handoff(monkeypatch):
+    agent = FakeAgent()
+    app = make_local_tui_app(agent, defer_submission=lambda: True)
+    app.submit_message("queued")
+    monkeypatch.setattr(app._agent_controller, "submit", lambda _text: False)
+
+    app.release_deferred_messages()
+
+    assert app._deferred_input_handoffs == []
+    assert app._pending_input_display() == []
+    assert "Message rejected." in app.output_buffer.text
+
+
 async def test_commands_tab_completion_for_slash():
     async with TUIHarness() as h:
         await h.type_keys("/he")
