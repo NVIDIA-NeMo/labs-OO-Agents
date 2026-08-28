@@ -254,6 +254,7 @@ class ExplorerModel:
         self.cursor = 0
         self.detail_offset = 0
         self.search_line_cursor = 0
+        self._last_detail_match_lines = []
 
     def set_view(
         self,
