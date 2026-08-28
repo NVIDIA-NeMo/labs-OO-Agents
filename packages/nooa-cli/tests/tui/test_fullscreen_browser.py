@@ -217,14 +217,14 @@ def test_explorer_browser_list_text_replaces_newlines_in_summary() -> None:
     """Newlines in row summaries are replaced with spaces to prevent rendering corruption."""
 
     class _MultiLineRow:
-        search_text = "line1\nline2"
+        search_text = "Multi-line Item\nsecond line\rthird line"
         title = "Multi-line Item"
         tag = "1"
 
     browser = _browser()
     browser.model.rows.clear()
     browser.model.rows.append(_MultiLineRow())
-    browser.view.format_row = lambda row, w: f"{row.tag} {row.title}"
+    browser.view.format_row = lambda row, w: f"{row.tag} {row.search_text}"
     browser.model.set_query("")
     browser.list_control.viewport = (80, 4)
 
@@ -232,18 +232,36 @@ def test_explorer_browser_list_text_replaces_newlines_in_summary() -> None:
     joined = "".join(text for _style, text in fragments)
 
     assert "\n" not in joined
-    assert "Multi-line Item" in joined
+    assert "\r" not in joined
+    assert "Multi-line Item second line third line" in joined
 
 
 def test_explorer_browser_has_separator_under_title() -> None:
-    """The browser layout includes separator lines under the title and list header."""
-    import inspect
+    """Separators follow the title, list header, and preview area."""
+    from prompt_toolkit.layout import FloatContainer, HSplit, VSplit, Window
 
-    from nooa_cli.tui.fullscreen_browser import build_fullscreen_browser
+    browser = _browser()
+    main = browser.container._get_container()
+    assert isinstance(main, FloatContainer)
+    body = main.content
+    assert isinstance(body, HSplit)
 
-    source = inspect.getsource(build_fullscreen_browser)
-    # Separators: after title, after list header, after preview header
-    assert source.count("separator()") >= 3
+    assert body.children[0].content is browser.title_control
+    assert isinstance(body.children[1], Window)
+    assert body.children[1].char == "─"
+
+    list_area = body.children[3]
+    assert isinstance(list_area, VSplit)
+    list_body = list_area.children[1]
+    assert isinstance(list_body, HSplit)
+    assert list_body.children[1].content is browser.list_header_control
+    assert isinstance(list_body.children[2], Window)
+    assert list_body.children[2].char == "─"
+
+    preview_area = body.children[5]
+    assert isinstance(preview_area, VSplit)
+    assert isinstance(body.children[6], Window)
+    assert body.children[6].char == "─"
 
 
 def test_explorer_browser_handle_key_scroll_down_scrolls_list() -> None:
@@ -258,7 +276,7 @@ def test_explorer_browser_handle_key_scroll_down_scrolls_list() -> None:
 
     browser.handle_key("scroll_down")
 
-    assert browser.list_offset > 0
+    assert browser.list_offset == 3
     assert browser.model.cursor == 0  # selection doesn't move
 
 
@@ -277,7 +295,7 @@ def test_explorer_browser_handle_key_scroll_up_detail() -> None:
 
     browser.handle_key("scroll_up")
 
-    assert browser.model.detail_offset < 10
+    assert browser.model.detail_offset == 7
 
 
 def test_explorer_browser_navigate_vertical_jumps_search_matches() -> None:
@@ -310,3 +328,15 @@ def test_explorer_browser_navigate_vertical_jumps_search_matches() -> None:
     browser.navigate_vertical(1)
     assert browser.model.search_line_cursor == 1
     assert browser.model.cursor == 0  # selection stays
+
+
+def test_explorer_browser_search_match_boundary_moves_to_next_row() -> None:
+    browser = _browser()
+    browser.model.search_active = True
+    browser.model._last_detail_match_lines = [1, 3]
+    browser.model.search_line_cursor = 1
+
+    browser.navigate_vertical(1)
+
+    assert browser.model.cursor == 1
+    assert browser.model.search_line_cursor == 0
