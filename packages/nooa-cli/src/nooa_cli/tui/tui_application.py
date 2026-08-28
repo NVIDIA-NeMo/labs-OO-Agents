@@ -1132,6 +1132,7 @@ class TUIApplication:
         full_screen: bool | None = None,
         display_mode: Any = None,
         submission_guard: Callable[[], str | None] | None = None,
+        defer_submission: Callable[[], bool] | None = None,
     ) -> None:
         """
         Args:
@@ -1161,6 +1162,8 @@ class TUIApplication:
                 one alternate-screen Application-owned transcript renderer.
             submission_guard: Returns an actionable error when plain agent-bound
                 input must be rejected. Slash and bang commands remain available.
+            defer_submission: Returns whether plain agent-bound input should remain
+                queued locally until ``release_deferred_messages`` is called.
 
         The per-message echo ("queued → accepted" transition, user-bar
         render, SessionUserMessage log) is wired on the agent's
@@ -1189,6 +1192,7 @@ class TUIApplication:
         self._session_label_fn: Callable[[], str] | None = session_label
         self._config = config
         self._submission_guard = submission_guard
+        self._defer_submission = defer_submission
         self._ctrl_c_exit_armed = False
         self._ctrl_c_exit_timer: asyncio.TimerHandle | None = None
         self._exit_hint_text = ""
@@ -1287,6 +1291,7 @@ class TUIApplication:
         # Admitted text remains visible here until its accepted transcript
         # block is committed. A worker may dequeue before the next paint.
         self._pending_input_handoff: list[_PendingInputHandoff] = []
+        self._deferred_input_handoffs: list[_PendingInputHandoff] = []
         self._llm_probe_status_text: str = ""
 
         # Large bracketed pastes stay out of the editable source buffer. Each
@@ -2852,17 +2857,10 @@ class TUIApplication:
         # already consumed by the agent can't be edited.
         empty_buffer = Condition(lambda: self.input_buffer.text == "") & subview_inactive
 
-        def _pop_last_queued() -> str | None:
-            if self._agent_controller.state is None:
-                return None
-            return self._agent_controller.withdraw_pending_input()
-
         @kb.add("up", filter=empty_buffer)
         def _(event):
-            popped = _pop_last_queued()
-            if popped is not None:
-                draft = self._draft_for_withdrawn_input(popped)
-                self.complete_pending_input_handoff(popped)
+            draft = self._withdraw_pending_input_draft()
+            if draft is not None:
                 self.input_buffer.text = draft
                 self.input_buffer.cursor_position = len(draft)
                 return
@@ -3155,6 +3153,21 @@ class TUIApplication:
         flush_literal()
         return "".join(result)
 
+    def _withdraw_pending_input_draft(self) -> str | None:
+        """Withdraw the newest queued input and recover its editable draft."""
+        if self._deferred_input_handoffs:
+            handoff = self._deferred_input_handoffs.pop()
+            self._discard_pending_input_handoff(handoff)
+            return handoff.draft_text or handoff.text
+        if self._agent_controller.state is None:
+            return None
+        text = self._agent_controller.withdraw_pending_input()
+        if text is None:
+            return None
+        draft = self._draft_for_withdrawn_input(text)
+        self.complete_pending_input_handoff(text)
+        return draft
+
     def _draft_for_withdrawn_input(self, text: str) -> str:
         """Recover compact attachment markers for one withdrawn queue item."""
         for represented in range(len(self._pending_input_handoff), 0, -1):
@@ -3219,10 +3232,15 @@ class TUIApplication:
         display_text: str | None = None,
         draft_text: str | None = None,
     ) -> None:
-        """Submit text through the current interactive agent."""
+        """Submit text now, or retain it locally while admission is deferred."""
         if self._agent_controller.state is None:
             return
-        if self._submission_guard is not None:
+        try:
+            deferred = self._defer_submission is not None and self._defer_submission()
+        except Exception:
+            logger.debug("TUI submission deferral check failed", exc_info=True)
+            deferred = False
+        if not deferred and self._submission_guard is not None:
             try:
                 problem = self._submission_guard()
             except Exception:
@@ -3239,19 +3257,45 @@ class TUIApplication:
             user_message if draft_text is None else draft_text,
         )
         self._pending_input_handoff.append(handoff)
+        if deferred:
+            self._deferred_input_handoffs.append(handoff)
+            if self._app.is_running:
+                self._app.invalidate()
+            return
+        self._submit_handoff(handoff)
+
+    def _submit_handoff(self, handoff: _PendingInputHandoff) -> bool:
+        """Admit one visible handoff to the agent, retiring it on rejection."""
         try:
-            accepted = self._agent_controller.submit(user_message)
+            accepted = self._agent_controller.submit(handoff.text)
         except Exception:
             self._discard_pending_input_handoff(handoff)
             logger.debug("TUI message submission failed", exc_info=True)
             self.emit_block("\x1b[31mMessage rejected.\x1b[0m\n")
-            return
+            return False
         if not accepted:
             self._discard_pending_input_handoff(handoff)
             self.emit_block("\x1b[31mMessage rejected.\x1b[0m\n")
-            return
+            return False
         if self._app.is_running:
             self._app.invalidate()
+        return True
+
+    def release_deferred_messages(self) -> None:
+        """Admit startup-deferred messages to the agent in FIFO order."""
+        deferred = self._deferred_input_handoffs
+        self._deferred_input_handoffs = []
+        for handoff in deferred:
+            self._submit_handoff(handoff)
+
+    def reject_deferred_messages(self, problem: str) -> None:
+        """Discard startup-deferred messages and explain why they were rejected."""
+        deferred = self._deferred_input_handoffs
+        self._deferred_input_handoffs = []
+        for handoff in deferred:
+            self._discard_pending_input_handoff(handoff)
+        if deferred:
+            self.emit_block(f"\x1b[31m{problem}\x1b[0m\n")
 
     def _discard_pending_input_handoff(self, handoff: _PendingInputHandoff) -> None:
         """Discard one exact optimistic admission without disturbing duplicates."""
@@ -3284,6 +3328,7 @@ class TUIApplication:
     def clear_pending_input_handoffs(self) -> None:
         """Discard optimistic queue rows after the runtime queue is flushed."""
         self._pending_input_handoff.clear()
+        self._deferred_input_handoffs.clear()
         self._reclaim_paste_attachments()
         if self._app.is_running:
             self._app.invalidate()
