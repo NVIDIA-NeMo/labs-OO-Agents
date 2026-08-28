@@ -20,11 +20,11 @@ pytest node ID, e.g. `test_stdout_is_captured[sandbox]`.
 | Validation retry | session completes after a rejected cell | **Deferred** — not yet covered |
 | Nested agent/tool calls | event ordering | **Deferred** — not yet covered |
 | `PythonOutput` status and ordering | `event_type` sequence, `tool_call_id` | |
-| Runtime exception surfacing | `execution_status is ResultStatus.ERROR` | Error *text* is #189-dependent; assert status and type only |
-| Runtime exception source context | `PythonOutput.error` | **Deferred to #189** — see #191 |
-| SyntaxError source and caret fidelity | `PythonOutput.error` | **Deferred to #189** |
-| Source line and wrapper-offset fidelity | `PythonOutput.error` | **Deferred to #189** |
-| `return_result()` success and failure | method return value | Failure transport is #189-dependent |
+| Runtime exception surfacing | `execution_status is ResultStatus.ERROR` | Status and exception type |
+| Runtime exception source context | `PythonOutput.error` | Frames, source lines and carets; regression guard for #191 |
+| SyntaxError source and caret fidelity | `PythonOutput.error` | **Deferred** — not yet covered |
+| Source line and wrapper-offset fidelity | `PythonOutput.error` | Line numbers pinned per frame |
+| `return_result()` success and failure | method return value | Failure transport **deferred** — not yet covered |
 | Cancellation and timeout | TBD | Parity boundary undefined; see open question |
 
 ## Backend-specific contracts
