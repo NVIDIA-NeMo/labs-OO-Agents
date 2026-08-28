@@ -338,6 +338,11 @@ class Session:
         self._toolbar = ToolbarRegistry()
         self._initial_outputs = list(initial_outputs or [])
         self._session_title_requested = False
+        # Building the next request temporarily replaces context_stats with a
+        # version whose provider token count is unknown. Keep the last exact
+        # display for the same context-window budget so the toolbar does not
+        # flicker back to its placeholder while that request is in flight.
+        self._last_context_usage_display: tuple[int | None, int | None, str] | None = None
         # Invalidates user-message UI callbacks queued before a session swap.
         self._session_generation = 0
 
@@ -390,15 +395,23 @@ class Session:
         so 100% means "the next call at the current completion budget will be
         rejected", not "the window is byte-full". Until the first response
         returns usage (``prompt_tokens`` is None) we show the placeholder
-        ``"ctx —"`` rather than a local estimate.
+        ``"ctx —"`` rather than a local estimate. While a later request is in
+        flight, retain the last exact value for the same context-window budget.
         """
         stats = getattr(self.agent, "context_stats", None)
         if stats is None:
             return "ctx —"
+        window = stats.model_context_window
+        reserve = stats.reserved_output_tokens
         util = stats.overall_utilization  # prompt / (window - output reserve)
-        if util is None:
-            return "ctx —"
-        return f"ctx {util * 100:.0f}%"
+        if util is not None:
+            label = f"ctx {util * 100:.0f}%"
+            self._last_context_usage_display = (window, reserve, label)
+            return label
+        cached = getattr(self, "_last_context_usage_display", None)
+        if cached is not None and cached[:2] == (window, reserve):
+            return cached[2]
+        return "ctx —"
 
     # ------------------------------------------------------------------
     # Exit diagnostics

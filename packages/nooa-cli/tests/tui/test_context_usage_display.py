@@ -87,6 +87,24 @@ def test_context_usage_label_uses_model_context_window():
     assert session._context_usage_label() == "ctx 10%"
 
 
+def test_context_usage_label_keeps_last_exact_value_while_next_call_is_pending():
+    session = _make_session_for_label(_stats(total=9_000, model_context_window=100_000))
+    assert session._context_usage_label() == "ctx 9%"
+
+    session.agent.context_stats = _stats(total=None, model_context_window=100_000)
+
+    assert session._context_usage_label() == "ctx 9%"
+
+
+def test_context_usage_label_does_not_reuse_value_for_different_window():
+    session = _make_session_for_label(_stats(total=9_000, model_context_window=100_000))
+    assert session._context_usage_label() == "ctx 9%"
+
+    session.agent.context_stats = _stats(total=None, model_context_window=200_000)
+
+    assert session._context_usage_label() == "ctx —"
+
+
 # ── TUI agent registers the context_usage dynamic block -----------------------
 
 
