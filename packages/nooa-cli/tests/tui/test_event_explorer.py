@@ -640,7 +640,18 @@ async def test_tui_app_event_explorer_routes_real_mouse_wheel_to_list() -> None:
     agent = FakeAgent()
     agent.event_manager = SimpleNamespace(
         items=lambda: [
-            (str(index), _FakeEvent("TUIUserInput", text=f"event {index}")) for index in range(30)
+            (
+                str(index),
+                _FakeEvent(
+                    "TUIUserInput",
+                    text=(
+                        "\n".join(f"detail line {line}" for line in range(100))
+                        if index == 29
+                        else f"event {index}"
+                    ),
+                ),
+            )
+            for index in range(30)
         ]
     )
     async with TUIHarness(agent=agent) as h:
@@ -650,12 +661,15 @@ async def test_tui_app_event_explorer_routes_real_mouse_wheel_to_list() -> None:
         assert browser is not None
         await h.wait_for(lambda: browser.list_control.viewport[1] > 1)
         await h.wait_for(lambda: browser.list_offset > 0)
+        await h.wait_for(lambda: browser.model._last_detail_line_count > 20)
         initial_offset = browser.list_offset
+        initial_detail_offset = browser.model.detail_offset
 
         # Xterm SGR wheel-up at column 10, row 8 (inside the list pane).
         await h.type_keys("\x1b[<64;10;8M")
         await h.wait_for(lambda: browser.list_offset < initial_offset)
 
+        assert browser.model.detail_offset == initial_detail_offset
         assert browser.model.cursor == 29
         await h.press("escape")
         await asyncio.wait_for(task, timeout=1)
