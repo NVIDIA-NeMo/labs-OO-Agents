@@ -61,7 +61,7 @@ class HealthCheckResult:
     # remain warnings so a real prompt may still succeed moments later.
     blocking: bool = False
     # Startup can render before the real provider probe finishes. While pending,
-    # normal agent prompts stay blocked, but slash and shell commands remain usable.
+    # normal agent prompts queue locally; slash and shell commands remain usable.
     pending: bool = False
 
 

@@ -469,6 +469,9 @@ class ModelCommand(Command):
                 startup_info.llm_status = "ready"
 
         app = getattr(self.frontend, "_app", None)
+        release_deferred = getattr(app, "release_deferred_messages", None)
+        if callable(release_deferred):
+            release_deferred()
         refreshed = False
         refresh_transcript_blocks = getattr(app, "refresh_transcript_blocks", None)
         if callable(refresh_transcript_blocks):
