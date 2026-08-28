@@ -292,7 +292,7 @@ class ExplorerModel:
         self.search_line_cursor = 0
 
     def move_or_scroll(self, delta: int) -> None:
-        if self.search_active and self.focus != "list":
+        if self.search_active and self._last_detail_match_lines:
             self._move_detail_match(delta)
         elif self.focus == "list":
             self.move(delta)
