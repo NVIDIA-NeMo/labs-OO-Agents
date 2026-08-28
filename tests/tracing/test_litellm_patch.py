@@ -13,7 +13,7 @@ from nooa.tracing._litellm_patch import (
 )
 
 
-def make_mock_result(content, reasoning_content=None):
+def make_mock_result(content, reasoning_content=None, choices=None):
     """Create a mock litellm result with the given content."""
     mock_message = MagicMock()
     mock_message.content = content
@@ -26,7 +26,33 @@ def make_mock_result(content, reasoning_content=None):
     mock_choice.message = mock_message
 
     mock_result = MagicMock()
-    mock_result.choices = [mock_choice]
+    mock_result.choices = choices if choices is not None else [mock_choice]
+
+    return mock_result
+
+
+def make_mock_result_with_distinct_choices():
+    """Create a litellm result whose choices have DIFFERENT messages.
+
+    Used to prove the trace records the FIRST choice (the one the framework
+    actually consumes), not the last one.
+    """
+    mock_first = MagicMock()
+    mock_first.content = "first"
+    mock_first.reasoning_content = None
+    mock_first.reasoning = None
+    mock_first_choice = MagicMock(spec=Choices)
+    mock_first_choice.message = mock_first
+
+    mock_last = MagicMock()
+    mock_last.content = "last"
+    mock_last.reasoning_content = None
+    mock_last.reasoning = None
+    mock_last_choice = MagicMock(spec=Choices)
+    mock_last_choice.message = mock_last
+
+    mock_result = MagicMock()
+    mock_result.choices = [mock_first_choice, mock_last_choice]
 
     return mock_result
 
@@ -116,6 +142,20 @@ class TestPatchedSetOutputMessageValue:
 
         # Should have only one call: OUTPUT_VALUE
         mock_span.set_attribute.assert_called_once_with(SpanAttributes.OUTPUT_VALUE, "hello")
+
+    def test_multiple_choices_uses_first(self):
+        """With several choices, the trace must use the FIRST choice's message.
+
+        The framework consumes choices[0] for the real response, so the trace
+        must record the same message instead of the last choice.
+        """
+        mock_span = MagicMock()
+        mock_result = make_mock_result_with_distinct_choices()
+
+        _patched_set_output_message_value(mock_span, mock_result)
+
+        # The first choice says "first", the last says "last". It must be "first".
+        mock_span.set_attribute.assert_any_call(SpanAttributes.OUTPUT_VALUE, "first")
 
 
 class TestApplyLitellmPatch:

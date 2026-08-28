@@ -245,13 +245,13 @@ class Portfolio:
 class Finder(Agent, context={"state": None}):
     """Generator agent: reads source, crafts PoCs, calls self.submit()."""
 
-    shell = ShellTools(cwd="/workspace")
     _portfolio: Annotated[Portfolio | None, hidden] = None
     _model_name: Annotated[str, hidden] = ""
     _last_portfolio_context: Annotated[str, hidden] = ""
 
     def __init__(self, *, portfolio: Portfolio, model_name: str = "", **kwargs):
         super().__init__(**kwargs)
+        self.shell = ShellTools(cwd="/workspace")
         self._portfolio = portfolio
         self._model_name = model_name
         self.context_manager.set_static("shell_api", doc(self.shell))
@@ -365,12 +365,12 @@ class Finder(Agent, context={"state": None}):
 class Expander(Agent, context={"state": None}):
     """Expander agent: given a seed crash, finds variant trigger paths."""
 
-    shell = ShellTools(cwd="/workspace")
     _portfolio: Annotated[Portfolio | None, hidden] = None
     _model_name: Annotated[str, hidden] = ""
 
     def __init__(self, *, portfolio: Portfolio, model_name: str = "", **kwargs):
         super().__init__(**kwargs)
+        self.shell = ShellTools(cwd="/workspace")
         self._portfolio = portfolio
         self._model_name = model_name
         self.context_manager.set_static("shell_api", doc(self.shell))
@@ -435,10 +435,12 @@ class Expander(Agent, context={"state": None}):
 class CyberGymAgent(Agent, context={"state": None}):
     """Entry point: orchestrates workers, reviews the portfolio, decides when to stop."""
 
-    shell = ShellTools(cwd="/workspace")
-
     description: str = ""
     _portfolio: Annotated[Portfolio | None, hidden] = None
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.shell = ShellTools(cwd="/workspace")
 
     async def solve(self, instruction: str) -> str:
         """Main solve loop."""

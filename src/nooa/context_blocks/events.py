@@ -232,6 +232,14 @@ class ToolCallEvent(EventBase):
     tool_call_id: Annotated[str, Field(description="Unique identifier for this tool call")]
     name: Annotated[str, Field(description="Name of the tool being called")]
     arguments: Annotated[dict[str, Any], Field(description="Arguments passed to the tool")]
+    reasoning_items: list[dict[str, Any]] | None = Field(
+        default=None,
+        repr=False,
+        description=(
+            "Opaque provider reasoning state that must accompany this assistant "
+            "tool call when conversation history is replayed"
+        ),
+    )
 
     # Nested result (filled after execution via EventManager.update())
     result: ToolResult | None = Field(

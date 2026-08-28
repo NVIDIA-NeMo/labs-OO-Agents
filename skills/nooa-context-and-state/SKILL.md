@@ -1,6 +1,6 @@
 ---
 name: nooa-context-and-state
-description: Manage what a NVIDIA OO agent sees and remembers — context blocks, event history and queries, history summarization, and persistent memory/storage. Use when pinning information into the system prompt, querying past events, bounding context growth in long conversations, or persisting agent state.
+description: Manage what a NOOA agent sees and remembers — context blocks, event history and queries, history summarization, and persistent memory/storage. Use when pinning information into the system prompt, querying past events, bounding context growth in long conversations, or persisting agent state.
 compatibility: nooa package
 ---
 
@@ -27,24 +27,49 @@ Do NOT re-declare `context`/`events` as class annotations to unhide them — use
 
 ## Context blocks
 
-Blocks appear as labelled SYSTEM sections, visible across all method calls on the instance (per-instance only — subagents don't inherit them).
+Blocks appear as labelled SYSTEM sections, visible across all method calls on
+the instance (per-instance only — subagents don't inherit them). They are not
+the only information retained between turns of an active generation call: the
+current task description stays present, and event history carries messages,
+generated code, tool results, and printed output. Event history can later be
+filtered, summarized, or evicted as it grows; a context block is rendered again
+each turn and is not removed by history summarization. Context is eager prompt
+input, not general-purpose object storage. Use it only for bounded information
+that must remain continuously visible.
 
 ```python
-# Static: computed once at assignment
-self.context["plan"] = plan.format()
+from nooa import Context
 
-# Dynamic: Python expression re-evaluated every LLM turn (live state)
-self.context.set_dynamic("progress", "self.format_project_state()")
+# Fixed content in the stable, provider-cache-friendly prefix
+self.context["plan"] = Context(plan.format(), prefix=True)
+
+# Live expression re-evaluated every LLM turn in the volatile suffix
+self.context["progress"] = Context(expr="self.format_project_state()")
+
+# Fixed literal in the volatile suffix (the bare-value shorthand)
+self.context["latest_decision"] = "Use the canary deployment."
 
 # Remove
 del self.context["plan"]           # or self.context.pop("plan")
 
 # Class-level default blocks
-from nooa import DynamicContext
-class MyAgent(Agent, llm=llm, context={"focus": DynamicContext("self.topic")}): ...
+class MyAgent(
+    Agent,
+    llm=llm,
+    context={"focus": Context(expr="self.topic")},
+): ...
 ```
 
-Use docstrings for per-call task instructions; use context blocks for cross-call state (decisions, plans, live status). Orchestrator pattern: each phase writes its output into a block so later phases see it without re-passing arguments.
+Content and placement are independent: `value` is fixed while `expr` is
+re-evaluated; `prefix=True` requests stable-prefix placement while the default
+uses the volatile suffix. Use docstrings for per-call task instructions and
+context blocks for bounded cross-call facts such as decisions, plans, and live
+status. Method arguments remain the right place for per-call input.
+
+Prefix placement directly affects provider prompt/KV caching. Put only truly
+stable content in the prefix: changing a prefix block invalidates cache reuse
+for that block and everything after it. Keep live or frequently changing blocks
+in the volatile suffix so the stable prefix remains reusable.
 
 Per-method overrides via `ScopedContext`:
 
@@ -126,9 +151,14 @@ See `examples/advanced/memory.py` and `examples/quickstart/12_memory.py`.
 ## Pitfalls
 
 - Context blocks and events are **per-instance**. Subagents start empty — pass data explicitly (constructor args, shared dataclasses).
-- Dynamic block expressions are evaluated every turn — keep them cheap and bounded (a huge `self.render_everything()` bloats every prompt).
-- Assigning `None` stores `None` as the block value — remove blocks with `del self.context["k"]` / `.pop("k")`. (Only class/instance `context=` init overrides treat `None` as "remove".)
-- A block key set via `self.context["k"] = v` lands in the volatile (dynamic) partition; use `self.context.set_static("k", value=v)` for prompt-cache-friendly stable content.
+- Expression blocks are evaluated every turn — keep them cheap and bounded (a huge `self.render_everything()` bloats every prompt).
+- `self.context["k"] = None` suppresses a block from prompt rendering. Use
+  `del self.context["k"]` / `.pop("k")` to remove a user block entirely.
+- A bare `self.context["k"] = value` is fixed content in the volatile suffix.
+  Use `Context(value, prefix=True)` for stable, cache-friendly content.
+- `set_static()`, `set_dynamic()`, and `DynamicContext` are legacy APIs. They
+  still work, but the unified `Context(value=...|expr=..., prefix=...)` API is
+  the current interface.
 
 ## Related skills
 

@@ -1559,9 +1559,14 @@ class ActorRuntime:
             if not isinstance(sys.stdin, BlockedStdinWrapper):
                 sys.stdin = BlockedStdinWrapper(sys.stdin)
 
+            # Use the execution-cell filename for parser diagnostics as well as
+            # compiled runtime tracebacks.
+            cell_filename = f"Cell In[{execution_count}]"
+
             # Parse AST to find method definitions
+            source_code = code
             try:
-                tree = ast.parse(code)
+                tree = ast.parse(code, filename=cell_filename)
             except SyntaxError as e:
                 result = ExecutionResult(stdout="", error=e, defined_methods={})
                 return result
@@ -1610,8 +1615,6 @@ class ActorRuntime:
             captured_locals: dict[str, Any] = {}
             wrapper_line_offset = 0  # Lines of wrapper before user code (for error adjustment)
 
-            # Use Jupyter-style "Cell In[N]" as filename for better error messages
-            cell_filename = f"Cell In[{execution_count}]"
             try:
                 if wrap_in_function:
                     # REPL mode: wrap entire code in async function to capture return
@@ -1706,6 +1709,22 @@ class ActorRuntime:
                     if func_defs:
                         func_tree = ast.Module(body=func_defs, type_ignores=[])
                         exec(compile(func_tree, cell_filename, "exec"), exec_globals)
+                        # Persisted helpers are compiled directly from the cell
+                        # AST, not through the async wrapper. Keep their source
+                        # cache aligned with those original line numbers.
+                        linecache.cache[cell_filename] = (
+                            len(source_code),
+                            None,
+                            source_code.splitlines(keepends=True),
+                            cell_filename,
+                        )
+                        # The wrapper's finally block captured the wrapped
+                        # function objects. Persist the direct-compiled versions
+                        # instead so later calls use source-relative line numbers.
+                        for node in func_defs:
+                            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                                if node.name in exec_globals:
+                                    captured_locals[node.name] = exec_globals[node.name]
 
                     # Attach source code to defined functions for has_ellipsis_body() detection
                     for method_name, method_code in method_sources.items():

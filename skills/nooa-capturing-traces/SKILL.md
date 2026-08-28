@@ -1,12 +1,12 @@
 ---
 name: nooa-capturing-traces
-description: Capture execution traces from NVIDIA OO Agents. Use when instrumenting an agent run, writing traces to JSONL files, sending traces to the viewer or an OTLP/Langfuse/Phoenix backend, controlling which methods are traced, or when traces are mysteriously missing.
+description: Capture execution traces from NOOA. Use when instrumenting an agent run, writing traces to JSONL files, sending traces to the viewer or an OTLP/Langfuse/Phoenix backend, controlling which methods are traced, or when traces are mysteriously missing.
 compatibility: nooa package; the [tracing] extra (opentelemetry + openinference) for exporters
 ---
 
 # Capturing Traces
 
-NVIDIA OO Agents traces every agent method call, LLM call, code execution, and tool invocation as OpenTelemetry spans using OpenInference semantic conventions. Traces are grouped by `session.id` and nested by call hierarchy.
+NOOA traces every agent method call, LLM call, code execution, and tool invocation as OpenTelemetry spans using OpenInference semantic conventions. Traces are grouped by `session.id` and nested by call hierarchy.
 
 ## Automatic tracing (zero config)
 

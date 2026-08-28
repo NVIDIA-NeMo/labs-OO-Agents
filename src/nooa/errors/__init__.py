@@ -10,6 +10,7 @@ Provides clear error categories for:
 Also provides error formatting utilities for LLM feedback.
 """
 
+from nooa.errors.formatting import ErrorFormatter as ErrorFormatter
 from nooa.errors.formatting import (
     IPythonErrorFormatter as IPythonErrorFormatter,
 )

@@ -5,7 +5,7 @@
 
 NeMo Relay is a multi-language agent runtime that adds execution scope
 management, lifecycle events, and a configurable middleware pipeline
-(guardrails/intercepts) to every LLM call and tool execution in NVIDIA OO Agents.
+(guardrails/intercepts) to every LLM call and tool execution in NOOA.
 It is wired in through ``event_manager.intercept()``.
 
 This example shows how to:
@@ -17,7 +17,7 @@ This example shows how to:
   6. Demonstrate how different return types appear in the NeMo Relay pipeline and ATIF
 
 Prerequisites:
-  Install NVIDIA OO Agents with the nemo-relay extra (public PyPI wheels):
+  Install NOOA with the nemo-relay extra (public PyPI wheels):
 
     uv sync --extra nemo-relay
 
@@ -26,6 +26,7 @@ Usage:
 """
 
 import json
+from typing import Literal
 
 try:
     import nemo_relay
@@ -58,15 +59,16 @@ class ResearchAgent(Agent, llm=llm):
 
         return datetime.datetime.now().year
 
-    async def fact_check(self, claim: str) -> str:
-        """Evaluate whether {claim} is plausible given your knowledge.
+    @strategy(PredictStrategy())
+    async def fact_check(self, claim: str) -> Literal["plausible", "dubious"]:
+        """Evaluate whether the claim is plausible given your knowledge.
 
         Return exactly one word: "plausible" or "dubious".
         """
         ...
 
     async def summarize(self, topic: str) -> str:
-        """Research {topic} using the available tools.
+        """Research the topic using the available tools.
 
         Steps:
         1. Use self.get_current_year() to anchor your research to the present.
@@ -130,7 +132,7 @@ class ReturnTypeDemoAgent(Agent, llm=llm):
         ...
 
     async def return_pydantic(self) -> Summary:
-        """Return a Summary about NVIDIA OO Agents with title 'NVIDIA OO Agents' and 2 short key points."""
+        """Return a Summary about NOOA with title 'NOOA' and 2 short key points."""
         ...
 
     async def return_string(self) -> str:

@@ -28,14 +28,14 @@
 [![Blog](https://img.shields.io/badge/blog-NVIDIA-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/blog/six-agent-harness-capabilities-for-higher-model-performance/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/LICENSE)
 
-**[Quick Start](#quick-start)** &nbsp;·&nbsp; **[Notebook Tutorials](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/notebook_tutorials/README.md)** &nbsp;·&nbsp; **[Examples](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md)** &nbsp;·&nbsp; **[Paper](https://arxiv.org/abs/2607.20709)** &nbsp;·&nbsp; **[Blog](https://developer.nvidia.com/blog/six-agent-harness-capabilities-for-higher-model-performance/)**
+**[Docs](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/README.md)** &nbsp;·&nbsp; **[Quick Start](#quick-start)** &nbsp;·&nbsp; **[Notebook Tutorials](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/notebook_tutorials/README.md)** &nbsp;·&nbsp; **[Examples](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md)** &nbsp;·&nbsp; **[Paper](https://arxiv.org/abs/2607.20709)** &nbsp;·&nbsp; **[Blog](https://developer.nvidia.com/blog/six-agent-harness-capabilities-for-higher-model-performance/)**
 
 <br />
 
 </div>
 
 
-NVIDIA-labs OO Agents (NOOA) is a model-agnostic Python framework designed to support reliable AI agent development. Many agent frameworks represent prompts, tools, callbacks, and workflows as separate abstractions. NOOA offers an alternative object-oriented interface that brings these concepts together in a Python class. NOOA lets developers express an agent’s state, capabilities, prompts, and typed interfaces through a single Python class:
+NVIDIA-labs Object Oriented Agents (NOOA) is a model-agnostic Python framework designed to support reliable AI agent development. Many agent frameworks represent prompts, tools, callbacks, and workflows as separate abstractions. NOOA offers an alternative object-oriented interface that brings these concepts together in a Python class. NOOA lets developers express an agent’s state, capabilities, prompts, and typed interfaces through a single Python class:
 
 ```python
 from nooa import Agent
@@ -64,7 +64,9 @@ class SupportAgent(Agent):
 - **Code as action.** The model acts by writing Python in a Jupyter-style REPL with access to `self`, imports, and helpers — Python methods and type annotations supply the callable interfaces, reducing the need to write separate tool-schema definitions.
 - **Pythonic and agent-ready.** Typed I/O with auto-retry, live-object arguments passed by reference, and model-callable context and event APIs — designed around agent-oriented Python workflows.
 
-This design supports familiar Python testing, tracing, refactoring, and version-control workflows — **just like the rest of your software**. Read the paper for the design principles and evaluation results: [NVIDIA OO Agents: Native Python Object-Oriented Agents](https://arxiv.org/abs/2607.20709).
+This design supports familiar Python testing, tracing, refactoring, and version-control workflows — **just like the rest of your software**. Read [the paper](https://arxiv.org/abs/2607.20709) for the design principles and evaluation results.
+
+Want to see how the pieces compose? Take the [**10-minute tour**](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/tour.md), from one thinking method through tools, typed contracts, deterministic orchestration, and object composition.
 
 ## Installation
 
@@ -80,15 +82,16 @@ uv add nooa
 Or with pip: `pip install nooa`.
 
 <details>
-<summary><b>Optional sub-packages</b> — CLI, memory, benchmarks, evaluation pipeline</summary>
+<summary><b>Optional sub-packages</b> — CLI, ACP, memory, benchmarks, evaluation pipeline</summary>
 
 <br />
 
-The CLI, memory, and benchmark packages are separate distributions. Install
+The CLI, ACP, memory, and benchmark packages are separate distributions. Install
 them by name, or pull them in as extras of the core package:
 
 ```bash
 uv add nooa-cli                 # or: uv add "nooa[cli]"
+uv add nooa-acp                 # or: uv add "nooa[acp]"
 uv add nooa-memory              # or: uv add "nooa[memory]"
 uv add nooa-bench               # or: uv add "nooa[bench]"
 
@@ -98,6 +101,7 @@ uv add "nooa[cli,memory]"       # several at once
 | Package | Extra | What it adds |
 |---|---|---|
 | `nooa-cli` | `nooa[cli]` | the `nooa` command, trace viewer, eval runner |
+| `nooa-acp` | `nooa[acp]` | coding agent for Agent Client Protocol hosts such as Zed — [setup](packages/nooa-acp/README.md) |
 | `nooa-memory` | `nooa[memory]` | long-term memory subsystem (`MemoryManager`) |
 | `nooa-bench` | `nooa[bench]` | `BenchAgent` and the Harbor benchmark runner |
 
@@ -183,7 +187,7 @@ Rename `analyze_feedback` to `analyze_feedback_briefly` and the output changes �
 
 Prefer a guided notebook path? Start with the [**notebook tutorials**](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/notebook_tutorials/README.md), which walk through the same ideas in Colab-friendly steps, with more notebooks planned.
 
-Ready for more? See [**examples/**](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md) for the full progressive tutorial — structured output, tools, strategies, tracing, context blocks, MCP, and more.
+Ready to run something specific? Use the [**examples catalog**](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md) to find quickstarts for structured output, tools, strategies, tracing, context blocks, MCP, and more.
 
 ### 3. See what your agent is doing
 
@@ -197,8 +201,10 @@ If the viewer isn't running, tracing is silently disabled — no configuration n
 
 ## Learn more
 
-- **[Notebook tutorials](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/notebook_tutorials/README.md)** — guided Colab-friendly walkthroughs for your first agent, strategy selection, and CodeAct's live-object workflow. More notebooks are planned.
-- **[examples/README.md](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md)** — the full progressive tutorial: structured output, tools via `self`, strategies, progressive disclosure with `doc()`, tracing, dynamic prompts, context blocks, summarization, skills, MCP, sandbox, and more.
+- **[Documentation](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/README.md)** — human-oriented reading paths, core concepts, architecture, and safety guidance.
+- **[Framework tour](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/tour.md)** — a concise conceptual showcase of NOOA's core ideas and Python-first design.
+- **[Notebook tutorials](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/notebook_tutorials/README.md)** — the primary hands-on path for your first agent, strategy selection, CodeAct's live-object workflow, and composing subagents. More notebooks are planned.
+- **[Examples catalog](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md)** — runnable quickstarts, advanced mechanics, and complete benchmark systems, indexed by capability and setup requirements.
 - **[Paper](https://arxiv.org/abs/2607.20709)** — design principles, harness details, capability tests, and SWE-bench Verified / Terminal-Bench 2.0 results.
 - **[Blog post](https://developer.nvidia.com/blog/six-agent-harness-capabilities-for-higher-model-performance/)** — Six Agent Harness Capabilities for Higher Model Performance.
 - **[AGENTS.md](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/AGENTS.md)** — conventions used inside this repo (helpful when reading the source).
@@ -233,7 +239,7 @@ See [CONTRIBUTING.md](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/CO
 
 ## Citation
 
-If you use NVIDIA-labs OO Agents in your research, please cite:
+If you use NVIDIA-labs Object Oriented Agents in your research, please cite:
 
 ```bibtex
 @techreport{nvidia_oo_agents_2026,

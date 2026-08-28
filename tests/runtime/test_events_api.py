@@ -5,7 +5,8 @@
 import pytest
 
 from nooa import Agent
-from nooa.events import Task
+from nooa.context_blocks import ResultStatus
+from nooa.events import PythonOutput, Task
 from nooa.unifiedllm import FakeLLMClient
 
 _LLM = FakeLLMClient()
@@ -119,3 +120,23 @@ def test_collapse_invalid_range_raises():
     agent = _TestAgent()
     with pytest.raises((ValueError, KeyError)):
         agent.events.collapse("999", "1000")
+
+
+def test_query_filters_execution_status_and_limit():
+    agent = _TestAgent()
+    for count, status in enumerate(
+        (ResultStatus.ERROR, ResultStatus.COMPLETE, ResultStatus.ERROR), start=1
+    ):
+        agent.event_manager.add(
+            PythonOutput(
+                tool_call_id=str(count),
+                execution_count=count,
+                execution_status=status,
+                error="failed" if status is ResultStatus.ERROR else "",
+            )
+        )
+
+    failures = agent.events.query(type="PythonOutput", execution_status="error", limit=1)
+
+    assert len(failures) == 1
+    assert failures[0].execution_count == 3

@@ -289,6 +289,7 @@ class Skill:
             cls_name = name or "Skill"
             self.__class__ = type(cls_name, (Skill,), {"__doc__": content})  # pyright: ignore[reportAttributeAccessIssue]
 
+    @hidden
     def attach(self, agent: Any) -> None:
         """Called when this skill is installed on an agent.
 
@@ -296,6 +297,7 @@ class Skill:
         """
         self._agent = agent
 
+    @hidden
     def detach(self) -> Awaitable[None] | None:
         """Called when this skill is removed from an agent.
 
@@ -361,6 +363,7 @@ class _GeneratedTextSkill(Skill):
     def source_dir(self) -> Path | None:
         return self._skill_path
 
+    @hidden
     async def detach(self) -> None:
         """Release the skill-local shell when the registry replaces this object."""
         try:

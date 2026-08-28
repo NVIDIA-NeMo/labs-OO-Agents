@@ -1,6 +1,6 @@
 ---
 name: nooa-self-extending
-description: Let NVIDIA OO agents extend themselves — persistent skill libraries the agent writes and hot-reloads (SkillWriting / self.libs, LibraryManager), in-cell helper functions and standalone @strategy sub-calls (MethodWriting), and @slash_command user actions. Use when an agent should accumulate reusable code across sessions, define its own helpers or LLM-powered sub-functions at runtime, or ship user-typed /commands from a skill.
+description: Let NOOA agents extend themselves — persistent skill libraries the agent writes and hot-reloads (SkillWriting / self.libs, LibraryManager), in-cell helper functions and standalone @strategy sub-calls (MethodWriting), and @slash_command user actions. Use when an agent should accumulate reusable code across sessions, define its own helpers or LLM-powered sub-functions at runtime, or ship user-typed /commands from a skill.
 compatibility: nooa package
 ---
 

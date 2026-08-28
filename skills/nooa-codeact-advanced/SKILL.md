@@ -1,6 +1,6 @@
 ---
 name: nooa-codeact-advanced
-description: Advanced tuning of NVIDIA OO Agents strategies — CodeAct prefill (understanding, disabling, custom, pre-ellipsis code), loop guards (max_iterations, retries, text-only stop), truncation tuning (TruncationConfig/CaptureConfig/FormatConfig), code restrictions (RestrictionsConfig), execution environment internals, and PredictStrategy tuning (retries, param guards, output_serialization). Use when configuring CodeActConfig or PredictConfig beyond defaults, writing a custom prefill, restricting generated code, or debugging truncation/eviction behavior.
+description: Advanced tuning of NOOA strategies — CodeAct prefill (understanding, disabling, custom, pre-ellipsis code), loop guards (max_iterations, retries, text-only stop), truncation tuning (TruncationConfig/CaptureConfig/FormatConfig), code restrictions (RestrictionsConfig), execution environment internals, and PredictStrategy tuning (retries, param guards, output_serialization). Use when configuring CodeActConfig or PredictConfig beyond defaults, writing a custom prefill, restricting generated code, or debugging truncation/eviction behavior.
 compatibility: nooa package
 ---
 

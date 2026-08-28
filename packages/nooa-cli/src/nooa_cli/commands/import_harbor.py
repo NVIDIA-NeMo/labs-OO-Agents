@@ -23,6 +23,8 @@ from pathlib import Path
 import click
 
 from ._otlp_helpers import (
+    OtlpRequestError,
+    _viewer_headers,
     check_endpoint_reachable,
     get_journal_record,
     inject_resource_attrs,
@@ -215,7 +217,7 @@ def _find_matching_live_session(endpoint: str, meta: dict, experiment: str) -> s
         }
         url = f"{endpoint.rstrip('/')}/api/eval/match-session?{urllib.parse.urlencode(query)}"
         try:
-            req = urllib.request.Request(url, method="GET")
+            req = urllib.request.Request(url, headers=_viewer_headers({}), method="GET")
             with urllib.request.urlopen(req, timeout=10) as resp:
                 if resp.status >= 300:
                     return None
@@ -437,7 +439,14 @@ def command(
 
     validate_endpoint(endpoint)
 
-    if not check_endpoint_reachable(endpoint):
+    try:
+        reachable = check_endpoint_reachable(endpoint)
+    except OtlpRequestError as error:
+        click.echo(f"Viewer at {endpoint} rejected the request: {error}")
+        if error.status_code in (401, 403):
+            click.echo("Check NOOA_VIEWER_AUTH_TOKEN and try again.")
+        raise SystemExit(1) from None
+    if not reachable:
         click.echo(f"Cannot reach viewer at {endpoint}. Is it running?")
         raise SystemExit(1)
 

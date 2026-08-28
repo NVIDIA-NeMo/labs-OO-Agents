@@ -20,13 +20,18 @@ from nooa.tracing import flush_traces  # noqa: E402
 from nooa.unifiedllm.fake import FakeLLMClient  # noqa: E402
 
 
+def _unused_shell() -> SimpleNamespace:
+    """Return isolated placeholder shell state for tests that never execute commands."""
+    return SimpleNamespace()
+
+
 def _submission_manager(
     *,
     submission_count: int = 0,
     submissions: list[cybergym_submissions.PocSubmission] | None = None,
 ) -> cybergym_submissions.SubmissionManager:
     return cybergym_submissions.SubmissionManager(
-        shell=nooa_cybergym_main.CyberGymAgent.shell,
+        shell=_unused_shell(),
         submission_count=submission_count,
         submissions=submissions or [],
     )
@@ -169,7 +174,7 @@ def test_submit_rejects_an_empty_hypothesis_before_running_verifier():
 
 def test_finder_uses_feedback_history_for_portfolio_context():
     portfolio = nooa_cybergym_agent.Portfolio(
-        cybergym_submissions.SubmissionManager(shell=nooa_cybergym_agent.CyberGymAgent.shell)
+        cybergym_submissions.SubmissionManager(shell=_unused_shell())
     )
 
     finder = nooa_cybergym_agent.Finder(
@@ -192,7 +197,7 @@ def test_finder_uses_feedback_history_for_portfolio_context():
 
 def test_finder_records_portfolio_feedback_only_when_changed():
     portfolio = nooa_cybergym_agent.Portfolio(
-        cybergym_submissions.SubmissionManager(shell=nooa_cybergym_agent.CyberGymAgent.shell)
+        cybergym_submissions.SubmissionManager(shell=_unused_shell())
     )
     finder = nooa_cybergym_agent.Finder(
         llm=FakeLLMClient(), portfolio=portfolio, model_name="test-model"
@@ -212,7 +217,7 @@ def test_finder_records_portfolio_feedback_only_when_changed():
 
 def test_expander_uses_static_tool_reminder_without_dynamic_context():
     portfolio = nooa_cybergym_agent.Portfolio(
-        cybergym_submissions.SubmissionManager(shell=nooa_cybergym_agent.CyberGymAgent.shell)
+        cybergym_submissions.SubmissionManager(shell=_unused_shell())
     )
 
     expander = nooa_cybergym_agent.Expander(
@@ -233,6 +238,14 @@ def test_cybergym_agent_disables_default_state_context():
 
     assert "state" in agent.context_manager._blocks
     assert agent.context_manager.is_disabled("state")
+
+
+def test_cybergym_agents_have_isolated_shell_sessions():
+    first = nooa_cybergym_agent.CyberGymAgent(llm=FakeLLMClient())
+    second = nooa_cybergym_agent.CyberGymAgent(llm=FakeLLMClient())
+
+    assert first.shell is not second.shell
+    assert first.shell._session is not second.shell._session
 
 
 def test_glm52_is_the_agent_default_with_three_finder_lanes():
@@ -321,7 +334,7 @@ def test_configure_tracing_installs_atif_with_nooa_api(tmp_path, monkeypatch):
 
 def test_portfolio_apply_review_updates_guidance_and_stop_flag():
     portfolio = nooa_cybergym_agent.Portfolio(
-        cybergym_submissions.SubmissionManager(shell=nooa_cybergym_agent.CyberGymAgent.shell)
+        cybergym_submissions.SubmissionManager(shell=_unused_shell())
     )
     review = nooa_cybergym_agent.Review(
         on_target=True,
@@ -368,7 +381,7 @@ def test_portfolio_renders_hypothesis_for_each_crash_family():
 
 
 def test_portfolio_pending_crash_clusters_skips_duplicates_and_expanders():
-    manager = cybergym_submissions.SubmissionManager(shell=nooa_cybergym_agent.CyberGymAgent.shell)
+    manager = cybergym_submissions.SubmissionManager(shell=_unused_shell())
     portfolio = nooa_cybergym_agent.Portfolio(manager)
     fp_a = cybergym_submissions.SubmissionManager.fingerprint_output(
         "crashed",
@@ -428,7 +441,7 @@ def test_portfolio_pending_crash_clusters_skips_duplicates_and_expanders():
 
 def test_finder_and_expander_are_distinct_worker_agent_types():
     portfolio = nooa_cybergym_agent.Portfolio(
-        cybergym_submissions.SubmissionManager(shell=nooa_cybergym_agent.CyberGymAgent.shell)
+        cybergym_submissions.SubmissionManager(shell=_unused_shell())
     )
 
     finder = nooa_cybergym_agent.Finder(llm=FakeLLMClient(), portfolio=portfolio)
@@ -438,3 +451,4 @@ def test_finder_and_expander_are_distinct_worker_agent_types():
     assert isinstance(expander, nooa_cybergym_agent.Expander)
     assert not isinstance(expander, nooa_cybergym_agent.Finder)
     assert finder is not expander
+    assert finder.shell is not expander.shell

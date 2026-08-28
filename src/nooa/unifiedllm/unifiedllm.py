@@ -1564,6 +1564,49 @@ def _extract_reasoning_and_usage(raw_response: Any) -> tuple[str | None, dict[st
     return reasoning, usage
 
 
+def _completion_assistant_message(
+    message: Any,
+    *,
+    tool_calls: list[Any] | None = None,
+) -> dict[str, Any]:
+    """Build a replayable Chat-Completions assistant message.
+
+    LiteLLM 1.97 bridges GPT-5.4+ function-tool requests to the Responses API
+    and returns the encrypted reasoning state as ``reasoning_items`` on the
+    chat-shaped message. That state must be replayed with the assistant tool
+    call on the next turn; dropping it makes multi-turn reasoning tool calls
+    lose their provider state.
+    """
+    assistant_message: dict[str, Any] = {
+        "role": "assistant",
+        "content": getattr(message, "content", None) or "",
+    }
+
+    if tool_calls:
+        assistant_message["tool_calls"] = [
+            {
+                "id": tool_call.id,
+                "type": "function",
+                "function": {
+                    "name": tool_call.function.name,
+                    "arguments": tool_call.function.arguments,
+                },
+            }
+            for tool_call in tool_calls
+        ]
+
+    reasoning_items = getattr(message, "reasoning_items", None)
+    if reasoning_items:
+        assistant_message["reasoning_items"] = [
+            item.model_dump(exclude_none=True)
+            if hasattr(item, "model_dump")
+            else copy.deepcopy(item)
+            for item in reasoning_items
+        ]
+
+    return assistant_message
+
+
 def _extract_xml_tool_calls(content: str) -> list["ToolCall"]:
     """Extract tool calls from XML format used by Nemotron/NIM models.
 
@@ -1833,9 +1876,13 @@ class CompletionClient(UnifiedLLM):
             _update_token_calibration(
                 self.model, prepared_messages, usage, tools=api_params.get("tools")
             )
-        raw_tool_calls = raw_response.choices[0].message.tool_calls  # type: ignore[union-attr]
+        raw_tool_calls = cast(
+            list[Any] | None,
+            raw_response.choices[0].message.tool_calls,  # type: ignore[union-attr]
+        )
 
         if raw_tool_calls:
+            response_message = raw_response.choices[0].message
             tool_calls = [
                 ToolCall(id=tc.id, name=tc.function.name or "", arguments=tc.function.arguments)
                 for tc in raw_tool_calls
@@ -1846,21 +1893,9 @@ class CompletionClient(UnifiedLLM):
                 content="",
                 tool_calls=tool_calls,
                 finish_reason="tool_calls",
-                assistant_message={
-                    "role": "assistant",
-                    "content": raw_response.choices[0].message.content or "",  # type: ignore[union-attr]
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                        for tc in raw_tool_calls
-                    ],
-                },
+                assistant_message=_completion_assistant_message(
+                    response_message, tool_calls=raw_tool_calls
+                ),
                 reasoning=reasoning,
                 usage=usage,
             )
@@ -1909,7 +1944,7 @@ class CompletionClient(UnifiedLLM):
                 content=parsed_content,
                 tool_calls=[],
                 finish_reason=_map_completion_finish_reason(raw_response),
-                assistant_message={"role": "assistant", "content": text_content},
+                assistant_message=_completion_assistant_message(raw_response.choices[0].message),
                 reasoning=reasoning if text_content else None,
                 usage=usage,
             )
@@ -1919,7 +1954,7 @@ class CompletionClient(UnifiedLLM):
             content=text_content,
             tool_calls=[],
             finish_reason=_map_completion_finish_reason(raw_response),
-            assistant_message={"role": "assistant", "content": text_content},
+            assistant_message=_completion_assistant_message(raw_response.choices[0].message),
             reasoning=reasoning,
             usage=usage,
         )
@@ -2009,9 +2044,13 @@ class CompletionClient(UnifiedLLM):
             _update_token_calibration(
                 self.model, prepared_messages, usage, tools=api_params.get("tools")
             )
-        raw_tool_calls = raw_response.choices[0].message.tool_calls  # type: ignore[union-attr]
+        raw_tool_calls = cast(
+            list[Any] | None,
+            raw_response.choices[0].message.tool_calls,  # type: ignore[union-attr]
+        )
 
         if raw_tool_calls:
+            response_message = raw_response.choices[0].message
             tool_calls = [
                 ToolCall(
                     id=tc.id, name=tc.function.name or "", arguments=tc.function.arguments or ""
@@ -2024,21 +2063,9 @@ class CompletionClient(UnifiedLLM):
                 content="",
                 tool_calls=tool_calls,
                 finish_reason="tool_calls",
-                assistant_message={
-                    "role": "assistant",
-                    "content": raw_response.choices[0].message.content or "",  # type: ignore[union-attr]
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                        for tc in raw_tool_calls
-                    ],
-                },
+                assistant_message=_completion_assistant_message(
+                    response_message, tool_calls=raw_tool_calls
+                ),
                 reasoning=reasoning,
                 usage=usage,
             )
@@ -2087,7 +2114,7 @@ class CompletionClient(UnifiedLLM):
                 content=parsed_content,
                 tool_calls=[],
                 finish_reason=_map_completion_finish_reason(raw_response),
-                assistant_message={"role": "assistant", "content": text_content},
+                assistant_message=_completion_assistant_message(raw_response.choices[0].message),
                 reasoning=reasoning if text_content else None,
                 usage=usage,
             )
@@ -2097,7 +2124,7 @@ class CompletionClient(UnifiedLLM):
             content=text_content,
             tool_calls=[],
             finish_reason=_map_completion_finish_reason(raw_response),
-            assistant_message={"role": "assistant", "content": text_content},
+            assistant_message=_completion_assistant_message(raw_response.choices[0].message),
             reasoning=reasoning,
             usage=usage,
         )

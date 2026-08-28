@@ -9,6 +9,31 @@ class SandboxError(RuntimeError):
     """Base class for sandbox infrastructure errors."""
 
 
+class SandboxExecutionError(RuntimeError):
+    """A user-code failure reconstructed from a sandbox worker.
+
+    ``diagnostic`` is rendered inside the worker while its traceback and source
+    cache still exist. The parent-side formatter treats it as trusted backend
+    output; ``original_type`` preserves the worker exception's type name.
+    """
+
+    def __init__(
+        self,
+        original_type: str,
+        message: str,
+        diagnostic: str,
+        original_error: Exception,
+    ) -> None:
+        super().__init__(message)
+        self.original_type = original_type
+        self.diagnostic = diagnostic
+        self.original_error = original_error
+
+    def __str__(self) -> str:
+        message = super().__str__()
+        return f"{self.original_type}: {message}" if message else self.original_type
+
+
 class SandboxUnavailable(SandboxError):
     """A requested guardrail cannot be enforced on this host.
 
