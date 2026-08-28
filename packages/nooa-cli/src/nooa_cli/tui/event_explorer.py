@@ -240,10 +240,22 @@ class EventExplorerView(ExplorerView):
 
     def detail_lines(self, row: EventExplorerRow, width: int) -> list[str]:
         self.model._last_detail_match_lines = detail_match_lines(row, width, self.model.query)
-        self.model._last_detail_match_occurrences = detail_match_occurrences(
-            row, width, self.model.query
+        occurrences = detail_match_occurrences(row, width, self.model.query)
+        self.model._last_detail_match_occurrences = occurrences
+        current_line = None
+        current_occurrence = None
+        if occurrences:
+            self.model.search_line_cursor = min(
+                max(self.model.search_line_cursor, 0), len(occurrences) - 1
+            )
+            current_line, current_occurrence = occurrences[self.model.search_line_cursor]
+        return highlighted_detail_lines(
+            row,
+            width,
+            self.model.query,
+            current_match_line=current_line,
+            current_match_occurrence=current_occurrence,
         )
-        return highlighted_detail_lines(row, width, self.model.query)
 
     def handle_action(self, action: str, row: Any) -> SubviewKeyResult:
         return "ignored"
