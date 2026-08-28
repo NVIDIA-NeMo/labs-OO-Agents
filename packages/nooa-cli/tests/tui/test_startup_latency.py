@@ -185,6 +185,45 @@ def test_bootstrap_registry_alias_defers_litellm_import(tmp_path) -> None:
     ]
 
 
+def test_bootstrap_explicit_trace_dir_defers_litellm_import(tmp_path) -> None:
+    project_dir = tmp_path / ".nooa"
+    project_dir.mkdir()
+    (project_dir / "settings.yaml").write_text("tui:\n  default_model: local-model\n")
+    (project_dir / "llm_config.yaml").write_text(
+        "models:\n"
+        "  local-model:\n"
+        "    model_name: openai/local-model\n"
+        "    api_base: http://localhost:9999/v1\n"
+        "    context_window: 1000\n"
+    )
+    code = (
+        "import asyncio, sys\n"
+        "from nooa_cli.tui.config import Config\n"
+        "from nooa_cli.tui.bootstrap import bootstrap\n"
+        "async def main():\n"
+        "    cfg = Config.load(no_splash=True, trace='traces')\n"
+        "    result = await bootstrap(cfg)\n"
+        "    try:\n"
+        "        print(type(result.agent.llm).__name__)\n"
+        "        print('litellm' in sys.modules)\n"
+        "    finally:\n"
+        "        result.session_manager.close()\n"
+        "asyncio.run(main())\n"
+    )
+    env = os.environ | {
+        "NEMO_OO_PROJECT_DIR": str(project_dir),
+        "NEMO_OO_USER_DIR": str(tmp_path / "user"),
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+    assert result.stdout.splitlines()[-2:] == ["LazyRegistryLLMClient", "False"]
+
+
 @pytest.mark.asyncio
 async def test_deferred_bootstrap_starts_app_before_agent_construction(monkeypatch):
     import nooa_cli.interactive as interactive_module

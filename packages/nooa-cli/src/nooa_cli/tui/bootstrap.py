@@ -267,7 +267,10 @@ def _enable_tracing(config: Config, messages: list[Output]):
                 trace_dir = find_project_root() / trace_dir
             trace_dir.mkdir(parents=True, exist_ok=True)
             enable_tracing(
-                exporters=[exporters.jsonl(trace_dir), exporters.journal()],
+                exporters=[
+                    exporters.jsonl(trace_dir),
+                    exporters.journal(defer_litellm_callback=True),
+                ],
                 quiet=True,
             )
         else:
