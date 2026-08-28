@@ -2857,19 +2857,10 @@ class TUIApplication:
         # already consumed by the agent can't be edited.
         empty_buffer = Condition(lambda: self.input_buffer.text == "") & subview_inactive
 
-        def _pop_last_queued() -> str | None:
-            if self._deferred_input_handoffs:
-                return self._deferred_input_handoffs.pop().text
-            if self._agent_controller.state is None:
-                return None
-            return self._agent_controller.withdraw_pending_input()
-
         @kb.add("up", filter=empty_buffer)
         def _(event):
-            popped = _pop_last_queued()
-            if popped is not None:
-                draft = self._draft_for_withdrawn_input(popped)
-                self.complete_pending_input_handoff(popped)
+            draft = self._withdraw_pending_input_draft()
+            if draft is not None:
                 self.input_buffer.text = draft
                 self.input_buffer.cursor_position = len(draft)
                 return
@@ -3161,6 +3152,21 @@ class TUIApplication:
                 result.append(attachment.text)
         flush_literal()
         return "".join(result)
+
+    def _withdraw_pending_input_draft(self) -> str | None:
+        """Withdraw the newest queued input and recover its editable draft."""
+        if self._deferred_input_handoffs:
+            handoff = self._deferred_input_handoffs.pop()
+            self._discard_pending_input_handoff(handoff)
+            return handoff.draft_text or handoff.text
+        if self._agent_controller.state is None:
+            return None
+        text = self._agent_controller.withdraw_pending_input()
+        if text is None:
+            return None
+        draft = self._draft_for_withdrawn_input(text)
+        self.complete_pending_input_handoff(text)
+        return draft
 
     def _draft_for_withdrawn_input(self, text: str) -> str:
         """Recover compact attachment markers for one withdrawn queue item."""
