@@ -539,10 +539,8 @@ class ExplorerBrowser:
                 " class:fullscreen-browser.selected" if selected else ""
             )
             marker = "❯ " if selected else "  "
-            text = sanitize_live_text(
-                marker + self.view.format_row(self.model.rows[row_index], max(1, width - 2))
-            )
-            text = text.replace("\n", " ").replace("\r", "")[:width]
+            text = marker + self.view.format_row(self.model.rows[row_index], max(1, width - 2))
+            text = sanitize_live_text(text.replace("\n", " ").replace("\r", " "))[:width]
             query = self.buffer.text.casefold().strip()
             if not query:
                 output.append((base, text))
