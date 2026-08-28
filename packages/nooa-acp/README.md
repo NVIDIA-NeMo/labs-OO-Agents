@@ -87,7 +87,7 @@ This is a JSON-RPC server, not an interactive program: it speaks ACP on
 stdin/stdout and exits when its input closes, so running it in a terminal
 without a client does nothing. Launch it this way to wire up an ACP client
 other than Zed, or to watch the diagnostics it writes to stderr while a client
-drives it. `--model` accepts any LiteLLM model name or configured NOOA alias.
+drives it. `--model` accepts any provider model name or configured NOOA alias.
 
 ## Opening a repository runs code from it
 

@@ -88,16 +88,13 @@ def test_context_usage_block_includes_collapse_hint():
     agent.runtime._last_context_stats = ContextWindowStats(
         context_blocks_count=2,
         events_count=12,
-        prompt_tokens=1000,
         context_blocks_chars=100,
         events_chars=900,
-        max_context_tokens=1000,
-        model_context_window=1000,
     )
 
     block = agent._context_usage_block()
 
-    assert "Context usage:" in block
+    assert "Context contains 2 blocks (100 chars) and 12 events (900 chars)." in block
     assert "self.events.collapse(start_tag, end_tag, summary_text)" in block
 
 

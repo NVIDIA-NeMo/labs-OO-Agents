@@ -6,34 +6,23 @@ import inspect
 import json
 import logging
 import re
-import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from types import SimpleNamespace
+from typing import Any, Literal
 
-import litellm
 from pydantic import BaseModel, RootModel
 
+from ._anyllm import AnyLLMTransport, close_async_client_sync
 from .http_config import HttpConfig
 from .retry import EmptyContentError, sync_retry, with_retry
 from .retry_config import RetryConfig
+from .types import LLMChunk, LLMToolCallChunk, LLMUsage
 
 logger = logging.getLogger(__name__)
-
-# Bedrock/Anthropic reject requests where messages contain tool_call blocks but
-# no tools= param is passed (e.g. PredictStrategy after a CodeAct turn).
-# This flag tells litellm to auto-insert a dummy tool instead of raising.
-litellm.modify_params = True
-
-# litellm defaults to aiohttp for async HTTP (faster than httpx at high RPS).
-# But it never closes sessions on shutdown, producing noisy ResourceWarnings:
-#   "Unclosed client session" / "Unclosed connector"
-# For a TUI agent making sequential calls the perf difference is irrelevant,
-# and we already patch httpx for connection management. Disable aiohttp.
-litellm.disable_aiohttp_transport = True
 
 # Optional integration with nooa debug handler for LLM call tracking
 # This allows the debug signal handler to show pending LLM calls
@@ -77,15 +66,6 @@ def _track_llm_call(model: str, endpoint: str | None = None, prompt_tokens: int 
         yield
 
 
-# Suppress harmless warning about litellm's async callback not being awaited
-# (occurs during shutdown when async logging callbacks aren't fully cleaned up)
-warnings.filterwarnings(
-    "ignore",
-    message="coroutine 'Logging.async_success_handler' was never awaited",
-    category=RuntimeWarning,
-)
-
-
 # ============================================================================
 # Per-client HTTP transport
 # ============================================================================
@@ -96,215 +76,71 @@ warnings.filterwarnings(
 # recently constructed client silently won (see GitLab #329).
 #
 # Instead, each UnifiedLLM client now owns its own httpx client(s), built from
-# its HttpConfig, and passes them to litellm per call via litellm's
+# its HttpConfig, and passes them to AnyLLM per call via AnyLLM's
 # caller-provided-client support. No global state, no monkey-patch, and two
 # clients with different HttpConfigs stay fully independent.
 
 
 class _ClientHttp:
-    """Per-client HTTP transport: owns httpx clients + litellm wrappers.
+    """Per-client HTTP transport owned and closed by UnifiedLLM."""
 
-    Builds one ``httpx.AsyncClient`` and one ``httpx.Client`` from the given
-    ``HttpConfig`` (so the configured connection-pool limits — notably
-    ``max_keepalive_connections`` — and timeouts apply to exactly this client's
-    requests) and wraps them in the object litellm expects for the target
-    provider:
-
-    * The Responses API always routes through litellm's ``base_llm_http_handler``,
-      which accepts an ``AsyncHTTPHandler`` / ``HTTPHandler`` for any provider, so
-      responses clients always use those wrappers.
-    * Chat Completions is provider-specific: OpenAI and OpenAI-compatible
-      providers go through the OpenAI SDK path (``client=`` must be an
-      ``AsyncOpenAI`` / ``OpenAI``), while anthropic/bedrock/etc. accept the
-      ``AsyncHTTPHandler`` / ``HTTPHandler`` wrappers.
-
-    If the correct wrapper can't be built (e.g. provider detection fails or the
-    OpenAI SDK client can't be constructed) the corresponding wrapper is left as
-    ``None`` and litellm falls back to building its own default client — the call
-    still succeeds, it just doesn't get this client's custom pool/timeout.
-    """
-
-    def __init__(self, model: str, config: dict[str, Any], http_config: HttpConfig):
+    def __init__(self, http_config: HttpConfig):
         import httpx
 
-        self.http_config = http_config
+        limits = http_config.to_httpx_limits()
+        self.limits = limits
+        timeout = http_config.to_httpx_timeout()
+        self.httpx_sync = httpx.Client(limits=limits, timeout=timeout, follow_redirects=True)
+        self.httpx_async = httpx.AsyncClient(limits=limits, timeout=timeout, follow_redirects=True)
+        # Compatibility names used by the request builders. AnyLLM receives the
+        # underlying httpx client, never a provider SDK object.
+        self.sync_client = self.httpx_sync
+        self.async_client = self.httpx_async
         self._sync_closed = False
         self._async_closed = False
-        self._timeout = http_config.to_httpx_timeout()
-        self.limits = http_config.to_httpx_limits()
-
-        # Mirror the SSL / redirect / default-header hardening litellm applies to
-        # its own httpx clients, so handing litellm our client only changes the
-        # connection-pool limits + timeout — not TLS verification, client certs,
-        # or redirect handling (see GitLab #329 review). Falls back to plain
-        # limits+timeout if litellm's internals move.
-        hardening = self._httpx_hardening()
-
-        # The per-client httpx clients. These are what carry this client's
-        # connection-pool limits (incl. max_keepalive_connections) + timeouts.
-        # transport is left as httpx's default so ``limits`` actually applies.
-        self.httpx_async: httpx.AsyncClient = httpx.AsyncClient(
-            limits=self.limits, timeout=self._timeout, **hardening
-        )
-        self.httpx_sync: httpx.Client = httpx.Client(
-            limits=self.limits, timeout=self._timeout, **hardening
-        )
-
-        # litellm wrappers, filled in by _build_* below.
-        self.async_client: Any = None
-        self.sync_client: Any = None
-        self._openai_clients: list[Any] = []
-
-    @staticmethod
-    def _httpx_hardening() -> dict[str, Any]:
-        """Transport kwargs mirroring litellm's own httpx client construction.
-
-        litellm builds its clients with SSL verification (``litellm.ssl_verify`` /
-        ``SSL_VERIFY``), an optional client cert (``SSL_CERTIFICATE`` /
-        ``litellm.ssl_certificate``), ``follow_redirects=True``, and a default
-        User-Agent. We replicate that here so a client that supplies its own
-        HttpConfig doesn't silently lose TLS/redirect behaviour.
-        """
-        try:
-            import os
-
-            from litellm.llms.custom_httpx.http_handler import (
-                get_default_headers,
-                get_ssl_configuration,
-            )
-
-            return {
-                "verify": get_ssl_configuration(),
-                "cert": os.getenv("SSL_CERTIFICATE", getattr(litellm, "ssl_certificate", None)),
-                "follow_redirects": True,
-                "headers": get_default_headers(),
-            }
-        except Exception as e:  # noqa: BLE001
-            logger.debug("Falling back to minimal httpx transport config: %s", e)
-            return {"follow_redirects": True}
-
-    def _build_handler_wrappers(self) -> None:
-        """Wrap the httpx clients in litellm's AsyncHTTPHandler / HTTPHandler."""
-        from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
-
-        # AsyncHTTPHandler eagerly creates an httpx.AsyncClient in __init__.
-        # Build the wrapper object directly so there is no throwaway async client
-        # to leak before replacing it with this _ClientHttp's managed client.
-        async_handler = AsyncHTTPHandler.__new__(AsyncHTTPHandler)
-        async_handler.timeout = self._timeout
-        async_handler.event_hooks = None
-        async_handler.client = self.httpx_async
-        async_handler.client_alias = None
-        self.async_client = async_handler
-
-        sync_handler = HTTPHandler(timeout=self._timeout)
-        try:
-            sync_handler.client.close()  # close the throwaway sync client
-        except Exception:  # noqa: BLE001
-            pass
-        sync_handler.client = self.httpx_sync
-        self.sync_client = sync_handler
-
-    def _build_completion_wrappers(self, model: str, config: dict[str, Any]) -> None:
-        """Pick the right litellm client type for a Chat Completions provider."""
-        try:
-            _, provider, dynamic_api_key, dynamic_api_base = litellm.get_llm_provider(
-                model,
-                api_key=config.get("api_key"),
-                api_base=config.get("api_base"),
-            )
-        except Exception as e:  # noqa: BLE001
-            # Unknown/ambiguous model — don't risk handing an incompatible client
-            # to a handler we can't identify. Let litellm build its own.
-            logger.debug(
-                "Could not detect provider for %r (%s); using litellm's default HTTP client.",
-                model,
-                e,
-            )
-            return
-
-        openai_family = provider == "openai" or provider in getattr(
-            litellm, "openai_compatible_providers", []
-        )
-        if not openai_family:
-            # anthropic / bedrock / vertex / ... accept AsyncHTTPHandler|HTTPHandler
-            # (guarded by isinstance in their handlers).
-            self._build_handler_wrappers()
-            return
-
-        # OpenAI SDK path: client= must be an AsyncOpenAI / OpenAI wrapping httpx.
-        api_key = config.get("api_key") or dynamic_api_key
-        api_base = config.get("api_base") or dynamic_api_base
-        common: dict[str, Any] = {"timeout": self._timeout}
-        if api_key:
-            common["api_key"] = api_key
-        if api_base:
-            common["base_url"] = api_base
-        try:
-            from openai import AsyncOpenAI, OpenAI
-
-            self.async_client = AsyncOpenAI(http_client=self.httpx_async, **common)
-            self.sync_client = OpenAI(http_client=self.httpx_sync, **common)
-            self._openai_clients = [self.async_client, self.sync_client]
-        except Exception as e:  # noqa: BLE001
-            # e.g. no API key resolvable — fall back to litellm's own client so
-            # auth/behaviour is preserved (this client just loses its custom pool).
-            logger.debug(
-                "Could not build OpenAI client for %r (%s); using litellm's default HTTP client.",
-                model,
-                e,
-            )
-            self.async_client = None
-            self.sync_client = None
 
     @classmethod
-    def for_completion(cls, model: str, config: dict[str, Any], http_config: HttpConfig):
-        inst = cls(model, config, http_config)
-        inst._build_completion_wrappers(model, config)
-        return inst
+    def for_completion(
+        cls, model: str, config: dict[str, Any], http_config: HttpConfig
+    ) -> "_ClientHttp":
+        return cls(http_config)
 
     @classmethod
-    def for_responses(cls, model: str, config: dict[str, Any], http_config: HttpConfig):
-        inst = cls(model, config, http_config)
-        # The Responses API always accepts the handler wrappers, regardless of
-        # provider.
-        inst._build_handler_wrappers()
-        return inst
+    def for_responses(
+        cls, model: str, config: dict[str, Any], http_config: HttpConfig
+    ) -> "_ClientHttp":
+        return cls(http_config)
 
     def close(self) -> None:
-        """Close the sync HTTP resources owned by this client."""
-        if self._sync_closed:
+        """Close all resources for synchronous callers.
+
+        AnyLLM's sync facade runs its async provider on its dedicated runner
+        loop, so close the injected AsyncClient on that same loop. Calling the
+        sync close API from an active event loop is an error; async callers must
+        use ``await aclose()``.
+        """
+        if self._sync_closed and self._async_closed:
             return
-        self._sync_closed = True
-        for oc in self._openai_clients:
-            close = getattr(oc, "close", None)
-            if close is not None and not inspect.iscoroutinefunction(close):
-                try:
-                    close()
-                except Exception:  # noqa: BLE001
-                    pass
         try:
-            self.httpx_sync.close()
-        except Exception:  # noqa: BLE001
+            asyncio.get_running_loop()
+        except RuntimeError:
             pass
+        else:
+            raise RuntimeError("close() cannot run inside an event loop; use 'await aclose()'")
+        if not self._sync_closed:
+            self._sync_closed = True
+            self.httpx_sync.close()
+        if not self._async_closed:
+            close_async_client_sync(self.httpx_async)
+            self._async_closed = True
 
     async def aclose(self) -> None:
-        """Close both the sync and async HTTP resources owned by this client."""
+        if not self._sync_closed:
+            self._sync_closed = True
+            self.httpx_sync.close()
         if not self._async_closed:
             self._async_closed = True
-            for oc in self._openai_clients:
-                close = getattr(oc, "close", None)
-                if close is None or not inspect.iscoroutinefunction(close):
-                    continue
-                try:
-                    await close()
-                except Exception:  # noqa: BLE001
-                    pass
-            try:
-                await self.httpx_async.aclose()
-            except Exception:  # noqa: BLE001
-                pass
-        self.close()
+            await self.httpx_async.aclose()
 
 
 def _recursively_parse_json_strings(obj: Any) -> Any:
@@ -672,15 +508,37 @@ class ToolCall:
 
 @dataclass
 class LLMResponse:
-    """Standardized response from any LLM API"""
+    """Provider-neutral response returned by every UnifiedLLM implementation.
 
-    raw_response: Any
+    ``usage`` remains the one-release compatibility storage field. It contains
+    only normalized primitive values; ``reported_usage`` is the canonical typed
+    read view used by new code.
+    """
+
     content: str | BaseModel
     tool_calls: list[ToolCall]
     finish_reason: Literal["stop", "tool_calls", "length", "error"]
     assistant_message: dict[str, Any]
-    reasoning: str | None = None  # o1-style or DeepSeek/QwQ reasoning
-    usage: dict[str, int] | None = None  # Token usage stats
+    reasoning: str | None = None
+    usage: dict[str, int | float] | LLMUsage | None = None
+
+    @property
+    def reported_usage(self) -> LLMUsage | None:
+        """Canonical provider-neutral usage view; never used for runtime control."""
+        return _normalize_usage(self.usage)
+
+    def to_wire(self) -> dict[str, Any]:
+        """Return a provider-neutral, JSON-friendly response representation."""
+        return {
+            "message": copy.deepcopy(self.assistant_message),
+            "content": self.content.model_dump()
+            if isinstance(self.content, BaseModel)
+            else self.content,
+            "tool_calls": [vars(call) for call in self.tool_calls],
+            "finish_reason": self.finish_reason,
+            "reasoning": self.reasoning,
+            "usage": _usage_dict(self.reported_usage),
+        }
 
     @property
     def message(self) -> str | BaseModel | None:
@@ -933,7 +791,7 @@ def _maybe_sanitize_response_format(
 
     - **Bedrock**: always a sanitized strict json_schema dict (unchanged).
     - **Other providers** (OpenAI/Azure/NIM chat completions): return the Pydantic model
-      as-is so litellm builds a strict json_schema — UNLESS the schema cannot satisfy
+      as-is so AnyLLM builds a strict json_schema — UNLESS the schema cannot satisfy
       strict mode (free-form dict, bare/untyped list, tuple, set), in which case we send
       a non-strict json_schema so the request is accepted. See issue 232.
     """
@@ -963,16 +821,16 @@ def _maybe_sanitize_response_format(
 
 
 def _responses_output_params(output_model: type[BaseModel]) -> dict[str, Any]:
-    """Structured-output params for the Responses API (``litellm.responses``).
+    """Structured-output params for the Responses API (``the provider Responses API``).
 
     The Responses API is the strict-mode counterpart of chat completions'
-    ``_maybe_sanitize_response_format``. litellm's ``text_format`` convenience builds a
+    ``_maybe_sanitize_response_format``. the transport's ``text_format`` convenience builds a
     *strict* ``text.format`` json_schema from the Pydantic model, which the API rejects
     for free-form dicts, bare/untyped lists, tuples, and sets (see issue 232).
 
-    - strict-compatible schema → ``{"text_format": output_model}`` (litellm builds strict);
+    - strict-compatible schema → ``{"text_format": output_model}`` (the transport builds strict);
     - otherwise → an explicit non-strict ``text.format`` so the request is accepted.
-      litellm passes a provided ``text`` through verbatim (``text_format`` is then ignored).
+      the transport passes a provided ``text`` through verbatim (``text_format`` is then ignored).
       PredictStrategy still validates the parsed output against the real model client-side.
     """
     raw_schema = output_model.model_json_schema()
@@ -991,8 +849,7 @@ def _responses_output_params(output_model: type[BaseModel]) -> dict[str, Any]:
 
 
 # Bedrock/Anthropic reject messages containing tool_call blocks when no tools= param
-# is set. litellm.modify_params=True should add a dummy tool, but doesn't work in all
-# code paths (e.g. litellm router). We detect and handle this ourselves.
+# is set. Some providers require a placeholder tool in this case, so handle it locally.
 _DUMMY_TOOL_SCHEMA = {
     "type": "function",
     "function": {
@@ -1042,114 +899,6 @@ def _instantiate_output_model(output_model: type[BaseModel], json_data: Any) -> 
         return output_model(**json_data)
 
 
-class TokenCalibration:
-    """Per-model EMA calibration of token estimates against API-reported usage.
-
-    litellm's token_counter uses OpenAI's cl100k_base tokenizer for all models
-    and ignores chat-template overhead, under-counting by 1.4–2.4× depending on
-    the model family.  After each LLM call we observe the *actual* prompt token
-    count from ``response.usage`` and maintain a running ratio so that future
-    estimates are corrected.
-
-    The ratio is an exponential moving average (EMA) that adapts quickly —
-    after ~10 observations the initial value's influence drops below 3%.
-    Before any observation arrives, ``default_ratio`` (1.0) is used — callers
-    who want a conservative first estimate can raise this.
-    """
-
-    __slots__ = ("_ratios", "_alpha", "_default_ratio")
-
-    def __init__(self, *, alpha: float = 0.3, default_ratio: float = 1.0):
-        self._ratios: dict[str, float] = {}
-        self._alpha = alpha
-        self._default_ratio = default_ratio
-
-    def update(self, model: str, estimated: int, actual: int) -> None:
-        """Record one observation after an LLM call."""
-        if estimated <= 0 or actual <= 0:
-            return
-        observed = actual / estimated
-        prev = self._ratios.get(model)
-        if prev is None:
-            self._ratios[model] = observed
-        else:
-            self._ratios[model] = self._alpha * observed + (1 - self._alpha) * prev
-
-    def ratio(self, model: str) -> float:
-        """Current calibration ratio for *model* (default if unseen)."""
-        return self._ratios.get(model, self._default_ratio)
-
-    def calibrate(self, model: str, estimated: int) -> int:
-        """Apply the calibration ratio to a raw estimate."""
-        return int(estimated * self.ratio(model))
-
-    def __repr__(self) -> str:
-        entries = ", ".join(f"{m}: {r:.3f}" for m, r in self._ratios.items())
-        return f"TokenCalibration({{{entries}}})"
-
-
-# Module-level singleton so all UnifiedLLM instances share calibration data.
-_token_calibration = TokenCalibration()
-
-
-def _update_token_calibration(
-    model: str,
-    messages: list[dict[str, Any]],
-    usage: dict[str, int],
-    tools: list[dict[str, Any]] | None = None,
-) -> None:
-    """Update token calibration from an API response's usage data.
-
-    The recorded ratio is ``actual / estimated`` where ``actual`` is the API's
-    reported ``prompt_tokens``. For the ratio to reflect the model tokenizer's
-    real skew (and not a *coverage* gap), ``estimated`` must count the SAME
-    request the API billed:
-
-    * **messages-mode** ``token_counter`` (not a per-message text sum) so the
-      chat-template / role framing the API charges is included, and
-    * the **tool/function schemas** that were sent (``tools``) — for an agent
-      with a large tool surface these are a big, fixed per-call cost that the
-      API bills in ``prompt_tokens``. Omitting them (the old behavior, which
-      summed only message text) made ``estimated`` far smaller than ``actual``
-      and inflated the ratio (observed ~2.7x), which then scaled every
-      displayed/triggering token count up by that bogus factor.
-    """
-    actual = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
-    if actual <= 0:
-        return
-    # Calibration is best-effort: it must NEVER raise out of the (already paid)
-    # response path. The whole estimate — primary AND fallback — is guarded.
-    try:
-        try:
-            estimated = litellm.token_counter(model=model, messages=messages)
-            if tools:
-                # Count the full messages+tools payload the way the API bills it,
-                # then take the larger of the bare and with-tools counts
-                # (with_tools is normally >= bare; max only guards a tokenizer
-                # that returns less with tools attached).
-                with_tools = litellm.token_counter(
-                    model=model, messages=messages, tools=cast(Any, tools)
-                )
-                estimated = max(estimated, with_tools)
-        except Exception:
-            # token_counter can reject some message/tool shapes; fall back to the
-            # per-message text sum rather than skip calibration entirely.
-            estimated = 0
-            for msg in messages:
-                content = msg.get("content")
-                if isinstance(content, str):
-                    estimated += litellm.token_counter(model=model, text=content)
-                elif isinstance(content, list):
-                    for part in content:
-                        if isinstance(part, dict) and part.get("type") == "text":
-                            estimated += litellm.token_counter(
-                                model=model, text=part.get("text", "")
-                            )
-        _token_calibration.update(model, estimated, actual)
-    except Exception:
-        logger.debug("token calibration skipped (estimate failed)", exc_info=True)
-
-
 class UnifiedLLM(ABC):
     _registry_config: dict[str, Any] | None
 
@@ -1161,7 +910,7 @@ class UnifiedLLM(ABC):
         self.cache_control_injection_points: list[dict[str, Any]] = (
             DEFAULT_CACHE_CONTROL_INJECTION_POINTS
         )
-        # Per-client HTTP transport (httpx clients + litellm wrappers). Set by
+        # Per-client HTTP transport (managed httpx clients). Set by
         # concrete subclasses; guarded here so base helpers stay safe.
         self._http: _ClientHttp | None = None
 
@@ -1296,33 +1045,14 @@ class UnifiedLLM(ABC):
 
         return messages
 
-    def count_tokens(self, text: str) -> int:
-        """Count tokens using model-appropriate tokenizer.
-
-        Uses litellm's token_counter with a calibration correction derived
-        from API-reported usage.  Before the first LLM call completes the
-        raw litellm estimate is returned unchanged (ratio = 1.0).
-
-        Args:
-            text: The text to count tokens for.
-
-        Returns:
-            Calibrated number of tokens in the text.
-        """
-        raw = litellm.token_counter(model=self.model, text=text)
-        return _token_calibration.calibrate(self.model, raw)
-
     def get_model_info(self) -> "Any":
-        """Get model metadata from litellm registry.
+        """Get model metadata from the configured provider registry.
 
         Returns:
             Dict with model info (max_input_tokens, max_output_tokens, etc.)
-            or None if model is not in litellm's registry.
+            or None if model is not in the configured registry.
         """
-        try:
-            return litellm.get_model_info(self.model)
-        except Exception:
-            return None
+        return None
 
     @property
     def context_window(self) -> int | None:
@@ -1332,7 +1062,7 @@ class UnifiedLLM(ABC):
         1. Explicit ``context_window`` config passed to the client constructor
         2. Registry config (if created via get_llm_client())
         3. Registry lookup by model name or model_name field
-        4. litellm model info (for known models)
+        4. the transport model info (for known models)
         5. None (unknown model)
 
         Returns:
@@ -1383,7 +1113,7 @@ class UnifiedLLM(ABC):
                 if cw is not None:
                     return cw
 
-        # Fallback to litellm
+        # Fallback to provider metadata
         info = self.get_model_info()
         return info.get("max_input_tokens") if info else None
 
@@ -1422,72 +1152,190 @@ class UnifiedLLM(ABC):
         pass
 
 
-def _collect_sync(raw: Any) -> "litellm.ModelResponse":
-    """Consume a sync streaming or non-streaming litellm response, returning ModelResponse."""
-    if isinstance(raw, litellm.CustomStreamWrapper):
-        chunks = list(raw)
-        result = litellm.stream_chunk_builder(chunks)
-        if result is None:
-            raise ValueError("stream_chunk_builder returned None for empty stream")
-        if not isinstance(result, litellm.ModelResponse):
-            raise TypeError(f"Expected ModelResponse, got {type(result)}")
-        return result
-    if not isinstance(raw, litellm.ModelResponse):
-        raise TypeError(f"Expected ModelResponse, got {type(raw)}")
+def _usage_dict(value: LLMUsage | None) -> dict[str, int | float] | None:
+    """Build the one-release compatibility mapping from canonical usage."""
+    if value is None:
+        return None
+    result: dict[str, int | float] = {}
+    if value.input_tokens is not None:
+        result["prompt_tokens"] = value.input_tokens
+    if value.output_tokens is not None:
+        result["completion_tokens"] = value.output_tokens
+    if value.input_tokens is not None and value.output_tokens is not None:
+        result["total_tokens"] = value.input_tokens + value.output_tokens
+    if value.cached_input_tokens is not None:
+        result["cached_input_tokens"] = value.cached_input_tokens
+    if value.reasoning_tokens is not None:
+        result["reasoning_tokens"] = value.reasoning_tokens
+    if value.cost_usd is not None:
+        result["cost_usd"] = value.cost_usd
+    return result
+
+
+def _normalize_usage(value: Any) -> LLMUsage | None:
+    if value is None:
+        return None
+    if hasattr(value, "model_dump"):
+        value = value.model_dump()
+    if not isinstance(value, dict):
+        value = {
+            name: getattr(value, name, None) for name in ("prompt_tokens", "completion_tokens")
+        }
+    input_details = value.get("input_tokens_details") or value.get("prompt_tokens_details") or {}
+    output_details = (
+        value.get("output_tokens_details") or value.get("completion_tokens_details") or {}
+    )
+    if hasattr(input_details, "model_dump"):
+        input_details = input_details.model_dump()
+    if hasattr(output_details, "model_dump"):
+        output_details = output_details.model_dump()
+    return LLMUsage(
+        input_tokens=value.get("input_tokens", value.get("prompt_tokens")),
+        output_tokens=value.get("output_tokens", value.get("completion_tokens")),
+        cached_input_tokens=value.get("cached_input_tokens", input_details.get("cached_tokens")),
+        reasoning_tokens=value.get("reasoning_tokens", output_details.get("reasoning_tokens")),
+        cost_usd=value.get("cost_usd"),
+    )
+
+
+def _chat_chunk_parts(chunk: Any) -> tuple[str, str, list[Any], str | None, Any]:
+    choices = getattr(chunk, "choices", None) or []
+    if not choices:
+        return "", "", [], None, getattr(chunk, "usage", None)
+    choice = choices[0]
+    delta = getattr(choice, "delta", None) or getattr(choice, "message", None)
+    tool_calls = tuple(
+        LLMToolCallChunk(
+            index=getattr(call, "index", position),
+            id=getattr(call, "id", None) or "",
+            name=getattr(getattr(call, "function", None), "name", None) or "",
+            arguments=getattr(getattr(call, "function", None), "arguments", None) or "",
+        )
+        for position, call in enumerate(getattr(delta, "tool_calls", None) or ())
+    )
+    return (
+        getattr(delta, "content", None) or "",
+        getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None) or "",
+        tool_calls,
+        getattr(choice, "finish_reason", None),
+        getattr(chunk, "usage", None),
+    )
+
+
+def _event_value(value: Any, name: str, default: Any = None) -> Any:
+    return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
+
+
+def _responses_chunk(event: Any) -> LLMChunk:
+    """Normalize one Responses API stream event without retaining SDK objects."""
+    event_type = _event_value(event, "type", "")
+    content = ""
+    calls: tuple[LLMToolCallChunk, ...] = ()
+    finish: str | None = None
+    usage = None
+    if event_type == "response.output_text.delta":
+        content = str(_event_value(event, "delta", "") or "")
+    elif event_type == "response.function_call_arguments.delta":
+        calls = (
+            LLMToolCallChunk(
+                index=int(_event_value(event, "output_index", 0) or 0),
+                id=str(_event_value(event, "item_id", "") or ""),
+                arguments=str(_event_value(event, "delta", "") or ""),
+            ),
+        )
+    elif event_type == "response.output_item.added":
+        item = _event_value(event, "item")
+        if _event_value(item, "type") == "function_call":
+            calls = (
+                LLMToolCallChunk(
+                    index=int(_event_value(event, "output_index", 0) or 0),
+                    id=str(_event_value(item, "call_id", "") or _event_value(item, "id", "") or ""),
+                    name=str(_event_value(item, "name", "") or ""),
+                    arguments=str(_event_value(item, "arguments", "") or ""),
+                ),
+            )
+    if event_type in {"response.completed", "response.incomplete", "response.failed"}:
+        response = _event_value(event, "response", event)
+        usage = _event_value(response, "usage")
+        status = _event_value(response, "status")
+        if event_type == "response.incomplete" or status == "incomplete":
+            details = _event_value(response, "incomplete_details")
+            finish = "length" if _event_value(details, "reason") == "max_output_tokens" else "error"
+        elif event_type == "response.failed" or status == "failed":
+            finish = "error"
+        else:
+            finish = "stop"
+    return LLMChunk(content, None, calls, finish, _normalize_usage(usage))
+
+
+def _aggregate_chat_chunks(chunks: list[Any]) -> Any:
+    content: list[str] = []
+    reasoning: list[str] = []
+    calls: dict[int, dict[str, str]] = {}
+    finish = None
+    usage = None
+    for chunk in chunks:
+        text, thought, tool_parts, chunk_finish, chunk_usage = _chat_chunk_parts(chunk)
+        content.append(text)
+        reasoning.append(thought)
+        finish = chunk_finish or finish
+        usage = chunk_usage or usage
+        for pos, tc in enumerate(tool_parts):
+            idx = getattr(tc, "index", pos)
+            item = calls.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+            item["id"] += getattr(tc, "id", None) or ""
+            item["name"] += tc.name
+            item["arguments"] += tc.arguments
+    tool_calls = [
+        SimpleNamespace(
+            id=v["id"], function=SimpleNamespace(name=v["name"], arguments=v["arguments"])
+        )
+        for _, v in sorted(calls.items())
+    ]
+    message = SimpleNamespace(
+        content="".join(content),
+        reasoning_content="".join(reasoning) or None,
+        tool_calls=tool_calls,
+    )
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=message, finish_reason=finish)], usage=usage
+    )
+
+
+def _collect_sync(raw: Any) -> Any:
+    """Consume a provider-neutral sync stream, leaving complete responses alone."""
+    if hasattr(raw, "choices") or hasattr(raw, "output"):
+        return raw
+    if hasattr(raw, "__iter__") and not isinstance(raw, (dict, str, bytes)):
+        return _aggregate_chat_chunks(list(raw))
     return raw
 
 
-async def _collect_async(raw: Any) -> "litellm.ModelResponse":
-    """Consume an async streaming or non-streaming litellm response, returning ModelResponse."""
-    if isinstance(raw, litellm.CustomStreamWrapper):
-        chunks = [chunk async for chunk in raw]  # type: ignore[attr-defined]
-        result = litellm.stream_chunk_builder(chunks)
-        if result is None:
-            raise ValueError("stream_chunk_builder returned None for empty stream")
-        if not isinstance(result, litellm.ModelResponse):
-            raise TypeError(f"Expected ModelResponse, got {type(result)}")
-        return result
-    if not isinstance(raw, litellm.ModelResponse):
-        raise TypeError(f"Expected ModelResponse, got {type(raw)}")
+async def _collect_async(raw: Any) -> Any:
+    """Consume a provider-neutral async stream, leaving complete responses alone."""
+    if hasattr(raw, "choices") or hasattr(raw, "output"):
+        return raw
+    if hasattr(raw, "__aiter__"):
+        chunks = [chunk async for chunk in raw]
+        # Responses streams are mappings/events rather than chat choices.
+        if chunks and all(isinstance(c, dict) and "type" in c for c in chunks):
+            text = "".join(
+                str(c.get("delta", ""))
+                for c in chunks
+                if c.get("type") == "response.output_text.delta"
+            )
+            return SimpleNamespace(output=[], output_text=text, status="completed", usage=None)
+        return _aggregate_chat_chunks(chunks)
     return raw
-
-
-async def _litellm_acompletion(api_params: dict[str, Any]) -> Any:
-    """Await LiteLLM without cancelling its nested provider coroutine.
-
-    LiteLLM runs sync ``completion()`` in an executor for async chat calls.
-    OpenAI-compatible providers return ``OpenAIChatCompletion.acompletion``
-    from that sync frame, then LiteLLM awaits it on the event loop. If a TUI
-    soft-cancel lands in that handoff window, Python can garbage-collect the
-    provider coroutine before it is awaited and print::
-
-        RuntimeWarning: coroutine 'OpenAIChatCompletion.acompletion' was never awaited
-
-    Shielding lets LiteLLM finish consuming that provider coroutine while the
-    caller still receives ``CancelledError`` immediately.
-    """
-    task = asyncio.create_task(litellm.acompletion(**api_params))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        task.add_done_callback(_consume_litellm_acompletion_result)
-        raise
-
-
-def _consume_litellm_acompletion_result(task: asyncio.Task[Any]) -> None:
-    try:
-        task.result()
-    except BaseException:
-        pass
 
 
 def _map_completion_finish_reason(
-    raw_response: Any,
+    provider_response: Any,
 ) -> Literal["stop", "tool_calls", "length", "error"]:
     """Map a Chat-Completions provider finish_reason onto LLMResponse.finish_reason.
 
-    litellm/OpenAI report the provider's stop condition on
-    ``raw_response.choices[0].finish_reason``. We surface ``"length"`` (output
+    Provider APIs report the provider's stop condition on
+    ``provider_response.choices[0].finish_reason``. We surface ``"length"`` (output
     tokens exhausted) and ``"error"`` (e.g. ``content_filter``) so downstream
     logic (e.g. CodeAct's max-tokens abort) can react. Callers that have already
     detected tool calls should keep ``finish_reason="tool_calls"`` rather than
@@ -1495,7 +1343,7 @@ def _map_completion_finish_reason(
     """
     raw = None
     try:
-        raw = raw_response.choices[0].finish_reason
+        raw = provider_response.choices[0].finish_reason
     except (AttributeError, IndexError, TypeError):
         raw = None
 
@@ -1509,7 +1357,7 @@ def _map_completion_finish_reason(
 
 
 def _map_responses_finish_reason(
-    raw_response: Any,
+    provider_response: Any,
 ) -> Literal["stop", "tool_calls", "length", "error"]:
     """Map a Responses-API response onto LLMResponse.finish_reason.
 
@@ -1519,10 +1367,10 @@ def _map_responses_finish_reason(
     ``"error"``. Callers that have already detected tool calls should keep
     ``finish_reason="tool_calls"`` rather than calling this.
     """
-    status = getattr(raw_response, "status", None)
+    status = getattr(provider_response, "status", None)
 
     if status == "incomplete":
-        details = getattr(raw_response, "incomplete_details", None)
+        details = getattr(provider_response, "incomplete_details", None)
         reason = getattr(details, "reason", None)
         if reason is None and isinstance(details, dict):
             reason = details.get("reason")
@@ -1534,19 +1382,21 @@ def _map_responses_finish_reason(
     return "stop"
 
 
-def _extract_reasoning_and_usage(raw_response: Any) -> tuple[str | None, dict[str, int] | None]:
+def _extract_reasoning_and_usage(
+    provider_response: Any,
+) -> tuple[str | None, dict[str, int] | None]:
     """Extract reasoning and usage from raw LLM response."""
     reasoning = None
     usage = None
 
     # Extract reasoning (o1-style or DeepSeek/QwQ)
-    if hasattr(raw_response, "choices") and raw_response.choices:
-        msg = raw_response.choices[0].message
+    if hasattr(provider_response, "choices") and provider_response.choices:
+        msg = provider_response.choices[0].message
         reasoning = getattr(msg, "reasoning", None) or getattr(msg, "reasoning_content", None)
 
     # Extract usage
-    if hasattr(raw_response, "usage") and raw_response.usage:
-        usage_obj = raw_response.usage
+    if hasattr(provider_response, "usage") and provider_response.usage:
+        usage_obj = provider_response.usage
         if hasattr(usage_obj, "_asdict"):
             usage = usage_obj._asdict()
         elif hasattr(usage_obj, "model_dump"):
@@ -1626,7 +1476,7 @@ def _extract_think_tags(content: str) -> tuple[str, str | None]:
     - cleaned_content is the content with think tags removed
     - reasoning is the extracted thinking content (or None if no tags found)
 
-    Handles both complete tags and malformed tags (missing opening tag due to litellm bug).
+    Handles both complete tags and malformed tags (missing opening tag due to the transport bug).
     """
     # Pattern for complete <think>...</think> tags
     think_pattern = r"<think>(.*?)</think>"
@@ -1639,7 +1489,7 @@ def _extract_think_tags(content: str) -> tuple[str, str | None]:
         return cleaned, reasoning
 
     # Handle malformed case: content starts with thinking and ends with </think>
-    # (litellm bug strips opening <think> but leaves closing </think>)
+    # (the transport bug strips opening <think> but leaves closing </think>)
     if "</think>" in content:
         parts = content.split("</think>", 1)
         if len(parts) == 2:
@@ -1655,42 +1505,6 @@ DEFAULT_CACHE_CONTROL_INJECTION_POINTS = [
     {"role": "system"},
     {"role": "tool", "position": "last"},
 ]
-
-
-# ============================================================================
-# PATCH: Prevent litellm from stripping cache_control for Anthropic models
-# ============================================================================
-# litellm's OpenAIGPTConfig.remove_cache_control_flag_from_messages_and_tools()
-# unconditionally strips cache_control from all messages and tools before sending.
-# For Anthropic models behind an OpenAI-compatible endpoint (e.g., NVIDIA gateway),
-# we need cache_control to survive so the API can enable prompt caching.
-_cache_control_patch_applied = False
-
-
-def _apply_cache_control_preserve_patch():
-    """Patch litellm to preserve cache_control for Anthropic models."""
-    global _cache_control_patch_applied
-    if _cache_control_patch_applied:
-        return
-
-    try:
-        from litellm.llms.openai.chat.gpt_transformation import OpenAIGPTConfig
-
-        _original_remove = OpenAIGPTConfig.remove_cache_control_flag_from_messages_and_tools
-
-        def _patched_remove(self, model, messages, tools=None):
-            if _is_anthropic_model(model):
-                return messages, tools
-            return _original_remove(self, model, messages, tools)
-
-        OpenAIGPTConfig.remove_cache_control_flag_from_messages_and_tools = _patched_remove
-        _cache_control_patch_applied = True
-        logger.debug("Applied cache_control preserve patch for Anthropic models")
-    except (ImportError, AttributeError) as e:
-        logger.warning(f"Could not apply cache_control preserve patch: {e}")
-
-
-_apply_cache_control_preserve_patch()
 
 
 class CompletionClient(UnifiedLLM):
@@ -1718,19 +1532,34 @@ class CompletionClient(UnifiedLLM):
             http_config: Optional per-client HTTP connection-pool and timeout
                          settings. Applied only to THIS client's requests: the
                          client builds its own httpx client from these values and
-                         passes it to litellm per call. No global state and no
+                         passes it to the transport per call. No global state and no
                          monkey-patching of httpx — two clients with different
                          http_configs are fully independent.
             cache_control_injection_points: Optional list of role/position rules to
                 enable prompt caching (for example: {"role": "system"} or
                 {"role": "tool", "position": "last"}). Applied to all calls.
                 Note: Do NOT manually add cache_control to message content when using this.
-            **config: Additional configuration passed to litellm (api_key, api_base, etc.)
+            **config: Additional configuration passed to the transport (api_key, api_base, etc.)
         """
         super().__init__(model, **config)
         self.retry_config = retry_config or RetryConfig()
         self._http_config = http_config or HttpConfig()
         self._http = _ClientHttp.for_completion(self.model, self.config, self._http_config)
+        self._transport = AnyLLMTransport(self.model, self.config, self._http.httpx_async)
+        transport_keys = {
+            "provider",
+            "api_key",
+            "api_base",
+            "base_url",
+            "endpoint",
+            "context_window",
+            "provider_options",
+            "capabilities",
+            "client_type",
+        }
+        self._request_config = {
+            key: value for key, value in self.config.items() if key not in transport_keys
+        }
         # Only set default if explicitly None (not if empty list is passed)
         if cache_control_injection_points is not None:
             self.cache_control_injection_points = cache_control_injection_points
@@ -1772,9 +1601,8 @@ class CompletionClient(UnifiedLLM):
         prepared_messages = self._inject_cache_control(messages, cache_points)
 
         api_params = {
-            "model": self.model,
             "messages": prepared_messages,
-            **self.config,
+            **self._request_config,
             **kwargs,
         }
 
@@ -1805,35 +1633,30 @@ class CompletionClient(UnifiedLLM):
 
         http_client = self._http
         assert http_client is not None
-        if http_client.sync_client is not None:
-            api_params.setdefault("client", http_client.sync_client)
 
         def _make_call():
-            raw_response = _collect_sync(litellm.completion(**api_params))
-            reasoning, _ = _extract_reasoning_and_usage(raw_response)
-            text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
+            provider_response = _collect_sync(self._transport.completion(**api_params))
+            reasoning, _ = _extract_reasoning_and_usage(provider_response)
+            text_content = provider_response.choices[0].message.content or ""  # type: ignore[union-attr]
 
             # Raise EmptyContentError to trigger retry if configured
             if not text_content and reasoning and retry_on_empty:
                 raise EmptyContentError(reasoning)
 
-            return raw_response
+            return provider_response
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
         with _track_llm_call(model=self.model, endpoint=self.config.get("api_base")):
-            raw_response = (
+            provider_response = (
                 sync_retry(_make_call, config=self.retry_config)
                 if self.retry_config
                 else _make_call()
             )
 
-        reasoning, usage = _extract_reasoning_and_usage(raw_response)
+        reasoning, usage = _extract_reasoning_and_usage(provider_response)
         if usage:
             _record_llm_metric("token_usage", usage)
-            _update_token_calibration(
-                self.model, prepared_messages, usage, tools=api_params.get("tools")
-            )
-        raw_tool_calls = raw_response.choices[0].message.tool_calls  # type: ignore[union-attr]
+        raw_tool_calls = provider_response.choices[0].message.tool_calls  # type: ignore[union-attr]
 
         if raw_tool_calls:
             tool_calls = [
@@ -1842,13 +1665,12 @@ class CompletionClient(UnifiedLLM):
             ]
 
             return LLMResponse(
-                raw_response=raw_response,
                 content="",
                 tool_calls=tool_calls,
                 finish_reason="tool_calls",
                 assistant_message={
                     "role": "assistant",
-                    "content": raw_response.choices[0].message.content or "",  # type: ignore[union-attr]
+                    "content": provider_response.choices[0].message.content or "",  # type: ignore[union-attr]
                     "tool_calls": [
                         {
                             "id": tc.id,
@@ -1862,10 +1684,10 @@ class CompletionClient(UnifiedLLM):
                     ],
                 },
                 reasoning=reasoning,
-                usage=usage,
+                usage=_usage_dict(_normalize_usage(usage)),
             )
 
-        text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
+        text_content = provider_response.choices[0].message.content or ""  # type: ignore[union-attr]
 
         # Fallback: vLLM's hermes parser fails on Nemotron's XML tool call format.
         # Extract <tool_call><function=name><parameter=...> from content.
@@ -1873,7 +1695,6 @@ class CompletionClient(UnifiedLLM):
             xml_tool_calls = _extract_xml_tool_calls(text_content)
             if xml_tool_calls:
                 return LLMResponse(
-                    raw_response=raw_response,
                     content="",
                     tool_calls=xml_tool_calls,
                     finish_reason="tool_calls",
@@ -1890,7 +1711,7 @@ class CompletionClient(UnifiedLLM):
                         ],
                     },
                     reasoning=reasoning,
-                    usage=usage,
+                    usage=_usage_dict(_normalize_usage(usage)),
                 )
 
         if output_model:
@@ -1905,24 +1726,72 @@ class CompletionClient(UnifiedLLM):
             parsed_content = _instantiate_output_model(output_model, json_data)
 
             return LLMResponse(
-                raw_response=raw_response,
                 content=parsed_content,
                 tool_calls=[],
-                finish_reason=_map_completion_finish_reason(raw_response),
+                finish_reason=_map_completion_finish_reason(provider_response),
                 assistant_message={"role": "assistant", "content": text_content},
                 reasoning=reasoning if text_content else None,
-                usage=usage,
+                usage=_usage_dict(_normalize_usage(usage)),
             )
 
         return LLMResponse(
-            raw_response=raw_response,
             content=text_content,
             tool_calls=[],
-            finish_reason=_map_completion_finish_reason(raw_response),
+            finish_reason=_map_completion_finish_reason(provider_response),
             assistant_message={"role": "assistant", "content": text_content},
             reasoning=reasoning,
-            usage=usage,
+            usage=_usage_dict(_normalize_usage(usage)),
         )
+
+    def stream(
+        self, messages: list[dict[str, Any]], tools: list[Tool] | None = None, **kwargs: Any
+    ):
+        """Yield provider-neutral chunks and always close the provider stream."""
+        prepared = self._inject_cache_control(messages, self.cache_control_injection_points)
+        params: dict[str, Any] = {
+            "messages": prepared,
+            **self._request_config,
+            **kwargs,
+            "stream": True,
+        }
+        if tools:
+            params["tools"] = [self._convert_tool_to_schema(tool) for tool in tools]
+        raw = self._transport.completion(**params)
+        try:
+            for item in raw:
+                content, reasoning, calls, finish, usage = _chat_chunk_parts(item)
+                yield LLMChunk(
+                    content, reasoning or None, tuple(calls), finish, _normalize_usage(usage)
+                )
+        finally:
+            close = getattr(raw, "close", None)
+            if close:
+                close()
+
+    async def astream(
+        self, messages: list[dict[str, Any]], tools: list[Tool] | None = None, **kwargs: Any
+    ):
+        """Yield provider-neutral async chunks and always close the provider stream."""
+        prepared = self._inject_cache_control(messages, self.cache_control_injection_points)
+        params: dict[str, Any] = {
+            "messages": prepared,
+            **self._request_config,
+            **kwargs,
+            "stream": True,
+        }
+        if tools:
+            params["tools"] = [self._convert_tool_to_schema(tool) for tool in tools]
+        raw = await self._transport.acompletion(**params)
+        try:
+            async for item in raw:
+                content, reasoning, calls, finish, usage = _chat_chunk_parts(item)
+                yield LLMChunk(
+                    content, reasoning or None, tuple(calls), finish, _normalize_usage(usage)
+                )
+        finally:
+            close = getattr(raw, "aclose", None)
+            if close:
+                await close()
 
     async def acall(
         self,
@@ -1948,9 +1817,8 @@ class CompletionClient(UnifiedLLM):
         prepared_messages = self._inject_cache_control(messages, cache_points)
 
         api_params = {
-            "model": self.model,
             "messages": prepared_messages,
-            **self.config,
+            **self._request_config,
             **kwargs,
         }
 
@@ -1981,35 +1849,32 @@ class CompletionClient(UnifiedLLM):
 
         http_client = self._http
         assert http_client is not None
-        if http_client.async_client is not None:
-            api_params.setdefault("client", http_client.async_client)
 
         async def _make_call():
-            raw_response = await _collect_async(await _litellm_acompletion(api_params))
-            reasoning, _ = _extract_reasoning_and_usage(raw_response)
-            text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
+            provider_response = await _collect_async(
+                await self._transport.acompletion(**api_params)
+            )
+            reasoning, _ = _extract_reasoning_and_usage(provider_response)
+            text_content = provider_response.choices[0].message.content or ""  # type: ignore[union-attr]
 
             # Raise EmptyContentError to trigger retry if configured
             if not text_content and reasoning and retry_on_empty:
                 raise EmptyContentError(reasoning)
 
-            return raw_response
+            return provider_response
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
         with _track_llm_call(model=self.model, endpoint=self.config.get("api_base")):
-            raw_response = (
+            provider_response = (
                 await with_retry(_make_call, config=self.retry_config)
                 if self.retry_config
                 else await _make_call()
             )
 
-        reasoning, usage = _extract_reasoning_and_usage(raw_response)
+        reasoning, usage = _extract_reasoning_and_usage(provider_response)
         if usage:
             _record_llm_metric("token_usage", usage)
-            _update_token_calibration(
-                self.model, prepared_messages, usage, tools=api_params.get("tools")
-            )
-        raw_tool_calls = raw_response.choices[0].message.tool_calls  # type: ignore[union-attr]
+        raw_tool_calls = provider_response.choices[0].message.tool_calls  # type: ignore[union-attr]
 
         if raw_tool_calls:
             tool_calls = [
@@ -2020,13 +1885,12 @@ class CompletionClient(UnifiedLLM):
             ]
 
             return LLMResponse(
-                raw_response=raw_response,
                 content="",
                 tool_calls=tool_calls,
                 finish_reason="tool_calls",
                 assistant_message={
                     "role": "assistant",
-                    "content": raw_response.choices[0].message.content or "",  # type: ignore[union-attr]
+                    "content": provider_response.choices[0].message.content or "",  # type: ignore[union-attr]
                     "tool_calls": [
                         {
                             "id": tc.id,
@@ -2040,10 +1904,10 @@ class CompletionClient(UnifiedLLM):
                     ],
                 },
                 reasoning=reasoning,
-                usage=usage,
+                usage=_usage_dict(_normalize_usage(usage)),
             )
 
-        text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
+        text_content = provider_response.choices[0].message.content or ""  # type: ignore[union-attr]
 
         # Fallback: vLLM's hermes parser fails on Nemotron's XML tool call format.
         # Extract <tool_call><function=name><parameter=...> from content.
@@ -2051,7 +1915,6 @@ class CompletionClient(UnifiedLLM):
             xml_tool_calls = _extract_xml_tool_calls(text_content)
             if xml_tool_calls:
                 return LLMResponse(
-                    raw_response=raw_response,
                     content="",
                     tool_calls=xml_tool_calls,
                     finish_reason="tool_calls",
@@ -2068,7 +1931,7 @@ class CompletionClient(UnifiedLLM):
                         ],
                     },
                     reasoning=reasoning,
-                    usage=usage,
+                    usage=_usage_dict(_normalize_usage(usage)),
                 )
 
         if output_model:
@@ -2083,23 +1946,21 @@ class CompletionClient(UnifiedLLM):
             parsed_content = _instantiate_output_model(output_model, json_data)
 
             return LLMResponse(
-                raw_response=raw_response,
                 content=parsed_content,
                 tool_calls=[],
-                finish_reason=_map_completion_finish_reason(raw_response),
+                finish_reason=_map_completion_finish_reason(provider_response),
                 assistant_message={"role": "assistant", "content": text_content},
                 reasoning=reasoning if text_content else None,
-                usage=usage,
+                usage=_usage_dict(_normalize_usage(usage)),
             )
 
         return LLMResponse(
-            raw_response=raw_response,
             content=text_content,
             tool_calls=[],
-            finish_reason=_map_completion_finish_reason(raw_response),
+            finish_reason=_map_completion_finish_reason(provider_response),
             assistant_message={"role": "assistant", "content": text_content},
             reasoning=reasoning,
-            usage=usage,
+            usage=_usage_dict(_normalize_usage(usage)),
         )
 
 
@@ -2109,7 +1970,7 @@ class ReasoningCompletionClient(CompletionClient):
 
     This client:
     1. Extracts reasoning from <think>...</think> tags in the content
-    2. Handles litellm's bug where opening <think> tag is stripped
+    2. Handles provider behavior where opening <think> tag is stripped
     3. Returns clean content with reasoning in the `reasoning` field
 
     Use this for models like:
@@ -2157,7 +2018,6 @@ class ReasoningCompletionClient(CompletionClient):
                 )
 
                 return LLMResponse(
-                    raw_response=response.raw_response,
                     content=cleaned_content,
                     tool_calls=response.tool_calls,
                     finish_reason=response.finish_reason,
@@ -2198,7 +2058,6 @@ class ReasoningCompletionClient(CompletionClient):
                 )
 
                 return LLMResponse(
-                    raw_response=response.raw_response,
                     content=cleaned_content,
                     tool_calls=response.tool_calls,
                     finish_reason=response.finish_reason,
@@ -2211,6 +2070,28 @@ class ReasoningCompletionClient(CompletionClient):
                 )
 
         return response
+
+
+def _provider_neutral(value: Any) -> Any:
+    """Recursively detach response data from provider SDK model instances."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, BaseModel):
+        return _provider_neutral(value.model_dump())
+    if hasattr(value, "model_dump"):
+        return _provider_neutral(value.model_dump())
+    if isinstance(value, dict):
+        return {str(key): _provider_neutral(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_provider_neutral(item) for item in value]
+    attributes = getattr(value, "__dict__", None)
+    if isinstance(attributes, dict):
+        return {
+            key: _provider_neutral(item)
+            for key, item in attributes.items()
+            if not key.startswith("_")
+        }
+    return str(value)
 
 
 class ResponsesClient(UnifiedLLM):
@@ -2228,7 +2109,7 @@ class ResponsesClient(UnifiedLLM):
         Mirrors CompletionClient so the Responses API path gets the same retry,
         HTTP, and cache-control behaviour. Accepting these as named parameters
         also keeps them out of ``self.config`` — otherwise they would leak into
-        ``litellm.responses()`` as bogus API params.
+        ``the provider Responses API`` as bogus API params.
 
         Args:
             model: The model identifier (e.g., "openai/gpt-5.3-codex").
@@ -2240,17 +2121,44 @@ class ResponsesClient(UnifiedLLM):
                           disable endpoint retries.
             http_config: Optional per-client HTTP connection-pool and timeout
                          settings. Applied only to THIS client's requests (its
-                         own httpx client is passed to litellm per call). No
+                         own httpx client is passed to the transport per call). No
                          global state and no monkey-patching of httpx.
             cache_control_injection_points: Optional list of role/position rules to
                 enable prompt caching (for example: {"role": "system"} or
                 {"role": "tool", "position": "last"}). Applied to all calls.
-            **config: Additional configuration passed to litellm (api_key, api_base, etc.)
+            **config: Additional configuration passed to the transport (api_key, api_base, etc.)
         """
+        capabilities = config.get("capabilities") or {}
+        responses_enabled = (
+            capabilities.get("responses", False)
+            if isinstance(capabilities, dict)
+            else bool(getattr(capabilities, "responses", False))
+        )
+        if not responses_enabled:
+            raise ValueError(
+                "ResponsesClient requires capabilities.responses=true; "
+                "declare endpoint support before using the Responses API"
+            )
         super().__init__(model, **config)
         self.retry_config = retry_config or RetryConfig()
         self._http_config = http_config or HttpConfig()
         self._http = _ClientHttp.for_responses(self.model, self.config, self._http_config)
+        transport_config = {**self.config, "_responses_api": True}
+        self._transport = AnyLLMTransport(self.model, transport_config, self._http.httpx_async)
+        transport_keys = {
+            "provider",
+            "api_key",
+            "api_base",
+            "base_url",
+            "endpoint",
+            "context_window",
+            "provider_options",
+            "capabilities",
+            "client_type",
+        }
+        self._request_config = {
+            key: value for key, value in self.config.items() if key not in transport_keys
+        }
         # Only set default if explicitly None (not if empty list is passed)
         if cache_control_injection_points is not None:
             self.cache_control_injection_points = cache_control_injection_points
@@ -2300,7 +2208,15 @@ class ResponsesClient(UnifiedLLM):
         Handles both native Responses format (from ResponsesProviderFormatter) and
         legacy OpenAI Chat format. System messages are extracted to the `instructions` param.
         """
-        # Inject cache_control only for Anthropic-served models. litellm.responses
+        if kwargs.pop("stream", False):
+            response = _stream_response(list(self.stream(messages, tools, **kwargs)))
+            if output_model is not None:
+                response.content = _instantiate_output_model(
+                    output_model, extract_and_parse_json(str(response.content))
+                )
+            return response
+
+        # Inject cache_control only for Anthropic-served models. the provider Responses API
         # passes input[] through verbatim — no equivalent of the Chat Completions
         # OpenAIGPTConfig.remove_cache_control_flag strip — so leaving the marker
         # on OpenAI/Azure/NIM Responses calls triggers a 400 "Unknown parameter:
@@ -2317,10 +2233,9 @@ class ResponsesClient(UnifiedLLM):
         input_messages, instructions = self._transform_messages(prepared_messages)
 
         api_params = {
-            "model": self.model,
-            "input": input_messages,
+            "input_data": input_messages,
             "truncation": "disabled",
-            **self.config,
+            **self._request_config,
             **kwargs,
         }
 
@@ -2343,15 +2258,13 @@ class ResponsesClient(UnifiedLLM):
 
         http_client = self._http
         assert http_client is not None
-        if http_client.sync_client is not None:
-            api_params.setdefault("client", http_client.sync_client)
 
         def _make_call():
-            return cast("litellm.ResponsesAPIResponse", litellm.responses(**api_params))
+            return self._transport.responses(**api_params)
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
         with _track_llm_call(model=self.model, endpoint=self.config.get("api_base")):
-            raw_response = (
+            provider_response = (
                 sync_retry(_make_call, config=self.retry_config)
                 if self.retry_config
                 else _make_call()
@@ -2359,16 +2272,13 @@ class ResponsesClient(UnifiedLLM):
 
         # Extract usage if available (Responses API may have different structure)
         usage = None
-        if hasattr(raw_response, "usage") and raw_response.usage:
-            usage_obj = raw_response.usage
+        if hasattr(provider_response, "usage") and provider_response.usage:
+            usage_obj = provider_response.usage
             if hasattr(usage_obj, "model_dump"):
                 usage = usage_obj.model_dump()
             elif isinstance(usage_obj, dict):
                 usage = usage_obj
-        if usage:
-            _update_token_calibration(self.model, messages, usage, tools=api_params.get("tools"))
-
-        output: list[Any] = raw_response.output  # type: ignore[assignment]
+        output: list[Any] = provider_response.output  # type: ignore[assignment]
         raw_tool_calls = [item for item in output if item.type == "function_call"]
 
         if raw_tool_calls:
@@ -2377,48 +2287,116 @@ class ResponsesClient(UnifiedLLM):
                 for tc in raw_tool_calls
             ]
 
-            assistant_messages = []
-            for item in output:
-                if hasattr(item, "model_dump"):
-                    assistant_messages.append(item.model_dump())
-                else:
-                    assistant_messages.append(item)
+            assistant_messages = [_provider_neutral(item) for item in output]
 
             return LLMResponse(
-                raw_response=raw_response,
                 content="",
                 tool_calls=tool_calls,
                 finish_reason="tool_calls",
                 assistant_message={"_batch": assistant_messages},
                 reasoning=None,  # Responses API doesn't have reasoning
-                usage=usage,
+                usage=_usage_dict(_normalize_usage(usage)),
             )
 
-        text_content = self._extract_text_from_output(raw_response)
+        text_content = self._extract_text_from_output(provider_response)
 
         if output_model:
             json_data = extract_and_parse_json(text_content)
             parsed_content = _instantiate_output_model(output_model, json_data)
 
             return LLMResponse(
-                raw_response=raw_response,
                 content=parsed_content,
                 tool_calls=[],
-                finish_reason=_map_responses_finish_reason(raw_response),
+                finish_reason=_map_responses_finish_reason(provider_response),
                 assistant_message={"role": "assistant", "content": text_content},
                 reasoning=None,
-                usage=usage,
+                usage=_usage_dict(_normalize_usage(usage)),
             )
 
         return LLMResponse(
-            raw_response=raw_response,
             content=text_content,
             tool_calls=[],
-            finish_reason=_map_responses_finish_reason(raw_response),
+            finish_reason=_map_responses_finish_reason(provider_response),
             assistant_message={"role": "assistant", "content": text_content},
             reasoning=None,
-            usage=usage,
+            usage=_usage_dict(_normalize_usage(usage)),
         )
+
+    def stream(
+        self, messages: list[dict[str, Any]], tools: list[Tool] | None = None, **kwargs: Any
+    ):
+        """Yield provider-neutral Responses API chunks and close the provider stream."""
+        prepared = (
+            self._inject_cache_control(messages, self.cache_control_injection_points)
+            if _is_anthropic_model(self.model)
+            else messages
+        )
+        input_messages, instructions = self._transform_messages(prepared)
+        params: dict[str, Any] = {
+            "input_data": input_messages,
+            "truncation": "disabled",
+            **self._request_config,
+            **kwargs,
+            "stream": True,
+        }
+        if instructions:
+            params["instructions"] = instructions
+        if "base_url" in params:
+            params["api_base"] = params.pop("base_url")
+        if tools:
+            params.update(
+                tools=[self._convert_tool_to_schema(tool) for tool in tools],
+                tool_choice="auto",
+                parallel_tool_calls=False,
+            )
+        if reasoning := self.config.get("reasoning"):
+            params["reasoning"] = reasoning
+        raw = self._transport.responses(**params)
+        try:
+            for event in raw:
+                yield _responses_chunk(event)
+        finally:
+            close = getattr(raw, "close", None)
+            if close:
+                close()
+
+    async def astream(
+        self, messages: list[dict[str, Any]], tools: list[Tool] | None = None, **kwargs: Any
+    ):
+        """Yield provider-neutral async Responses API chunks and close the provider stream."""
+        prepared = (
+            self._inject_cache_control(messages, self.cache_control_injection_points)
+            if _is_anthropic_model(self.model)
+            else messages
+        )
+        input_messages, instructions = self._transform_messages(prepared)
+        params: dict[str, Any] = {
+            "input_data": input_messages,
+            "truncation": "disabled",
+            **self._request_config,
+            **kwargs,
+            "stream": True,
+        }
+        if instructions:
+            params["instructions"] = instructions
+        if "base_url" in params:
+            params["api_base"] = params.pop("base_url")
+        if tools:
+            params.update(
+                tools=[self._convert_tool_to_schema(tool) for tool in tools],
+                tool_choice="auto",
+                parallel_tool_calls=False,
+            )
+        if reasoning := self.config.get("reasoning"):
+            params["reasoning"] = reasoning
+        raw = await self._transport.aresponses(**params)
+        try:
+            async for event in raw:
+                yield _responses_chunk(event)
+        finally:
+            close = getattr(raw, "aclose", None)
+            if close:
+                await close()
 
     async def acall(
         self,
@@ -2434,6 +2412,15 @@ class ResponsesClient(UnifiedLLM):
         Handles both native Responses format (from ResponsesProviderFormatter) and
         legacy OpenAI Chat format. System messages are extracted to the `instructions` param.
         """
+        if kwargs.pop("stream", False):
+            chunks = [chunk async for chunk in self.astream(messages, tools, **kwargs)]
+            response = _stream_response(chunks)
+            if output_model is not None:
+                response.content = _instantiate_output_model(
+                    output_model, extract_and_parse_json(str(response.content))
+                )
+            return response
+
         # See ResponsesClient.call for why cache_control injection is gated on
         # Anthropic models only.
         if _is_anthropic_model(self.model):
@@ -2448,10 +2435,9 @@ class ResponsesClient(UnifiedLLM):
         input_messages, instructions = self._transform_messages(prepared_messages)
 
         api_params = {
-            "model": self.model,
-            "input": input_messages,
+            "input_data": input_messages,
             "truncation": "disabled",
-            **self.config,
+            **self._request_config,
             **kwargs,
         }
 
@@ -2474,15 +2460,13 @@ class ResponsesClient(UnifiedLLM):
 
         http_client = self._http
         assert http_client is not None
-        if http_client.async_client is not None:
-            api_params.setdefault("client", http_client.async_client)
 
         async def _make_call():
-            return cast("litellm.ResponsesAPIResponse", await litellm.aresponses(**api_params))
+            return await _collect_async(await self._transport.aresponses(**api_params))
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
         with _track_llm_call(model=self.model, endpoint=self.config.get("api_base")):
-            raw_response = (
+            provider_response = (
                 await with_retry(_make_call, config=self.retry_config)
                 if self.retry_config
                 else await _make_call()
@@ -2490,16 +2474,13 @@ class ResponsesClient(UnifiedLLM):
 
         # Extract usage if available (Responses API may have different structure)
         usage = None
-        if hasattr(raw_response, "usage") and raw_response.usage:
-            usage_obj = raw_response.usage
+        if hasattr(provider_response, "usage") and provider_response.usage:
+            usage_obj = provider_response.usage
             if hasattr(usage_obj, "model_dump"):
                 usage = usage_obj.model_dump()
             elif isinstance(usage_obj, dict):
                 usage = usage_obj
-        if usage:
-            _update_token_calibration(self.model, messages, usage, tools=api_params.get("tools"))
-
-        output: list[Any] = raw_response.output  # type: ignore[assignment]
+        output: list[Any] = provider_response.output  # type: ignore[assignment]
         raw_tool_calls = [item for item in output if item.type == "function_call"]
 
         if raw_tool_calls:
@@ -2508,47 +2489,39 @@ class ResponsesClient(UnifiedLLM):
                 for tc in raw_tool_calls
             ]
 
-            assistant_messages = []
-            for item in output:
-                if hasattr(item, "model_dump"):
-                    assistant_messages.append(item.model_dump())
-                else:
-                    assistant_messages.append(item)
+            assistant_messages = [_provider_neutral(item) for item in output]
 
             return LLMResponse(
-                raw_response=raw_response,
                 content="",
                 tool_calls=tool_calls,
                 finish_reason="tool_calls",
                 assistant_message={"_batch": assistant_messages},
                 reasoning=None,
-                usage=usage,
+                usage=_usage_dict(_normalize_usage(usage)),
             )
 
-        text_content = self._extract_text_from_output(raw_response)
+        text_content = self._extract_text_from_output(provider_response)
 
         if output_model:
             json_data = extract_and_parse_json(text_content)
             parsed_content = _instantiate_output_model(output_model, json_data)
 
             return LLMResponse(
-                raw_response=raw_response,
                 content=parsed_content,
                 tool_calls=[],
-                finish_reason=_map_responses_finish_reason(raw_response),
+                finish_reason=_map_responses_finish_reason(provider_response),
                 assistant_message={"role": "assistant", "content": text_content},
                 reasoning=None,
-                usage=usage,
+                usage=_usage_dict(_normalize_usage(usage)),
             )
 
         return LLMResponse(
-            raw_response=raw_response,
             content=text_content,
             tool_calls=[],
-            finish_reason=_map_responses_finish_reason(raw_response),
+            finish_reason=_map_responses_finish_reason(provider_response),
             assistant_message={"role": "assistant", "content": text_content},
             reasoning=None,
-            usage=usage,
+            usage=_usage_dict(_normalize_usage(usage)),
         )
 
     def _transform_messages(
@@ -2660,3 +2633,193 @@ class ResponsesClient(UnifiedLLM):
                             texts.append(content_item.text)  # type: ignore
                     return "\n".join(texts)
         return ""
+
+
+# Lifecycle instrumentation is applied at the normalized client boundary, outside
+# retry loops. Re-entrant wrappers let subclasses extend normalization without
+# emitting a second terminal event.
+_lifecycle_depth: ContextVar[int] = ContextVar("unifiedllm_lifecycle_depth", default=0)
+
+
+def _instrument_sync_call(fn: Callable[..., LLMResponse]) -> Callable[..., LLMResponse]:
+    def wrapped(
+        self: UnifiedLLM, messages: list[dict[str, Any]], tools=None, *args: Any, **kwargs: Any
+    ) -> LLMResponse:
+        if _lifecycle_depth.get():
+            return fn(self, messages, tools, *args, **kwargs)
+        from nooa.runtime.llm_lifecycle import begin_llm_call, end_llm_call
+
+        schemas = [self._convert_tool_to_schema(t) for t in tools] if tools else None
+        call = begin_llm_call(self.model, messages, schemas, **kwargs)
+        token = _lifecycle_depth.set(1)
+        try:
+            response = fn(self, messages, tools, *args, **kwargs)
+        except BaseException as exc:
+            end_llm_call(call, exception=exc)
+            raise
+        else:
+            end_llm_call(call, response=response)
+            return response
+        finally:
+            _lifecycle_depth.reset(token)
+
+    return wrapped
+
+
+def _instrument_async_call(fn: Callable[..., Any]) -> Callable[..., Any]:
+    async def wrapped(
+        self: UnifiedLLM, messages: list[dict[str, Any]], tools=None, *args: Any, **kwargs: Any
+    ) -> LLMResponse:
+        if _lifecycle_depth.get():
+            return await fn(self, messages, tools, *args, **kwargs)
+        from nooa.runtime.llm_lifecycle import begin_llm_call, end_llm_call
+
+        schemas = [self._convert_tool_to_schema(t) for t in tools] if tools else None
+        call = begin_llm_call(self.model, messages, schemas, **kwargs)
+        token = _lifecycle_depth.set(1)
+        try:
+            response = await fn(self, messages, tools, *args, **kwargs)
+        except BaseException as exc:
+            end_llm_call(call, exception=exc)
+            raise
+        else:
+            end_llm_call(call, response=response)
+            return response
+        finally:
+            _lifecycle_depth.reset(token)
+
+    return wrapped
+
+
+def _stream_response(chunks: list[LLMChunk]) -> LLMResponse:
+    """Build the normalized terminal response exposed to lifecycle consumers."""
+    content = "".join(chunk.content for chunk in chunks)
+    reasoning = "".join(chunk.reasoning or "" for chunk in chunks) or None
+    calls: dict[int, dict[str, str]] = {}
+    for chunk in chunks:
+        for position, chunk_call in enumerate(chunk.tool_calls):
+            index = chunk_call.index if chunk_call.index is not None else position
+            item = calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+            item["id"] += chunk_call.id
+            item["name"] += chunk_call.name
+            item["arguments"] += chunk_call.arguments
+    tool_calls = [
+        ToolCall(id=value["id"], name=value["name"], arguments=value["arguments"])
+        for _, value in sorted(calls.items())
+    ]
+    usage = next((chunk.usage for chunk in reversed(chunks) if chunk.usage is not None), None)
+    finish_reason = next(
+        (chunk.finish_reason for chunk in reversed(chunks) if chunk.finish_reason is not None),
+        "tool_calls" if tool_calls else "stop",
+    )
+    assistant_message: dict[str, Any] = {"role": "assistant", "content": content}
+    if tool_calls:
+        assistant_message["tool_calls"] = [
+            {
+                "id": tool_call.id,
+                "type": "function",
+                "function": {"name": tool_call.name, "arguments": tool_call.arguments},
+            }
+            for tool_call in tool_calls
+        ]
+    return LLMResponse(
+        content="" if tool_calls else content,
+        tool_calls=tool_calls,
+        finish_reason=finish_reason,
+        assistant_message=assistant_message,
+        reasoning=reasoning,
+        usage=_usage_dict(_normalize_usage(usage)),
+    )
+
+
+def _instrument_sync_stream(fn: Callable[..., Any]) -> Callable[..., Any]:
+    def wrapped(
+        self: UnifiedLLM, messages: list[dict[str, Any]], tools=None, *args: Any, **kwargs: Any
+    ):
+        if _lifecycle_depth.get():
+            yield from fn(self, messages, tools, *args, **kwargs)
+            return
+        from nooa.runtime.llm_lifecycle import begin_llm_call, end_llm_call
+
+        schemas = [self._convert_tool_to_schema(t) for t in tools] if tools else None
+        call = begin_llm_call(self.model, messages, schemas, **kwargs)
+        chunks: list[LLMChunk] = []
+        stream = None
+        try:
+            stream = fn(self, messages, tools, *args, **kwargs)
+            for chunk in stream:
+                chunks.append(chunk)
+                yield chunk
+        except BaseException as exc:
+            try:
+                close = getattr(stream, "close", None)
+                if close:
+                    close()
+            finally:
+                end_llm_call(call, exception=exc)
+            raise
+        else:
+            try:
+                close = getattr(stream, "close", None)
+                if close:
+                    close()
+            except BaseException as exc:
+                end_llm_call(call, exception=exc)
+                raise
+            else:
+                end_llm_call(call, response=_stream_response(chunks))
+
+    return wrapped
+
+
+def _instrument_async_stream(fn: Callable[..., Any]) -> Callable[..., Any]:
+    async def wrapped(
+        self: UnifiedLLM, messages: list[dict[str, Any]], tools=None, *args: Any, **kwargs: Any
+    ):
+        if _lifecycle_depth.get():
+            async for chunk in fn(self, messages, tools, *args, **kwargs):
+                yield chunk
+            return
+        from nooa.runtime.llm_lifecycle import begin_llm_call, end_llm_call
+
+        schemas = [self._convert_tool_to_schema(t) for t in tools] if tools else None
+        call = begin_llm_call(self.model, messages, schemas, **kwargs)
+        chunks: list[LLMChunk] = []
+        stream = None
+        try:
+            stream = fn(self, messages, tools, *args, **kwargs)
+            async for chunk in stream:
+                chunks.append(chunk)
+                yield chunk
+        except BaseException as exc:
+            try:
+                close = getattr(stream, "aclose", None)
+                if close:
+                    await close()
+            finally:
+                end_llm_call(call, exception=exc)
+            raise
+        else:
+            try:
+                close = getattr(stream, "aclose", None)
+                if close:
+                    await close()
+            except BaseException as exc:
+                end_llm_call(call, exception=exc)
+                raise
+            else:
+                end_llm_call(call, response=_stream_response(chunks))
+
+    return wrapped
+
+
+CompletionClient.call = _instrument_sync_call(CompletionClient.call)
+CompletionClient.acall = _instrument_async_call(CompletionClient.acall)
+CompletionClient.stream = _instrument_sync_stream(CompletionClient.stream)
+CompletionClient.astream = _instrument_async_stream(CompletionClient.astream)
+ReasoningCompletionClient.call = _instrument_sync_call(ReasoningCompletionClient.call)
+ReasoningCompletionClient.acall = _instrument_async_call(ReasoningCompletionClient.acall)
+ResponsesClient.call = _instrument_sync_call(ResponsesClient.call)
+ResponsesClient.acall = _instrument_async_call(ResponsesClient.acall)
+ResponsesClient.stream = _instrument_sync_stream(ResponsesClient.stream)
+ResponsesClient.astream = _instrument_async_stream(ResponsesClient.astream)

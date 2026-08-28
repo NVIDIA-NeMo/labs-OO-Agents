@@ -66,7 +66,7 @@ target_files:
 # extra) and the aliases resolve automatically. Run
 # `nooa config show` to inspect which YAML files are loading.
 #
-# Any model name supported by litellm also works as-is.
+# Any model name supported by any_llm also works as-is.
 # =============================================================================
 
 # 8-model matrix: (Gemini, Nemotron, Claude, OpenAI) × (Big, Small).

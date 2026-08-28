@@ -23,7 +23,7 @@ def _exporter_routes() -> set[str]:
     """Inspect ``MessageJournalCallback`` to discover which ``/v1/journal/*``
     paths it actually POSTs to, so adding a new wire route automatically
     pulls it into this contract test."""
-    from nooa.tracing._litellm_journal import MessageJournalCallback
+    from nooa.tracing._llm_journal import MessageJournalCallback
 
     cb = MessageJournalCallback("http://example.invalid")
     paths: set[str] = set()

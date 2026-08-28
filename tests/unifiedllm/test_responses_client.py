@@ -31,6 +31,7 @@ def client():
         model="openai/nvidia/openai/gpt-oss-20b",
         base_url="https://inference-api.nvidia.com/v1/",
         api_key=api_key,
+        capabilities={"responses": True},
     )
 
 

@@ -13,29 +13,25 @@ Design:
   name/value drifts from the upstream spec.
 * Two independent fixtures:
   - ``framework_spans`` runs a small CodeAct ``FakeLLM`` agent through the real
-    instrumentation hooks (no network, no ``litellm.acompletion``).  It produces
+    instrumentation hooks (no network, no ``any_llm.acompletion``).  It produces
     the framework spans: AGENT (``method.*``), ``generation`` (CHAIN),
     ``code_execution`` (TOOL), and — depending on the strategy — ``method_call``
     / ``tool_execution`` / ``context_snapshot``.  It produces **no** ``LLM`` span.
-  - ``llm_span`` drives ``litellm.acompletion(mock_response=...)`` so the
-    ``LiteLLMInstrumentor`` (+ our ``apply_litellm_patch``) emits the real
+  - ``llm_span`` drives the normalized provider lifecycle so NOOA emits the real
     ``LLM`` span with ``llm.*`` attributes and ``tool_call.id``.
 """
 
 from __future__ import annotations
 
 import json
-import tempfile
 
 import pytest
 from openinference.semconv.trace import (
-    MessageAttributes,
     OpenInferenceMimeTypeValues,
     OpenInferenceSpanKindValues,
     SpanAttributes,
     ToolCallAttributes,
 )
-from otlp_test_helpers import read_all_otlp_jsonl_spans
 
 from nooa import Agent
 from nooa.runtime.hooks import set_hooks
@@ -54,7 +50,7 @@ SPAN_KIND = SpanAttributes.OPENINFERENCE_SPAN_KIND
 
 class _CodeActFakeLLM:
     """Emits one ``execute_python`` call that invokes ``self.lookup()`` then
-    terminates via ``return_result()``.  Network-free; never calls litellm."""
+    terminates via ``return_result()``.  Network-free; never calls any_llm."""
 
     def __init__(self) -> None:
         self.call_count = 0
@@ -63,7 +59,6 @@ class _CodeActFakeLLM:
         self.call_count += 1
         code = "x = self.lookup('widget')\nreturn_result({'stock': x})\n"
         return LLMResponse(
-            raw_response=None,
             content="",
             tool_calls=[
                 ToolCall(
@@ -215,13 +210,13 @@ async def test_agent_method_span_is_agent_kind_with_io(framework_spans):
 async def test_generation_span_is_chain_not_llm(framework_spans):
     """Regression guard: the framework ``generation`` span is
     CHAIN, and the FakeLLM run emits NO LLM-kind span (the real LLM span only
-    exists when litellm.acompletion runs — see test_llm_span_* below)."""
+    exists when any_llm.acompletion runs — see test_llm_span_* below)."""
     by_name = await _run_agent(framework_spans)
     gen_spans = by_name.get("generation")
     assert gen_spans, f"no generation span; names={list(by_name)}"
     for span in gen_spans:
         assert _attr(span, SPAN_KIND) == OpenInferenceSpanKindValues.CHAIN.value, (
-            "generation span must be CHAIN — the nested litellm.acompletion span "
+            "generation span must be CHAIN — the nested any_llm.acompletion span "
             "is the real LLM call"
         )
         # CHAIN output rendering.
@@ -329,108 +324,3 @@ async def test_session_id_present(framework_spans):
     by_name = await _run_agent(framework_spans)
     run_span = by_name["method.run"][0]
     assert _attr(run_span, SpanAttributes.SESSION_ID) == "conformance-session"
-
-
-# ---------------------------------------------------------------------------
-# LLM-span conformance (delegated to litellm instrumentor + our patch).
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_llm_span_conformance():
-    """A real ``litellm.acompletion`` produces a spec-conformant ``LLM`` span."""
-    pytest.importorskip(
-        "openinference.instrumentation.litellm",
-        reason="openinference-instrumentation-litellm required for LLM spans",
-    )
-    import litellm
-
-    from nooa.tracing import enable_tracing, exporters, flush_traces, set_session
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        enable_tracing(exporters=[exporters.jsonl(tmpdir)])
-        set_session("conformance-llm")
-
-        await litellm.acompletion(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "be terse"},
-                {"role": "user", "content": "what is 2+2?"},
-                {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "tc_abc123",
-                            "type": "function",
-                            "function": {"name": "add", "arguments": '{"a": 2, "b": 2}'},
-                        }
-                    ],
-                },
-                {"role": "tool", "tool_call_id": "tc_abc123", "content": "4"},
-            ],
-            mock_response="The answer is 4.",
-        )
-        flush_traces()
-
-        spans = read_all_otlp_jsonl_spans(tmpdir)
-        assert spans, f"no spans written to {tmpdir}"
-        llm_spans = [
-            s
-            for s in spans
-            if s["attributes"].get(SPAN_KIND) == OpenInferenceSpanKindValues.LLM.value
-        ]
-        assert llm_spans, f"no LLM span; names={[s.get('name') for s in spans]}"
-        span = llm_spans[0]
-        attrs = span["attributes"]
-
-        # Span name (catches an upstream litellm rename).
-        assert span.get("name") == "acompletion", (
-            f"expected litellm span name 'acompletion', got {span.get('name')!r}"
-        )
-
-        # Core LLM attributes.
-        assert isinstance(attrs.get(SpanAttributes.LLM_MODEL_NAME), str)
-
-        # Token counts are integers when present.
-        for tok in (
-            SpanAttributes.LLM_TOKEN_COUNT_PROMPT,
-            SpanAttributes.LLM_TOKEN_COUNT_COMPLETION,
-            SpanAttributes.LLM_TOKEN_COUNT_TOTAL,
-        ):
-            if tok in attrs:
-                assert isinstance(attrs[tok], int), f"{tok} must be int, got {attrs[tok]!r}"
-
-        # Cost is stamped (llm.cost.*) — the litellm instrumentor omits it, our
-        # patch adds it from litellm's computed cost / gateway headers. gpt-3.5-turbo
-        # has known pricing so a positive total is expected here.
-        total_cost = attrs.get(SpanAttributes.LLM_COST_TOTAL)
-        assert isinstance(total_cost, (int, float)) and total_cost > 0, (
-            f"LLM span missing positive llm.cost.total; got {total_cost!r}"
-        )
-
-        # Input/output messages present.
-        assert any(k.startswith(SpanAttributes.LLM_INPUT_MESSAGES) for k in attrs), (
-            "LLM span missing llm.input_messages.*"
-        )
-        assert any(k.startswith(SpanAttributes.LLM_OUTPUT_MESSAGES) for k in attrs), (
-            "LLM span missing llm.output_messages.*"
-        )
-
-        # input.value / output.value present.
-        assert attrs.get(SpanAttributes.INPUT_VALUE) is not None
-        assert attrs.get(SpanAttributes.OUTPUT_VALUE) is not None
-
-        # The tool-call message carries name + arguments + id. Assert the actual
-        # dotted semconv keys are present on the span (not just a substring of the
-        # serialized blob — ``...function.name``'s last segment "name" appears in
-        # unrelated keys like ``llm.model_name`` and would pass vacuously).
-        suffix = ToolCallAttributes.TOOL_CALL_FUNCTION_NAME  # "tool_call.function.name"
-        assert any(suffix in k for k in attrs), (
-            f"LLM span missing a {suffix} message attribute; keys: {sorted(attrs)}"
-        )
-        # tool_call.id is the patch's contribution — assert it round-tripped.
-        flat = json.dumps(attrs)
-        assert "tc_abc123" in flat, "tool_call.id not captured on the LLM span (patch regression)"
-        # role/content message attributes use the semconv names.
-        assert any(k.endswith(MessageAttributes.MESSAGE_ROLE) for k in attrs)

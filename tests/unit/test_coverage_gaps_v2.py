@@ -12,7 +12,7 @@ import concurrent.futures
 import subprocess
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -2319,8 +2319,9 @@ class TestMethodWrapperNonGenerationDirect:
         result = await wrapper(obj, 7)
         assert result == 21  # Line 271: original_func called directly
 
-    async def test_agent_runtime_path_flushes_litellm_journal_callbacks(self):
-        """Agent runtime path drains LiteLLM journal callbacks before returning."""
+    async def test_agent_runtime_path_emits_native_lifecycle_events(self):
+        """The fast path emits native call lifecycle events before returning."""
+        from nooa.events import AfterAgentCall, BeforeAgentCall
         from nooa.runtime.method_wrapper import create_agent_method_wrapper
 
         async def my_regular(self) -> str:
@@ -2352,24 +2353,21 @@ class TestMethodWrapperNonGenerationDirect:
                 self.event_manager = _EventManager()
 
         agent = _Agent()
-        sleep = AsyncMock()
-        to_thread = AsyncMock()
-        with (
-            patch("nooa.runtime.method_wrapper.asyncio.sleep", sleep),
-            patch("nooa.runtime.method_wrapper.asyncio.to_thread", to_thread),
-            patch("nooa.tracing._litellm_journal.flush_pending") as flush_pending,
-        ):
-            result = await wrapper(agent)
+        result = await wrapper(agent)
 
         assert result == "ok"
-        assert sleep.await_count == 3
-        sleep.assert_awaited_with(0)
-        to_thread.assert_awaited_once_with(flush_pending)
-        flush_pending.assert_not_called()
+        before, after = agent.event_manager.events
+        assert isinstance(before, BeforeAgentCall)
+        assert isinstance(after, AfterAgentCall)
+        assert before.call_id == after.call_id
+        assert before.method_name == after.method_name == "my_regular"
+        assert before.is_top_level is after.is_top_level is True
+        assert after.success is True
 
-    async def test_agent_runtime_middleware_path_flushes_litellm_journal_callbacks(self):
-        """Agent middleware runtime path drains LiteLLM journal callbacks before returning."""
+    async def test_agent_runtime_middleware_path_emits_native_lifecycle_events(self):
+        """The middleware path uses the same native call lifecycle."""
         from nooa.agent import Agent
+        from nooa.events import AfterAgentCall, BeforeAgentCall
         from nooa.runtime.method_wrapper import create_agent_method_wrapper
 
         async def my_regular(self) -> str:
@@ -2381,22 +2379,24 @@ class TestMethodWrapperNonGenerationDirect:
             needs_tracing=False,
             strategy=None,
         )
-
         agent = Agent(llm=FakeLLMClient())
 
         async def passthrough(ctx: object, nxt: object) -> object:
             return await nxt(ctx)
 
         agent.event_manager.intercept("agent_call", passthrough)
-        flush_journal = AsyncMock()
-        with patch(
-            "nooa.runtime.method_wrapper._flush_litellm_journal",
-            flush_journal,
-        ):
-            result = await wrapper(agent)
+        lifecycle = []
+        agent.event_manager.on("BeforeAgentCall", lifecycle.append)
+        agent.event_manager.on("AfterAgentCall", lifecycle.append)
+        result = await wrapper(agent)
 
         assert result == "ok"
-        flush_journal.assert_awaited_once_with()
+        assert len(lifecycle) == 2
+        before, after = lifecycle
+        assert isinstance(before, BeforeAgentCall)
+        assert isinstance(after, AfterAgentCall)
+        assert before.call_id == after.call_id
+        assert after.success is True
 
 
 # =============================================================================

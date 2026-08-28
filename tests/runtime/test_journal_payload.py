@@ -198,7 +198,7 @@ class TestPartsAndBlocks:
         assert rendered == {"role": "user", "content": "hello"}
 
     def test_images_hashed_into_blocks_and_round_trip(self):
-        """Multimodal images — LiteLLM-shape dicts wrapping multi-MB
+        """Multimodal images — AnyLLM-shape dicts wrapping multi-MB
         base64 strings — get content-addressed into the blocks dict
         so they ship at most once per session. The viewer's
         ``_resolve_message`` restores the original ``images`` list

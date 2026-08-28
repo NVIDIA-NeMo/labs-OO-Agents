@@ -42,9 +42,9 @@ from nooa_memory.descriptors import (
     to_status,
 )
 from nooa_memory.embeddings import (
+    AnyLLMEmbedder,
     Embedder,
     HashingEmbedder,
-    LiteLLMEmbedder,
     get_embedder,
 )
 from nooa_memory.generative import llm_reasoner, llm_reconciler
@@ -108,7 +108,7 @@ __all__ = [
     # embeddings
     "Embedder",
     "HashingEmbedder",
-    "LiteLLMEmbedder",
+    "AnyLLMEmbedder",
     "get_embedder",
     # store
     "MemoryStore",

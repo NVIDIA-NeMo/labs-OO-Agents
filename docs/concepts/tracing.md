@@ -57,7 +57,7 @@ private methods. Common span types include:
 |---|---|
 | `method.<name>` | One agent method call |
 | `generation` | One strategy execution |
-| `litellm.acompletion` | One provider call |
+| `acompletion` | One provider call |
 | `code_execution` | One CodeAct Python cell |
 | `method_call.<name>` | Generated code calling another agent method |
 | `tool_execution.<tool>` | An external tool invocation |

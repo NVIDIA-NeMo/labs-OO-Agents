@@ -179,7 +179,6 @@ class TestPredictStrategyIntegration:
         fake_llm = FakeLLMClient(
             scripted_responses=[
                 LLMResponse(
-                    raw_response=None,
                     content=content,
                     tool_calls=[],
                     finish_reason="stop",
@@ -213,7 +212,6 @@ class TestPredictStrategyIntegration:
         fake_llm = FakeLLMClient(
             scripted_responses=[
                 LLMResponse(
-                    raw_response=None,
                     content=content,
                     tool_calls=[],
                     finish_reason="stop",
@@ -252,7 +250,6 @@ class TestPredictStrategyIntegration:
         fake_llm = FakeLLMClient(
             scripted_responses=[
                 LLMResponse(
-                    raw_response=None,
                     content=content1,
                     tool_calls=[],
                     finish_reason="stop",
@@ -261,7 +258,6 @@ class TestPredictStrategyIntegration:
                     usage=None,
                 ),
                 LLMResponse(
-                    raw_response=None,
                     content=content2,
                     tool_calls=[],
                     finish_reason="stop",
@@ -299,7 +295,6 @@ class TestPredictStrategyIntegration:
         fake_llm = FakeLLMClient(
             scripted_responses=[
                 LLMResponse(
-                    raw_response=None,
                     content=content,
                     tool_calls=[],
                     finish_reason="stop",
@@ -337,7 +332,6 @@ class TestPredictStrategyIntegration:
         fake_llm = FakeLLMClient(
             scripted_responses=[
                 LLMResponse(
-                    raw_response=None,
                     content=content,
                     tool_calls=[],
                     finish_reason="stop",
@@ -393,7 +387,6 @@ class TestPredictStrategyIntegration:
         fake_llm = FakeLLMClient(
             scripted_responses=[
                 LLMResponse(
-                    raw_response=None,
                     content=content,
                     tool_calls=[],
                     finish_reason="stop",

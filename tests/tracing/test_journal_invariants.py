@@ -27,7 +27,7 @@ from nooa.tracing._context_sideband import (
     JournalPayload,
     set_journal_payload,
 )
-from nooa.tracing._litellm_journal import MessageJournalCallback
+from nooa.tracing._llm_journal import MessageJournalCallback
 
 
 def _capture_posts():
@@ -108,14 +108,14 @@ def test_large_tool_call_arguments_routed_through_blocks():
 
     set_session("output-blocks-1")
 
-    with patch("nooa.tracing._litellm_journal._post_json", side_effect=fake_post):
+    with patch("nooa.tracing._llm_journal._post_json", side_effect=fake_post):
         cb.log_pre_api_call(
             model="gpt-x",
             messages=[{"role": "user", "content": "run this"}],
-            kwargs={"litellm_call_id": "c1"},
+            kwargs={"call_id": "c1"},
         )
         cb.log_success_event(
-            kwargs={"litellm_call_id": "c1", "model": "gpt-x"},
+            kwargs={"call_id": "c1", "model": "gpt-x"},
             response_obj=_fake_response_with_tool(arguments=big),
             start_time=0.0,
             end_time=1.0,
@@ -170,15 +170,15 @@ def test_per_session_dedup_is_o_delta_across_calls():
 
     def drive_call(call_id: str, blocks: dict[str, str]) -> None:
         set_journal_payload(JournalPayload(skeleton=[], blocks=blocks))
-        cb.log_pre_api_call(model="m", messages=[], kwargs={"litellm_call_id": call_id})
+        cb.log_pre_api_call(model="m", messages=[], kwargs={"call_id": call_id})
         cb.log_success_event(
-            kwargs={"litellm_call_id": call_id, "model": "m"},
+            kwargs={"call_id": call_id, "model": "m"},
             response_obj=_fake_response(),
             start_time=0.0,
             end_time=1.0,
         )
 
-    with patch("nooa.tracing._litellm_journal._post_json", side_effect=fake_post):
+    with patch("nooa.tracing._llm_journal._post_json", side_effect=fake_post):
         # Call 1: ships 3 blocks.
         drive_call("c1", dict(base_blocks))
         # Call 2: same 3 blocks + 1 new -- only the new one should ship.
@@ -246,17 +246,17 @@ async def test_concurrent_tasks_each_get_own_journal_payload():
         # mutate ContextVars that are task-local.
         set_session(session_id)
         set_journal_payload(JournalPayload(skeleton=[], blocks={f"sha256:{call_id}": content}))
-        cb.log_pre_api_call(model="m", messages=[], kwargs={"litellm_call_id": call_id})
+        cb.log_pre_api_call(model="m", messages=[], kwargs={"call_id": call_id})
         # Yield to let other tasks run between pre and success.
         await asyncio.sleep(0)
         cb.log_success_event(
-            kwargs={"litellm_call_id": call_id, "model": "m"},
+            kwargs={"call_id": call_id, "model": "m"},
             response_obj=_fake_response(content=content),
             start_time=0.0,
             end_time=1.0,
         )
 
-    with patch("nooa.tracing._litellm_journal._post_json", side_effect=fake_post):
+    with patch("nooa.tracing._llm_journal._post_json", side_effect=fake_post):
         await asyncio.gather(
             one_call("sess-A", "alpha", "ca"),
             one_call("sess-B", "beta", "cb"),
@@ -293,3 +293,51 @@ async def test_concurrent_tasks_each_get_own_journal_payload():
     assert len(b_calls) == 1 and b_calls[0]["call_id"] == "cb"
     assert a_calls[0]["session_id"] == "sess-A"
     assert b_calls[0]["session_id"] == "sess-B"
+
+
+# ---------------------------------------------------------------------------
+# Secret redaction
+# ---------------------------------------------------------------------------
+
+
+def test_journal_redacts_input_output_and_failure_secrets():
+    posts, fake_post = _capture_posts()
+    cb = MessageJournalCallback("http://example.invalid")
+    secret = "sk-" + "A" * 24
+
+    from nooa.tracing import set_session
+
+    set_session("redaction-1")
+    set_journal_payload(
+        JournalPayload(
+            skeleton=[{"role": "system", "parts": [{"block_hash": "secret-block"}]}],
+            blocks={"secret-block": f"password={secret}"},
+        )
+    )
+    with patch("nooa.tracing._llm_journal._post_json", side_effect=fake_post):
+        cb.log_pre_api_call(
+            model="gpt-x",
+            messages=[{"role": "user", "content": f"api_key={secret}"}],
+            kwargs={"call_id": "ok"},
+        )
+        cb.log_success_event(
+            kwargs={"call_id": "ok", "model": "gpt-x"},
+            response_obj=_fake_response(f"token={secret}"),
+            start_time=0.0,
+            end_time=1.0,
+        )
+        cb.log_pre_api_call(
+            model="gpt-x",
+            messages=[{"role": "user", "content": "safe"}],
+            kwargs={"call_id": "bad"},
+        )
+        cb.log_failure_event(
+            kwargs={"call_id": "bad", "model": "gpt-x"},
+            response_obj=RuntimeError(f"Authorization: Bearer {secret}"),
+            start_time=0.0,
+            end_time=1.0,
+        )
+
+    serialized = json.dumps(posts)
+    assert secret not in serialized
+    assert "[REDACTED]" in serialized

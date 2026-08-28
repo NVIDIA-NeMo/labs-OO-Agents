@@ -21,7 +21,7 @@ from acp import (
     update_tool_call,
 )
 from acp.interfaces import Client
-from acp.schema import ContentToolCallContent, Cost, ToolCallLocation, UsageUpdate
+from acp.schema import ContentToolCallContent, ToolCallLocation
 from nooa_cli.coding import (
     CodingAgent,
     FileEdit,
@@ -258,17 +258,6 @@ class ACPEventBridge:
         if not isinstance(event, LLMComplete):
             return
         self._cost_usd += event.cost_usd
-        context_window = getattr(self.agent.llm, "context_window", None)
-        if context_window is None:
-            return
-        self._enqueue(
-            UsageUpdate(
-                session_update="usage_update",
-                used=event.prompt_tokens,
-                size=max(context_window, event.prompt_tokens),
-                cost=Cost(amount=self._cost_usd, currency="USD"),
-            )
-        )
 
     def _stopped_error(self, cause: BaseException) -> RuntimeError:
         error = RuntimeError("ACP event bridge stopped")

@@ -498,7 +498,7 @@ class AnthropicProviderFormatter(ProviderFormatter):
                     }
                 )
             elif msg.images:
-                # Keep the universal LiteLLM image_url shape — LiteLLM translates for Anthropic.
+                # Keep the universal universal image_url shape — providers translate for Anthropic.
                 role = msg.role if msg.role in (Role.USER, Role.ASSISTANT) else Role.USER
                 content_parts: list[dict] = [{"type": "text", "text": msg.content or ""}]
                 content_parts.extend(msg.images)

@@ -40,7 +40,7 @@ class TestIsUserCodeFrame:
 
     def test_site_packages_is_framework(self):
         """Frames from site-packages are framework code."""
-        assert _is_user_code_frame("/lib/python3.12/site-packages/litellm/main.py") is False
+        assert _is_user_code_frame("/lib/python3.12/site-packages/any_llm/main.py") is False
 
     def test_lib_python_is_framework(self):
         """Frames from lib/python are framework code."""

@@ -289,6 +289,30 @@ class InstrumentationHooks(Protocol):
         """
         ...
 
+    def before_llm_call(
+        self,
+        call_id: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        invocation_parameters: dict[str, Any],
+    ) -> Any:
+        """Called once before a logical LLM call (retries are internal)."""
+        ...
+
+    def after_llm_call(
+        self,
+        call_id: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        response: Any,
+        exception: BaseException | None,
+        context: Any,
+    ) -> None:
+        """Called once when a logical LLM call succeeds, fails, or is cancelled."""
+        ...
+
     def on_messages_built(
         self,
         agent: Any,

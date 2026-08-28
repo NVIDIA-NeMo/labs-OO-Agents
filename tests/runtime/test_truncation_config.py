@@ -265,10 +265,10 @@ class TestMergeSemantics:
         assert merged.capture.max_stdout == 90_000
 
     def test_explicit_default_value_overrides(self):
-        """Explicitly setting a field to the default value still overrides."""
-        base = TruncationConfig(max_context_tokens=10_000)
-        override = TruncationConfig(max_context_tokens=20_000)
+        """Explicitly setting the default recovery batch still overrides."""
+        base = TruncationConfig(context_error_event_batch=5)
+        override = TruncationConfig(context_error_event_batch=10)
 
         merged = base.merge_with(override)
 
-        assert merged.max_context_tokens == 20_000
+        assert merged.context_error_event_batch == 10

@@ -30,7 +30,6 @@ def make_fake_llm() -> FakeLLMClient:
     return FakeLLMClient(
         scripted_responses=[
             LLMResponse(
-                raw_response=None,
                 content="test",
                 tool_calls=[],
                 finish_reason="stop",

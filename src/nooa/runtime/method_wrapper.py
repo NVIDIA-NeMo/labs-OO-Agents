@@ -10,7 +10,6 @@ Having this in one place eliminates duplication and ensures consistent behavior
 for context variable management, tracing hooks, and execution routing.
 """
 
-import asyncio
 import inspect
 import logging
 from collections.abc import Callable
@@ -34,22 +33,6 @@ if TYPE_CHECKING:
     from nooa.strategies.base import GenerationStrategy
 
 logger = logging.getLogger(__name__)
-
-
-async def _flush_litellm_journal() -> None:
-    # Three yields drain litellm's GLOBAL_LOGGING_WORKER chain before joining the
-    # journal POST thread; running the join in a worker avoids blocking the loop.
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-    from nooa.runtime.async_safety import _in_agent_context
-    from nooa.tracing._litellm_journal import flush_pending
-
-    token = _in_agent_context.set(False)
-    try:
-        await asyncio.to_thread(flush_pending)
-    finally:
-        _in_agent_context.reset(token)
 
 
 def create_agent_method_wrapper(
@@ -265,7 +248,6 @@ def create_agent_method_wrapper(
                                 **trace_attrs,
                             )
                         ctx.result = await _dispatch(ctx.args, ctx.kwargs)
-                        await _flush_litellm_journal()
                         return ctx
 
                     ac_ctx = await em.run_middleware("agent_call", ac_ctx, _core_agent)
@@ -289,7 +271,6 @@ def create_agent_method_wrapper(
                             **trace_attrs,
                         )
                     result = await _dispatch(args, kwargs)
-                    await _flush_litellm_journal()
 
                 return result
             except Exception as e:

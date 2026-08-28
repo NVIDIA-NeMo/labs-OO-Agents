@@ -294,14 +294,14 @@ def enable_tracing(
             # default id generator draws from the global random module, so a
             # private-RNG generator keeps span ids unique regardless.
             id_generator=_IsolatedIdGenerator(),
-            # No attribute cap. LiteLLM's instrumentor emits one attribute
+            # No attribute cap. LLM instrumentation emits one attribute
             # per message in the conversation history
             # (``llm.input_messages.N.message.role`` / ``.content`` /
             # ``.tool_call_id`` / …). A long conversation overflows any
             # finite cap and OTel SDK's ``BoundedAttributes`` evicts the
             # OLDEST entries FIFO — which is exactly where ``session.id``
             # lives (stamped by :class:`SessionSpanProcessor.on_start`
-            # *before* LiteLLM adds anything else). Evicted ``session.id``
+            # *before* LLM message attributes are added). Evicted ``session.id``
             # → span exports with no session → viewer buckets it as
             # ``unknown_*``. The OTLP exporter already handles multi-MB
             # spans, so drop the cap.
@@ -332,9 +332,6 @@ def enable_tracing(
         assert _hooks is not None, (
             "NemoOOAgentsInstrumentor.instrument() should have called set_hooks()"
         )
-
-    # Instrument litellm if available
-    _instrument_litellm(tracer_provider)
 
     # Print trace target
     _print_trace_target(exporters, experiment)
@@ -435,25 +432,6 @@ def _default_exporters() -> list[SpanExporter] | None:
         )
 
     return None
-
-
-def _instrument_litellm(tracer_provider: TracerProvider) -> None:
-    """Instrument LiteLLM with the OpenInference auto-instrumentor.
-
-    Required dep: ``openinference-instrumentation-litellm`` is what stamps
-    ``llm.input_messages.*`` / ``llm.output_messages.*`` onto LLM spans
-    at the source.  Without it, file exports silently lack message
-    content (the wire-strip-and-reconstruct path on the viewer side
-    can't recover what was never produced).  Listed in
-    ``pyproject.toml::project.dependencies`` so install failures surface
-    here rather than as missing message attrs at runtime.
-    """
-    from openinference.instrumentation.litellm import LiteLLMInstrumentor
-
-    from nooa.tracing._litellm_patch import apply_litellm_patch
-
-    LiteLLMInstrumentor().instrument(tracer_provider=tracer_provider)
-    apply_litellm_patch()
 
 
 def _describe_exporter(exp: SpanExporter) -> str:

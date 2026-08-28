@@ -1115,7 +1115,7 @@ def get_experiment_summary(experiment: str) -> dict[str, Any]:
 def _resolve_message(msg: dict[str, Any], blocks: dict[str, str]) -> dict[str, Any]:
     """Resolve a journal-skeleton message back to its v2-shape, in-line content.
 
-    Inverse of :func:`nooa.tracing._litellm_journal._skeleton_dict_message`
+    Inverse of :func:`nooa.tracing._llm_journal._skeleton_dict_message`
     (and the same for ``_journal_builder.build_journal_payload``):
 
     * ``parts: [{block_hash}]`` / ``[{text}]`` -> ``content`` (string, parts joined).

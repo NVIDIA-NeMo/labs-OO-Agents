@@ -87,7 +87,7 @@ _CALL_RE = re.compile(r"(?:self\.)?([A-Za-z_]\w*)\s*\(")
 
 
 def _pricing_key(model: str) -> str:
-    """Map a litellm model id (e.g. ``openai/openai/gpt-5.5``) to a key that
+    """Map an AnyLLM model id (e.g. ``openai/openai/gpt-5.5``) to a key that
     ``arc_agi_3.llm_configs.get_pricing`` recognises, so the Status panel's ``$``
     cost line resolves a real price. model_tokens is keyed by the llm_call
     ``agent_id``, and get_pricing knows the short names ``opus`` / ``gpt5.5`` /

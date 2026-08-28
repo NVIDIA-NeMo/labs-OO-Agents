@@ -214,7 +214,7 @@ RESTRICTED_MODULES: frozenset[str] = frozenset(
         # LLM SDKs
         "openai",
         "anthropic",
-        "litellm",
+        "any_llm",
         # System
         "sys",
         "ctypes",

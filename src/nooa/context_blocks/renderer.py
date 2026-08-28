@@ -77,74 +77,13 @@ def format_message_content(block: ResolvedBlock, format_type: str) -> str:
     return _markdown_message_content(block)
 
 
-def _apply_context_total_limit(
-    blocks: list[ResolvedBlock],
-    total_limit: int,
-    count_fn: Callable[[str], int],
-) -> tuple[list[ResolvedBlock], int]:
-    """Mark over-budget context blocks as EVICTED in-place.
-
-    Two-pass strategy: select user blocks (``self.context``) from the end first,
-    then remaining blocks from the end until the total fits. Selected blocks
-    keep their original key/position and render an EVICTED label with per-block
-    size stats.
-    """
-    total = sum(count_fn(b.content) for b in blocks)
-    if total <= total_limit:
-        return blocks, 0
-
-    to_evict: set[int] = set()
-    evicted_sizes: dict[int, int] = {}
-
-    for i in range(len(blocks) - 1, -1, -1):
-        if total <= total_limit:
-            break
-        if blocks[i].metadata.user_block and not blocks[i].metadata.static:
-            size = count_fn(blocks[i].content)
-            total -= size
-            to_evict.add(i)
-            evicted_sizes[i] = size
-
-    if total > total_limit:
-        for i in range(len(blocks) - 1, -1, -1):
-            if total <= total_limit:
-                break
-            if i not in to_evict and not blocks[i].metadata.static:
-                size = count_fn(blocks[i].content)
-                total -= size
-                to_evict.add(i)
-                evicted_sizes[i] = size
-
-    rendered: list[ResolvedBlock] = []
-    for i, block in enumerate(blocks):
-        if i not in to_evict:
-            rendered.append(block)
-            continue
-        size = evicted_sizes.get(i, count_fn(block.content))
-        msg = f"EVICTED: over context budget (block_tokens={size:,})"
-        rendered.append(
-            block.model_copy(
-                update={
-                    "content": msg,
-                    "metadata": block.metadata.model_copy(update={"truncated": True}),
-                }
-            )
-        )
-
-    return rendered, len(to_evict)
-
-
 def render_context(
     blocks: list[ResolvedBlock],
     *,
     block_formatter: BlockFormatter,
     provider_formatter: ProviderFormatter,
-    context_limit: int | None = None,
-    count_tokens: Callable[[str], int] | None = None,
     event_format: "FormatConfig | None" = None,
     event_format_resolver: Callable[[Any], "FormatConfig | None"] | None = None,
-    model_context_window: int | None = None,
-    reserved_output_tokens: int | None = None,
 ) -> RenderResult:
     """Render resolved blocks into provider-specific output with utilization stats.
 
@@ -158,14 +97,6 @@ def render_context(
     which lets method-level ``@strategy(truncation=...)`` affect events from
     that method without re-rendering the rest of the context under that config.
     """
-    if count_tokens is None and context_limit is not None:
-        raise ValueError(
-            "max_context_tokens requires a token counter. "
-            "Pass count_tokens=llm.count_tokens to render_context()."
-        )
-
-    count_fn: Callable[[str], int] = count_tokens if count_tokens is not None else len
-
     # Partition for truncation only.
     system_blocks = [b for b in blocks if b.role == Role.SYSTEM]
     message_blocks = [b for b in blocks if b.role != Role.SYSTEM]
@@ -185,18 +116,6 @@ def render_context(
         serialized_messages.append(block)
     message_blocks = serialized_messages
 
-    # Total-context eviction: mark over-budget blocks EVICTED in place.
-    # The eviction count is reported to the caller via
-    # ``ContextWindowStats.context_blocks_dropped`` (below). The runtime owns
-    # its ``HarnessMetrics`` singleton and increments
-    # ``context_limits_blocks_evicted`` from that value — this leaf library
-    # never reaches into the runtime's metrics (see issue #330).
-    context_blocks_dropped = 0
-    if context_limit is not None:
-        system_blocks, context_blocks_dropped = _apply_context_total_limit(
-            system_blocks, context_limit, count_fn
-        )
-
     # Stats — structural only. Token figures are NOT estimated here; the
     # runtime writes the provider-reported prompt_tokens back after the call.
     # We record raw character sizes (post-eviction) so the provider total can
@@ -204,14 +123,8 @@ def render_context(
     stats = ContextWindowStats(
         context_blocks_count=len(system_blocks),
         events_count=len(message_blocks),
-        prompt_tokens=None,
         context_blocks_chars=sum(len(b.content) for b in system_blocks),
         events_chars=sum(len(b.content) for b in message_blocks),
-        max_context_tokens=context_limit,
-        model_context_window=model_context_window,
-        context_blocks_dropped=context_blocks_dropped,
-        events_dropped=0,
-        reserved_output_tokens=reserved_output_tokens,
     )
 
     # Neutral message list → provider wire format.

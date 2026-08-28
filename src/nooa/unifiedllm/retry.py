@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-# Provider/LiteLLM error substrings to fall back on when an error only carries a
+# Provider/provider error substrings to fall back on when an error only carries a
 # stringified form (e.g. raw gateway HTML) without a usable ``.status_code`` or a
 # ``status {code}`` token. Keyed by HTTP status code so a phrase only triggers a
 # retry when that code is present in ``RetryConfig.retryable_status_codes``.
@@ -163,7 +163,7 @@ def _is_retryable_error(error: Exception, config: RetryConfig) -> tuple[bool, bo
     if isinstance(error, EmptyContentError) and config.retry_on_empty_content:
         return True, False
 
-    # Prefer the structured status code when the exception exposes one (LiteLLM /
+    # Prefer the structured status code when the exception exposes one (provider /
     # OpenAI APIStatusError subclasses carry ``.status_code`` — e.g. BadGatewayError
     # has 502). A present but non-retryable status is terminal; do not let broad
     # endpoint text matching retry permanent 4xx/auth/model errors.
@@ -185,7 +185,7 @@ def _is_retryable_error(error: Exception, config: RetryConfig) -> tuple[bool, bo
     for code in config.retryable_status_codes:
         if f"status {code}" in error_str:
             return True, False
-        # Fall back to provider/LiteLLM phrasing (e.g. "502 Bad Gateway",
+        # Fall back to provider/provider phrasing (e.g. "502 Bad Gateway",
         # "BadGatewayError") when the "status {code}" token is absent.
         if any(phrase in error_str for phrase in _RETRYABLE_STATUS_PHRASES.get(code, ())):
             return True, False
@@ -195,7 +195,7 @@ def _is_retryable_error(error: Exception, config: RetryConfig) -> tuple[bool, bo
         return True, False
 
     # Check for endpoint-level transient failures that may not expose a status
-    # code, including LiteLLM APIConnectionError and httpx transport errors.
+    # code, including provider APIConnectionError and httpx transport errors.
     if _is_retryable_endpoint_error(error, error_str):
         return True, False
 

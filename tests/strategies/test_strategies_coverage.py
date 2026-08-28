@@ -61,7 +61,6 @@ _TEST_LLM = FakeLLMClient()
 def _resp(content: str, tool_calls: list | None = None) -> LLMResponse:
     finish_reason = "tool_calls" if tool_calls else "stop"
     return LLMResponse(
-        raw_response=None,
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
@@ -88,7 +87,6 @@ def _tool_call(code: str, call_id: str = "call_1") -> ToolCall:
 def _llm_resp(content: str) -> LLMResponse:
     """Create an LLMResponse with string content (for PREDICT tests)."""
     return LLMResponse(
-        raw_response=None,
         content=content,
         tool_calls=[],
         finish_reason="stop",

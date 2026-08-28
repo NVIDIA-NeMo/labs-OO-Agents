@@ -140,6 +140,12 @@ class TestInstrumentationHooksProtocol:
             def on_messages_built(self, agent, method_name, messages, generation_id, **kwargs):
                 pass
 
+            def before_llm_call(self, call_id, model, messages, tools, invocation_parameters):
+                return {}
+
+            def after_llm_call(self, call_id, model, messages, tools, response, exception, context):
+                pass
+
         hooks = FullHooks()
         assert isinstance(hooks, InstrumentationHooks)
 

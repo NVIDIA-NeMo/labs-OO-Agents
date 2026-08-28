@@ -30,7 +30,6 @@ def _resp(
 ) -> LLMResponse:
     finish_reason = "tool_calls" if tool_calls else "stop"
     return LLMResponse(
-        raw_response=None,
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,

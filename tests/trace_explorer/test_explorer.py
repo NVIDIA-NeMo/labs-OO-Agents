@@ -351,6 +351,19 @@ class TestTraceExplorerBasic:
         finally:
             trace_file.unlink()
 
+    async def test_openinference_kind_detects_native_llm_call_name(self):
+        """Native ``llm.call`` spans are turns based on semantic kind, not a legacy name."""
+        generation = make_generation_span("gen1", "aaaaaa000000")
+        llm = make_llm_span("llm1", "gen1", messages=[("user", "hello")])
+        llm["name"] = "llm.call"
+        trace_file = create_trace_file([generation, llm])
+        try:
+            trace = await TraceExplorer.from_file(trace_file)
+            assert len(trace.sessions[0].turns) == 1
+            assert isinstance(trace.sessions[0].turns[0], LLMTurn)
+        finally:
+            trace_file.unlink()
+
     async def test_extracts_tool_calls_from_llm_turns(self):
         """Test that tool calls are properly extracted from LLM turns."""
         spans = [

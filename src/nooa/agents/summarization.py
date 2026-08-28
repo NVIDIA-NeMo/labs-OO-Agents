@@ -36,7 +36,7 @@ from nooa.strategies import PredictStrategy
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from nooa.config.summarizer_config import MethodSummarizerConfig, TokenBudgetConfig
+    from nooa.config.summarizer_config import MethodSummarizerConfig
     from nooa.events import AfterTurn, EventBase
     from nooa.runtime.event_manager import EventManager
 
@@ -452,186 +452,25 @@ class SummarizationAgent(Agent):
             )
             rendered.append(format_message_content(block, "markdown"))
 
-        # Total-input cap. Per-event ``event_format`` bounds each event's fields,
-        # but the SUM across a long range can still exceed the summarizer's own
-        # model context window — the summarize() call then 400s ("prompt is too
-        # long") and compaction can never make progress. Keep the NEWEST events
-        # (most relevant to a resume summary) under a token budget and head-drop
-        # the oldest with an explicit marker, so the single summarize() call
-        # always fits. See _input_token_budget for the budget derivation.
-        budget = self._input_token_budget()
-        if budget is not None:
-            count = self._input_token_counter()
-            kept: list[str] = []
-            used = 0
-            dropped = 0
-            sep = 4  # "\n\n" between parts, counted approximately
-            # Walk newest -> oldest so the most recent survive the cap.
-            for part in reversed(rendered):
-                cost = count(part) + sep
-                if used + cost > budget and kept:
-                    dropped = len(rendered) - len(kept)
-                    break
-                kept.append(part)
-                used += cost
-            if dropped:
-                kept.reverse()
-                marker = (
-                    f"[... {dropped} older event(s) omitted to fit the summarizer's "
-                    f"input budget; summarize what remains ...]"
-                )
-                return "\n\n".join([marker, *kept])
-            # No drop: kept is newest-first; restore chronological order.
-            rendered = list(reversed(kept))
-
         return "\n\n".join(rendered)
-
-    @hidden
-    @no_trace
-    def _input_token_counter(self) -> "Callable[[str], int]":
-        """Token counter for sizing the summarizer's own input.
-
-        Prefer the summarizer LLM's ``count_tokens``; fall back to the shared
-        char-approximate counter so the cap still applies when no counter is set.
-        """
-        llm = getattr(self, "_llm", None)
-        counter = getattr(llm, "count_tokens", None)
-        if callable(counter):
-            return counter
-        from nooa.token_counter import char_approximate_token_counter
-
-        return char_approximate_token_counter
-
-    @hidden
-    @no_trace
-    def _input_token_budget(self) -> int | None:
-        """Max tokens for the rendered summarization input (history_markdown).
-
-        ~70% of the summarizer model's context window, leaving headroom for the
-        summarize() method's own prompt scaffolding (docstring, instructions,
-        target_chars) and the completion. ``None`` (no cap) when the model
-        window can't be determined — never wipe the input on a misconfig; the
-        API error path is still the backstop."""
-        llm = getattr(self, "_llm", None)
-        for attr in ("context_window", "context_limit"):
-            window = getattr(llm, attr, None)
-            if isinstance(window, int) and window > 0:
-                return int(window * 0.7)
-        return None
 
 
 # =============================================================================
 # Helper Functions
 # =============================================================================
 def context_budget(llm: Any, percent: float = 0.8, fallback: int = 100_000) -> int:
-    """Calculate token budget as percentage of the LLM's context window.
-
-    Args:
-        llm: LLM instance with ``context_window`` attribute (``context_limit``
-             also accepted for historical callers)
-        percent: Fraction of context to use (0.0-1.0), default 0.8 (80%)
-        fallback: Value returned when the LLM doesn't expose either attribute
-
-    Returns:
-        Token budget as integer.
-
-    Example:
-        TokenBudgetSummarizer.install(
-            agent, config=TokenBudgetConfig(max_tokens=context_budget(my_llm, 0.8))
-        )
-    """
-    if percent <= 0:
-        raise ValueError("percent must be > 0")
-
-    # ``context_window`` is the UnifiedLLM convention. ``context_limit`` was
-    # the originally-documented attribute name but no shipped LLM client sets
-    # it — falling back keeps the helper useful for any custom wrapper that
-    # does. Treat non-positive limits as unavailable; returning 0 silently
-    # disables useful token-budget summarization.
-    for attr in ("context_window", "context_limit"):
-        limit = getattr(llm, attr, None)
-        if limit is not None and limit > 0:
-            return int(limit * percent)
-    return fallback
+    """Removed: model token metadata no longer controls summarization."""
+    raise RuntimeError("context_budget() was removed; use explicit event-based summarization")
 
 
-# =============================================================================
-# Example Summarizers (Good Defaults)
-# =============================================================================
 class TokenBudgetSummarizer(SummarizationAgent):
-    """Summarize when event count exceeds token budget.
-
-    Trigger: Event tokens > config.max_tokens
-    Action: Summarize oldest events, preserve N most recent
-
-    Example:
-        from nooa.config.summarizer_config import TokenBudgetConfig
-        # Absolute limit
-        TokenBudgetSummarizer.install(agent, config=TokenBudgetConfig(max_tokens=80_000))
-
-        # Percentage of LLM context
-        TokenBudgetSummarizer.install(agent, config=TokenBudgetConfig(max_tokens=context_budget(my_llm, 0.8)))
-    """
+    """Removed token-driven summarizer retained only for a clear migration error."""
 
     @classmethod
-    def install(
-        cls, agent: Agent, *, config: "TokenBudgetConfig | None" = None, **kwargs: Any
-    ) -> SummarizationAgent:
-        """Install with a TokenBudgetConfig.
-
-        Args:
-            agent: Agent to attach to.
-            config: TokenBudgetConfig instance. Use TokenBudgetConfig(field=value) to override.
-            **kwargs: Only 'llm' is allowed; all other flat kwargs raise TypeError.
-        """
-        unknown = set(kwargs) - {"llm"}
-        if unknown:
-            raise TypeError(
-                f"TokenBudgetSummarizer.install() got unexpected keyword arguments: "
-                f"{sorted(unknown)}. Use config=TokenBudgetConfig(...) instead."
-            )
-        return super().install(agent, config=config, **kwargs)
-
-    def __init__(self, agent: Agent, **kwargs: Any) -> None:
-        from nooa.config.summarizer_config import TokenBudgetConfig as _TBC
-
-        config = kwargs.pop("config", None)
-        self.config = config or _TBC()
-        super().__init__(agent, **kwargs)
-
-    @hidden
-    @no_trace
-    def _should_summarize(self, event: "AfterTurn") -> bool:
-        """Trigger only from provider-reported prompt tokens."""
-        agent = self._target_agent
-        if agent is None:
-            return False
-
-        try:
-            actual = agent.runtime.last_prompt_tokens_actual
-        except Exception:
-            logger.warning(
-                "TokenBudgetSummarizer: failed to read API-reported token count", exc_info=True
-            )
-            return False
-
-        return actual is not None and actual > self.config.max_tokens
-
-    @hidden
-    @no_trace
-    def _compute_range(self, event: "AfterTurn") -> tuple[str, str] | None:
-        """Summarize oldest events, preserving recent ones."""
-        if self.target_event_manager is None:
-            return None
-
-        tags = self.target_event_manager.keys()
-        if len(tags) <= self.config.preserve_recent:
-            return None
-
-        # Summarize from oldest to (len - preserve_recent - 1)
-        start_tag = tags[0]
-        end_tag = tags[-(self.config.preserve_recent + 1)]
-        return (start_tag, end_tag)
+    def install(cls, agent: Agent, **kwargs: Any) -> SummarizationAgent:
+        raise RuntimeError(
+            "TokenBudgetSummarizer was removed; use MethodSummarizer or explicit event collapse"
+        )
 
 
 class MethodSummarizer(SummarizationAgent):

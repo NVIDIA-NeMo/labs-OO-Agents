@@ -240,7 +240,7 @@ description: "What this tests"   # Optional description
 # All models defined here, referenced by ID
 models:
   model-id:                      # Your chosen ID
-    model_name: provider/model   # LiteLLM model string
+    model_name: provider/model   # provider model string
     endpoint: https://...        # API endpoint
     api_key_env: ENV_VAR_NAME    # Environment variable with API key
     max_tokens: 4096             # Max output tokens

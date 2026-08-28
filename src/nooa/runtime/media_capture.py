@@ -5,14 +5,14 @@
 Uses a ContextVar-based collector (same pattern as stdout/stderr capture)
 to accumulate multimodal content blocks during execute_python() calls.
 
-All content blocks follow LiteLLM's format conventions:
+All content blocks follow provider-neutral content conventions:
 - Images:  {"type": "image_url", "image_url": {"url": ..., "format": ...}}
 - Audio:   {"type": "input_audio", "input_audio": {"data": ..., "format": ...}}
 - Video:   {"type": "video_url", "video_url": {"url": ...}}
 - Files:   {"type": "file", "file": {"file_data": "data:...;base64,...", "filename": ...}}
 
-LiteLLM automatically converts these to provider-native formats.
-See: https://docs.litellm.ai/docs/completion/vision
+The configured provider converts these to provider-native formats.
+
 """
 
 import base64
@@ -52,11 +52,11 @@ _media_buffer_var: contextvars.ContextVar[_MediaBuffer | None] = contextvars.Con
 
 
 def media_to_content_block(media: Any) -> dict[str, Any]:
-    """Convert a Media object to a LiteLLM-compatible content block.
+    """Convert a Media object to a provider-neutral content block.
 
-    Uses LiteLLM's universal formats. Provider-specific conversion
-    (e.g. Anthropic image source format) is handled by LiteLLM.
-    See: https://docs.litellm.ai/docs/completion/vision
+    Uses provider-neutral formats. Provider-specific conversion
+    (e.g. Anthropic image source format) is handled by the configured provider.
+
     """
     from nooa.media import Audio, File, Image, Media, Video
 
@@ -74,7 +74,7 @@ def media_to_content_block(media: Any) -> dict[str, Any]:
         return {"type": "image_url", "image_url": image_url_dict}
 
     if isinstance(media, Audio):
-        # LiteLLM input_audio format: {"type": "input_audio", "input_audio": {"data": base64, "format": "wav"}}
+        # input_audio format: {"type": "input_audio", "input_audio": {"data": base64, "format": "wav"}}
         fmt = media.media_type.split("/")[-1] if media.media_type else "wav"
         return {
             "type": "input_audio",
@@ -82,14 +82,14 @@ def media_to_content_block(media: Any) -> dict[str, Any]:
         }
 
     if isinstance(media, Video):
-        # LiteLLM video_url format: {"type": "video_url", "video_url": {"url": ...}}
+        # video_url format: {"type": "video_url", "video_url": {"url": ...}}
         video_url_dict: dict[str, Any] = {"url": media.data_url}
         if media.vendor_metadata:
             video_url_dict.update(media.vendor_metadata)
         return {"type": "video_url", "video_url": video_url_dict}
 
     if isinstance(media, File):
-        # LiteLLM file format
+        # file content format
         return {
             "type": "file",
             "file": {"file_data": media.data_url, "filename": "attachment"},

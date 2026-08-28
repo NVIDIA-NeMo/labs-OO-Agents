@@ -11,9 +11,7 @@ callers and CodeAct's max-tokens abort branch was dead in production.
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-import litellm
 import pytest
-from litellm.types.utils import ChatCompletionMessageToolCall, Function
 
 from nooa import Agent, strategy
 from nooa.config import CodeActConfig
@@ -29,11 +27,11 @@ from nooa.unifiedllm.unifiedllm import (
 def make_mock_response(
     content: str | None = None,
     reasoning: str | None = None,
-    tool_calls: list[ChatCompletionMessageToolCall] | None = None,
+    tool_calls: list[SimpleNamespace] | None = None,
     finish_reason: str | None = None,
-) -> litellm.ModelResponse:
-    """Create a litellm.ModelResponse for testing with an explicit finish_reason."""
-    msg = litellm.Message(
+) -> SimpleNamespace:
+    """Create a any_llm.ModelResponse for testing with an explicit finish_reason."""
+    msg = SimpleNamespace(
         content=content,
         role="assistant",
         tool_calls=tool_calls,
@@ -41,13 +39,13 @@ def make_mock_response(
     )
     if finish_reason is None:
         finish_reason = "tool_calls" if tool_calls else "stop"
-    choice = litellm.Choices(message=msg, index=0, finish_reason=finish_reason)
-    return litellm.ModelResponse(choices=[choice], model="test-model")
+    choice = SimpleNamespace(message=msg, index=0, finish_reason=finish_reason)
+    return SimpleNamespace(choices=[choice], model="test-model", usage=None)
 
 
-def make_tool_call(id: str, name: str, arguments: str) -> ChatCompletionMessageToolCall:
-    return ChatCompletionMessageToolCall(
-        id=id, function=Function(name=name, arguments=arguments), type="function"
+def make_tool_call(id: str, name: str, arguments: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=id, function=SimpleNamespace(name=name, arguments=arguments), type="function"
     )
 
 
@@ -119,26 +117,28 @@ class TestCompletionClientPropagation:
 
     def test_sync_length_propagates(self, client):
         resp = make_mock_response(content="partial", finish_reason="length")
-        with patch("litellm.completion", return_value=resp):
+        with patch.object(client._transport, "completion", return_value=resp):
             out = client.call([{"role": "user", "content": "Hi"}])
         assert out.finish_reason == "length"
 
     @pytest.mark.asyncio
     async def test_async_length_propagates(self, client):
         resp = make_mock_response(content="partial", finish_reason="length")
-        with patch("litellm.acompletion", new_callable=AsyncMock, return_value=resp):
+        with patch.object(
+            client._transport, "acompletion", new_callable=AsyncMock, return_value=resp
+        ):
             out = await client.acall([{"role": "user", "content": "Hi"}])
         assert out.finish_reason == "length"
 
     def test_sync_stop_stays_stop(self, client):
         resp = make_mock_response(content="done", finish_reason="stop")
-        with patch("litellm.completion", return_value=resp):
+        with patch.object(client._transport, "completion", return_value=resp):
             out = client.call([{"role": "user", "content": "Hi"}])
         assert out.finish_reason == "stop"
 
     def test_content_filter_maps_to_error(self, client):
         resp = make_mock_response(content="", finish_reason="content_filter")
-        with patch("litellm.completion", return_value=resp):
+        with patch.object(client._transport, "completion", return_value=resp):
             out = client.call([{"role": "user", "content": "Hi"}])
         assert out.finish_reason == "error"
 
@@ -147,14 +147,14 @@ class TestCompletionClientPropagation:
         # the provider's raw finish_reason.
         tc = make_tool_call("call_1", "do_thing", "{}")
         resp = make_mock_response(content=None, tool_calls=[tc], finish_reason="length")
-        with patch("litellm.completion", return_value=resp):
+        with patch.object(client._transport, "completion", return_value=resp):
             out = client.call([{"role": "user", "content": "Hi"}])
         assert out.finish_reason == "tool_calls"
         assert len(out.tool_calls) == 1
 
 
 def _make_responses_api_response(status: str, reason: str | None = None):
-    """Fake a litellm Responses-API response with a given status/reason."""
+    """Fake a any_llm Responses-API response with a given status/reason."""
     details = SimpleNamespace(reason=reason) if reason is not None else None
     return SimpleNamespace(
         output=[],  # no message/tool items -> empty text, no tool calls
@@ -169,30 +169,32 @@ class TestResponsesClientPropagation:
 
     @pytest.fixture
     def client(self):
-        return ResponsesClient(model="test-model")
+        return ResponsesClient(model="test-model", capabilities={"responses": True})
 
     def test_sync_incomplete_max_output_tokens_maps_to_length(self, client):
         resp = _make_responses_api_response("incomplete", "max_output_tokens")
-        with patch("litellm.responses", return_value=resp):
+        with patch.object(client._transport, "responses", return_value=resp):
             out = client.call([{"role": "user", "content": "Hi"}])
         assert out.finish_reason == "length"
 
     @pytest.mark.asyncio
     async def test_async_incomplete_max_output_tokens_maps_to_length(self, client):
         resp = _make_responses_api_response("incomplete", "max_output_tokens")
-        with patch("litellm.aresponses", new_callable=AsyncMock, return_value=resp):
+        with patch.object(
+            client._transport, "aresponses", new_callable=AsyncMock, return_value=resp
+        ):
             out = await client.acall([{"role": "user", "content": "Hi"}])
         assert out.finish_reason == "length"
 
     def test_sync_completed_maps_to_stop(self, client):
         resp = _make_responses_api_response("completed")
-        with patch("litellm.responses", return_value=resp):
+        with patch.object(client._transport, "responses", return_value=resp):
             out = client.call([{"role": "user", "content": "Hi"}])
         assert out.finish_reason == "stop"
 
     def test_sync_failed_maps_to_error(self, client):
         resp = _make_responses_api_response("failed")
-        with patch("litellm.responses", return_value=resp):
+        with patch.object(client._transport, "responses", return_value=resp):
             out = client.call([{"role": "user", "content": "Hi"}])
         assert out.finish_reason == "error"
 
@@ -217,8 +219,8 @@ class TestCodeActAbortOnRealLengthPath:
 
         agent_instance = TestAgent(llm=real_llm)
 
-        with patch(
-            "litellm.acompletion", new_callable=AsyncMock, return_value=length_response
+        with patch.object(
+            real_llm._transport, "acompletion", new_callable=AsyncMock, return_value=length_response
         ) as mock_acompletion:
             with pytest.raises(GenerationError, match="max_tokens"):
                 await agent_instance.my_task()

@@ -11,16 +11,14 @@ import os
 import time
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    import litellm
+from typing import Any
 
 import yaml
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from nooa.unifiedllm import CompletionClient, Tool
 from nooa.unifiedllm.registry import resolve_api_key_from_config
 
 from . import otlp_store
@@ -598,7 +596,7 @@ DEFAULT_SANDBOX_TOOLS = [
 
 
 def normalize_messages_for_api(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Transform messages to the format expected by OpenAI/litellm API."""
+    """Transform messages to the format expected by completion API."""
     normalized = []
     for msg in messages:
         new_msg = {"role": msg.get("role", "user")}
@@ -641,87 +639,55 @@ def normalize_messages_for_api(messages: list[dict[str, Any]]) -> list[dict[str,
     return normalized
 
 
-async def _collect(
-    response: "litellm.ModelResponse | litellm.CustomStreamWrapper",
-) -> "litellm.ModelResponse":
-    """Consume a streaming or non-streaming litellm response, always returning ModelResponse."""
-    import litellm
-
-    if isinstance(response, litellm.CustomStreamWrapper):
-        chunks = [chunk async for chunk in response]  # type: ignore
-        result = litellm.stream_chunk_builder(chunks)
-        if result is None:
-            raise ValueError("stream_chunk_builder returned None for empty stream")
-        if not isinstance(result, litellm.ModelResponse):
-            raise TypeError(f"Expected ModelResponse, got {type(result)}")
-        return result
-    return response
-
-
 @router.post("/api/playground/inference")
 async def run_inference(request: InferenceRequest):
-    """Run LLM inference with the specified model and messages."""
+    """Run LLM inference through the public NOOA unified LLM boundary."""
     try:
-        import litellm
-
-        model_config = get_model_config(request.model)
+        model_config = get_model_config(request.model) or {}
         normalized_messages = normalize_messages_for_api(request.messages)
-
-        kwargs = {
-            "model": request.model,
-            "messages": normalized_messages,
+        client_config: dict[str, Any] = {
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
         }
-
-        has_tool_calls = any(
-            msg.get("tool_calls") for msg in normalized_messages if isinstance(msg, dict)
+        if model_config.get("endpoint"):
+            client_config["api_base"] = model_config["endpoint"]
+        api_key = resolve_api_key_from_config(
+            request.model, model_config, allowed_env_vars=get_known_api_key_patterns()
         )
-        if has_tool_calls:
-            kwargs["tools"] = DEFAULT_SANDBOX_TOOLS
+        if api_key:
+            client_config["api_key"] = api_key
 
-        if model_config and model_config.get("endpoint"):
-            kwargs["api_base"] = model_config["endpoint"]
-            kwargs["custom_llm_provider"] = "openai"
+        tools = None
+        if any(msg.get("tool_calls") for msg in normalized_messages):
 
-        if model_config:
-            api_key = resolve_api_key_from_config(
-                request.model,
-                model_config,
-                allowed_env_vars=get_known_api_key_patterns(),
-            )
-            if api_key:
-                kwargs["api_key"] = api_key
+            def execute_python(code: str) -> str:
+                """Execute Python code and return the result."""
+                raise RuntimeError("playground tool declarations are not executed server-side")
 
-        response = await litellm.acompletion(**kwargs)
-        raw_response = await _collect(response)  # type: ignore[arg-type]
+            def return_result(result: str) -> str:
+                """Return the final result to the user."""
+                return result
 
-        choice = raw_response.choices[0]
-        if not isinstance(choice, litellm.Choices):
-            raise TypeError(f"Expected Choices, got {type(choice)}")
-        message = choice.message
-        reasoning_content = getattr(message, "reasoning_content", None)
-        usage = getattr(raw_response, "usage", None)
+            tools = [
+                Tool("execute_python", execute_python.__doc__ or "", execute_python),
+                Tool("return_result", return_result.__doc__ or "", return_result),
+            ]
+
+        client = CompletionClient(request.model, **client_config)
+        try:
+            response = await client.acall(normalized_messages, tools=tools)
+        finally:
+            await client.aclose()
+        usage = response.reported_usage or {}
         return {
             "status": "success",
-            "response": {
-                "role": message.role,
-                "content": message.content,
-                "tool_calls": (
-                    [tc.model_dump() for tc in message.tool_calls] if message.tool_calls else None
-                ),
-                "reasoning_content": reasoning_content,
-            },
+            "response": response.assistant_message,
             "usage": {
-                "prompt_tokens": usage.prompt_tokens if usage is not None else None,
-                "completion_tokens": usage.completion_tokens if usage is not None else None,
-                "total_tokens": usage.total_tokens if usage is not None else None,
+                "prompt_tokens": usage.get("prompt_tokens"),
+                "completion_tokens": usage.get("completion_tokens"),
+                "total_tokens": usage.get("total_tokens"),
             },
-            "model": raw_response.model,
+            "model": request.model,
         }
-    except ImportError as e:
-        raise HTTPException(
-            status_code=500, detail="litellm not installed. Run: pip install litellm"
-        ) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Inference error: {str(e)}") from e

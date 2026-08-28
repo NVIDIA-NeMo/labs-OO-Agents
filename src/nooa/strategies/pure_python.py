@@ -49,7 +49,7 @@ from nooa.strategies.generated_code import (
 )
 from nooa.strategies.template import TemplateStrategy
 
-# Import httpx timeout exceptions if available (used by litellm)
+# Import httpx timeout exceptions if available (used by provider clients)
 try:
     import httpx
 

@@ -29,7 +29,6 @@ CAPS = probe_capabilities()
 
 def _resp(content: str, tool_calls: list | None = None) -> LLMResponse:
     return LLMResponse(
-        raw_response=None,
         content=content,
         tool_calls=tool_calls or [],
         finish_reason="tool_calls" if tool_calls else "stop",

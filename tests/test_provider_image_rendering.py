@@ -3,7 +3,7 @@
 """Tests for provider formatter image rendering.
 
 Verifies that PythonOutput events with images produce multi-part content
-in both OpenAI and Anthropic message formats. Both use LiteLLM's universal
+in both OpenAI and Anthropic message formats. Both use AnyLLM's universal
 image_url format — no provider-specific conversion needed.
 """
 
@@ -95,7 +95,7 @@ class TestAnthropicProviderFormatterImages:
         assert isinstance(msg["content"], str)
 
     def test_with_images_uses_universal_format(self):
-        """Anthropic formatter uses LiteLLM's universal image_url format — LiteLLM converts."""
+        """Anthropic formatter uses AnyLLM's universal image_url format — AnyLLM converts."""
         image_block = {
             "type": "image_url",
             "image_url": {"url": "data:image/png;base64,AAAA", "format": "image/png"},

@@ -83,7 +83,7 @@ class MyAgent(Agent, llm=llm):
 |---|---|---|
 | `method.{name}` | AGENT | an agent method call; carries args as `input.value`, docstring, signature |
 | `generation` | CHAIN | one strategy execution (an LLM "thinking" episode) |
-| `litellm.acompletion` | LLM | the actual LLM call (from openinference-litellm), nested under `generation`; carries `llm.input_messages`/`llm.output_messages`/`llm.model_name` |
+| `acompletion` | LLM | the normalized provider call, nested under `generation`; carries `llm.input_messages`/`llm.output_messages`/`llm.model_name` |
 | `code_execution` | TOOL | one CodeAct `execute_python` cell |
 | `method_call.{name}` | TOOL | LLM-generated code calling a method on `self` |
 | `tool_execution.{tool}` | TOOL | external tool invocation |

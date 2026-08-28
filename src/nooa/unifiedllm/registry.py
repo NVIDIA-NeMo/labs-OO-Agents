@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """YAML-based model registry for UnifiedLLM.
 
-The registry is a *thin* layer on top of litellm. Most users do not need it:
-litellm already knows how to route every common public model (OpenAI, Anthropic,
+The registry is a *thin* layer on top of AnyLLM. Most users do not need it:
+AnyLLM already knows how to route every common public model (OpenAI, Anthropic,
 Google, Azure, etc.) via its built-in model database. Pass the model name
-directly to ``get_llm_client()`` and litellm handles the rest.
+directly to ``get_llm_client()`` and AnyLLM handles the rest.
 
 The registry is useful for *custom* models — models behind a proxy/gateway,
 models with non-standard API keys, or convenience aliases for a team.
@@ -30,7 +30,7 @@ YAML schema::
 
     models:
       my-alias:
-        model_name: openai/my-org/my-model   # exact litellm routing string
+        model_name: openai/my-org/my-model   # exact AnyLLM routing string
         api_base: https://my-gateway.example.com/v1
         api_key_env: MY_API_KEY
         context_window: 128000               # optional
@@ -48,6 +48,7 @@ import logging
 import os
 import re
 import threading
+import warnings
 from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -89,7 +90,7 @@ def resolve_api_key_from_config(
     Returns the env var's value on success, or ``None`` if ``api_key_env``
     isn't set in ``config``. **Logs a WARN if ``api_key_env`` is set but
     the named env var is unset or empty** — callers should propagate the
-    ``None`` so litellm can fall back to its own defaults, but the user
+    ``None`` so AnyLLM can fall back to its own defaults, but the user
     sees a visible signal that their config promised an env var that
     doesn't exist.
 
@@ -137,7 +138,7 @@ def resolve_api_key_from_config(
             return api_key
     logger.warning(
         "Model %r is configured to read its API key from env var %r, but "
-        "that variable is unset or empty. Falling back to litellm defaults "
+        "that variable is unset or empty. Falling back to AnyLLM defaults "
         "(which may use OPENAI_API_KEY).",
         model_name,
         api_key_env,
@@ -178,7 +179,7 @@ def _load_models_from_yaml(path: Path) -> dict[str, dict[str, Any] | None]:
 # framework (TUI bootstrap) can call reload_registry() explicitly during
 # startup. reload_registry() updates this dict in-place so existing
 # references stay live.
-# NOTE: entries are raw dicts so litellm can receive arbitrary passthrough
+# NOTE: entries are raw dicts so AnyLLM can receive arbitrary passthrough
 # kwargs and external readers (nat plugin, eval_pipeline, viewer) keep working.
 # The typed boundary is ``nooa.config.ModelConfig`` /
 # ``get_model_config()``. Long term this should become
@@ -229,7 +230,16 @@ def reload_registry(*paths: Path) -> dict[str, dict[str, Any]]:
             if cfg is None:
                 fresh.pop(name, None)
             elif isinstance(cfg, dict):
-                fresh[name] = cfg
+                from nooa.config.model_config import ModelConfig
+
+                try:
+                    validated = ModelConfig.from_registry(name, cfg)
+                except ValueError as exc:
+                    logger.warning("Ignoring invalid model %r in %s: %s", name, path, exc)
+                    fresh.pop(name, None)
+                else:
+                    # Keep mapping compatibility, but only store canonical validated data.
+                    fresh[name] = validated.registry_dict()
             else:
                 logger.warning(
                     "Ignoring model %r in %s: expected mapping or null, got %s",
@@ -298,7 +308,7 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
     """Create an LLM client, optionally using registry config.
 
     If ``name`` is a registry key, its config (model_name, endpoint, API key,
-    defaults) is applied. Otherwise ``name`` is passed directly to litellm,
+    defaults) is applied. Otherwise ``name`` is passed directly to AnyLLM,
     which handles routing for every common public provider.
 
     Triggers :func:`ensure_loaded` on the first call so the registry
@@ -312,7 +322,7 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
     3. Default: ``"completion"``
 
     Args:
-        name: Registry key or a litellm-supported model string.
+        name: Registry key or a AnyLLM-supported model string.
         client_type: ``"completion"`` or ``"responses"``. Overrides YAML config.
         **overrides: Override any parameter (max_tokens, temperature, etc.)
 
@@ -321,7 +331,7 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
 
     Example::
 
-        # Pass-through to litellm (no registry entry needed)
+        # Pass-through to AnyLLM (no registry entry needed)
         llm = get_llm_client("gpt-4o-mini")
         llm = get_llm_client("claude-sonnet-4-5-20250514")
 
@@ -336,6 +346,14 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
     """
     from nooa.unifiedllm import CompletionClient, ResponsesClient, RetryConfig
 
+    for alias, replacement_name in (("api_base", "endpoint"), ("max_tokens", "max_output_tokens")):
+        if alias in overrides:
+            warnings.warn(
+                f"{alias} is deprecated; use {replacement_name} (removal after one release)",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
     ensure_loaded()
 
     # Snapshot the alias's config under the lock so a concurrent
@@ -349,67 +367,78 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
     if config:
         model = config.get("model_name", name)
         logger.info(
-            "LLM registry hit for %r → model=%r, api_base=%r", name, model, config.get("api_base")
+            "LLM registry hit for %r → model=%r, endpoint=%r",
+            name,
+            model,
+            config.get("endpoint"),
         )
     else:
         model = name
-        logger.debug("LLM registry miss for %r — passing through to litellm", name)
+        logger.debug("LLM registry miss for %r — passing through to AnyLLM", name)
 
-    params: dict[str, Any] = {
-        "model": model,
-        "drop_params": config.get("drop_params", True),
-    }
+    # Select and validate before output-token normalization.
+    selected_client_type = client_type or config.get("client_type", "completion")
+    if selected_client_type not in {"completion", "responses"}:
+        raise ValueError(
+            f"Unknown client_type {selected_client_type!r}; expected 'completion' or 'responses'"
+        )
 
-    if "api_base" not in overrides and (api_base := config.get("api_base")):
-        params["api_base"] = api_base
+    params: dict[str, Any] = {"model": model}
+    for key in ("provider", "endpoint", "provider_options", "capabilities"):
+        if key in config and key not in overrides:
+            params[key] = config[key]
 
-    # Only resolve the registry's api_key_env when the caller hasn't
-    # supplied an explicit api_key — otherwise resolve_api_key_from_config
-    # would emit a misleading "env var unset" warning for credentials
-    # the user is already passing in directly.
+    # Only resolve the registry's api_key_env when the caller hasn't supplied
+    # an explicit key. Secret values are never included in log messages.
     if (
         "api_key" not in overrides
         and (api_key := resolve_api_key_from_config(name, config)) is not None
     ):
         params["api_key"] = api_key
 
-    # Copy model-specific defaults from config (overrides win).  Keep LiteLLM
-    # pass-through controls here too: OpenAI-compatible gateways drop unknown
-    # params unless aliases explicitly whitelist them.
-    for key in (
-        "temperature",
-        "top_p",
-        "max_tokens",
-        "reasoning",
-        "reasoning_effort",
-        "allowed_openai_params",
-        "additional_drop_params",
-        "extra_body",
-    ):
+    request = dict(config.get("request") or {})
+    output_limit = request.pop("max_output_tokens", None)
+    if output_limit is not None:
+        output_key = "max_output_tokens" if selected_client_type == "responses" else "max_tokens"
+        request[output_key] = output_limit
+    for key, value in request.items():
+        if key not in overrides:
+            params[key] = value
+
+    # These supported settings are not part of LLMRequestDefaults but are still
+    # request-scoped and therefore forwarded to AnyLLM calls.
+    for key in ("reasoning", "extra_body"):
         if key in config and key not in overrides:
             params[key] = config[key]
 
-    # Registry aliases can centrally tune or disable the clients' default endpoint
-    # retry behavior. ``retry_config: false`` means a single attempt for every
-    # endpoint error; a mapping is passed to RetryConfig(...). Explicit call-site
-    # overrides still win.
     if "retry_config" in config and "retry_config" not in overrides:
         retry_config = config["retry_config"]
         if retry_config is False or retry_config is None:
             params["retry_config"] = RetryConfig(max_retries=0, rate_limit_extra_retries=0)
         elif isinstance(retry_config, dict):
             params["retry_config"] = RetryConfig(**retry_config)
-        else:
-            logger.warning(
-                "Ignoring model %r retry_config: expected mapping, false, or null; got %s.",
-                name,
-                type(retry_config).__name__,
-            )
 
-    params.update(overrides)
+    # Reject ambiguous spellings rather than silently choosing based on update order.
+    if "endpoint" in overrides and "api_base" in overrides:
+        raise ValueError("endpoint and api_base overrides collide")
+    if "max_output_tokens" in overrides and "max_tokens" in overrides:
+        raise ValueError("max_output_tokens and max_tokens overrides collide")
+    normalized_overrides = dict(overrides)
+    override_limit = normalized_overrides.pop("max_output_tokens", None)
+    legacy_limit = normalized_overrides.pop("max_tokens", None)
+    if override_limit is None:
+        override_limit = legacy_limit
+    if override_limit is not None:
+        output_key = (
+            "max_output_tokens" if selected_client_type == "responses" else "max_tokens"
+        )
+        normalized_overrides[output_key] = override_limit
+    params.update(normalized_overrides)
 
-    # Select client class: explicit param > YAML config > default
-    client_type = client_type or config.get("client_type", "completion")
-    client = ResponsesClient(**params) if client_type == "responses" else CompletionClient(**params)
+    client = (
+        ResponsesClient(**params)
+        if selected_client_type == "responses"
+        else CompletionClient(**params)
+    )
     client._registry_config = config  # For context_window lookup
     return client

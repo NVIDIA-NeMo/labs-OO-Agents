@@ -49,7 +49,6 @@ from tests.atif.normative import assert_atif_normative
 
 def _resp(tool_calls: list[ToolCall] | None = None, content: str = "") -> LLMResponse:
     return LLMResponse(
-        raw_response=None,
         content=content,
         tool_calls=tool_calls or [],
         finish_reason="tool_calls" if tool_calls else "stop",

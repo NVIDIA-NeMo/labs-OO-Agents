@@ -34,6 +34,7 @@ from nooa.runtime.middleware import (
     ExecutePythonContext,
     LLMCallContext,
 )
+from nooa.unifiedllm import LLMResponse
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -52,19 +53,28 @@ def _nemo_relay_scope():
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class FakeLLMResponse:
-    content: str = "hello"
-    tool_calls: list = field(default_factory=list)
-    finish_reason: str = "stop"
-    assistant_message: dict = field(
-        default_factory=lambda: {"role": "assistant", "content": "hello"}
-    )
-    reasoning: str | None = None
-    usage: dict | None = field(
-        default_factory=lambda: {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
-    )
-    raw_response: Any = None
+class FakeLLMResponse(LLMResponse):
+    """Convenient real LLMResponse with defaults for middleware tests."""
+
+    def __init__(
+        self,
+        content: str = "hello",
+        tool_calls: list | None = None,
+        finish_reason: str = "stop",
+        assistant_message: dict | None = None,
+        reasoning: str | None = None,
+        usage: dict | None = None,
+    ) -> None:
+        super().__init__(
+            content=content,
+            tool_calls=tool_calls or [],
+            finish_reason=finish_reason,
+            assistant_message=assistant_message or {"role": "assistant", "content": content},
+            reasoning=reasoning,
+            usage=usage
+            if usage is not None
+            else {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        )
 
 
 # ---------------------------------------------------------------------------

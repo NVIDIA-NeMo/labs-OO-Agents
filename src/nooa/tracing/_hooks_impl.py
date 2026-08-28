@@ -153,6 +153,7 @@ class ViewerPlugin:
 
     METHOD = "method"
     GENERATION = "generation"
+    LLM_CALL = "llm.call"
     CODE_EXECUTION = "code_execution"
     TOOL_EXECUTION = "tool_execution"
 
@@ -331,6 +332,162 @@ class OpenInferenceHooks:
         if call_id and call_id in _get_active_spans():
             del _get_active_spans()[call_id]
 
+    def before_llm_call(
+        self,
+        call_id: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        invocation_parameters: dict[str, Any],
+    ) -> Any:
+        """Create the single OpenInference LLM span for a logical call."""
+        from opentelemetry import context as otel_context
+
+        from nooa.tracing._llm_journal import begin_call
+
+        span = self.tracer.start_span("llm.call", start_time=time.time_ns())
+        span.set_attribute(
+            SpanAttributes.OPENINFERENCE_SPAN_KIND, OpenInferenceSpanKindValues.LLM.value
+        )
+        span.set_attribute(SpanAttributes.LLM_MODEL_NAME, model)
+        span.set_attribute(VIEWER_PLUGIN_ATTR, ViewerPlugin.LLM_CALL)
+        span.set_attribute(SpanAttributes.INPUT_VALUE, json.dumps(messages, default=str))
+        span.set_attribute(SpanAttributes.INPUT_MIME_TYPE, OpenInferenceMimeTypeValues.JSON.value)
+        params = {
+            k: v
+            for k, v in invocation_parameters.items()
+            if k not in {"messages", "input", "tools"}
+        }
+        span.set_attribute(
+            SpanAttributes.LLM_INVOCATION_PARAMETERS, json.dumps(params, default=str)
+        )
+        if tools:
+            span.set_attribute(SpanAttributes.LLM_TOOLS, json.dumps(tools, default=str))
+        self._set_message_attributes(span, SpanAttributes.LLM_INPUT_MESSAGES, messages)
+        token = otel_context.attach(trace.set_span_in_context(span))
+        begin_call(call_id, model, messages)
+        return {"span": span, "token": token, "start_time": time.time()}
+
+    def after_llm_call(
+        self,
+        call_id: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        response: Any,
+        exception: BaseException | None,
+        context: Any,
+    ) -> None:
+        """Complete an LLM span and its journal record."""
+        from opentelemetry import context as otel_context
+
+        from nooa.tracing._llm_journal import _extract_output_msgs, end_call
+
+        if not context:
+            return
+        span = context["span"]
+        try:
+            end_call(call_id, model, response, context["start_time"], exception)
+            if exception is not None:
+                if isinstance(exception, Exception):
+                    _record_error(span, exception)
+                else:
+                    span.set_status(Status(StatusCode.ERROR, "cancelled"))
+                    span.set_attribute("error.type", type(exception).__name__)
+                    span.set_attribute("error.message", str(exception))
+            else:
+                outputs = _extract_output_msgs(response)
+                self._set_message_attributes(span, SpanAttributes.LLM_OUTPUT_MESSAGES, outputs)
+                span.set_attribute(SpanAttributes.OUTPUT_VALUE, json.dumps(outputs, default=str))
+                span.set_attribute(
+                    SpanAttributes.OUTPUT_MIME_TYPE, OpenInferenceMimeTypeValues.JSON.value
+                )
+                usage = getattr(response, "usage", None)
+                if hasattr(usage, "model_dump"):
+                    usage = usage.model_dump()
+                if usage is not None:
+
+                    def usage_value(*names: str) -> Any:
+                        for name in names:
+                            value = (
+                                usage.get(name)
+                                if isinstance(usage, dict)
+                                else getattr(usage, name, None)
+                            )
+                            if value is not None:
+                                return value
+                        return None
+
+                    prompt = usage_value("prompt_tokens", "input_tokens")
+                    completion = usage_value("completion_tokens", "output_tokens")
+                    total = usage_value("total_tokens")
+                    if prompt is not None:
+                        span.set_attribute(SpanAttributes.LLM_TOKEN_COUNT_PROMPT, int(prompt))
+                    if completion is not None:
+                        span.set_attribute(
+                            SpanAttributes.LLM_TOKEN_COUNT_COMPLETION, int(completion)
+                        )
+                    if total is not None:
+                        span.set_attribute(SpanAttributes.LLM_TOKEN_COUNT_TOTAL, int(total))
+                    details = usage_value("prompt_tokens_details", "input_tokens_details")
+                    if hasattr(details, "model_dump"):
+                        details = details.model_dump()
+                    cached = (
+                        details.get("cached_tokens")
+                        if isinstance(details, dict)
+                        else getattr(details, "cached_tokens", None)
+                    )
+                    if cached is None:
+                        cached = usage_value("cached_input_tokens")
+                    if cached is not None:
+                        span.set_attribute(
+                            SpanAttributes.LLM_TOKEN_COUNT_PROMPT_DETAILS_CACHE_READ,
+                            int(cached),
+                        )
+                normalized_finish = getattr(response, "finish_reason", None)
+                if normalized_finish:
+                    span.set_attribute(SpanAttributes.LLM_FINISH_REASON, str(normalized_finish))
+                choices = getattr(response, "choices", None)
+                if choices:
+                    finish = getattr(choices[0], "finish_reason", None)
+                    if finish:
+                        span.set_attribute(SpanAttributes.LLM_FINISH_REASON, str(finish))
+                    message = getattr(choices[0], "message", None)
+                    reasoning = getattr(message, "reasoning_content", None) if message else None
+                    if reasoning:
+                        span.set_attribute(
+                            "llm.output_messages.0.message.reasoning", str(reasoning)
+                        )
+                span.set_status(Status(StatusCode.OK))
+        finally:
+            span.end(end_time=time.time_ns())
+            otel_context.detach(context["token"])
+
+    @staticmethod
+    def _set_message_attributes(span: Span, prefix: str, messages: list[Any]) -> None:
+        """Flatten OpenAI-shaped messages to OpenInference dotted attributes."""
+        from nooa.tracing._llm_journal import _msg_to_dict
+
+        for index, raw in enumerate(messages):
+            msg = _msg_to_dict(raw)
+            base = f"{prefix}.{index}.message"
+            if role := msg.get("role"):
+                span.set_attribute(f"{base}.role", str(role))
+            if msg.get("content") is not None:
+                span.set_attribute(f"{base}.content", str(msg["content"]))
+            if tool_call_id := msg.get("tool_call_id"):
+                span.set_attribute(f"{base}.tool_call_id", str(tool_call_id))
+            for tc_index, tc in enumerate(msg.get("tool_calls") or []):
+                tc = _msg_to_dict(tc)
+                fn = _msg_to_dict(tc.get("function"))
+                tc_base = f"{base}.tool_calls.{tc_index}.tool_call"
+                if tc.get("id"):
+                    span.set_attribute(f"{tc_base}.id", str(tc["id"]))
+                if fn.get("name"):
+                    span.set_attribute(f"{tc_base}.function.name", str(fn["name"]))
+                if fn.get("arguments") is not None:
+                    span.set_attribute(f"{tc_base}.function.arguments", str(fn["arguments"]))
+
     def before_generation(
         self,
         agent: Any,
@@ -345,8 +502,8 @@ class OpenInferenceHooks:
 
         This is an orchestration step (one strategy "turn"), NOT the provider
         call itself — it carries no ``llm.*`` attributes. The real ``LLM`` span
-        is the nested ``litellm.acompletion`` span emitted by
-        ``openinference-instrumentation-litellm``. Marking this ``CHAIN`` (rather
+        is the nested the provider call span emitted by
+        NOOA lifecycle hooks. Marking this ``CHAIN`` (rather
         than ``LLM``) keeps OpenInference backends from expecting
         ``llm.model_name`` / ``llm.input_messages`` here.
         """
@@ -373,7 +530,7 @@ class OpenInferenceHooks:
         )
 
         # Set OpenInference attributes. CHAIN (not LLM) — the nested
-        # litellm.acompletion span is the real LLM call.
+        # native LLM span is the real LLM call.
         span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, SpanKind.CHAIN)
         span.set_attribute(VIEWER_PLUGIN_ATTR, ViewerPlugin.GENERATION)
         span.set_attribute("agent.name", agent_name)
@@ -397,7 +554,7 @@ class OpenInferenceHooks:
         # Track span
         _get_active_spans()[generation_id] = span
 
-        # CRITICAL: Attach span to context so litellm instrumentor sees it
+        # CRITICAL: Attach span to context so native instrumentation sees it
         token = context.attach(trace.set_span_in_context(span))
 
         return {

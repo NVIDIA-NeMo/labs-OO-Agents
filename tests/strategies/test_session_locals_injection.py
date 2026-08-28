@@ -22,7 +22,6 @@ def _resp(content: str, tool_calls: list | None = None) -> LLMResponse:
     """Create a test LLM response."""
     finish_reason = "tool_calls" if tool_calls else "stop"
     return LLMResponse(
-        raw_response=None,
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
@@ -169,7 +168,6 @@ class TestCodeActSessionLocalsInjection:
 def _pure_resp(code: str) -> LLMResponse:
     """Create a PurePython-style LLM response (raw code as content)."""
     return LLMResponse(
-        raw_response=None,
         content=code,
         tool_calls=[],
         finish_reason="stop",

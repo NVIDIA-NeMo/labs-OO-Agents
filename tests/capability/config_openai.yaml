@@ -1,5 +1,5 @@
 # Capability tests using official OpenAI API endpoints.
-# Tests gpt-5-nano and gpt-5.4 via direct litellm routing.
+# Tests gpt-5-nano and gpt-5.4 via direct any_llm routing.
 #
 # Run with:
 #   uv run python -m eval_pipeline \

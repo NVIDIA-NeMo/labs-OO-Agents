@@ -40,7 +40,6 @@ def _resp(
 ) -> LLMResponse:
     finish_reason = "tool_calls" if tool_calls else "stop"
     return LLMResponse(
-        raw_response=None,
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
@@ -238,34 +237,14 @@ async def test_canonical_call_id_used_when_both_ids_present(tmp_path: Path) -> N
     ``fc_*`` function-call id and a runtime ``call_*`` runtime id. The
     exporter reads from ``LLMResponse.tool_calls`` whose ``id`` is set to
     the canonical ``call_*`` by ``unifiedllm.ResponsesClient``. This test
-    simulates an LLMResponse-shape that carries BOTH ids (the
-    ``raw_response`` mirrors the OpenAI Responses output: ``fc_*`` as
-    ``id``, ``call_*`` as ``call_id``) and asserts the trajectory shows
-    ONLY the canonical ``call_*`` form — no leak of the model-emitted
-    ``fc_*``.
-
-    Guards against a regression where the unified wrapper picks ``id``
-    (fc_*) instead of ``call_id`` (call_*), or the exporter reads from
-    ``raw_response`` directly.
+    supplies the already-normalized canonical ``call_*`` id and asserts the
+    trajectory does not invent or substitute a provider-specific id.
     """
     # The framework converts to ``ToolCall(id=call_id, ...)`` — so the
     # tool_call we hand to FakeLLMClient already uses the canonical id.
-    # We additionally stuff a raw_response with BOTH ids to verify
-    # neither the strategy nor the exporter reaches into the raw shape
-    # and picks up the fc_* id.
-    raw_response = {
-        "output": [
-            {
-                "type": "function_call",
-                "id": "fc_MODEL_EMITTED",  # model-emitted; SHOULD NOT leak
-                "call_id": "call_RUNTIME_ID",  # canonical; SHOULD be used
-                "name": "return_result",
-                "arguments": '{"result": 42}',
-            }
-        ]
-    }
+    # The normalized response exposes only the canonical call id; provider
+    # response identifiers cannot leak through the UnifiedLLM boundary.
     response = LLMResponse(
-        raw_response=raw_response,
         content="",
         tool_calls=[
             ToolCall(

@@ -38,7 +38,7 @@ class Secrets(BaseModel):
 
     This is the *loaded representation*; the values are still pushed into
     ``os.environ`` by :func:`nooa.secrets.load_secrets_into_env`,
-    which is what providers/litellm actually read. The map is intentionally
+    which is what providers actually read. The map is intentionally
     open-ended (any env-var name), so it stays a ``dict`` rather than typed
     per-key fields.
     """

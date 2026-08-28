@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 def _resp(content: str) -> LLMResponse:
     """Create a test LLM response with the given content."""
     return LLMResponse(
-        raw_response=None,
         content=content,
         tool_calls=[],
         finish_reason="stop",

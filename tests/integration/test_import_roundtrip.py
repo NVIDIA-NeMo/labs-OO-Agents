@@ -11,7 +11,7 @@ The user-visible invariant is:
 
 This test pins exactly that round-trip:
 
-  1.  enable_tracing(file + journal-to-viewer-A) -> one litellm.acompletion
+  1.  enable_tracing(file + journal-to-viewer-A) -> one native LLM lifecycle call
       -> the file on disk has full messages on its LLM span (T1 covers
       that file is complete).
   2.  Spin up an *empty* viewer-B.
@@ -60,10 +60,9 @@ def fresh_viewer():
 async def test_save_then_import_then_download_preserves_messages(fresh_viewer):
     """A JSONL written by the file exporter, then re-imported into a fresh
     viewer, must round-trip its full message content."""
-    pytest.importorskip("openinference.instrumentation.litellm")
-    import litellm
-
+    from nooa.runtime.llm_lifecycle import begin_llm_call, end_llm_call
     from nooa.tracing import enable_tracing, exporters, set_session
+    from nooa.unifiedllm import LLMResponse
 
     with tempfile.TemporaryDirectory() as tmpdir_str:
         tmpdir = Path(tmpdir_str)
@@ -72,13 +71,19 @@ async def test_save_then_import_then_download_preserves_messages(fresh_viewer):
         session_id = "t6-roundtrip"
         set_session(session_id)
 
-        await litellm.acompletion(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "be terse"},
-                {"role": "user", "content": "T6_INPUT what is 2+2?"},
-            ],
-            mock_response="T6_OUTPUT 4",
+        messages = [
+            {"role": "system", "content": "be terse"},
+            {"role": "user", "content": "T6_INPUT what is 2+2?"},
+        ]
+        call = begin_llm_call("test-model", messages)
+        end_llm_call(
+            call,
+            response=LLMResponse(
+                content="T6_OUTPUT 4",
+                tool_calls=[],
+                finish_reason="stop",
+                assistant_message={"role": "assistant", "content": "T6_OUTPUT 4"},
+            ),
         )
 
         from nooa.tracing import _provider

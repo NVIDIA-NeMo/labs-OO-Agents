@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import json
-import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,11 +18,11 @@ def enable_http_request_logging(
     """Enable logging of HTTP requests to JSON files for debugging.
 
     This function patches httpx.HTTPTransport and httpx.AsyncHTTPTransport to intercept
-    and log all HTTP requests made through httpx (used by OpenAI SDK, litellm, etc.).
+    and log all HTTP requests made through httpx (used by OpenAI SDK, AnyLLM, etc.).
     Each request is saved to a JSON file with a sequential counter.
 
-    IMPORTANT: By default, litellm uses aiohttp transport instead of httpx. This function
-    automatically sets DISABLE_AIOHTTP_TRANSPORT=True to force litellm to use httpx,
+    IMPORTANT: By default, AnyLLM uses aiohttp transport instead of httpx. This function
+    automatically sets DISABLE_AIOHTTP_TRANSPORT=True to force AnyLLM to use httpx,
     which can be intercepted. Set force_httpx=False to disable this behavior.
 
     Args:
@@ -32,7 +31,7 @@ def enable_http_request_logging(
         save_responses: If True, also save response bodies to separate files
         errors_only: If True, only log requests that result in HTTP errors (status >= 400)
         verbose: If True, print summary info for each captured request
-        force_httpx: If True, sets DISABLE_AIOHTTP_TRANSPORT=True so litellm uses httpx (default: True)
+        force_httpx: If True, sets DISABLE_AIOHTTP_TRANSPORT=True so AnyLLM uses httpx (default: True)
 
     Returns:
         A function that when called, disables the logging and restores original behavior
@@ -63,12 +62,6 @@ def enable_http_request_logging(
         # Errors saved to: eval_errors/llm_errors.jsonl
         ```
     """
-    # Force litellm to use httpx instead of aiohttp (which we can't easily intercept)
-    original_disable_aiohttp = os.environ.get("DISABLE_AIOHTTP_TRANSPORT")
-    if force_httpx:
-        os.environ["DISABLE_AIOHTTP_TRANSPORT"] = "True"
-        if verbose:
-            print("✓ Set DISABLE_AIOHTTP_TRANSPORT=True to force litellm to use httpx")
 
     try:
         import httpx
@@ -416,12 +409,6 @@ def enable_http_request_logging(
     def disable():
         httpx.HTTPTransport.handle_request = original_sync_send
         httpx.AsyncHTTPTransport.handle_async_request = original_async_send
-        # Restore original env var
-        if force_httpx:
-            if original_disable_aiohttp is None:
-                os.environ.pop("DISABLE_AIOHTTP_TRANSPORT", None)
-            else:
-                os.environ["DISABLE_AIOHTTP_TRANSPORT"] = original_disable_aiohttp
         if verbose:
             print(
                 f"\n✅ HTTP request logging disabled. Logged {request_counter[0]} requests to {output_path}"

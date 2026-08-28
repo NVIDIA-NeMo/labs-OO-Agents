@@ -1091,17 +1091,12 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # Empty response - error
                 get_harness_metrics().empty_response()
                 session.record_error()
-                # Capture raw LLM response for debugging before removing the event
+                # Capture the normalized response for debugging before removing the event.
                 _debug_parts = [
                     f"finish_reason={response.finish_reason!r}",
                     f"content={response.content!r}",
                     f"tool_calls={response.tool_calls!r}",
                 ]
-                raw = getattr(response, "raw_response", None)
-                if raw is not None:
-                    output = getattr(raw, "output", None)
-                    if output is not None:
-                        _debug_parts.append(f"raw_response.output={output!r}")
                 runtime.event_manager.add(
                     DebugTrace(content=f"Empty response: {'; '.join(_debug_parts)}")
                 )

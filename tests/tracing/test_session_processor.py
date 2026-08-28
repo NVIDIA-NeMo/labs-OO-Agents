@@ -104,14 +104,14 @@ class TestSessionSpanProcessor:
         proc.shutdown()  # Should not raise
 
     def test_session_propagates_via_otel_context_to_openinference_spans(self):
-        """Regression: acompletion spans created by LiteLLMInstrumentor
+        """Regression: acompletion spans created by AnyLLMInstrumentor
         were landing in ``unknown_*`` sessions because our ContextVar was
         a separate propagation channel from OTel's context — and
         OpenInference's OITracer reads ``session.id`` out of the OTel
         context at span creation, not from our ContextVar.
 
         This test uses :class:`OITracer` directly (same tracer class
-        LiteLLMInstrumentor uses) to confirm ``set_session()`` makes it
+        AnyLLMInstrumentor uses) to confirm ``set_session()`` makes it
         all the way onto a span without relying on
         :class:`SessionSpanProcessor`.
         """

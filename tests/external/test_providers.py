@@ -45,7 +45,7 @@ class TestProviderConfiguration:
             assert api_base == "https://inference-api.nvidia.com/v1"
 
     def test_nvidia_internal_model_prefix(self):
-        """NVIDIA internal models should be prefixed with 'openai/' for litellm."""
+        """NVIDIA internal models should be prefixed with 'openai/' for any_llm."""
         model = "azure/openai/gpt-5"
 
         # The run_ablation.py logic adds openai/ prefix if not present
@@ -138,9 +138,9 @@ class TestProviderIntegration:
     @pytest.mark.asyncio
     async def test_openai_chat_completion(self):
         """Test real OpenAI API call."""
-        import litellm
+        import any_llm
 
-        response = await litellm.acompletion(
+        response = await any_llm.acompletion(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": "Say 'test' and nothing else."}],
             api_key=os.getenv("OPENAI_API_KEY"),
@@ -154,9 +154,9 @@ class TestProviderIntegration:
     @pytest.mark.asyncio
     async def test_nvidia_nim_chat_completion(self):
         """Test real NVIDIA NIM API call."""
-        import litellm
+        import any_llm
 
-        response = await litellm.acompletion(
+        response = await any_llm.acompletion(
             model="nvidia_nim/meta/llama-3.3-70b-instruct",
             messages=[{"role": "user", "content": "Say 'test' and nothing else."}],
             api_key=os.getenv("NVIDIA_API_KEY"),
@@ -172,11 +172,11 @@ class TestProviderIntegration:
     @pytest.mark.asyncio
     async def test_nvidia_internal_chat_completion(self):
         """Test real NVIDIA internal API call with GPT-5.1."""
-        import litellm
+        import any_llm
 
-        litellm.drop_params = True  # GPT-5 doesn't support all params
+        any_llm.drop_params = True  # GPT-5 doesn't support all params
 
-        response = await litellm.acompletion(
+        response = await any_llm.acompletion(
             model="openai/azure/openai/gpt-5.1",  # Use gpt-5.1 from models.yaml
             messages=[{"role": "user", "content": "Say 'test' and nothing else."}],
             api_key=os.getenv("NVIDIA_INFERENCE_API_KEY"),
@@ -194,13 +194,13 @@ class TestSimpleLLMClient:
 
     @pytest.mark.asyncio
     async def test_client_passes_api_key(self):
-        """Client should pass api_key to litellm when set."""
+        """Client should pass api_key to any_llm when set."""
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "test response"
         mock_response.choices[0].message.tool_calls = None
 
-        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_completion:
+        with patch("any_llm.acompletion", new_callable=AsyncMock) as mock_completion:
             mock_completion.return_value = mock_response
 
             # Simulate what SimpleLLMClient.chat does
@@ -220,13 +220,13 @@ class TestSimpleLLMClient:
 
     @pytest.mark.asyncio
     async def test_client_passes_api_base(self):
-        """Client should pass api_base to litellm when set."""
+        """Client should pass api_base to any_llm when set."""
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "test response"
         mock_response.choices[0].message.tool_calls = None
 
-        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_completion:
+        with patch("any_llm.acompletion", new_callable=AsyncMock) as mock_completion:
             mock_completion.return_value = mock_response
 
             kwargs = {
@@ -256,7 +256,7 @@ class TestSimpleLLMClient:
         mock_response.choices[0].message.content = None
         mock_response.choices[0].message.tool_calls = [mock_tool_call]
 
-        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_completion:
+        with patch("any_llm.acompletion", new_callable=AsyncMock) as mock_completion:
             mock_completion.return_value = mock_response
 
             # Simulate response processing like SimpleLLMClient does

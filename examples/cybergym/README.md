@@ -41,7 +41,7 @@ OPENAI_BASE_URL=https://your-openai-compatible-gateway.example/v1
 
 Configure the models available through your LLM provider in
 [`nooa_cybergym/llm_config.yaml`](nooa_cybergym/llm_config.yaml). Model names and
-providers must be supported by [LiteLLM](https://docs.litellm.ai/docs/providers).
+providers must be supported by [AnyLLM](https://docs.mozilla.ai/any-llm/).
 The aliases referenced by the finder
 lanes in [`agent.py`](nooa_cybergym/agent.py) must match entries in that file.
 

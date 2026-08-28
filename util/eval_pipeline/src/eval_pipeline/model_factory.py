@@ -138,12 +138,7 @@ def client(model_id: str, **kwargs) -> UnifiedLLM:
             return get_llm_client(model_id, **kwargs)
     except ImportError:
         pass
-    import litellm
-
     from nooa.unifiedllm import CompletionClient, RetryConfig
-
-    # Drop unsupported params (e.g., tool_choice for some Azure models via NVIDIA)
-    litellm.drop_params = True
 
     # Enable error capture if CAPTURE_LLM_ERRORS is set (only once globally)
     global _error_capture_enabled
@@ -170,8 +165,8 @@ def client(model_id: str, **kwargs) -> UnifiedLLM:
     cfg = get(model_id)
 
     # Use model_name if specified, otherwise fall back to model_id
-    # The model_name should include the litellm routing prefix (e.g., openai/)
-    litellm_model = cfg.model_name or cfg.model_id
+    # The model_name should include the provider routing prefix (e.g., openai/)
+    model_name = cfg.model_name or cfg.model_id
 
     # Build config dict for CompletionClient
     # Use model's max_tokens if specified, otherwise default
@@ -207,4 +202,4 @@ def client(model_id: str, **kwargs) -> UnifiedLLM:
             retry_on_empty_content=retry_on_empty_content,
         )
 
-    return CompletionClient(model=litellm_model, **config)
+    return CompletionClient(model=model_name, **config)

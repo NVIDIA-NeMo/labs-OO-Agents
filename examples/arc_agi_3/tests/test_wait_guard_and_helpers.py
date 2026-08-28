@@ -33,7 +33,6 @@ def _tool_response(name: str, args: dict):
     args_json = json.dumps(args)
     call_id = f"call_{abs(hash(args_json)) & 0xFFFF}"
     return LLMResponse(
-        raw_response=None,
         content="",
         tool_calls=[ToolCall(id=call_id, name=name, arguments=args_json)],
         finish_reason="tool_calls",

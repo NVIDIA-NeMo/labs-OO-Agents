@@ -29,7 +29,6 @@ class _FakeLLM:
         self.call_count += 1
         code = "self.submit(1)\nself.submit(2)\nreturn_result({'done': True})\n"
         return LLMResponse(
-            raw_response=None,
             content="",
             tool_calls=[
                 ToolCall(
@@ -68,7 +67,6 @@ class _AsyncFakeLLM:
         self.call_count += 1
         code = "await self.submit(1)\nawait self.submit(2)\nreturn_result({'done': True})\n"
         return LLMResponse(
-            raw_response=None,
             content="",
             tool_calls=[
                 ToolCall(

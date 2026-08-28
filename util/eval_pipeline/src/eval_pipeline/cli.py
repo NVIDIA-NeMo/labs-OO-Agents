@@ -569,8 +569,6 @@ async def main_async():
     else:
         logging.basicConfig(level=logging.WARNING)
         logging.getLogger("nooa").setLevel(logging.ERROR)
-        logging.getLogger("LiteLLM").setLevel(logging.ERROR)
-        logging.getLogger("litellm").setLevel(logging.ERROR)
 
     # Add config directory to path for importing test modules
     config_dir = str(args.config.parent.resolve())

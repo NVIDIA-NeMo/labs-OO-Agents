@@ -15,11 +15,11 @@ Two flavours live here, both as typed objects:
 The unifiedllm registry is touched only lazily inside ``resolved_config()`` /
 ``get_model_config()`` (to avoid an import cycle and module-load cost here);
 note that importing the ``nooa`` package itself already loads
-litellm via ``strategies``.
+provider clients via ``strategies``.
 """
 
 from nooa.config.execution_config import ExecutionConfig
-from nooa.config.model_config import ModelConfig
+from nooa.config.model_config import ModelCapabilities, ModelConfig
 from nooa.config.resolved import (
     ResolvedConfig,
     Secrets,
@@ -55,6 +55,7 @@ __all__ = [
     "FormatConfig",
     # File-based configs (typed) + loaders
     "ModelConfig",
+    "ModelCapabilities",
     "Secrets",
     "ResolvedConfig",
     "resolved_config",

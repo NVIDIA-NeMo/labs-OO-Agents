@@ -121,6 +121,10 @@ function getViewerPlugin(attrs: Record<string, unknown>): string | undefined {
  */
 function derivePluginType(attrs: Record<string, unknown>, spanName: string | undefined): string {
   const plugin = getViewerPlugin(attrs);
+
+  // OpenInference semantic kind is the canonical signal for LLM spans. This
+  // also renders provider traces that do not carry NOOA's viewer hint.
+  if (attrs['openinference.span.kind'] === 'LLM') return plugin || 'llm.call';
   if (!plugin) return spanName || 'unknown';
 
   // For method/method_call plugins, the span name (e.g. "method.handle")

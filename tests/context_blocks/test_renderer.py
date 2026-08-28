@@ -7,8 +7,6 @@ them via BlockFormatter + ProviderFormatter. No eval function, no expression
 evaluation, no class — just a pure function.
 """
 
-import pytest
-
 from nooa.context_blocks.formatter import (
     AnthropicProviderFormatter,
     MarkdownBlockFormatter,
@@ -620,46 +618,3 @@ class TestRenderContextEventSerialization:
         user_msg = result[1]
         assert user_msg["role"] == "user"
         assert "pre-existing content" in user_msg["content"]
-
-
-class TestCountTokens:
-    """Tests for count_tokens parameter in render_context()."""
-
-    def test_raises_if_context_limit_set_without_counter(self):
-        """ValueError when context_limit set but no count_tokens."""
-        with pytest.raises(ValueError, match="max_context_tokens requires a token counter"):
-            render_context(
-                [],
-                block_formatter=XMLBlockFormatter(),
-                provider_formatter=OpenAIProviderFormatter(),
-                context_limit=10_000,
-                count_tokens=None,
-            )
-
-    def test_accepts_none_counter_when_no_token_limits(self):
-        """No error when context_limit is not set."""
-        result = render_context(
-            [],
-            block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
-            count_tokens=None,
-        ).output
-        assert result is not None
-
-    def test_uses_count_tokens_for_context_limit(self):
-        """count_tokens is called when context_limit is set."""
-        call_count = []
-
-        def counter(s: str) -> int:
-            call_count.append(1)
-            return len(s) // 4
-
-        blocks = [ResolvedBlock(key="sys", content="Hello world")]
-        render_context(
-            blocks,
-            block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
-            context_limit=10_000,
-            count_tokens=counter,
-        )
-        assert len(call_count) > 0

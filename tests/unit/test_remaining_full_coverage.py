@@ -19,7 +19,6 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
 import importlib
 import os
 import runpy
@@ -216,98 +215,20 @@ class TestTypeInfoDedupAndFilters:
 
 
 class TestSummarizationNoneGuards:
-    """Cover target_event_manager-is-None guard lines in summarization.py."""
-
-    def _make_summarizer(self):
-        """Create a TokenBudgetSummarizer attached to a parent agent."""
-        from nooa.agent import Agent
-        from nooa.agents.summarization import TokenBudgetSummarizer
-        from nooa.config.summarizer_config import TokenBudgetConfig
-
-        llm = FakeLLMClient()
-
-        class _Parent(Agent, llm=llm):
-            async def chat(self, msg: str) -> str:
-                """Chat."""
-                ...
-
-        agent = _Parent()
-        config = TokenBudgetConfig(max_tokens=50_000)
-        summarizer = TokenBudgetSummarizer.install(agent, config=config)
-        return summarizer
-
-    def test_install_raises_when_target_event_manager_is_none(self):
-        """Line 151: _install raises ValueError when target_event_manager is None.
-
-        We create a summarizer normally, then set target_event_manager to None
-        and call _install directly.
-        """
-        summarizer = self._make_summarizer()
-        # Uninstall existing subscriptions first
-        summarizer._uninstall()
-        # Force target_event_manager to None
-        summarizer.target_event_manager = None
-        with pytest.raises(ValueError, match="target_event_manager is None"):
-            summarizer._install()
-
-    def test_schedule_summarization_none_guard(self):
-        """Line 278: _schedule_summarization returns early if target_event_manager is None."""
-        summarizer = self._make_summarizer()
-        summarizer.target_event_manager = None
-        # Should return without error
-        summarizer._schedule_summarization("t1", "t5")
-        assert summarizer._pending_task is None
-
-    def test_get_events_in_range_none_guard(self):
-        """Line 353: _get_events_in_range returns [] if target_event_manager is None."""
-        summarizer = self._make_summarizer()
-        summarizer.target_event_manager = None
-        result = summarizer._get_events_in_range("t1", "t5")
-        assert result == []
-
-    def test_render_range_to_markdown_none_guard(self):
-        """Line 386: _render_range_to_markdown returns '' if target_event_manager is None."""
-        summarizer = self._make_summarizer()
-        summarizer.target_event_manager = None
-        result = summarizer._render_range_to_markdown("t1", "t5")
-        assert result == ""
-
-    def test_render_range_to_markdown_empty_events(self):
-        """Line 391: _render_range_to_markdown returns '' if events list is empty."""
-        summarizer = self._make_summarizer()
-        # Patch _get_events_in_range to return empty list
-        summarizer._get_events_in_range = MagicMock(return_value=[])  # type: ignore[method-assign]
-        result = summarizer._render_range_to_markdown("t1", "t5")
-        assert result == ""
-
-    def test_token_budget_compute_range_none_guard(self):
-        """Line 514: TokenBudgetSummarizer._compute_range returns None when target_event_manager is None."""
-        summarizer = self._make_summarizer()
-        summarizer.target_event_manager = None
-        mock_event = MagicMock()
-        result = summarizer._compute_range(mock_event)
-        assert result is None
+    """Cover the supported MethodSummarizer event-manager guard."""
 
     def test_method_summarizer_compute_range_none_guard(self):
-        """Line 585: MethodSummarizer._compute_range returns None when target_event_manager is None."""
+        """MethodSummarizer._compute_range returns None without an event manager."""
         from nooa.agent import Agent
         from nooa.agents.summarization import MethodSummarizer
         from nooa.config.summarizer_config import MethodSummarizerConfig
 
-        llm = FakeLLMClient()
-
-        class _Parent(Agent, llm=llm):
-            async def chat(self, msg: str) -> str:
-                """Chat."""
-                ...
-
-        agent = _Parent()
+        agent = Agent(llm=FakeLLMClient())
         summarizer = MethodSummarizer.install(agent, config=MethodSummarizerConfig())
         summarizer.target_event_manager = None
         mock_event = MagicMock()
         mock_event.metadata = {"call_id": "abc"}
-        result = summarizer._compute_range(mock_event)
-        assert result is None
+        assert summarizer._compute_range(mock_event) is None
 
 
 class TestSummarizationKwargsOverride:
@@ -332,87 +253,6 @@ class TestSummarizationKwargsOverride:
         assert summarizer.config == "custom_config_value"
 
 
-class TestSummarizationPendingDoneAndNotAfterTurn:
-    """Lines 198 and 201: pending task done check and not-AfterTurn check."""
-
-    def _make_summarizer(self):
-        from nooa.agent import Agent
-        from nooa.agents.summarization import TokenBudgetSummarizer
-        from nooa.config.summarizer_config import TokenBudgetConfig
-
-        llm = FakeLLMClient()
-
-        class _Parent(Agent, llm=llm):
-            async def chat(self, msg: str) -> str:
-                """Chat."""
-                ...
-
-        agent = _Parent()
-        return TokenBudgetSummarizer.install(agent, config=TokenBudgetConfig())
-
-    def test_before_turn_clears_done_pending_task(self):
-        """_handle_before_turn is where pending-summary state gets cleared.
-
-        AfterTurn intentionally doesn't touch pending state (that ordering
-        is what prevents the stale-stats cascade), so clearing is the
-        exclusive responsibility of BeforeTurn.
-        """
-        summarizer = self._make_summarizer()
-        loop = asyncio.new_event_loop()
-        try:
-            future = loop.create_future()
-            future.set_result(None)
-            summarizer._pending_task = future  # type: ignore[assignment]
-
-            from nooa.events import BeforeTurn
-
-            event = BeforeTurn(
-                method_name="chat",
-                strategy="CodeAct",
-                generation_id="gen-1",
-                turn_number=1,
-            )
-            summarizer._handle_before_turn(event)
-            assert summarizer._pending_task is None
-        finally:
-            loop.close()
-
-    def test_after_turn_preserves_pending_state(self):
-        """AfterTurn must not clear pending state — a done-but-unapplied
-        summary needs to survive until BeforeTurn applies it."""
-        summarizer = self._make_summarizer()
-        loop = asyncio.new_event_loop()
-        try:
-            future = loop.create_future()
-            future.set_result(None)
-            summarizer._pending_task = future  # type: ignore[assignment]
-
-            from nooa.events import AfterTurn
-
-            event = AfterTurn(
-                method_name="chat",
-                strategy="CodeAct",
-                generation_id="gen-1",
-                turn_number=1,
-                is_final=False,
-            )
-            summarizer._handle_after_turn(event)
-            # Pending state untouched; BeforeTurn will handle it.
-            assert summarizer._pending_task is future
-        finally:
-            loop.close()
-
-    def test_non_after_turn_event_returns_early(self):
-        """Line 201: _handle_after_turn returns early for non-AfterTurn events."""
-        summarizer = self._make_summarizer()
-
-        # Pass a generic event that is NOT AfterTurn
-        mock_event = MagicMock()
-        # Make it explicitly not an AfterTurn instance
-        mock_event.__class__ = type("FakeEvent", (), {})
-
-        # Should not raise — just return early
-        summarizer._handle_after_turn(mock_event)
 
 
 # =============================================================================
@@ -487,9 +327,18 @@ class TestMediaCaptureMatplotlib:
     def test_matplotlib_figure_to_content_block(self):
         """matplotlib Figure is converted to an image_url content block."""
         pytest.importorskip("matplotlib")
+        from matplotlib import font_manager
         from matplotlib.figure import Figure
 
         from nooa.runtime.media_capture import _try_matplotlib_to_content_block
+
+        try:
+            font_manager.findfont(
+                font_manager.FontProperties(family="DejaVu Sans"),
+                fallback_to_default=False,
+            )
+        except ValueError:
+            pytest.skip("environment lacks Matplotlib's required DejaVu Sans font")
 
         fig = Figure(figsize=(2, 2))
         ax = fig.add_subplot(111)

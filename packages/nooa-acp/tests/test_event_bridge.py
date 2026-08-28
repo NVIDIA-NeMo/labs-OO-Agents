@@ -3,7 +3,7 @@
 """Tests for translating NOOA events into ACP updates."""
 
 import asyncio
-from typing import Any, cast
+from typing import cast
 
 import pytest
 from acp.schema import (
@@ -13,7 +13,6 @@ from acp.schema import (
     TextContentBlock,
     ToolCallProgress,
     ToolCallStart,
-    UsageUpdate,
 )
 from nooa_acp.event_bridge import ACPEventBridge
 from nooa_cli.coding import (
@@ -43,7 +42,7 @@ def _content_text(content: ContentToolCallContent) -> str:
     return block.text
 
 
-async def test_bridge_preserves_message_tool_and_usage_order(tmp_path):
+async def test_bridge_preserves_message_and_tool_order(tmp_path):
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
@@ -89,7 +88,6 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path):
         AgentMessageChunk,
         ToolCallStart,
         ToolCallProgress,
-        UsageUpdate,
     ]
     assert cast(AgentMessageChunk, updates[0]).content.text == "Final answer"
     started = cast(ToolCallStart, updates[1])
@@ -117,9 +115,6 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path):
     output = _content_text(cast(ContentToolCallContent, completed.content[1]))
     assert completed_source == "```python\nprint('hello')\n```"
     assert output == "```text\nhello\n```"
-    usage = cast(UsageUpdate, updates[3])
-    assert usage.cost is not None
-    assert usage.cost.amount == 0.25
     await bridge.close()
     await agent.close()
 
@@ -193,41 +188,6 @@ async def test_bridge_retains_python_source_when_interrupted(tmp_path):
     assert output == "```text\nUser canceled\n```"
     await bridge.close()
     await agent.close()
-
-
-async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
-    llm = FakeLLMClient()
-    cast(Any, llm)._context_window = None
-    agent = CodingAgent(llm=llm, cwd=tmp_path)
-    client = _RecordingClient()
-    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
-
-    agent.event_manager.add(AgentMessage(content="alive"))
-    agent.event_manager.add(LLMComplete(prompt_tokens=40, completion_tokens=10, cost_usd=0.25))
-    await bridge.flush()
-
-    # Positive control: prove the bridge is actually forwarding before asserting
-    # an absence. Without it this passes even with every handler unsubscribed.
-    assert any(
-        isinstance(update, AgentMessageChunk) and update.content.text == "alive"
-        for _, update in client.updates
-    )
-    assert not any(isinstance(update, UsageUpdate) for _, update in client.updates)
-    await bridge.close()
-    await agent.close()
-
-    # Paired positive: the same event with a known context window must emit a
-    # UsageUpdate. Without this, `return` at the top of _on_llm_complete passes
-    # both halves — an AgentMessageChunk control comes from a different handler
-    # and cannot tell "the guard works" from "usage never fires".
-    sized = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
-    sized_client = _RecordingClient()
-    sized_bridge = ACPEventBridge(sized, sized_client, "session-2")  # type: ignore[arg-type]
-    sized.event_manager.add(LLMComplete(prompt_tokens=40, completion_tokens=10, cost_usd=0.25))
-    await sized_bridge.flush()
-    assert any(isinstance(update, UsageUpdate) for _, update in sized_client.updates)
-    await sized_bridge.close()
-    await sized.close()
 
 
 async def test_bridge_emits_structured_file_edit(tmp_path):

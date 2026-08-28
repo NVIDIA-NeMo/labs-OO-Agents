@@ -38,7 +38,6 @@ _TEST_LLM = FakeLLMClient()
 def _resp(content: str, tool_calls: list | None = None) -> LLMResponse:
     finish_reason = "tool_calls" if tool_calls else "stop"
     return LLMResponse(
-        raw_response=None,
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
@@ -65,7 +64,6 @@ def _unknown_tool(name: str = "my_tool", call_id: str = "call_u1", **kwargs) -> 
 def _llm_resp(content: str, reasoning: str | None = None) -> LLMResponse:
     """Create an LLMResponse with string content (for PREDICT tests)."""
     return LLMResponse(
-        raw_response=None,
         content=content,
         tool_calls=[],
         finish_reason="stop",
@@ -727,7 +725,6 @@ class TestPredictMalformedResponseFallback:
                 # Return a response with weird content type that won't parse
                 # but also patch _extract_raw to return None
                 resp = LLMResponse(
-                    raw_response=None,
                     content="not json at all!!!",
                     tool_calls=[],
                     finish_reason="stop",

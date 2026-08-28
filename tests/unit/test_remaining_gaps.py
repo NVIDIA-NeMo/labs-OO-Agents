@@ -226,25 +226,28 @@ class TestNemoRelayLLMMiddleware:
             # model_name is "" because agent is None
             assert captured_calls[0] == ""
 
-    async def test_llm_middleware_response_with_raw_model_dump(self):
-        """When response has raw_response with model_dump, it is used."""
+    async def test_llm_middleware_prefers_normalized_wire_response(self):
+        """Relay receives UnifiedLLM's provider-neutral wire representation."""
         with _nemo_relay_patched() as (nm, fake_nemo_relay, _):
+            captured = []
 
             async def execute_and_capture(*args, **kwargs):
                 wrapper = args[2]
                 request = args[1]
-                await wrapper(request)
+                captured.append(await wrapper(request))
 
             fake_nemo_relay.llm.execute.side_effect = execute_and_capture
 
             from nooa.runtime.middleware import LLMCallContext
+            from nooa.unifiedllm import LLMResponse
 
-            raw_resp = MagicMock()
-            raw_resp.model_dump.return_value = {"choices": []}
-
-            response = MagicMock()
-            response.raw_response = raw_resp
-
+            response = LLMResponse(
+                content="hello",
+                tool_calls=[],
+                finish_reason="stop",
+                assistant_message={"role": "assistant", "content": "hello"},
+                usage={"prompt_tokens": 2, "completion_tokens": 1},
+            )
             ctx = LLMCallContext(messages=[{"role": "user", "content": "hi"}], params={})
             inner = LLMCallContext(messages=ctx.messages, params={})
             inner.response = response
@@ -254,26 +257,7 @@ class TestNemoRelayLLMMiddleware:
 
             result = await nm.nemo_relay_llm_middleware(ctx, nxt)
             assert result is inner
-            raw_resp.model_dump.assert_called_once_with(mode="json")
-
-    async def test_llm_middleware_response_with_model_dump_no_raw(self):
-        """When response has model_dump but no raw_response, model_dump is used."""
-        with _nemo_relay_patched() as (nm, fake_nemo_relay, _):
-            from nooa.runtime.middleware import LLMCallContext
-
-            response = MagicMock(spec=["model_dump"])
-            response.raw_response = None
-            response.model_dump.return_value = {"result": "data"}
-
-            ctx = LLMCallContext(messages=[{"role": "user", "content": "hi"}], params={})
-            inner = LLMCallContext(messages=ctx.messages, params={})
-            inner.response = response
-
-            async def nxt(c):
-                return inner
-
-            await nm.nemo_relay_llm_middleware(ctx, nxt)
-            response.model_dump.assert_called_once_with(mode="json")
+            assert captured == [response.to_wire()]
 
     async def test_llm_middleware_response_assistant_message_fallback(self):
         """When response has assistant_message, fall back to manual serialization."""
@@ -644,24 +628,6 @@ class TestTruncationConfigValidators:
         with pytest.raises(Exception, match="max_stderr must be > 0"):
             CaptureConfig(max_stderr=0)
 
-    def test_max_context_tokens_zero_raises(self):
-        from nooa.config.truncation_config import TruncationConfig
-
-        with pytest.raises(Exception, match="max_context_tokens must be > 0 or None"):
-            TruncationConfig(max_context_tokens=0)
-
-    def test_max_event_tokens_negative_raises(self):
-        from nooa.config.truncation_config import TruncationConfig
-
-        with pytest.raises(Exception, match="max_event_tokens must be > 0 or None"):
-            TruncationConfig(max_event_tokens=-5)
-
-    def test_max_context_tokens_none_valid(self):
-        from nooa.config.truncation_config import TruncationConfig
-
-        cfg = TruncationConfig(max_context_tokens=None)
-        assert cfg.max_context_tokens is None
-
     def test_value_max_length_zero_raises(self):
         from nooa.config.truncation_config import FormatConfig
 
@@ -736,14 +702,6 @@ class TestTruncationConfigValidators:
         cfg = TruncationConfig()
         result = cfg.merge_with(None)
         assert result is cfg
-
-    def test_merge_with_overrides_set_fields(self):
-        from nooa.config.truncation_config import TruncationConfig
-
-        base = TruncationConfig()
-        override = TruncationConfig(max_context_tokens=5000)
-        result = base.merge_with(override)
-        assert result.max_context_tokens == 5000
 
     def test_merge_with_no_fields_set_raises(self):
         from nooa.config.truncation_config import TruncationConfig

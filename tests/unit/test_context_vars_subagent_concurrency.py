@@ -43,7 +43,6 @@ from nooa.unifiedllm import FakeLLMClient, LLMResponse
 
 def _resp(content: str) -> LLMResponse:
     return LLMResponse(
-        raw_response=None,
         content=content,
         tool_calls=[],
         finish_reason="stop",
@@ -667,7 +666,6 @@ class TestScopedBlocksIsolation:
 
         def _codeact_resp(code: str) -> LLMResponse:
             return LLMResponse(
-                raw_response=None,
                 content="",
                 tool_calls=[_tool_call(code)],
                 finish_reason="tool_calls",
@@ -676,7 +674,6 @@ class TestScopedBlocksIsolation:
 
         def _codeact_return(val) -> LLMResponse:
             return LLMResponse(
-                raw_response=None,
                 content="",
                 tool_calls=[_return(val)],
                 finish_reason="tool_calls",

@@ -268,7 +268,7 @@ class RenderedMessage(BaseModel):
     * A tool result sets ``role=TOOL``, ``tool_call_id`` to the matching call
       id, and ``content`` to the result text.
     * A multimodal message sets ``content`` to the text and ``images`` to a
-      list of provider-agnostic image part dicts (LiteLLM's ``image_url``
+      list of provider-agnostic image part dicts (the universal ``image_url``
       shape, which all providers support).
 
     Block-aware formatters additionally populate ``parts``, a list of
@@ -300,209 +300,24 @@ class RenderedMessage(BaseModel):
         default=None, description="Tool-call id this message is a result for"
     )
     images: list[dict[str, Any]] | None = Field(
-        default=None, description="Optional image parts (LiteLLM shape)"
+        default=None, description="Optional image parts (provider-neutral shape)"
     )
 
 
 class ContextWindowStats(BaseModel):
-    """Context window utilization snapshot.
+    """Structural snapshot of the rendered context; never a sizing control."""
 
-    The single source of truth for token usage is ``prompt_tokens`` — the
-    exact prompt-token count reported by the provider in the response usage
-    of the most recent successful call. There is **no local token estimate**:
-    before the first response ``prompt_tokens`` is ``None`` and all derived
-    token figures are ``None`` too.
-
-    ``render_context()`` populates only the structural fields (block/event
-    *counts* and raw *character* sizes); the runtime writes ``prompt_tokens``
-    back after the provider returns usage. The per-category token breakdown
-    (context blocks vs. events) is **attributed** from the authoritative
-    ``prompt_tokens`` total in proportion to each category's character share —
-    the provider reports a single prompt-token number, never a breakdown, so
-    the split is approximate but always sums exactly to ``prompt_tokens``.
-    """
-
-    # extra="forbid": reject the removed token-estimate kwargs
-    # (total_tokens/context_blocks_tokens/events_tokens/max_event_tokens) so a
-    # stale caller fails loudly instead of silently producing None.
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    context_blocks_count: Annotated[
-        int, Field(description="Number of system blocks (post-eviction)")
-    ]
+    context_blocks_count: Annotated[int, Field(description="Number of system blocks")]
     events_count: Annotated[int, Field(description="Number of event blocks")]
-    prompt_tokens: Annotated[
-        int | None,
-        Field(
-            description=(
-                "Provider-reported prompt tokens from the latest response usage. "
-                "None until the first successful call returns usage."
-            )
-        ),
-    ] = None
-    context_blocks_chars: Annotated[
-        int, Field(description="Raw character size of system blocks (for breakdown attribution)")
-    ] = 0
-    events_chars: Annotated[
-        int, Field(description="Raw character size of event blocks (for breakdown attribution)")
-    ] = 0
-    max_context_tokens: Annotated[
-        int | None,
-        Field(description="Configured eviction budget for context blocks (informational)"),
-    ] = None
-    model_context_window: Annotated[
-        int | None, Field(description="Model's total context window size (the % denominator)")
-    ] = None
-    context_blocks_dropped: Annotated[
-        int, Field(description="System blocks marked EVICTED during eviction")
-    ] = 0
-    events_dropped: Annotated[int, Field(description="Events dropped during truncation")] = 0
-    reserved_output_tokens: Annotated[
-        int | None,
-        Field(
-            description=(
-                "Tokens reserved for the model's response on the next call "
-                "(the call's max_tokens when known, else the configured "
-                "response reserve). Subtracted from the window when computing "
-                "utilization: a prompt only fits if prompt + output ≤ window."
-            )
-        ),
-    ] = None
-
-    @property
-    def total_tokens(self) -> int | None:
-        """Provider-reported prompt tokens, or None before the first response."""
-        return self.prompt_tokens
-
-    @property
-    def context_blocks_tokens(self) -> int | None:
-        """Provider total attributed to context blocks by character share.
-
-        None until ``prompt_tokens`` is available.
-        """
-        if self.prompt_tokens is None:
-            return None
-        total_chars = self.context_blocks_chars + self.events_chars
-        if total_chars <= 0:
-            return 0
-        return round(self.prompt_tokens * self.context_blocks_chars / total_chars)
-
-    @property
-    def events_tokens(self) -> int | None:
-        """Provider total attributed to events (= prompt_tokens − context blocks).
-
-        Defined as the remainder so the breakdown sums exactly to
-        ``prompt_tokens``. None until ``prompt_tokens`` is available.
-        """
-        if self.prompt_tokens is None:
-            return None
-        return self.prompt_tokens - (self.context_blocks_tokens or 0)
-
-    @property
-    def effective_window(self) -> int | None:
-        """Usable input window: model window minus the output-token reserve.
-
-        The provider rejects any call where prompt + completion budget exceeds
-        the window, so the honest denominator for "how full are we" is
-        ``model_context_window - reserved_output_tokens``. Falls back to the
-        raw window when no reserve is known. None if the window is unknown.
-        """
-        if not self.model_context_window:
-            return None
-        reserve = self.reserved_output_tokens or 0
-        return max(1, self.model_context_window - reserve)
-
-    @property
-    def overall_utilization(self) -> float | None:
-        """Fraction of the *usable* context window consumed, or None if unknown.
-
-        Usable = model window minus ``reserved_output_tokens`` (see
-        :attr:`effective_window`). Can exceed 1.0 when the prompt has grown
-        into the output reserve — the next call at full ``max_tokens`` would
-        be rejected by the provider.
-        """
-        if self.prompt_tokens is None:
-            return None
-        window = self.effective_window
-        if not window:
-            return None
-        return self.prompt_tokens / window
+    context_blocks_chars: Annotated[int, Field(description="Characters in system blocks")] = 0
+    events_chars: Annotated[int, Field(description="Characters in event blocks")] = 0
 
     def format(self) -> str:
-        """Human-readable context window summary, suitable for a context block.
-
-        Before the first provider response there is no token count yet::
-
-            Context usage: awaiting first model response (no provider token count yet)
-
-        With provider usage and a known model window::
-
-            Context usage: 12,450 / 200,000 tokens (6.2%) [provider-reported]
-              Context blocks: ~8,200 tokens — 6 blocks
-              Events:         ~4,250 tokens — 18 events
-
-        The header total is the exact provider count; the per-category lines
-        are attributed from it by character share (prefixed ``~``).
-        """
-        if self.prompt_tokens is None:
-            return (
-                "Context usage: awaiting first model response (no provider token count yet)\n"
-                "Free space by collapsing older event history with "
-                "self.events.collapse(start_tag, end_tag, summary_text=...); "
-                "use doc(self.events) for the available event-history tools. "
-                "Use self.context (ContextApi) to summarize or remove large "
-                "context blocks."
-            )
-
-        lines: list[str] = []
-
-        # --- Header line: exact provider total over the usable window ---
-        window = self.model_context_window
-        usable = self.effective_window
-        if window and usable:
-            pct = self.prompt_tokens / usable * 100
-            reserve = self.reserved_output_tokens or 0
-            if reserve:
-                lines.append(
-                    f"Context usage: {self.prompt_tokens:,} / {usable:,} usable tokens "
-                    f"({pct:.1f}%) [provider-reported; {reserve:,} of the "
-                    f"{window:,}-token window reserved for output]"
-                )
-            else:
-                lines.append(
-                    f"Context usage: {self.prompt_tokens:,} / {window:,} tokens "
-                    f"({pct:.1f}%) [provider-reported]"
-                )
-        else:
-            lines.append(f"Context usage: {self.prompt_tokens:,} tokens [provider-reported]")
-
-        # --- Context blocks line (attributed by character share) ---
-        cb = self.context_blocks_tokens or 0
-        cb_parts = [f"~{cb:,} tokens", f"{self.context_blocks_count} blocks"]
-        if self.context_blocks_dropped:
-            cb_parts.append(f"{self.context_blocks_dropped} EVICTED")
-        lines.append(f"  Context blocks: {' — '.join(cb_parts)}")
-
-        # --- Events line (attributed by character share) ---
-        ev = self.events_tokens or 0
-        ev_parts = [f"~{ev:,} tokens", f"{self.events_count} events"]
-        if self.events_dropped:
-            ev_parts.append(f"{self.events_dropped} dropped")
-        lines.append(f"  Events:         {' — '.join(ev_parts)}")
-
-        # --- Warning (only when hot or something was evicted/dropped) ---
-        util = self.overall_utilization
-        hot = util is not None and util > 0.8
-        if self.context_blocks_dropped or self.events_dropped or hot:
-            lines.append("Context is nearly full. Context blocks over budget are labeled EVICTED.")
-
-        # --- Cleanup guidance ---
-        lines.append(
-            "Free space by collapsing older event history with "
-            "self.events.collapse(start_tag, end_tag, summary_text=...); "
-            "use doc(self.events) for the available event-history tools. "
-            "Use self.context (ContextApi) to summarize or remove large "
-            "context blocks."
+        """Return structural context information without estimating capacity."""
+        return (
+            f"Context contains {self.context_blocks_count} blocks "
+            f"({self.context_blocks_chars:,} chars) and {self.events_count} events "
+            f"({self.events_chars:,} chars)."
         )
-
-        return "\n".join(lines)

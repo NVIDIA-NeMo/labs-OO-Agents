@@ -28,7 +28,6 @@ def _return_result_call(result, call_id: str = "call_ret") -> ToolCall:
 
 def _resp(tool_calls: list) -> LLMResponse:
     return LLMResponse(
-        raw_response=None,
         content="",
         tool_calls=tool_calls,
         finish_reason="tool_calls",

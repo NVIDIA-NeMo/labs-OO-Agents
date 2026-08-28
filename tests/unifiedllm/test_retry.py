@@ -167,11 +167,10 @@ class TestIsRetryableError:
         assert is_retryable is False
 
     def test_status_code_attribute_502(self):
-        """LiteLLM exceptions expose .status_code; 502 is retryable, not rate limit."""
-        import litellm
-
+        """AnyLLM exceptions expose .status_code; 502 is retryable, not rate limit."""
         config = RetryConfig()
-        error = litellm.BadGatewayError(message="502 Bad Gateway", model="m", llm_provider="openai")
+        error = Exception("502 Bad Gateway")
+        error.status_code = 502
 
         is_retryable, is_rate_limit = _is_retryable_error(error, config)
 
@@ -179,27 +178,18 @@ class TestIsRetryableError:
         assert is_rate_limit is False
 
     def test_internal_server_error_with_server_disconnected_message(self):
-        """LiteLLM InternalServerError with server-disconnected text is retryable."""
-        import litellm
-
+        """AnyLLM InternalServerError with server-disconnected text is retryable."""
         config = RetryConfig()
-        error = litellm.InternalServerError(
-            message=(
-                "InternalServerError: OpenAIException - Server disconnected\n"
-                "No fallback model group found for original model_group=nvidia/qwen/qwen3.5-35b-a3b."
-            ),
-            model="m",
-            llm_provider="openai",
-        )
+        error = Exception("InternalServerError: Server disconnected")
+        error.status_code = 500
 
         assert _is_retryable_error(error, config) == (True, False)
 
     def test_status_code_attribute_400_not_retryable(self):
         """A 400 .status_code is not in retryable set."""
-        import litellm
-
         config = RetryConfig()
-        error = litellm.BadRequestError(message="bad", model="m", llm_provider="openai")
+        error = Exception("bad")
+        error.status_code = 400
 
         is_retryable, _ = _is_retryable_error(error, config)
 
@@ -221,7 +211,7 @@ class TestIsRetryableError:
     def test_bad_gateway_string_without_status_token(self):
         """Raw 'BadGatewayError: 502 Bad Gateway' string (no 'status 502') is retryable."""
         config = RetryConfig()
-        error = Exception("litellm.BadGatewayError: OpenAIException - 502 Bad Gateway")
+        error = Exception("any_llm.BadGatewayError: OpenAIException - 502 Bad Gateway")
 
         is_retryable, is_rate_limit = _is_retryable_error(error, config)
 
@@ -257,11 +247,10 @@ class TestIsRetryableError:
 
     def test_429_disabled_when_code_excluded(self):
         """429 is NOT retried when 429 is excluded from retryable_status_codes."""
-        import litellm
-
         config = RetryConfig(retryable_status_codes=frozenset({500, 502, 503, 504}))
         # Both the structured-attribute path and the string path must respect config.
-        attr_error = litellm.RateLimitError(message="rate limit", model="m", llm_provider="openai")
+        attr_error = Exception("rate limit")
+        attr_error.status_code = 429
         str_error = Exception("API call failed with status 429: rate limit exceeded")
 
         assert _is_retryable_error(attr_error, config) == (False, False)

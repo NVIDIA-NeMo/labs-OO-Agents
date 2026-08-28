@@ -7,8 +7,7 @@ Two implementations behind a tiny ``Embedder`` protocol:
 * ``HashingEmbedder`` — deterministic, offline, dependency-free. Hashes token
   n-grams into a fixed-dim L2-normalised vector. The default, so the memory
   system works out-of-the-box and tests run without a network.
-* ``LiteLLMEmbedder`` — calls an OpenAI-compatible ``/embeddings`` endpoint
-  (e.g. the NVIDIA gateway) synchronously via ``litellm.embedding``.
+* ``AnyLLMEmbedder`` — calls an embedding provider through NOOA unifiedllm.
 
 Embeddings are always **L2-normalised**, so cosine similarity == dot product.
 """
@@ -82,8 +81,8 @@ class HashingEmbedder:
         return [self.embed(t) for t in texts]
 
 
-class LiteLLMEmbedder:
-    """Synchronous embeddings via ``litellm.embedding`` (OpenAI-compatible)."""
+class AnyLLMEmbedder:
+    """Synchronous backend-neutral embeddings through :mod:`nooa.unifiedllm`."""
 
     def __init__(self, config: EmbeddingConfig) -> None:
         self._config = config
@@ -101,24 +100,19 @@ class LiteLLMEmbedder:
         return self._dim
 
     def _call(self, texts: list[str]) -> list[np.ndarray]:
-        import litellm
+        from nooa.unifiedllm import embedding
 
-        kwargs: dict[str, object] = {"model": self._config.model, "input": texts}
+        kwargs: dict[str, object] = {}
         if self._config.endpoint:
             kwargs["api_base"] = self._config.endpoint
         if self._config.api_key:
             kwargs["api_key"] = self._config.api_key
         if self._config.dimensions:
             kwargs["dimensions"] = self._config.dimensions
-        # Hard timeout + retries so a hung gateway embedding request can't stall the caller
-        # forever (litellm aborts and retries instead of blocking indefinitely).
         kwargs["timeout"] = self._config.timeout
         kwargs["num_retries"] = self._config.num_retries
-        resp = litellm.embedding(**kwargs)
-        out: list[np.ndarray] = []
-        for item in resp["data"]:
-            vec = _normalize(np.asarray(item["embedding"], dtype=np.float32))
-            out.append(vec)
+        vectors = embedding(self._config.model, texts, **kwargs)
+        out = [_normalize(np.asarray(vector, dtype=np.float32)) for vector in vectors]
         if out:
             self._dim = int(out[0].shape[0])
         return out
@@ -140,6 +134,6 @@ def get_embedder(config: EmbeddingConfig) -> Embedder:
     """Instantiate the embedder named by ``config.backend``."""
     if config.backend == "hashing":
         return HashingEmbedder(dim=config.dim)
-    if config.backend == "litellm":
-        return LiteLLMEmbedder(config)
+    if config.backend == "anyllm":
+        return AnyLLMEmbedder(config)
     raise ValueError(f"Unknown embedding backend: {config.backend!r}")

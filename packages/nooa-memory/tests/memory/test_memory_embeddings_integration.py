@@ -12,7 +12,7 @@ import os
 import numpy as np
 import pytest
 from nooa_memory.config import EmbeddingConfig
-from nooa_memory.embeddings import LiteLLMEmbedder
+from nooa_memory.embeddings import AnyLLMEmbedder
 
 pytestmark = pytest.mark.integration
 
@@ -23,7 +23,7 @@ def cfg():
         pytest.skip("MEM_EMBED_API_KEY not set")
     dims = os.environ.get("MEM_EMBED_DIMS")
     return EmbeddingConfig(
-        backend="litellm",
+        backend="anyllm",
         model=os.environ.get("MEM_EMBED_MODEL", "openai/azure/openai/text-embedding-3-large"),
         endpoint=os.environ.get(
             "MEM_EMBED_BASE_URL", "https://inference-api.nvidia.com/v1/embeddings"
@@ -34,7 +34,7 @@ def cfg():
 
 
 def test_live_embedding_is_normalised_and_consistent(cfg):
-    emb = LiteLLMEmbedder(cfg)
+    emb = AnyLLMEmbedder(cfg)
     v = emb.embed("deploy the service to production")
     assert v.ndim == 1 and v.shape[0] == emb.dim
     assert np.isclose(np.linalg.norm(v), 1.0, atol=1e-3)  # L2-normalised

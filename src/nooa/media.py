@@ -157,7 +157,7 @@ class Video(Media):
     OpenAI-compatible endpoints (vLLM, NVIDIA inference API), which accept
     ``video_url`` content blocks natively.
 
-    Provider support varies. LiteLLM transforms ``video_url`` blocks for
+    Provider support varies. Providers transform ``video_url`` blocks for
     providers that support video; on providers that do not, the request
     will be rejected — same contract as Audio.
 

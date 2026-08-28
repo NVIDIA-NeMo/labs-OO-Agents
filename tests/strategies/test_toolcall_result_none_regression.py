@@ -46,7 +46,6 @@ def _resp(content: str, tool_calls: list | None = None) -> LLMResponse:
     """Create a test LLM response."""
     finish_reason = "tool_calls" if tool_calls else "stop"
     return LLMResponse(
-        raw_response=None,
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
@@ -469,7 +468,6 @@ class TestTranslatedToolCallPath:
             scripted_responses=[
                 # LLM calls "add" directly as a tool (will be translated)
                 LLMResponse(
-                    raw_response=None,
                     content="",
                     tool_calls=[
                         ToolCall(
@@ -516,7 +514,6 @@ class TestTranslatedToolCallPath:
         fake_llm = FakeLLMClient(
             scripted_responses=[
                 LLMResponse(
-                    raw_response=None,
                     content="",
                     tool_calls=[
                         ToolCall(
@@ -609,7 +606,6 @@ class TestStopToReturnResultPath:
             scripted_responses=[
                 # Empty stop → synthetic return_result(None) → should succeed for -> None
                 LLMResponse(
-                    raw_response=None,
                     content="",
                     tool_calls=[],
                     finish_reason="stop",

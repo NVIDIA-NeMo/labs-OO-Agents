@@ -55,28 +55,12 @@ def reset_tracing_module_state():
 
         _context_active_spans.set(None)
 
-    # Drop any MessageJournalCallback instances from every litellm
-    # callback list.  ``function_setup`` copies anything in
-    # ``litellm.callbacks`` into ``success_callback`` /
-    # ``_async_success_callback`` / etc on the first call -- those copies
-    # outlive a test that only cleared ``litellm.callbacks`` and would
-    # let a stale callback keep firing against a recorder that has since
-    # been torn down.  Mirrors ``tests/integration/conftest.py``; the
-    # ``test_conftest_reset.py`` meta-test pins the contract.
+    # Clear native journal sinks left by a previous test.
     with contextlib.suppress(ImportError):
-        import litellm
+        from nooa.tracing._llm_journal import _SINKS, _SINKS_LOCK
 
-        from nooa.tracing._litellm_journal import MessageJournalCallback
-
-        def _strip(lst: list) -> list:
-            return [cb for cb in lst if not isinstance(cb, MessageJournalCallback)]
-
-        litellm.callbacks = _strip(litellm.callbacks)
-        litellm.input_callback = _strip(litellm.input_callback)
-        litellm.success_callback = _strip(litellm.success_callback)
-        litellm.failure_callback = _strip(litellm.failure_callback)
-        litellm._async_success_callback = _strip(litellm._async_success_callback)
-        litellm._async_failure_callback = _strip(litellm._async_failure_callback)
+        with _SINKS_LOCK:
+            _SINKS.clear()
 
 
 @pytest.fixture(autouse=True)

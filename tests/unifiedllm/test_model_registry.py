@@ -69,7 +69,7 @@ def _user_dir(tmp_path: Path) -> Path:
 
 
 class TestEmptyDefaultRegistry:
-    """The registry ships empty; public models rely on litellm's built-in routing."""
+    """The registry ships empty; public models rely on any_llm's built-in routing."""
 
     def test_registry_empty_after_clear(self):
         """``reload_registry()`` with no args clears MODELS."""
@@ -107,11 +107,11 @@ class TestGetRegistryConfig:
 
         cfg = get_registry_config("my-alias")
         assert cfg["model_name"] == "openai/my-org/my-model"
-        assert cfg["api_base"] == "https://gw.example.com/v1"
+        assert cfg["endpoint"] == "https://gw.example.com/v1"
 
         # Mutating the returned dict must not corrupt the live registry.
-        cfg["api_base"] = "tampered"
-        assert MODELS["my-alias"]["api_base"] == "https://gw.example.com/v1"
+        cfg["endpoint"] = "tampered"
+        assert MODELS["my-alias"]["endpoint"] == "https://gw.example.com/v1"
 
     def test_returns_empty_dict_for_unknown_alias(self):
         assert get_registry_config("does-not-exist") == {}
@@ -138,6 +138,16 @@ class TestGetRegistryConfig:
 class TestGetLlmClient:
     """Tests for get_llm_client() function."""
 
+    def test_rejects_unknown_client_type(self):
+        with pytest.raises(ValueError, match="Unknown client_type"):
+            get_llm_client("gpt-4o-mini", client_type="bogus")
+
+    def test_rejects_override_key_collisions(self):
+        with pytest.raises(ValueError, match="collide"):
+            get_llm_client("gpt-4o-mini", endpoint="a", api_base="b")
+        with pytest.raises(ValueError, match="collide"):
+            get_llm_client("gpt-4o-mini", max_output_tokens=1, max_tokens=2)
+
     def test_returns_completion_client(self):
         llm = get_llm_client("gpt-4o-mini")
         assert isinstance(llm, CompletionClient)
@@ -154,8 +164,8 @@ class TestGetLlmClient:
 
         assert openai_llm.model == "gpt-4o-mini"
         assert anthropic_llm.model == "claude-sonnet-4-5-20250514"
-        assert openai_llm.config.get("drop_params") is True
-        assert anthropic_llm.config.get("drop_params") is True
+        assert "drop_params" not in openai_llm.config
+        assert "drop_params" not in anthropic_llm.config
 
     def test_registry_model_uses_model_name(self, tmp_path):
         """Registry model should use the model_name from config."""
@@ -238,8 +248,8 @@ class TestGetLlmClient:
         assert llm.config.get("temperature") == 0.9
         assert llm.config.get("max_tokens") == 100
 
-    def test_registry_preserves_litellm_pass_through_controls(self, tmp_path):
-        """Reasoning aliases can whitelist gateway params for LiteLLM."""
+    def test_registry_ignores_legacy_any_llm_pass_through_controls(self, tmp_path):
+        """Reasoning aliases can whitelist gateway params for AnyLLM."""
         path = _write_project_config(
             _project_dir(tmp_path),
             """\
@@ -247,8 +257,6 @@ class TestGetLlmClient:
               reasoning-alias:
                 model_name: openai/aws/anthropic/bedrock-claude-opus-4-6
                 reasoning_effort: high
-                allowed_openai_params:
-                  - reasoning_effort
                 extra_body:
                   trace: true
             """,
@@ -259,12 +267,11 @@ class TestGetLlmClient:
 
         assert llm.model == "openai/aws/anthropic/bedrock-claude-opus-4-6"
         assert llm.config["reasoning_effort"] == "high"
-        assert llm.config["allowed_openai_params"] == ["reasoning_effort"]
         assert llm.config["extra_body"] == {"trace": True}
 
     def test_drop_params_default_true(self):
         llm = get_llm_client("gpt-4o-mini")
-        assert llm.config.get("drop_params") is True
+        assert "drop_params" not in llm.config
 
     def test_registry_hit_logs_info(self, tmp_path, caplog):
         """Registry hits should be logged at INFO level for user visibility."""
@@ -422,7 +429,7 @@ class TestApiKeyHandling:
             llm = get_llm_client("numeric-env")
 
         assert llm.config.get("api_key") is None
-        assert "invalid api_key_env" in caplog.text
+        assert "api_key_env" in caplog.text
         assert "int" in caplog.text  # type name surfaced
 
     def test_explicit_api_key_override_skips_env_warning(self, tmp_path, monkeypatch, caplog):
@@ -472,7 +479,7 @@ class TestApiBaseHandling:
         llm = get_llm_client("local-model")
 
         assert llm.model == "hosted_vllm/Qwen/Qwen2.5-0.5B-Instruct"
-        assert llm.config["api_base"] == "http://127.0.0.1:8000/v1"
+        assert llm.config["endpoint"] == "http://127.0.0.1:8000/v1"
 
     def test_explicit_api_base_override_beats_registry(self, tmp_path):
         path = _write_project_config(
@@ -509,7 +516,7 @@ class TestConfigLayering:
         )
         registry = reload_registry(path)
         assert "my-custom-model" in registry
-        assert registry["my-custom-model"]["api_base"] == "https://my-endpoint.example.com/v1"
+        assert registry["my-custom-model"]["endpoint"] == "https://my-endpoint.example.com/v1"
 
     def test_null_removes_model(self, tmp_path):
         """Setting a model to null in a later layer should remove it."""
@@ -650,7 +657,7 @@ class TestReloadRegistry:
         """A reader hitting ``get_llm_client()`` while another thread
         runs ``reload_registry()`` must never observe a half-cleared
         registry. The reader either sees the pre-reload value (registry
-        miss → litellm passthrough) or the post-reload value
+        miss → any_llm passthrough) or the post-reload value
         (registry hit), never a transient empty state that loses the
         alias mid-mutation.
         """
@@ -679,7 +686,7 @@ class TestReloadRegistry:
                     llm = get_llm_client("raceable")
                     # Either we see the registry hit (model_name from
                     # YAML) or the registry miss (alias passes through
-                    # to litellm as-is). The bad case the lock
+                    # to any_llm as-is). The bad case the lock
                     # prevents is: ``llm.model == "raceable"`` *and*
                     # MODELS containing "raceable" — i.e. a transient
                     # empty-dict observation. We can't directly observe

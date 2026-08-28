@@ -905,7 +905,6 @@ async def test_no_trace_outer_strategy_inner_ordering_also_suppresses_hooks():
 
     def _resp(content):
         return LLMResponse(
-            raw_response=None,
             content=content,
             tool_calls=[],
             finish_reason="stop",
@@ -943,7 +942,6 @@ async def test_no_trace_decorator_suppresses_hooks_on_generation_method():
 
     def _resp(content):
         return LLMResponse(
-            raw_response=None,
             content=content,
             tool_calls=[],
             finish_reason="stop",
@@ -981,7 +979,6 @@ async def test_no_trace_on_generation_method_in_enable_tracing_class_suppresses_
 
     def _resp(content):
         return LLMResponse(
-            raw_response=None,
             content=content,
             tool_calls=[],
             finish_reason="stop",

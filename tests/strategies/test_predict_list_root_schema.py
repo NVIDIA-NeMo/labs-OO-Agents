@@ -38,7 +38,6 @@ _TEST_LLM = FakeLLMClient()
 
 def _llm_resp(content: str) -> LLMResponse:
     return LLMResponse(
-        raw_response=None,
         content=content,
         tool_calls=[],
         finish_reason="stop",

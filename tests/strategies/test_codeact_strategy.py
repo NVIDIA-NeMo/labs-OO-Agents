@@ -33,7 +33,6 @@ def _resp(content: str, tool_calls: list | None = None) -> LLMResponse:
     """Create a test LLM response with the given content."""
     finish_reason = "tool_calls" if tool_calls else "stop"
     return LLMResponse(
-        raw_response=None,
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
@@ -1173,7 +1172,6 @@ class TestCodeActStrategyEventSequence:
                 ...
 
         model_response = LLMResponse(
-            raw_response=None,
             content=ThoughtModel(thought="I need to reason carefully here."),
             tool_calls=[],
             finish_reason="stop",
@@ -1332,7 +1330,6 @@ class TestCodeActStrategyEventSequence:
                 ...
 
         model_response = LLMResponse(
-            raw_response=None,
             content=ThoughtModel(thought="I should calculate this."),
             tool_calls=[_tool_call("x = 6 * 7", call_id="c1")],
             finish_reason="tool_calls",

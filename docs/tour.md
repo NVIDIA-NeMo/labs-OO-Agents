@@ -16,7 +16,7 @@ step-by-step path, use the
 
 ## 1. A Python method that thinks
 
-Choose a model supported by LiteLLM and put `...` in an async method:
+Choose a model supported by AnyLLM and put `...` in an async method:
 
 ```python
 import asyncio

@@ -8,8 +8,8 @@ class HttpConfig(BaseModel):
     """Per-client HTTP connection-pool and timeout settings.
 
     Each ``CompletionClient`` / ``ResponsesClient`` builds its **own** httpx
-    client from its ``HttpConfig`` and hands it to litellm on a per-call basis
-    (via litellm's caller-provided-client support). The settings therefore apply
+    client from its ``HttpConfig`` and hands it to AnyLLM on a per-call basis
+    (via AnyLLM's caller-provided-client support). The settings therefore apply
     **only to that client's requests** — there is no global state, no
     module-level ``_active_http_config``, and no monkey-patch of
     ``httpx.AsyncClient``. Two clients constructed with different ``HttpConfig``s

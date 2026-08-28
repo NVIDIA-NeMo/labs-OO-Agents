@@ -62,17 +62,17 @@ class EmbeddingConfig(BaseModel, frozen=True):
     """Embedding backend selection."""
 
     # "hashing" = deterministic, offline, dependency-free (default, great for tests);
-    # "litellm" = call an OpenAI-compatible /embeddings endpoint (e.g. NVIDIA gateway).
-    backend: Literal["hashing", "litellm"] = "hashing"
-    # For the NVIDIA gateway + text-embedding-3-large, use the litellm openai provider
+    # "anyllm" = call a configured embedding provider through NOOA unifiedllm.
+    backend: Literal["hashing", "anyllm"] = "hashing"
+    # For the NVIDIA gateway + text-embedding-3-large, use the openai-compatible provider
     # prefix, e.g. "openai/azure/openai/text-embedding-3-large".
-    model: str = "nvidia/nv-embedqa-e5-v5"  # used when backend == "litellm"
-    endpoint: str | None = None  # api_base override for litellm (e.g. the gateway /v1)
+    model: str = "nvidia/nv-embedqa-e5-v5"  # used when backend != "hashing"
+    endpoint: str | None = None  # API base override (e.g. the gateway /v1)
     api_key: str | None = None
-    dim: int = 256  # hashing dimension (litellm infers from the response)
+    dim: int = 256  # hashing dimension (the provider infers from the response)
     dimensions: int | None = None  # OpenAI 'dimensions' param (3-large supports reduction)
     batch_size: int = 64
-    timeout: float = 60.0  # per-request HTTP timeout for litellm.embedding (avoid silent hangs)
+    timeout: float = 60.0  # per-request HTTP timeout for the embedding request (avoid silent hangs)
     num_retries: int = 2  # retry transient embedding failures (incl. timeouts) before raising
 
 

@@ -126,8 +126,8 @@ def journal(
     """Content-addressed journal exporter for the local nooa viewer.
 
     Sends spans to the viewer with ``llm.input_messages.*`` /
-    ``llm.output_messages.*`` attributes stripped, and installs a litellm
-    ``CustomLogger`` that posts only new (delta) messages to the viewer's
+    ``llm.output_messages.*`` attributes stripped, and installs a native LLM
+    lifecycle sink that posts only new (delta) messages to the viewer's
     journal endpoints.  The viewer reconstructs full messages from journal
     hashes, reducing storage from O(N²) to O(delta).
 

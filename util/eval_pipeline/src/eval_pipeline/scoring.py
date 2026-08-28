@@ -124,8 +124,8 @@ def _iter_all_sessions(trace: TraceExplorer):
         yield from _recurse(root)
 
 
-def _count_tokens(trace: TraceExplorer) -> tuple[int, int, int] | None:
-    """Sum token counts across all LLM turns in the trace."""
+def _reported_usage_totals(trace: TraceExplorer) -> tuple[int, int, int] | None:
+    """Aggregate passive provider-reported usage across traced LLM turns."""
     from nooa.trace_explorer.explorer import LLMTurn as _LLMTurn
 
     input_t = output_t = total_t = 0
@@ -197,15 +197,15 @@ def build_scoring_context(
 ) -> ScoringContext:
     """Build scoring context from execution result.
 
-    Token counts are extracted from the TraceExplorer instance (when provided).
+    Provider-reported usage is copied from the TraceExplorer instance when provided.
 
     Args:
         metadata: Task metadata dict (from Task.metadata) forwarded to
             ScoringContext.metadata so custom scorers can access per-task
             rubrics, difficulty tags, etc.
-        trace: TraceExplorer instance for token extraction and code analysis.
+        trace: TraceExplorer instance for passive usage reporting and code analysis.
     """
-    token_data = _count_tokens(trace) if trace is not None else None
+    token_data = _reported_usage_totals(trace) if trace is not None else None
 
     input_tokens = None
     output_tokens = None

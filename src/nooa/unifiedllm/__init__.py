@@ -1,5 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+from nooa.unifiedllm._anyllm import (
+    LLMAuthenticationError,
+    LLMContentFilterError,
+    LLMContextLengthError,
+    LLMError,
+    LLMGatewayTimeoutError,
+    LLMInsufficientFundsError,
+    LLMInvalidRequestError,
+    LLMModelNotFoundError,
+    LLMProviderError,
+    LLMRateLimitError,
+    LLMTransportError,
+    LLMUnsupportedError,
+    LLMUpstreamError,
+    embedding,
+)
 from nooa.unifiedllm.fake import FakeLLMClient
 from nooa.unifiedllm.http_config import HttpConfig
 from nooa.unifiedllm.registry import (
@@ -17,6 +33,14 @@ from nooa.unifiedllm.retry import (
     with_retry,
 )
 from nooa.unifiedllm.retry_config import RetryConfig
+from nooa.unifiedllm.types import (
+    LLMCallOptions,
+    LLMChunk,
+    LLMClient,
+    LLMRequestDefaults,
+    LLMToolCallChunk,
+    LLMUsage,
+)
 from nooa.unifiedllm.unifiedllm import (
     CompletionClient,
     LLMResponse,
@@ -31,6 +55,20 @@ from nooa.unifiedllm.unifiedllm import (
 
 __all__ = [
     # Core classes
+    "LLMError",
+    "LLMAuthenticationError",
+    "LLMRateLimitError",
+    "LLMInvalidRequestError",
+    "LLMModelNotFoundError",
+    "LLMContextLengthError",
+    "LLMContentFilterError",
+    "LLMInsufficientFundsError",
+    "LLMUnsupportedError",
+    "LLMUpstreamError",
+    "LLMGatewayTimeoutError",
+    "LLMTransportError",
+    "LLMProviderError",
+    "embedding",
     "UnifiedLLM",
     "CompletionClient",
     "ReasoningCompletionClient",
@@ -48,6 +86,12 @@ __all__ = [
     "create_tool_from_callable",
     # Response types
     "LLMResponse",
+    "LLMClient",
+    "LLMUsage",
+    "LLMChunk",
+    "LLMToolCallChunk",
+    "LLMRequestDefaults",
+    "LLMCallOptions",
     # HTTP config
     "HttpConfig",
     # Retry utilities

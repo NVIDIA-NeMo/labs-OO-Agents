@@ -23,14 +23,10 @@ classifiers = [
 ]
 dependencies = [
     "pydantic>=2.5.0",
-    # context_blocks + unifiedllm now ship as nooa.context_blocks /
-    # nooa.unifiedllm subpackages — pull their formerly-external deps in.
-    # >=1.84.0: CVE-2026-49468 (Critical, proxy-server RCE) is fixed in 1.84.0;
-    # also keeps us past the yanked 1.82.7/1.82.8 (March 2026 backdoor).
-    "litellm>=1.84.0",
     # from mcp-nemo-oo-agents (now internal)
     "httpx>=0.27.0",
-    "openinference-instrumentation-litellm>=0.1.30",
+    # Reviewed migration target; pinned because the adapter API is evolving quickly.
+    "any-llm-sdk==1.26.0",
 ]
 
 [project.urls]
@@ -63,6 +59,10 @@ nooa-bench = { workspace = true }
 # Extra index URLs to search for packages (in addition to PyPI)
 # Ignore packages uploaded less than 7 days ago to mitigate supply-chain attacks
 exclude-newer = "2026-07-23T00:00:00Z"
+# any-llm-sdk 1.26.0 was explicitly reviewed for this migration and published
+# after the global soak cutoff. Keep all of its transitive dependencies under
+# the normal cutoff; exempt only this direct package release.
+exclude-newer-package = { any-llm-sdk = "2026-08-18T00:00:00Z", openresponses-types = "2026-08-06T00:00:00Z" }
 
 [tool.uv.workspace]
 members = [
@@ -101,7 +101,6 @@ tracing = [
     "opentelemetry-sdk>=1.20.0",
     "openinference-instrumentation>=0.1.42",
     "openinference-semantic-conventions>=0.1.9",
-    "openinference-instrumentation-litellm>=0.1.28",
 ]
 viewer = [
     "fastapi>=0.100.0",
@@ -225,6 +224,7 @@ testpaths = [
     "tests/trace_explorer",
 ]
 pythonpath = [
+    ".",
     "src",
     "packages/nooa-cli/src",
 ]
@@ -237,7 +237,6 @@ markers = [
     "stress: marks tests as stress/load tests that simulate high concurrency (run with '-m stress')",
 ]
 filterwarnings = [
-    "ignore::DeprecationWarning:litellm.*",
     "ignore::DeprecationWarning:aiohttp.*",
     "ignore:coroutine.*was never awaited:RuntimeWarning",
     "ignore:Pydantic serializer warnings:UserWarning",

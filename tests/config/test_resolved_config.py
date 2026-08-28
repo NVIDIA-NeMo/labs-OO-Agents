@@ -45,10 +45,38 @@ class TestModelConfig:
         assert mc.api_base == "https://example.test/v1"
         assert mc.api_key_env == "K"
 
-    def test_extra_passthrough_preserved(self):
-        mc = ModelConfig.from_registry("a", {"model_name": "m", "num_retries": 7})
-        # Unknown litellm passthrough keys are kept (extra="allow").
-        assert mc.num_retries == 7  # type: ignore[attr-defined]
+    def test_unknown_fields_are_rejected(self):
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            ModelConfig.from_registry("a", {"model_name": "m", "num_retries": 7})
+
+    def test_common_fields_are_explicitly_typed(self):
+        mc = ModelConfig.from_registry(
+            "a",
+            {
+                "retry_config": {"max_retries": 1},
+                "reasoning": {"effort": "high"},
+                "extra_body": {"trace": True},
+                "request": {"max_output_tokens": 99, "temperature": 0.2},
+            },
+        )
+        assert mc.retry_config is not None
+        assert mc.reasoning == {"effort": "high"}
+        assert mc.extra_body == {"trace": True}
+        assert mc.request.max_output_tokens == 99
+
+    def test_aliases_warn_and_canonicalize(self):
+        with pytest.warns(DeprecationWarning, match="api_base"):
+            mc = ModelConfig.from_registry("a", {"api_base": "https://example.test/v1"})
+        assert mc.registry_dict()["endpoint"] == "https://example.test/v1"
+        assert "api_base" not in mc.registry_dict()
+
+    def test_rejects_alias_and_provider_option_collisions(self):
+        with pytest.raises(ValidationError, match="collides"):
+            ModelConfig.from_registry(
+                "a", {"max_tokens": 1, "request": {"max_output_tokens": 2}}
+            )
+        with pytest.raises(ValidationError, match="reserved key"):
+            ModelConfig.from_registry("a", {"provider_options": {"endpoint": "bad"}})
 
     def test_frozen(self):
         mc = ModelConfig.from_registry("a", {"model_name": "m"})

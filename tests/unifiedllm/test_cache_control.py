@@ -2,23 +2,25 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for Anthropic prompt caching support in CompletionClient.
 
-Tests the cache_control injection and the litellm patch that prevents
+Tests the cache_control injection and the any_llm patch that prevents
 cache_control from being stripped for Anthropic models.
 """
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-import litellm
 import pytest
 
 from nooa.unifiedllm import CompletionClient
 
 
-def make_mock_response(content: str = "ok") -> litellm.ModelResponse:
-    """Create a minimal litellm.ModelResponse for testing."""
-    msg = litellm.Message(content=content, role="assistant")
-    choice = litellm.Choices(message=msg, index=0, finish_reason="stop")
-    return litellm.ModelResponse(choices=[choice], model="test-model")
+def make_mock_response(content: str = "ok") -> SimpleNamespace:
+    """Create a minimal any_llm.ModelResponse for testing."""
+    msg = SimpleNamespace(
+        content=content, role="assistant", tool_calls=None, reasoning_content=None
+    )
+    choice = SimpleNamespace(message=msg, index=0, finish_reason="stop")
+    return SimpleNamespace(choices=[choice], model="test-model", usage=None)
 
 
 # ---------------------------------------------------------------------------
@@ -124,65 +126,27 @@ class TestDefaultCacheControlInjectionPoints:
 
 
 # ---------------------------------------------------------------------------
-# litellm patch preserves cache_control for Anthropic models
+# any_llm patch preserves cache_control for Anthropic models
 # ---------------------------------------------------------------------------
 
 
-class TestCacheControlPreservePatch:
-    """Tests for the monkey-patch that prevents litellm from stripping cache_control."""
-
-    def test_patch_preserves_for_anthropic(self):
-        """cache_control survives for Anthropic model names."""
-        from litellm.llms.openai.chat.gpt_transformation import OpenAIGPTConfig
-
-        config = OpenAIGPTConfig()
-        messages = [
-            {"role": "system", "content": "Hi", "cache_control": {"type": "ephemeral"}},
-            {"role": "user", "content": "Hello"},
-        ]
-
-        result_messages, _ = config.remove_cache_control_flag_from_messages_and_tools(
-            model="openai/aws/anthropic/bedrock-claude-sonnet-4-5-v1",
-            messages=messages,
-        )
-
-        # cache_control should be preserved
-        assert result_messages[0].get("cache_control") == {"type": "ephemeral"}
-
-    def test_patch_strips_for_non_anthropic(self):
-        """cache_control is still stripped for non-Anthropic models."""
-        from litellm.llms.openai.chat.gpt_transformation import OpenAIGPTConfig
-
-        config = OpenAIGPTConfig()
-        messages = [
-            {"role": "system", "content": "Hi", "cache_control": {"type": "ephemeral"}},
-            {"role": "user", "content": "Hello"},
-        ]
-
-        result_messages, _ = config.remove_cache_control_flag_from_messages_and_tools(
-            model="openai/gpt-4o",
-            messages=messages,
-        )
-
-        # cache_control should be stripped for non-Anthropic
-        assert "cache_control" not in result_messages[0]
-
-
 # ---------------------------------------------------------------------------
-# End-to-end: cache_control reaches litellm.completion
+# End-to-end: cache_control reaches any_llm.completion
 # ---------------------------------------------------------------------------
 
 
 class TestCacheControlEndToEnd:
-    """Verify cache_control is present in the messages passed to litellm."""
+    """Verify cache_control is present in the messages passed to any_llm."""
 
     @pytest.mark.asyncio
     async def test_acall_passes_cache_control(self):
-        """acall() should inject cache_control before calling litellm."""
+        """acall() should inject cache_control before calling any_llm."""
         client = CompletionClient(model="openai/aws/anthropic/bedrock-claude-sonnet-4-5-v1")
         mock_response = make_mock_response()
 
-        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
+        with patch.object(
+            client._transport, "acompletion", new_callable=AsyncMock
+        ) as mock_acompletion:
             mock_acompletion.return_value = mock_response
 
             await client.acall(
@@ -209,7 +173,9 @@ class TestCacheControlEndToEnd:
         )
         mock_response = make_mock_response()
 
-        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
+        with patch.object(
+            client._transport, "acompletion", new_callable=AsyncMock
+        ) as mock_acompletion:
             mock_acompletion.return_value = mock_response
 
             await client.acall(
@@ -229,7 +195,7 @@ class TestCacheControlEndToEnd:
         client = CompletionClient(model="openai/aws/anthropic/bedrock-claude-sonnet-4-5-v1")
         mock_response = make_mock_response()
 
-        with patch("litellm.completion") as mock_completion:
+        with patch.object(client._transport, "completion") as mock_completion:
             mock_completion.return_value = mock_response
 
             client.call(
@@ -412,7 +378,9 @@ class TestDefaultIncludesPositionBased:
         client = CompletionClient(model="openai/aws/anthropic/bedrock-claude-sonnet-4-5-v1")
         mock_response = make_mock_response()
 
-        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
+        with patch.object(
+            client._transport, "acompletion", new_callable=AsyncMock
+        ) as mock_acompletion:
             mock_acompletion.return_value = mock_response
 
             await client.acall(

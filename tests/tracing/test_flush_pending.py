@@ -16,7 +16,7 @@ import threading
 import time
 from unittest.mock import patch
 
-from nooa.tracing._litellm_journal import (
+from nooa.tracing._llm_journal import (
     _PENDING_THREADS,
     _post_json,
     flush_pending,
@@ -37,7 +37,7 @@ def test_flush_pending_blocks_until_post_completes():
         finished.set()
 
     with patch(
-        "nooa.tracing._litellm_journal.urllib.request.urlopen",
+        "nooa.tracing._llm_journal.urllib.request.urlopen",
         side_effect=slow_post,
     ):
         _post_json("http://example.invalid/v1/journal/calls", {"call_id": "x"})
@@ -101,7 +101,7 @@ def test_flush_pending_handles_thread_added_during_flush():
         return fake_response
 
     with patch(
-        "nooa.tracing._litellm_journal.urllib.request.urlopen",
+        "nooa.tracing._llm_journal.urllib.request.urlopen",
         side_effect=dispatcher,
     ):
         _post_json("http://example.invalid/one", {"x": 1})
@@ -148,7 +148,7 @@ def test_pending_threads_self_evict_when_post_returns():
         return resp
 
     with patch(
-        "nooa.tracing._litellm_journal.urllib.request.urlopen",
+        "nooa.tracing._llm_journal.urllib.request.urlopen",
         side_effect=fast_post,
     ):
         for i in range(5):

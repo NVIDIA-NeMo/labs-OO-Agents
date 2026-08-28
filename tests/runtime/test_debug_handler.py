@@ -323,7 +323,7 @@ class TestDetectLlmInStack:
         from nooa.runtime.debug_handler import _detect_llm_in_stack
 
         bad_frame = MagicMock()
-        bad_frame.f_code.co_filename = "/site-packages/litellm/main.py"
+        bad_frame.f_code.co_filename = "/site-packages/any_llm/main.py"
         bad_frame.f_code.co_name = "completion"
         bad_frame.f_lineno = 42
         # Make f_back raise

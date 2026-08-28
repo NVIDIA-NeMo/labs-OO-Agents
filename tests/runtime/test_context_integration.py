@@ -574,7 +574,6 @@ class TestScopedContextCurrentCallFiltering:
         fake_llm = FakeLLMClient(
             scripted_responses=[
                 LLMResponse(
-                    raw_response=None,
                     content="",
                     tool_calls=[
                         ToolCall(

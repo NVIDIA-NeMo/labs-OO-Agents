@@ -9,7 +9,6 @@ import inspect
 import io
 import linecache
 import logging
-import math
 import re as _re
 import tokenize
 import types
@@ -100,15 +99,6 @@ def _harness_metrics_lifecycle(should_trace: bool):
 
 def _make_llm_metrics_bridge(hm: "HarnessMetrics") -> Callable[[str, Any], None]:
     """Create a callback that bridges unifiedllm metric events to HarnessMetrics."""
-    from nooa.runtime.token_usage import accumulate_tokens
-
-    def _handle_token_usage(usage: Any) -> None:
-        if isinstance(usage, dict):
-            accumulate_tokens(
-                input_tokens=usage.get("prompt_tokens", 0) or 0,
-                output_tokens=usage.get("completion_tokens", 0) or 0,
-            )
-
     _dispatch: dict[str, Callable[[Any], None]] = {
         "think_tag_extracted": lambda _: hm.record_think_tag_extracted(),
         "malformed_think_tag_fixed": lambda _: hm.record_malformed_think_tag(),
@@ -118,7 +108,6 @@ def _make_llm_metrics_bridge(hm: "HarnessMetrics") -> Callable[[str, Any], None]
         "json_nested_extraction": lambda _: hm.record_json_nested_extraction(),
         "json_double_decoded": lambda _: hm.record_json_double_decoded(),
         "reasoning_as_structured_output": lambda _: hm.record_reasoning_as_structured_output(),
-        "token_usage": _handle_token_usage,
     }
 
     def bridge(event: str, detail: Any = None) -> None:
@@ -198,13 +187,13 @@ def _resolve_provider_formatter(llm_client: Any, default_formatter: Any) -> Any:
     """Auto-select provider formatter based on LLM client type.
 
     ResponsesClient needs ResponsesProviderFormatter to emit native Responses
-    API wire format.  All other clients (including Anthropic via LiteLLM) use
+    API wire format.  All other clients (including Anthropic via AnyLLM) use
     the agent's configured formatter.
 
     This is intentionally runtime-dispatched rather than config-driven:
-    Anthropic formatting is handled by LiteLLM (so OpenAIProviderFormatter
+    Anthropic formatting is handled by AnyLLM (so OpenAIProviderFormatter
     works), but the Responses API has a fundamentally different wire shape
-    that LiteLLM does not translate, requiring its own formatter.
+    that AnyLLM does not translate, requiring its own formatter.
     """
     from nooa.unifiedllm import ResponsesClient
 
@@ -219,13 +208,8 @@ def _resolve_provider_formatter(llm_client: Any, default_formatter: Any) -> Any:
 # Shared collapse/archival helpers (L4 boundary + error-driven archival)
 # ---------------------------------------------------------------------------
 
-# When the LLM API returns a context-window error, archive events until utilization
-# drops to this fraction of the token budget cap. Lower = more headroom before re-triggering.
-_ARCHIVE_TARGET_UTILIZATION = 0.60
-
-# Cold-start chars→tokens ratio (~4 chars per token) used before any provider
-# response has calibrated _tokens_per_char from real usage.
-_DEFAULT_TOKENS_PER_CHAR = 0.25
+# Context recovery is provider-driven: archive a fixed oldest-event batch and
+# retry once. No token metadata participates in control flow.
 
 
 def _collapse_oldest(
@@ -236,13 +220,7 @@ def _collapse_oldest(
     *,
     log_prefix: str = "collapse",
 ) -> int:
-    """Collapse the *target* oldest active events in one shot.
-
-    Collapses a single contiguous range from the start of active_tags,
-    producing one summary event instead of many tiny fragments.
-
-    Returns the number of events actually archived.
-    """
+    """Collapse a deterministic oldest-event batch in one shot."""
     if target <= 0:
         return 0
     n = min(target, len(active_tags))
@@ -258,117 +236,11 @@ def _collapse_oldest(
         return 0
 
 
-# ---------------------------------------------------------------------------
-# ContextWindowExceededError recovery helpers
-# ---------------------------------------------------------------------------
-
-_MIN_RECOVERY_OUTPUT_TOKENS = 1024
-
-
-_PROMPT_TOKENS_RE = _re.compile(
-    r"(?:prompt|request)[^0-9]*"
-    # "contains/has N tokens" (OpenAI/NVIDIA) OR
-    # "is too long: N tokens" (Anthropic / Azure-Anthropic gateway)
-    r"(?:contains?|has|is\s+too\s+long\s*:?)\s+(?:at\s+least\s+)?(\d[\d,]*)\s*(?:input\s+)?tokens",
-    _re.IGNORECASE,
-)
-
-_CONTEXT_WINDOW_TOKENS_RE = _re.compile(
-    r"maximum\s+context\s+length\s+is\s+(\d[\d,]*)\s+tokens"
-    r"|context\s+window\s+of\s+(?:this\s+model\s+is\s+)?(\d[\d,]*)\s+tokens"
-    r"|(\d[\d,]*)\s+tokens\s*>\s*(\d[\d,]*)\s+maximum",
-    _re.IGNORECASE,
-)
-
-
 def _is_context_window_error(exc: BaseException) -> bool:
-    """Recognize context-window errors using typed and provider-normalized signals."""
-    try:
-        from litellm.exceptions import ContextWindowExceededError
-    except Exception:  # pragma: no cover - litellm is optional at import time
-        ContextWindowExceededError = None  # type: ignore[assignment]
+    """Accept only the normalized UnifiedLLM context-length exception."""
+    from nooa.unifiedllm import LLMContextLengthError
 
-    seen: set[int] = set()
-    cur: BaseException | None = exc
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        if ContextWindowExceededError is not None and isinstance(cur, ContextWindowExceededError):
-            return True
-
-        name = type(cur).__name__.lower()
-        msg = str(cur).lower()
-        if (
-            "contextwindowexceeded" in name
-            or "context length" in msg
-            or "context_length_exceeded" in msg
-            or "context window" in msg
-            # Anthropic / Azure-Anthropic gateway phrasing, surfaced as a
-            # BadRequestError rather than a typed ContextWindowExceededError:
-            #   "prompt is too long: 1017198 tokens > 1000000 maximum"
-            or "prompt is too long" in msg
-        ):
-            return True
-        cur = cur.__cause__ or cur.__context__
-    return False
-
-
-def _parse_prompt_tokens(exc: BaseException) -> int | None:
-    """Extract prompt token count from a ContextWindowExceededError chain."""
-    seen: set[int] = set()
-    cur: BaseException | None = exc
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        m = _PROMPT_TOKENS_RE.search(str(cur))
-        if m:
-            return int(m.group(1).replace(",", ""))
-        cur = cur.__cause__ or cur.__context__
-    return None
-
-
-def _parse_context_window_tokens(exc: BaseException) -> int | None:
-    """Extract model context-window size from a ContextWindowExceededError chain."""
-    seen: set[int] = set()
-    cur: BaseException | None = exc
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        m = _CONTEXT_WINDOW_TOKENS_RE.search(str(cur))
-        if m:
-            # Alternatives capture either the window directly or "input > maximum".
-            for group in reversed(m.groups()):
-                if group:
-                    return int(group.replace(",", ""))
-        cur = cur.__cause__ or cur.__context__
-    return None
-
-
-def _context_window_for_error(llm_client: Any, exc: BaseException) -> int | None:
-    """Return the provider-reported context window, falling back to the client."""
-    reported = _parse_context_window_tokens(exc)
-    if reported:
-        return reported
-    return getattr(llm_client, "context_window", None)
-
-
-def _compute_reduced_max_tokens(
-    exc: BaseException,
-    ctx_window: int | None,
-    original_max_tokens: int | None,
-) -> int | None:
-    """Compute reduced max_tokens for context window recovery.
-
-    Returns the reduced value, or None if recovery is not possible.
-    """
-    prompt_tok = _parse_prompt_tokens(exc)
-    if ctx_window and prompt_tok:
-        margin = max(int(ctx_window * 0.02), 256)
-        reduced = ctx_window - prompt_tok - margin
-    elif ctx_window and original_max_tokens:
-        reduced = original_max_tokens // 2
-    else:
-        return None
-    if reduced < _MIN_RECOVERY_OUTPUT_TOKENS:
-        return None
-    return reduced
+    return isinstance(exc, LLMContextLengthError)
 
 
 def _strip_blocked_modules(
@@ -625,14 +497,8 @@ class ActorRuntime:
         # asyncio.gather on the same agent, the last write wins. For per-task
         # isolation, read stats from the on_messages_built hook's context_stats kwarg.
         self._last_context_stats: ContextWindowStats | None = None
-        self._last_prompt_tokens_actual: int | None = None
         self._event_format_cache: dict[tuple[tuple[str, Any], ...], Any] = {}
         self._event_format_cache_max_entries = 32
-        # Chars→tokens ratio, calibrated from the last provider response
-        # (prompt_tokens / total_chars). Every token estimate in the system is
-        # chars × this ratio, anchored to the real provider count. Defaults to
-        # the ~4-chars-per-token heuristic before the first response.
-        self._tokens_per_char: float = _DEFAULT_TOKENS_PER_CHAR
 
     def _event_format_for_event(self, event: Any) -> Any:
         """Return the FormatConfig to use when serializing an event.
@@ -677,91 +543,15 @@ class ActorRuntime:
             self._generation_lock = asyncio.Lock()
             self._generation_lock_loop = loop
 
-    def _archive_on_context_error(
-        self,
-        ctx_window: int | None,
-        exc: BaseException | None = None,
-    ) -> None:
-        """Archive oldest events after a ContextWindowExceededError from the API.
-
-        Only called when the LLM actually rejects the request as too large.
-        Uses the last context stats to estimate how many events to shed.
-        """
-        stats = self._last_context_stats
-        if not stats or not ctx_window:
-            return
-        active_tags = list(self.event_manager.keys())
-        n_active = len(active_tags)
-        if n_active == 0:
-            return
-        # Shed against the REAL current prompt size vs a REAL 70% budget of the
-        # USABLE window (model window minus the output-token reserve — the
-        # provider rejected prompt + completion budget, so headroom must
-        # account for the completion too).
-        # After successful calls, stats.total_tokens is provider usage. On a
-        # COLD-START context error (the first call IS the overflow, so no prior
-        # response has reported usage), stats.total_tokens is None — prefer the
-        # authoritative token count the error itself reports; if the error text
-        # omits a parseable count, fall back to chars × the calibrated ratio
-        # (the same chars→tokens estimate used everywhere else) to size the shed.
-        usable_window = max(1, ctx_window - (stats.reserved_output_tokens or 0))
-        cap = int(usable_window * 0.70)
-        target_tok = int(cap * _ARCHIVE_TARGET_UTILIZATION)
-        # Char-based estimates used only when no provider token count exists.
-        events_tok = stats.events_tokens
-        if events_tok is None:
-            events_tok = round(stats.events_chars * self._tokens_per_char)
-        total_tok = stats.total_tokens
-        if total_tok is None:
-            total_tok = round(
-                (stats.context_blocks_chars + stats.events_chars) * self._tokens_per_char
-            )
-        if exc is not None:
-            reported = _parse_prompt_tokens(exc)
-            if reported and reported > total_tok:
-                total_tok = reported
-            elif reported is None and total_tok <= target_tok:
-                # The provider rejected the request, so the prompt exceeded the
-                # true window even if our estimate is still under target and the
-                # error text omits a parseable token count. Shed at least one
-                # average event instead of no-op'ing and retrying the same prompt.
-                avg_event_guess = math.ceil(max(1, events_tok) / max(1, n_active))
-                total_tok = target_tok + max(1, avg_event_guess)
-        tokens_to_shed = max(0, total_tok - target_tok)
-        if tokens_to_shed == 0:
-            return
-        # Only event tokens are archiveable. total_tok may include fixed
-        # tool-schema tokens, and archiving events cannot remove those; using
-        # total_tok - context_blocks here would overestimate per-event size and
-        # under-archive for tool-heavy agents. If attribution says events are
-        # zero-token but active events exist (e.g. structured ToolCallEvents
-        # rendered with content=""), fall back to a prompt-wide average so one
-        # context error does not collapse the entire active history.
-        if events_tok > 0:
-            avg_event_tok = events_tok / max(1, n_active)
-        else:
-            avg_event_tok = total_tok / max(1, n_active)
-        n_to_archive = min(
-            int(math.ceil(tokens_to_shed / max(1, avg_event_tok))),
-            n_active,
+    def _archive_on_context_error(self) -> int:
+        """Archive one fixed batch after a normalized provider rejection."""
+        return _collapse_oldest(
+            self.event_manager,
+            list(self.event_manager.keys()),
+            self.agent._truncation.context_error_event_batch,
+            "provider context-length error; archived oldest event batch",
+            log_prefix="context-error-archival",
         )
-        if n_to_archive > 0:
-            summary_text = (
-                f"context-window API error: total_tokens={total_tok:,}, "
-                f"cap={cap:,}, archiving {n_to_archive} events to reach "
-                f"{_ARCHIVE_TARGET_UTILIZATION:.0%} utilization"
-            )
-            _collapse_oldest(
-                self.event_manager,
-                active_tags,
-                n_to_archive,
-                summary_text,
-                log_prefix="context-error-archival",
-            )
-            hm = get_harness_metrics()
-            if isinstance(hm, HarnessMetrics):
-                hm.context_limits_events_collapsed += n_to_archive
-                hm.context_limits_tokens_archived += int(n_to_archive * avg_event_tok)
 
     @property
     def _agent_call_stack(self) -> tuple[str | None, ...]:
@@ -823,21 +613,6 @@ class ActorRuntime:
             current_id = self.runtime.current_call.id
         """
         return _current_call_var.get()
-
-    @property
-    def last_prompt_tokens_actual(self) -> int | None:
-        """Provider-reported prompt token count from the most recent generation.
-
-        Read-only public accessor for the actual (API-reported) prompt token
-        count recorded after the last LLM call, or ``None`` if no provider count
-        is available yet (e.g. before the first response). Used by budget-based
-        summarizers (e.g. ``TokenBudgetSummarizer``).
-
-        NOTE: This is a plain instance attribute, not a ContextVar. Under
-        concurrent ``asyncio.gather`` on the same agent the last write wins; it is
-        intended for coarse budget checks, not per-task accounting.
-        """
-        return self._last_prompt_tokens_actual
 
     @property
     def _current_method(self) -> Any:
@@ -993,38 +768,19 @@ class ActorRuntime:
                     except Exception as _cw_exc:
                         if not _is_context_window_error(_cw_exc):
                             raise
-                        # Always archive first — even if we can't reduce max_tokens,
-                        # shedding events lets the retry (or caller's next attempt) succeed.
-                        _ctx_window = _context_window_for_error(llm_client, _cw_exc)
-                        self._archive_on_context_error(
-                            _ctx_window,
-                            exc=_cw_exc,
-                        )
-                        _reduced = _compute_reduced_max_tokens(
-                            _cw_exc,
-                            _ctx_window,
-                            ctx.params.get("max_tokens"),
-                        )
-                        if _reduced is None:
+                        if self._archive_on_context_error() <= 0:
                             raise
-                        logger.warning(
-                            "context-window recovery (middleware): reducing max_tokens %s -> %d",
-                            ctx.params.get("max_tokens"),
-                            _reduced,
-                        )
-                        # Re-build messages after archival so the retry sees the
-                        # reduced event store.
+                        logger.warning("context-length recovery: archived oldest event batch")
                         ctx.messages = await self._build_messages(
                             self._current_method,
                             call_args=self._current_call.args if self._current_call else (),
                             call_kwargs=self._current_call.kwargs if self._current_call else {},
                             tools=ctx.params.get("tools"),
-                            max_output_tokens=_reduced,
+                            max_output_tokens=ctx.params.get("max_tokens"),
                         )
                         _dynamic_context = _snapshot_llm_request(
                             self.event_manager, ctx.messages, current_generation_id or ""
                         )
-                        ctx.params["max_tokens"] = _reduced
                         ctx = await em.run_middleware("llm_call", ctx, _core_llm)
                 except Exception as _exc:
                     _emit_llm_end(success=False, exception_type=type(_exc).__name__)
@@ -1075,51 +831,21 @@ class ActorRuntime:
                     except Exception as _cw_exc:
                         if not _is_context_window_error(_cw_exc):
                             raise
-                        # Always archive first — even if we can't reduce max_tokens,
-                        # shedding events lets the retry (or caller's next attempt) succeed.
-                        _ctx_window = _context_window_for_error(llm_client, _cw_exc)
-                        self._archive_on_context_error(
-                            _ctx_window,
-                            exc=_cw_exc,
-                        )
-                        _reduced = _compute_reduced_max_tokens(
-                            _cw_exc,
-                            _ctx_window,
-                            kwargs.get("max_tokens"),
-                        )
-                        if _reduced is None:
-                            # Can't compute a reduced max_tokens, but archival already ran.
-                            # Re-raise so the caller (e.g. CodeAct) retries with fresh messages.
+                        if self._archive_on_context_error() <= 0:
                             raise
-                        logger.warning(
-                            "context-window recovery: reducing max_tokens %s -> %d "
-                            "(prompt=%s, ctx_window=%s)",
-                            kwargs.get("max_tokens"),
-                            _reduced,
-                            _parse_prompt_tokens(_cw_exc),
-                            _ctx_window,
-                        )
-                        # Re-build messages after archival so the retry sees the
-                        # reduced event store. Retrying with the same messages would
-                        # fail again when input tokens exceed the context window.
+                        logger.warning("context-length recovery: archived oldest event batch")
                         messages = await self._build_messages(
                             self._current_method,
                             call_args=self._current_call.args if self._current_call else (),
                             call_kwargs=self._current_call.kwargs if self._current_call else {},
                             tools=tools,
-                            max_output_tokens=_reduced,
+                            max_output_tokens=kwargs.get("max_tokens"),
                         )
                         _dynamic_context = _snapshot_llm_request(
                             self.event_manager, messages, current_generation_id or ""
                         )
-                        # Reuse _kwargs (already has the per-(agent, strategy) key set)
-                        # so recovery lands on the same shard as the original attempt.
-                        _recovery_kw = {**_kwargs, "max_tokens": _reduced}
                         response = await llm_client.acall(
-                            messages,
-                            tools=tools,
-                            output_model=output_model,
-                            **_recovery_kw,
+                            messages, tools=tools, output_model=output_model, **_kwargs
                         )
                 except Exception as _exc:
                     _emit_llm_end(success=False, exception_type=type(_exc).__name__)
@@ -1135,8 +861,6 @@ class ActorRuntime:
         usage = getattr(response, "usage", None)
         # Normalize usage to a dict regardless of whether the provider returned
         # a dict, a Pydantic model with attributes, or nothing at all. The
-        # token-calibration logic above already grovels through both shapes;
-        # mirror that here so LLMComplete metrics don't silently zero out.
         _usage_raw = usage if usage is not None else getattr(response, "usage", None)
         _usage_dict: dict[str, Any] = {}
         if isinstance(_usage_raw, dict):
@@ -1177,24 +901,6 @@ class ActorRuntime:
         _prompt_tokens = int(
             _usage_dict.get("prompt_tokens") or _usage_dict.get("input_tokens") or 0
         )
-        if _prompt_tokens > 0:
-            self._last_prompt_tokens_actual = _prompt_tokens
-            if self._last_context_stats is not None:
-                # The provider's exact prompt-token count is the single source of
-                # truth for ctx% display, summarization triggers, and archive
-                # sizing. render_context leaves prompt_tokens=None (no local
-                # estimate); we write the authoritative value back here.
-                stats = self._last_context_stats
-                self._last_context_stats = stats.model_copy(
-                    update={"prompt_tokens": _prompt_tokens}
-                )
-                # Recalibrate the chars→tokens ratio from this real response:
-                # tokens_per_char = prompt_tokens / total_chars. The next
-                # render's eviction sizing uses it instead of a fixed heuristic
-                # or the litellm tokenizer.
-                total_chars = stats.context_blocks_chars + stats.events_chars
-                if total_chars > 0:
-                    self._tokens_per_char = _prompt_tokens / total_chars
         _completion_tokens = int(
             _usage_dict.get("completion_tokens") or _usage_dict.get("output_tokens") or 0
         )
@@ -2986,60 +2692,14 @@ class ActorRuntime:
         then render_context() to format them using the agent's configured
         block and provider formatters.
 
-        ``tools`` is accepted for call-site compatibility. This method no
-        longer performs full-payload pre-call token estimation; context stats
-        stay as render_context fallback until provider usage is written after a
-        successful call.
-
-        ``max_output_tokens`` is the completion budget of the upcoming call
-        (``kwargs["max_tokens"]`` at the generate() call site, or the reduced
-        value during context-window recovery). It is reserved out of the model
-        window for budgeting and utilization: the provider rejects any request
-        where prompt + completion budget exceeds the window, so the usable
-        input window is ``context_window - reserve``. When the call does not
-        set ``max_tokens`` explicitly, providers shrink the completion budget
-        to fit and no hard reserve applies — we then fall back to the
-        configured ``TruncationConfig.response_reserve_tokens`` as a planning
-        reserve (0 disables).
+        ``tools`` and ``max_output_tokens`` are accepted for call-site
+        compatibility. Rendering does not estimate or budget model tokens.
         """
         hm = get_harness_metrics()
         with hm.timer("time_prepare_context"):
             blocks = await self._prepare_context(method, call_args, call_kwargs)
         tc = self.agent._truncation
         llm_client = _current_llm_var.get()
-
-        effective_context_limit = tc.max_context_tokens
-        ctx_window = getattr(llm_client, "context_window", None)
-
-        # Output-token reserve (see docstring). Per-call max_tokens is the
-        # binding constraint when set; otherwise the configured planning
-        # reserve.
-        reserved_output = max_output_tokens
-        if not reserved_output:
-            reserved_output = tc.response_reserve_tokens or None
-
-        # Default (unconfigured) context budget: up to half the USABLE window
-        # (model window minus the output reserve).
-        if (
-            effective_context_limit is None
-            and ctx_window is not None
-            and tc.response_reserve_tokens > 0
-        ):
-            usable_window = max(0, ctx_window - (reserved_output or 0))
-            effective_context_limit = usable_window // 2
-
-        # Token sizing for eviction uses the provider-calibrated chars→tokens
-        # ratio (prompt_tokens / total_chars from the last response), not the
-        # LLM's tokenizer. Every token number in the system is therefore
-        # chars × the same ratio, anchored to real provider usage. No LLM
-        # ``count_tokens`` method is required.
-        ratio = self._tokens_per_char
-
-        def count_tokens(text: str) -> int:
-            # chars × ratio. No per-block floor: the budget is compared against
-            # the SUM, so flooring each tiny block to ≥1 token would over-count
-            # (and spuriously evict) agents with many small context blocks.
-            return round(len(text) * ratio)
 
         with hm.timer("time_render_context"):
             provider_formatter = _resolve_provider_formatter(
@@ -3049,23 +2709,12 @@ class ActorRuntime:
                 blocks,
                 block_formatter=self.agent.render_config.block_formatter,
                 provider_formatter=provider_formatter,
-                context_limit=effective_context_limit,
-                count_tokens=count_tokens,
                 event_format=tc.event_format,
                 event_format_resolver=self._event_format_for_event,
-                model_context_window=getattr(llm_client, "context_window", None),
-                reserved_output_tokens=reserved_output,
             )
 
-        # ``render_context`` is a framework-agnostic leaf and does not touch the
-        # runtime's metrics. The runtime owns ``HarnessMetrics``, so it
-        # increments the eviction counter here from the count the renderer
-        # reported via its stats (see issue #330).
-        if result.stats.context_blocks_dropped and isinstance(hm, HarnessMetrics):
-            hm.context_limits_blocks_evicted += result.stats.context_blocks_dropped
-
         # Publish the rendered message list to the tracing sideband so
-        # the litellm journal callback can compress block bodies into a
+        # the any_llm journal callback can compress block bodies into a
         # content-addressed sideband and ship a hash-only skeleton on
         # the wire.  Pure tracing concern -- the runtime hands over its
         # ``RenderedMessage``s and is otherwise oblivious to
@@ -3083,5 +2732,4 @@ class ActorRuntime:
         # for diagnostics and context-window error recovery.
         messages = result.output
         self._last_context_stats = result.stats
-        self._last_prompt_tokens_actual = None
         return messages

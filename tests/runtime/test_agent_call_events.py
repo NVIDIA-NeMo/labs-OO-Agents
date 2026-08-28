@@ -26,7 +26,6 @@ _DEFAULT = FakeLLMClient()
 
 def _predict_resp(content: str) -> LLMResponse:
     return LLMResponse(
-        raw_response=None,
         content=content,
         tool_calls=[],
         finish_reason="stop",

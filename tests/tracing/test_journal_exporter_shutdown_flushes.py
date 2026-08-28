@@ -35,7 +35,7 @@ def test_shutdown_joins_pending_journal_posts():
     → ``JournalExporter.shutdown`` → returns immediately → process exits
     → daemon-thread POSTs are killed mid-flight."""
     from nooa.tracing._journal_exporter import JournalExporter
-    from nooa.tracing._litellm_journal import _post_json
+    from nooa.tracing._llm_journal import _post_json
 
     exporter = JournalExporter("http://example.invalid")
 
@@ -55,7 +55,7 @@ def test_shutdown_joins_pending_journal_posts():
         return fake
 
     with patch(
-        "nooa.tracing._litellm_journal.urllib.request.urlopen",
+        "nooa.tracing._llm_journal.urllib.request.urlopen",
         side_effect=slow_post,
     ):
         # Dispatch a journal POST; daemon thread blocks inside urlopen.

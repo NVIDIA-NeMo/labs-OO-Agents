@@ -16,7 +16,7 @@ Usage — reference this file via ``import_path`` in your Harbor config
 Credentials: set ``NVIDIA_INFERENCE_API_KEY`` (inference.nvidia.com gateway)
 or ``NVIDIA_API_KEY`` (public NIM endpoint) on the host — it is forwarded
 into the agent process. The NVIDIA endpoints are OpenAI-compatible, so the
-key is also exposed as ``OPENAI_API_KEY`` for litellm when you point
+key is also exposed as ``OPENAI_API_KEY`` for the OpenAI-compatible transport when you point
 ``api_base`` at them. To use another provider directly, add its key to
 ``FORWARDED_ENV_VARS`` below.
 
@@ -132,7 +132,7 @@ class NooaBenchAgent(BaseInstalledAgent):
             f"2>&1 | tee /logs/agent/nooa_bench.log"
         )
         env = {k: v for k in FORWARDED_ENV_VARS if (v := os.environ.get(k))}
-        # The NVIDIA endpoints are OpenAI-compatible; litellm reads the key
+        # The NVIDIA endpoints are OpenAI-compatible; the transport reads the key
         # from OPENAI_API_KEY when the model is routed via api_base.
         nvidia_key = env.get("NVIDIA_INFERENCE_API_KEY") or env.get("NVIDIA_API_KEY")
         if nvidia_key:

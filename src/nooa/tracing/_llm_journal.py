@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""LiteLLM CustomLogger that maintains a content-addressed message journal.
+"""NOOA-native lifecycle sink that maintains a content-addressed message journal.
 
 Intercepts the message list *before* each LLM call and posts only messages
 not yet seen in this session to ``POST /v1/journal/messages``.  After each
@@ -13,11 +13,7 @@ not the full accumulated context window.
 
 Usage (handled automatically by ``enable_tracing()``)::
 
-    import litellm
-    from nooa.tracing._litellm_journal import (
-        MessageJournalCallback,
-    )
-    litellm.callbacks.append(MessageJournalCallback("http://localhost:5001"))
+    from nooa.tracing._llm_journal import MessageJournalCallback
 """
 
 from __future__ import annotations
@@ -32,10 +28,10 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any
 
-from litellm.integrations.custom_logger import CustomLogger
 from opentelemetry import trace as otel_trace
 
 from nooa.tracing._journal_builder import _encode_image
+from nooa.tracing._secret_scrubber import scrub_string, scrub_value
 from nooa.tracing._session import get_session
 
 log = logging.getLogger(__name__)
@@ -55,8 +51,19 @@ def _hash_msg(msg: dict) -> str:
     return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def _replace_block_hashes(value: Any, replacements: dict[str, str]) -> Any:
+    """Recursively update skeleton references after redacted blocks are re-hashed."""
+    if isinstance(value, dict):
+        return {key: _replace_block_hashes(item, replacements) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_replace_block_hashes(item, replacements) for item in value]
+    if isinstance(value, str):
+        return replacements.get(value, value)
+    return value
+
+
 def _msg_to_dict(msg: Any) -> dict:
-    """Normalise a litellm message to a plain JSON-serialisable dict."""
+    """Normalise a provider message to a plain JSON-serialisable dict."""
     if msg is None:
         return {}
     if isinstance(msg, dict):
@@ -66,11 +73,16 @@ def _msg_to_dict(msg: Any) -> dict:
     try:
         return dict(msg)
     except TypeError:
-        return {"raw": str(msg)}
+        fields = {
+            key: getattr(msg, key)
+            for key in ("role", "content", "tool_calls", "tool_call_id", "name")
+            if hasattr(msg, key)
+        }
+        return fields or {"raw": str(msg)}
 
 
 def _extract_output_msgs(response_obj: Any) -> list[dict]:
-    """Pull assistant messages out of a litellm completion response.
+    """Pull assistant messages out of a provider response.
 
     Handles both Chat Completions format (.choices) and Responses API format (.output).
     """
@@ -89,6 +101,10 @@ def _extract_output_msgs(response_obj: Any) -> list[dict]:
                     msgs.append(item)
                 else:
                     msgs.append({"type": getattr(item, "type", "unknown"), "repr": repr(item)})
+        elif getattr(response_obj, "assistant_message", None):
+            msgs.append(_msg_to_dict(response_obj.assistant_message))
+        elif getattr(response_obj, "content", None) is not None:
+            msgs.append({"role": "assistant", "content": response_obj.content})
     except Exception as exc:
         log.debug("Failed to extract output messages: %s", exc)
     return msgs
@@ -273,7 +289,7 @@ def _post_json(
         t.start()
 
 
-# Process-wide lock guarding the scan-and-append on ``litellm.callbacks``
+# Process-wide lock guarding the scan-and-append on the native sink registry
 # in :meth:`JournalExporter._install`.  Two ``enable_tracing`` calls for
 # the same base_url racing concurrently would otherwise both scan, see
 # no existing :class:`MessageJournalCallback`, and each append a fresh
@@ -340,9 +356,7 @@ class _Destination:
 
     Each ``MessageJournalCallback`` holds an ordered list of these so the
     eval pipeline can fan a single LLM call's journal payload out to both
-    the in-process headless backend and the user's running viewer without
-    needing two ``litellm.callbacks`` entries (litellm only delivers
-    ``log_success_event`` to one callback per class).
+    the in-process headless backend and the user's running viewer through one native lifecycle sink, preserving identical fan-out.
     """
 
     __slots__ = (
@@ -370,8 +384,8 @@ class _Destination:
         self.sent_hashes: set[str] = set()
 
 
-class MessageJournalCallback(CustomLogger):
-    """LiteLLM callback that streams skeletons + content-addressed blocks.
+class MessageJournalCallback:
+    """NOOA lifecycle sink that streams skeletons + content-addressed blocks.
 
     Per LLM call:
 
@@ -385,18 +399,14 @@ class MessageJournalCallback(CustomLogger):
        ``/v1/journal/calls`` *on every configured destination*.  Output
        messages (assistant replies) are included inline.
 
-    Multiple destinations live behind a single callback so they all get
-    every event.  litellm dispatches ``log_pre_api_call`` to every
-    callback in ``litellm.callbacks`` but only delivers
-    ``log_success_event`` to one per class — putting all destinations
-    inside one callback instance sidesteps that asymmetry.
+    Multiple destinations live behind a single lifecycle sink so they all
+    receive the same correlated begin/success/failure events.
 
     Per-destination, per-session in-memory hash sets avoid retransmitting
     blocks that were already sent for that session.
     """
 
     def __init__(self, base_url: str | list[str]) -> None:
-        super().__init__()
         if isinstance(base_url, str):
             urls: list[str] = [base_url]
         else:
@@ -404,7 +414,7 @@ class MessageJournalCallback(CustomLogger):
         if not urls:
             raise ValueError("MessageJournalCallback requires at least one base URL")
         self._destinations: list[_Destination] = [_Destination(u) for u in urls]
-        # litellm_call_id -> (input_skeleton, span_id | None). Entries
+        # call_id -> (input_skeleton, span_id | None). Entries
         # are removed in log_success_event / log_failure_event.
         self._call_inputs: dict[str, tuple[list[dict], str | None]] = {}
         self._lock = threading.Lock()
@@ -535,18 +545,32 @@ class MessageJournalCallback(CustomLogger):
         )
 
         session_id = self._session()
-        call_id = kwargs.get("litellm_call_id", "")
+        call_id = kwargs.get("call_id", "")
 
         payload = get_journal_payload()
         if payload is not None:
             set_journal_payload(None)  # consume
-            self._send_new_blocks(session_id, payload.blocks)
-            input_skeleton = payload.skeleton
+            clean_skeleton, _ = scrub_value(payload.skeleton)
+            clean_blocks: dict[str, str] = {}
+            replacements: dict[str, str] = {}
+            for old_hash, content in payload.blocks.items():
+                clean_content, redactions = scrub_string(str(content))
+                if redactions:
+                    new_hash = "sha256:" + hashlib.sha256(clean_content.encode()).hexdigest()
+                    replacements[old_hash] = new_hash
+                else:
+                    new_hash = old_hash
+                clean_blocks[new_hash] = clean_content
+            if replacements:
+                clean_skeleton = _replace_block_hashes(clean_skeleton, replacements)
+            self._send_new_blocks(session_id, clean_blocks)
+            input_skeleton = clean_skeleton
         else:
             # No sideband — publish the raw messages as the skeleton
             # with no block refs. The viewer just uses their content
             # as-is, matching what the wire shows.
-            input_skeleton = [_msg_to_dict(m) for m in messages]
+            clean_messages, _ = scrub_value([_msg_to_dict(m) for m in messages])
+            input_skeleton = clean_messages
 
         span_id = self._current_span_id()
         with self._lock:
@@ -556,7 +580,7 @@ class MessageJournalCallback(CustomLogger):
         self, kwargs: dict, response_obj: Any, start_time: Any, end_time: Any
     ) -> None:
         session_id = self._session()
-        call_id = kwargs.get("litellm_call_id", "")
+        call_id = kwargs.get("call_id", "")
         with self._lock:
             stored = self._call_inputs.pop(call_id, None)
         if stored is None:
@@ -569,7 +593,7 @@ class MessageJournalCallback(CustomLogger):
         else:
             input_skeleton, span_id = stored
 
-        raw_output = _extract_output_msgs(response_obj)
+        raw_output, _ = scrub_value(_extract_output_msgs(response_obj))
         # Content-address the output messages too. The assistant's reply
         # itself doesn't dedup across *different* calls, but a single
         # reply can already be hundreds of KB when it embeds a large
@@ -585,15 +609,29 @@ class MessageJournalCallback(CustomLogger):
         usage = getattr(response_obj, "usage", None)
         tokens: dict[str, int] | None = None
         if usage:
+
+            def usage_value(*names: str, default: Any = 0) -> Any:
+                for name in names:
+                    value = (
+                        usage.get(name) if isinstance(usage, dict) else getattr(usage, name, None)
+                    )
+                    if value is not None:
+                        return value
+                return default
+
             tokens = {
-                "prompt": getattr(usage, "prompt_tokens", 0) or 0,
-                "completion": getattr(usage, "completion_tokens", 0) or 0,
+                "prompt": int(usage_value("prompt_tokens", "input_tokens") or 0),
+                "completion": int(usage_value("completion_tokens", "output_tokens") or 0),
             }
-            details = getattr(usage, "prompt_tokens_details", None)
-            if details:
-                cached = getattr(details, "cached_tokens", 0) or 0
-                if cached:
-                    tokens["cached"] = cached
+            details = usage_value("prompt_tokens_details", "input_tokens_details", default={})
+            cached = (
+                details.get("cached_tokens", 0)
+                if isinstance(details, dict)
+                else getattr(details, "cached_tokens", 0)
+            )
+            cached = cached or usage_value("cached_input_tokens", default=0)
+            if cached:
+                tokens["cached"] = int(cached)
 
         record: dict = {
             "call_id": call_id,
@@ -604,6 +642,7 @@ class MessageJournalCallback(CustomLogger):
             "input_skeleton": input_skeleton,
             "output_messages": output_messages,
             "tokens": tokens,
+            "outcome": "success",
         }
         if span_id:
             record["span_id"] = span_id
@@ -619,9 +658,37 @@ class MessageJournalCallback(CustomLogger):
     def log_failure_event(
         self, kwargs: dict, response_obj: Any, start_time: Any, end_time: Any
     ) -> None:
-        call_id = kwargs.get("litellm_call_id", "")
+        session_id = self._session()
+        call_id = kwargs.get("call_id", "")
         with self._lock:
-            self._call_inputs.pop(call_id, None)
+            stored = self._call_inputs.pop(call_id, None)
+        input_skeleton, span_id = stored if stored is not None else ([], None)
+        error = response_obj
+        record: dict[str, Any] = {
+            "call_id": call_id,
+            "session_id": session_id,
+            "model": kwargs.get("model", ""),
+            "ts_start": _to_ts(start_time),
+            "ts_end": _to_ts(end_time),
+            "input_skeleton": input_skeleton,
+            "output_messages": [],
+            "tokens": None,
+            # ``status`` is retained for existing consumers; ``outcome`` is
+            # the explicit lifecycle result used by newer journal readers.
+            "status": "cancelled"
+            if isinstance(error, BaseException) and not isinstance(error, Exception)
+            else "error",
+            "outcome": "cancelled"
+            if isinstance(error, BaseException) and not isinstance(error, Exception)
+            else "error",
+            "error": {
+                "type": type(error).__name__,
+                "message": scrub_string(str(error))[0],
+            },
+        }
+        if span_id:
+            record["span_id"] = span_id
+        self._send_call(session_id, record)
 
     # ------------------------------------------------------------------
     # Async hooks — delegate to sync; ContextVar propagates correctly
@@ -650,7 +717,6 @@ class FileMessageJournalCallback(MessageJournalCallback):
     """
 
     def __init__(self, writer: Any) -> None:
-        CustomLogger.__init__(self)
         self._call_inputs: dict[str, tuple[list[dict], str | None]] = {}
         self._lock = threading.Lock()
         self._writers: dict[Any, int] = {writer: 1}
@@ -695,3 +761,74 @@ class FileMessageJournalCallback(MessageJournalCallback):
             writers = list(self._writers)
         for writer in writers:
             writer.append_call(session_id, record)
+
+
+# Process-wide native sink registry. Exporters register sinks here; lifecycle
+# hooks fan each logical call out to every active sink.
+_SINKS: list[MessageJournalCallback] = []
+_SINKS_LOCK = threading.Lock()
+
+
+def register_sink(sink: MessageJournalCallback) -> MessageJournalCallback:
+    with _SINKS_LOCK:
+        if sink not in _SINKS:
+            _SINKS.append(sink)
+    return sink
+
+
+def unregister_sink(sink: MessageJournalCallback) -> None:
+    with _SINKS_LOCK:
+        if sink in _SINKS:
+            _SINKS.remove(sink)
+
+
+def begin_call(call_id: str, model: str, messages: list[dict[str, Any]]) -> None:
+    from nooa.tracing._context_sideband import get_journal_payload, set_journal_payload
+
+    with _SINKS_LOCK:
+        sinks = list(_SINKS)
+    kwargs = {"call_id": call_id, "model": model}
+    payload = get_journal_payload()
+    for sink in sinks:
+        set_journal_payload(payload)
+        sink.log_pre_api_call(model, messages, kwargs)
+    set_journal_payload(None)
+
+
+def end_call(
+    call_id: str,
+    model: str,
+    response: Any,
+    start_time: float,
+    exception: BaseException | None = None,
+) -> None:
+    with _SINKS_LOCK:
+        sinks = list(_SINKS)
+    kwargs = {"call_id": call_id, "model": model}
+    now = time.time()
+    for sink in sinks:
+        if exception is None:
+            sink.log_success_event(kwargs, response, start_time, now)
+        else:
+            sink.log_failure_event(kwargs, exception, start_time, now)
+
+
+def acquire_http_sink(base_url: str) -> MessageJournalCallback:
+    """Share one HTTP sink while retaining per-destination refcounts."""
+    normalized = base_url.rstrip("/")
+    with _SINKS_LOCK:
+        for sink in _SINKS:
+            if type(sink) is MessageJournalCallback and normalized in sink.base_urls:
+                sink.add_destination(normalized)
+                return sink
+        sink = MessageJournalCallback(normalized)
+        _SINKS.append(sink)
+        return sink
+
+
+def release_http_sink(sink: MessageJournalCallback, base_url: str) -> None:
+    """Release one exporter reference and unregister an unused sink."""
+    sink.remove_destination(base_url)
+    with _SINKS_LOCK:
+        if not sink.has_destinations() and sink in _SINKS:
+            _SINKS.remove(sink)

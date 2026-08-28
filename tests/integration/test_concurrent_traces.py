@@ -50,7 +50,6 @@ class FakeLLM:
         # Return a proper tool-call response so CodeAct executes the code
         # and terminates via return_result() on the first iteration.
         return LLMResponse(
-            raw_response=None,
             content="",
             tool_calls=[
                 ToolCall(

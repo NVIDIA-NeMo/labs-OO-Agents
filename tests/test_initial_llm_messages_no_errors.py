@@ -92,7 +92,6 @@ class TestInitialLlmMessagesNoErrors:
         fake_llm = FakeLLMClient(
             scripted_responses=[
                 LLMResponse(
-                    raw_response=None,
                     content="",
                     tool_calls=[_return_result_tool(42)],
                     finish_reason="tool_calls",

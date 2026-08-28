@@ -12,8 +12,7 @@ queues and re-enters ``handle()`` once per notification. It provides:
   and sessions,
 * ``message()`` — send a Markdown message to the user,
 * the ``handle()`` → ``RespondResult`` turn protocol,
-* token-budget history summarization (``install_summarizer`` /
-  ``apply_model_limits``).
+* explicit history summarization helpers.
 
 ``nooa_cli.coding.CodingAgent`` adds the shared coding tools used by
 interactive hosts such as the TUI and ACP.
@@ -35,7 +34,6 @@ with hidden:
     from collections.abc import Callable
 
     from nooa import Agent
-    from nooa.agents import TokenBudgetSummarizer
     from nooa.config import CodeActConfig, PredictConfig  # noqa: F401
     from nooa.runtime.channels import Channel, QueueManager, _ChannelReader
     from nooa.runtime.producers_skill import ProducersSkill
@@ -83,9 +81,6 @@ try:
     import sklearn  # noqa: F401  # type: ignore[import-untyped]
 except ImportError:
     pass
-
-with hidden:
-    from nooa.unifiedllm import UnifiedLLM
 
 
 class RespondReason(StrEnum):
@@ -169,17 +164,9 @@ class AgentMessage(Metadata):
 
 
 class SummarizationConfig(BaseModel):
-    """Configuration for history summarization.
+    """Interactive summarization configuration. Automatic token triggers were removed."""
 
-    ``max_tokens`` defaults to ``None`` meaning "80% of the LLM's context
-    window, resolved at install time." The old 100K absolute was fine when
-    models had ~200K context but fired at ~10% usage on 1M-context models
-    like Opus 4.8, making summarization feel constant. Set an explicit
-    integer to pin a specific threshold.
-    """
-
-    policy: Literal["token_budget", "none"] = "token_budget"
-    max_tokens: int | None = None
+    policy: Literal["none"] = "none"
     preserve_recent: int = 10
     target_chars: int = 4000
 
@@ -199,68 +186,12 @@ with hidden:
         _DEFAULT_LLM = FakeLLMClient()
 
 
-# Summarizer trigger as a fraction of the LLM's context window. This is the
-# ONLY budget managed here — event-pile truncation is enforced at the
-# runtime level (see ActorRuntime._build_messages) and adapts to whichever
-# LLM is actually resolved for each call (including per-call overrides).
-_SUMMARIZER_BUDGET_PCT = 0.8
-
-
-def _summarizer_budget(llm: "UnifiedLLM") -> int:
-    """Resolve the summarizer trigger from the LLM's context window.
-
-    Falls back to 100K when the LLM doesn't expose ``context_window`` so
-    we still have a functional threshold.
-    """
-    cw = getattr(llm, "context_window", None)
-    return int(cw * _SUMMARIZER_BUDGET_PCT) if cw else 100_000
-
-
 def apply_model_limits(agent: Agent) -> None:
-    """Sync the summarizer trigger against ``agent.llm.context_window``.
-
-    Call after a model switch so the summarizer threshold moves with the
-    new context window. Runtime-level event truncation picks up the new
-    window automatically on the next ``_build_messages`` call.
-    """
-    from nooa.config.summarizer_config import TokenBudgetConfig
-
-    summarizer_max = _summarizer_budget(agent.llm)
-    for summarizer in getattr(agent, "_summarizers", []):
-        current = summarizer.config
-        summarizer.config = TokenBudgetConfig(
-            max_tokens=summarizer_max,
-            preserve_recent=current.preserve_recent,
-            target_chars=current.target_chars,
-        )
+    """Compatibility no-op; model metadata no longer controls runtime behavior."""
 
 
 def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
-    """Install a summarizer on the agent based on configuration.
-
-    Args:
-        config: Summarization configuration. ``config.max_tokens=None`` (the
-            default) resolves to 80% of the agent LLM's context window at
-            install time, so the trigger scales with model capability.
-        agent: Agent to install summarizer on (inherits LLM, attaches to history)
-    """
-    if config.policy == "none":
-        return
-
-    from nooa.config.summarizer_config import TokenBudgetConfig
-
-    summarizer_max = (
-        config.max_tokens if config.max_tokens is not None else _summarizer_budget(agent.llm)
-    )
-
-    TokenBudgetSummarizer.install(
-        agent,
-        config=TokenBudgetConfig(
-            max_tokens=summarizer_max,
-            preserve_recent=config.preserve_recent,
-            target_chars=config.target_chars,
-        ),
-    )
+    """Automatic token-triggered summarization has been removed."""
 
 
 class AgentVars:

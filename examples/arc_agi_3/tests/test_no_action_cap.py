@@ -143,7 +143,6 @@ def _codeact_response(code: str):
 
     args = json.dumps({"code": code})
     return LLMResponse(
-        raw_response=None,
         content="",
         tool_calls=[
             ToolCall(id=f"call_{abs(hash(code)) & 0xFFFF}", name="execute_python", arguments=args)

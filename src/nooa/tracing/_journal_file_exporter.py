@@ -25,7 +25,7 @@ from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from nooa.tracing._otlp_serialize import build_resource_spans
 
 if TYPE_CHECKING:
-    from nooa.tracing._litellm_journal import FileMessageJournalCallback
+    from nooa.tracing._llm_journal import FileMessageJournalCallback
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ JOURNAL_VERSION = 1
 
 
 class JournalFileWriter:
-    """Thread-safe writer shared by the span exporter and LiteLLM callback."""
+    """Thread-safe writer shared by the span exporter and native LLM lifecycle sink."""
 
     def __init__(self, trace_dir: str | Path) -> None:
         self.trace_dir = Path(trace_dir)
@@ -116,21 +116,9 @@ class JournalFileExporter(SpanExporter):
         self._callback = self._install_callback()
 
     def _install_callback(self) -> FileMessageJournalCallback:
-        import litellm
+        from nooa.tracing._llm_journal import FileMessageJournalCallback, register_sink
 
-        from nooa.tracing._litellm_journal import _INSTALL_LOCK, FileMessageJournalCallback
-
-        with _INSTALL_LOCK:
-            for callback in litellm.callbacks:
-                if (
-                    isinstance(callback, FileMessageJournalCallback)
-                    and type(callback) is FileMessageJournalCallback
-                ):
-                    callback.add_writer(self._writer)
-                    return callback
-            callback = FileMessageJournalCallback(self._writer)
-            litellm.callbacks.append(callback)
-            return callback
+        return register_sink(FileMessageJournalCallback(self._writer))
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         try:
@@ -155,14 +143,9 @@ class JournalFileExporter(SpanExporter):
         return SpanExportResult.SUCCESS
 
     def shutdown(self) -> None:
-        import litellm
+        from nooa.tracing._llm_journal import unregister_sink
 
-        from nooa.tracing._litellm_journal import _INSTALL_LOCK
-
-        with _INSTALL_LOCK:
-            self._callback.remove_writer(self._writer)
-            if not self._callback.has_writers():
-                litellm.callbacks = [c for c in litellm.callbacks if c is not self._callback]
+        unregister_sink(self._callback)
 
     def force_flush(self, timeout_millis: int = 30_000) -> bool:
         return True

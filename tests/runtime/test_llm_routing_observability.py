@@ -17,7 +17,6 @@ from nooa.unifiedllm import FakeLLMClient, LLMResponse
 
 def _resp(value: str) -> LLMResponse:
     return LLMResponse(
-        raw_response=None,
         content=f'{{"value": "{value}"}}',
         tool_calls=[],
         finish_reason="stop",

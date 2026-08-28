@@ -182,21 +182,18 @@ async def nemo_relay_llm_middleware(
         resp = captured_ctx.response
         if resp is None:
             return {}
-        # Prefer the raw litellm ModelResponse (Pydantic) — gives NeMo Relay the
-        # full OpenAI-style structure matching what the old hooks-based
-        # integration returned via captured_response.model_dump(mode="json").
-        raw = getattr(resp, "raw_response", None)
-        if raw is not None and hasattr(raw, "model_dump"):
-            return raw.model_dump(mode="json")
-        # Pydantic response (e.g. passed directly)
+        # UnifiedLLM owns the serialization boundary; provider SDK response
+        # objects never cross into Relay or other framework consumers.
+        to_wire = getattr(resp, "to_wire", None)
+        if callable(to_wire):
+            return to_wire()
         if hasattr(resp, "model_dump"):
             return resp.model_dump(mode="json")  # type: ignore[union-attr]
-        # Fallback: manual serialization from unifiedllm.LLMResponse dataclass.
         if hasattr(resp, "assistant_message"):
             result: dict[str, Any] = {"message": resp.assistant_message}
-            if resp.usage:
+            if getattr(resp, "usage", None):
                 result["usage"] = resp.usage
-            if resp.finish_reason:
+            if getattr(resp, "finish_reason", None):
                 result["finish_reason"] = resp.finish_reason
             return result
         return {}

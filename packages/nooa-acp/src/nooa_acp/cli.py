@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     "--model",
     envvar="NOOA_MODEL",
     required=True,
-    help="LiteLLM model name or configured NOOA model alias. Or set NOOA_MODEL.",
+    help="provider model name or configured NOOA model alias. Or set NOOA_MODEL.",
 )
 @click.option(
     "--client-type",

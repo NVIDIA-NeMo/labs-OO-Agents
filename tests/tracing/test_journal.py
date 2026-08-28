@@ -20,7 +20,7 @@ from nooa.tracing._context_sideband import (
     JournalPayload,
     set_journal_payload,
 )
-from nooa.tracing._litellm_journal import (
+from nooa.tracing._llm_journal import (
     MessageJournalCallback,
 )
 
@@ -48,7 +48,7 @@ def session_ctx():
 
 
 def _fake_response(content: str = ""):
-    """Minimal stand-in for a litellm completion response."""
+    """Minimal stand-in for a any_llm completion response."""
     choice = SimpleNamespace(
         message=SimpleNamespace(
             content=content,
@@ -73,10 +73,10 @@ class TestJournalCallbackPreApiCall:
         set_journal_payload(payload)
 
         with patch(
-            "nooa.tracing._litellm_journal._post_json",
+            "nooa.tracing._llm_journal._post_json",
             side_effect=fake_post,
         ):
-            cb.log_pre_api_call("model-x", [], {"litellm_call_id": "cid1"})
+            cb.log_pre_api_call("model-x", [], {"call_id": "cid1"})
 
         # Blocks were posted.
         block_posts = [c for c in calls if c[0].endswith("/v1/journal/blocks")]
@@ -95,13 +95,13 @@ class TestJournalCallbackPreApiCall:
 
         payload = JournalPayload(skeleton=[], blocks={"h1": "<b/>"})
         with patch(
-            "nooa.tracing._litellm_journal._post_json",
+            "nooa.tracing._llm_journal._post_json",
             side_effect=fake_post,
         ):
             set_journal_payload(payload)
-            cb.log_pre_api_call("m", [], {"litellm_call_id": "c1"})
+            cb.log_pre_api_call("m", [], {"call_id": "c1"})
             set_journal_payload(payload)
-            cb.log_pre_api_call("m", [], {"litellm_call_id": "c2"})
+            cb.log_pre_api_call("m", [], {"call_id": "c2"})
 
         block_posts = [c for c in calls if c[0].endswith("/v1/journal/blocks")]
         # First call posts the block; second call skips it (already sent).
@@ -115,10 +115,10 @@ class TestJournalCallbackPreApiCall:
         set_journal_payload(None)  # explicitly empty
         messages = [{"role": "user", "content": "hello"}]
         with patch(
-            "nooa.tracing._litellm_journal._post_json",
+            "nooa.tracing._llm_journal._post_json",
             side_effect=fake_post,
         ):
-            cb.log_pre_api_call("m", messages, {"litellm_call_id": "cid"})
+            cb.log_pre_api_call("m", messages, {"call_id": "cid"})
 
         # No block POSTs (nothing to post).
         assert not any(c[0].endswith("/v1/journal/blocks") for c in calls)
@@ -139,12 +139,12 @@ class TestJournalCallbackSuccessEvent:
             )
         )
         with patch(
-            "nooa.tracing._litellm_journal._post_json",
+            "nooa.tracing._llm_journal._post_json",
             side_effect=fake_post,
         ):
-            cb.log_pre_api_call("m", [], {"litellm_call_id": "cid"})
+            cb.log_pre_api_call("m", [], {"call_id": "cid"})
             cb.log_success_event(
-                {"litellm_call_id": "cid", "model": "m"},
+                {"call_id": "cid", "model": "m"},
                 _fake_response("answer"),
                 1.0,
                 2.0,
@@ -181,18 +181,18 @@ class TestSentBlocksBounding:
 
         payload = JournalPayload(skeleton=[], blocks={"h1": "block1"})
         with patch(
-            "nooa.tracing._litellm_journal._post_json",
+            "nooa.tracing._llm_journal._post_json",
             side_effect=fake_post,
         ):
             # Post block under session A
             set_session("session-A")
             set_journal_payload(payload)
-            cb.log_pre_api_call("m", [], {"litellm_call_id": "c1"})
+            cb.log_pre_api_call("m", [], {"call_id": "c1"})
 
             # Switch to session B — same block hash should be re-posted
             set_session("session-B")
             set_journal_payload(payload)
-            cb.log_pre_api_call("m", [], {"litellm_call_id": "c2"})
+            cb.log_pre_api_call("m", [], {"call_id": "c2"})
 
         block_posts = [c for c in calls if c[0].endswith("/v1/journal/blocks")]
         assert len(block_posts) == 2, "Block should be posted once per session"
@@ -208,15 +208,47 @@ class TestSentBlocksBounding:
 
         payload = JournalPayload(skeleton=[], blocks={"h1": "block1"})
         with patch(
-            "nooa.tracing._litellm_journal._post_json",
+            "nooa.tracing._llm_journal._post_json",
             side_effect=failing_post,
         ):
             set_journal_payload(payload)
-            cb.log_pre_api_call("m", [], {"litellm_call_id": "c1"})
+            cb.log_pre_api_call("m", [], {"call_id": "c1"})
 
             # Same block again — should be re-posted since prior POST "failed"
             set_journal_payload(payload)
-            cb.log_pre_api_call("m", [], {"litellm_call_id": "c2"})
+            cb.log_pre_api_call("m", [], {"call_id": "c2"})
 
         block_posts = [c for c in calls if c[0].endswith("/v1/journal/blocks")]
         assert len(block_posts) == 2, "Failed POST should not mark hashes as sent"
+
+
+class TestJournalTerminalEvents:
+    def test_dataclass_usage_and_success_outcome(self, session_ctx):
+        from nooa.unifiedllm import LLMUsage
+
+        cb = MessageJournalCallback("http://localhost:5001")
+        calls, fake_post = _posts()
+        response = _fake_response("ok")
+        response.usage = LLMUsage(input_tokens=7, output_tokens=3, cached_input_tokens=2)
+        with patch("nooa.tracing._llm_journal._post_json", side_effect=fake_post):
+            cb.log_pre_api_call("m", [], {"call_id": "usage"})
+            cb.log_success_event({"call_id": "usage", "model": "m"}, response, 1.0, 2.0)
+
+        record = next(payload for url, payload in calls if url.endswith("/v1/journal/calls"))
+        assert record["tokens"] == {"prompt": 7, "completion": 3, "cached": 2}
+        assert record["outcome"] == "success"
+
+    @pytest.mark.parametrize(("error", "outcome"), [(RuntimeError("boom"), "error"), (KeyboardInterrupt(), "cancelled")])
+    def test_failure_emits_empty_terminal_record(self, session_ctx, error, outcome):
+        cb = MessageJournalCallback("http://localhost:5001")
+        calls, fake_post = _posts()
+        with patch("nooa.tracing._llm_journal._post_json", side_effect=fake_post):
+            cb.log_pre_api_call("m", [{"role": "user", "content": "q"}], {"call_id": "failed"})
+            cb.log_failure_event({"call_id": "failed", "model": "m"}, error, 1.0, 2.0)
+
+        record = next(payload for url, payload in calls if url.endswith("/v1/journal/calls"))
+        assert record["outcome"] == outcome
+        assert record["status"] == outcome
+        assert record["error"]["type"] == type(error).__name__
+        assert record["output_messages"] == []
+        assert "failed" not in cb._call_inputs

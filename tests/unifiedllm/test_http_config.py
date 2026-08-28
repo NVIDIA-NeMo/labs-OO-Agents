@@ -116,7 +116,9 @@ def test_no_pooling_client_has_keepalive_zero():
     from nooa.unifiedllm import CompletionClient, HttpConfig, ResponsesClient
 
     comp = CompletionClient("anthropic/claude-3-5-sonnet", http_config=HttpConfig())
-    resp = ResponsesClient("openai/gpt-5.3-codex", http_config=HttpConfig())
+    resp = ResponsesClient(
+        "openai/gpt-5.3-codex", http_config=HttpConfig(), capabilities={"responses": True}
+    )
     try:
         assert comp._http_config.max_keepalive_connections == 0
         assert _configured_keepalive(comp) == 0
@@ -128,192 +130,34 @@ def test_no_pooling_client_has_keepalive_zero():
         resp.close()
 
 
-def test_responses_client_passes_own_httpx_via_handler():
-    """ResponsesClient wraps its own httpx client in litellm's AsyncHTTPHandler/HTTPHandler."""
-    from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
-
-    from nooa.unifiedllm import HttpConfig, ResponsesClient
-
-    r = ResponsesClient("openai/gpt-5.3-codex", http_config=HttpConfig(max_keepalive_connections=3))
-    try:
-        assert isinstance(r._http.async_client, AsyncHTTPHandler)
-        assert isinstance(r._http.sync_client, HTTPHandler)
-        # The handler must use THIS client's httpx client (not litellm's default).
-        assert r._http.async_client.client is r._http.httpx_async
-        assert r._http.sync_client.client is r._http.httpx_sync
-        assert _configured_keepalive(r) == 3
-    finally:
-        r.close()
-
-
-def test_handler_wrapper_does_not_create_throwaway_async_client(monkeypatch):
-    """Building handler wrappers should not leak a throwaway AsyncHTTPHandler client."""
-    from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
-
-    from nooa.unifiedllm import ResponsesClient
-
-    def fail_create_client(*args, **kwargs):
-        raise AssertionError("AsyncHTTPHandler.__init__ created a throwaway client")
-
-    monkeypatch.setattr(AsyncHTTPHandler, "create_client", fail_create_client)
-    c = ResponsesClient("openai/gpt-5.3-codex")
-    try:
-        assert isinstance(c._http.async_client, AsyncHTTPHandler)
-        assert c._http.async_client.client is c._http.httpx_async
-    finally:
-        c.close()
-
-
 @pytest.mark.asyncio
-async def test_aclose_is_idempotent_after_aclose_and_close(monkeypatch):
-    """aclose() should match close() idempotency and not double-close transports."""
+async def test_aclose_is_idempotent_and_closes_transport(monkeypatch):
     from nooa.unifiedllm import CompletionClient
 
-    c = CompletionClient("anthropic/claude-3-5-sonnet")
+    client = CompletionClient("anthropic/claude-3-5-sonnet")
     calls = 0
-    original_aclose = c._http.httpx_async.aclose
+    original = client._http.httpx_async.aclose
 
-    async def counted_aclose():
+    async def counted():
         nonlocal calls
         calls += 1
-        await original_aclose()
+        await original()
 
-    monkeypatch.setattr(c._http.httpx_async, "aclose", counted_aclose)
-    await c.aclose()
-    await c.aclose()
-    c.close()
+    monkeypatch.setattr(client._http.httpx_async, "aclose", counted)
+    await client.aclose()
+    await client.aclose()
     assert calls == 1
+    assert client._http.httpx_async.is_closed
 
 
-@pytest.mark.asyncio
-async def test_aclose_releases_async_transport_after_close(monkeypatch):
-    """close() must not prevent a later aclose() from releasing async resources."""
+def test_http_client_is_passed_as_provider_option():
     from nooa.unifiedllm import CompletionClient
 
-    c = CompletionClient("anthropic/claude-3-5-sonnet")
-    calls = 0
-    original_aclose = c._http.httpx_async.aclose
-
-    async def counted_aclose():
-        nonlocal calls
-        calls += 1
-        await original_aclose()
-
-    monkeypatch.setattr(c._http.httpx_async, "aclose", counted_aclose)
-    c.close()
-    assert c._http.httpx_sync.is_closed
-    assert not c._http.httpx_async.is_closed
-    await c.aclose()
-    await c.aclose()
-    assert c._http.httpx_async.is_closed
-    assert calls == 1
-
-
-def test_completion_openai_family_uses_openai_sdk_wrapping_httpx(monkeypatch):
-    """OpenAI-family completion clients wrap their httpx client in an AsyncOpenAI/OpenAI."""
-    from openai import AsyncOpenAI, OpenAI
-
-    from nooa.unifiedllm import CompletionClient, HttpConfig
-
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    c = CompletionClient("gpt-4o-mini", http_config=HttpConfig(max_keepalive_connections=0))
+    client = CompletionClient("anthropic/claude-3-5-sonnet")
     try:
-        assert isinstance(c._http.async_client, AsyncOpenAI)
-        assert isinstance(c._http.sync_client, OpenAI)
-        # The OpenAI SDK client must route through our httpx client.
-        assert c._http.async_client._client is c._http.httpx_async
-        assert _configured_keepalive(c) == 0
+        assert client._transport.http_client is client._http.httpx_async
+        assert "http_client" not in client._transport.provider_options
+        assert client._http.httpx_async.follow_redirects is True
     finally:
-        c.close()
-
-
-def test_completion_non_openai_uses_handler():
-    """Anthropic/bedrock completion clients use the AsyncHTTPHandler/HTTPHandler wrappers."""
-    from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
-
-    from nooa.unifiedllm import CompletionClient
-
-    c = CompletionClient("anthropic/claude-3-5-sonnet")
-    try:
-        assert isinstance(c._http.async_client, AsyncHTTPHandler)
-        assert isinstance(c._http.sync_client, HTTPHandler)
-        assert c._http.async_client.client is c._http.httpx_async
-    finally:
-        c.close()
-
-
-@pytest.mark.asyncio
-async def test_aclose_closes_httpx_clients():
-    """aclose() releases the per-client httpx resources."""
-    from nooa.unifiedllm import CompletionClient
-
-    c = CompletionClient("anthropic/claude-3-5-sonnet")
-    async_client = c._http.httpx_async
-    sync_client = c._http.httpx_sync
-    await c.aclose()
-    assert async_client.is_closed
-    assert sync_client.is_closed
-
-
-def test_httpx_clients_preserve_litellm_transport_hardening():
-    """Per-client httpx clients keep litellm's SSL + redirect behaviour."""
-    from nooa.unifiedllm import CompletionClient
-
-    c = CompletionClient("anthropic/claude-3-5-sonnet")
-    try:
-        # follow_redirects must stay True (litellm's default), not httpx's False.
-        assert c._http.httpx_async.follow_redirects is True
-        assert c._http.httpx_sync.follow_redirects is True
-        # ...while still applying this client's connection-pool limits.
-        assert _configured_keepalive(c) == 0
-    finally:
-        c.close()
-
-
-def test_call_forwards_client_to_litellm(monkeypatch):
-    """CompletionClient.call must hand its own client object to litellm.completion."""
-    import litellm
-
-    from nooa.unifiedllm import CompletionClient
-
-    captured = {}
-
-    def fake_completion(**kwargs):
-        captured["client"] = kwargs.get("client")
-        raise RuntimeError("stop here — we only need the client kwarg")
-
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setattr(litellm, "completion", fake_completion)
-    c = CompletionClient(
-        "gpt-4o-mini",
-        retry_config=None,  # no retries — fail fast after the single call
-        http_config=HttpConfig(),
-    )
-    try:
-        with pytest.raises(RuntimeError):
-            c.call([{"role": "user", "content": "hi"}])
-        assert captured["client"] is c._http.sync_client
-    finally:
-        c.close()
-
-
-def test_responses_call_forwards_client_to_litellm(monkeypatch):
-    """ResponsesClient.call must hand its own client object to litellm.responses."""
-    import litellm
-
-    from nooa.unifiedllm import ResponsesClient
-
-    captured = {}
-
-    def fake_responses(**kwargs):
-        captured["client"] = kwargs.get("client")
-        raise RuntimeError("stop here — we only need the client kwarg")
-
-    monkeypatch.setattr(litellm, "responses", fake_responses)
-    c = ResponsesClient("openai/gpt-5.3-codex", retry_config=None)
-    try:
-        with pytest.raises(RuntimeError):
-            c.call([{"role": "user", "content": "hi"}])
-        assert captured["client"] is c._http.sync_client
-    finally:
-        c.close()
+        # Synchronous close cannot safely drive an async client; aclose owns cleanup.
+        client.close()

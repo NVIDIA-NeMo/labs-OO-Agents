@@ -28,7 +28,6 @@ from tests.helpers.cross_module_parent import ParentAgent
 def _exec_python_resp(code: str) -> LLMResponse:
     """Build a CodeAct LLM response that calls execute_python(code=...)."""
     return LLMResponse(
-        raw_response=None,
         content="",
         tool_calls=[ToolCall(id="c1", name="execute_python", arguments=json.dumps({"code": code}))],
         finish_reason="tool_calls",

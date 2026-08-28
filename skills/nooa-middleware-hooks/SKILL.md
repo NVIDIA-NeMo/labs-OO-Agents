@@ -44,7 +44,7 @@ unsubscribe()                                       # intercept() returns a remo
 Verified semantics:
 
 - **Order**: registration order = execution order; first registered is outermost. Nesting across kinds: `agent_call` → per-turn `llm_call` → per-cell `execute_python`.
-- **Short-circuiting** (don't call `nxt`) is allowed for guardrails/caching, but you MUST set the output slot (`ctx.result` / `ctx.response`) — the runtime raises `RuntimeError` if middleware returns without it. To fake an LLM turn, construct an `LLMResponse` (`content`, `tool_calls=[]`, `finish_reason="stop"`, `assistant_message={...}`, `raw_response=None`).
+- **Short-circuiting** (don't call `nxt`) is allowed for guardrails/caching, but you MUST set the output slot (`ctx.result` / `ctx.response`) — the runtime raises `RuntimeError` if middleware returns without it. To fake an LLM turn, construct an `LLMResponse` (`content`, `tool_calls=[]`, `finish_reason="stop"`, `assistant_message={...}`).
 - **Blocking**: raise from the middleware — the exception propagates to the caller exactly like a failure of the wrapped operation (for `llm_call`, CodeAct counts it against its session error budget).
 - **Exceptions are NOT swallowed** — middleware is control flow, unlike hooks.
 - Per-agent: registered on that agent's `EventManager`; subagents have their own.

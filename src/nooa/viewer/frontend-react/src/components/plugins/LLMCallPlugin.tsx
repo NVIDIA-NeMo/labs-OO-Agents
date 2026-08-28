@@ -277,9 +277,11 @@ export function LLMCallPlugin({ event, viewState, rawJsonOpen, viewControls }: P
   const shortModel = model.length > 35 ? model.substring(0, 32) + '...' : model;
   const durationNs = (attrs.duration_ns as number) || 0;
   const statusCode = (attrs.status_code as string) || 'UNSET';
-  const promptTokens = (attrs['llm.token_count.prompt'] as number) || 0;
-  const completionTokens = (attrs['llm.token_count.completion'] as number) || 0;
-  const totalTokens = (attrs['llm.token_count.total'] as number) || promptTokens + completionTokens;
+  // Usage is optional, provider-reported metadata. Preserve missing values rather
+  // than estimating a total from input/output counts.
+  const promptTokens = (attrs['llm.token_count.prompt'] ?? attrs['gen_ai.usage.input_tokens']) as number | undefined;
+  const completionTokens = (attrs['llm.token_count.completion'] ?? attrs['gen_ai.usage.output_tokens']) as number | undefined;
+  const totalTokens = (attrs['llm.token_count.total'] ?? attrs['gen_ai.usage.total_tokens']) as number | undefined;
   const timestamp = event.timestamp ? new Date(event.timestamp).toLocaleTimeString() : '';
   const reasoningContent = extractReasoningContent(attrs);
 
@@ -291,7 +293,7 @@ export function LLMCallPlugin({ event, viewState, rawJsonOpen, viewControls }: P
         </span>
         <span className="text-gray-300 font-mono">{shortModel}</span>
         {reasoningContent && <span className="text-purple-300 text-xs">[reasoning]</span>}
-        {totalTokens > 0 && <span className="text-gray-500">({totalTokens} tokens)</span>}
+        {totalTokens != null && <span className="text-gray-500">({totalTokens} provider-reported tokens)</span>}
         {durationNs > 0 && <span className="text-gray-500">{formatDuration(durationNs)}</span>}
         {statusCode === 'ERROR' && <span className="text-red-400">ERROR</span>}
       </div>
@@ -321,8 +323,9 @@ export function LLMCallPlugin({ event, viewState, rawJsonOpen, viewControls }: P
         LLM Call
       </span>
       <span className="text-gray-300 font-mono">{shortModel}</span>
-      {promptTokens > 0 && <span>in: {promptTokens}</span>}
-      {completionTokens > 0 && <span>out: {completionTokens}</span>}
+      {promptTokens != null && <span title="Provider-reported usage">in: {promptTokens}</span>}
+      {completionTokens != null && <span title="Provider-reported usage">out: {completionTokens}</span>}
+      {totalTokens != null && <span title="Provider-reported usage">total: {totalTokens}</span>}
       {durationNs > 0 && <span>{formatDuration(durationNs)}</span>}
       {handleOpenPlayground && (
         <button

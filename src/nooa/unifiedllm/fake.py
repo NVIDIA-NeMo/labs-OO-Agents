@@ -9,6 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from nooa.unifiedllm.types import LLMUsage
 from nooa.unifiedllm.unifiedllm import LLMResponse, Tool, ToolCall, UnifiedLLM
 
 
@@ -43,10 +44,6 @@ class FakeLLMClient(UnifiedLLM):
         """Return fake context window size for testing."""
         return self._context_window
 
-    def count_tokens(self, text: str) -> int:
-        """Fake token counter - rough estimate of 4 chars per token."""
-        return len(text) // 4 + 1
-
     async def acall(
         self,
         messages: list[dict[str, Any]],
@@ -71,7 +68,6 @@ class FakeLLMClient(UnifiedLLM):
             else:
                 # Return empty response if we've exhausted scripted responses
                 return LLMResponse(
-                    raw_response=None,
                     content="",
                     tool_calls=[],
                     finish_reason="stop",
@@ -97,7 +93,6 @@ class FakeLLMClient(UnifiedLLM):
             return self._response_queue.popleft()
         else:
             return LLMResponse(
-                raw_response=None,
                 content="",
                 tool_calls=[],
                 finish_reason="stop",
@@ -129,17 +124,12 @@ class FakeLLMClient(UnifiedLLM):
         for code in code_strings:
             responses.append(
                 LLMResponse(
-                    raw_response=None,
                     content=code,
                     tool_calls=[],
                     finish_reason="stop",
                     assistant_message={"role": "assistant", "content": code},
                     reasoning=None,
-                    usage={
-                        "prompt_tokens": 10,
-                        "completion_tokens": len(code.split()),
-                        "total_tokens": 10 + len(code.split()),
-                    },
+                    usage=LLMUsage(input_tokens=10, output_tokens=len(code.split())),
                 )
             )
         return cls(scripted_responses=responses)
@@ -159,17 +149,12 @@ class FakeLLMClient(UnifiedLLM):
         return cls(
             scripted_responses=[
                 LLMResponse(
-                    raw_response=None,
                     content=message,
                     tool_calls=[],
                     finish_reason="stop",
                     assistant_message={"role": "assistant", "content": message},
                     reasoning=None,
-                    usage={
-                        "prompt_tokens": 10,
-                        "completion_tokens": len(words),
-                        "total_tokens": 10 + len(words),
-                    },
+                    usage=LLMUsage(input_tokens=10, output_tokens=len(words)),
                 )
             ]
         )
@@ -195,7 +180,6 @@ class FakeLLMClient(UnifiedLLM):
         return cls(
             scripted_responses=[
                 LLMResponse(
-                    raw_response=None,
                     content=message or "",
                     tool_calls=[
                         ToolCall(
@@ -220,7 +204,7 @@ class FakeLLMClient(UnifiedLLM):
                         ],
                     },
                     reasoning=None,
-                    usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                    usage=LLMUsage(input_tokens=10, output_tokens=5),
                 )
             ]
         )
@@ -244,13 +228,12 @@ class FakeLLMClient(UnifiedLLM):
         return cls(
             scripted_responses=[
                 LLMResponse(
-                    raw_response=None,
                     content=message,
                     tool_calls=[],
                     finish_reason="stop",
                     assistant_message={"role": "assistant", "content": message},
                     reasoning=reasoning,
-                    usage={"prompt_tokens": 15, "completion_tokens": 10, "total_tokens": 25},
+                    usage=LLMUsage(input_tokens=15, output_tokens=10),
                 )
             ]
         )

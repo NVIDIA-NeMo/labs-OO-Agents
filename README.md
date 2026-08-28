@@ -139,15 +139,15 @@ NOOA validates generated code (AST checks) and applies module deny-lists before 
 
 ### 1. Choose a model
 
-Choose from supported hosted or local [LiteLLM-supported](https://docs.litellm.ai/) model:
+Choose from supported hosted or local [AnyLLM-supported](https://docs.mozilla.ai/any-llm/) model:
 
 ```python
 from nooa.unifiedllm.registry import get_llm_client
 
-llm = get_llm_client("claude-haiku-4-5")                                            # Anthropic (after `export ANTHROPIC_API_KEY=...`)
-llm = get_llm_client("gpt-5-mini")                                                  # OpenAI    (after `export OPENAI_API_KEY=...`)
-llm = get_llm_client("ollama_chat/qwen3:1.7b", api_base="http://localhost:11434")   # Ollama    (no key)
-llm = get_llm_client("hosted_vllm/Qwen/Qwen3-1.7B", api_base="http://localhost:8000/v1")  # vLLM (no key)
+llm = get_llm_client("anthropic:claude-haiku-4-5")                                            # Anthropic (after `export ANTHROPIC_API_KEY=...`)
+llm = get_llm_client("openai:gpt-5-mini")                                                  # OpenAI    (after `export OPENAI_API_KEY=...`)
+llm = get_llm_client("qwen3:1.7b", provider="openai-compatible", endpoint="http://localhost:11434")   # Ollama    (no key)
+llm = get_llm_client("Qwen/Qwen3-1.7B", provider="openai-compatible", endpoint="http://localhost:8000/v1")  # vLLM (no key)
 ```
 
 ### 2. Your first agent

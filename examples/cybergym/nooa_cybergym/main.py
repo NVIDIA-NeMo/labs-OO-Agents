@@ -90,7 +90,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--reasoning-effort",
         default=os.environ.get("NOOA_CYBERGYM_REASONING_EFFORT"),
-        help="Reasoning effort knob forwarded to LiteLLM.",
+        help="Reasoning effort knob forwarded to AnyLLM.",
     )
     return parser.parse_args()
 

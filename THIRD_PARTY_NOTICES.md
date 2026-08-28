@@ -16,20 +16,32 @@ installed `.dist-info` metadata and source distributions for those packages.
 
 ## `nooa`
 
+any-llm-sdk - Apache License 2.0
+Attribution Statements: NVIDIA includes Mozilla AI's `any-llm-sdk` under the Apache License 2.0 for use with NVIDIA OO Agents.
+License Text(https://spdx.org/licenses/Apache-2.0.html)
+Source/Homepage: https://github.com/mozilla-ai/any-llm
+
+openresponses-types - Apache License 2.0
+Attribution Statements: NVIDIA includes Mozilla AI's `openresponses-types` under the Apache License 2.0 for use with NVIDIA OO Agents.
+License Text(https://spdx.org/licenses/Apache-2.0.html)
+Source/Homepage: https://github.com/mozilla-ai/openresponses-python
+
+anthropic - MIT License
+Attribution Statements: NVIDIA includes `anthropic` under the MIT License for use with NVIDIA OO Agents.
+License Text(https://spdx.org/licenses/MIT.html)
+Source/Homepage: https://github.com/anthropics/anthropic-sdk-python
+
+openai - Apache License 2.0
+Attribution Statements: NVIDIA includes `openai` under the Apache License 2.0 for use with NVIDIA OO Agents.
+License Text(https://spdx.org/licenses/Apache-2.0.html)
+Source/Homepage: https://github.com/openai/openai-python
+
 httpx - BSD 3-Clause License
 Attribution Statements: NVIDIA includes `httpx` under the BSD 3-Clause License for use with NVIDIA OO Agents.
 License Text(https://spdx.org/licenses/BSD-3-Clause.html)
 Source/Homepage: https://github.com/encode/httpx
 
-litellm - MIT License
-Attribution Statements: NVIDIA includes `litellm` under the MIT License for use with NVIDIA OO Agents.
-License Text(https://spdx.org/licenses/MIT.html)
-Source/Homepage: https://github.com/BerriAI/litellm
 
-openinference-instrumentation-litellm - Apache License 2.0
-Attribution Statements: NVIDIA includes `openinference-instrumentation-litellm` under the Apache License 2.0 for use with NVIDIA OO Agents.
-License Text(https://spdx.org/licenses/Apache-2.0.html)
-Source/Homepage: https://github.com/Arize-ai/openinference
 
 pydantic - MIT License
 Attribution Statements: NVIDIA includes `pydantic` under the MIT License for use with NVIDIA OO Agents.
@@ -74,10 +86,6 @@ Attribution Statements: NVIDIA includes `click` under the BSD 3-Clause License f
 License Text(https://spdx.org/licenses/BSD-3-Clause.html)
 Source/Homepage: https://github.com/pallets/click
 
-litellm - MIT License
-Attribution Statements: NVIDIA includes `litellm` under the MIT License for use with NVIDIA OO Agents.
-License Text(https://spdx.org/licenses/MIT.html)
-Source/Homepage: https://github.com/BerriAI/litellm
 
 nooa - Apache License 2.0
 Attribution Statements: NVIDIA includes `nooa` under the Apache License 2.0 for use with NVIDIA OO Agents.
@@ -174,10 +182,6 @@ Attribution Statements: NVIDIA includes `openinference-instrumentation` under th
 License Text(https://spdx.org/licenses/Apache-2.0.html)
 Source/Homepage: https://github.com/Arize-ai/openinference
 
-openinference-instrumentation-litellm - Apache License 2.0
-Attribution Statements: NVIDIA includes `openinference-instrumentation-litellm` under the Apache License 2.0 for use with NVIDIA OO Agents.
-License Text(https://spdx.org/licenses/Apache-2.0.html)
-Source/Homepage: https://github.com/Arize-ai/openinference
 
 openinference-semantic-conventions - Apache License 2.0
 Attribution Statements: NVIDIA includes `openinference-semantic-conventions` under the Apache License 2.0 for use with NVIDIA OO Agents.

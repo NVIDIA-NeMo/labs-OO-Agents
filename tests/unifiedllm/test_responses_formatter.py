@@ -125,7 +125,7 @@ class TestResponsesClientTransformMessages:
     def client(self):
         from nooa.unifiedllm import ResponsesClient
 
-        return ResponsesClient(model="test-model", api_key="fake")
+        return ResponsesClient(model="test-model", api_key="fake", capabilities={"responses": True})
 
     def test_native_format_passthrough(self, client):
         """Messages already in Responses format pass through unchanged."""

@@ -169,7 +169,7 @@ def _resolve_registry_model(registry_name: str, overrides: dict | None = None) -
         )
 
     # Build ModelSpec fields from registry config
-    # model_name from config is the litellm-ready string; fall back to registry key
+    # model_name from config is the provider model string; fall back to registry key
     fields: dict = {
         "model_name": config.get("model_name", registry_name),
     }
@@ -410,11 +410,6 @@ def evaluator_from_config(
     # Enable error capture if CAPTURE_LLM_ERRORS is set (global, once)
     _enable_error_capture_if_requested()
 
-    # Drop unsupported params (e.g., tool_choice for some Azure models via NVIDIA)
-    import litellm
-
-    litellm.drop_params = True
-
     # Create LLM client factories from ModelSpecs (fresh client per sample for parallelism)
     models = {}
     model_factories = {}
@@ -434,7 +429,7 @@ def evaluator_from_config(
 
                 # Build config dict
                 # Guard against api_key_env=None (public registry models that
-                # delegate API key resolution to litellm)
+                # delegate API key resolution to the provider)
                 api_key = os.getenv(s.api_key_env, "") if s.api_key_env else ""
                 config_dict = {
                     "model": s.model_name,
@@ -453,10 +448,10 @@ def evaluator_from_config(
                 # Add reasoning support for Claude and other models
                 if s.reasoning_effort:
                     config_dict["reasoning_effort"] = s.reasoning_effort
-                    # Tell litellm to allow reasoning_effort through for OpenAI-compatible endpoints
+                    # Allow reasoning_effort through for OpenAI-compatible endpoints
                     config_dict["allowed_openai_params"] = ["reasoning_effort"]
 
-                # Build extra_body for litellm passthrough
+                # Build extra_body for provider passthrough
                 extra_body: dict = {}
                 if s.max_thinking_tokens:
                     extra_body["nvext"] = {"max_thinking_tokens": s.max_thinking_tokens}
@@ -478,6 +473,7 @@ def evaluator_from_config(
                 if getattr(s, "client_type", None) == "responses":
                     from nooa.unifiedllm import ResponsesClient
 
+                    config_dict.setdefault("capabilities", {"responses": True})
                     return ResponsesClient(retry_config=retry_config, **config_dict)
                 return CompletionClient(retry_config=retry_config, **config_dict)
 

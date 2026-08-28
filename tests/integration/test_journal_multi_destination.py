@@ -8,19 +8,19 @@ viewer (long-lived, cross-run).  Both must receive *all* journal data for
 every LLM call, not just the first-installed one.
 
 Today this fails: ``MessageJournalCallback`` is registered as a separate
-``litellm.callbacks`` entry per exporter, and litellm fires
+``any_llm.callbacks`` entry per exporter, and any_llm fires
 ``log_pre_api_call`` on both instances but ``log_success_event`` on only
 *one*.  Result: the second-registered destination (the viewer in real eval
 runs) sees ``/v1/journal/messages`` POSTs but never ``/v1/journal/calls``,
 so its ``llm_calls`` table stays empty.
 
 Phase 2 fix: a single callback with a list of destinations, dispatched
-internally.  This sidesteps litellm's same-class callback dedup entirely.
+internally.  This sidesteps any_llm's same-class callback dedup entirely.
 
 This test pins the post-fix contract: when N destinations are configured,
 each one must receive every ``/v1/journal/*`` POST.  It drives the
 callback's hooks directly (``log_pre_api_call`` + ``log_success_event``)
-because litellm's ``mock_response`` shortcut bypasses its callback chain
+because any_llm's ``mock_response`` shortcut bypasses its callback chain
 entirely, so we can't observe dispatch through ``acompletion`` without a
 live or stubbed HTTP backend.  T2 and T6 cover the live path.
 """
@@ -71,16 +71,16 @@ def _drive_one_call(
     )
 
     with patch(
-        "nooa.tracing._litellm_journal._post_json",
+        "nooa.tracing._llm_journal._post_json",
         side_effect=fake_post,
     ):
         callback.log_pre_api_call(
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": "hi"}],
-            kwargs={"litellm_call_id": call_id},
+            kwargs={"call_id": call_id},
         )
         callback.log_success_event(
-            kwargs={"litellm_call_id": call_id, "model": "gpt-3.5-turbo"},
+            kwargs={"call_id": call_id, "model": "gpt-3.5-turbo"},
             response_obj=fake_response,
             start_time=0.0,
             end_time=1.0,
@@ -92,7 +92,7 @@ def _drive_one_call(
 def test_callback_fans_out_call_record_to_every_destination():
     """The callback must be configurable with multiple destination base URLs
     and POST ``/v1/journal/calls`` to each of them on every ``log_success_event``."""
-    from nooa.tracing._litellm_journal import MessageJournalCallback
+    from nooa.tracing._llm_journal import MessageJournalCallback
 
     base_a = "http://a.invalid"
     base_b = "http://b.invalid"
@@ -148,7 +148,7 @@ def test_callback_fans_out_call_record_to_every_destination():
 def test_two_callbacks_each_fan_out_independently():
     """Backwards-compat: two separately-constructed callbacks (the way the
     eval pipeline does it today) must each post to their own destination
-    when both are driven, even if they share state through ``litellm.callbacks``.
+    when both are driven, even if they share state through ``any_llm.callbacks``.
 
     This test is the one that maps directly onto the eval pipeline's
     ``_start_tracing`` shape: ``exporters.journal(headless) +
@@ -156,7 +156,7 @@ def test_two_callbacks_each_fan_out_independently():
     they may collapse into one shared callback with two destinations; either
     way, each destination must end up with the call record.
     """
-    from nooa.tracing._litellm_journal import MessageJournalCallback
+    from nooa.tracing._llm_journal import MessageJournalCallback
 
     base_a = "http://a.invalid"
     base_b = "http://b.invalid"
@@ -165,7 +165,7 @@ def test_two_callbacks_each_fan_out_independently():
     cb_b = MessageJournalCallback(base_b)
 
     # Drive each callback independently.  The bug-today is that real
-    # litellm only delivers log_success_event to one of two same-class
+    # any_llm only delivers log_success_event to one of two same-class
     # callbacks; here we verify each callback works in isolation.
     posts_a = _drive_one_call(cb_a, session_id="t4-cb-a", call_id="c-a")
     posts_b = _drive_one_call(cb_b, session_id="t4-cb-b", call_id="c-b")

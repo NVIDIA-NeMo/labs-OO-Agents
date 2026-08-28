@@ -12,14 +12,12 @@ sink survived.
 
 from __future__ import annotations
 
-import litellm
-
 from nooa.tracing._journal_exporter import JournalExporter
-from nooa.tracing._litellm_journal import MessageJournalCallback
+from nooa.tracing._llm_journal import _SINKS, MessageJournalCallback
 
 
 def _journal_callbacks() -> list[MessageJournalCallback]:
-    return [cb for cb in litellm.callbacks if isinstance(cb, MessageJournalCallback)]
+    return [cb for cb in _SINKS if isinstance(cb, MessageJournalCallback)]
 
 
 def test_two_exporters_same_url_share_one_callback_with_refcount_two():
@@ -65,13 +63,14 @@ def test_distinct_urls_each_get_own_destination():
     try:
         b = JournalExporter("http://b.invalid")
         try:
-            (cb,) = _journal_callbacks()
-            assert sorted(cb.base_urls) == [
+            callbacks = _journal_callbacks()
+            assert sorted(url for cb in callbacks for url in cb.base_urls) == [
                 "http://a.invalid",
                 "http://b.invalid",
             ]
-            for dest in cb._destinations:
-                assert dest.refcount == 1
+            for cb in callbacks:
+                for dest in cb._destinations:
+                    assert dest.refcount == 1
         finally:
             b.shutdown()
     finally:

@@ -191,7 +191,7 @@ class LLMTurn:
     duration_ms: float | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)  # Tool calls in response
     reasoning_content: str = ""  # Hidden/model reasoning emitted alongside response
-    span_id: str = ""  # Span ID of the acompletion span
+    span_id: str = ""  # Span ID of the LLM span
     provider: str = ""  # LLM provider (e.g., "openai", "anthropic")
     invocation_parameters: dict[str, Any] = field(default_factory=dict)  # temperature, etc.
     tools: list[ToolDefinition] = field(default_factory=list)  # Available tools
@@ -832,7 +832,7 @@ def _parse_trace_from_spans(spans: list[dict[str, Any]]) -> list[AgentSession]:
     Builds a complete tree from AGENT spans with:
     - Parent-child relationships via parent_span_id
     - Depth calculated from tree structure
-    - Content (turns) populated from associated generation/acompletion/execution spans
+    - Content (turns) populated from associated generation/LLM/execution spans
 
     Returns a list of root-level sessions (those with no parent AGENT span).
     """
@@ -1171,7 +1171,7 @@ def _populate_session_turns_from_generation(
     spans: list[dict[str, Any]],
     span_index: dict[str, dict],
 ) -> None:
-    """Populate turns from generation/acompletion/execution spans."""
+    """Populate turns from generation/LLM/execution spans."""
     # Find all generation spans for this session
     all_gen_spans = [
         s
@@ -1190,7 +1190,15 @@ def _populate_session_turns_from_generation(
         span_name = span["name"]
         span_attrs = span.get("attributes", {})
 
-        if span_name == "acompletion":
+        # OpenInference kind is canonical; names remain fallbacks for legacy traces.
+        if span_attrs.get("openinference.span.kind") == "LLM" or span_name in {
+            "llm.call",
+            "llm_call",
+            "acompletion",
+            "completion",
+            "aresponses",
+            "responses",
+        }:
             parent_id = span.get("parent_span_id")
             while parent_id:
                 parent_span = span_index.get(parent_id)

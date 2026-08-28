@@ -81,8 +81,6 @@ def test_install_summarizer_none_policy_is_noop(agent):
     assert not getattr(agent, "_summarizers", [])
 
 
-def test_install_summarizer_attaches(agent):
+def test_install_summarizer_legacy_token_policy_is_noop(agent):
     install_summarizer(SummarizationConfig(max_tokens=50_000), agent=agent)
-    summarizers = getattr(agent, "_summarizers", [])
-    assert len(summarizers) == 1
-    assert summarizers[0].config.max_tokens == 50_000
+    assert not getattr(agent, "_summarizers", [])

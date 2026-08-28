@@ -265,7 +265,6 @@ _LLM_STACK_PATTERNS = [
     ("urllib3", "HTTP client (urllib3)"),
     ("requests/", "HTTP client (requests)"),
     # LLM libraries
-    ("litellm", "LiteLLM"),
     ("openai/", "OpenAI SDK"),
     ("anthropic/", "Anthropic SDK"),
     ("google/generativeai", "Google AI SDK"),

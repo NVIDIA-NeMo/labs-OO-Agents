@@ -19,24 +19,24 @@ from nooa.unifiedllm.registry import get_llm_client
 # Load environment variables
 load_dotenv(override=True)
 
-# The examples run against any litellm-supported provider. By default they pick
+# The examples run against any AnyLLM-supported provider. By default they pick
 # whichever credential you have set (see the README's "API Keys"):
 #   * NVIDIA_API_KEY           -> NVIDIA build.nvidia.com NIM (public), served at
-#                                 integrate.api.nvidia.com (litellm `nvidia_nim/`)
+#                                 integrate.api.nvidia.com (provider `nvidia_nim/`)
 #   * OPENAI_API_KEY           -> OpenAI (public)
 #   * NVIDIA_INFERENCE_API_KEY -> NVIDIA internal inference gateway
 #                                 (inference-api.nvidia.com; NVIDIA employees)
-# To use a specific model, set MODEL to any litellm name and provide its key,
-# e.g. MODEL = "claude-haiku-4-5" with ANTHROPIC_API_KEY.
+# To use a specific model, set MODEL to any provider model name and provide its key,
+# e.g. MODEL = "anthropic:claude-haiku-4-5" with ANTHROPIC_API_KEY.
 _internal_key = os.getenv("NVIDIA_INFERENCE_API_KEY") or os.getenv("NVIDIA_INTERNAL_API_KEY")
 if os.getenv("NVIDIA_API_KEY"):
-    # build.nvidia.com NIM. litellm routes `nvidia_nim/*` to
+    # build.nvidia.com NIM. AnyLLM routes `nvidia_nim/*` to
     # integrate.api.nvidia.com; it reads the key from NVIDIA_NIM_API_KEY, so
     # pass NVIDIA_API_KEY (the build.nvidia.com convention) explicitly.
     MODEL = "nvidia_nim/nvidia/nemotron-3-super-120b-a12b"
     llm = get_llm_client(MODEL, api_key=os.environ["NVIDIA_API_KEY"])
 elif os.getenv("OPENAI_API_KEY"):
-    MODEL = "gpt-5-mini"
+    MODEL = "openai:gpt-5-mini"
     llm = get_llm_client(MODEL)
 elif _internal_key:
     # NVIDIA-internal inference gateway (OpenAI-compatible).
@@ -47,7 +47,7 @@ elif _internal_key:
 else:
     # No key set — default to OpenAI so the examples raise a clear
     # missing-OPENAI_API_KEY error rather than a confusing one.
-    MODEL = "gpt-5-mini"
+    MODEL = "openai:gpt-5-mini"
     llm = get_llm_client(MODEL)
 
 

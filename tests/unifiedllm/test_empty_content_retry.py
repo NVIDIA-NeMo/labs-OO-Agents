@@ -2,11 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for empty content retry and reasoning fallback in CompletionClient."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-import litellm
 import pytest
-from litellm.types.utils import ChatCompletionMessageToolCall, Function
 from pydantic import BaseModel
 
 from nooa.unifiedllm import CompletionClient, EmptyContentError, RetryConfig
@@ -15,24 +14,24 @@ from nooa.unifiedllm import CompletionClient, EmptyContentError, RetryConfig
 def make_mock_response(
     content: str | None = None,
     reasoning: str | None = None,
-    tool_calls: list[ChatCompletionMessageToolCall] | None = None,
-) -> litellm.ModelResponse:
-    """Create a litellm.ModelResponse for testing."""
-    msg = litellm.Message(
+    tool_calls: list[SimpleNamespace] | None = None,
+) -> SimpleNamespace:
+    """Create a any_llm.ModelResponse for testing."""
+    msg = SimpleNamespace(
         content=content,
         role="assistant",
         tool_calls=tool_calls,
         reasoning_content=reasoning,
     )
     finish_reason = "tool_calls" if tool_calls else "stop"
-    choice = litellm.Choices(message=msg, index=0, finish_reason=finish_reason)
-    return litellm.ModelResponse(choices=[choice], model="test-model")
+    choice = SimpleNamespace(message=msg, index=0, finish_reason=finish_reason)
+    return SimpleNamespace(choices=[choice], model="test-model", usage=None)
 
 
-def make_tool_call(id: str, name: str, arguments: str) -> ChatCompletionMessageToolCall:
-    """Create a litellm tool call for testing."""
-    return ChatCompletionMessageToolCall(
-        id=id, function=Function(name=name, arguments=arguments), type="function"
+def make_tool_call(id: str, name: str, arguments: str) -> SimpleNamespace:
+    """Create a any_llm tool call for testing."""
+    return SimpleNamespace(
+        id=id, function=SimpleNamespace(name=name, arguments=arguments), type="function"
     )
 
 
@@ -95,7 +94,9 @@ class TestCompletionClientEmptyContentRetry:
         """Test that successful responses don't trigger retry."""
         mock_response = make_mock_response(content="Hello, world!")
 
-        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
+        with patch.object(
+            client_with_retry._transport, "acompletion", new_callable=AsyncMock
+        ) as mock_acompletion:
             mock_acompletion.return_value = mock_response
 
             response = await client_with_retry.acall([{"role": "user", "content": "Hi"}])
@@ -108,7 +109,9 @@ class TestCompletionClientEmptyContentRetry:
         """Test that empty content without reasoning doesn't retry."""
         mock_response = make_mock_response(content="")
 
-        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
+        with patch.object(
+            client_with_retry._transport, "acompletion", new_callable=AsyncMock
+        ) as mock_acompletion:
             mock_acompletion.return_value = mock_response
 
             response = await client_with_retry.acall([{"role": "user", "content": "Hi"}])
@@ -128,7 +131,9 @@ class TestCompletionClientEmptyContentRetry:
                 return make_mock_response(content="", reasoning="I'm thinking...")
             return make_mock_response(content="Final answer")
 
-        with patch("litellm.acompletion", side_effect=mock_acompletion):
+        with patch.object(
+            client_with_retry._transport, "acompletion", side_effect=mock_acompletion
+        ):
             response = await client_with_retry.acall([{"role": "user", "content": "Hi"}])
 
             assert response.content == "Final answer"
@@ -139,7 +144,9 @@ class TestCompletionClientEmptyContentRetry:
         """Test that exhausted retries raise EmptyContentError."""
         mock_response = make_mock_response(content="", reasoning="Still thinking...")
 
-        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
+        with patch.object(
+            client_with_retry._transport, "acompletion", new_callable=AsyncMock
+        ) as mock_acompletion:
             mock_acompletion.return_value = mock_response
 
             with pytest.raises(EmptyContentError) as exc_info:
@@ -153,7 +160,9 @@ class TestCompletionClientEmptyContentRetry:
         """Test that retry is disabled when retry_on_empty_content=False."""
         mock_response = make_mock_response(content="", reasoning="I'm thinking...")
 
-        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
+        with patch.object(
+            client_retry_disabled._transport, "acompletion", new_callable=AsyncMock
+        ) as mock_acompletion:
             mock_acompletion.return_value = mock_response
 
             response = await client_retry_disabled.acall([{"role": "user", "content": "Hi"}])
@@ -166,7 +175,9 @@ class TestCompletionClientEmptyContentRetry:
         """Default endpoint retries do not retry empty content unless explicitly enabled."""
         mock_response = make_mock_response(content="", reasoning="I'm thinking...")
 
-        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
+        with patch.object(
+            client_default_retry._transport, "acompletion", new_callable=AsyncMock
+        ) as mock_acompletion:
             mock_acompletion.return_value = mock_response
 
             response = await client_default_retry.acall([{"role": "user", "content": "Hi"}])
@@ -179,8 +190,9 @@ class TestCompletionClientEmptyContentRetry:
         client = CompletionClient(model="test-model")
         with (
             patch("nooa.unifiedllm.retry.time.sleep"),
-            patch(
-                "litellm.completion",
+            patch.object(
+                client._transport,
+                "completion",
                 side_effect=[Exception("status 502 bad gateway"), make_mock_response(content="ok")],
             ) as mock_completion,
         ):
@@ -194,8 +206,8 @@ class TestCompletionClientEmptyContentRetry:
         client = CompletionClient(
             model="test-model", retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0)
         )
-        with patch(
-            "litellm.completion", side_effect=Exception("status 502 bad gateway")
+        with patch.object(
+            client._transport, "completion", side_effect=Exception("status 502 bad gateway")
         ) as mock_completion:
             with pytest.raises(Exception, match="status 502"):
                 client.call([{"role": "user", "content": "Hi"}])
@@ -212,7 +224,7 @@ class TestCompletionClientEmptyContentRetry:
         )
         with (
             patch("nooa.unifiedllm.retry.asyncio.sleep", sleep),
-            patch("litellm.acompletion", mock_acompletion),
+            patch.object(client._transport, "acompletion", mock_acompletion),
         ):
             response = await client.acall([{"role": "user", "content": "Hi"}])
 
@@ -227,7 +239,7 @@ class TestCompletionClientEmptyContentRetry:
             model="test-model", retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0)
         )
         mock_acompletion = AsyncMock(side_effect=Exception("status 502 bad gateway"))
-        with patch("litellm.acompletion", mock_acompletion):
+        with patch.object(client._transport, "acompletion", mock_acompletion):
             with pytest.raises(Exception, match="status 502"):
                 await client.acall([{"role": "user", "content": "Hi"}])
 
@@ -241,7 +253,9 @@ class TestCompletionClientEmptyContentRetry:
         )
         mock_response = make_mock_response(content="", tool_calls=[mock_tool_call])
 
-        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
+        with patch.object(
+            client_with_retry._transport, "acompletion", new_callable=AsyncMock
+        ) as mock_acompletion:
             mock_acompletion.return_value = mock_response
 
             response = await client_with_retry.acall([{"role": "user", "content": "Hi"}])
@@ -261,7 +275,9 @@ class TestCompletionClientEmptyContentRetry:
         # Simulate API returning None for content on tool-call-only response
         mock_response = make_mock_response(content=None, tool_calls=[mock_tool_call])
 
-        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
+        with patch.object(
+            client_with_retry._transport, "acompletion", new_callable=AsyncMock
+        ) as mock_acompletion:
             mock_acompletion.return_value = mock_response
 
             response = await client_with_retry.acall([{"role": "user", "content": "Hi"}])
@@ -293,7 +309,7 @@ class TestCompletionClientSyncEmptyContentRetry:
                 return make_mock_response(content="", reasoning="Thinking...")
             return make_mock_response(content="Done!")
 
-        with patch("litellm.completion", side_effect=mock_completion):
+        with patch.object(client_with_retry._transport, "completion", side_effect=mock_completion):
             response = client_with_retry.call([{"role": "user", "content": "Hi"}])
 
             assert response.content == "Done!"
@@ -321,7 +337,9 @@ class TestOutputModelReasoningFallback:
         """When content is empty but reasoning has JSON, parse reasoning."""
         mock_response = make_mock_response(content="", reasoning='{"value": "positive"}')
 
-        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
+        with patch.object(
+            client._transport, "acompletion", new_callable=AsyncMock
+        ) as mock_acompletion:
             mock_acompletion.return_value = mock_response
 
             response = await client.acall(
@@ -339,7 +357,7 @@ class TestOutputModelReasoningFallback:
         """Sync path: when content is empty but reasoning has JSON, parse reasoning."""
         mock_response = make_mock_response(content="", reasoning='{"value": "negative"}')
 
-        with patch("litellm.completion") as mock_completion:
+        with patch.object(client._transport, "completion") as mock_completion:
             mock_completion.return_value = mock_response
 
             response = client.call(
@@ -359,7 +377,9 @@ class TestOutputModelReasoningFallback:
             reasoning='{"value": "from_reasoning"}',
         )
 
-        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
+        with patch.object(
+            client._transport, "acompletion", new_callable=AsyncMock
+        ) as mock_acompletion:
             mock_acompletion.return_value = mock_response
 
             response = await client.acall(
@@ -378,7 +398,9 @@ class TestOutputModelReasoningFallback:
 
         mock_response = make_mock_response(content="", reasoning="")
 
-        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
+        with patch.object(
+            client._transport, "acompletion", new_callable=AsyncMock
+        ) as mock_acompletion:
             mock_acompletion.return_value = mock_response
 
             with pytest.raises(json.JSONDecodeError):
@@ -395,7 +417,9 @@ class TestOutputModelReasoningFallback:
             reasoning='{\n  "value": "neutral"\n}',
         )
 
-        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
+        with patch.object(
+            client._transport, "acompletion", new_callable=AsyncMock
+        ) as mock_acompletion:
             mock_acompletion.return_value = mock_response
 
             response = await client.acall(
@@ -410,7 +434,9 @@ class TestOutputModelReasoningFallback:
         """Without output_model, empty content stays empty (no reasoning fallback)."""
         mock_response = make_mock_response(content="", reasoning="some reasoning text")
 
-        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
+        with patch.object(
+            client._transport, "acompletion", new_callable=AsyncMock
+        ) as mock_acompletion:
             mock_acompletion.return_value = mock_response
 
             response = await client.acall(

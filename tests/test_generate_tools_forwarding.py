@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Regression tests for ActorRuntime.generate() tool-list forwarding.
 
-Bedrock via litellm rejects ``tools=[]`` with UnsupportedParamsError ("Bedrock
+Bedrock via any_llm rejects ``tools=[]`` with UnsupportedParamsError ("Bedrock
 doesn't support tool calling without tools= param specified"). Callers like
 ``PredictStrategy`` pass ``tools=[]`` to signal "tool-free generation"; the
 runtime must translate that intent to "omit tools from the request" (i.e.
@@ -25,7 +25,6 @@ from nooa.unifiedllm import FakeLLMClient, LLMResponse
 def _resp(content: Any) -> LLMResponse:
     """Build a minimal LLMResponse for a FakeLLMClient."""
     return LLMResponse(
-        raw_response=None,
         content=content,
         tool_calls=[],
         finish_reason="stop",

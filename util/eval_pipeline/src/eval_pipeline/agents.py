@@ -68,6 +68,7 @@ def agent_from_spec(spec) -> AgentWrapper:
         # Dispatch based on client_type
         client_type = cc.pop("client_type", "completion")
         if client_type == "responses":
+            cc.setdefault("capabilities", {"responses": True})
             client = ResponsesClient(retry_config=retry_config, **cc)
         else:
             client = CompletionClient(retry_config=retry_config, **cc)

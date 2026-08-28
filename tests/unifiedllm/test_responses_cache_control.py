@@ -10,7 +10,7 @@ from nooa.unifiedllm import ResponsesClient
 
 
 def make_mock_responses_response(content: str = "ok"):
-    """Create a minimal litellm.ResponsesAPIResponse for testing."""
+    """Create a minimal any_llm.ResponsesAPIResponse for testing."""
     from unittest.mock import MagicMock
 
     resp = MagicMock()
@@ -25,13 +25,13 @@ class TestResponsesClientCacheControlDefaults:
 
     def test_default_has_system_and_last_tool(self):
         """ResponsesClient gets the default injection points from UnifiedLLM."""
-        client = ResponsesClient(model="test-model")
+        client = ResponsesClient(model="test-model", capabilities={"responses": True})
         assert {"role": "system"} in client.cache_control_injection_points
         assert {"role": "tool", "position": "last"} in client.cache_control_injection_points
 
     def test_inject_cache_control_on_system(self):
         """_inject_cache_control marks system messages."""
-        client = ResponsesClient(model="test-model")
+        client = ResponsesClient(model="test-model", capabilities={"responses": True})
         messages = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Hi"},
@@ -46,7 +46,7 @@ class TestResponsesClientCacheControlInjection:
 
     @pytest.fixture
     def client(self):
-        return ResponsesClient(model="test-model")
+        return ResponsesClient(model="test-model", capabilities={"responses": True})
 
     def test_system_cache_control_not_in_output(self, client):
         """System messages are extracted to instructions; cache_control on system is harmless."""
@@ -125,7 +125,7 @@ class TestToolOutputNotCorrupted:
 
     def test_tool_output_remains_string_after_position_injection(self):
         """When last-tool injection converts content to blocks, output must stay a string."""
-        client = ResponsesClient(model="test-model")
+        client = ResponsesClient(model="test-model", capabilities={"responses": True})
         messages = [
             {"role": "system", "content": "System"},
             {"role": "user", "content": "Do it"},
@@ -157,7 +157,7 @@ class TestToolOutputNotCorrupted:
 
 
 class TestResponsesClientEndToEnd:
-    """End-to-end tests that cache_control reaches litellm.aresponses on Anthropic models.
+    """End-to-end tests that cache_control reaches any_llm.aresponses on Anthropic models.
 
     The end-to-end pipeline is gated on _is_anthropic_model so that OpenAI/Azure/NIM
     Responses calls don't ship cache_control keys (the Responses API rejects them).
@@ -169,11 +169,13 @@ class TestResponsesClientEndToEnd:
 
     @pytest.mark.asyncio
     async def test_acall_injects_cache_control(self):
-        """acall() injects cache_control on messages before calling litellm."""
-        client = ResponsesClient(model=self.ANTHROPIC_MODEL)
+        """acall() injects cache_control on messages before calling any_llm."""
+        client = ResponsesClient(model=self.ANTHROPIC_MODEL, capabilities={"responses": True})
         mock_response = make_mock_responses_response()
 
-        with patch("litellm.aresponses", new_callable=AsyncMock) as mock_aresponses:
+        with patch.object(
+            client._transport, "aresponses", new_callable=AsyncMock
+        ) as mock_aresponses:
             mock_aresponses.return_value = mock_response
 
             await client.acall(
@@ -197,7 +199,7 @@ class TestResponsesClientEndToEnd:
             )
 
             call_kwargs = mock_aresponses.call_args[1]
-            input_items = call_kwargs["input"]
+            input_items = call_kwargs["input_data"]
 
             # Find function_call_output (tool result)
             fco_items = [m for m in input_items if m.get("type") == "function_call_output"]
@@ -208,11 +210,13 @@ class TestResponsesClientEndToEnd:
     @pytest.mark.asyncio
     async def test_acall_no_injection_when_empty(self):
         """No cache_control when injection_points is empty."""
-        client = ResponsesClient(model=self.ANTHROPIC_MODEL)
+        client = ResponsesClient(model=self.ANTHROPIC_MODEL, capabilities={"responses": True})
         client.cache_control_injection_points = []
         mock_response = make_mock_responses_response()
 
-        with patch("litellm.aresponses", new_callable=AsyncMock) as mock_aresponses:
+        with patch.object(
+            client._transport, "aresponses", new_callable=AsyncMock
+        ) as mock_aresponses:
             mock_aresponses.return_value = mock_response
 
             await client.acall(
@@ -223,7 +227,7 @@ class TestResponsesClientEndToEnd:
             )
 
             call_kwargs = mock_aresponses.call_args[1]
-            input_items = call_kwargs["input"]
+            input_items = call_kwargs["input_data"]
             # No items should have cache_control
             for item in input_items:
                 assert "cache_control" not in item
@@ -231,10 +235,12 @@ class TestResponsesClientEndToEnd:
     @pytest.mark.asyncio
     async def test_acall_custom_injection_points(self):
         """Custom injection points override defaults."""
-        client = ResponsesClient(model=self.ANTHROPIC_MODEL)
+        client = ResponsesClient(model=self.ANTHROPIC_MODEL, capabilities={"responses": True})
         mock_response = make_mock_responses_response()
 
-        with patch("litellm.aresponses", new_callable=AsyncMock) as mock_aresponses:
+        with patch.object(
+            client._transport, "aresponses", new_callable=AsyncMock
+        ) as mock_aresponses:
             mock_aresponses.return_value = mock_response
 
             await client.acall(
@@ -248,7 +254,7 @@ class TestResponsesClientEndToEnd:
             )
 
             call_kwargs = mock_aresponses.call_args[1]
-            input_items = call_kwargs["input"]
+            input_items = call_kwargs["input_data"]
             # Last user message should have content-block-level cache_control
             last_user = [m for m in input_items if m.get("role") == "user"][-1]
             assert isinstance(last_user["content"], list)
@@ -300,7 +306,7 @@ def _make_non_anthropic_messages() -> list[dict]:
 class TestNonAnthropicResponsesPath:
     """Regression: non-Anthropic Responses calls must NOT ship cache_control.
 
-    litellm.aresponses passes input[] through verbatim — unlike the Chat Completions
+    any_llm.aresponses passes input[] through verbatim — unlike the Chat Completions
     path, there's no OpenAIGPTConfig strip — so a stray cache_control key on any item
     triggers a 400 'Unknown parameter: input[N].cache_control' at the OpenAI/Azure/NIM
     gateway. ResponsesClient.{call,acall} must gate the inject on _is_anthropic_model.
@@ -321,18 +327,20 @@ class TestNonAnthropicResponsesPath:
     async def test_acall_no_cache_control_on_non_anthropic(self, model: str):
         """acall() must not inject cache_control for non-Anthropic Responses models.
 
-        litellm.aresponses passes input[] verbatim; a stray cache_control key
+        any_llm.aresponses passes input[] verbatim; a stray cache_control key
         triggers a 400 'Unknown parameter: input[N].cache_control' at the gateway.
         """
-        client = ResponsesClient(model=model)
+        client = ResponsesClient(model=model, capabilities={"responses": True})
         mock_response = make_mock_responses_response()
 
-        with patch("litellm.aresponses", new_callable=AsyncMock) as mock_aresponses:
+        with patch.object(
+            client._transport, "aresponses", new_callable=AsyncMock
+        ) as mock_aresponses:
             mock_aresponses.return_value = mock_response
             await client.acall(_make_non_anthropic_messages())
 
             call_kwargs = mock_aresponses.call_args[1]
-            input_items = call_kwargs["input"]
+            input_items = call_kwargs["input_data"]
 
             for i, item in enumerate(input_items):
                 assert not _has_cache_control_anywhere(item), (
@@ -342,15 +350,17 @@ class TestNonAnthropicResponsesPath:
 
     def test_call_no_cache_control_on_non_anthropic(self):
         """Sync variant — same gate."""
-        client = ResponsesClient(model="openai/openai/openai/gpt-5.5")
+        client = ResponsesClient(
+            model="openai/openai/openai/gpt-5.5", capabilities={"responses": True}
+        )
         mock_response = make_mock_responses_response()
 
-        with patch("litellm.responses") as mock_responses:
+        with patch.object(client._transport, "responses") as mock_responses:
             mock_responses.return_value = mock_response
             client.call(_make_non_anthropic_messages())
 
             call_kwargs = mock_responses.call_args[1]
-            input_items = call_kwargs["input"]
+            input_items = call_kwargs["input_data"]
             for i, item in enumerate(input_items):
                 assert not _has_cache_control_anywhere(item), (
                     f"cache_control leaked to input[{i}] (sync path): {item!r}"

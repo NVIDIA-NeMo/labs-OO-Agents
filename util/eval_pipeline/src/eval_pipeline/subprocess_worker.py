@@ -183,7 +183,7 @@ async def run_task(task_input: SubprocessTaskInput) -> EvalTestResult:
     #    all exports complete before we read the trace back for scoring.
     #
     # Run in a thread executor so the event loop stays responsive during the
-    # BSP flush.  Blocking the event loop thread directly causes LiteLLM's
+    # BSP flush.  Blocking the event loop thread directly causes the provider client's
     # LoggingWorker asyncio.wait_for() to time out (CancelledError → TimeoutError).
     try:
         from nooa.tracing import shutdown_traces
@@ -482,27 +482,6 @@ def main() -> None:
     When stdin closes (EOF), the worker exits. This amortizes Python startup
     cost across all tasks routed to this worker.
     """
-    # Suppress litellm's "coroutine was never awaited" warning on loop close.
-    # This is a known litellm issue: its async HTTP client cleanup coroutine
-    # is still pending when the event loop closes.
-    import warnings
-
-    warnings.filterwarnings(
-        "ignore",
-        message="coroutine 'close_litellm_async_clients' was never awaited",
-        category=RuntimeWarning,
-    )
-
-    # Drop unsupported LLM params (e.g. tool_choice for some Azure models).
-    # This is a litellm global that the parent sets in config loading;
-    # the subprocess must set it independently.
-    try:
-        import litellm
-
-        litellm.drop_params = True
-    except ImportError:
-        pass
-
     # Capture the real stdout for protocol output, then redirect sys.stdout
     # to stderr so that print() in agent code / libraries doesn't corrupt
     # the JSON line protocol.

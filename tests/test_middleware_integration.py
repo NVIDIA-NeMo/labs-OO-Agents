@@ -118,7 +118,6 @@ class TestLLMCallMiddlewareViaGenerate:
 
         async def fake_response(ctx, nxt):
             ctx.response = LLMResponse(
-                raw_response=None,
                 content="faked",
                 tool_calls=[],
                 finish_reason="stop",
@@ -603,7 +602,6 @@ class TestNestedGenerationReentry:
 
         def _resp(tc_list):
             return LLMResponse(
-                raw_response=None,
                 content="",
                 tool_calls=tc_list,
                 finish_reason="tool_calls",
@@ -701,7 +699,6 @@ class TestAgentCallMiddleware:
         llm = FakeLLMClient(
             scripted_responses=[
                 LLMResponse(
-                    raw_response=None,
                     content="",
                     tool_calls=[
                         ToolCall(
@@ -744,7 +741,6 @@ class TestAgentCallMiddleware:
         llm = FakeLLMClient(
             scripted_responses=[
                 LLMResponse(
-                    raw_response=None,
                     content="",
                     tool_calls=[
                         ToolCall(
@@ -788,7 +784,6 @@ class TestAgentCallMiddleware:
         llm = FakeLLMClient(
             scripted_responses=[
                 LLMResponse(
-                    raw_response=None,
                     content="",
                     tool_calls=[
                         ToolCall(
@@ -885,7 +880,6 @@ class TestAgentCallMiddleware:
         llm = FakeLLMClient(
             scripted_responses=[
                 LLMResponse(
-                    raw_response=None,
                     content="",
                     tool_calls=[
                         ToolCall(
@@ -898,7 +892,6 @@ class TestAgentCallMiddleware:
                     assistant_message={"role": "assistant", "content": ""},
                 ),
                 LLMResponse(
-                    raw_response=None,
                     content="",
                     tool_calls=[
                         ToolCall(

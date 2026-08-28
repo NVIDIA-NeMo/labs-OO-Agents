@@ -19,10 +19,11 @@ from nooa.tracing._context_sideband import (
     JournalPayload,
     set_journal_payload,
 )
+from nooa.tracing._secret_scrubber import scrub_value
 
 
 def _hash(content: str) -> str:
-    """SHA-256 a UTF-8 string the same way the litellm callback does."""
+    """SHA-256 a UTF-8 string the same way the NOOA lifecycle sink does."""
     return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
@@ -30,7 +31,7 @@ def _encode_image(img: Any) -> str:
     """Canonicalize an image value to a stable string for hashing.
 
     String pass-through (URLs); everything else serializes via canonical
-    JSON.  Must match :func:`nooa.tracing._litellm_journal._skeleton_dict_message`
+    JSON.  Must match :func:`nooa.tracing._llm_journal._skeleton_dict_message`
     so the same image hashes identically whether it arrives via the
     runtime sideband (input messages) or via the assistant's reply
     (output messages).  Otherwise dedup misses across the in/out boundary.
@@ -50,7 +51,7 @@ def build_journal_payload(messages: list[Any]) -> JournalPayload:
     ``parts`` are carried through as-is (plain ``content``).
 
     The shape returned here must match what
-    :class:`nooa.tracing._litellm_journal.MessageJournalCallback`
+    :class:`nooa.tracing._llm_journal.MessageJournalCallback`
     consumes from the sideband -- and what the viewer's
     ``_resolve_message`` reverses on the read side.  Keep the three in
     sync.
@@ -71,11 +72,14 @@ def build_journal_payload(messages: list[Any]) -> JournalPayload:
             parts_repr: list[dict[str, Any]] = []
             for part in msg.parts:
                 if part.kind == "block":
-                    h = _hash(part.content)
-                    blocks[h] = part.content
+                    content, _ = scrub_value(part.content)
+                    content = str(content)
+                    h = _hash(content)
+                    blocks[h] = content
                     parts_repr.append({"block_hash": h, "key": part.key})
                 else:  # text
-                    parts_repr.append({"text": part.text})
+                    clean_text, _ = scrub_value(part.text)
+                    parts_repr.append({"text": clean_text})
             entry["parts"] = parts_repr
         elif msg.content is not None:
             # Content-address plain content too -- otherwise an N-turn
@@ -83,14 +87,16 @@ def build_journal_payload(messages: list[Any]) -> JournalPayload:
             # on each /v1/journal/calls POST.  ``_send_new_blocks`` ships
             # the same hash at most once per session, collapsing the
             # per-call journal record to O(delta).
-            content_s = str(msg.content)
+            clean_content, _ = scrub_value(msg.content)
+            content_s = str(clean_content)
             h = _hash(content_s)
             blocks[h] = content_s
             entry["parts"] = [{"block_hash": h}]
 
         if msg.tool_call is not None:
             tc = msg.tool_call
-            args = tc.arguments if isinstance(tc.arguments, str) else json.dumps(tc.arguments)
+            clean_args, _ = scrub_value(tc.arguments)
+            args = clean_args if isinstance(clean_args, str) else json.dumps(clean_args)
             ah = _hash(args)
             blocks[ah] = args
             entry["tool_calls"] = [
@@ -105,7 +111,8 @@ def build_journal_payload(messages: list[Any]) -> JournalPayload:
         if msg.images:
             img_hashes: list[str] = []
             for img in msg.images:
-                s = _encode_image(img)
+                clean_img, _ = scrub_value(img)
+                s = _encode_image(clean_img)
                 h = _hash(s)
                 blocks[h] = s
                 img_hashes.append(h)
@@ -126,7 +133,7 @@ def set_journal_payload_from_messages(messages: list[Any]) -> None:
     it on the next ``log_pre_api_call``.
 
     Safe to call when tracing is disabled -- the sideband is just a
-    ``ContextVar`` set; no I/O happens until the litellm callback fires.
+    ``ContextVar`` set; no I/O happens until the NOOA lifecycle sink fires.
     """
     payload = build_journal_payload(messages)
     set_journal_payload(payload)

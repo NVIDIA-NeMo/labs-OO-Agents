@@ -2,7 +2,7 @@
 # API keys are referenced by environment variable name (stored in .env)
 # This file is shared across all applications in the project
 #
-# NOTE: model_name is the full litellm model string including routing prefix
+# NOTE: model_name is the full provider model string including routing prefix
 # For custom endpoints, use openai/{api_model} format
 
 models:
@@ -13,7 +13,7 @@ models:
   # Default judge model - Nano v3 on AIRE (reasoning model)
   nvidia/nano-v3:
     name: "Nemotron Nano v3"
-    model_name: openai/nvidia/nano-v3  # litellm format: openai/{api_model}
+    model_name: openai/nvidia/nano-v3  # provider/model format: openai/{api_model}
     provider: nvidia
     endpoint: https://your-nim-endpoint.example.com/v1
     api_key_env: NVIDIA_API_KEY
@@ -39,7 +39,7 @@ models:
   # Alternative judge model (7B params)
   nvidia_nim/qwen/qwen2.5-7b-instruct:
     name: "Qwen 2.5 7B Instruct"
-    model_name: openai/qwen/qwen2.5-7b-instruct  # litellm format
+    model_name: openai/qwen/qwen2.5-7b-instruct  # provider/model format
     provider: nvidia
     endpoint: https://integrate.api.nvidia.com/v1
     api_key_env: NVIDIA_API_KEY
@@ -84,7 +84,7 @@ models:
 
   nvidia_nim/openai/gpt-oss-20b:
     name: "GPT-OSS 20B"
-    model_name: openai/nvidia/openai/gpt-oss-20b  # litellm needs openai/{api_model}
+    model_name: openai/nvidia/openai/gpt-oss-20b  # provider expects openai/{api_model}
     provider: nvidia_internal
     endpoint: https://inference-api.nvidia.com/v1
     api_key_env: NVIDIA_INFERENCE_API_KEY

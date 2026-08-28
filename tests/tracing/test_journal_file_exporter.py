@@ -20,12 +20,12 @@ def _spans(body: dict):
 
 @pytest.mark.asyncio
 async def test_journal_file_is_stripped_and_import_reconstructs_messages(tmp_path: Path):
-    pytest.importorskip("openinference.instrumentation.litellm")
-    import litellm
     from opentelemetry import trace as otel_trace
 
     from nooa.tracing import enable_tracing, exporters, flush_traces, set_session
     from nooa.tracing._context_sideband import JournalPayload, set_journal_payload
+    from nooa.tracing._llm_journal import _SINKS, FileMessageJournalCallback
+    from nooa.unifiedllm import LLMResponse
 
     enable_tracing(exporters=[exporters.journal_file(tmp_path)])
     session_id = "portable-journal"
@@ -38,22 +38,19 @@ async def test_journal_file_is_stripped_and_import_reconstructs_messages(tmp_pat
         skeleton=[{"role": "user", "parts": [{"block_hash": input_hash}]}],
         blocks={input_hash: input_text},
     )
-    callback = next(
-        callback
-        for callback in litellm.callbacks
-        if type(callback).__name__ == "FileMessageJournalCallback"
-    )
-    kwargs = {"litellm_call_id": "portable-call", "model": "gpt-3.5-turbo"}
+    callback = next(callback for callback in _SINKS if type(callback) is FileMessageJournalCallback)
+    kwargs = {"call_id": "portable-call", "model": "gpt-3.5-turbo"}
     messages = [{"role": "user", "content": input_text}]
     tracer = otel_trace.get_tracer(__name__)
     with tracer.start_as_current_span("acompletion") as span:
         span.set_attribute("openinference.span.kind", "LLM")
         set_journal_payload(payload)
         callback.log_pre_api_call("gpt-3.5-turbo", messages, kwargs)
-        response = await litellm.acompletion(
-            model="gpt-3.5-turbo",
-            messages=messages,
-            mock_response="PORTABLE_OUTPUT",
+        response = LLMResponse(
+            content="PORTABLE_OUTPUT",
+            tool_calls=[],
+            finish_reason="stop",
+            assistant_message={"role": "assistant", "content": "PORTABLE_OUTPUT"},
         )
         now = datetime.now(UTC)
         callback.log_success_event(kwargs, response, now, now)
@@ -155,10 +152,10 @@ def test_harbor_import_posts_journal_with_trial_session(monkeypatch, tmp_path: P
 
 @pytest.mark.parametrize("file_first", [False, True])
 def test_http_and_file_journal_callbacks_coexist_in_either_order(tmp_path: Path, file_first: bool):
-    import litellm
 
     from nooa.tracing import exporters
-    from nooa.tracing._litellm_journal import (
+    from nooa.tracing._llm_journal import (
+        _SINKS,
         FileMessageJournalCallback,
         MessageJournalCallback,
     )
@@ -171,8 +168,8 @@ def test_http_and_file_journal_callbacks_coexist_in_either_order(tmp_path: Path,
         factories.reverse()
     created = [factory() for factory in factories]
     try:
-        assert sum(type(cb) is MessageJournalCallback for cb in litellm.callbacks) == 1
-        assert sum(type(cb) is FileMessageJournalCallback for cb in litellm.callbacks) == 1
+        assert sum(type(cb) is MessageJournalCallback for cb in _SINKS) == 1
+        assert sum(type(cb) is FileMessageJournalCallback for cb in _SINKS) == 1
     finally:
         for exporter in reversed(created):
             exporter.shutdown()

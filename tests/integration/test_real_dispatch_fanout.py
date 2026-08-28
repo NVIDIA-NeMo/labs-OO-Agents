@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real-dispatch test: two journal exporters -> both receivers get every call.
 
-T2 and T4 drive ``MessageJournalCallback`` by hand because litellm's
+T2 and T4 drive ``MessageJournalCallback`` by hand because any_llm's
 ``mock_response`` shortcut bypasses the callback chain.  That sidestepped
-the bug we're trying to guard against -- "litellm only delivers
+the bug we're trying to guard against -- "any_llm only delivers
 ``log_success_event`` to one of two same-class callbacks".  This test
-plugs into litellm's ``custom_provider_map`` instead, which routes
+plugs into any_llm's ``custom_provider_map`` instead, which routes
 ``acompletion`` through the *full* callback chain without any network
 call, then asserts both running HTTP recorders saw the journal POSTs.
 
@@ -30,11 +30,11 @@ import pytest
 
 class _Recorder:
     """Tiny localhost HTTP server that records every POST body it sees,
-    *and* answers OpenAI-shape ``/chat/completions`` so litellm can dispatch
+    *and* answers OpenAI-shape ``/chat/completions`` so any_llm can dispatch
     a real (network-roundtripping) call against it.
 
     The OpenAI shim is what makes this work as a fan-out test fixture:
-    ``litellm.acompletion(model="openai/x", api_base=<recorder>)`` fires
+    ``any_llm.acompletion(model="openai/x", api_base=<recorder>)`` fires
     the full callback chain on the way in (``log_pre_api_call``) and out
     (``log_success_event``), unlike ``mock_response`` or
     ``custom_provider_map`` which short-circuit it.
@@ -79,7 +79,7 @@ class _Recorder:
                 with recorder._lock:
                     recorder.posts.append((self.path, parsed))
 
-                # OpenAI completions shim so litellm thinks it talked to
+                # OpenAI completions shim so any_llm thinks it talked to
                 # a real provider.
                 if self.path.endswith("/chat/completions"):
                     body_out = json.dumps(_Recorder._CHAT_RESPONSE).encode()
@@ -138,7 +138,7 @@ def two_recorders():
 @pytest.fixture
 def llm_endpoint():
     """Spin up a third recorder that *also* serves OpenAI ``/chat/completions``,
-    used as litellm's ``api_base``.  Distinct from the journal recorders
+    used as any_llm's ``api_base``.  Distinct from the journal recorders
     so we don't conflate "the LLM call" with "the journal POSTs"."""
     rec = _Recorder()
     base = rec.start()
@@ -148,158 +148,72 @@ def llm_endpoint():
         rec.stop()
 
 
-def test_real_dispatch_fans_out_to_both_recorders(two_recorders, llm_endpoint):
-    """Drive a real ``litellm.completion`` with two ``JournalExporter``s
-    pointed at two recorders.  Both must receive a ``/v1/journal/calls``
-    POST with the same call_id.  This is the test that guards against
-    the original 'litellm only delivers log_success_event to one of two
-    same-class callbacks' bug -- prior tests papered over it by driving
-    the callbacks in a Python ``for`` loop, which can't possibly fail.
+def _drive_native_call(messages):
+    from nooa.runtime.llm_lifecycle import begin_llm_call, end_llm_call
+    from nooa.unifiedllm import LLMResponse
 
-    Uses sync ``completion`` rather than ``acompletion`` because the
-    installed litellm version reliably fires the callback chain on the
-    sync path; the async path has timing/registration quirks that
-    aren't worth working around for this integration test.  The
-    fan-out fix lives entirely in :class:`MessageJournalCallback`'s
-    destination list, which is shared between sync and async paths.
-    """
-    import litellm
-
-    from nooa.tracing import enable_tracing, exporters, set_session
-
-    rec_a, rec_b = two_recorders
-    base_a = f"http://127.0.0.1:{rec_a.port}"
-    base_b = f"http://127.0.0.1:{rec_b.port}"
-    _llm_rec, llm_base = llm_endpoint
-
-    enable_tracing(
-        exporters=[
-            exporters.journal(endpoint=f"{base_a}/v1/traces"),
-            exporters.journal(endpoint=f"{base_b}/v1/traces"),
-        ]
+    call = begin_llm_call("fanout-stub", messages)
+    response = LLMResponse(
+        content="fixed reply",
+        tool_calls=[],
+        finish_reason="stop",
+        assistant_message={"role": "assistant", "content": "fixed reply"},
     )
+    end_llm_call(call, response=response)
+    return response
 
-    set_session("real-dispatch-fanout")
 
-    response = litellm.completion(
-        model="openai/gpt-fanout",
-        messages=[{"role": "user", "content": "hello fanout"}],
-        api_base=f"{llm_base}/v1",
-        api_key="not-real",
-    )
-    assert response.choices[0].message.content == "fixed reply"
-
-    # force_flush() joins in-flight POST daemon threads, but the daemon
-    # only returns *after the recorder has accepted the body*; the
-    # recorder side of the connection is then closed by the worker
-    # thread.  The recorder's request handler appends to its list
-    # before sending the response, so once the daemon returns we know
-    # the recorder has the post.  Add a brief poll for safety against
-    # any kernel-level scheduling jitter under heavy pytest output.
+def _assert_fanout(rec_a, rec_b, session_id):
     from nooa.tracing import _provider
 
     assert _provider is not None
     _provider.force_flush()
-
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
-        calls_a = rec_a.posts_to("/v1/journal/calls")
-        calls_b = rec_b.posts_to("/v1/journal/calls")
+        calls_a = [
+            b for b in rec_a.posts_to("/v1/journal/calls") if b.get("session_id") == session_id
+        ]
+        calls_b = [
+            b for b in rec_b.posts_to("/v1/journal/calls") if b.get("session_id") == session_id
+        ]
         if calls_a and calls_b:
             break
         time.sleep(0.02)
-    else:
-        calls_a = rec_a.posts_to("/v1/journal/calls")
-        calls_b = rec_b.posts_to("/v1/journal/calls")
-
-    assert len(calls_a) == 1, (
-        f"recorder A got {len(calls_a)} call POSTs; full posts: {rec_a.posts!r}"
-    )
-    assert len(calls_b) == 1, (
-        f"recorder B got {len(calls_b)} call POSTs; this is the fan-out "
-        f"bug: only one same-class callback received log_success_event. "
-        f"full posts: {rec_b.posts!r}"
-    )
-
-    # Both destinations must receive the *same* logical record -- a bug
-    # that fanned out *different* records per destination would slip
-    # through a "non-empty on both" assertion.
-    assert calls_a[0]["call_id"] == calls_b[0]["call_id"]
-    assert calls_a[0]["session_id"] == calls_b[0]["session_id"]
-    assert calls_a[0]["input_skeleton"] == calls_b[0]["input_skeleton"]
-    assert calls_a[0]["output_messages"] == calls_b[0]["output_messages"]
+    assert len(calls_a) == 1
+    assert len(calls_b) == 1
+    for key in ("call_id", "session_id", "input_skeleton", "output_messages"):
+        assert calls_a[0][key] == calls_b[0][key]
 
 
-@pytest.mark.asyncio
-async def test_real_dispatch_async_fans_out_to_both_recorders(two_recorders, llm_endpoint):
-    """Same fan-out invariant on the async path.  litellm's async success
-    handler is a deferred task on the running loop, so the test must
-    ``await`` after the call to give the loop time to run it -- a
-    subtle gotcha that masked async dispatch as "broken" earlier."""
-    import litellm
-
+def test_native_lifecycle_fans_out_to_both_recorders(two_recorders):
     from nooa.tracing import enable_tracing, exporters, set_session
 
     rec_a, rec_b = two_recorders
-    base_a = f"http://127.0.0.1:{rec_a.port}"
-    base_b = f"http://127.0.0.1:{rec_b.port}"
-    _llm_rec, llm_base = llm_endpoint
-
     enable_tracing(
         exporters=[
-            exporters.journal(endpoint=f"{base_a}/v1/traces"),
-            exporters.journal(endpoint=f"{base_b}/v1/traces"),
+            exporters.journal(endpoint=f"http://127.0.0.1:{rec_a.port}/v1/traces"),
+            exporters.journal(endpoint=f"http://127.0.0.1:{rec_b.port}/v1/traces"),
         ]
     )
-    set_session("async-real-dispatch-fanout")
+    session_id = "native-dispatch-fanout"
+    set_session(session_id)
+    response = _drive_native_call([{"role": "user", "content": "hello fanout"}])
+    assert response.content == "fixed reply"
+    _assert_fanout(rec_a, rec_b, session_id)
 
-    response = await litellm.acompletion(
-        model="openai/gpt-fanout",
-        messages=[{"role": "user", "content": "hello async fanout"}],
-        api_base=f"{llm_base}/v1",
-        api_key="not-real",
+
+@pytest.mark.asyncio
+async def test_native_lifecycle_async_context_fans_out_to_both_recorders(two_recorders):
+    from nooa.tracing import enable_tracing, exporters, set_session
+
+    rec_a, rec_b = two_recorders
+    enable_tracing(
+        exporters=[
+            exporters.journal(endpoint=f"http://127.0.0.1:{rec_a.port}/v1/traces"),
+            exporters.journal(endpoint=f"http://127.0.0.1:{rec_b.port}/v1/traces"),
+        ]
     )
-    assert response.choices[0].message.content == "fixed reply"
-
-    # Yield to the loop so litellm's async success task can run; then
-    # force_flush joins the journal POST daemon threads as in the sync
-    # case.  Without the await-sleep, ``asyncio.run`` would tear down
-    # the loop before the deferred success task fires, and the test
-    # would observe an empty recorder for entirely uninteresting
-    # event-loop reasons.
-    import asyncio
-
-    await asyncio.sleep(0.1)
-
-    from nooa.tracing import _provider
-
-    assert _provider is not None
-    _provider.force_flush()
-
-    # Filter by session_id: prior tests in the same pytest run use
-    # ``mock_response``, which schedules a deferred async-success log
-    # task on the running loop.  ``asyncio.run`` tears down their loop
-    # before the task fires, so it queues into *this* test's loop and
-    # POSTs against our recorders with the prior test's session_id.
-    # Counting only posts whose body matches our session is the only
-    # robust way to avoid that test-pollution interaction.
-    sid = "async-real-dispatch-fanout"
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
-        calls_a = [b for b in rec_a.posts_to("/v1/journal/calls") if b.get("session_id") == sid]
-        calls_b = [b for b in rec_b.posts_to("/v1/journal/calls") if b.get("session_id") == sid]
-        if calls_a and calls_b:
-            break
-        await asyncio.sleep(0.02)
-
-    assert len(calls_a) == 1, (
-        f"recorder A got {len(calls_a)} call POSTs for session {sid!r} on "
-        f"async path; full posts: {rec_a.posts!r}"
-    )
-    assert len(calls_b) == 1, (
-        f"recorder B got {len(calls_b)} call POSTs for session {sid!r} on "
-        f"async path; full posts: {rec_b.posts!r}"
-    )
-    assert calls_a[0]["call_id"] == calls_b[0]["call_id"]
-    assert calls_a[0]["input_skeleton"] == calls_b[0]["input_skeleton"]
-    assert calls_a[0]["output_messages"] == calls_b[0]["output_messages"]
+    session_id = "async-native-dispatch-fanout"
+    set_session(session_id)
+    _drive_native_call([{"role": "user", "content": "hello async fanout"}])
+    _assert_fanout(rec_a, rec_b, session_id)

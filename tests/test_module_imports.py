@@ -16,7 +16,6 @@ from nooa.unifiedllm import FakeLLMClient, LLMResponse
 def _resp(content: str) -> LLMResponse:
     """Create a test LLM response with the given content."""
     return LLMResponse(
-        raw_response=None,
         content=content,
         tool_calls=[],
         finish_reason="stop",

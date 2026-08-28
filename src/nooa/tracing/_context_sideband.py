@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """ContextVar sideband carrying a journal skeleton + content-addressed blocks.
 
-The nooa runtime sets this before each litellm call so
+The nooa runtime sets this before each LLM call so
 ``MessageJournalCallback`` can ship a *skeleton* (the wire message list
 with each block reference replaced by its content hash) and the
 underlying block bodies (content-addressed so repeat blocks across
@@ -19,12 +19,12 @@ Block bodies are ``dict[str, str]`` keyed by hash.
 
 **Async-boundary note:** ``ContextVar.set()`` only modifies the value in the
 *current* async task's context copy. The consumer
-(``MessageJournalCallback.log_pre_api_call`` in ``_litellm_journal.py``)
+(``MessageJournalCallback.log_pre_api_call`` in ``_llm_journal.py``)
 calls ``set_journal_payload(None)`` to consume the sideband after reading it.
-This works correctly as long as the litellm call and the callback both
+This works correctly as long as the LLM call and the callback both
 execute in the *same* async task as the ``set_journal_payload`` call —
 which is true for nooa's normal execution model
-(``_build_messages`` → ``litellm.acompletion`` → callback, all in the
+(``_build_messages`` → the provider call → callback, all in the
 same coroutine).
 """
 
@@ -52,7 +52,7 @@ _current_payload: ContextVar[JournalPayload | None] = ContextVar(
 
 
 def set_journal_payload(payload: JournalPayload | None) -> None:
-    """Called by the runtime just before each litellm call.
+    """Called by the runtime just before each LLM call.
 
     Pass ``None`` to clear. Consumers (the journal callback) clear the
     sideband immediately after reading so later calls within the same

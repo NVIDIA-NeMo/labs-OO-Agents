@@ -55,7 +55,7 @@ def _model_for(return_type):
 
 
 def _is_strict_path(model, payload) -> bool:
-    """Strict path returns the Pydantic model unchanged (litellm builds strict schema)."""
+    """Strict path returns the Pydantic model unchanged (any_llm builds strict schema)."""
     return payload is model
 
 
@@ -181,7 +181,7 @@ class TestBedrock:
         assert "uniqueItems" not in _flatten_keys(payload["json_schema"]["schema"])
 
 
-# ── Responses API path (litellm.responses text_format / text) ───────────────
+# ── Responses API path (any_llm.responses text_format / text) ───────────────
 class TestResponsesOutputParams:
     """Mirror of the completion path for the Responses API (issue 232 follow-up)."""
 

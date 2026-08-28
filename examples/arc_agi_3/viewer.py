@@ -95,7 +95,7 @@ def _model_cost(mid: str, mt: dict) -> float:
 
 
 def _pricing_key(model: str) -> str:
-    """Map a litellm model id to a pricing key (``opus`` / ``gpt5.5`` / ``flash``)."""
+    """Map an AnyLLM model id to a pricing key (``opus`` / ``gpt5.5`` / ``flash``)."""
     m = (model or "").lower()
     if "gpt-5.5" in m or "gpt5.5" in m:
         return "gpt5.5"

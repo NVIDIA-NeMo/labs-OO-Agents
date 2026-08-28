@@ -230,7 +230,6 @@ class TestWildcardSubscription:
 
         def _resp(tool_calls: list[ToolCall] | None = None) -> LLMResponse:
             return LLMResponse(
-                raw_response=None,
                 content="",
                 tool_calls=tool_calls or [],
                 finish_reason="tool_calls" if tool_calls else "stop",

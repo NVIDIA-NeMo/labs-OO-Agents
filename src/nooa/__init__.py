@@ -79,7 +79,6 @@ from nooa.strategy_validation import (  # noqa: E402
     MethodPostcondition,
     MethodPrecondition,
 )
-from nooa.token_counter import char_approximate_token_counter  # noqa: E402
 from nooa.unifiedllm import LLMResponse  # noqa: E402
 
 
@@ -169,8 +168,6 @@ __all__ = [
     "StorageNotConfiguredError",
     # Storage
     "StorageManager",
-    # Token counting
-    "char_approximate_token_counter",
 ]
 
 # Install debug handler by default (zero overhead until SIGUSR2 received)

@@ -22,7 +22,7 @@ PYTHONPATH=examples/benchmarks harbor run --config examples/benchmarks/harbor_mi
 Credentials: set `NVIDIA_INFERENCE_API_KEY` (inference.nvidia.com gateway) or
 `NVIDIA_API_KEY` (public NIM endpoint) on your host — the adapter forwards it
 into the agent process, and since the NVIDIA endpoints are OpenAI-compatible
-it is also exposed as `OPENAI_API_KEY` for litellm. To use another provider
+it is also exposed as `OPENAI_API_KEY` for the OpenAI-compatible transport. To use another provider
 directly, add its key to `FORWARDED_ENV_VARS` in `harbor_adapter.py`. The
 trial container needs network access during install (git clone + dependency
 download).

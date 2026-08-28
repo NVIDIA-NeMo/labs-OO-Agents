@@ -22,7 +22,7 @@ Usage:
 Providers:
     - openai: OpenAI API (requires OPENAI_API_KEY)
     - nvidia: NVIDIA NIM (requires NVIDIA_API_KEY)
-    - gemini: Google Gemini (requires GOOGLE_API_KEY or through litellm routing)
+    - gemini: Google Gemini (requires GOOGLE_API_KEY or through any_llm routing)
 
 Expected behavior: Should fail with "Missing corresponding tool call for tool response message"
 when the bug is present.
@@ -55,7 +55,7 @@ def get_llm_client(provider: str, model: str | None = None):
     """Get LLM client for the specified provider."""
     from nooa.unifiedllm import CompletionClient
 
-    # Default models per provider (litellm format)
+    # Default models per provider (any_llm format)
     default_models = {
         "openai": "gpt-4o-mini",
         "nvidia": "nvidia_nim/qwen/qwen3-next-80b-a3b-instruct",
@@ -63,7 +63,7 @@ def get_llm_client(provider: str, model: str | None = None):
         "gemini": "gemini/gemini-2.0-flash",
     }
 
-    # Get model with proper prefix for litellm
+    # Get model with proper prefix for any_llm
     def get_model(provider_name: str, user_model: str | None) -> str:
         if user_model:
             # Add prefix if needed for certain providers

@@ -131,7 +131,7 @@ typical trace looks like:
 method.run
 └── method.research
     └── generation
-        ├── litellm.acompletion
+        ├── acompletion
         ├── code_execution
         └── method_call.search
 ```

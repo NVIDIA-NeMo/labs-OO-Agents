@@ -60,7 +60,7 @@ class ModelSpec(BaseModel):
     endpoint: str | None = None  # API endpoint URL
     api_key_env: str | None = None  # Env var for API key
     max_tokens: int | None = None  # Max tokens limit
-    # Sampling parameters (forwarded to the client / litellm)
+    # Sampling parameters (forwarded to the client / provider)
     temperature: float | None = None  # Sampling temperature
     top_p: float | None = None  # Nucleus sampling probability
     # Reasoning model parameters

@@ -2,11 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Configuration for output truncation across the agent framework.
 
-Two layers of bounds:
-
-1. **Whole-context token budget** (optional, applied at assembly):
-   ``max_context_tokens``, ``max_event_tokens``.
-2. **Sub-configs by mechanism**:
+Character bounds apply only at capture and formatting boundaries.
+Sub-configs by mechanism:
    - ``capture`` (head/tail truncation of raw text streams via
      ``TruncatingStringIO`` — used for execute_python's stdout / stderr /
      error fields).
@@ -173,40 +170,14 @@ class TruncationConfig(BaseModel):
     See module docstring for the layering. The sub-configs (``capture``,
     ``media_capture``, ``event_format``, ``prefill_format``,
     ``context_block_format``) cover the distinct mechanisms / rendering
-    moments; the top-level fields are cross-cutting (token budgets).
+    moments. Model-context sizing is deliberately left to the provider.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    max_context_tokens: Annotated[int | None, Field(description="Total context token budget")] = (
-        None
-    )
-    max_event_tokens: Annotated[int | None, Field(description="Total event token budget")] = None
-    # L4 eviction: never evict fewer than this many recent events. Guarantees
-    # the model always sees its current Task + recent reasoning even when older
-    # events get evicted to fit the budget.
-    min_preserved_events: Annotated[
-        int,
-        Field(description="Minimum number of recent events preserved during eviction"),
-    ] = 5
-    # Output-token planning reserve. When a call sets ``max_tokens``
-    # explicitly, THAT value is reserved out of the model window (the provider
-    # rejects prompt + max_tokens > window); when it doesn't, this value is
-    # used instead. The reserve shrinks the usable window for the default
-    # context-block budget (``(context_window - reserve) // 2``), for the
-    # ``ctx N%`` utilization / nearly-full warning, and for post-error archive
-    # sizing. Set to 0 to disable both the reserve and the auto-derived
-    # default budget.
-    response_reserve_tokens: Annotated[
-        int,
-        Field(
-            description=(
-                "Tokens reserved for the LLM response when the call does not "
-                "set max_tokens explicitly. Shrinks the usable context window "
-                "for budgeting and utilization. 0 disables."
-            )
-        ),
-    ] = 4_096
+    context_error_event_batch: Annotated[
+        int, Field(description="Oldest events archived per context-length retry")
+    ] = 10
     capture: CaptureConfig = CaptureConfig()
     media_capture: MediaCaptureConfig = MediaCaptureConfig()
     # Generous: rendered every turn, especially PythonOutput.value (the LLM
@@ -224,10 +195,10 @@ class TruncationConfig(BaseModel):
     @model_validator(mode="after")
     def _check(self) -> "TruncationConfig":
         errors = []
-        for name in ("max_context_tokens", "max_event_tokens"):
-            v = getattr(self, name)
-            if v is not None and v <= 0:
-                errors.append(f"{name} must be > 0 or None, got {v}")
+        if self.context_error_event_batch <= 0:
+            errors.append(
+                f"context_error_event_batch must be > 0, got {self.context_error_event_batch}"
+            )
         if errors:
             raise ValueError("Invalid TruncationConfig:\n" + "\n".join(f"  - {e}" for e in errors))
         return self

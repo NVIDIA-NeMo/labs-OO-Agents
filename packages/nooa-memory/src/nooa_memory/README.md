@@ -90,7 +90,7 @@ as a skill.
                          • RetrievalEngine (hybrid recall + ACT-R scoring + k-hop)
                          • ReflectionEngine (merge · reconsolidate · abstract · prune)
                          • ForgettingEngine (decay + prune)
-                         • Embedder      (hashing | litellm)
+                         • Embedder      (hashing | anyllm)
                          • VectorIndex   (numpy | sqlite-vec | chroma)
 ```
 
@@ -344,13 +344,13 @@ All four return identical ranking; swap freely. Embeddings (`embeddings.py`):
 | `embedding.backend` | what |
 |---|---|
 | `hashing` (default) | deterministic, offline, dependency-free (great for tests) |
-| `litellm` | OpenAI-compatible `/embeddings` (e.g. `text-embedding-3-large` via the NVIDIA gateway) |
+| `anyllm` | OpenAI-compatible `/embeddings` (e.g. `text-embedding-3-large` via the NVIDIA gateway) |
 
 ```python
 MemoryConfig(
     enabled=True,
     vector=VectorConfig(backend="sqlite_vec"),
-    embedding=EmbeddingConfig(backend="litellm",
+    embedding=EmbeddingConfig(backend="anyllm",
                               model="openai/azure/openai/text-embedding-3-large",
                               endpoint="https://inference-api.nvidia.com/v1",
                               dimensions=1024),
@@ -422,7 +422,7 @@ fit the budget, and *hurts* pinpoint lookups.
 |---|---|
 | `schema.py` | `Memory`, `MemoryType`, `Edge`, `EdgeType` |
 | `config.py` | `MemoryConfig` + sub-configs (frozen Pydantic) |
-| `embeddings.py` | `Embedder` protocol, `HashingEmbedder`, `LiteLLMEmbedder`, `get_embedder` |
+| `embeddings.py` | `Embedder` protocol, `HashingEmbedder`, `AnyLLMEmbedder`, `get_embedder` |
 | `store.py` | `MemoryStore` (SQLite: records + graph + vectors) |
 | `vector_backends.py` | `VectorIndex` protocol + numpy / sqlite-vec / chroma impls + `make_vector_index` |
 | `retrieval.py` | `RetrievalEngine` (hybrid recall, ACT-R scoring, k-hop), query strategies |

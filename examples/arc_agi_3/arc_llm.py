@@ -65,17 +65,19 @@ def build_llm(
         extra["max_tokens"] = max_tokens
     if request_timeout is not None:
         # Hard per-request HTTP timeout: a gateway request that hangs would otherwise
-        # block the solving loop forever (litellm calls aren't cancellation-responsive).
+        # block the solving loop forever (provider calls may not be cancellation-responsive).
         extra["timeout"] = request_timeout
-    model = "openai/" + os.environ["ARC_LLM_MODEL"]  # litellm needs the provider prefix
+    model = (
+        "openai/" + os.environ["ARC_LLM_MODEL"]
+    )  # the OpenAI-compatible endpoint needs the provider prefix
     reasoning_model = "nemotron" in model.lower()
     # Reasoning-effort routing (verified live against the gateway 2026-07-16):
     #  * Anthropic Opus 4.8+ uses the *adaptive* thinking API — thinking.type=adaptive
-    #    + output_config.effort. litellm's reasoning_effort maps to the OLD
+    #    + output_config.effort. the adapter's reasoning_effort maps to the OLD
     #    thinking.type=enabled, which Opus 4.8 REJECTS ("not supported for this model;
     #    use thinking.type.adaptive and output_config.effort"), and drop_params then
     #    silently drops it -> reasoning_tokens=0, NO thinking. So send the adaptive
-    #    params raw via extra_body (CompletionClient forwards **config to litellm).
+    #    params raw via extra_body (CompletionClient forwards **config to the adapter).
     #  * gpt-5.x (Responses API) and everything else keep plain reasoning_effort.
     if reasoning_effort:
         if "anthropic" in model.lower():
@@ -111,13 +113,13 @@ def llm_uri() -> str:
 def build_embedding_config(force: str = "auto") -> EmbeddingConfig:
     """Gateway embeddings when keys are set, else the deterministic hashing embedder.
 
-    ``force`` ∈ {"auto", "litellm", "hashing"}.
+    ``force`` ∈ {"auto", "any_llm", "hashing"}.
     """
-    want_real = force == "litellm" or (force == "auto" and has_embedding_creds())
+    want_real = force == "any_llm" or (force == "auto" and has_embedding_creds())
     if want_real:
         dims = os.environ.get("MEM_EMBED_DIMS")
         return EmbeddingConfig(
-            backend="litellm",
+            backend="any_llm",
             model=os.environ.get("MEM_EMBED_MODEL", "openai/azure/openai/text-embedding-3-large"),
             endpoint=os.environ.get("MEM_EMBED_BASE_URL", "https://inference-api.nvidia.com/v1"),
             api_key=os.environ.get("MEM_EMBED_API_KEY"),

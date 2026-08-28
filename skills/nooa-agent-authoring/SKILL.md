@@ -20,7 +20,7 @@ from typing import Annotated
 from nooa import Agent
 from nooa.unifiedllm import get_llm_client
 
-llm = get_llm_client("gpt-4o-mini")    # any litellm model name, or a registry alias
+llm = get_llm_client("gpt-4o-mini")    # any AnyLLM-supported model name, or a registry alias
 
 class Summarizer(Agent, llm=llm):
     """Produce concise, faithful summaries."""          # class docstring → static prefix
@@ -46,7 +46,7 @@ Use `Annotated[type, "description"]` on parameters and return types to give the 
 ```python
 from nooa.unifiedllm import get_llm_client, CompletionClient, RetryConfig
 
-llm = get_llm_client("gpt-4o-mini")                        # any litellm name passes through (needs provider key)
+llm = get_llm_client("gpt-4o-mini")                        # any AnyLLM-supported name passes through (needs provider key)
 llm = get_llm_client("qwen3.5-397b")                       # registry alias (public NIM via NVIDIA_API_KEY from build.nvidia.com)
 llm = get_llm_client("gpt-4o-mini", retry_config=RetryConfig(max_retries=5))  # retries default ON (max_retries=3)
 llm = CompletionClient(model="m", base_url="https://.../v1", api_key="...")  # any OpenAI-compatible endpoint

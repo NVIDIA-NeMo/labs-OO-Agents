@@ -130,7 +130,7 @@ class BenchAgent(
     repo: RepoTools
 
     def _context_usage_block(self) -> str:
-        """Return context-window usage plus a benchmark-agent compaction hint."""
+        """Return structural context size plus a benchmark-agent compaction hint."""
         if not self.context_stats:
             return ""
         return (

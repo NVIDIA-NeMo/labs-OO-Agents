@@ -146,63 +146,13 @@ class TestHandleBlockSyntaxError:
 
 
 class TestContextBudget:
-    """context_budget() — formerly 3 pragmas on a pure function."""
+    """The removed token-derived budget helper gives explicit migration guidance."""
 
-    def test_returns_percentage_of_context_window(self):
-        """``context_window`` is the canonical UnifiedLLM attribute."""
+    def test_removed_api_raises_migration_error(self):
         from nooa.agents.summarization import context_budget
 
-        llm = MagicMock(spec=["context_window"])
-        llm.context_window = 1_000_000
-        assert context_budget(llm, 0.8) == 800_000
-        assert context_budget(llm, 0.5) == 500_000
-
-    def test_falls_back_to_context_limit(self):
-        """Legacy callers that set ``context_limit`` on custom wrappers still work."""
-        from nooa.agents.summarization import context_budget
-
-        llm = MagicMock(spec=["context_limit"])
-        llm.context_limit = 100_000
-        assert context_budget(llm, 0.8) == 80_000
-
-    def test_returns_fallback_when_no_attributes(self):
-        from nooa.agents.summarization import context_budget
-
-        llm = MagicMock(spec=[])  # no attributes
-        assert context_budget(llm) == 100_000
-        assert context_budget(llm, fallback=50_000) == 50_000
-
-    def test_returns_fallback_when_attributes_are_none(self):
-        from nooa.agents.summarization import context_budget
-
-        llm = MagicMock(spec=["context_window", "context_limit"])
-        llm.context_window = None
-        llm.context_limit = None
-        assert context_budget(llm) == 100_000
-
-    def test_default_percent_is_80(self):
-        from nooa.agents.summarization import context_budget
-
-        llm = MagicMock(spec=["context_window"])
-        llm.context_window = 200_000
-        assert context_budget(llm) == 160_000
-
-    def test_returns_fallback_when_context_window_is_zero(self):
-        """context_budget returns fallback when the model exposes a zero window."""
-        from nooa.agents.summarization import context_budget
-
-        llm = MagicMock(spec=["context_window"])
-        llm.context_window = 0
-        assert context_budget(llm) == 100_000
-
-    def test_rejects_zero_percent(self):
-        """context_budget rejects zero percent because it would disable budget sizing."""
-        from nooa.agents.summarization import context_budget
-
-        llm = MagicMock(spec=["context_window"])
-        llm.context_window = 200_000
-        with pytest.raises(ValueError, match="percent"):
-            context_budget(llm, 0)
+        with pytest.raises(RuntimeError, match="explicit event-based summarization"):
+            context_budget(MagicMock())
 
 
 # =============================================================================
@@ -235,118 +185,16 @@ class TestPredictCreateResponseModelFailure:
 # =============================================================================
 
 
-class TestSummarizationAgentKwargsOverride:
-    """SummarizationAgent.__init__ extracts class attrs from kwargs."""
+class TestRemovedTokenBudgetSummarizer:
+    """The removed token-driven summarizer gives explicit migration guidance."""
 
-    def test_config_kwarg_extracted_via_install(self):
+    def test_install_raises_migration_error(self):
         from nooa.agent import Agent
         from nooa.agents.summarization import TokenBudgetSummarizer
-        from nooa.config.summarizer_config import TokenBudgetConfig
 
-        llm = FakeLLMClient()
-
-        class _Parent(Agent, llm=llm):
-            async def chat(self, msg: str) -> str:
-                """Chat."""
-                ...
-
-        agent = _Parent()
-        config = TokenBudgetConfig(max_tokens=42_000)
-        summarizer = TokenBudgetSummarizer.install(agent, config=config)
-        assert summarizer.config.max_tokens == 42_000
-
-
-# =============================================================================
-# Task 5: _run_summarization and _apply_pending_summary exception handlers
-# =============================================================================
-
-
-class TestRunSummarizationExceptionHandler:
-    """_run_summarization catches exceptions from summarize()."""
-
-    @pytest.mark.asyncio
-    async def test_summarize_failure_sets_pending_summary_none(self):
-        from nooa.agent import Agent
-        from nooa.agents.summarization import TokenBudgetSummarizer
-        from nooa.config.summarizer_config import TokenBudgetConfig
-
-        llm = FakeLLMClient()
-
-        class _Parent(Agent, llm=llm):
-            async def chat(self, msg: str) -> str:
-                """Chat."""
-                ...
-
-        agent = _Parent()
-        summarizer = TokenBudgetSummarizer.install(agent, config=TokenBudgetConfig())
-
-        # Make summarize() raise
-        summarizer.summarize = AsyncMock(side_effect=RuntimeError("LLM exploded"))
-
-        await summarizer._run_summarization("some history", "1", "5")
-
-        assert summarizer._pending_summary is None
-
-    @pytest.mark.asyncio
-    async def test_summarize_success_stores_summary(self):
-        from nooa.agent import Agent
-        from nooa.agents.summarization import TokenBudgetSummarizer
-        from nooa.config.summarizer_config import TokenBudgetConfig
-
-        llm = FakeLLMClient()
-
-        class _Parent(Agent, llm=llm):
-            async def chat(self, msg: str) -> str:
-                """Chat."""
-                ...
-
-        agent = _Parent()
-        summarizer = TokenBudgetSummarizer.install(agent, config=TokenBudgetConfig())
-
-        summarizer.summarize = AsyncMock(return_value="Condensed summary")
-
-        await summarizer._run_summarization("some history", "1", "5")
-
-        assert summarizer._pending_summary == "Condensed summary"
-
-
-class TestApplyPendingSummaryExceptionHandler:
-    """_apply_pending_summary catches exceptions from collapse()."""
-
-    def test_collapse_failure_clears_pending_state(self):
-        from nooa.agent import Agent
-        from nooa.agents.summarization import TokenBudgetSummarizer
-        from nooa.config.summarizer_config import TokenBudgetConfig
-
-        llm = FakeLLMClient()
-
-        class _Parent(Agent, llm=llm):
-            async def chat(self, msg: str) -> str:
-                """Chat."""
-                ...
-
-        agent = _Parent()
-        summarizer = TokenBudgetSummarizer.install(agent, config=TokenBudgetConfig())
-
-        # Set up state as if _run_summarization completed
-        done_task = MagicMock()
-        done_task.done.return_value = True
-        summarizer._pending_task = done_task
-        summarizer._pending_range = ("1", "5")
-        summarizer._pending_summary = "A summary"
-
-        # Make collapse() raise
-        summarizer.target_event_manager.collapse = MagicMock(
-            side_effect=RuntimeError("collapse failed")
-        )
-
-        # Should not raise
-        summarizer._apply_pending_summary()
-
-        # Pending state should be cleared despite the error
-        assert summarizer._pending_task is None
-        assert summarizer._pending_range is None
-        assert summarizer._pending_summary is None
+        agent = Agent(llm=FakeLLMClient())
+        with pytest.raises(RuntimeError, match="MethodSummarizer or explicit event collapse"):
+            TokenBudgetSummarizer.install(agent)
 
 
 # =============================================================================

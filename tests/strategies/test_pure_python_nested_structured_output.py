@@ -30,7 +30,6 @@ async def test_pure_python_nested_structured_output_same_turn():
     # Response 2: Nested PredictStrategy returns JSON with "value" field
     responses = [
         LLMResponse(
-            raw_response=None,
             content='''@strategy(PredictStrategy())
 
 
@@ -49,7 +48,6 @@ return summaries''',
         ),
         # PredictStrategy for basic types wraps in {"value": ...}
         LLMResponse(
-            raw_response=None,
             content='{"value": "Document summary"}',
             tool_calls=[],
             finish_reason="stop",
@@ -82,7 +80,6 @@ async def test_pure_python_nested_structured_output_multiple_calls():
     # Parent generates once, nested helper called 3 times
     responses = [
         LLMResponse(
-            raw_response=None,
             content='''@strategy(PredictStrategy())
 
 
@@ -101,21 +98,18 @@ return results''',
         ),
         # Three PredictStrategy responses for the three loop iterations
         LLMResponse(
-            raw_response=None,
             content='{"value": "processed_a"}',
             tool_calls=[],
             finish_reason="stop",
             assistant_message={"role": "assistant", "content": '{"value": "processed_a"}'},
         ),
         LLMResponse(
-            raw_response=None,
             content='{"value": "processed_b"}',
             tool_calls=[],
             finish_reason="stop",
             assistant_message={"role": "assistant", "content": '{"value": "processed_b"}'},
         ),
         LLMResponse(
-            raw_response=None,
             content='{"value": "processed_c"}',
             tool_calls=[],
             finish_reason="stop",

@@ -15,6 +15,7 @@ registerPlugin('user_message', UserMessagePlugin);
 registerPlugin('user.message', UserMessagePlugin);
 
 registerPlugin('span.llm_call', LLMCallPlugin);
+registerPlugin('span.llm.call', LLMCallPlugin);
 registerPlugin('span.aresponses', LLMCallPlugin);
 registerPlugin('span.acompletion', LLMCallPlugin);
 registerPlugin('span.completion', LLMCallPlugin);

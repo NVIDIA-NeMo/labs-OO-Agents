@@ -39,7 +39,6 @@ def _resp(content: str, tool_calls: list | None = None) -> LLMResponse:
     """Create a test LLM response."""
     finish_reason = "tool_calls" if tool_calls else "stop"
     return LLMResponse(
-        raw_response=None,
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
@@ -141,7 +140,6 @@ class TestNonStringLLMContent:
 
         # Build a response where content is an integer (not str, not BaseModel)
         numeric_resp = LLMResponse(
-            raw_response=None,
             content=12345,  # numeric, not str
             tool_calls=[_return_result(result=99)],
             finish_reason="tool_calls",

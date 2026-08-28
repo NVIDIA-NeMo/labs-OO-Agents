@@ -58,18 +58,18 @@ def test_get_embedder_unknown_backend_raises():
         get_embedder(EmbeddingConfig(backend="nope"))  # type: ignore[arg-type]
 
 
-def test_litellm_embedder_dim_uses_dimensions_not_hashing_dim():
-    """Regression: LiteLLMEmbedder.dim must come from `dimensions`, not the hashing `dim`.
+def test_anyllm_embedder_dim_uses_dimensions_not_hashing_dim():
+    """Regression: AnyLLMEmbedder.dim must come from `dimensions`, not the hashing `dim`.
 
     (A sqlite-vec/Chroma table is created from this dim; using the 256 hashing
     default against 1024-d text-embedding-3-large caused a live dim-mismatch.)
     """
-    from nooa_memory.embeddings import LiteLLMEmbedder
+    from nooa_memory.embeddings import AnyLLMEmbedder
 
-    e = LiteLLMEmbedder(EmbeddingConfig(backend="litellm", dim=256, dimensions=1024))
+    e = AnyLLMEmbedder(EmbeddingConfig(backend="anyllm", dim=256, dimensions=1024))
     assert e._dim == 1024  # set from dimensions, no network probe
     assert e.dim == 1024
 
     # dimensions unset -> probe lazily (stays None until first call)
-    e2 = LiteLLMEmbedder(EmbeddingConfig(backend="litellm", dim=256, dimensions=None))
+    e2 = AnyLLMEmbedder(EmbeddingConfig(backend="anyllm", dim=256, dimensions=None))
     assert e2._dim is None

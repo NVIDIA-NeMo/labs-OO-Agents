@@ -88,14 +88,12 @@ async def test_fake_llm_custom_responses():
     """Test FakeLLMClient with custom responses."""
     custom_responses = [
         LLMResponse(
-            raw_response=None,
             content="First response",
             tool_calls=[],
             finish_reason="stop",
             assistant_message={"role": "assistant", "content": "First response"},
         ),
         LLMResponse(
-            raw_response=None,
             content="Second response",
             tool_calls=[],
             finish_reason="stop",
@@ -122,21 +120,18 @@ async def test_fake_llm_multiple_calls():
     client = FakeLLMClient(
         scripted_responses=[
             LLMResponse(
-                raw_response=None,
                 content="Response 1",
                 tool_calls=[],
                 finish_reason="stop",
                 assistant_message={"role": "assistant", "content": "Response 1"},
             ),
             LLMResponse(
-                raw_response=None,
                 content="Response 2",
                 tool_calls=[],
                 finish_reason="stop",
                 assistant_message={"role": "assistant", "content": "Response 2"},
             ),
             LLMResponse(
-                raw_response=None,
                 content="Response 3",
                 tool_calls=[ToolCall(id="1", name="test_tool", arguments=json.dumps({}))],
                 finish_reason="tool_calls",

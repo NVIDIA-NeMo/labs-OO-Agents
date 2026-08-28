@@ -26,7 +26,6 @@ def _fake(answer: str = "") -> FakeLLMClient:
     return FakeLLMClient(
         scripted_responses=[
             LLMResponse(
-                raw_response=None,
                 content=content,
                 tool_calls=[],
                 finish_reason="stop",

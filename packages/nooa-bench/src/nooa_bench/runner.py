@@ -215,15 +215,11 @@ async def _run(
     # All agents share the same interface: {"user_message": instruction}.
     # Benchmark-specific parsing (system prompts, data paths, etc.) happens
     # inside the agent's _run_evaluation method.
-    from nooa.runtime.token_usage import get_task_tokens, start_task_tokens
-
     logger.info("Running agent %s (model=%s)...", agent_type, model)
-    start_task_tokens()
     task_input: dict[str, Any] = {"user_message": instruction}
     if working_dir:
         task_input["working_dir"] = working_dir
     result = await agent._run_evaluation(task_input)
-    result.update(get_task_tokens())
     _write_result(result, model, agent_type)
     _write_trajectory(agent)
     _write_answer(result)
@@ -238,7 +234,7 @@ async def _run(
 
 @click.command()
 @click.option("--instruction", required=True, help="Task instruction / problem statement")
-@click.option("--model", required=True, help="Model name in litellm format")
+@click.option("--model", required=True, help="Model name in provider/model format")
 @click.option("--agent-type", default="bench", show_default=True, help="Agent variant to run")
 @click.option("--working-dir", default=None, help="Working directory for the agent shell session")
 @click.option("--api-base", default=None, help="Override API base URL")
