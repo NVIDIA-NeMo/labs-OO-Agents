@@ -278,3 +278,35 @@ def test_explorer_browser_handle_key_scroll_up_detail() -> None:
     browser.handle_key("scroll_up")
 
     assert browser.model.detail_offset < 10
+
+
+def test_explorer_browser_navigate_vertical_jumps_search_matches() -> None:
+    """When search is active, up/down jumps between matches instead of moving list selection."""
+
+    class _MatchRow:
+        search_text = "alpha beta alpha"
+        title = "Match Row"
+        tag = "1"
+
+    browser = _browser()
+    browser.model.rows.clear()
+    browser.model.rows.append(_MatchRow())
+    browser.model.set_query("")
+    browser.list_control.viewport = (80, 4)
+    browser.preview_control.viewport = (80, 4)
+    browser.active_control = "list"
+
+    # Simulate a search query being typed
+    browser.buffer.text = "alpha"
+    browser._query_changed()
+
+    assert browser.model.search_active is True
+
+    # Populate match lines (as detail_lines would)
+    browser.model._last_detail_match_lines = [0, 2]
+    browser.model._last_detail_visible_lines = 4
+
+    # Down should jump to match, not move cursor
+    browser.navigate_vertical(1)
+    assert browser.model.search_line_cursor == 1
+    assert browser.model.cursor == 0  # selection stays

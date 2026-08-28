@@ -239,6 +239,10 @@ class EventExplorerView(ExplorerView):
         return f"{row.tag:<8} {row.event_type:<22} {row.summary}"[:width]
 
     def detail_lines(self, row: EventExplorerRow, width: int) -> list[str]:
+        self.model._last_detail_match_lines = detail_match_lines(row, width, self.model.query)
+        self.model._last_detail_match_occurrences = detail_match_occurrences(
+            row, width, self.model.query
+        )
         return highlighted_detail_lines(row, width, self.model.query)
 
     def handle_action(self, action: str, row: Any) -> SubviewKeyResult:
