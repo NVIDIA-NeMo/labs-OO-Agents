@@ -347,3 +347,12 @@ def test_explorer_browser_search_match_boundary_moves_to_next_row() -> None:
     # A second move before rendering must not reuse the previous row's matches.
     browser.navigate_vertical(1)
     assert browser.model.cursor == 2
+
+
+def test_explorer_query_change_clears_cached_detail_matches() -> None:
+    browser = _browser()
+    browser.model._last_detail_match_lines = [0, 2]
+
+    browser.model.edit_query("alpha")
+
+    assert browser.model._last_detail_match_lines == []

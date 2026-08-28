@@ -108,6 +108,8 @@ class EventExplorerModel:
         self.cursor = 0
         self.detail_offset = 0
         self.search_line_cursor = 0
+        self._last_detail_match_lines = []
+        self._last_detail_match_occurrences = []
 
     def set_enabled_types(self, enabled: set[str]) -> None:
         self.enabled_types = set(enabled)
@@ -163,6 +165,8 @@ class EventExplorerModel:
         old_cursor = self.cursor
         self.move(delta)
         if self.cursor != old_cursor:
+            self._last_detail_match_lines = []
+            self._last_detail_match_occurrences = []
             self.search_line_cursor = 0 if delta > 0 else 10**9
 
     def move_or_scroll(self, delta: int) -> None:
