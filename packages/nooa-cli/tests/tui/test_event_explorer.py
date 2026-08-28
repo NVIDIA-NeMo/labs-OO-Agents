@@ -690,7 +690,7 @@ async def test_tui_app_routes_grouped_options_without_editing_prompt() -> None:
         assert len(browser.dropdown_floats) == 1
         event_type_menu = browser.dropdown_floats[0]
         assert event_type_menu.z_index == 10
-        assert event_type_menu.top == 3
+        assert event_type_menu.top == 4
         dropdown_text = "".join(text for _style, text in browser.dropdown_controls[0]._text())
         assert "☑ All" in dropdown_text
         assert "☑ PythonOutput" in dropdown_text
