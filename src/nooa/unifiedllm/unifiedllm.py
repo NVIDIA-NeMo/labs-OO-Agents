@@ -343,8 +343,8 @@ def extract_and_parse_json(text: str) -> dict[str, Any]:
     original_text = text
     text = text.strip()
 
-    markdown_pattern = r"```(?:json)?\s*\n?(.*?)\n?```"
-    markdown_match = re.search(markdown_pattern, text, re.DOTALL)
+    markdown_pattern = r"```(?:json)?[ \t]*\r?\n(.*?)\r?\n?```"
+    markdown_match = re.fullmatch(markdown_pattern, text, re.DOTALL)
     if markdown_match:
         _record_llm_metric("json_fence_removed")
         text = markdown_match.group(1).strip()
