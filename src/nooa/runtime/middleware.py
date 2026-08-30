@@ -9,7 +9,10 @@ Register middleware via ``event_manager.intercept()``::
 
 Three hooks are available:
 
-- ``agent_call``: wraps the entire agent method (all turns, all code)
+- ``agent_call``: wraps an instrumented async agent method (all turns, all code).
+  Does **not** apply to sync methods, ``@no_trace`` methods, ``staticmethod`` /
+  ``classmethod``, or methods inherited from non-Agent bases — see
+  :class:`AgentCallContext`.
 - ``llm_call``: wraps ``runtime.generate()`` (the LLM round-trip)
 - ``execute_python``: wraps ``runtime.execute_code()`` (sandbox execution)
 
@@ -68,8 +71,29 @@ MIDDLEWARE_EXECUTE_PYTHON = "execute_python"
 class AgentCallContext(BaseModel):
     """Context for ``agent_call`` middleware.
 
-    Wraps the entire agent method execution — all LLM turns, all code
-    executions, the final return.
+    Wraps the entire execution of an instrumented async agent method — all LLM
+    turns, all code executions, the final return.
+
+    .. warning::
+       Coverage is narrower than "every agent method". Middleware is async and
+       runs only in the wrapper the metaclass builds for traced async methods, so
+       a method executes with no ``AgentCallContext`` ever created for it when it
+       is any of:
+
+       - synchronous (``def``) — cannot be wrapped by an async chain;
+       - marked ``@no_trace``, sync or async — the metaclass does not wrap it;
+       - a ``staticmethod`` or ``classmethod`` — skipped as a non-plain function;
+       - inherited from a base that is not itself an ``Agent``.
+
+       This holds however the method is reached, including from generated CodeAct
+       Python. Traced sync methods still emit agent-call events and spans; it is
+       specifically the middleware chain, the part that can *block*, that does
+       not apply.
+
+       Declare a capability as a traced ``async def`` method to place it under
+       middleware, or enforce the policy inside the method body. A
+       ``RuntimeWarning`` naming the uncovered methods is emitted when
+       ``agent_call`` middleware is registered on a class that has any.
 
     Attributes:
         agent: The agent instance.

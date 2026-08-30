@@ -115,6 +115,10 @@ class EventManager:
         }
         self._middleware_id: int = next(_em_id_counter)
 
+        # Methods already reported as being outside agent_call middleware
+        # coverage, so the diagnostic is emitted once rather than per call.
+        self._agent_call_bypass_reported: set[str] = set()
+
     # === Core Methods ===
 
     def add(self, event: EventBase, *, record: bool = True) -> str:
@@ -277,7 +281,7 @@ class EventManager:
 
         Execution order::
 
-            agent_call middleware        ← auth, rate limiting
+            agent_call middleware        ← auth, rate limiting (traced async only)
               → llm_call middleware      ← per-call guardrails
                 → acall()
               → execute_python middleware ← per-exec guardrails
@@ -286,6 +290,18 @@ class EventManager:
                 → on() handlers fire     ← observe only
 
         Registration order = execution order.  First registered = outermost.
+
+        .. warning::
+           ``agent_call`` middleware only wraps async agent methods that the
+           metaclass instruments. Sync (``def``) methods, ``@no_trace`` methods,
+           ``staticmethod`` / ``classmethod``, and methods inherited from
+           non-Agent bases all execute outside it, so a guard registered here
+           will not block them — including when generated CodeAct Python calls
+           them. Declare such a capability as a traced ``async def`` method to
+           bring it under middleware, or enforce the policy inside the method
+           body. Registering ``agent_call`` middleware on a class that has any
+           uncovered methods emits a ``RuntimeWarning`` naming them. See
+           :class:`~nooa.runtime.middleware.AgentCallContext`.
 
         Args:
             kind: ``"agent_call"``, ``"llm_call"``, or ``"execute_python"``.
