@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from eval_pipeline.eval_types import ScoreDetail
-from eval_pipeline.trace_eval_span import write_eval_span_to_trace
+from eval_pipeline.trace_eval_span import post_eval_span_to_otlp, write_eval_span_to_trace
 from tests.otlp_helpers import _otlp_attrs_to_dict
 
 
@@ -22,6 +22,42 @@ def _read_first_span_from_otlp_file(trace_file: Path) -> tuple[str, dict]:
     span = scope["spans"][0]
     attrs = _otlp_attrs_to_dict(span.get("attributes", []))
     return span.get("name", ""), attrs
+
+
+def test_post_eval_span_applies_viewer_auth(monkeypatch: pytest.MonkeyPatch):
+    """Remote eval-span posts include the configured viewer bearer token."""
+    captured: dict[str, object] = {}
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def fake_urlopen(request, timeout):
+        captured["authorization"] = request.get_header("Authorization")
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setenv("NOOA_VIEWER_AUTH_TOKEN", "viewer-secret")
+    monkeypatch.setattr("eval_pipeline.trace_eval_span.urllib.request.urlopen", fake_urlopen)
+
+    assert post_eval_span_to_otlp(
+        session_id="session-1",
+        experiment="experiment-1",
+        test_id="test-1",
+        passed=True,
+        weighted_score=1.0,
+        model="model-1",
+        agent_class="Agent",
+        method="run",
+        scores={},
+        endpoint="http://viewer.example/v1/traces",
+    )
+    assert captured == {"authorization": "Bearer viewer-secret", "timeout": 5}
 
 
 class TestWriteEvalSpanToTrace:

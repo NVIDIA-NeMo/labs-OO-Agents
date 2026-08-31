@@ -1,6 +1,6 @@
 ---
 name: nooa-channels
-description: Reactive input for NVIDIA OO agents — Channel/QueueManager for queued and event-mode input, race() turn dispatch, spawn() background jobs with JobHandle, and the bundled producers (monitor a shell command, cron ticks, one-shot timers, file tails). Use when an agent must react to external input mid-run — user messages, CI output, timers, job completions — or when building an interactive/long-running agent loop.
+description: Reactive input for NOOA agents — Channel/QueueManager for queued and event-mode input, race() turn dispatch, spawn() background jobs with JobHandle, and the bundled producers (monitor a shell command, cron ticks, one-shot timers, file tails). Use when an agent must react to external input mid-run — user messages, CI output, timers, job completions — or when building an interactive/long-running agent loop.
 compatibility: nooa package
 ---
 

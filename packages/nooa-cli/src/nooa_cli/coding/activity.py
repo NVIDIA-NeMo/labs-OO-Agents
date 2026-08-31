@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 from collections.abc import AsyncIterator
 from difflib import unified_diff
 from functools import wraps
@@ -27,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 _MAX_EVENT_TEXT_CHARS = 10_000
 _MAX_COMMAND_OUTPUT_CHARS = 30_000
+_MAX_DIFF_INPUT_CHARS = 1_000_000
+_MAX_DIFF_INPUT_LINES = 20_000
 
 
 def _line_count(value: str) -> int:
@@ -35,23 +39,61 @@ def _line_count(value: str) -> int:
     return value.count("\n") + (0 if value.endswith("\n") else 1)
 
 
-def _edit_diff(path: str, old_text: str, new_text: str, start_line: int | None) -> str:
-    lines = list(
-        unified_diff(
-            old_text.splitlines(keepends=True),
-            new_text.splitlines(keepends=True),
-            fromfile=f"a/{path}",
-            tofile=f"b/{path}",
-        )
+def _diff_input_is_too_large(value: str) -> bool:
+    return len(value) > _MAX_DIFF_INPUT_CHARS or _line_count(value) > _MAX_DIFF_INPUT_LINES
+
+
+def _omitted_diff(path: str, reason: str) -> tuple[str, bool]:
+    return (
+        f"--- a/{path}\n+++ b/{path}\n@@ -0,0 +0,0 @@\n Diff omitted: {reason}.\n",
+        False,
     )
-    if start_line is not None:
-        for index, line in enumerate(lines):
-            if line.startswith("@@ "):
-                old_count = max(1, _line_count(old_text))
-                new_count = max(1, _line_count(new_text))
-                lines[index] = f"@@ -{start_line},{old_count} +{start_line},{new_count} @@\n"
-                break
-    return pformat("".join(lines), max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
+
+
+_HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
+
+
+def _offset_hunk_header(line: str, offset: int) -> str:
+    """Shift one hunk header into file coordinates, keeping difflib's counts."""
+    match = _HUNK_HEADER.match(line.rstrip("\n"))
+    if match is None:
+        return line
+    old_start, old_count, new_start, new_count, trailer = match.groups()
+    old_part = f"-{int(old_start) + offset}" + (f",{old_count}" if old_count else "")
+    new_part = f"+{int(new_start) + offset}" + (f",{new_count}" if new_count else "")
+    return f"@@ {old_part} {new_part} @@{trailer}\n"
+
+
+def _edit_diff(
+    path: str,
+    old_text: str,
+    new_text: str,
+    start_line: int | None,
+) -> tuple[str, bool]:
+    """Return a bounded, line-oriented unified diff and its completeness."""
+    if _diff_input_is_too_large(old_text) or _diff_input_is_too_large(new_text):
+        return _omitted_diff(path, "file content exceeds the safe diff preview limit")
+
+    output = TruncatingStringIO(limit=_MAX_EVENT_TEXT_CHARS)
+    # A region diff is generated in region coordinates; every hunk shifts by the
+    # same amount to reach file coordinates. Rewriting only the first one, with
+    # the whole region's counts, left later hunks region-relative — able to point
+    # before the first hunk, and unappliable by patch.
+    offset = start_line - 1 if start_line is not None else 0
+    for line in unified_diff(
+        old_text.splitlines(keepends=True),
+        new_text.splitlines(keepends=True),
+        fromfile=f"a/{path}",
+        tofile=f"b/{path}",
+    ):
+        if offset and line.startswith("@@ "):
+            line = _offset_hunk_header(line, offset)
+        if not line.endswith("\n"):
+            # difflib emits the source line verbatim, so unterminated content
+            # would run the next marker onto the same line ("-a+b").
+            line = f"{line}\n\\ No newline at end of file\n"
+        output.write(line)
+    return output.getvalue(), not output.was_truncated
 
 
 class FileEdit(EventBase):  # type: ignore[misc]
@@ -82,6 +124,10 @@ class FileEdit(EventBase):  # type: ignore[misc]
         bool,
         Field(description="Whether old_text and new_text contain the complete affected text"),
     ] = True
+    diff_complete: Annotated[
+        bool,
+        Field(description="Whether diff contains the complete unified diff"),
+    ] = True
 
 
 class TerminalCommandStarted(EventBase):  # type: ignore[misc]
@@ -107,7 +153,11 @@ class TerminalCommandStarted(EventBase):  # type: ignore[misc]
 
 
 class TerminalCommandOutput(EventBase):  # type: ignore[misc]
-    """One streaming output chunk from a coding-agent terminal command."""
+    """The output of one coding-agent terminal command.
+
+    Emitted once, when the command finishes: output is buffered and bounded
+    rather than streamed, so hosts receive a single event per command.
+    """
 
     _role: ClassVar[Role] = Role.RUNTIME_EVENT
 
@@ -129,6 +179,10 @@ class TerminalCommandFinished(EventBase):  # type: ignore[misc]
     exit_code: Annotated[int | None, Field(description="Process exit code when available")] = None
     timed_out: Annotated[bool, Field(description="Whether the command timed out")] = False
     error: Annotated[str, Field(description="Failure before an exit code was available")] = ""
+    cancelled: Annotated[
+        bool,
+        Field(description="Whether the command was stopped by cancellation rather than failing"),
+    ] = False
     output_truncated: Annotated[
         bool,
         Field(description="Whether output was omitted from command activity events"),
@@ -178,6 +232,12 @@ class ActivityShellTools(Skill):
     def _resolve_path(self, path: str) -> Path:
         return self._shell._resolve_path(path)
 
+    def _diff_path(self, resolved: Path) -> str:
+        try:
+            return resolved.relative_to(self.cwd).as_posix()
+        except ValueError:
+            return resolved.as_posix().lstrip("/")
+
     def _emit(self, event: EventBase) -> None:
         try:
             self._event_manager.add(event)
@@ -215,10 +275,12 @@ class ActivityShellTools(Skill):
         try:
             result = await self._shell.run(command, stdin=stdin, timeout=timeout)
         except BaseException as error:
+            cancelled = isinstance(error, asyncio.CancelledError)
             self._emit(
                 TerminalCommandFinished(
                     command_id=command_id,
-                    error=str(error) or type(error).__name__,
+                    error="" if cancelled else (str(error) or type(error).__name__),
+                    cancelled=cancelled,
                 )
             )
             raise
@@ -306,10 +368,12 @@ class ActivityShellTools(Skill):
                             truncated=output_truncated,
                         )
                     )
+                cancelled = isinstance(error, asyncio.CancelledError)
                 self._emit(
                     TerminalCommandFinished(
                         command_id=command_id,
-                        error=str(error) or type(error).__name__,
+                        error="" if cancelled else (str(error) or type(error).__name__),
+                        cancelled=cancelled,
                         output_truncated=output_truncated,
                     )
                 )
@@ -320,7 +384,7 @@ class ActivityShellTools(Skill):
     @wraps(ShellTools.read)
     async def read(
         self,
-        path: Annotated[str, spec(description="File path (relative to cwd)")],
+        path: Annotated[str, spec(description="File path (relative to cwd or absolute)")],
         lines: Annotated[
             tuple[int, int] | None,
             spec(description="(start, end) 1-indexed inclusive, or None for whole file"),
@@ -348,7 +412,9 @@ class ActivityShellTools(Skill):
         if not isinstance(path, str):
             return await self._shell.replace(target, old_or_new, new)
 
-        resolved = self._resolve_path(path)
+        resolved = (
+            Path(target.resolved_path) if isinstance(target, Match) else self._resolve_path(path)
+        )
         if isinstance(target, Match):
             old_text = target.text
             start_line = target.start
@@ -375,6 +441,12 @@ class ActivityShellTools(Skill):
         written_text = result.new_text
         bounded_new = pformat(written_text, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
         new_truncated = len(written_text) > _MAX_EVENT_TEXT_CHARS
+        diff, diff_complete = _edit_diff(
+            self._diff_path(resolved),
+            old_text,
+            written_text,
+            start_line,
+        )
         self._emit(
             FileEdit(
                 path=str(resolved),
@@ -383,8 +455,9 @@ class ActivityShellTools(Skill):
                 new_text=bounded_new,
                 start_line=start_line,
                 end_line=end_line,
-                diff=_edit_diff(path, bounded_old, bounded_new, start_line),
+                diff=diff,
                 content_complete=not old_truncated and not new_truncated,
+                diff_complete=diff_complete,
             )
         )
         return result
@@ -392,40 +465,67 @@ class ActivityShellTools(Skill):
     @wraps(ShellTools.write_file)
     async def write_file(
         self,
-        path: Annotated[str, spec(description="File path (relative to cwd)")],
+        path: Annotated[str, spec(description="File path (relative to cwd or absolute)")],
         content: Annotated[str, spec(description="Full file content")],
     ) -> FileWrite:
         resolved = self._resolve_path(path)
         existed = resolved.exists()
-        old_text: str | None = None
-        old_complete = True
+        old_diff_text: str | None = None
+        old_content_complete = not existed
         if existed:
             try:
                 with resolved.open("r") as stream:
-                    old_text = stream.read(_MAX_EVENT_TEXT_CHARS + 1)
-                old_complete = len(old_text) <= _MAX_EVENT_TEXT_CHARS
-                old_text = pformat(old_text, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
+                    old_diff_text = stream.read(_MAX_DIFF_INPUT_CHARS + 1)
+                old_content_complete = len(old_diff_text) <= _MAX_EVENT_TEXT_CHARS
             except (OSError, UnicodeError):
                 # Observation must not make an otherwise valid overwrite fail.
-                old_complete = False
+                old_content_complete = False
 
         result = await self._shell.write_file(path, content)
+        bounded_old = (
+            pformat(
+                old_diff_text,
+                max_string=_MAX_EVENT_TEXT_CHARS,
+                unquote_strings=True,
+            )
+            if old_diff_text is not None
+            else None
+        )
         bounded_content = pformat(content, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
         content_truncated = len(content) > _MAX_EVENT_TEXT_CHARS
+        if existed and old_diff_text is None:
+            diff, diff_complete = _omitted_diff(
+                self._diff_path(resolved),
+                "previous file content could not be read",
+            )
+        else:
+            diff, diff_complete = _edit_diff(
+                self._diff_path(resolved),
+                old_diff_text or "",
+                content,
+                None,
+            )
         self._emit(
             FileEdit(
                 path=str(resolved),
                 operation="update" if existed else "create",
-                old_text=old_text,
+                old_text=bounded_old,
                 new_text=bounded_content,
-                start_line=1 if existed and old_complete and old_text is not None else None,
-                end_line=(
-                    max(1, _line_count(old_text))
-                    if existed and old_complete and old_text is not None
+                # An existing *empty* file has no original line to point at, so
+                # reporting 1..1 names lines that never existed.
+                start_line=(
+                    1
+                    if existed and old_content_complete and _line_count(old_diff_text or "")
                     else None
                 ),
-                diff=_edit_diff(path, old_text or "", bounded_content, 1),
-                content_complete=old_complete and not content_truncated,
+                end_line=(
+                    _line_count(old_diff_text or "")
+                    if existed and old_content_complete and _line_count(old_diff_text or "")
+                    else None
+                ),
+                diff=diff,
+                content_complete=old_content_complete and not content_truncated,
+                diff_complete=diff_complete,
             )
         )
         return result

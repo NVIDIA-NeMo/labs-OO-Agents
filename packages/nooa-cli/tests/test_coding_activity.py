@@ -2,6 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Semantic activity emitted by the shared interactive coding tools."""
 
+import asyncio
+from pathlib import Path
+
+import nooa_cli.coding.activity as activity
+import pytest
 from nooa_cli.coding.activity import (
     ActivityShellTools,
     FileEdit,
@@ -48,9 +53,11 @@ async def test_write_and_replace_emit_bounded_structured_file_edits(tmp_path):
     ]
     assert edits[0].path == str(tmp_path / "example.txt")
     assert edits[0].diff.startswith("--- a/example.txt\n+++ b/example.txt")
+    assert edits[0].diff_complete is True
     assert (edits[1].start_line, edits[1].end_line) == (1, 1)
     assert "-one" in edits[1].diff
     assert "+two" in edits[1].diff
+    assert edits[1].diff_complete is True
 
 
 async def test_match_replace_emits_actual_before_and_after_text(tmp_path):
@@ -69,7 +76,8 @@ async def test_match_replace_emits_actual_before_and_after_text(tmp_path):
     assert edit.new_text == "changed\n"
     assert (tmp_path / "example.txt").read_text() == "one\nchanged\nthree\n"
     assert (edit.start_line, edit.end_line) == (2, 2)
-    assert "@@ -2,1 +2,1 @@" in edit.diff
+    # difflib omits the count for a single-line hunk; the offset is what matters.
+    assert "@@ -2 +2 @@" in edit.diff
 
 
 async def test_match_replace_at_end_of_file_reports_the_unterminated_text(tmp_path):
@@ -87,6 +95,26 @@ async def test_match_replace_at_end_of_file_reports_the_unterminated_text(tmp_pa
     assert (tmp_path / "example.txt").read_text() == "one\ntwo\nchanged"
 
 
+async def test_match_replace_after_cwd_change_emits_original_path(tmp_path):
+    shell, events = _observed_shell(tmp_path)
+    original = tmp_path / "example.txt"
+    original.write_text("before\n")
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "example.txt").write_text("wrong file\n")
+    try:
+        match = await shell.read("example.txt")
+        await shell.run("cd other")
+        await shell.replace(match, "after")
+    finally:
+        await shell.close()
+
+    edit = next(event for event in events if isinstance(event, FileEdit))
+    assert edit.path == str(original)
+    assert original.read_text() == "after"
+    assert (other / "example.txt").read_text() == "wrong file\n"
+
+
 async def test_observing_an_overwrite_does_not_break_binary_file_replacement(tmp_path):
     shell, events = _observed_shell(tmp_path)
     (tmp_path / "binary.dat").write_bytes(b"\xff\xfe")
@@ -100,7 +128,46 @@ async def test_observing_an_overwrite_does_not_break_binary_file_replacement(tmp
     assert edit.old_text is None
     assert edit.new_text == "now text"
     assert edit.content_complete is False
+    assert edit.diff_complete is False
+    assert "previous file content could not be read" in edit.diff
     assert (tmp_path / "binary.dat").read_text() == "now text"
+
+
+async def test_large_text_file_keeps_a_real_line_oriented_diff(tmp_path):
+    shell, events = _observed_shell(tmp_path)
+    old_lines = [f"section {index}: {'old content ' * 8}\n" for index in range(250)]
+    new_lines = list(old_lines)
+    new_lines[125] = "section 125: corrected agenda text\n"
+    path = tmp_path / "agenda.md"
+    path.write_text("".join(old_lines))
+    try:
+        await shell.write_file(str(path), "".join(new_lines))
+    finally:
+        await shell.close()
+
+    edit = next(event for event in events if isinstance(event, FileEdit))
+    assert edit.content_complete is False
+    assert edit.diff_complete is True
+    assert edit.diff.startswith("--- a/agenda.md\n+++ b/agenda.md\n")
+    assert "-section 125: old content" in edit.diff
+    assert "+section 125: corrected agenda text" in edit.diff
+    assert "str(len=" not in edit.diff
+    assert "a//" not in edit.diff
+
+
+async def test_diff_generation_has_a_separate_input_safety_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(activity, "_MAX_DIFF_INPUT_CHARS", 100)
+    shell, events = _observed_shell(tmp_path)
+    try:
+        await shell.write_file("large.txt", "x" * 101)
+    finally:
+        await shell.close()
+
+    edit = next(event for event in events if isinstance(event, FileEdit))
+    assert edit.content_complete is True
+    assert edit.diff_complete is False
+    assert edit.diff.startswith("--- a/large.txt\n+++ b/large.txt\n")
+    assert "exceeds the safe diff preview limit" in edit.diff
 
 
 async def test_run_emits_correlated_start_and_finish(tmp_path):
@@ -181,11 +248,143 @@ async def test_activity_payloads_are_bounded(tmp_path):
     )
 
     assert edit.new_text.startswith("str(len=50000,")
-    assert edit.diff.startswith("str(len=")
+    assert edit.diff.startswith("<truncated-output>")
+    assert "--- a/large.txt" in edit.diff
+    assert "str(len=" not in edit.diff
     assert edit.content_complete is False
+    assert edit.diff_complete is False
     assert (starts[0].stdin or "").startswith("str(len=50000,")
     assert starts[0].stdin_truncated is True
     assert sum(len(event.stdout) + len(event.stderr) for event in stream_outputs) <= 31_000
     assert stream_outputs[0].stdout.startswith("<truncated-output>")
     assert stream_finished.output_truncated is True
     assert streamed[-1].kind == "done"
+
+
+async def test_cancelling_a_command_is_not_reported_as_an_error(tmp_path):
+    """Cancellation is a user action, not a command failure.
+
+    The handler stringified the exception, and CancelledError has an empty
+    str(), so the event carried the literal text "CancelledError" and hosts
+    rendered a deliberate stop as a crash.
+    """
+    shell, events = _observed_shell(tmp_path)
+    try:
+        running = asyncio.create_task(shell.run("sleep 30"))
+        started = None
+        while started is None:
+            await asyncio.sleep(0.05)
+            started = next(
+                (event for event in events if isinstance(event, TerminalCommandStarted)),
+                None,
+            )
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+    finally:
+        await shell.close()
+
+    finished = next(event for event in events if isinstance(event, TerminalCommandFinished))
+    assert finished.cancelled is True
+    assert "CancelledError" not in finished.error
+
+
+def test_every_hunk_is_offset_not_just_the_first():
+    """Multi-hunk diffs must stay in one coordinate system.
+
+    Only the first header was rewritten, and its counts were replaced with the
+    size of the whole region — so later hunks kept region-relative numbers and
+    could point *before* the first hunk.
+    """
+    old = "".join(f"line{i}\n" for i in range(1, 42))
+    new = old.replace("line2\n", "CHANGED2\n").replace("line20\n", "CHANGED20\n")
+
+    diff, complete = activity._edit_diff("f.py", old, new, start_line=10)
+
+    def hunk_starts(text: str) -> list[int]:
+        return [
+            int(line.split()[1].lstrip("-").split(",")[0])
+            for line in text.splitlines()
+            if line.startswith("@@ ")
+        ]
+
+    raw, _ = activity._edit_diff("f.py", old, new, start_line=None)
+    assert len(hunk_starts(raw)) >= 2, raw
+    # Every hunk shifts by the same amount; none keeps region-relative numbers.
+    assert hunk_starts(diff) == [start + 9 for start in hunk_starts(raw)]
+    assert complete is True
+
+
+def test_a_missing_final_newline_is_marked():
+    """Unterminated content needs the marker, or the diff is not applicable."""
+    diff, _ = activity._edit_diff("f.py", "a", "b", start_line=None)
+
+    assert "-a" in diff and "+b" in diff
+    assert "\\ No newline at end of file" in diff, diff
+
+
+async def test_overwriting_an_empty_file_reports_no_original_lines(tmp_path):
+    """An existing empty file has no line 1 to point at."""
+    shell, events = _observed_shell(tmp_path)
+    (tmp_path / "empty.txt").write_text("")
+    try:
+        await shell.write_file("empty.txt", "now has content\n")
+    finally:
+        await shell.close()
+
+    edit = next(event for event in events if isinstance(event, FileEdit))
+    assert edit.operation == "update"
+    assert (edit.start_line, edit.end_line) == (None, None)
+
+
+async def test_a_path_outside_the_workspace_is_made_relative(tmp_path):
+    """The fallback branch was unreachable from the other tests.
+
+    Every fixture file lives under tmp_path, which is the shell cwd, so
+    relative_to() always succeeds and the except branch never ran — leaving
+    `assert "a//" not in edit.diff` unable to fail.
+    """
+    shell, _ = _observed_shell(tmp_path)
+    try:
+        assert shell._diff_path(Path("/etc/hosts")) == "etc/hosts"
+        inside = tmp_path / "kept.txt"
+        assert shell._diff_path(inside) == "kept.txt"
+    finally:
+        await shell.close()
+
+
+async def test_overwrite_reads_the_previous_content_boundedly(tmp_path):
+    """The bound must be on the read, not only on what is emitted.
+
+    The other activity tests assert on the emitted event, which is produced by
+    pformat/TruncatingStringIO *after* the read — so reverting to an unbounded
+    read_text() of a workspace-controlled file is invisible to them.
+    """
+    reads: list[int] = []
+    real_open = Path.open
+
+    def spying_open(self, *args, **kwargs):
+        stream = real_open(self, *args, **kwargs)
+        real_read = stream.read
+
+        def read(size=-1):
+            reads.append(size)
+            return real_read(size)
+
+        stream.read = read  # type: ignore[method-assign]
+        return stream
+
+    target = tmp_path / "big.txt"
+    target.write_text("x" * 5000)
+    shell, _ = _observed_shell(tmp_path)
+    try:
+        with pytest.MonkeyPatch.context() as patcher:
+            patcher.setattr(Path, "open", spying_open)
+            await shell.write_file("big.txt", "replacement\n")
+    finally:
+        await shell.close()
+
+    # Positive sizes only: an unbounded read records -1, which satisfies any
+    # "<= limit" assertion.
+    assert reads, "the previous content was never read"
+    assert all(0 < size <= activity._MAX_DIFF_INPUT_CHARS + 1 for size in reads), reads

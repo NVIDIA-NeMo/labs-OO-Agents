@@ -86,6 +86,7 @@ def layered_paths(
     env_var: str | None = None,
     *,
     prepend: Iterable[Path] = (),
+    project_dir: Path | None = None,
 ) -> list[Path]:
     """Return existing config paths for *filename*, lowest priority first.
 
@@ -98,6 +99,11 @@ def layered_paths(
         prepend: Lowest-priority paths placed before the user layer
             (e.g. entry-point bundled defaults). Already in priority
             order; non-existent entries are dropped.
+        project_dir: Explicit directory containing the project layer. When
+            omitted, the process-global :func:`nooa.paths.get_project_dir`
+            discovery is used. Interactive hosts should pass the active
+            workspace's ``.nooa`` directory so several workspaces can be
+            served safely by one process.
 
     Only files that exist are returned, each canonicalised via
     :meth:`pathlib.Path.resolve`. Env-var paths that don't exist log a
@@ -127,7 +133,8 @@ def layered_paths(
     if user is not None:
         _push(user)
 
-    project = _resolved_if_exists(get_project_dir(filename))
+    project_path = project_dir / filename if project_dir is not None else get_project_dir(filename)
+    project = _resolved_if_exists(project_path)
     if project is not None:
         _push(project)
 
@@ -167,6 +174,7 @@ def load_layered_yaml(
     env_var: str | None = None,
     *,
     prepend: Iterable[Path] = (),
+    project_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Load and deep-merge every layer of *filename* into a single dict.
 
@@ -180,10 +188,17 @@ def load_layered_yaml(
     import yaml
 
     merged: dict[str, Any] = {}
-    for path in layered_paths(filename, env_var, prepend=prepend):
+    for path in layered_paths(
+        filename,
+        env_var,
+        prepend=prepend,
+        project_dir=project_dir,
+    ):
         try:
             data = yaml.safe_load(path.read_text())
-        except (OSError, yaml.YAMLError) as e:
+        # UnicodeError too: a non-UTF-8 settings file otherwise aborts every
+        # caller of this loader rather than degrading to the other layers.
+        except (OSError, UnicodeError, yaml.YAMLError) as e:
             logger.warning("Failed to load config file %s: %s", path, e)
             continue
         if data is None:

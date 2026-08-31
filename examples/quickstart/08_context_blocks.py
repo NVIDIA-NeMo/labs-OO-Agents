@@ -41,7 +41,7 @@ class NoteTakingAgent(Agent, llm=llm):
 async def main():
     agent = NoteTakingAgent()
 
-    # Dynamic block: the expression is re-evaluated every LLM turn,
+    # Expression-backed block: the expression is re-evaluated every LLM turn,
     # so the LLM always sees the latest notes without re-passing them
     from nooa import Context
 
@@ -60,8 +60,11 @@ async def main():
     answer = await agent.answer("What triggers an automatic rollback?")
     print(f"Answer: {answer}")
 
-    # Static block: pin a value once — useful for specs, plans, decisions.
-    # Unlike set_dynamic, this is evaluated once and never re-evaluated.
-    agent.context["policy"] = "Always prefer rollback over forward-fix during incidents."
+    # Fixed block: pin a value once in the cache-friendly prefix — useful for
+    # specs, plans, and decisions.
+    agent.context["policy"] = Context(
+        "Always prefer rollback over forward-fix during incidents.",
+        prefix=True,
+    )
     answer2 = await agent.answer("Should we try to fix forward or roll back?")
     print(f"Answer: {answer2}")

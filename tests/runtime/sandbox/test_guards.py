@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import signal
 import socket
+import sys
 import tempfile
 
 import pytest
@@ -64,13 +65,17 @@ def run_child(fn) -> tuple[str, int]:
 
 
 # --- guardrail 2a: memory ---------------------------------------------------
-@pytest.mark.skipif(not CAPS.rlimit, reason="RLIMIT unavailable")
+@pytest.mark.skipif(
+    sys.platform != "linux" or not CAPS.rlimit, reason="Linux RLIMIT_AS unavailable"
+)
 def test_memory_leak_without_cap():
     msg, _ = run_child(lambda: bytearray(400 * 1024 * 1024))
     assert msg == "OK"  # 400 MiB allocates fine when unbounded
 
 
-@pytest.mark.skipif(not CAPS.rlimit, reason="RLIMIT unavailable")
+@pytest.mark.skipif(
+    sys.platform != "linux" or not CAPS.rlimit, reason="Linux RLIMIT_AS unavailable"
+)
 def test_memory_closed_with_cap():
     def child():
         apply_rlimits(max_memory_mb=128)

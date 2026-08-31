@@ -29,6 +29,7 @@ class EventsApi(Skill):
         events.query(limit=50)                      # recent 50
         events.query(type="Task")                   # all task events
         events.query(type="PythonOutput")           # execution outputs
+        events.query(type="PythonOutput", execution_status="error", limit=1)
         events.query(call_id="abc123")              # events for one call
         events.query(query="error")                 # text search
         events.query(query="error.*db", regex=True) # regex search
@@ -45,8 +46,13 @@ class EventsApi(Skill):
         children = events[summary.children_tags]
 
     Examples:
-        # Find the last error
+        # Find the most recent strategy/retry Error event
         errors = events.query(type="Error", limit=1)
+
+        # Cell failures are PythonOutput events, not standalone Error events
+        failed_outputs = events.query(
+            type="PythonOutput", execution_status="error", limit=1
+        )
 
         # Get all outputs from current call
         outputs = events.query(type="PythonOutput", call_id=call_id)
@@ -76,6 +82,7 @@ class EventsApi(Skill):
         *,
         type: str | None = None,
         call_id: str | None = None,
+        execution_status: str | None = None,
         query: str | None = None,
         regex: bool = False,
         limit: int | None = None,
@@ -88,6 +95,7 @@ class EventsApi(Skill):
         Args:
             type: Event type filter (e.g., "Task", "PythonOutput", "ToolCallEvent")
             call_id: Call ID filter (matches metadata.call_id)
+            execution_status: PythonOutput status filter (e.g. "error" or "complete")
             query: Text search (case-insensitive substring, or regex if regex=True)
             regex: If True, treat query as regex pattern
             limit: Maximum results (most recent first when limit < total)
@@ -107,6 +115,7 @@ class EventsApi(Skill):
         return self._manager.filter(
             type=type,
             call_id=call_id,
+            execution_status=execution_status,
             query=query,
             regex=regex,
             limit=limit,

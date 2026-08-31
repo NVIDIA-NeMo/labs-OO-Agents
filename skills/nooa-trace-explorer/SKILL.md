@@ -1,6 +1,6 @@
 ---
 name: nooa-trace-explorer
-description: Analyze NVIDIA OO Agents execution traces programmatically with the trace-explorer CLI and Python API. Use when debugging why an agent run failed, inspecting LLM turns and code executions, diffing two runs, aggregating errors across an eval experiment, or root-causing behavior from a trace file or viewer session.
+description: Analyze NOOA execution traces programmatically with the trace-explorer CLI and Python API. Use when debugging why an agent run failed, inspecting LLM turns and code executions, diffing two runs, aggregating errors across an eval experiment, or root-causing behavior from a trace file or viewer session.
 compatibility: nooa package (trace-explorer CLI ships with it); a running viewer only for --viewer / thin-client modes
 ---
 

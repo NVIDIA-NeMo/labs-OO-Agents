@@ -487,6 +487,15 @@ class SkillRegistry(Skill):
                 if attr_name.startswith("_") or attr_name in _RESERVED_ATTRS:
                     logger.warning("Refusing to load skill with reserved name %s", attr_name)
                     continue
+                held_by = self._protected_conflict(name, attr_name, skill)
+                if held_by is not None:
+                    logger.warning(
+                        "Refusing to load skill %s as '%s': %s",
+                        name,
+                        attr_name,
+                        held_by,
+                    )
+                    continue
                 if hasattr(self._agent, attr_name) and attr_name not in set(
                     self._attr_map.values()
                 ):
@@ -506,6 +515,33 @@ class SkillRegistry(Skill):
                 logger.warning("Failed to load skill %s", name, exc_info=True)
         if changed:
             self._refresh_host_commands()
+
+    def _protected_conflict(self, name: str, attr: str, skill: Any = None) -> str | None:
+        """Describe why *name* may not take over *attr*, or None if it may.
+
+        Agents declare the attributes carrying their own tools via
+        ``__protected_skill_attrs__``. Those may be claimed once: a second
+        claimant removes the tool while the model is still told it has one.
+
+        Protection cannot depend on the attribute being skill-owned. An agent
+        assigns some of them directly — ``self.skills = SkillRegistry(self)`` —
+        so they have no ``_attr_map`` entry, and keying only on ownership left
+        exactly those unguarded. Binding an existing object to its own name is
+        still allowed, which is how a skill assigned in ``__init__`` registers
+        itself. Both ``register()`` and ``load()`` consult this, so the explicit
+        and discovered paths cannot drift apart.
+        """
+        protected = getattr(type(self._agent), "__protected_skill_attrs__", frozenset())
+        if attr not in protected:
+            return None
+        owner = next(
+            (held for held, held_attr in self._attr_map.items() if held_attr == attr), None
+        )
+        if owner is not None:
+            return None if owner == name else f"already provided by {owner!r}"
+        if hasattr(self._agent, attr) and getattr(self._agent, attr, None) is not skill:
+            return "assigned directly by the agent"
+        return None
 
     def register(
         self, name: str, skill_or_cls: "Skill | type[Skill] | None" = None, /, **kwargs
@@ -542,7 +578,18 @@ class SkillRegistry(Skill):
         attr = self._attr_name(name)
         if attr.startswith("_") or attr in _RESERVED_ATTRS:
             raise ValueError(f"Cannot register skill with reserved attr name {attr!r}")
-        if hasattr(self._agent, attr) and attr not in self._attr_map.values():
+        conflict = self._protected_conflict(name, attr, skill)
+        if conflict is not None:
+            # Colliding leaves are supported in general — reload disambiguates
+            # by fully-qualified name — but an agent may declare attributes that
+            # carry its own tools. Those must not be taken over: the previous
+            # check was suppressed once an attr was in _attr_map, so the second
+            # claimant silently won. That is how a repo-supplied `cmd.shell` or
+            # a client-supplied `mcp.shell` removed the agent's real shell while
+            # the model kept being told it still had one. Re-registering the
+            # same name is still fine.
+            raise ValueError(f"Cannot register skill {name!r} as agent attr {attr!r}: {conflict}")
+        if hasattr(self._agent, attr) and attr not in set(self._attr_map.values()):
             logger.warning("Skill %s overwrites existing agent attr '%s'", name, attr)
         setattr(self._agent, attr, skill)
         if hasattr(skill, "attach"):

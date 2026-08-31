@@ -718,3 +718,39 @@ class TestScopedBlocksIsolation:
         assert result == 42, (
             "_scoped_blocks_var from outer's CodeActStrategy must not leak to inner's PurePythonStrategy"
         )
+
+    async def test_async_generator_preserves_scope_only_within_the_same_agent(self):
+        """A subagent generator must not hide the cross-agent boundary from nested calls."""
+        from nooa.context_blocks import ScopedContext
+        from nooa.context_blocks.scoped import _scoped_blocks_var, _scoped_events_var
+        from nooa.runtime.event_query import EventQuery
+
+        llm = FakeLLMClient()
+
+        class Child(Agent, llm=llm):
+            async def observe_scope(self):
+                return _scoped_blocks_var.get(), _scoped_events_var.get()
+
+            async def stream(self):
+                yield await self.observe_scope()
+
+            async def drain_own_stream(self):
+                return [item async for item in self.stream()]
+
+        class Parent(Agent, llm=llm):
+            async def drain_child_stream(self, child):
+                observations = []
+                async for child_scope in child.stream():
+                    consumer_scope = _scoped_blocks_var.get(), _scoped_events_var.get()
+                    observations.append((child_scope, consumer_scope))
+                return observations
+
+        event_query = EventQuery.last_n(1)
+        with ScopedContext(context={"parent_only": "secret"}, events=event_query):
+            [same_agent_scope] = await Child().drain_own_stream()
+            [(child_scope, consumer_scope)] = await Parent().drain_child_stream(Child())
+
+        expected_parent_scope = ({"parent_only": "secret"}, event_query)
+        assert same_agent_scope == expected_parent_scope
+        assert child_scope == (None, None)
+        assert consumer_scope == expected_parent_scope

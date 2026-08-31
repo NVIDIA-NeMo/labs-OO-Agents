@@ -23,6 +23,7 @@ from pydantic import BaseModel, ValidationError
 
 from nooa import Agent, strategy
 from nooa.config import CodeActConfig
+from nooa.context_blocks import ResultStatus
 from nooa.errors import GenerationError, XMLFormatError
 from nooa.strategies.codeact import (
     CodeActSession,
@@ -316,6 +317,17 @@ class TestCodeActEmptyCode:
         agent = TestAgent(llm=fake_llm)
         result = await agent.compute()
         assert result == 99
+
+        from nooa.events import PythonOutput
+
+        output = next(
+            event
+            for event in agent.event_manager.values()
+            if isinstance(event, PythonOutput) and event.tool_call_id == "c1"
+        )
+        assert output.execution_status is ResultStatus.ERROR
+        assert output.error == "Execution error: empty code provided."
+        assert output.stderr == ""
 
 
 # ---------------------------------------------------------------------------
@@ -885,31 +897,82 @@ class TestTryValidateReturnValue:
 
 
 class TestFormatErrorCustomFormatter:
-    """Tests for _format_error with custom error formatters."""
+    """Tests for the complete custom error-formatter contract."""
 
-    def test_custom_formatter_with_line_offset(self):
-        """Custom formatter supporting line_offset should be called correctly (lines 1900-1901)."""
+    def test_custom_formatter_receives_complete_context(self):
+        class CustomFormatter:
+            def format(
+                self,
+                error,
+                code=None,
+                *,
+                line_offset=0,
+                max_error=None,
+                tail_chars=None,
+            ):
+                return f"custom[{line_offset}/{max_error}/{tail_chars}]: {error}: {code}"
 
-        class MyFormatter:
-            def format(self, error, code, line_offset=0):
-                return f"custom[{line_offset}]: {error}"
+        strat = CodeActStrategy(error_formatter=CustomFormatter())
+        result = strat._format_error(
+            ValueError("surrogate"),
+            "bad()",
+            line_offset=4,
+            max_error=321,
+            tail_chars=17,
+        )
 
-        strat = CodeActStrategy(error_formatter=MyFormatter())
-        result = strat._format_error(ValueError("test"), "code", line_offset=5)
-        assert "custom[5]" in result
-        assert "test" in result
+        assert result == "custom[4/321/17]: surrogate: bad()"
 
-    def test_custom_formatter_without_line_offset(self):
-        """Custom formatter not supporting line_offset should fall back (lines 1902-1904)."""
+    def test_builtin_formatter_receives_worker_diagnostic_and_error_budget(self):
+        from nooa.errors import IPythonErrorFormatter
+        from nooa.runtime.sandbox.errors import SandboxExecutionError
 
-        class OldFormatter:
+        strat = CodeActStrategy(error_formatter=IPythonErrorFormatter())
+        diagnostic = "Cell In[7], line 1\nValueError: " + "x" * 500
+        error = SandboxExecutionError(
+            original_type="ValueError",
+            message="surrogate",
+            diagnostic=diagnostic,
+            original_error=ValueError("surrogate"),
+        )
+
+        result = strat._format_error(error, "bad()", line_offset=4, max_error=100)
+
+        assert result == diagnostic
+        assert "surrogate" not in result
+
+    def test_incomplete_custom_formatter_is_rejected(self):
+        class IncompleteFormatter:
             def format(self, error, code):
-                return f"old: {error}"
+                return f"old: {error}: {code}"
 
-        strat = CodeActStrategy(error_formatter=OldFormatter())
-        result = strat._format_error(ValueError("test"), "code", line_offset=5)
-        assert "old" in result
-        assert "test" in result
+        strat = CodeActStrategy(error_formatter=IncompleteFormatter())
+
+        with pytest.raises(TypeError, match="line_offset"):
+            strat._format_error(ValueError("test"), "code", line_offset=5)
+
+    def test_custom_formatter_body_typeerror_is_not_retried(self):
+        class BrokenFormatter:
+            calls = 0
+
+            def format(
+                self,
+                error,
+                code=None,
+                *,
+                line_offset=0,
+                max_error=None,
+                tail_chars=None,
+            ):
+                self.calls += 1
+                raise TypeError("formatter body failed")
+
+        formatter = BrokenFormatter()
+        strat = CodeActStrategy(error_formatter=formatter)
+
+        with pytest.raises(TypeError, match="formatter body failed"):
+            strat._format_error(ValueError("test"), "code", line_offset=5)
+        assert formatter.calls == 1
 
     def test_default_formatter_used_when_no_custom(self):
         """Default formatter should be used when no custom formatter configured."""
@@ -1418,34 +1481,45 @@ class TestPurePythonRunPrefill:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_run_prefill_with_error_logs_warning(self):
-        """_run_prefill with execution error should log but not fail (line 521)."""
+    async def test_run_prefill_with_error_emits_failed_python_output(self):
+        """Prefill failures are visible to the model but remain non-fatal."""
+        from nooa.events import ExecutionResult, PythonOutput
 
         class ErrorPrefill:
             def get_code(self, call, config=None):
-                return "x = 1"
+                return "print('before failure')\nraise RuntimeError('execution failed')"
 
         strat = PurePythonStrategy(prefill=ErrorPrefill())
         rt = MagicMock()
         rt.event_manager = MagicMock()
-        rt.event_manager.add = MagicMock(return_value="evt1")
+        added_events = []
+        rt.event_manager.add = MagicMock(side_effect=lambda event, **kw: added_events.append(event))
         call = MagicMock()
         call.method_name = "test"
         builtins = {}
         session = GenerationSession(max_iterations=5, max_retries=3, target_method_name="test")
 
-        # Make _execute_code return an error result
-        from nooa.events import ExecutionResult
-
         error_result = ExecutionResult(
-            stdout="", error=RuntimeError("execution failed"), defined_methods={}
+            stdout="before failure\n",
+            stderr="warning\n",
+            error=RuntimeError("execution failed"),
+            defined_methods={},
+            wrapper_line_offset=3,
         )
         strat._execute_code = AsyncMock(return_value=error_result)
-        # Mock continuation_prompt
-        strat.continuation_prompt = AsyncMock(return_value="Continue...")
 
         await strat._run_prefill(rt, call, builtins, session)
-        # No exception raised - prefill errors are non-fatal
+
+        output = next(event for event in added_events if isinstance(event, PythonOutput))
+        assert output.execution_status is ResultStatus.ERROR
+        assert output.stdout == "before failure\n"
+        assert output.stderr == "warning\n"
+        assert output.error == "RuntimeError: execution failed"
+        assert output.metadata == {
+            "prefill": True,
+            "prefill_type": "inspect_inputs",
+            "execution_error": True,
+        }
 
     @pytest.mark.asyncio
     async def test_run_prefill_success_emits_python_output_not_feedback(self):
@@ -1473,13 +1547,11 @@ class TestPurePythonRunPrefill:
 
         await strat._run_prefill(rt, call, builtins, session)
 
-        # Should have LLMOutput then PythonOutput (not Feedback)
         event_types = [type(e).__name__ for e in added_events]
         assert "LLMOutput" in event_types
         assert "PythonOutput" in event_types
         assert "Feedback" not in event_types
 
-        # PythonOutput should have prefill metadata
         py_out = [e for e in added_events if isinstance(e, PythonOutput)][0]
         assert py_out.metadata.get("prefill") is True
 
@@ -1891,32 +1963,93 @@ class TestPurePythonSendExecutionError:
 
     @pytest.mark.asyncio
     async def test_send_execution_error_with_stdout(self):
-        """Should include stdout in error message (line 824)."""
+        """Syntax failures use PythonOutput and preserve guidance/stdout."""
+        from nooa.events import PythonOutput
+
         strat = PurePythonStrategy()
         rt = MagicMock()
         rt.event_manager = MagicMock()
         rt.event_manager.add = MagicMock(return_value="evt1")
-
-        # Mock error_syntax to return a string
         strat.error_syntax = AsyncMock(return_value="Fix your syntax.")
 
-        error = SyntaxError("invalid syntax")
-        await strat._send_execution_error(rt, error, "bad code", stdout="some output", stderr="")
-        # Verify event was added
-        rt.event_manager.add.assert_called()
+        await strat._send_execution_error(
+            rt,
+            SyntaxError("invalid syntax"),
+            "bad code",
+            stdout="some output",
+            execution_count=4,
+        )
+
+        event = rt.event_manager.add.call_args.args[0]
+        assert isinstance(event, PythonOutput)
+        assert event.execution_status == ResultStatus.ERROR
+        assert event.execution_count == 4
+        assert event.stdout == "some output"
+        assert "SyntaxError: invalid syntax" in event.error
+        assert "Fix your syntax." in event.error
 
     @pytest.mark.asyncio
-    async def test_send_execution_error_with_stderr(self):
-        """Should include stderr in error message (line 826)."""
+    async def test_syntax_guidance_is_included_inside_error_budget(self):
+        """The final diagnostic stays bounded after appending syntax guidance."""
+        from nooa.config.truncation_config import CaptureConfig, TruncationConfig
+
+        strat = PurePythonStrategy()
+        rt = MagicMock()
+        rt.event_manager = MagicMock()
+        rt.truncation_config = TruncationConfig(
+            capture=CaptureConfig(max_stdout=100, max_stderr=100, max_error=100)
+        )
+        strat.error_syntax = AsyncMock(return_value="G" * 1_000)
+
+        await strat._send_execution_error(rt, SyntaxError("invalid syntax"), "bad code")
+
+        event = rt.event_manager.add.call_args.args[0]
+        assert event.error.count("<truncated-output>") == 1
+        assert "Showing first 50 and last 50 chars" in event.error
+        assert event.error.endswith("G" * 50 + "\n</truncated-output>")
+
+    @pytest.mark.asyncio
+    async def test_send_execution_error_preserves_source_caret_offset_and_both_streams(self):
+        """PurePython uses the same structured, source-aware contract as CodeAct."""
+        import linecache
+
+        from nooa.events import PythonOutput
+
         strat = PurePythonStrategy()
         rt = MagicMock()
         rt.event_manager = MagicMock()
         rt.event_manager.add = MagicMock(return_value="evt1")
-        strat.error_syntax = AsyncMock(return_value="Fix syntax.")
+        code = "text = 'abc'\nstart = text.index('missing')"
+        filename = "Cell In[23001]"
+        previous = linecache.cache.get(filename)
+        linecache.cache[filename] = (len(code), None, code.splitlines(keepends=True), filename)
+        try:
+            try:
+                exec(compile(code, filename, "exec"))
+            except ValueError as error:
+                await strat._send_execution_error(
+                    rt,
+                    error,
+                    code,
+                    stdout="partial output",
+                    stderr="warning before failure",
+                    execution_count=23,
+                    line_offset=0,
+                )
+        finally:
+            if previous is None:
+                linecache.cache.pop(filename, None)
+            else:
+                linecache.cache[filename] = previous
 
-        error = RuntimeError("runtime error")
-        await strat._send_execution_error(rt, error, "x = 1/0", stdout="", stderr="traceback here")
-        rt.event_manager.add.assert_called()
+        event = rt.event_manager.add.call_args.args[0]
+        assert isinstance(event, PythonOutput)
+        assert event.execution_status == ResultStatus.ERROR
+        assert event.stdout == "partial output"
+        assert event.stderr == "warning before failure"
+        assert "Cell In[23001], line 2" in event.error
+        assert "start = text.index('missing')" in event.error
+        assert "ValueError: substring not found" in event.error
 
     @pytest.mark.asyncio
     async def test_send_continuation_feedback_with_defined_methods(self):
@@ -2598,7 +2731,7 @@ class TestCodeActExecutePrefillStep:
     @pytest.mark.asyncio
     async def test_execute_prefill_step_merges_captured_locals(self):
         """Captured locals from prefill should be merged into session (lines 1773-1774)."""
-        from nooa.events import ExecutionResult
+        from nooa.events import ExecutionResult, PythonOutput
 
         strat = CodeActStrategy()
         em = MagicMock()
@@ -2626,17 +2759,67 @@ class TestCodeActExecutePrefillStep:
             {},
             session,
             "compute",
-            "inspect_inputs",
+            "pre_ellipsis",
         )
 
-        # Captured locals should be in session
+        # Captured locals should be in session, and both synthetic events retain
+        # the actual prefill kind rather than being mislabeled as input inspection.
         assert "x" in session.session_locals
         assert session.session_locals["x"] == 42
+        emitted = [call.args[0] for call in em.add.call_args_list]
+        assert emitted
+        assert all(event.metadata["prefill_type"] == "pre_ellipsis" for event in emitted)
+        assert all("execution_error" not in event.metadata for event in emitted)
+        output = next(event for event in emitted if isinstance(event, PythonOutput))
+        assert output.execution_count == 1
+
+    @pytest.mark.asyncio
+    async def test_execute_prefill_steps_use_distinct_execution_counts(self):
+        """Prefill execution, diagnostics, and output events share unique cell numbers."""
+        from nooa.events import ExecutionResult, PythonOutput
+
+        strat = CodeActStrategy()
+        em = MagicMock()
+        em.add = MagicMock(side_effect=["evt1", None, "evt2", None])
+        em.update = MagicMock()
+        rt = MagicMock()
+        rt.event_manager = em
+        session = CodeActSession(
+            max_iterations=5,
+            max_retries=3,
+            target_method_name="compute",
+            event_manager=em,
+        )
+        executed_counts = []
+
+        async def execute_prefill(*args, **kwargs):
+            executed_counts.append(session.execution_count)
+            count = session.execution_count
+            return ExecutionResult(
+                stdout=f"cell {count}",
+                error=RuntimeError("failure") if count == 2 else None,
+                defined_methods={},
+            )
+
+        strat._execute_code = AsyncMock(side_effect=execute_prefill)
+
+        await strat._execute_prefill_step(rt, "first = 1", {}, session, "compute", "inspect_inputs")
+        await strat._execute_prefill_step(
+            rt, "raise RuntimeError('failure')", {}, session, "compute", "pre_ellipsis"
+        )
+
+        outputs = [
+            call.args[0] for call in em.add.call_args_list if isinstance(call.args[0], PythonOutput)
+        ]
+        assert executed_counts == [1, 2]
+        assert [output.execution_count for output in outputs] == [1, 2]
+        assert outputs[1].error == "RuntimeError: failure"
+        assert session.record_execution() == 3
 
     @pytest.mark.asyncio
     async def test_execute_prefill_step_with_error_logs_warning(self):
         """Prefill step with error should log but not raise (line 1806)."""
-        from nooa.events import ExecutionResult
+        from nooa.events import ExecutionResult, PythonOutput
 
         strat = CodeActStrategy()
         em = MagicMock()
@@ -2667,6 +2850,17 @@ class TestCodeActExecutePrefillStep:
             "compute",
             "inspect_inputs",
         )
+
+        output = next(
+            call.args[0] for call in em.add.call_args_list if isinstance(call.args[0], PythonOutput)
+        )
+        assert output.execution_status is ResultStatus.ERROR
+        assert output.execution_count == 1
+        assert output.metadata == {
+            "prefill": True,
+            "prefill_type": "inspect_inputs",
+            "execution_error": True,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -2802,13 +2996,36 @@ class TestPurePythonExecutionError:
 
         fake_llm = FakeLLMClient(
             scripted_responses=[
-                _resp("raise ValueError('oops')"),
+                _resp(
+                    "import sys\n"
+                    "print('before failure')\n"
+                    "print('warning', file=sys.stderr)\n"
+                    "text = 'abc'\n"
+                    "text.index('missing')"
+                ),
                 _resp("return 42"),
             ]
         )
         agent = TestAgent(llm=fake_llm)
         result = await agent.compute()
         assert result == 42
+
+        from nooa.events import PythonOutput
+
+        outputs = [
+            event for event in agent.event_manager.values() if isinstance(event, PythonOutput)
+        ]
+        failed = next(event for event in outputs if event.execution_status == ResultStatus.ERROR)
+        succeeded = next(
+            event for event in outputs if event.execution_status == ResultStatus.COMPLETE
+        )
+        assert failed.execution_count == 1
+        assert failed.stdout == "before failure\n"
+        assert failed.stderr == "warning\n"
+        assert "Cell In[1], line 5" in failed.error
+        assert "text.index('missing')" in failed.error
+        assert failed.error.endswith("ValueError: substring not found")
+        assert succeeded.execution_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -4119,6 +4336,18 @@ class TestCodeActInlineReturnResultWithError:
         result = await agent.compute()
         assert result == 99
 
+        from nooa.events import PythonOutput
+
+        failed_output = next(
+            event
+            for event in agent.event_manager.values()
+            if isinstance(event, PythonOutput) and event.tool_call_id == "c1"
+        )
+        assert "Cell In[1], line 1" in failed_output.error
+        assert "x = 1/0" in failed_output.error
+        assert "ZeroDivisionError: division by zero" in failed_output.error
+        assert "Execution error" not in failed_output.stderr
+
 
 # ---------------------------------------------------------------------------
 # Pure Python - continuation feedback with stdout (line 881)
@@ -4686,3 +4915,124 @@ class TestMaybeEvalConstructorString:
         session = self._make_session()
         result = strat._maybe_eval_constructor_string("123Bad(x=1)", object, session)
         assert result == "123Bad(x=1)"
+
+
+class TestCodeActDistinctExecutionErrorEvents:
+    """Lock the event contract for error producers with intentionally different shapes."""
+
+    @staticmethod
+    def _failed_output(agent: Agent, call_id: str):
+        from nooa.events import PythonOutput
+
+        output = next(
+            event
+            for event in agent.event_manager.values()
+            if isinstance(event, PythonOutput) and event.tool_call_id == call_id
+        )
+        assert output.execution_status == ResultStatus.ERROR
+        return output
+
+    @pytest.mark.asyncio
+    async def test_cell_timeout_reaches_python_output_as_actionable_concise_error(self):
+        from types import SimpleNamespace
+
+        from nooa.events import ExecutionResult, PythonOutput
+
+        strat = CodeActStrategy()
+        emitted = []
+        em = MagicMock()
+        em.add = MagicMock(side_effect=lambda event, **kwargs: emitted.append(event) or "evt")
+        em.update = MagicMock()
+        runtime = MagicMock()
+        runtime.event_manager = em
+        session = CodeActSession(
+            max_iterations=3, max_retries=2, target_method_name="compute", event_manager=em
+        )
+        strat._execute_code = AsyncMock(
+            return_value=ExecutionResult(
+                stdout="started\n",
+                error=TimeoutError(
+                    "Code execution timed out after 0.01 seconds. "
+                    "Check for infinite loops or blocking operations."
+                ),
+                defined_methods={},
+            )
+        )
+
+        result = await strat._handle_execute_python(
+            runtime,
+            _tool_call("await asyncio.sleep(1)", call_id="timeout"),
+            {"code": "await asyncio.sleep(1)"},
+            {},
+            session,
+            SimpleNamespace(method_name="compute"),
+            int,
+            "tool-event",
+        )
+
+        assert result.error is not None
+        output = next(event for event in emitted if isinstance(event, PythonOutput))
+        assert output.execution_status == ResultStatus.ERROR
+        assert output.stdout == "started\n"
+        assert "TimeoutError: Code execution timed out after 0.01 seconds" in output.error
+        assert "Check for infinite loops or blocking operations" in output.error
+        assert "Cell In[" not in output.error
+        assert "^" not in output.error
+
+    @pytest.mark.asyncio
+    async def test_indirect_system_exit_conversion_reaches_python_output_with_prior_stdout(self):
+        class TestAgent(Agent, llm=_TEST_LLM):
+            @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=3, max_retries=2)))
+            async def compute(self) -> int:
+                """Compute."""
+                ...
+
+        agent = TestAgent(
+            llm=FakeLLMClient(
+                scripted_responses=[
+                    _resp(
+                        "",
+                        tool_calls=[
+                            _tool_call(
+                                "print('before exit')\nexit_type = SystemExit\nraise exit_type",
+                                call_id="system-exit",
+                            )
+                        ],
+                    ),
+                    _resp("", tool_calls=[_return_result(result=8)]),
+                ]
+            )
+        )
+
+        assert await agent.compute() == 8
+        output = self._failed_output(agent, "system-exit")
+        assert output.stdout == "before exit\n"
+        assert "RuntimeError: SystemExit raised inside generated code" in output.error
+        assert "use break, a flag, a helper return, or return_result()" in output.error
+
+    @pytest.mark.asyncio
+    async def test_static_validation_failure_reaches_python_output_without_fake_traceback(self):
+        class TestAgent(Agent, llm=_TEST_LLM):
+            @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=3, max_retries=2)))
+            async def compute(self) -> int:
+                """Compute."""
+                ...
+
+            async def helper(self) -> int:
+                return 1
+
+        agent = TestAgent(
+            llm=FakeLLMClient(
+                scripted_responses=[
+                    _resp("", tool_calls=[_tool_call("self.helper()", call_id="policy")]),
+                    _resp("", tool_calls=[_return_result(result=9)]),
+                ]
+            )
+        )
+
+        assert await agent.compute() == 9
+        output = self._failed_output(agent, "policy")
+        assert "Code validation failed:" in output.error
+        assert "Method `helper` is async and must be called with `await`" in output.error
+        assert "Cell In[" not in output.error
+        assert "Traceback" not in output.error

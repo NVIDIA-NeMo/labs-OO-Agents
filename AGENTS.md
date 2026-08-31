@@ -33,6 +33,7 @@ The framework already shows the LLM every argument: the method signature accompa
 - **Helpers beat prompts.** Deterministic logic as regular methods > telling the LLM to figure it out. Methods are visible to the LLM via `doc(self)` (auto-generated API documentation). Define helpers as class methods, not as lambda/function references assigned to `self`.
 - **Evidence before assertions.** Run tests/verification before claiming work is done. Enforce in the orchestrator.
 - **Everything visible by default.** Module-level and agent-level names are visible to the LLM (in `doc(self)` and exec_globals). Hide explicitly with `@hidden`, `Annotated[T, hidden]`, or `with hidden:`.
+- **Generator methods are hand-written, never generated.** A method containing `yield` is traced like any other, but generation strategies commit one final result and do not define a stream protocol. Writing both `yield` and a `...` generation marker raises `TypeError`; applying `@strategy` to a deterministic generator also raises with instructions to remove the decorator. See [Generator methods](#generator-methods).
 
 ### Visibility
 
@@ -131,15 +132,21 @@ Common typing constructs and framework symbols (`asyncio`, `typing`, strategies,
 
 ### Context Blocks
 
-- **Static context blocks for once-computed values.** Use `self.context["key"] = value` for values known at assignment time. These are evaluated once and cached.
-- **Dynamic context blocks for runtime values.** Use `self.context.set_dynamic("key", "python_expression")` for values that change during agent execution. The expression is re-evaluated each LLM turn.
+- **Fixed context blocks for once-computed values.** Use a literal `Context`
+  value. Set `prefix=True` when the content is stable enough for the provider's
+  cacheable prompt prefix; bare values are fixed content in the volatile suffix.
+- **Expression context blocks for runtime values.** Use `Context(expr=...)` for
+  values that change during agent execution. The expression is re-evaluated
+  each LLM turn.
 
 ```python
-# Static: set once, never changes
-self.context["plan"] = plan.format()
+from nooa import Context
 
-# Dynamic: re-evaluated each LLM turn
-self.context.set_dynamic("project_state", "self.format_project_state()")
+# Fixed: set once, rendered in the cacheable prefix
+self.context["plan"] = Context(plan.format(), prefix=True)
+
+# Live: re-evaluated each LLM turn in the volatile suffix
+self.context["project_state"] = Context(expr="self.format_project_state()")
 ```
 
 ### Tracing
@@ -166,6 +173,39 @@ class MyAgent(Agent, llm=llm):
         """Public but NOT traced"""
         ...
 ```
+
+#### Generator methods
+
+Methods containing `yield` (`def` or `async def`) are traced, with the span
+covering the generator's lifetime. A generator's body runs in slices — between
+yields the *consumer* is running, not the generator — so work is attributed to
+whoever actually did it: calls the body makes nest under the generator, and
+calls the consumer makes between yields do not.
+
+```python
+class MyAgent(Agent, llm=llm):
+    async def review(self, items: list[str]):
+        """Traced; each classify() call nests under review()."""
+        for item in items:
+            yield await self.classify(item)
+```
+
+Two limits worth knowing:
+
+- **A generator can't be a generation stub.** `yield` plus a `...` generation
+  marker raises `TypeError` at class creation. Generation strategies commit one
+  final result; supporting generated streams would require a separate protocol
+  for yields, completion, errors, cancellation, middleware, and validation.
+- **A deterministic generator does not use `@strategy`.** It is regular Python
+  and is supported directly as an agent method. The decorator is rejected with
+  a targeted message instead of the misleading “must be async” diagnostic.
+- **Decorated generators are not detected.** If you wrap a generator method in
+  your own decorator, the framework sees the decorator rather than the
+  generator and falls back to the plain method wrapper, so calls made by the
+  body get attributed to the consumer. This is not fixable in general — a
+  decorator that returns the generator and one that consumes it are
+  indistinguishable from the outside — so leave trace-sensitive generator
+  methods undecorated.
 
 ### Quality & Testing
 

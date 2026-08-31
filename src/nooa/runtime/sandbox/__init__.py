@@ -18,6 +18,7 @@ from nooa.runtime.sandbox.errors import (
     CellSerializationError,
     CellTimeoutError,
     SandboxError,
+    SandboxExecutionError,
     SandboxUnavailable,
     WorkerDiedError,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "SandboxConfig",
     "FileRule",
     "SandboxError",
+    "SandboxExecutionError",
     "SandboxUnavailable",
     "CellTimeoutError",
     "CellMemoryError",

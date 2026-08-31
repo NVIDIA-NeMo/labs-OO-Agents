@@ -6,12 +6,16 @@ Run locally with ``uv run python scripts/check_license_headers.py``; the CI
 ``lint`` job runs it on every merge request. Empty ``__init__.py`` package
 markers (0 bytes) are exempt — they hold no copyrightable content.
 
-Walks the filesystem (no ``git`` dependency, so it runs in the minimal CI lint
-image), skipping virtualenvs, caches, build output, and vendored trees.
+Uses Git's file and exclude handling as the source of truth: tracked Python
+files and untracked, nonignored Python files are checked. Files excluded by
+``.gitignore``, ``.git/info/exclude``, or the user's global Git excludes are
+not repository source and are not scanned.
 """
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -19,37 +23,27 @@ REQUIRED = "SPDX-License-Identifier"
 # Only the first few lines are checked (header sits above any docstring, after
 # an optional shebang/coding line).
 HEAD_LINES = 5
-# Directory names to skip anywhere in the tree.
-SKIP_DIRS = {
-    ".git",
-    ".venv",
-    "venv",
-    "__pycache__",
-    "node_modules",
-    "dist",
-    "build",
-    ".uv-cache",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    "site-packages",
-    ".scratch",
-    "htmlcov",
-    # Local git worktrees are separate checkouts of other branches. Scanning
-    # them makes this check fail on someone else's in-progress work — and on
-    # vendored trees that branch happens to contain. CI never has them, so the
-    # failure only ever hits developers running the check locally.
-    ".worktrees",
-}
 
 
 def source_python_files(root: Path) -> list[Path]:
-    files: list[Path] = []
-    for path in root.rglob("*.py"):
-        if any(part in SKIP_DIRS for part in path.relative_to(root).parts):
-            continue
-        files.append(path)
-    return files
+    """Return tracked and untracked, nonignored Python files under *root*."""
+    result = subprocess.run(
+        [
+            "git",
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            "*.py",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+    relative_paths = (os.fsdecode(raw) for raw in result.stdout.split(b"\0") if raw)
+    return sorted(root / relative for relative in relative_paths)
 
 
 def main() -> int:

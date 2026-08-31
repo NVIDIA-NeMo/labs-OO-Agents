@@ -302,6 +302,7 @@ class Skill:
             cls_name = name or "Skill"
             self.__class__ = type(cls_name, (Skill,), {"__doc__": content})  # pyright: ignore[reportAttributeAccessIssue]
 
+    @hidden
     def attach(self, agent: Any) -> None:
         """Called when this skill is installed on an agent.
 
@@ -309,6 +310,7 @@ class Skill:
         """
         self._agent = agent
 
+    @hidden
     def detach(self) -> None:
         """Called when this skill is removed from an agent."""
         self._agent = None

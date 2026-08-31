@@ -1,6 +1,6 @@
 ---
 name: nooa-trace-viewer
-description: Run and use the NVIDIA OO Agents trace viewer — the web UI + OTLP receiver for browsing agent traces and eval results. Use when starting the viewer, importing/exporting/deleting traces, querying the viewer's REST API, or wiring an agent run so traces show up at localhost:5001.
+description: Run and use the NOOA trace viewer — the web UI + OTLP receiver for browsing agent traces and eval results. Use when starting the viewer, importing/exporting/deleting traces, querying the viewer's REST API, or wiring an agent run so traces show up at localhost:5001.
 compatibility: nooa package with the [viewer] extra (fastapi, uvicorn); nooa-cli for the `nooa` commands
 ---
 

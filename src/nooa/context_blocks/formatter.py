@@ -225,6 +225,7 @@ def _event_block_to_messages(
                     name=event.name,
                     arguments=event.arguments,
                 ),
+                reasoning_items=event.reasoning_items,
             )
         ]
         if event.result is not None:
@@ -425,22 +426,23 @@ class OpenAIProviderFormatter(ProviderFormatter):
         out: list[dict] = []
         for msg in messages:
             if msg.tool_call is not None:
-                out.append(
-                    {
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "id": msg.tool_call.id,
-                                "type": "function",
-                                "function": {
-                                    "name": msg.tool_call.name,
-                                    "arguments": json.dumps(msg.tool_call.arguments),
-                                },
-                            }
-                        ],
-                    }
-                )
+                assistant_message = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": msg.tool_call.id,
+                            "type": "function",
+                            "function": {
+                                "name": msg.tool_call.name,
+                                "arguments": json.dumps(msg.tool_call.arguments),
+                            },
+                        }
+                    ],
+                }
+                if msg.reasoning_items:
+                    assistant_message["reasoning_items"] = msg.reasoning_items
+                out.append(assistant_message)
             elif msg.tool_call_id is not None:
                 out.append(
                     {
@@ -535,6 +537,8 @@ class ResponsesProviderFormatter(ProviderFormatter):
                 # Preserve assistant text that precedes the tool call
                 if msg.content and msg.role == Role.ASSISTANT:
                     out.append({"role": "assistant", "content": msg.content})
+                if msg.reasoning_items:
+                    out.extend(msg.reasoning_items)
                 out.append(
                     {
                         "type": "function_call",

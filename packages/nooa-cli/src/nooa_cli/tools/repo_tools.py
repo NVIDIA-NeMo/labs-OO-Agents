@@ -267,7 +267,7 @@ def _line_match(path: Path, line_no: int) -> Match | None:
         return None
     if not (1 <= line_no <= len(lines)):
         return None
-    return Match(str(path), line_no, line_no, lines[line_no - 1])
+    return Match(str(path), line_no, line_no, lines[line_no - 1], resolved_path=path)
 
 
 def _symbol_anchor_pairs(path: Path, symbols: list[str]) -> list[tuple[str, Match]]:
@@ -286,7 +286,18 @@ def _symbol_anchor_pairs(path: Path, symbols: list[str]) -> list[tuple[str, Matc
         except ValueError:
             continue
         if 1 <= line_no <= len(lines):
-            pairs.append((symbol, Match(str(path), line_no, line_no, lines[line_no - 1])))
+            pairs.append(
+                (
+                    symbol,
+                    Match(
+                        str(path),
+                        line_no,
+                        line_no,
+                        lines[line_no - 1],
+                        resolved_path=path,
+                    ),
+                )
+            )
     return pairs
 
 

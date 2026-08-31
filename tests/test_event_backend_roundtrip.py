@@ -370,3 +370,34 @@ def test_python_output_none_value_is_preserved(backend):
     retrieved = backend.get("noneval")
     assert retrieved is not None
     assert retrieved.value is None
+
+
+def test_python_output_rich_diagnostic_roundtrip_preserves_every_channel(backend):
+    """Source-aware failures must survive the backend used by resumed sessions."""
+    diagnostic = (
+        "Cell In[75], line 5, in <module>\n"
+        "    start = sens.index('missing')\n"
+        "            ^^^^^^^^^^^^^^^^^^^^^\n"
+        "ValueError: substring not found"
+    )
+    event = PythonOutput(
+        tool_call_id="tc-diagnostic",
+        execution_status="error",
+        execution_count=75,
+        stdout="partial result\n",
+        stderr="warning before failure\n",
+        error=diagnostic,
+    )
+
+    backend.store("diagnostic", event)
+    retrieved = backend.get("diagnostic")
+
+    assert isinstance(retrieved, PythonOutput)
+    assert retrieved.tool_call_id == "tc-diagnostic"
+    assert retrieved.execution_count == 75
+    assert retrieved.execution_status == ResultStatus.ERROR
+    assert retrieved.stdout == "partial result\n"
+    assert retrieved.stderr == "warning before failure\n"
+    assert retrieved.error == diagnostic
+    assert "start = sens.index('missing')" in retrieved.error
+    assert "^^^^^^^^^^^^^^^^^^^^^" in retrieved.error

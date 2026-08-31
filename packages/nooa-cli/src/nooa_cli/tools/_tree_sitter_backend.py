@@ -58,7 +58,7 @@ _DEFINITION_QUERIES = {
     """,
     "typescript": """
         (function_declaration name: (identifier) @name) @def
-        (class_declaration name: (identifier) @name) @def
+        (class_declaration name: (type_identifier) @name) @def
         (interface_declaration name: (type_identifier) @name) @def
         (type_alias_declaration name: (type_identifier) @name) @def
         (method_definition name: (property_identifier) @name) @def
@@ -139,18 +139,29 @@ def _get_parser(lang: str) -> ts.Parser | None:
         return None
 
 
-def _query_captures(query: ts.Query, root_node: ts.Node) -> list[tuple[ts.Node, str]]:
-    legacy_captures = getattr(query, "captures", None)
-    if legacy_captures is not None:
-        return legacy_captures(root_node)
+def _compile_query(language: ts.Language, source: str) -> ts.Query:
+    """Compile a query using the API exposed by the installed Tree-sitter version."""
+    legacy_query = getattr(language, "query", None)
+    if callable(legacy_query):
+        return legacy_query(source)
+    return ts.Query(language, source)
 
-    captures = ts.QueryCursor(query).captures(root_node)
+
+def _normalize_captures(captures) -> list[tuple[ts.Node, str]]:
+    """Normalize capture results returned by different Tree-sitter releases."""
     if isinstance(captures, dict):
-        flattened = [
+        captures = [
             (node, capture_name) for capture_name, nodes in captures.items() for node in nodes
         ]
-        return sorted(flattened, key=lambda item: item[0].start_byte)
+        return sorted(captures, key=lambda item: item[0].start_byte)
     return captures
+
+
+def _query_captures(query: ts.Query, root_node: ts.Node) -> list[tuple[ts.Node, str]]:
+    legacy_captures = getattr(query, "captures", None)
+    if callable(legacy_captures):
+        return _normalize_captures(legacy_captures(root_node))
+    return _normalize_captures(ts.QueryCursor(query).captures(root_node))
 
 
 def ts_extract_symbols(path: Path, lang: str, max_symbols: int = 200) -> list[str] | None:
@@ -176,7 +187,7 @@ def ts_extract_symbols(path: Path, lang: str, max_symbols: int = 200) -> list[st
 
     try:
         language = parser.language
-        query = language.query(query_src)
+        query = _compile_query(language, query_src)
     except Exception as e:
         logger.debug(f"tree-sitter query compilation failed for {lang}: {e}")
         return None
@@ -237,7 +248,7 @@ def ts_find_references(
 
     try:
         language = parser.language
-        query = language.query(query_src)
+        query = _compile_query(language, query_src)
     except Exception:
         return None
 
