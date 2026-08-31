@@ -347,7 +347,9 @@ def test_live_preview_reports_empty_conversation() -> None:
     app = MagicMock()
     app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
     picker = ResumePicker([row("empty", "Empty", turns=())], app)
-    assert picker.preview_text(40, 5) == [("class:fullscreen-browser.empty", "No conversation preview")]
+    assert picker.preview_text(40, 5) == [
+        ("class:fullscreen-browser.empty", "No conversation preview")
+    ]
 
 
 def test_preview_uses_live_scrollback_visual_language() -> None:
@@ -489,6 +491,44 @@ async def test_picker_excludes_empty_sessions(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_resume_picker_f2_temporarily_restores_native_selection(monkeypatch) -> None:
+    from nooa_cli.tui import session_manager as sm
+
+    from .tui_app_harness import TUIHarness
+
+    session = SimpleNamespace(
+        id="resumable",
+        name="kept",
+        model="m",
+        agent="A",
+        working_dir=str(Path.cwd()),
+        last_active=2,
+        turn_count=1,
+    )
+    monkeypatch.setattr(
+        sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: [session])
+    )
+    monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
+    monkeypatch.setattr(
+        sm.SessionManager,
+        "load_turns",
+        classmethod(lambda cls, value, limit=12: [SimpleNamespace(role="agent", content="copy")]),
+    )
+    async with TUIHarness() as harness:
+        opened = asyncio.create_task(harness.app.open_session_resume_dialog())
+        await harness.wait_for(lambda: harness.app._resume_picker is not None)
+        assert bool(harness.app._app.mouse_support()) is True
+
+        await harness.press("f2")
+        await harness.wait_for(lambda: not bool(harness.app._app.mouse_support()))
+
+        await harness.press("f2")
+        await harness.wait_for(lambda: bool(harness.app._app.mouse_support()))
+        await harness.press("escape")
+        assert await asyncio.wait_for(opened, 1) is None
+
+
+@pytest.mark.asyncio
 async def test_filter_change_prepares_new_preview_without_blocking(monkeypatch) -> None:
     import threading
 
@@ -566,7 +606,31 @@ def test_preview_mouse_drag_selects_and_copies() -> None:
 
     assert copied
     assert app.clipboard.set_text.call_args.args[0] == copied[0]
-    assert picker._preview_model(20).selected_text() == ""
+    assert picker._preview_model(20).selected_text() == copied[0]
+
+
+@pytest.mark.asyncio
+async def test_resume_f2_native_selection_cancels_edge_autoscroll() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker(
+        [row("1", "one", turns=(ResumePickerTurn("agent", "\n".join(map(str, range(20)))),))],
+        app,
+    )
+    picker.preview_control.create_content(20, 3)
+    scrolls: list[tuple[str, int]] = []
+    picker.mouse_scroll = lambda pane, delta: scrolls.append((pane, delta))  # type: ignore[method-assign]
+    picker.preview_control.mouse_handler(
+        MouseEvent(Point(0, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+    picker.preview_control.mouse_handler(
+        MouseEvent(Point(3, 2), MouseEventType.MOUSE_MOVE, MouseButton.LEFT, frozenset())
+    )
+
+    picker.toggle_native_selection()
+    assert picker.mouse_support is False
+    await asyncio.sleep(0.4)
+    assert scrolls == []
 
 
 @pytest.mark.asyncio

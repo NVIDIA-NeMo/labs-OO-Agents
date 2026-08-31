@@ -16,7 +16,7 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
 from rich.cells import cell_len, split_graphemes
 
-from .fullscreen_browser import build_fullscreen_browser
+from .fullscreen_browser import SelectablePreviewControl, build_fullscreen_browser
 from .terminal_safety import sanitize_live_text
 
 
@@ -462,12 +462,11 @@ def render_resume_picker(model: ResumePickerModel, width: int, height: int) -> s
 
 
 class _PickerControl(FormattedTextControl):
-    def __init__(self, picker: ResumePicker, kind: Literal["list", "preview"]):
+    """Resume list control; preview gestures use SelectablePreviewControl."""
+
+    def __init__(self, picker: ResumePicker):
         self.picker = picker
-        self.kind = kind
         self.viewport = (1, 1)
-        self._dragging = False
-        self._drag_moved = False
         super().__init__(self._text, focusable=True, show_cursor=False)
 
     def create_content(self, width: int, height: int):
@@ -477,66 +476,38 @@ class _PickerControl(FormattedTextControl):
 
     def _text(self):
         width, height = self.viewport
-        if self.kind == "list":
-            output = []
-            for index, match in self.picker.model.visible(height):
-                for row_line in _row_fragments(
-                    match,
-                    index == self.picker.model.selected,
-                    width,
-                    sort_updated=self.picker.model.sort_updated,
-                ):
-                    if output:
-                        output.append(("", "\n"))
-                    output.extend(row_line)
-            if not output:
-                output = [("class:fullscreen-browser.empty", "No matching sessions")]
-            return output
-
-        return self.picker.preview_text(width, height)
+        output = []
+        for index, match in self.picker.model.visible(height):
+            for row_line in _row_fragments(
+                match,
+                index == self.picker.model.selected,
+                width,
+                sort_updated=self.picker.model.sort_updated,
+            ):
+                if output:
+                    output.append(("", "\n"))
+                output.extend(row_line)
+        return output or [("class:fullscreen-browser.empty", "No matching sessions")]
 
     def mouse_handler(self, mouse_event: MouseEvent):
         if (
             MouseModifier.ALT in mouse_event.modifiers
             or MouseModifier.SHIFT in mouse_event.modifiers
         ):
-            self._dragging = False
             return NotImplemented
         if mouse_event.event_type is MouseEventType.SCROLL_UP:
-            self.picker.mouse_scroll(self.kind, -3)
+            self.picker.mouse_scroll("list", -3)
             return None
         if mouse_event.event_type is MouseEventType.SCROLL_DOWN:
-            self.picker.mouse_scroll(self.kind, 3)
+            self.picker.mouse_scroll("list", 3)
             return None
         if (
             mouse_event.event_type is MouseEventType.MOUSE_DOWN
             and mouse_event.button is MouseButton.LEFT
         ):
-            self.picker.activate_control(self.kind)
-            if self.kind == "list":
-                self.picker.select(self.picker.model.list_offset + mouse_event.position.y)
-            else:
-                self._dragging = True
-                self._drag_moved = False
-                self.picker.preview_selection(
-                    "start", mouse_event.position.x, mouse_event.position.y
-                )
+            self.picker.activate_control("list")
+            self.picker.select(self.picker.model.list_offset + mouse_event.position.y)
             return None
-        if self.kind == "preview" and self._dragging:
-            if mouse_event.event_type is MouseEventType.MOUSE_MOVE:
-                self._drag_moved = True
-                self.picker.preview_selection(
-                    "extend", mouse_event.position.x, mouse_event.position.y
-                )
-                return None
-            if mouse_event.event_type is MouseEventType.MOUSE_UP:
-                self._dragging = False
-                action = "finish" if self._drag_moved else "cancel"
-                self._drag_moved = False
-                self.picker.preview_selection(
-                    action, mouse_event.position.x, mouse_event.position.y
-                )
-                return None
         return NotImplemented
 
 
@@ -603,6 +574,7 @@ class ResumePicker:
         self._selection_copy_callback = selection_copy_callback
         self._preview_models: dict[tuple[str, int], Any] = {}
         self._preview_tasks: dict[tuple[str, int], Any] = {}
+        self.native_selection = False
         self.active_control = "list"
         self.option_cursor: Literal["filter", "sort"] | None = None
         self.buffer = Buffer(multiline=False)
@@ -642,8 +614,8 @@ class ResumePicker:
             [search, Window(FormattedTextControl(" "), width=1, height=1), selectors],
             padding=0,
         )
-        self.list_control = _PickerControl(self, "list")
-        self.preview_control = _PickerControl(self, "preview")
+        self.list_control = _PickerControl(self)
+        self.preview_control = SelectablePreviewControl(self)
 
         self.title_control = FormattedTextControl(self._title)
         self.list_header_control = FormattedTextControl(self._list_header)
@@ -703,6 +675,17 @@ class ResumePicker:
         glyph = "▌" if active else "│"
         return [(style, "\n".join([glyph] * max(1, self.app.output.get_size().rows)))]
 
+    @property
+    def mouse_support(self) -> bool:
+        """Disable mouse reporting while terminal-native selection is active."""
+        return not self.native_selection
+
+    def toggle_native_selection(self) -> None:
+        """Switch between application selection and terminal-native selection."""
+        self.preview_control.cancel_drag()
+        self.native_selection = not self.native_selection
+        self.invalidate()
+
     def _help_text(self):
         columns = self.app.output.get_size().columns
         if self.option_cursor is not None:
@@ -710,8 +693,8 @@ class ResumePicker:
                 return "Options · ←→ select · ↑↓/Space change · Esc done"
             return "Options · ←→ select · ↑↓/Space change · Enter/Esc done"
         if columns < 72:
-            return "Type search · Ctrl-O options · ↵ resume · Esc"
-        return "Type search · Ctrl-O options · Tab panes · ↑↓ move · ↵ resume · Esc"
+            return "Ctrl-O options · F2 native · ↵ resume · Esc"
+        return "Ctrl-O options · Tab panes · F2 native · ↵ resume · Esc"
 
     def _title(self):
         count = len(self.model.matches)
@@ -963,7 +946,6 @@ class ResumePicker:
             transcript.update_selection(x=x, y=y, width=width, height=height)
         if action == "finish":
             selected = transcript.selected_text()
-            transcript.clear_selection()
             if selected:
                 self.app.clipboard.set_text(selected)
                 if self._selection_copy_callback is not None:
@@ -1017,6 +999,7 @@ class ResumePicker:
 
     def close(self) -> None:
         """Cancel preview preparation when the picker is dismissed."""
+        self.preview_control.cancel_drag()
         for task in self._preview_tasks.values():
             task.cancel()
         self._preview_tasks.clear()
