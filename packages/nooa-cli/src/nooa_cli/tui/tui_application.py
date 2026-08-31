@@ -1706,7 +1706,7 @@ class TUIApplication:
 
         def _subview_mouse_enabled() -> bool:
             if self._resume_picker is not None:
-                return True
+                return bool(self._resume_picker.mouse_support)
             view = self._active_subview
             if view is None:
                 return self._is_fullscreen and self._fullscreen_mouse_navigation
@@ -2075,7 +2075,9 @@ class TUIApplication:
         if getattr(view, "use_fullscreen_browser", False) and not hasattr(view, "container"):
             from .fullscreen_browser import ExplorerBrowser
 
-            view = ExplorerBrowser(view, self._app)
+            view = ExplorerBrowser(
+                view, self._app, selection_copy_callback=self._start_fullscreen_selection_copy
+            )
         self._cancel_fullscreen_drag()
         self._active_subview = view
         loop = asyncio.get_running_loop()
@@ -2685,9 +2687,12 @@ class TUIApplication:
         def _(event):
             self._subview_key(event, "copy")
 
-        @kb.add("f2", filter=subview_active, eager=True)
+        @kb.add("f2", filter=subview_active | resume_picker_active, eager=True)
         def _(event):
-            self._subview_key(event, "native_selection")
+            if self._resume_picker is not None:
+                self._resume_picker.toggle_native_selection()
+            else:
+                self._subview_key(event, "native_selection")
 
         @kb.add("c-o", filter=subview_active, eager=True)
         def _(event):
