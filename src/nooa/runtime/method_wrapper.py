@@ -434,11 +434,12 @@ def create_sync_agent_method_wrapper(
         # nearest traced ancestor — same semantics as the async wrapper.
         _push_agent_call_id(call_id if _tracing_enabled[0] else parent_call_id)
 
+        current_parent = _parent_agent_var.get()
+        is_top_level = current_parent is None
+
         # Set parent agent for LLM inheritance — subagents instantiated inside
         # this sync method can inherit the parent's LLM (mirrors async wrapper).
         parent_token = _parent_agent_var.set(self)
-
-        is_top_level = _parent_agent_var.get() is None
         try:
             self.event_manager.add(
                 BeforeAgentCall(
