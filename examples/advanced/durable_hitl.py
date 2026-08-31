@@ -1,17 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: F403,F405
-"""Advanced: durable human-in-the-loop — suspend a run, resume it in a new process.
+"""Advanced: durable workflow resumption — pause a run and continue it later.
 
-Orchestrators are pure Python, but a method's progress lives on the call stack and
-`AgentSnapshot` captures agent *attributes*, not the stack. So a `run()` that pauses
-for a human cannot be picked up again after the process exits.
+Most workflows run to completion in one process. This example covers the cases where
+a workflow must stop and continue later: a worker restart, an external dependency,
+a scheduled handoff, or a human approval.
 
-Keeping progress in a snapshotted field instead of in locals fixes that: re-entering
-the orchestrator after `restore_snapshot()` skips whatever is already done.
+Use a storage manager to save the agent's state before stopping. Later, create a
+fresh agent, restore the snapshot, provide any newly available input, and call the
+workflow again. Completed steps are kept in agent fields, so the workflow skips them
+and continues with the next unfinished step.
 
-Watch the "running ..." lines. The child process prints only the step it actually
-had to perform — the earlier one came back from the snapshot.
+Here, a human threshold is the reason for the pause. The example resumes in a
+separate Python process to demonstrate that the saved progress survives a process
+boundary. Watch the "running ..." lines: the child runs only the remaining step.
 
     uv run python examples/advanced/durable_hitl.py
 """
