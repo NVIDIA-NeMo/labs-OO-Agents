@@ -100,7 +100,19 @@ def _find_harbor_traces(root: Path) -> list[Path]:
     """Find trace JSONL files within Harbor trials, independent of layout."""
     traces: set[Path] = set()
     for trial_dir in _trial_dirs(root):
-        traces.update(path for path in trial_dir.rglob("*.jsonl") if _is_trace_jsonl(path))
+        seen_contents: set[str] = set()
+        candidates = sorted(
+            trial_dir.rglob("*.jsonl"),
+            key=lambda path: (len(path.relative_to(trial_dir).parts), str(path)),
+        )
+        for path in candidates:
+            if not _is_trace_jsonl(path):
+                continue
+            content_hash = _trace_content_hash(path)
+            if content_hash is None or content_hash in seen_contents:
+                continue
+            seen_contents.add(content_hash)
+            traces.add(path)
     return sorted(traces)
 
 
@@ -127,6 +139,15 @@ def _is_trace_jsonl(path: Path) -> bool:
     except (OSError, UnicodeError):
         return False
     return False
+
+
+def _trace_content_hash(path: Path) -> str | None:
+    """Return a streaming digest used to deduplicate copies within one trial."""
+    try:
+        with path.open("rb") as stream:
+            return hashlib.file_digest(stream, "sha256").hexdigest()
+    except OSError:
+        return None
 
 
 def _read_json(path: Path) -> dict[str, Any]:

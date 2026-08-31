@@ -150,6 +150,10 @@ def test_trace_discovery_is_content_based_and_layout_independent(tmp_path: Path)
     trace_path = nested_dir / "events.jsonl"
     trace_path.write_text("not-json\n" + json.dumps(_trace_body()) + "\n")
 
+    duplicate_path = trial_dir / "artifacts" / "logs" / "artifacts" / "traces" / "events.jsonl"
+    duplicate_path.parent.mkdir(parents=True)
+    duplicate_path.write_bytes(trace_path.read_bytes())
+
     unrelated = trial_dir / "agent" / "traces" / "messages.jsonl"
     unrelated.write_text(json.dumps({"messages": ["not a trace"]}) + "\n")
     outside_trial = job_dir / "other.jsonl"
@@ -165,8 +169,10 @@ def test_regular_import_groups_trial_files_and_adds_one_eval_span(
     job_dir, trial_dir = _make_trial(tmp_path, {"rewards": {"progress": 0.5}})
     trace_dir = trial_dir / "custom" / "trace-output"
     trace_dir.mkdir(parents=True)
-    for name in ("first.jsonl", "second.jsonl"):
-        (trace_dir / name).write_text(json.dumps(_trace_body()) + "\n")
+    for name, span_id in (("first.jsonl", "2" * 16), ("second.jsonl", "3" * 16)):
+        body = _trace_body()
+        body["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["spanId"] = span_id
+        (trace_dir / name).write_text(json.dumps(body) + "\n")
 
     posted: list[list[dict[str, Any]]] = []
     monkeypatch.setattr(import_harbor, "check_endpoint_reachable", lambda _endpoint: True)
