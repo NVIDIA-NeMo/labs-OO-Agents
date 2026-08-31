@@ -56,6 +56,7 @@ they are references rather than a second tutorial.
 | Example | Focus |
 |---|---|
 | [`codeact_event_sequence.py`](advanced/codeact_event_sequence.py) | Raw events emitted during a CodeAct run |
+| [`durable_hitl.py`](advanced/durable_hitl.py) | Resume a durable workflow after an interruption, illustrated with a human-input pause |
 | [`memory.py`](advanced/memory.py) | Conversation history across method calls |
 | [`prefill.py`](advanced/prefill.py) | Customizing the input prefill shown to generated code |
 | [`swappable_execution_engines.py`](advanced/swappable_execution_engines.py) | Replacing the default Python execution engine |
