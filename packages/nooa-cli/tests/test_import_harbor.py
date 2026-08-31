@@ -143,12 +143,30 @@ def test_missing_primary_score_does_not_become_failure(tmp_path: Path) -> None:
     assert span["status"]["code"] == 1
 
 
+def test_trace_discovery_is_content_based_and_layout_independent(tmp_path: Path) -> None:
+    job_dir, trial_dir = _make_trial(tmp_path, {"rewards": {"progress": 0.5}})
+    nested_dir = trial_dir / "custom" / "deeply" / "nested"
+    nested_dir.mkdir(parents=True)
+    trace_path = nested_dir / "events.jsonl"
+    trace_path.write_text("not-json\n" + json.dumps(_trace_body()) + "\n")
+
+    unrelated = trial_dir / "agent" / "traces" / "messages.jsonl"
+    unrelated.write_text(json.dumps({"messages": ["not a trace"]}) + "\n")
+    outside_trial = job_dir / "other.jsonl"
+    outside_trial.write_text(json.dumps(_trace_body()) + "\n")
+
+    assert import_harbor._find_harbor_traces(job_dir) == [trace_path]
+    assert import_harbor._trial_dir_for_trace(trace_path) == trial_dir
+
+
 def test_regular_import_groups_trial_files_and_adds_one_eval_span(
     tmp_path: Path, monkeypatch
 ) -> None:
     job_dir, trial_dir = _make_trial(tmp_path, {"rewards": {"progress": 0.5}})
+    trace_dir = trial_dir / "custom" / "trace-output"
+    trace_dir.mkdir(parents=True)
     for name in ("first.jsonl", "second.jsonl"):
-        (trial_dir / "agent" / "traces" / name).write_text(json.dumps(_trace_body()) + "\n")
+        (trace_dir / name).write_text(json.dumps(_trace_body()) + "\n")
 
     posted: list[list[dict[str, Any]]] = []
     monkeypatch.setattr(import_harbor, "check_endpoint_reachable", lambda _endpoint: True)

@@ -45,6 +45,7 @@ MAX_VERIFIER_FIELDS = 100
 MAX_VERIFIER_DEPTH = 4
 MAX_VERIFIER_SCALAR_CHARS = 1_000
 MAX_VERIFIER_OUTPUT_CHARS = 50_000
+MAX_TRACE_SNIFF_RECORDS = 20
 
 OtlpScalar = str | bool | int | float
 
@@ -96,16 +97,36 @@ class HarborVerifierOutcome:
 
 
 def _find_harbor_traces(root: Path) -> list[Path]:
-    """Find OTLP or portable journal traces under supported Harbor layouts.
-
-    Older integrations wrote beneath ``trial_dir/artifacts``. Current Harbor
-    mounts ``/logs/agent`` at ``trial_dir/agent``, where Nooa writes ``traces``.
-    """
-    traces = set(root.rglob("artifacts/**/*.jsonl"))
-    # Current Harbor mounts /logs/agent directly at <trial>/agent, while older
-    # integrations copied /logs/artifacts to <trial>/artifacts.
-    traces.update(root.rglob("agent/traces/**/*.jsonl"))
+    """Find trace JSONL files within Harbor trials, independent of layout."""
+    traces: set[Path] = set()
+    for trial_dir in _trial_dirs(root):
+        traces.update(path for path in trial_dir.rglob("*.jsonl") if _is_trace_jsonl(path))
     return sorted(traces)
+
+
+def _is_trace_jsonl(path: Path) -> bool:
+    """Return whether a JSONL file contains an OTLP envelope or Nooa journal record."""
+    records_seen = 0
+    try:
+        with path.open() as stream:
+            for line in stream:
+                if not line.strip():
+                    continue
+                try:
+                    body = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                records_seen += 1
+                if isinstance(body, dict) and (
+                    isinstance(body.get("resourceSpans"), list)
+                    or get_journal_record(body) is not None
+                ):
+                    return True
+                if records_seen >= MAX_TRACE_SNIFF_RECORDS:
+                    break
+    except (OSError, UnicodeError):
+        return False
+    return False
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -299,10 +320,11 @@ def _serialize_verifier_output(outcome: HarborVerifierOutcome) -> str | None:
 
 
 def _trial_dir_for_trace(jsonl_path: Path) -> Path:
-    """Resolve a trace file to its Harbor trial across supported host layouts."""
+    """Resolve a trace file to its nearest enclosing Harbor trial directory."""
     for parent in jsonl_path.parents:
-        if parent.name in {"artifacts", "agent"}:
-            return parent.parent
+        result = _read_json(parent / "result.json")
+        if result.get("trial_name") or (parent / "config.json").is_file():
+            return parent
     return jsonl_path.parent
 
 
@@ -318,8 +340,8 @@ def _datetime_ns(value: object, fallback: int) -> int:
     return max(0, int(parsed.timestamp() * 1_000_000_000))
 
 
-def _trial_meta(jsonl_path: Path) -> dict:
-    """Extract Harbor metadata for a trace file from its surrounding directory structure.
+def _trial_meta_from_dir(trial_dir: Path) -> dict:
+    """Extract Harbor metadata from a discovered trial directory.
 
     Expected layout::
 
@@ -330,10 +352,8 @@ def _trial_meta(jsonl_path: Path) -> dict:
                 verifier/
                     result.json      ← arbitrary benchmark verifier result
                     reward.json      ← optional scalar reward (or reward.txt)
-                artifacts/...        ← legacy trace layout
-                agent/traces/...     ← current persisted trace layout
+                <any path>/*.jsonl   ← OTLP or portable journal traces
     """
-    trial_dir = _trial_dir_for_trace(jsonl_path)
     job_dir = trial_dir.parent
 
     trial_result = _read_json(trial_dir / "result.json")
@@ -383,6 +403,11 @@ def _trial_meta(jsonl_path: Path) -> dict:
         "experiment": job_dir.name or harbor_eval or "harbor",
         "job_name": job_dir.name,
     }
+
+
+def _trial_meta(jsonl_path: Path) -> dict:
+    """Extract Harbor metadata for a trace file from its enclosing trial."""
+    return _trial_meta_from_dir(_trial_dir_for_trace(jsonl_path))
 
 
 def _harbor_resource_attrs(meta: dict, experiment: str, batch_id: str) -> dict[str, OtlpScalar]:
@@ -578,11 +603,6 @@ def _trial_dirs(root: Path) -> list[Path]:
     return sorted(out)
 
 
-def _trial_meta_from_dir(trial_dir: Path) -> dict:
-    """Extract Harbor metadata when only a trial directory is available."""
-    return _trial_meta(trial_dir / "artifacts" / "traces" / "_synthetic.jsonl")
-
-
 def _import_trace_file(
     endpoint: str,
     jsonl_path: Path,
@@ -765,7 +785,7 @@ def command(
     else:
         if not files:
             click.echo(f"No Harbor trace files found under {path}")
-            click.echo("Expected: <job>/<trial>/{artifacts/**,agent/traces/**}/*.jsonl")
+            click.echo("Expected: OTLP or Nooa journal JSONL within a Harbor trial directory")
             click.echo("Tip: use --eval-only to group Harbor result metadata without trace files")
             raise SystemExit(1)
 
