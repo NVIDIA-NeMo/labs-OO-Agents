@@ -11,7 +11,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
 from nooa.context_blocks import ScopedContext
-from nooa.ellipsis_detection import has_ellipsis_body
+from nooa.ellipsis_detection import has_ellipsis_body, has_ellipsis_marker
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
@@ -97,6 +97,22 @@ def strategy(
         setattr(func, "_strategy_context", final_context)  # noqa: B010
         setattr(func, "_strategy_events", final_events)  # noqa: B010
         setattr(func, "_strategy_truncation", truncation)  # noqa: B010
+
+        # @strategy has a unary, single-result contract. Deterministic
+        # generators need no strategy, while generated streams require a
+        # separate protocol rather than pretending each yield is a result.
+        if inspect.isasyncgenfunction(func) or inspect.isgeneratorfunction(func):
+            if has_ellipsis_marker(func):
+                raise TypeError(
+                    f"@strategy method '{func.__name__}' is an LLM-generated generator. "
+                    f"Generation methods must produce one final result; generated "
+                    f"streams are not supported."
+                )
+            raise TypeError(
+                f"@strategy cannot be applied to deterministic generator method "
+                f"'{func.__name__}'. Remove @strategy; deterministic generators are "
+                f"supported directly as agent methods."
+            )
 
         # Also create runtime wrapper for dynamically-defined methods
         if not inspect.iscoroutinefunction(func):
