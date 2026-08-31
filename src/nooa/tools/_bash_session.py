@@ -61,6 +61,7 @@ class BashSession:
         self._started = False
         self._started_on_loop: asyncio.AbstractEventLoop | None = None
         self._lock = asyncio.Lock()
+        self._lock_loop: asyncio.AbstractEventLoop | None = None
         self._last_successful_command: float | None = None
         self._last_command: str = ""
         self._start_count: int = 0
@@ -242,12 +243,17 @@ class BashSession:
         return f'eval "$(base64 -d <<<{blob})" </dev/null\n{protocol}'
 
     def _ensure_lock_on_current_loop(self) -> None:
-        """Recreate the lock if the event loop changed since it was created."""
-        if (
-            self._started_on_loop is not None
-            and self._started_on_loop is not asyncio.get_running_loop()
-        ):
+        """Recreate the lock if serialized commands move to another event loop.
+
+        Track the lock separately from the shell lifecycle so reset() cannot
+        replace a lock that a caller still holds.
+        """
+        loop = asyncio.get_running_loop()
+        if self._lock_loop is None:
+            self._lock_loop = loop
+        elif self._lock_loop is not loop:
             self._lock = asyncio.Lock()
+            self._lock_loop = loop
 
     async def run(self, command: str, timeout: float = 30.0) -> tuple[str, str, int]:
         """Run a command and return (stdout, stderr, exit_code).
@@ -687,4 +693,3 @@ class BashSession:
         self._process = None
         self._started = False
         self._started_on_loop = None
-        self._lock = asyncio.Lock()
