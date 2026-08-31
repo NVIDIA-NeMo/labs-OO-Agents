@@ -100,7 +100,7 @@ def _find_harbor_traces(root: Path) -> list[Path]:
     """Find trace JSONL files within Harbor trials, independent of layout."""
     traces: set[Path] = set()
     for trial_dir in _trial_dirs(root):
-        seen_contents: set[str] = set()
+        candidates_by_size: dict[int, list[Path]] = {}
         candidates = sorted(
             trial_dir.rglob("*.jsonl"),
             key=lambda path: (len(path.relative_to(trial_dir).parts), str(path)),
@@ -108,34 +108,47 @@ def _find_harbor_traces(root: Path) -> list[Path]:
         for path in candidates:
             if not _is_trace_jsonl(path):
                 continue
-            content_hash = _trace_content_hash(path)
-            if content_hash is None or content_hash in seen_contents:
+            try:
+                candidates_by_size.setdefault(path.stat().st_size, []).append(path)
+            except OSError:
                 continue
-            seen_contents.add(content_hash)
-            traces.add(path)
+
+        # Identical content necessarily has an identical byte size.  Avoid a
+        # full streaming digest for the common case of one trace per trial,
+        # while retaining content-based deduplication for mirrored copies.
+        for same_size_paths in candidates_by_size.values():
+            if len(same_size_paths) == 1:
+                traces.add(same_size_paths[0])
+                continue
+
+            seen_contents: set[str] = set()
+            for path in same_size_paths:
+                content_hash = _trace_content_hash(path)
+                if content_hash is None or content_hash in seen_contents:
+                    continue
+                seen_contents.add(content_hash)
+                traces.add(path)
     return sorted(traces)
 
 
 def _is_trace_jsonl(path: Path) -> bool:
     """Return whether a JSONL file contains an OTLP envelope or Nooa journal record."""
-    records_seen = 0
     try:
         with path.open() as stream:
-            for line in stream:
+            for records_seen, line in enumerate(stream, start=1):
+                if records_seen > MAX_TRACE_SNIFF_RECORDS:
+                    break
                 if not line.strip():
                     continue
                 try:
                     body = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                records_seen += 1
                 if isinstance(body, dict) and (
                     isinstance(body.get("resourceSpans"), list)
                     or get_journal_record(body) is not None
                 ):
                     return True
-                if records_seen >= MAX_TRACE_SNIFF_RECORDS:
-                    break
     except (OSError, UnicodeError):
         return False
     return False
@@ -274,11 +287,6 @@ def _read_verifier_outcome(trial_dir: Path, trial_result: dict[str, Any]) -> Har
         error=error,
         source=source,
     )
-
-
-def _read_score(trial_dir: Path, trial_result: dict) -> float | None:
-    """Compatibility wrapper returning the generic verifier outcome's score."""
-    return _read_verifier_outcome(trial_dir, trial_result).score
 
 
 def _attribute_segment(value: object) -> str:

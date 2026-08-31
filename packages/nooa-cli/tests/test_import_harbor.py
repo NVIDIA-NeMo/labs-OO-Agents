@@ -143,7 +143,9 @@ def test_missing_primary_score_does_not_become_failure(tmp_path: Path) -> None:
     assert span["status"]["code"] == 1
 
 
-def test_trace_discovery_is_content_based_and_layout_independent(tmp_path: Path) -> None:
+def test_trace_discovery_is_content_based_and_layout_independent(
+    tmp_path: Path, monkeypatch
+) -> None:
     job_dir, trial_dir = _make_trial(tmp_path, {"rewards": {"progress": 0.5}})
     nested_dir = trial_dir / "custom" / "deeply" / "nested"
     nested_dir.mkdir(parents=True)
@@ -154,13 +156,38 @@ def test_trace_discovery_is_content_based_and_layout_independent(tmp_path: Path)
     duplicate_path.parent.mkdir(parents=True)
     duplicate_path.write_bytes(trace_path.read_bytes())
 
+    unique_trace_path = trial_dir / "another" / "unique.jsonl"
+    unique_trace_path.parent.mkdir()
+    unique_trace_path.write_text(json.dumps(_trace_body()) + "\n\n")
+
     unrelated = trial_dir / "agent" / "traces" / "messages.jsonl"
     unrelated.write_text(json.dumps({"messages": ["not a trace"]}) + "\n")
     outside_trial = job_dir / "other.jsonl"
     outside_trial.write_text(json.dumps(_trace_body()) + "\n")
 
-    assert import_harbor._find_harbor_traces(job_dir) == [trace_path]
+    hashed_paths: list[Path] = []
+    original_hash = import_harbor._trace_content_hash
+
+    def record_hash(path: Path) -> str | None:
+        hashed_paths.append(path)
+        return original_hash(path)
+
+    monkeypatch.setattr(import_harbor, "_trace_content_hash", record_hash)
+
+    assert import_harbor._find_harbor_traces(job_dir) == [unique_trace_path, trace_path]
+    assert hashed_paths == [trace_path, duplicate_path]
     assert import_harbor._trial_dir_for_trace(trace_path) == trial_dir
+
+
+def test_trace_sniff_limits_malformed_and_blank_lines(tmp_path: Path) -> None:
+    path = tmp_path / "mostly-invalid.jsonl"
+    lines = [
+        "not-json" if index % 2 else "" for index in range(import_harbor.MAX_TRACE_SNIFF_RECORDS)
+    ]
+    lines.append(json.dumps(_trace_body()))
+    path.write_text("\n".join(lines) + "\n")
+
+    assert not import_harbor._is_trace_jsonl(path)
 
 
 def test_regular_import_groups_trial_files_and_adds_one_eval_span(

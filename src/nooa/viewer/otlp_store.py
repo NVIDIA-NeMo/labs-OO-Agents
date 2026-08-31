@@ -613,7 +613,8 @@ def _ingest_one(body: dict, db: sqlite3.Connection) -> dict[str, Any]:
     # Other span kinds retain the existing append semantics used by streaming.
     updated_eval_rows: list[tuple[tuple, int]] = []
     updated_size_delta = 0
-    if existing and span_rows:
+    has_deterministic_eval = any(row[4] == "eval" and row[1] and row[2] for row in span_rows)
+    if existing and has_deterministic_eval:
         stored_eval_rows = db.execute(
             """SELECT id, trace_id, span_id, attributes, resource, events
                FROM spans WHERE session_id = ? AND name = 'eval'""",

@@ -482,6 +482,20 @@ class TestIngestReIngest:
         sessions = store.list_sessions()
         assert sessions[0]["span_count"] == 2
 
+    def test_reingesting_regular_spans_skips_eval_deduplication_query(self):
+        store.ingest(_make_body(session_id="s1"))
+        statements: list[str] = []
+        db = store._get_db()
+        db.set_trace_callback(statements.append)
+
+        store.ingest(_make_body(session_id="s1"))
+
+        db.set_trace_callback(None)
+        assert not any(
+            "FROM spans WHERE session_id" in statement and "name = 'eval'" in statement
+            for statement in statements
+        )
+
     def test_deterministic_eval_span_is_refreshed_without_duplication(self):
         def body(output: str, passed: bool | None) -> dict:
             attributes = [

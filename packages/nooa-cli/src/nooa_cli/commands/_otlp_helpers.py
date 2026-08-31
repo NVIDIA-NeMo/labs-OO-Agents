@@ -69,7 +69,9 @@ def inject_resource_attrs(
         if isinstance(val, bool):
             return {"boolValue": val}
         if isinstance(val, int):
-            return {"intValue": val}
+            # OTLP JSON encodes int64 values as decimal strings so values above
+            # JavaScript's safe integer limit retain their exact value.
+            return {"intValue": str(val)}
         if isinstance(val, float):
             return {"doubleValue": val}
         return {"stringValue": val}
