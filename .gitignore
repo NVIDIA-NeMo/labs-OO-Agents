@@ -366,7 +366,6 @@ sft_data/**/*.jsonl
 
 # Git credentials (must not be committed)
 .git-credentials
--e
 # Bridge watchpoint file — per-worktree, never committed
 .bridge_watch.json
 

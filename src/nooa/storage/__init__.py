@@ -8,15 +8,21 @@ from nooa.storage.manager import StorageManager
 from nooa.storage.markers import nosnapshot, snapshotable
 from nooa.storage.serialization import SKIP, deserialize, serialize
 from nooa.storage.snapshot import AgentSnapshot
-from nooa.storage.sqlite import SQLiteStorageManager
+from nooa.storage.sqlite import (
+    SessionAlreadyActiveError,
+    SQLiteStorageManager,
+    delete_sqlite_database,
+)
 
 __all__ = [
     "AgentSnapshot",
     "InMemoryStorageManager",
     "SKIP",
     "SQLiteStorageManager",
+    "SessionAlreadyActiveError",
     "StorageManager",
     "deserialize",
+    "delete_sqlite_database",
     "nosnapshot",
     "serialize",
     "snapshotable",

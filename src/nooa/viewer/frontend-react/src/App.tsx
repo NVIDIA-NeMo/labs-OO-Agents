@@ -7,6 +7,7 @@ import { EvalTraceDetail } from '@/pages/EvalTraceDetail';
 import { PlaygroundPage } from '@/pages/PlaygroundPage';
 import { MemoryPage } from '@/pages/MemoryPage';
 import { MemoryRecordDetail } from '@/pages/MemoryRecordDetail';
+import { AuthBanner } from '@/components/shared/AuthBanner';
 
 function NavBar() {
   return (
@@ -60,6 +61,7 @@ export function App() {
   return (
     <div className="min-h-screen">
       <NavBar />
+      <AuthBanner />
       <Routes>
         <Route path="/" element={<Navigate to="/eval" replace />} />
         <Route path="/traces" element={<TraceList />} />

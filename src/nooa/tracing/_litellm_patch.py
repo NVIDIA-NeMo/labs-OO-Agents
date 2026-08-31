@@ -182,8 +182,10 @@ def _patched_set_output_message_value(span: trace_api.Span, result: Any) -> Any:
 
     from litellm.types.utils import Choices
 
-    if result.choices and isinstance(result.choices[-1], Choices):
-        message = result.choices[-1].message
+    # Use the FIRST choice (choices[0]). The framework reads the first choice
+    # everywhere else, so the trace must match the message that was actually used.
+    if result.choices and isinstance(result.choices[0], Choices):
+        message = result.choices[0].message
         content = message.content
         # Use direct set_attribute to preserve empty strings
         # (the original _set_span_attribute helper filters them out)

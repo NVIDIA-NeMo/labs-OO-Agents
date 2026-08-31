@@ -31,6 +31,7 @@ Three behaviours differ from the non-generator wrappers, deliberately:
 """
 
 import asyncio
+import inspect
 import logging
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
@@ -153,9 +154,15 @@ def create_agent_method_wrapper(
             if hasattr(self, "runtime"):
                 _fw_kwargs = {
                     _name: kwargs.pop(_name)
-                    for _name in ("_session_locals", "_strategy", "llm")
+                    for _name in ("_session_locals", "_strategy")
                     if _name in kwargs
                 }
+                try:
+                    _has_user_llm_param = "llm" in inspect.signature(original_func).parameters
+                except (TypeError, ValueError):
+                    _has_user_llm_param = False
+                if not _has_user_llm_param and "llm" in kwargs:
+                    _fw_kwargs["llm"] = kwargs.pop("llm")
             try:
                 ArgumentValidator().validate(original_func, args, kwargs, _tc)
             finally:

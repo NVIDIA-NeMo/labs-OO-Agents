@@ -2,9 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the SQLite-centric memory store + numpy vector index."""
 
+import json
+import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import pytest
+from nooa_memory.config import ForgetPolicy, ReflectionPolicy
 from nooa_memory.embeddings import HashingEmbedder
+from nooa_memory.reflection import ReflectionEngine
 from nooa_memory.schema import EdgeType, Memory, MemoryType
 from nooa_memory.store import MemoryStore, NumpyVectorIndex
 
@@ -115,6 +122,7 @@ def test_persistence_reopen(tmp_path, emb):
     s2 = MemoryStore(path)
     assert s2.count() == 1
     got = s2.get(m.id)
+    assert got is not None
     assert got.content == "persisted across sessions"
     # index rebuilt from disk -> knn works
     ranked = s2.knn(emb.embed("persisted across sessions"), 1)
@@ -132,3 +140,148 @@ def test_numpy_index_add_remove():
     idx.remove("a")
     assert len(idx) == 1
     assert idx.query(np.array([1.0, 0.0], dtype=np.float32), 2)[0][0] == "b"
+
+
+class _TrackedRLock:
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._local = threading.local()
+
+    def __enter__(self):
+        self._lock.acquire()
+        self._local.depth = getattr(self._local, "depth", 0) + 1
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._local.depth -= 1
+        self._lock.release()
+
+    def owned(self) -> bool:
+        return getattr(self._local, "depth", 0) > 0
+
+
+class _GuardedConnection:
+    def __init__(self, conn, lock: _TrackedRLock) -> None:
+        self._conn = conn
+        self._lock = lock
+
+    def _assert_locked(self) -> None:
+        assert self._lock.owned(), "MemoryStore touched sqlite connection without its lock"
+
+    def execute(self, *args, **kwargs):
+        self._assert_locked()
+        return self._conn.execute(*args, **kwargs)
+
+    def executescript(self, *args, **kwargs):
+        self._assert_locked()
+        return self._conn.executescript(*args, **kwargs)
+
+    def commit(self):
+        self._assert_locked()
+        return self._conn.commit()
+
+    def close(self):
+        self._assert_locked()
+        return self._conn.close()
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+class _GuardedIndex:
+    def __init__(self, index, lock: _TrackedRLock) -> None:
+        self._index = index
+        self._lock = lock
+
+    def _assert_locked(self) -> None:
+        assert self._lock.owned(), "MemoryStore touched vector index without its lock"
+
+    def add(self, id, vector):
+        self._assert_locked()
+        return self._index.add(id, vector)
+
+    def remove(self, id):
+        self._assert_locked()
+        return self._index.remove(id)
+
+    def query(self, vector, k):
+        self._assert_locked()
+        return self._index.query(vector, k)
+
+    def __len__(self):
+        self._assert_locked()
+        return len(self._index)
+
+
+def test_store_serializes_connection_and_index_access(store, emb):
+    lock = _TrackedRLock()
+    store._lock = lock
+    store._conn = _GuardedConnection(store._conn, lock)
+    store._index = _GuardedIndex(store._index, lock)
+
+    m = _add(store, emb, "alpha beta", type=MemoryType.INFO)
+    got = store.get(m.id)
+    assert got is not None
+    got.add_edge("other", EdgeType.RELATED, 0.4)
+    store.save(got)
+    store.add_edge(got.id, "other", EdgeType.SUPPORTS)
+
+    assert store.resolve_id(m.id[:8]) == m.id
+    assert store.owner_of(m.id) == ""
+    assert store.get_embedding(m.id) is not None
+    assert store.neighbors(m.id)
+    assert store.all_memories()
+    assert store.count() == 1
+    assert store.knn(emb.embed("alpha beta"), 1)
+    assert store.keyword_search("alpha", 1) == [m.id]
+
+    store.rename_owner("missing-owner", "new-owner")
+    store.log_maintenance("test", {"ok": True})
+    assert store.maintenance_history()[0]["report"] == {"ok": True}
+    store.archive(m.id)
+    store.delete(m.id)
+
+
+def test_store_survives_foreground_and_reflection_thread_overlap(tmp_path, emb):
+    path = tmp_path / "memory.sqlite"
+    store = MemoryStore(path)
+    try:
+        for i in range(12):
+            _add(store, emb, f"seed memory {i}", type=MemoryType.INFO)
+
+        engine = ReflectionEngine(
+            store,
+            emb,
+            ReflectionPolicy(merge_threshold=0.999, edge_threshold=0.999),
+            ForgetPolicy(),
+        )
+
+        def reflect_worker() -> None:
+            for _ in range(20):
+                engine.consolidate()
+
+        def foreground_worker(worker_id: int) -> None:
+            for i in range(40):
+                m = _add(store, emb, f"foreground {worker_id} memory {i}")
+                store.count()
+                store.keyword_search("foreground memory", 5)
+                store.knn(emb.embed(f"foreground {worker_id}"), 5)
+                got = store.get(m.id)
+                if got is not None:
+                    got.touch()
+                    store.save(got)
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(reflect_worker)]
+            futures.extend(pool.submit(foreground_worker, n) for n in range(3))
+            for fut in futures:
+                fut.result(timeout=30)
+
+        with sqlite3.connect(path) as conn:
+            assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            rows = conn.execute("SELECT data FROM memories").fetchall()
+        assert rows
+        for (payload,) in rows:
+            Memory.model_validate(json.loads(payload))
+    finally:
+        store.close()

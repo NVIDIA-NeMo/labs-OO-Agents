@@ -65,6 +65,138 @@ class TestDoc:
         assert "def " in result  # Methods shown as def statements
         assert "counter" in result  # Variables shown as attributes
 
+    def test_doc_instance_preserves_type_docs_and_adds_dynamic_fields(self):
+        """Issue #199: instance docs augment, rather than replace, type docs."""
+
+        class Documented:
+            """A documented class."""
+
+            required: int
+            configured: str = "default"
+
+            @property
+            def status(self) -> str:
+                """Current status."""
+                raise AssertionError("doc() must not evaluate properties")
+
+            def run(self, count: int) -> bool:
+                """Run the operation."""
+                return count > 0
+
+            def __repr__(self) -> str:
+                return "custom-repr"
+
+        instance = Documented.__new__(Documented)
+        instance.configured = "runtime"
+        instance.dynamic = 42
+
+        type_output = doc(Documented)
+        instance_output = doc(instance)
+
+        # Every type-level declaration remains represented on the instance.
+        for snippet in (
+            "class Documented:",
+            "A documented class.",
+            "required: int",
+            "status: str",
+            "def run(self, count: int) -> bool:",
+            "Run the operation.",
+        ):
+            assert snippet in type_output
+            assert snippet in instance_output
+
+        # Current declared values and instance-only state augment that contract.
+        assert "configured: str = 'runtime'" in instance_output
+        assert "dynamic: int = 42" in instance_output
+        assert "custom-repr" not in instance_output
+
+    def test_doc_instance_includes_pydantic_extra_fields(self):
+        """Pydantic extra fields are runtime-only state outside __dict__."""
+        from pydantic import BaseModel, ConfigDict
+
+        class Model(BaseModel):
+            model_config = ConfigDict(extra="allow")
+            label: str = "default"
+
+        instance = Model(label="runtime")
+        instance.dynamic = 42
+
+        output = doc(instance)
+        assert "label: str = 'runtime'" in output
+        assert "dynamic: int = 42" in output
+        assert "dynamic" not in doc(Model)
+
+    def test_doc_instance_preserves_pydantic_constraints(self):
+        """Pydantic constraints remain documented when rendering an instance."""
+        from typing import Annotated
+
+        from pydantic import BaseModel, Field
+
+        class Limits(BaseModel):
+            percentage: int = Field(default=50, gt=0, lt=100, description="Percentage")
+            count: int = Field(ge=1, le=10)
+            code: str = Field(min_length=2, max_length=5, pattern=r"^[A-Z]+$")
+            score: Annotated[float, Field(gt=0.0, le=1.0)] = 0.5
+
+        output = doc(Limits(count=2, code="OK"))
+
+        assert "percentage: int = 50  # Percentage [>0, <100]" in output
+        assert "count: int = 2  # [≥1, ≤10]" in output
+        assert "code: str = 'OK'  # [min_len=2, max_len=5, pattern='^[A-Z]+$']" in output
+        assert "score: float = 0.5  # [>0.0, ≤1.0]" in output
+
+    def test_doc_instance_respects_instance_hidden_dynamic_field(self):
+        """Instance-only fields hidden with spec() must not leak from doc()."""
+        from nooa.agentdoc import spec
+
+        class Documented:
+            pass
+
+        instance = Documented()
+        instance.public = "shown"
+        instance.secret = "SECRET"
+        spec(instance, "secret", hidden=True)
+
+        output = doc(instance)
+        assert "public: str = 'shown'" in output
+        assert "secret" not in output
+        assert "SECRET" not in output
+
+    def test_doc_instance_respects_instance_hidden_declared_field(self):
+        """Instance visibility overrides also apply to declared fields."""
+        from nooa.agentdoc import spec
+
+        class Documented:
+            visible: str = "class-secret"
+
+        instance = Documented()
+        instance.visible = "runtime-secret"
+        spec(instance, "visible", hidden=True)
+
+        output = doc(instance)
+        assert "visible" not in output
+        assert "runtime-secret" not in output
+        assert "class-secret" not in output
+
+    def test_doc_instance_does_not_invoke_descriptor_over_inherited_slot(self):
+        """Static slot extraction must not execute an overriding descriptor."""
+
+        class Base:
+            __slots__ = ("value",)
+
+        class Child(Base):
+            @property
+            def value(self) -> str:
+                raise AssertionError("doc() must not evaluate descriptors")
+
+            def __repr__(self) -> str:
+                return "custom-repr"
+
+        output = doc(Child())
+        assert "class Child:" in output
+        assert "value: str" in output
+        assert "custom-repr" not in output
+
     def test_doc_includes_methods(self):
         """Test doc() includes method signatures."""
         obj = SimpleClass()
@@ -853,8 +985,8 @@ class TestLargeValueTruncation:
         assert "data:" in result
         assert "str(len=100000," in result
 
-    def test_doc_on_class_with_repr_uses_repr(self):
-        """Classes with custom __repr__ should use repr(), not field extraction."""
+    def test_doc_on_class_with_repr_preserves_type_docs(self):
+        """doc(instance) ignores custom repr so it can preserve the type contract."""
 
         class WithRepr:
             def __init__(self):
@@ -864,11 +996,50 @@ class TestLargeValueTruncation:
                 return "custom_repr_sentinel"
 
         result = doc(WithRepr())
-        assert "custom_repr_sentinel" in result
-        assert "hidden" not in result
+        assert "class WithRepr:" in result
+        assert "hidden: str = 'not extracted'" in result
+        assert "custom_repr_sentinel" not in result
 
-    def test_slots_class_with_repr_uses_repr(self):
-        """__slots__-only classes with __repr__ should also trust repr()."""
+    def test_doc_empty_slots_class_with_repr_preserves_type_docs(self):
+        """doc() renders APIs for custom-repr classes with no public slots."""
+
+        class EmptySlots:
+            __slots__ = ()
+
+            def work(self, value: int) -> str:
+                """Do documented work."""
+                return str(value)
+
+            def __repr__(self) -> str:
+                return "EMPTY-SLOTS-REPR"
+
+        result = doc(EmptySlots())
+        assert "class EmptySlots:" in result
+        assert "def work(self, value: int) -> str:" in result
+        assert "Do documented work." in result
+        assert "EMPTY-SLOTS-REPR" not in result
+        assert pformat(EmptySlots()) == "EMPTY-SLOTS-REPR"
+
+    def test_doc_plain_class_does_not_probe_storage_via_getattr(self):
+        """Instance storage discovery must not invoke arbitrary __getattr__."""
+
+        class StrictLookup:
+            __slots__ = ()
+            value: int = 1
+
+            def __getattr__(self, name: str):
+                raise RuntimeError(f"unexpected storage probe: {name}")
+
+            def work(self) -> str:
+                """Documented API."""
+                return "done"
+
+        output = doc(StrictLookup())
+        assert "value: int = 1" in output
+        assert "def work(self) -> str:" in output
+
+    def test_doc_slots_class_with_repr_preserves_type_docs(self):
+        """doc(instance) supports slots-only classes and ignores custom repr."""
 
         class SlotsWithRepr:
             __slots__ = ("x", "y")
@@ -881,7 +1052,10 @@ class TestLargeValueTruncation:
                 return "SlotsWithRepr(custom)"
 
         result = doc(SlotsWithRepr())
-        assert "SlotsWithRepr(custom)" in result
+        assert "class SlotsWithRepr:" in result
+        assert "x: int = 1" in result
+        assert "y: int = 2" in result
+        assert "SlotsWithRepr(custom)" not in result
 
     def test_pydantic_still_uses_field_extraction_despite_repr(self):
         """Pydantic models define __repr__ but should still use field extraction."""

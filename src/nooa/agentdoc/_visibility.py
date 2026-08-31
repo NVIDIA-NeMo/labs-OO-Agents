@@ -31,12 +31,9 @@ def _is_dunder(name: str) -> bool:
 
 
 class _Hidden:
-    """Exclude fields, methods, or imports from documentation.
+    """Hide a field, callable, or module-level name from documentation.
 
-    Works in three roles:
-    1. Decorator: @hidden on functions (module-level or methods)
-    2. Annotation marker: Annotated[T, hidden] on variables (module-level or fields)
-    3. Context manager: ``with hidden:`` — names defined in the block are hidden at module level
+    Use as ``@hidden``, ``Annotated[T, hidden]``, or ``with hidden:``.
     """
 
     def __init__(self):

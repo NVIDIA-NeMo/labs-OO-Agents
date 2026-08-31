@@ -55,6 +55,7 @@ trace-explorer = "nooa.trace_explorer:main"
 [tool.uv.sources]
 eval_pipeline = { workspace = true }
 nooa-cli = { workspace = true }
+nooa-acp = { workspace = true }
 nooa-memory = { workspace = true }
 nooa-bench = { workspace = true }
 
@@ -62,15 +63,12 @@ nooa-bench = { workspace = true }
 # Extra index URLs to search for packages (in addition to PyPI)
 # Ignore packages uploaded less than 7 days ago to mitigate supply-chain attacks
 exclude-newer = "2026-07-23T00:00:00Z"
-# Match the package's supported Python range and LiteLLM's stable releases.
-environments = [
-    "python_full_version >= '3.12' and python_full_version < '3.14'",
-]
 
 [tool.uv.workspace]
 members = [
     "util/eval_pipeline",
     "packages/nooa-cli",
+    "packages/nooa-acp",
     "packages/nooa-memory",
     "packages/nooa-bench",
 ]
@@ -89,8 +87,9 @@ members = [
 cli = ["nooa-cli"]
 memory = ["nooa-memory"]
 bench = ["nooa-bench"]
+acp = ["nooa-acp"]
 # ARC-AGI-3 example agent (examples/arc_agi_3): the public ARC-AGI-3 SDK + deps.
-# Install with `pip install "nemo-oo-agents[arc]"` (or `uv sync --extra arc`).
+# Install with `pip install "nooa[arc]"` (or `uv sync --extra arc`).
 arc = [
     "arc-agi>=0.9.8",
     "arcengine>=0.9.3",
@@ -183,14 +182,15 @@ dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
     "pytest-rerunfailures>=14.0",
-    "pytest-cov>=4.0.0",
+    "pytest-timeout>=2.3.0",
     "mypy>=1.7.0",
     "ruff>=0.14.14",
     "httpx[socks]>=0.28.1",
     "opentelemetry-exporter-otlp-proto-http>=1.39.1",
     "eval_pipeline",
-    # Workspace packages — keep bench + cli + memory installed/editable in dev sync
+    # Workspace packages — keep acp + bench + cli + memory installed/editable in dev sync
     "nooa-cli",
+    "nooa-acp",
     "nooa-memory",
     "nooa-bench",
     "pre-commit>=4.5.0",
@@ -205,6 +205,12 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# A hang is a failure, not a pending result. Without this a test that wedges —
+# a lock that never releases, a subprocess prompt that never answers — stalls
+# CI instead of reporting, and a stalled job reads as "still running" rather
+# than "broken". Deliberately far above any real test: the slowest here is a
+# few seconds, so this only ever fires on a genuine hang.
+timeout = 300
 testpaths = [
     "tests",
     "tests/agentdoc",
@@ -214,6 +220,7 @@ testpaths = [
     "tests/tracing",
     "tests/test_mcp",
     "packages/nooa-cli/tests",
+    "packages/nooa-acp/tests",
     "packages/nooa-bench/tests",
     "tests/trace_explorer",
 ]
@@ -273,10 +280,12 @@ disable_error_code = ["empty-body", "return", "call-arg"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+force-exclude = true
 extend-exclude = [
     "worktrees",
     ".vscode-server",
     ".claude",
+    "notebook_tutorials",
     "examples/arc_agi_3/arc_agi_3",
     "examples/cybergym/task_artifacts",
 ]
@@ -300,7 +309,6 @@ ignore = [
 # Tests intentionally use legacy typing syntax (Optional[X], Union[X,Y], Generic[T])
 # to verify that _get_complex_type() handles those annotation forms correctly.
 "tests/test_pure_functions_gl105.py" = ["UP007", "UP045", "UP046"]
-
 [tool.ruff.lint.isort]
 known-first-party = ["nooa", "eval_pipeline", "evaluation", "agentdoc"]
 

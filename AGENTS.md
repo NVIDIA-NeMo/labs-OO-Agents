@@ -132,15 +132,21 @@ Common typing constructs and framework symbols (`asyncio`, `typing`, strategies,
 
 ### Context Blocks
 
-- **Static context blocks for once-computed values.** Use `self.context["key"] = value` for values known at assignment time. These are evaluated once and cached.
-- **Dynamic context blocks for runtime values.** Use `self.context.set_dynamic("key", "python_expression")` for values that change during agent execution. The expression is re-evaluated each LLM turn.
+- **Fixed context blocks for once-computed values.** Use a literal `Context`
+  value. Set `prefix=True` when the content is stable enough for the provider's
+  cacheable prompt prefix; bare values are fixed content in the volatile suffix.
+- **Expression context blocks for runtime values.** Use `Context(expr=...)` for
+  values that change during agent execution. The expression is re-evaluated
+  each LLM turn.
 
 ```python
-# Static: set once, never changes
-self.context["plan"] = plan.format()
+from nooa import Context
 
-# Dynamic: re-evaluated each LLM turn
-self.context.set_dynamic("project_state", "self.format_project_state()")
+# Fixed: set once, rendered in the cacheable prefix
+self.context["plan"] = Context(plan.format(), prefix=True)
+
+# Live: re-evaluated each LLM turn in the volatile suffix
+self.context["project_state"] = Context(expr="self.format_project_state()")
 ```
 
 ### Tracing

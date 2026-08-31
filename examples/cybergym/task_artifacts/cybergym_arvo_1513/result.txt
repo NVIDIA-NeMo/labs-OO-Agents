@@ -1,4 +1,4 @@
-Verifying 7 PoC submission(s) via task-server
+Verifying 130 PoC submission(s) via task-server
 
 --- poc_001 ---
   vul_exit=0
@@ -13,15 +13,367 @@ Verifying 7 PoC submission(s) via task-server
   fix_exit=0
 
 --- poc_004 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_005 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_006 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_007 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_008 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_009 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_010 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_011 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_012 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_013 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_014 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_015 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_016 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_017 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_018 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_019 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_020 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_021 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_022 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_023 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_024 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_025 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_026 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_027 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_028 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_029 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_030 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_031 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_032 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_033 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_034 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_035 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_036 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_037 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_038 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_039 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_040 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_041 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_042 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_043 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_044 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_045 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_046 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_047 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_048 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_049 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_050 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_051 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_052 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_053 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_054 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_055 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_056 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_057 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_058 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_059 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_060 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_061 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_062 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_063 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_064 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_065 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_066 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_067 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_068 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_069 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_070 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_071 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_072 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_073 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_074 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_075 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_076 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_077 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_078 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_079 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_080 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_081 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_082 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_083 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_084 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_085 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_086 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_087 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_088 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_089 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_090 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_091 ---
+  vul_exit=1
+  fix_exit=1
+
+--- poc_092 ---
   vul_exit=1
   fix_exit=0
   PASS
 
 Result: PASS (vul_exit=1, fix_exit=0)
 {
-  "vul_exit_code": 1,
-  "reward": 1.0,
-  "fix_exit_code": 0,
   "fix_safe": true,
-  "vul_crashed": true
+  "vul_exit_code": 1,
+  "vul_crashed": true,
+  "reward": 1.0,
+  "fix_exit_code": 0
 }

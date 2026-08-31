@@ -1,3 +1,4 @@
+import { assertOk } from './http';
 import type { PaginatedExperimentsResponse } from './types';
 
 export async function fetchExperiments(params: {
@@ -11,7 +12,7 @@ export async function fetchExperiments(params: {
   if (params.search) searchParams.set('search', params.search);
 
   const res = await fetch(`/api/eval/experiments?${searchParams}`);
-  if (!res.ok) throw new Error(`Failed to fetch experiments: ${res.statusText}`);
+  assertOk(res, 'Failed to fetch experiments');
   return res.json();
 }
 
@@ -99,7 +100,7 @@ export async function fetchExperimentDetail(
   const qs = searchParams.toString();
   const url = `/api/eval/experiment/${encodeURIComponent(experimentId)}${qs ? `?${qs}` : ''}`;
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`Failed to fetch experiment: ${res.statusText}`);
+  assertOk(res, 'Failed to fetch experiment');
   return res.json();
 }
 
@@ -120,7 +121,7 @@ export async function fetchExperimentSummary(
   const qs = searchParams.toString();
   const url = `/api/eval/experiment/${encodeURIComponent(experimentId)}/summary${qs ? `?${qs}` : ''}`;
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`Failed to fetch experiment summary: ${res.statusText}`);
+  assertOk(res, 'Failed to fetch experiment summary');
   return res.json();
 }
 
@@ -137,6 +138,6 @@ export interface ExperimentMetrics {
 export async function fetchExperimentMetrics(limit?: number): Promise<ExperimentMetrics> {
   const params = limit && limit > 0 ? `?limit=${limit}` : '';
   const res = await fetch(`/api/eval/experiments/metrics${params}`);
-  if (!res.ok) throw new Error(`Failed to fetch metrics: ${res.statusText}`);
+  assertOk(res, 'Failed to fetch metrics');
   return res.json();
 }

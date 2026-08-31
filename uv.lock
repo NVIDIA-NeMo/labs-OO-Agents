@@ -6,8 +6,6 @@ resolution-markers = [
     "sys_platform == 'emscripten'",
     "sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
-supported-markers = [
-]
 
 [options]
 exclude-newer = "2026-07-23T00:00:00Z"
@@ -16,9 +14,22 @@ exclude-newer = "2026-07-23T00:00:00Z"
 members = [
     "eval-pipeline",
     "nooa",
+    "nooa-acp",
     "nooa-bench",
     "nooa-cli",
     "nooa-memory",
+]
+
+[[package]]
+name = "agent-client-protocol"
+version = "0.11.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6c/93/396d02c91b387b2678f23081869ca47bd495fc6c78789022c683180cf5f1/agent_client_protocol-0.11.0.tar.gz", hash = "sha256:8920a3b27bdcc852fd7c73066f47ab53257dbfbe57b505e20a40c69f80a5391c", size = 87402, upload-time = "2026-07-05T17:07:56.803Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a0/48/a1367dded7765f5489f9840389949d5aeac53a73aeb1b4e6c0ab61e1617a/agent_client_protocol-0.11.0-py3-none-any.whl", hash = "sha256:2d8570cd4911f8af9fbab4808f7b05f09204a756f346c7409ecdcae3f37cdb2f", size = 68089, upload-time = "2026-07-05T17:07:55.518Z" },
 ]
 
 [[package]]
@@ -1349,6 +1360,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+acp = [
+    { name = "nooa-acp" },
+]
 arc = [
     { name = "arc-agi" },
     { name = "arcengine" },
@@ -1394,6 +1408,7 @@ dev = [
     { name = "httpx", extra = ["socks"] },
     { name = "matplotlib" },
     { name = "mypy" },
+    { name = "nooa-acp" },
     { name = "nooa-bench" },
     { name = "nooa-cli" },
     { name = "nooa-memory" },
@@ -1405,6 +1420,7 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "pytest-rerunfailures" },
+    { name = "pytest-timeout" },
     { name = "python-dotenv" },
     { name = "python-multipart" },
     { name = "pyyaml" },
@@ -1430,6 +1446,7 @@ requires-dist = [
     { name = "litellm", specifier = ">=1.84.0" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.0.0" },
     { name = "nemo-relay", marker = "extra == 'nemo-relay'", specifier = ">=0.6,<0.7" },
+    { name = "nooa-acp", marker = "extra == 'acp'", editable = "packages/nooa-acp" },
     { name = "nooa-bench", marker = "extra == 'bench'", editable = "packages/nooa-bench" },
     { name = "nooa-cli", marker = "extra == 'cli'", editable = "packages/nooa-cli" },
     { name = "nooa-memory", marker = "extra == 'memory'", editable = "packages/nooa-memory" },
@@ -1447,7 +1464,7 @@ requires-dist = [
     { name = "rich", marker = "extra == 'arc'", specifier = ">=13.0" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'viewer'", specifier = ">=0.20.0" },
 ]
-provides-extras = ["arc", "bench", "cli", "mcp", "memory", "nemo-relay", "sandbox", "tracing", "viewer"]
+provides-extras = ["acp", "arc", "bench", "cli", "mcp", "memory", "nemo-relay", "sandbox", "tracing", "viewer"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1456,6 +1473,7 @@ dev = [
     { name = "httpx", extras = ["socks"], specifier = ">=0.28.1" },
     { name = "matplotlib", specifier = ">=3.8.0" },
     { name = "mypy", specifier = ">=1.7.0" },
+    { name = "nooa-acp", editable = "packages/nooa-acp" },
     { name = "nooa-bench", editable = "packages/nooa-bench" },
     { name = "nooa-cli", editable = "packages/nooa-cli" },
     { name = "nooa-memory", editable = "packages/nooa-memory" },
@@ -1465,9 +1483,9 @@ dev = [
     { name = "pyright", specifier = ">=1.1.408" },
     { name = "pytest", specifier = ">=7.4.0" },
     { name = "pytest-asyncio", specifier = ">=0.21.0" },
-    { name = "pytest-cov", specifier = ">=4.0.0" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "pytest-rerunfailures", specifier = ">=14.0" },
+    { name = "pytest-timeout", specifier = ">=2.3.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "python-multipart", specifier = ">=0.0.20" },
     { name = "pyyaml", specifier = ">=6.0.0" },
@@ -1482,6 +1500,26 @@ trace-viewer = [
     { name = "pyyaml", specifier = ">=6.0.0" },
     { name = "uvicorn", specifier = ">=0.38.0" },
     { name = "watchfiles", specifier = ">=1.0.0" },
+]
+
+[[package]]
+name = "nooa-acp"
+source = { editable = "packages/nooa-acp" }
+dependencies = [
+    { name = "agent-client-protocol" },
+    { name = "click" },
+    { name = "litellm" },
+    { name = "nooa", extra = ["mcp"] },
+    { name = "nooa-cli" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "agent-client-protocol", specifier = ">=0.11,<0.12" },
+    { name = "click", specifier = ">=8.1.0" },
+    { name = "litellm", specifier = "!=1.95.0" },
+    { name = "nooa", extras = ["mcp"], editable = "." },
+    { name = "nooa-cli", editable = "packages/nooa-cli" },
 ]
 
 [[package]]
@@ -2151,6 +2189,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/47/60/a90ca1cc6cffcb97b4260ed0ad2b7934b999d7c48abe4ea0840344862a3b/pytest_rerunfailures-16.4.tar.gz", hash = "sha256:8222d17c37eb7b9e4d6fc96a3c724ff4e1a5c97a5cc7cbb2c19e9282cfd21a11", size = 36635, upload-time = "2026-07-01T06:30:56.813Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ce/93/3cdcc4033444e822e01b573414b03fd37fd5533070c750477b8f5fa5224b/pytest_rerunfailures-16.4-py3-none-any.whl", hash = "sha256:f69b5beb39622c90d1e44bd945d826eff6db545dcf0b68f52b7e4ad15eaf6d6c", size = 16955, upload-time = "2026-07-01T06:30:55.333Z" },
+]
+
+[[package]]
+name = "pytest-timeout"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ac/82/4c9ecabab13363e72d880f2fb504c5f750433b2b6f16e99f4ec21ada284c/pytest_timeout-2.4.0.tar.gz", hash = "sha256:7e68e90b01f9eff71332b25001f85c75495fc4e3a836701876183c4bcfd0540a", size = 17973, upload-time = "2025-05-05T19:44:34.99Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fa/b6/3127540ecdf1464a00e5a01ee60a1b09175f6913f0644ac748494d9c4b21/pytest_timeout-2.4.0-py3-none-any.whl", hash = "sha256:c42667e5cdadb151aeb5b26d114aff6bdf5a907f176a007a30b940d3d865b5c2", size = 14382, upload-time = "2025-05-05T19:44:33.502Z" },
 ]
 
 [[package]]
