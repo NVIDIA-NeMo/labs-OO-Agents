@@ -108,8 +108,10 @@ class FullscreenTranscriptModel:
         self,
         *,
         show_trailing_blank: bool | Callable[[], bool] = True,
+        align_short_content_bottom: bool = True,
     ) -> None:
         self._show_trailing_blank = show_trailing_blank
+        self._align_short_content_bottom = align_short_content_bottom
         self._records: list[_Record] = []
         self._projectable_record_count = 0
         self._next_record_id = 0
@@ -157,9 +159,9 @@ class FullscreenTranscriptModel:
             history_fits = len(rows) <= height
             top = 0 if history_fits else self.top_row(width=width, height=height)
             rows = rows[top : top + height]
-            if history_fits:
-                # Short histories belong next to the bottom chrome regardless
-                # of whether navigation has explicitly anchored their sole page.
+            if history_fits and self._align_short_content_bottom:
+                # Transcript histories belong next to the bottom chrome; other
+                # consumers can opt into conventional top-aligned documents.
                 top_padding = height - len(rows)
         hyperlink_marker = render_counter & 1
         key = (width, top, len(rows), top_padding, hyperlink_marker)
@@ -245,7 +247,9 @@ class FullscreenTranscriptModel:
         top = self.top_row(width=width, height=height)
         visible = rows[top : top + max(1, height)]
         if self._viewport.follows_tail:
-            top_padding = max(0, max(1, height) - len(visible))
+            top_padding = (
+                max(0, max(1, height) - len(visible)) if self._align_short_content_bottom else 0
+            )
             return Point(
                 x=self._row_text_length(visible[-1]),
                 y=top_padding + len(visible) - 1,
@@ -578,7 +582,11 @@ class FullscreenTranscriptModel:
         height = max(1, height)
         rows = self._display_rows(width)
         top = self.top_row(width=width, height=height)
-        top_padding = max(0, height - len(rows)) if len(rows) <= height else 0
+        top_padding = (
+            max(0, height - len(rows))
+            if self._align_short_content_bottom and len(rows) <= height
+            else 0
+        )
         visual_y = max(0, min(height - 1, y))
         if visual_y < top_padding:
             return None

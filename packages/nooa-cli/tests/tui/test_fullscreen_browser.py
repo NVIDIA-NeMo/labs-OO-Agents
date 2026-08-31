@@ -9,7 +9,11 @@ import pytest
 from nooa_cli.tui.explorer_base import ExplorerConfig, ExplorerModel, ExplorerView
 from nooa_cli.tui.fullscreen_browser import ExplorerBrowser
 from prompt_toolkit.application import Application
-from prompt_toolkit.data_structures import Size
+from prompt_toolkit.application.current import set_app
+from prompt_toolkit.data_structures import Point, Size
+from prompt_toolkit.layout.mouse_handlers import MouseHandlers
+from prompt_toolkit.layout.screen import Screen, WritePosition
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
 from prompt_toolkit.output import DummyOutput
 
 
@@ -103,6 +107,130 @@ def test_explorer_browser_search_cursor_uses_left_and_right() -> None:
     assert browser.buffer.cursor_position == 1
     browser.handle_key("right")
     assert browser.buffer.cursor_position == 2
+
+
+def test_preview_short_detail_remains_top_aligned() -> None:
+    browser = _browser()
+    browser.view.detail_lines = lambda _row, _width: ["first", "second"]
+
+    fragments = browser.preview_text(20, 5)
+
+    assert "".join(text for _style, text, *_rest in fragments).startswith("first\nsecond")
+
+
+def test_preview_mouse_drag_copies_and_retains_highlight() -> None:
+    browser = _browser()
+    browser.view.detail_lines = lambda _row, _width: ["\x1b[31malpha\x1b[0m beta", "gamma"]
+    copied: list[str] = []
+    browser._selection_copy_callback = copied.append
+    browser.preview_control.create_content(20, 3)
+
+    browser.preview_control.mouse_handler(
+        MouseEvent(Point(0, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+    browser.preview_control.mouse_handler(
+        MouseEvent(Point(4, 1), MouseEventType.MOUSE_MOVE, MouseButton.LEFT, frozenset())
+    )
+    browser.preview_control.mouse_handler(
+        MouseEvent(Point(4, 1), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
+    )
+
+    assert copied
+    assert browser.app.clipboard.get_data().text == copied[0]
+    assert browser._detail_transcript is not None
+    assert browser._detail_transcript.selected_text() == copied[0]
+    assert "\x1b" not in copied[0]
+
+
+def test_preview_click_clears_selection_and_modifiers_remain_native() -> None:
+    browser = _browser()
+    browser.view.detail_lines = lambda _row, _width: ["alpha beta"]
+    browser.preview_control.create_content(20, 2)
+    control = browser.preview_control
+    control.mouse_handler(
+        MouseEvent(Point(0, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+    control.mouse_handler(
+        MouseEvent(Point(3, 1), MouseEventType.MOUSE_MOVE, MouseButton.LEFT, frozenset())
+    )
+    control.mouse_handler(
+        MouseEvent(Point(3, 1), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
+    )
+    assert browser._detail_transcript is not None
+    assert browser._detail_transcript.selected_text()
+
+    control.mouse_handler(
+        MouseEvent(Point(1, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+    control.mouse_handler(
+        MouseEvent(Point(1, 1), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
+    )
+    assert browser._detail_transcript.selected_text() == ""
+    modified = MouseEvent(
+        Point(0, 0), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset({MouseModifier.ALT})
+    )
+    assert control.mouse_handler(modified) is NotImplemented
+    browser.view.native_selection = True
+    native = MouseEvent(Point(0, 0), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    assert control.mouse_handler(native) is NotImplemented
+
+
+@pytest.mark.asyncio
+async def test_preview_drag_at_vertical_edge_repeats_until_release() -> None:
+    browser = _browser()
+    browser.view.detail_lines = lambda _row, _width: [f"line {i}" for i in range(20)]
+    browser.preview_control.create_content(20, 3)
+    control = browser.preview_control
+    cursor = browser.model.cursor
+    control.mouse_handler(
+        MouseEvent(Point(0, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+    control.mouse_handler(
+        MouseEvent(Point(3, 2), MouseEventType.MOUSE_MOVE, MouseButton.LEFT, frozenset())
+    )
+
+    await asyncio.sleep(0.5)
+    offset = browser.model.detail_offset
+    assert offset >= 2
+    assert browser.model.cursor == cursor
+
+    control.mouse_handler(
+        MouseEvent(Point(3, 2), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
+    )
+    await asyncio.sleep(0.2)
+    assert browser.model.detail_offset == offset
+
+
+@pytest.mark.asyncio
+async def test_preview_release_over_list_finishes_drag_and_stops_autoscroll() -> None:
+    browser = _browser()
+    browser.view.detail_lines = lambda _row, _width: [f"line {i}" for i in range(30)]
+    handlers = MouseHandlers()
+    with set_app(browser.app):
+        browser.container.write_to_screen(
+            Screen(), handlers, WritePosition(0, 0, 100, 24), "", True, None
+        )
+    control = browser.preview_control
+    control.mouse_handler(
+        MouseEvent(Point(0, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+    control.mouse_handler(
+        MouseEvent(
+            Point(3, control.viewport[1] - 1),
+            MouseEventType.MOUSE_MOVE,
+            MouseButton.LEFT,
+            frozenset(),
+        )
+    )
+    assert control.dragging
+
+    handlers.mouse_handlers[5][10](
+        MouseEvent(Point(10, 5), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
+    )
+    assert not control.dragging
+    offset = browser.model.detail_offset
+    await asyncio.sleep(0.4)
+    assert browser.model.detail_offset == offset
 
 
 @pytest.mark.asyncio
