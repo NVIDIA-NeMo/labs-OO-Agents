@@ -436,6 +436,16 @@ def create_sync_agent_method_wrapper(
 
         current_parent = _parent_agent_var.get()
         is_top_level = current_parent is None
+        is_subagent_call = current_parent is not None and current_parent is not self
+
+        # Clear scoped blocks and events only when entering a different agent —
+        # mirrors the async wrapper so a parent's ScopedContext cannot leak
+        # across agent boundaries through sync method calls.
+        scoped_blocks_token = None
+        scoped_events_token = None
+        if is_subagent_call:
+            scoped_blocks_token = _scoped_blocks_var.set(None)
+            scoped_events_token = _scoped_events_var.set(None)
 
         # Set parent agent for LLM inheritance — subagents instantiated inside
         # this sync method can inherit the parent's LLM (mirrors async wrapper).
@@ -492,8 +502,14 @@ def create_sync_agent_method_wrapper(
                 )
             except Exception:  # noqa: BLE001
                 logger.debug("agent-call: AfterAgentCall emission failed (sync)", exc_info=True)
-            _pop_agent_call_id()
+            # Reset scoped blocks/events if we cleared them, then the parent
+            # agent context (order mirrors the async wrapper).
+            if scoped_blocks_token is not None:
+                _scoped_blocks_var.reset(scoped_blocks_token)
+            if scoped_events_token is not None:
+                _scoped_events_var.reset(scoped_events_token)
             _parent_agent_var.reset(parent_token)
+            _pop_agent_call_id()
             if hook_context is not None:
                 call_after_hook(
                     "after_agent_call",
