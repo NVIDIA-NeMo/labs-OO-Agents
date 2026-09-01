@@ -2426,8 +2426,14 @@ class TUIApplication:
             noun = "character" if count == 1 else "characters"
             self._show_transient_status(f"Copied {count} {noun}", style="class:return-to-tail")
         else:
+            # Subview browsers advertise F2 (view-local native selection) in
+            # their footers; the main transcript advertises F6. Point at the
+            # toggle the user can actually see for the view they are in.
+            subview_open = self._resume_picker is not None or self._active_subview is not None
+            native_hint = "F2" if subview_open else "F6"
             self._show_transient_status(
-                f"Copy failed: {result.reason}. Try Option/Alt-drag, or press F6 for native selection."
+                f"Copy failed: {result.reason}. Try Option/Alt-drag, "
+                f"or press {native_hint} for native selection."
             )
 
     def _show_transient_status(

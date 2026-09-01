@@ -468,10 +468,6 @@ class ExplorerInteraction:
             self.model.scroll_detail(delta)
         return "handled"
 
-    def selection_hint(self) -> str:
-        return "F2 mouse/wheel" if self.native_selection else "F2 select/copy"
-
-
 class ExplorerView(ExplorerInteraction):
     """Generic in-app explorer subview.
 
