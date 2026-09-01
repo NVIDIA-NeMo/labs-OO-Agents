@@ -2,9 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for ActorRuntime.execute_code() method."""
 
+import asyncio
+
 import pytest
 
 from nooa import Agent
+from nooa.runtime.hooks import set_hooks
 from nooa.unifiedllm import FakeLLMClient
 
 # Module-level test LLM
@@ -233,3 +236,30 @@ print("done")
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.asyncio
+async def test_sandbox_cancellation_is_reported_to_after_code_hook(test_agent) -> None:
+    exceptions: list[BaseException | None] = []
+
+    class Hooks:
+        def before_code_execution(self, **kwargs):
+            return "code-context"
+
+        def after_code_execution(self, *, context, exception, **kwargs):
+            assert context == "code-context"
+            exceptions.append(exception)
+
+    class CancellingSandbox:
+        async def run_cell(self, code: str, *, execution_count: int = 1):
+            raise asyncio.CancelledError
+
+    set_hooks(Hooks())  # type: ignore[arg-type]
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await test_agent.runtime.execute_code("pass", sandbox_executor=CancellingSandbox())
+    finally:
+        set_hooks(None)
+
+    assert len(exceptions) == 1
+    assert isinstance(exceptions[0], asyncio.CancelledError)

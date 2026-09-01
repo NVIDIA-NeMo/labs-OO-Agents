@@ -1755,7 +1755,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         )
 
         validated = None
-        exception = None
+        exception: BaseException | None = None
         error_msg = None
         normalized_args: dict[str, Any] = {}
 
@@ -1891,6 +1891,10 @@ Standard Python builtins and agent instance (`self`) are available."""
                 ) from e
 
             return (None, error_msg)
+
+        except BaseException as error:
+            exception = error
+            raise
 
         finally:
             # Call after hook

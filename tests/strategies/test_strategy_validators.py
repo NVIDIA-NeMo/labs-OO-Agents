@@ -11,6 +11,7 @@ run before generation and fail fast.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -171,3 +172,41 @@ async def test_buggy_postcondition_surfaces_as_infra_error_not_retry():
     with pytest.raises(RuntimeError, match="postcondition"):
         await agent.solve("q")
     assert fake.call_count == 1  # no spurious retry loop
+
+
+def _post_cancel(agent, result, call):
+    raise asyncio.CancelledError
+
+
+@pytest.mark.asyncio
+async def test_return_result_cancellation_is_reported_to_tool_hook() -> None:
+    from nooa.runtime.hooks import set_hooks
+
+    exceptions: list[BaseException | None] = []
+
+    class Hooks:
+        def before_tool_execution(self, **kwargs):
+            return "return-result-context"
+
+        def after_tool_execution(self, *, context, exception, **kwargs):
+            assert context == "return-result-context"
+            exceptions.append(exception)
+
+    class CancellingAgent(Agent, llm=_DUMMY_LLM):
+        @strategy(CodeActStrategy(config=CodeActConfig(postconditions=[_post_cancel])))
+        async def solve(self) -> str:
+            """Return a result."""
+            ...
+
+    set_hooks(Hooks())  # type: ignore[arg-type]
+    try:
+        agent = CancellingAgent(
+            llm=FakeLLMClient(scripted_responses=[_resp([_return_result_call("done")])])
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await agent.solve()
+    finally:
+        set_hooks(None)
+
+    assert len(exceptions) == 1
+    assert isinstance(exceptions[0], asyncio.CancelledError)

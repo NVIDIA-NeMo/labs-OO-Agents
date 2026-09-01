@@ -53,7 +53,7 @@ from nooa.tracing._hooks_impl import OpenInferenceHooks, end_active_spans
 from nooa.tracing._metadata import get_all_metadata
 from nooa.tracing._otlp_file_exporter import OtlpJsonFileExporter
 from nooa.tracing._otlp_http_exporter import OtlpJsonHttpExporter
-from nooa.tracing._session import get_session, set_session
+from nooa.tracing._session import get_session, session_scope, set_session
 from nooa.tracing._session_processor import SessionSpanProcessor
 
 # ---------------------------------------------------------------------------
@@ -136,9 +136,9 @@ class NemoOOAgentsInstrumentor:
 
         self._hooks = OpenInferenceHooks(tracer=tracer)
 
-        from nooa.runtime.hooks import set_hooks
+        from nooa.runtime.hooks import compose_hooks, get_hooks, set_hooks
 
-        set_hooks(self._hooks)
+        set_hooks(compose_hooks(get_hooks(), self._hooks))
         self._is_instrumented = True
 
     def uninstrument(self, **kwargs: Any) -> None:
@@ -146,9 +146,18 @@ class NemoOOAgentsInstrumentor:
         if not self._is_instrumented:
             return
 
-        from nooa.runtime.hooks import set_hooks
+        from nooa.runtime.hooks import (
+            CompositeInstrumentationHooks,
+            compose_hooks,
+            get_hooks,
+            set_hooks,
+        )
 
-        set_hooks(None)
+        current = get_hooks()
+        if current is self._hooks:
+            set_hooks(None)
+        elif isinstance(current, CompositeInstrumentationHooks):
+            set_hooks(compose_hooks(*(hook for hook in current.hooks if hook is not self._hooks)))
         self._hooks = None
         self._is_instrumented = False
 
@@ -325,10 +334,9 @@ def enable_tracing(
     # Instrument nooa hooks; capture the instance for re-registration
     # in future asyncio task contexts (see _re_register_hooks).
     with contextlib.suppress(ImportError):
-        NemoOOAgentsInstrumentor().instrument(tracer_provider=tracer_provider)
-        from nooa.runtime.hooks import get_hooks
-
-        _hooks = get_hooks()  # type: ignore[assignment]
+        instrumentor = NemoOOAgentsInstrumentor()
+        instrumentor.instrument(tracer_provider=tracer_provider)
+        _hooks = instrumentor._hooks
         assert _hooks is not None, (
             "NemoOOAgentsInstrumentor.instrument() should have called set_hooks()"
         )
@@ -356,9 +364,9 @@ def _re_register_hooks() -> None:
     if _hooks is None:
         return
     with contextlib.suppress(ImportError):
-        from nooa.runtime.hooks import set_hooks
+        from nooa.runtime.hooks import compose_hooks, get_hooks, set_hooks
 
-        set_hooks(_hooks)
+        set_hooks(compose_hooks(get_hooks(), _hooks))
 
 
 def _add_exporters(provider: TracerProvider, exporters: list[SpanExporter]) -> None:
@@ -514,6 +522,7 @@ __all__ = [
     "exporters",
     "probe_otlp_endpoint",
     "set_session",
+    "session_scope",
     "get_session",
     "flush_traces",
     "shutdown_traces",

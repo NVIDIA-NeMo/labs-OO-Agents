@@ -76,3 +76,48 @@ class TestSessionIsolation:
 
         set_session(None)
         assert get_session() is None
+
+
+class TestSessionScope:
+    def test_restores_nested_scopes_after_exception(self):
+        from nooa.tracing._session import session_scope
+
+        set_session("original")
+        with pytest.raises(RuntimeError, match="boom"):
+            with session_scope("outer"):
+                assert get_session() == "outer"
+                with session_scope("inner"):
+                    assert get_session() == "inner"
+                    raise RuntimeError("boom")
+
+        assert get_session() == "original"
+
+    def test_none_temporarily_clears_session(self):
+        from nooa.tracing._session import session_scope
+
+        set_session("original")
+        with session_scope(None):
+            assert get_session() is None
+        assert get_session() == "original"
+
+    @pytest.mark.asyncio
+    async def test_isolated_between_concurrent_tasks(self):
+        from nooa.tracing._session import session_scope
+
+        ready = asyncio.Event()
+        entered = 0
+
+        async def observe(session_id: str):
+            nonlocal entered
+            with session_scope(session_id):
+                entered += 1
+                if entered == 2:
+                    ready.set()
+                await ready.wait()
+                before = get_session()
+                await asyncio.sleep(0)
+                return before, get_session()
+
+        first, second = await asyncio.gather(observe("first"), observe("second"))
+        assert first == ("first", "first")
+        assert second == ("second", "second")

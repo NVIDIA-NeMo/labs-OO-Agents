@@ -318,7 +318,7 @@ def create_agent_method_wrapper(
                     await _flush_litellm_journal()
 
                 return result
-            except Exception as e:
+            except BaseException as e:
                 exception_caught = e
                 raise
             finally:
@@ -510,7 +510,7 @@ def create_sync_agent_method_wrapper(
 
         hook_context = None
         result = None
-        exception_caught: Exception | None = None
+        exception_caught: BaseException | None = None
         try:
             if _tracing_enabled[0]:
                 hook_context = call_before_hook(
@@ -525,7 +525,7 @@ def create_sync_agent_method_wrapper(
                 )
             result = original_func(self, *args, **kwargs)
             return result
-        except Exception as e:
+        except BaseException as e:
             exception_caught = e
             raise
         finally:
