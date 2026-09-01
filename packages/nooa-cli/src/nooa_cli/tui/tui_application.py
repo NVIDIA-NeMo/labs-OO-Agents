@@ -2624,24 +2624,26 @@ class TUIApplication:
             event.app.invalidate()
 
         mouse_bindings = load_mouse_bindings()
-        vt100_mouse_handler = mouse_bindings.get_bindings_for_keys((Keys.Vt100MouseEvent,))[
-            -1
-        ].handler
-        windows_mouse_handler = mouse_bindings.get_bindings_for_keys((Keys.WindowsMouseEvent,))[
-            -1
-        ].handler
+        vt100_mouse_handler = mouse_bindings.get_bindings_for_keys(
+            (Keys.Vt100MouseEvent,)
+        )[0].handler
+        windows_mouse_handler = mouse_bindings.get_bindings_for_keys(
+            (Keys.WindowsMouseEvent,)
+        )[0].handler
 
         @kb.add(Keys.Vt100MouseEvent, filter=subview_active, eager=True)
         def _(event):
-            if self._is_fullscreen and not self._fullscreen_mouse_navigation:
-                return NotImplemented
-            return vt100_mouse_handler(event)
+            view = self._active_subview
+            if view is not None and getattr(view, "mouse_support", True):
+                return vt100_mouse_handler(event)
+            return None
 
         @kb.add(Keys.WindowsMouseEvent, filter=subview_active, eager=True)
         def _(event):
-            if self._is_fullscreen and not self._fullscreen_mouse_navigation:
-                return NotImplemented
-            return windows_mouse_handler(event)
+            view = self._active_subview
+            if view is not None and getattr(view, "mouse_support", True):
+                return windows_mouse_handler(event)
+            return None
 
         @kb.add(Keys.Any, filter=subview_active, eager=True)
         def _(event):
