@@ -97,6 +97,34 @@ def test_agent_message_bodies_use_terminal_default_foreground() -> None:
         assert not re.search(r"\x1b\[[0-9;]*m", body), rendered
 
 
+def test_inline_code_spans_follow_the_active_theme() -> None:
+    """Inline ``code`` spans must not keep Rich's fixed cyan-on-black style.
+
+    The default markdown.code style ignores the palette, so light themes
+    rendered unreadable blue-on-black chips.
+    """
+    from nooa_cli.tui.config import Config
+    from nooa_cli.tui.frontend import TerminalFrontend
+    from nooa_cli.tui.output import AgentMessage
+
+    frontend = TerminalFrontend(Config())
+    original = theme.get_theme()
+    bodies = {}
+    try:
+        for name in ("mocha", "latte"):
+            theme.set_theme(name)
+            frontend._console.refresh_theme()
+            rendered = frontend._render_output_to_ansi(AgentMessage("see `chip` here"), 40)
+            bodies[name] = next(line for line in rendered.splitlines() if "chip" in line)
+        for name, body in bodies.items():
+            assert "\x1b[40m" not in body, (name, body)
+            assert "chip" in body
+        assert bodies["mocha"] != bodies["latte"]
+    finally:
+        theme.set_theme(original)
+        frontend._console.refresh_theme()
+
+
 async def test_theme_command_refreshes_and_persists_selection(tmp_path, monkeypatch) -> None:
     import yaml
 
