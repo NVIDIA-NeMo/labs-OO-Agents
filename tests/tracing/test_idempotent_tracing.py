@@ -133,16 +133,18 @@ def test_instrumentor_composes_with_and_restores_existing_hooks() -> None:
     existing = MagicMock()
     provider = MagicMock()
     set_hooks(existing)
-    instrumentor = NemoOOAgentsInstrumentor()
+    try:
+        instrumentor = NemoOOAgentsInstrumentor()
+        instrumentor.instrument(tracer_provider=provider)
+        active = get_hooks()
+        assert isinstance(active, CompositeInstrumentationHooks)
+        assert active.hooks[0] is existing
+        assert active.hooks[1] is instrumentor._hooks
 
-    instrumentor.instrument(tracer_provider=provider)
-    active = get_hooks()
-    assert isinstance(active, CompositeInstrumentationHooks)
-    assert active.hooks[0] is existing
-    assert active.hooks[1] is instrumentor._hooks
-
-    instrumentor.uninstrument()
-    assert get_hooks() is existing
+        instrumentor.uninstrument()
+        assert get_hooks() is existing
+    finally:
+        set_hooks(None)
 
 
 def test_instrumentors_can_be_uninstrumented_out_of_order() -> None:

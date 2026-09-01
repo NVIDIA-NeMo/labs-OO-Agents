@@ -83,14 +83,17 @@ class TestSessionScope:
         from nooa.tracing._session import session_scope
 
         set_session("original")
-        with pytest.raises(RuntimeError, match="boom"):
-            with session_scope("outer"):
-                assert get_session() == "outer"
-                with session_scope("inner"):
-                    assert get_session() == "inner"
-                    raise RuntimeError("boom")
+        try:
+            with pytest.raises(RuntimeError, match="boom"):
+                with session_scope("outer"):
+                    assert get_session() == "outer"
+                    with session_scope("inner"):
+                        assert get_session() == "inner"
+                        raise RuntimeError("boom")
 
-        assert get_session() == "original"
+            assert get_session() == "original"
+        finally:
+            set_session(None)
 
     def test_none_temporarily_clears_session(self):
         from nooa.tracing._session import session_scope
