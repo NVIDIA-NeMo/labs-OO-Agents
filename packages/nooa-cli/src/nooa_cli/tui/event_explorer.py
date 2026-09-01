@@ -382,7 +382,7 @@ def _event_summary(event: Any, event_type: str) -> str:
         return status
     if event_type in {"SessionUserMessage", "TUIUserInput"}:
         field = "content" if event_type == "SessionUserMessage" else "text"
-        return str(getattr(event, field, "") or "")[:100]
+        return " ".join(str(getattr(event, field, "") or "").split())[:100]
     if event_type == "Task":
         prompt = str(getattr(event, "prompt", "") or "").strip()
         return prompt.splitlines()[0][:100] if prompt else ""
