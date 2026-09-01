@@ -334,6 +334,7 @@ class _BrowserPaneControl(FormattedTextControl):
         if (
             MouseModifier.ALT in mouse_event.modifiers
             or MouseModifier.SHIFT in mouse_event.modifiers
+            or not getattr(self.browser, "mouse_support", True)
         ):
             return NotImplemented
         if mouse_event.event_type is MouseEventType.SCROLL_UP:
@@ -474,7 +475,9 @@ class ExplorerBrowser:
         self._selection_copy_callback = selection_copy_callback
         self._selection_status = selection_status
         self._detail_transcript: FullscreenTranscriptModel | None = None
-        self._detail_transcript_key: tuple[int, int, tuple[str, ...]] | None = None
+        # The row object itself is retained in the key so a recycled
+        # ``id(row)`` can never alias a stale transcript.
+        self._detail_transcript_key: tuple[Any, int, tuple[str, ...]] | None = None
         self.title = view.title
         self.active_control = "list"
         self.option_cursor: int | None = None
@@ -616,7 +619,7 @@ class ExplorerBrowser:
             return "Options · ←→ select · ↑↓/Space change · Enter/Esc done"
         actions = " · ".join(self.view.config.actions.values())
         suffix = f" · {actions}" if actions else ""
-        return f"Type search · Ctrl-O options · Tab panes · ↑↓ move · Esc close{suffix}"
+        return f"Type search · Ctrl-O options · Tab panes · ↑↓ move · F2 native · Esc close{suffix}"
 
     def _search_label(self):
         style = "class:fullscreen-browser.search-label"
@@ -779,7 +782,7 @@ class ExplorerBrowser:
         if row is None:
             return None
         lines = tuple(self.view.detail_lines(row, max(1, width)))
-        key = (id(row), max(1, width), lines)
+        key = (row, max(1, width), lines)
         if self._detail_transcript_key != key:
             if self._detail_transcript_key is not None:
                 self.preview_control.cancel_drag()
