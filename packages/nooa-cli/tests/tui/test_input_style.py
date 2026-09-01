@@ -33,6 +33,70 @@ def test_input_uses_terminal_background_across_themes() -> None:
         theme.set_theme(original_theme)
 
 
+@pytest.mark.parametrize(
+    "style_name",
+    [
+        "fullscreen-browser.row",
+        "fullscreen-browser.meta",
+        "fullscreen-browser.detail",
+        "fullscreen-browser.search-label",
+        "fullscreen-browser.control",
+        "fullscreen-browser.heading",
+        "fullscreen-browser.preview",
+        "fullscreen-browser.preview-user",
+        "fullscreen-browser.preview-agent",
+        "fullscreen-browser.footer",
+        "fullscreen-browser.control-focused",
+        "fullscreen-browser.active-rail-active",
+    ],
+)
+def test_fullscreen_browser_standard_text_uses_terminal_default_foreground(style_name: str) -> None:
+    """Standard browser text matches scrollback: the terminal default foreground.
+
+    The theme does not paint ordinary text; only focus/selection/match roles
+    carry color. Focus and preview-user roles keep a background.
+    """
+    app = TUIApplication()
+
+    attrs = app._app.style.get_attrs_for_style_str(f"class:{style_name}")
+
+    assert attrs.color == ""
+    if style_name not in {"fullscreen-browser.preview-user", "fullscreen-browser.control-focused"}:
+        assert attrs.bgcolor == ""
+
+
+def test_agent_message_bodies_use_terminal_default_foreground() -> None:
+    """Scrollback agent text must stay "no color" like live agent messages.
+
+    Both live rendering and resume replay render plain bodies without a
+    foreground SGR so the terminal default foreground (not the theme
+    palette) paints agent text, matching the event viewer chrome.
+    """
+    import re
+
+    from nooa_cli.tui.config import Config
+    from nooa_cli.tui.frontend import (
+        TerminalFrontend,
+        render_history_replay_to_ansi,
+    )
+    from nooa_cli.tui.output import AgentMessage, HistoryReplay, HistoryTurn
+
+    frontend = TerminalFrontend(Config())
+    live = frontend._render_output_to_ansi(AgentMessage("body words"), 40)
+    replay = render_history_replay_to_ansi(
+        HistoryReplay(
+            turns=[HistoryTurn("agent", "body words")],
+            session_id="t",
+            show_header=False,
+            show_footer=False,
+        ),
+        40,
+    )
+    for rendered in (live, replay):
+        body = next(line for line in rendered.splitlines() if "body words" in line)
+        assert not re.search(r"\x1b\[[0-9;]*m", body), rendered
+
+
 async def test_theme_command_refreshes_and_persists_selection(tmp_path, monkeypatch) -> None:
     import yaml
 

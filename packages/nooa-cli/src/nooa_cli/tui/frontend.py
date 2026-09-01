@@ -105,10 +105,12 @@ class _HistoryReplayRenderer:
 
                 buf.write(render_user_bar(turn.content, render_width, COLORS))
             else:
-                console.print(Text("OO:", style=f"bold {dim}"))
+                # Mirror live agent-message rendering exactly: bold label,
+                # body with no color so the terminal default foreground shows.
+                console.print(Text("OO:", style=f"bold {COLORS['mauve']}"))
                 # Preserve semantic line boundaries. The transcript owner wraps for its
                 # current viewport; Rich hard wrapping would add copied whitespace.
-                console.print(self.agent_markdown[agent_index], style=dim, soft_wrap=True)
+                console.print(self.agent_markdown[agent_index], soft_wrap=True)
                 agent_index += 1
                 console.print()
         if self.output.show_footer:
