@@ -248,6 +248,11 @@ def create_theme() -> Theme:
             "spinner.text": c["subtext1"],
             # Code/technical
             "code": c["peach"],
+            # Rich's default inline code span (``like this``) is cyan on a
+            # black background, which ignores the palette and disappears on
+            # light themes. Use the active surface/peach so the chip reads
+            # correctly on dark and light palettes alike.
+            "markdown.code": f"on {c['surface0']} {c['peach']}",
             "path": c["teal"],
             "number": c["peach"],
             # History tags
