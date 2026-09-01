@@ -517,6 +517,7 @@ class _PickerControl(FormattedTextControl):
         if (
             MouseModifier.ALT in mouse_event.modifiers
             or MouseModifier.SHIFT in mouse_event.modifiers
+            or not self.picker.mouse_support
         ):
             return NotImplemented
         if mouse_event.event_type is MouseEventType.SCROLL_UP:
@@ -600,6 +601,10 @@ class ResumePicker(ExplorerBrowser):
         @staticmethod
         def handle_key(_action: str, _value: str = "") -> str:
             return "handled"
+
+        @staticmethod
+        def handle_action(_action: str, _row: Any) -> str:
+            return "ignored"
 
     @property
     def view(self) -> ResumePicker._ViewFacade:
