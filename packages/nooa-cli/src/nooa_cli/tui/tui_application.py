@@ -1844,7 +1844,10 @@ class TUIApplication:
             rows = await asyncio.to_thread(load_rows)
             self._cancel_fullscreen_drag()
             self._resume_picker = ResumePicker(
-                rows, self._app, selection_copy_callback=self._start_fullscreen_selection_copy
+                rows,
+                self._app,
+                selection_copy_callback=self._start_fullscreen_selection_copy,
+                selection_status=lambda: self._transient_status_text,
             )
             self._resume_picker.focus_initial()
             self._app.invalidate()
@@ -2076,7 +2079,10 @@ class TUIApplication:
             from .fullscreen_browser import ExplorerBrowser
 
             view = ExplorerBrowser(
-                view, self._app, selection_copy_callback=self._start_fullscreen_selection_copy
+                view,
+                self._app,
+                selection_copy_callback=self._start_fullscreen_selection_copy,
+                selection_status=lambda: self._transient_status_text,
             )
         self._cancel_fullscreen_drag()
         self._active_subview = view
