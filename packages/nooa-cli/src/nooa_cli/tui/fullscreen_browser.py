@@ -449,11 +449,17 @@ class ExplorerBrowser:
         return bool(getattr(self.view, "mouse_support", True))
 
     def __init__(
-        self, view: Any, app: Any, *, selection_copy_callback: Callable[[str], None] | None = None
+        self,
+        view: Any,
+        app: Any,
+        *,
+        selection_copy_callback: Callable[[str], None] | None = None,
+        selection_status: Callable[[], str] | None = None,
     ) -> None:
         self.view = view
         self.app = app
         self._selection_copy_callback = selection_copy_callback
+        self._selection_status = selection_status
         self._detail_transcript: FullscreenTranscriptModel | None = None
         self._detail_transcript_key: tuple[int, int, tuple[str, ...]] | None = None
         self.title = view.title
@@ -590,6 +596,9 @@ class ExplorerBrowser:
         ]
 
     def _help_text(self):
+        copy_status = self._selection_status() if self._selection_status is not None else ""
+        if copy_status:
+            return copy_status
         if self.option_cursor is not None:
             return "Options · ←→ select · ↑↓/Space change · Enter/Esc done"
         actions = " · ".join(self.view.config.actions.values())
@@ -723,7 +732,7 @@ class ExplorerBrowser:
             )
             marker = "❯ " if selected else "  "
             text = marker + self.view.format_row(self.model.rows[row_index], max(1, width - 2))
-            text = sanitize_live_text(text.replace("\n", " ").replace("\r", " "))[:width]
+            text = " ".join(sanitize_live_text(text).split())[:width]
             query = self.buffer.text.casefold().strip()
             if not query:
                 output.append((base, text))
@@ -787,6 +796,7 @@ class ExplorerBrowser:
             transcript.update_selection(x=x, y=y, width=width, height=height)
         if action == "finish":
             selected = transcript.selected_text()
+            transcript.clear_selection()
             if selected:
                 self.app.clipboard.set_text(selected)
                 if self._selection_copy_callback is not None:

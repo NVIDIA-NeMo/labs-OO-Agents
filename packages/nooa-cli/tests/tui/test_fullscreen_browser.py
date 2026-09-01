@@ -54,6 +54,13 @@ def test_explorer_browser_uses_resume_layout_and_search() -> None:
     assert browser.handle_key("escape") == "close"
 
 
+def test_explorer_browser_shows_copy_status_in_its_footer() -> None:
+    browser = _browser()
+    browser._selection_status = lambda: "Copied 12 characters"
+
+    assert browser._help_text() == "Copied 12 characters"
+
+
 def test_explorer_browser_options_and_two_pane_focus() -> None:
     browser = _browser()
     browser.handle_key("options")
@@ -75,6 +82,15 @@ def test_explorer_browser_options_and_two_pane_focus() -> None:
     browser.handle_key("options")
     browser.handle_key("enter")
     assert browser.option_cursor is None
+
+
+def test_explorer_browser_collapses_multiline_rows() -> None:
+    browser = _browser()
+    browser.view.format_row = lambda _row, _width: "first line\n\nsecond\tline"
+
+    text = "".join(fragment[1] for fragment in browser.list_text(80, 4))
+
+    assert text.splitlines() == ["first line second line", "❯ first line second line"]
 
 
 def test_explorer_browser_mouse_wheel_scrolls_list_without_moving_selection() -> None:
@@ -118,7 +134,7 @@ def test_preview_short_detail_remains_top_aligned() -> None:
     assert "".join(text for _style, text, *_rest in fragments).startswith("first\nsecond")
 
 
-def test_preview_mouse_drag_copies_and_retains_highlight() -> None:
+def test_preview_mouse_drag_copies_and_clears_highlight() -> None:
     browser = _browser()
     browser.view.detail_lines = lambda _row, _width: ["\x1b[31malpha\x1b[0m beta", "gamma"]
     copied: list[str] = []
@@ -138,7 +154,7 @@ def test_preview_mouse_drag_copies_and_retains_highlight() -> None:
     assert copied
     assert browser.app.clipboard.get_data().text == copied[0]
     assert browser._detail_transcript is not None
-    assert browser._detail_transcript.selected_text() == copied[0]
+    assert browser._detail_transcript.selected_text() == ""
     assert "\x1b" not in copied[0]
 
 
@@ -157,7 +173,7 @@ def test_preview_click_clears_selection_and_modifiers_remain_native() -> None:
         MouseEvent(Point(3, 1), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
     )
     assert browser._detail_transcript is not None
-    assert browser._detail_transcript.selected_text()
+    assert browser._detail_transcript.selected_text() == ""
 
     control.mouse_handler(
         MouseEvent(Point(1, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
