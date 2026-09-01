@@ -807,7 +807,9 @@ async def test_tui_app_event_explorer_routes_real_mouse_wheel_to_detail() -> Non
 
 
 def test_event_explorer_has_in_app_mouse_scroll_bindings() -> None:
-    source = Path("packages/nooa-cli/src/nooa_cli/tui/tui_application.py").read_text()
+    # Resolve from this test file so the check works from any cwd
+    # (repo root or packages/nooa-cli).
+    source = (Path(__file__).parents[2] / "src/nooa_cli/tui/tui_application.py").read_text()
 
     assert "open_event_explorer" in source
     assert "Keys.ScrollDown" in source
