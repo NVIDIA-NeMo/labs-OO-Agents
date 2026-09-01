@@ -99,9 +99,12 @@ class TestSessionScope:
         from nooa.tracing._session import session_scope
 
         set_session("original")
-        with session_scope(None):
-            assert get_session() is None
-        assert get_session() == "original"
+        try:
+            with session_scope(None):
+                assert get_session() is None
+            assert get_session() == "original"
+        finally:
+            set_session(None)
 
     @pytest.mark.asyncio
     async def test_isolated_between_concurrent_tasks(self):

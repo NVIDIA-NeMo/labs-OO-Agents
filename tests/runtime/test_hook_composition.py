@@ -3,6 +3,7 @@
 """Tests for composable, task-local instrumentation hooks."""
 
 import asyncio
+from contextlib import contextmanager
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -208,6 +209,45 @@ def test_after_uses_originating_composite_when_active_hooks_change() -> None:
     assert calls == [
         ("original", "before", "generation-1"),
         ("original", "after", "original-context", "generation-1"),
+    ]
+
+
+def test_composite_reactivates_each_child_agent_call_context() -> None:
+    events: list[tuple[str, str, Any]] = []
+
+    class ActivatingHooks(RecordingHooks):
+        def before_agent_call(self, **kwargs: Any) -> str:
+            return f"{self.name}-{kwargs['call_id']}-context"
+
+        @contextmanager
+        def activate_agent_call(self, context: Any):
+            events.append((self.name, "enter", context))
+            try:
+                yield
+            finally:
+                events.append((self.name, "exit", context))
+
+    first = ActivatingHooks("first", [])
+    second = ActivatingHooks("second", [])
+    hooks = CompositeInstrumentationHooks(first, second)  # type: ignore[arg-type]
+    context = hooks.before_agent_call(
+        agent=None,
+        method_name="stream",
+        args=(),
+        kwargs={},
+        call_id="call-1",
+        parent_call_id=None,
+    )
+
+    with hooks.activate_agent_call(context):
+        events.append(("body", "active", None))
+
+    assert events == [
+        ("first", "enter", context.children[0]),
+        ("second", "enter", context.children[1]),
+        ("body", "active", None),
+        ("second", "exit", context.children[1]),
+        ("first", "exit", context.children[0]),
     ]
 
 
