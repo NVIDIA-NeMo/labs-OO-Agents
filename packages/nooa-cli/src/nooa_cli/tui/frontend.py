@@ -105,8 +105,10 @@ class _HistoryReplayRenderer:
 
                 buf.write(render_user_bar(turn.content, render_width, COLORS))
             else:
-                # Mirror live agent-message rendering exactly: bold label,
-                # body with no color so the terminal default foreground shows.
+                # Replay uses the compact inline label the picker preview
+                # expects (live scrollback prints a full-width rule instead).
+                # The body carries no color, so the terminal default foreground
+                # paints it, matching live agent-message text.
                 console.print(Text("OO:", style=f"bold {COLORS['mauve']}"))
                 # Preserve semantic line boundaries. The transcript owner wraps for its
                 # current viewport; Rich hard wrapping would add copied whitespace.
