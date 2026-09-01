@@ -90,7 +90,103 @@ def test_explorer_browser_collapses_multiline_rows() -> None:
 
     text = "".join(fragment[1] for fragment in browser.list_text(80, 4))
 
-    assert text.splitlines() == ["  first line second line", "❯ first line second line"]
+    # Newlines flatten so a hostile row stays on one line; intra-line
+    # whitespace (including tab-expanded spaces) is preserved verbatim.
+    assert text.splitlines() == [
+        "  first line second    line",
+        "❯ first line second    line",
+    ]
+
+
+def test_explorer_browser_preserves_row_column_padding() -> None:
+    """Column padding from format_row must survive newline collapsing.
+
+    Regression for whitespace flattening that rendered every padded
+    explorer row (events, jobs, memories) with ragged columns.
+    """
+    browser = _browser()
+    browser.view.format_row = lambda _row, _width: "tag      PythonOutput   did a thing"
+
+    text = "".join(fragment[1] for fragment in browser.list_text(80, 1)).splitlines()[0]
+
+    assert text == "❯ tag      PythonOutput   did a thing"
+
+
+@pytest.mark.asyncio
+async def test_shared_explorer_f2_toggles_native_selection_and_cancels_drag() -> None:
+    """F2 in a shared fullscreen viewer flips mouse support and cancels drags."""
+    from types import SimpleNamespace
+
+    from nooa_cli.tui.todo_explorer import TodoExplorerView
+
+    from .tui_app_harness import MutableRecordingOutput, TUIHarness
+
+    view = TodoExplorerView(
+        [
+            SimpleNamespace(
+                id="todo-1",
+                title="F2 me",
+                status="open",
+                deps=(),
+                created_at="now",
+                notes="alpha beta gamma",
+                comments=(),
+                search_text="F2 me alpha beta gamma",
+            )
+        ]
+    )
+    async with TUIHarness(output=MutableRecordingOutput(80, 24), full_screen=True) as harness:
+        opened = asyncio.create_task(harness.app.open_subview(view))
+        await harness.wait_for(lambda: isinstance(harness.app.active_subview, ExplorerBrowser))
+        browser = harness.app.active_subview
+        await harness.wait_for(lambda: browser.preview_control.viewport == (79, 9))
+
+        # Start a drag so F2 must cancel it.
+        harness._pipe.send_text("\x1b[<0;2;15M")
+        await harness.wait_for(lambda: browser.preview_control.dragging)
+
+        await harness.press("f2")
+        await harness.wait_for(lambda: not browser.preview_control.dragging)
+        await harness.wait_for(lambda: not bool(harness.app._app.mouse_support()))
+        assert view.native_selection is True
+
+        await harness.press("f2")
+        await harness.wait_for(lambda: bool(harness.app._app.mouse_support()))
+        assert view.native_selection is False
+
+        await harness.press("escape")
+        await asyncio.wait_for(opened, 1)
+
+
+@pytest.mark.asyncio
+async def test_preview_autoscroll_extends_selection_between_ticks() -> None:
+    """Edge autoscroll must extend the selection, not just scroll the preview."""
+    import asyncio as _asyncio
+
+    browser = _browser()
+    browser.view.detail_lines = lambda _row, _width: [f"line {i}" for i in range(20)]
+    browser.preview_control.create_content(20, 3)
+    control = browser.preview_control
+    control.mouse_handler(
+        MouseEvent(Point(0, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+    control.mouse_handler(
+        MouseEvent(Point(3, 2), MouseEventType.MOUSE_MOVE, MouseButton.LEFT, frozenset())
+    )
+    assert control.dragging
+
+    await _asyncio.sleep(0.5)
+    assert browser._detail_transcript is not None
+    assert browser._detail_transcript.selected_text()
+    before = browser.model.detail_offset
+    assert before >= 2
+
+    control.mouse_handler(
+        MouseEvent(Point(3, 2), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
+    )
+    await _asyncio.sleep(0.2)
+    assert browser.model.detail_offset == before
+    assert browser._detail_transcript.selected_text() == ""
 
 
 def test_explorer_browser_reserves_marker_column_for_alignment() -> None:

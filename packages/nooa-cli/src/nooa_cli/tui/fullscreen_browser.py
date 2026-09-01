@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -27,6 +28,18 @@ from prompt_toolkit.widgets import Frame
 
 from .fullscreen_transcript import FullscreenTranscriptModel
 from .terminal_safety import sanitize_live_text
+
+_MULTILINE_RUN_RE = re.compile(r"\s*\n\s*")
+
+
+def _collapse_multiline(text: str) -> str:
+    """Flatten embedded newlines/tabs in a list row without touching padding.
+
+    ``format_row`` output is padded for column alignment; collapsing *all*
+    whitespace would shred those columns. Only line-boundary whitespace is
+    normalized so a hostile multiline row still renders as one line.
+    """
+    return _MULTILINE_RUN_RE.sub(" ", text).strip()
 
 
 class _DragCaptureFloatContainer(FloatContainer):
@@ -737,10 +750,10 @@ class ExplorerBrowser:
             # and highlighted text would shift right by one on selection.
             text = (
                 marker
-                + " ".join(
+                + _collapse_multiline(
                     sanitize_live_text(
                         self.view.format_row(self.model.rows[row_index], max(1, width - 2))
-                    ).split()
+                    )
                 )
             )[:width]
             query = self.buffer.text.casefold().strip()

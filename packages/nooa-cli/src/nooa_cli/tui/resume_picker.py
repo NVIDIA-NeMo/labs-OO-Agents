@@ -7,6 +7,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Literal
 
 from prompt_toolkit.buffer import Buffer
@@ -583,7 +584,26 @@ class _PickerButtonControl(FormattedTextControl):
 
 
 class ResumePicker(ExplorerBrowser):
-    """Session-specific ExplorerBrowser with asynchronous replay previews."""
+    """Session-specific ExplorerBrowser with asynchronous replay previews.
+
+    The host owns this picker's key dispatch (it never routes through
+    ``ExplorerBrowser.handle_key``), but inherited helpers dereference
+    ``self.view``. Expose a minimal facade so an accidental inherited call
+    degrades gracefully instead of raising ``AttributeError``.
+    """
+
+    class _ViewFacade:
+        config = SimpleNamespace(actions={})
+        options: tuple[Any, ...] = ()
+        item_name = "session"
+
+        @staticmethod
+        def handle_key(_action: str, _value: str = "") -> str:
+            return "handled"
+
+    @property
+    def view(self) -> ResumePicker._ViewFacade:
+        return self._view_facade
 
     @property
     def model(self) -> ResumePickerModel:
@@ -602,6 +622,7 @@ class ResumePicker(ExplorerBrowser):
         selection_status: Callable[[], str] | None = None,
     ):
         self.app = app
+        self._view_facade = ResumePicker._ViewFacade()
         self.model = ResumePickerModel(rows)
         self._selection_copy_callback = selection_copy_callback
         self._selection_status = selection_status
