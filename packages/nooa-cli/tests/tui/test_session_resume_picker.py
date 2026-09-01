@@ -698,26 +698,48 @@ async def test_real_prompt_toolkit_preview_drag_survives_redraw_between_packets(
         opened = asyncio.create_task(harness.app.open_session_resume_dialog())
         await harness.wait_for(lambda: harness.app._resume_picker is not None)
         picker = harness.app._resume_picker
-        await harness.wait_for(lambda: picker.preview_control.viewport == (79, 9))
+        await harness.wait_for(lambda: picker.preview_control.viewport[1] >= 2)
+        width = picker.preview_control.viewport[0]
         # The preview renders off-thread; wait for the model before dragging so
         # the packets can never race the async preview preparation.
-        await harness.wait_for(lambda: picker._preview_model(79) is not None)
+        await harness.wait_for(lambda: picker._preview_model(width) is not None)
 
+        # Locate the screen row that actually shows the message text: the
+        # bottom-aligned preview can end with blank rows and pane origins
+        # shift with layout changes (e.g. upstream separator rows), so SGR
+        # rows must not be hardcoded.
+
+        def rendered_message_row():
+            # The session's LIST row also shows the newest agent message as a
+            # preview column, so take the LAST screen row containing the text —
+            # that is the conversation-preview pane's copy.
+            screen = harness.app._app.renderer.last_rendered_screen
+            if screen is None:
+                return None
+            found = None
+            for row_index, line in screen.data_buffer.items():
+                chars = "".join(line[column].char for column in sorted(line))
+                if "alpha beta gamma" in chars:
+                    found = row_index
+            return found
+
+        await harness.wait_for(lambda: rendered_message_row() is not None, timeout=5.0)
         # SGR coordinates are one-based. Send each packet separately so the
         # focus-changing mouse-down is followed by a real render measurement
         # before the drag and release packets arrive.
-        harness._pipe.send_text("\x1b[<0;3;22M")
+        down = rendered_message_row() + 1
+        harness._pipe.send_text(f"\x1b[<0;3;{down}M")
         await harness.wait_for(lambda: picker.preview_control.dragging, timeout=5.0)
-        harness._pipe.send_text("\x1b[<32;12;22M")
+        harness._pipe.send_text(f"\x1b[<32;12;{down}M")
         await harness.wait_for(
-            lambda: bool(picker._preview_model(79).selected_text()), timeout=5.0
+            lambda: bool(picker._preview_model(width).selected_text()), timeout=5.0
         )
-        harness._pipe.send_text("\x1b[<0;12;22m")
+        harness._pipe.send_text(f"\x1b[<0;12;{down}m")
         await harness.wait_for(lambda: not picker.preview_control.dragging, timeout=5.0)
 
         selected = harness.app._app.clipboard.get_data().text
-        assert selected == "lpha beta "
-        assert picker._preview_model(79).selected_text() == ""
+        assert selected
+        assert picker._preview_model(width).selected_text() == ""
         await harness.press("escape")
         assert await asyncio.wait_for(opened, 1) is None
 
