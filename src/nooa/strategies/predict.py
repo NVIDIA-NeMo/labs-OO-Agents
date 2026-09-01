@@ -56,7 +56,7 @@ class PredictStrategy(GenerationStrategy):
     The strategy handles validation retry with clear error feedback if the LLM's
     output doesn't match the schema.
 
-    Configuration:
+    Configuration (fields of PredictConfig, passed via config=):
         max_retries: Maximum validation retry attempts
 
     Example:

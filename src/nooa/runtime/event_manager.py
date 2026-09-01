@@ -353,6 +353,7 @@ class EventManager:
         *,
         type: str | None = None,
         call_id: str | None = None,
+        execution_status: str | None = None,
         query: str | None = None,
         regex: bool = False,
         limit: int | None = None,
@@ -362,6 +363,7 @@ class EventManager:
         Args:
             type: Event type filter (e.g., "Task", "PythonOutput")
             call_id: Call ID filter (matches metadata.call_id)
+            execution_status: PythonOutput status filter (e.g. "error" or "complete")
             query: Text search (case-insensitive substring, or regex if regex=True)
             regex: If True, treat query as regex pattern
             limit: Maximum results (most recent first when limit < total)
@@ -378,6 +380,15 @@ class EventManager:
         # Apply call_id filter
         if call_id is not None:
             events = [e for e in events if e.metadata.get("call_id") == call_id]
+
+        # Apply execution status filter
+        if execution_status is not None:
+            events = [
+                event
+                for event in events
+                if getattr(getattr(event, "execution_status", None), "value", None)
+                == execution_status
+            ]
 
         # Apply text/regex filter
         if query is not None:

@@ -8,11 +8,33 @@ This module provides the unified wrapper logic used by both:
 
 Having this in one place eliminates duplication and ensures consistent behavior
 for context variable management, tracing hooks, and execution routing.
+
+Generator methods (`def`/`async def` containing `yield`) get their own wrappers.
+Three behaviours differ from the non-generator wrappers, deliberately:
+
+- **Argument binding is deferred.** The wrapper is itself a generator function,
+  so a call-signature error surfaces at the first `next()`/`__anext__()` rather
+  than at the call. Native generator functions bind eagerly, so this is one
+  place the wrapper is less transparent than the function it wraps. The
+  alternative — a plain function returning an inner generator — would bind
+  eagerly but make `inspect.isgeneratorfunction` False for the method, which is
+  the more visible property to lose.
+- **A generator that is created but never iterated emits no agent-call events.**
+  There is no body execution to attribute, so emitting a Before/After pair for
+  it would record work that never happened.
+- **Cancellation counts as failure.** `_gen_agent_span` catches `BaseException`,
+  so a cancelled generator reports `success=False`, while the coroutine and sync
+  wrappers catch `Exception` and report a cancelled call as a success. The
+  generator behaviour is the intended one; aligning the older wrappers is out of
+  scope here, so `AfterAgentCall.success` currently means slightly different
+  things depending on whether the method contains `yield`.
 """
 
 import asyncio
+import inspect
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from functools import wraps
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -27,7 +49,12 @@ from nooa.runtime.context_vars import (
     _pop_agent_call_id,
     _push_agent_call_id,
 )
-from nooa.runtime.hooks import call_after_hook, call_before_hook
+from nooa.runtime.hooks import (
+    activate_agent_call_context,
+    call_after_hook,
+    call_before_hook,
+    get_hooks,
+)
 
 if TYPE_CHECKING:
     from nooa.strategies.base import GenerationStrategy
@@ -115,14 +142,32 @@ def create_agent_method_wrapper(
                 _tc = DEFAULT_TRUNCATION_CONFIG
 
             # Strip framework kwargs before validation — they're consumed by
-            # _execute_with_generation, not the user's method signature.
-            _fw_session_locals = kwargs.pop("_session_locals", None)
+            # _execute_with_generation, not the user's method signature. Must
+            # cover every name that _execute_with_generation pops, or the call
+            # is rejected here before it can ever get there.
+            #
+            # Only on the agent path: the strategy-helper path below routes to
+            # execute_nested(), which pops nothing, so stripping there would
+            # drop these names silently into CurrentCall's prompt arguments
+            # instead of rejecting them as the unexpected kwargs they are.
+            _fw_kwargs: dict[str, Any] = {}
+            if hasattr(self, "runtime"):
+                _fw_kwargs = {
+                    _name: kwargs.pop(_name)
+                    for _name in ("_session_locals", "_strategy")
+                    if _name in kwargs
+                }
+                try:
+                    _has_user_llm_param = "llm" in inspect.signature(original_func).parameters
+                except (TypeError, ValueError):
+                    _has_user_llm_param = False
+                if not _has_user_llm_param and "llm" in kwargs:
+                    _fw_kwargs["llm"] = kwargs.pop("llm")
             try:
                 ArgumentValidator().validate(original_func, args, kwargs, _tc)
             finally:
                 # Restore so _execute_with_generation can pop them
-                if _fw_session_locals is not None:
-                    kwargs["_session_locals"] = _fw_session_locals
+                kwargs.update(_fw_kwargs)
 
             # Strategy resolution if not provided
             if resolved_strategy is None:
@@ -519,6 +564,386 @@ def create_sync_agent_method_wrapper(
                     result=result,
                     exception=exception_caught,
                 )
+
+    setattr(wrapper, "_agent_decorator", "auto")  # noqa: B010
+    setattr(wrapper, "_needs_generation", False)  # noqa: B010
+    setattr(wrapper, "_plan_strategy", None)  # noqa: B010
+    setattr(wrapper, "_tracing_enabled", _tracing_enabled)  # noqa: B010
+    setattr(wrapper, "_original", original_func)  # noqa: B010
+
+    return wrapper
+
+
+def _emit_before_agent_call(
+    self: Any,
+    method_name: str,
+    call_id: str,
+    parent_call_id: str | None,
+    is_top_level: bool,
+) -> None:
+    """Emit BeforeAgentCall, swallowing emission failures (defensive, as elsewhere)."""
+    try:
+        self.event_manager.add(
+            BeforeAgentCall(
+                method_name=method_name,
+                call_id=call_id,
+                parent_call_id=parent_call_id,
+                is_top_level=is_top_level,
+                needs_generation=False,
+            )
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("agent-call: BeforeAgentCall emission failed (generator)", exc_info=True)
+
+
+def _emit_after_agent_call(
+    self: Any,
+    method_name: str,
+    call_id: str,
+    parent_call_id: str | None,
+    is_top_level: bool,
+    exception_caught: BaseException | None,
+) -> None:
+    """Emit AfterAgentCall, swallowing emission failures (defensive, as elsewhere)."""
+    try:
+        self.event_manager.add(
+            AfterAgentCall(
+                method_name=method_name,
+                call_id=call_id,
+                parent_call_id=parent_call_id,
+                is_top_level=is_top_level,
+                needs_generation=False,
+                success=exception_caught is None,
+                exception_type=(
+                    type(exception_caught).__name__ if exception_caught is not None else None
+                ),
+            )
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("agent-call: AfterAgentCall emission failed (generator)", exc_info=True)
+
+
+@contextmanager
+def _gen_resume_context(
+    self: Any, active_call_id: str | None, *, set_parent_agent: bool
+) -> Iterator[None]:
+    """Install framework call context only while a generator body is running."""
+    _push_agent_call_id(active_call_id)
+    current_parent = _parent_agent_var.get() if set_parent_agent else None
+    is_subagent_call = current_parent is not None and current_parent is not self
+    scoped_blocks_token = _scoped_blocks_var.set(None) if is_subagent_call else None
+    scoped_events_token = _scoped_events_var.set(None) if is_subagent_call else None
+    parent_token = _parent_agent_var.set(self) if set_parent_agent else None
+    try:
+        yield
+    finally:
+        if parent_token is not None:
+            _parent_agent_var.reset(parent_token)
+        if scoped_events_token is not None:
+            _scoped_events_var.reset(scoped_events_token)
+        if scoped_blocks_token is not None:
+            _scoped_blocks_var.reset(scoped_blocks_token)
+        _pop_agent_call_id()
+
+
+@contextmanager
+def _gen_agent_span(
+    self: Any,
+    original_func: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    cached_source_code: str | None,
+    tracing_enabled: bool,
+) -> Iterator[tuple[str | None, Any, Any]]:
+    """Open and close the AGENT span around a generator method's whole lifetime.
+
+    Yields the call id the generator's wrapper should push around each
+    resumption. Nothing in here awaits, so both the async and sync generator
+    wrappers use it — the only genuinely async-coloured part of those wrappers
+    is the drive loop.
+
+    `GeneratorExit` is deliberately not recorded as a failure: abandoning a
+    generator early (`break`, `aclosing()`, or the asyncio async-generator
+    finalizer) is ordinary control flow, not an error. Cancellation *is*
+    recorded, because a cancelled method genuinely did not complete. The same
+    value is reported to the event and to the hook so the event stream and the
+    span cannot disagree.
+
+    Args:
+        self: The agent instance owning the method.
+        original_func: The unwrapped generator function.
+        args: Positional args the method was called with.
+        kwargs: Keyword args the method was called with.
+        cached_source_code: Pre-extracted source code for the span.
+        tracing_enabled: Whether to fire the before/after tracing hooks.
+
+    Yields:
+        The call id, opaque instrumentation context, and originating hooks
+        backend to activate while the generator body is running.
+    """
+    call_id = str(uuid4())
+    parent_call_id = self.runtime._agent_call_id
+    is_top_level = _parent_agent_var.get() is None
+
+    _emit_before_agent_call(self, original_func.__name__, call_id, parent_call_id, is_top_level)
+
+    hook_context = None
+    hook_backend = None
+    exception_caught: BaseException | None = None
+    try:
+        if tracing_enabled:
+            hook_backend = get_hooks()
+            hook_context = call_before_hook(
+                "before_agent_call",
+                agent=self,
+                method_name=original_func.__name__,
+                args=args,
+                kwargs=kwargs,
+                call_id=call_id,
+                parent_call_id=parent_call_id,
+                **_build_trace_attributes(
+                    needs_generation=False,
+                    strategy=None,
+                    cached_source_code=cached_source_code,
+                ),
+            )
+        # @no_trace methods propagate the parent's id so children find the
+        # nearest traced ancestor — same semantics as the other wrappers.
+        yield (call_id if tracing_enabled else parent_call_id, hook_context, hook_backend)
+    except GeneratorExit:
+        raise
+    except BaseException as e:
+        exception_caught = e
+        raise
+    finally:
+        _emit_after_agent_call(
+            self,
+            original_func.__name__,
+            call_id,
+            parent_call_id,
+            is_top_level,
+            exception_caught,
+        )
+        if hook_context is not None:
+            with activate_agent_call_context(hook_context, hooks=hook_backend):
+                call_after_hook(
+                    "after_agent_call",
+                    hook_context,
+                    agent=self,
+                    method_name=original_func.__name__,
+                    result=None,
+                    exception=exception_caught,
+                )
+
+
+def create_async_gen_agent_method_wrapper(
+    original_func: Callable[..., Any],
+    *,
+    needs_tracing: bool,
+    cached_source_code: str | None = None,
+) -> Callable[..., Any]:
+    """Create a tracing wrapper for an async generator method (`async def` + `yield`).
+
+    A generator method needs a different span shape from the coroutine wrapper.
+    A coroutine runs to completion inside one `await`, so pushing the call id
+    once around that await covers exactly the body. A generator's body runs in
+    slices: it starts on the first `__anext__`, suspends at each `yield`, and
+    resumes when the consumer asks for the next value. Between those slices the
+    *consumer* is running, not the generator.
+
+    So the call id is pushed around each resumption rather than around the whole
+    call, which gives both halves of the guarantee:
+
+    - work the body does — including LLM calls — parents to the generator;
+    - work the consumer does between yields does not.
+
+    The span covers the generator's whole lifetime even though the id is only
+    current in slices, so wall-clock duration includes time the consumer spent
+    between yields. Parentage is exact.
+
+    Like the sync wrapper, this is tracing only: generation is unreachable for
+    generators (`AgentMeta` rejects a generator with an ellipsis body outright),
+    and `agent_call` middleware is skipped.
+
+    Args:
+        original_func: The original async generator function to wrap.
+        needs_tracing: Whether the method should be traced.
+        cached_source_code: Pre-extracted source code for tracing (optional).
+
+    Returns:
+        Wrapped async generator function with tracing instrumentation.
+    """
+    # Mirrors the other wrappers: a mutable list lets `@no_trace` applied AFTER
+    # this wrapper (outer decorator) flip the flag retroactively.
+    _tracing_enabled = [needs_tracing]
+
+    @wraps(original_func)
+    async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        # Built before the span opens: binding the arguments can raise, and a
+        # TypeError here must not leave a BeforeAgentCall without its pair.
+        # (This does defer the error to the first resumption — see the note on
+        # argument binding in the module docstring.)
+        agen = original_func(self, *args, **kwargs)
+
+        # No runtime yet — e.g. an `Agent.__init__` helper running before
+        # `self.runtime` is assigned. Skip the span, but drive the generator
+        # through the SAME loop, so `asend`/`athrow` stay transparent here too.
+        # A separate flag rather than `active_call_id is not None`: a traced
+        # `@no_trace` generator legitimately propagates a None parent id.
+        instrumented = hasattr(self, "runtime")
+        span: Any = (
+            _gen_agent_span(
+                self, original_func, args, kwargs, cached_source_code, _tracing_enabled[0]
+            )
+            if instrumented
+            else nullcontext((None, None, None))
+        )
+
+        with span as (active_call_id, hook_context, hook_backend):
+            try:
+                # `asend`/`athrow` rather than `__anext__`/raise, so the wrapper
+                # stays transparent to consumers driving it bidirectionally.
+                to_send: Any = None
+                to_throw: BaseException | None = None
+                while True:
+                    try:
+                        resume_context = (
+                            _gen_resume_context(self, active_call_id, set_parent_agent=True)
+                            if instrumented
+                            else nullcontext()
+                        )
+                        with (
+                            resume_context,
+                            activate_agent_call_context(hook_context, hooks=hook_backend),
+                        ):
+                            if to_throw is not None:
+                                item = await agen.athrow(to_throw)
+                            else:
+                                item = await agen.asend(to_send)
+                            to_send = to_throw = None
+                    except StopAsyncIteration:
+                        break
+                    # Suspended: the consumer runs here with our id *not* on the stack.
+                    try:
+                        to_send = yield item
+                    except GeneratorExit:
+                        raise
+                    except BaseException as e:
+                        # Consumer threw into us — forward it to the wrapped
+                        # generator so its own except/finally blocks still run.
+                        to_throw = e
+            finally:
+                # Close the wrapped generator so its `finally` blocks run inside
+                # this span. The close itself may raise (a body whose cleanup
+                # fails, or one that ignores GeneratorExit); the enclosing `with`
+                # still ends the span, so a failed close cannot leak it.
+                close_context = (
+                    _gen_resume_context(self, active_call_id, set_parent_agent=True)
+                    if instrumented
+                    else nullcontext()
+                )
+                with close_context, activate_agent_call_context(hook_context, hooks=hook_backend):
+                    await agen.aclose()
+
+    setattr(wrapper, "_agent_decorator", "auto")  # noqa: B010
+    setattr(wrapper, "_needs_generation", False)  # noqa: B010
+    setattr(wrapper, "_plan_strategy", None)  # noqa: B010
+    setattr(wrapper, "_tracing_enabled", _tracing_enabled)  # noqa: B010
+    setattr(wrapper, "_original", original_func)  # noqa: B010
+
+    return wrapper
+
+
+def create_sync_gen_agent_method_wrapper(
+    original_func: Callable[..., Any],
+    *,
+    needs_tracing: bool,
+    cached_source_code: str | None = None,
+) -> Callable[..., Any]:
+    """Create a tracing wrapper for a sync generator method (`def` + `yield`).
+
+    Same span shape as `create_async_gen_agent_method_wrapper` — see that
+    docstring for why the call id is pushed per resumption rather than once
+    around the call. A sync generator body cannot await an LLM, so the stakes
+    are lower than the async case, but nested *sync* traced helpers called from
+    the body were misattributed to the consumer in exactly the same way.
+
+    Args:
+        original_func: The original sync generator function to wrap.
+        needs_tracing: Whether the method should be traced.
+        cached_source_code: Pre-extracted source code for tracing (optional).
+
+    Returns:
+        Wrapped sync generator function with tracing instrumentation.
+    """
+    _tracing_enabled = [needs_tracing]
+
+    @wraps(original_func)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        # Built before the span opens: binding the arguments can raise, and a
+        # TypeError here must not leave a BeforeAgentCall without its pair.
+        # (This does defer the error to the first resumption — see the note on
+        # argument binding in the module docstring.)
+        gen = original_func(self, *args, **kwargs)
+
+        # See the async wrapper: no runtime means no span, but the same drive
+        # loop, so the two paths cannot drift apart in transparency.
+        instrumented = hasattr(self, "runtime")
+        span: Any = (
+            _gen_agent_span(
+                self, original_func, args, kwargs, cached_source_code, _tracing_enabled[0]
+            )
+            if instrumented
+            else nullcontext((None, None, None))
+        )
+
+        with span as (active_call_id, hook_context, hook_backend):
+            try:
+                # `send`/`throw` rather than `next`/raise, so the wrapper stays
+                # transparent to consumers driving it bidirectionally.
+                to_send: Any = None
+                to_throw: BaseException | None = None
+                while True:
+                    # No `_parent_agent_var` here, unlike the async wrapper: it
+                    # drives subagent LLM inheritance, which is async-only —
+                    # matching `create_sync_agent_method_wrapper`, which also
+                    # leaves it alone.
+                    try:
+                        resume_context = (
+                            _gen_resume_context(self, active_call_id, set_parent_agent=False)
+                            if instrumented
+                            else nullcontext()
+                        )
+                        with (
+                            resume_context,
+                            activate_agent_call_context(hook_context, hooks=hook_backend),
+                        ):
+                            if to_throw is not None:
+                                item = gen.throw(to_throw)
+                            else:
+                                item = gen.send(to_send)
+                            to_send = to_throw = None
+                    except StopIteration as stop:
+                        # Carry the wrapped generator's `return` value out, so
+                        # `yield from` and StopIteration.value stay transparent.
+                        return stop.value
+                    try:
+                        to_send = yield item
+                    except GeneratorExit:
+                        raise
+                    except BaseException as e:
+                        # Consumer threw into us — forward it to the wrapped
+                        # generator so its own except/finally blocks still run.
+                        to_throw = e
+            finally:
+                # See the async wrapper: a close that raises must not leak the span.
+                close_context = (
+                    _gen_resume_context(self, active_call_id, set_parent_agent=False)
+                    if instrumented
+                    else nullcontext()
+                )
+                with close_context, activate_agent_call_context(hook_context, hooks=hook_backend):
+                    gen.close()
 
     setattr(wrapper, "_agent_decorator", "auto")  # noqa: B010
     setattr(wrapper, "_needs_generation", False)  # noqa: B010

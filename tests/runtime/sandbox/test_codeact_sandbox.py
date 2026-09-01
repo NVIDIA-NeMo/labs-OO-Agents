@@ -17,12 +17,13 @@ import pytest
 
 from nooa import Agent, strategy
 from nooa.config import CodeActConfig
+from nooa.events import PythonOutput, ResultStatus
 from nooa.runtime.sandbox.config import SandboxConfig
 from nooa.runtime.sandbox.guards import probe_capabilities
 from nooa.strategies.codeact import CodeActStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
-pytestmark = pytest.mark.integration
+pytestmark = pytest.mark.sandbox
 
 CAPS = probe_capabilities()
 
@@ -43,6 +44,17 @@ def _exec(code: str, call_id: str = "c1") -> ToolCall:
 
 def _ret(result: Any = None, call_id: str = "cret") -> ToolCall:
     return ToolCall(id=call_id, name="return_result", arguments=json.dumps({"result": result}))
+
+
+def _failed_output(agent: Agent, call_id: str | None = None) -> PythonOutput:
+    """Return the first failed Python output, optionally for one tool call."""
+    return next(
+        event
+        for event in agent.event_manager.values()
+        if isinstance(event, PythonOutput)
+        and event.execution_status is ResultStatus.ERROR
+        and (call_id is None or event.tool_call_id == call_id)
+    )
 
 
 # A sandbox that keeps network on (so FakeLLM's parent-side calls are irrelevant
@@ -130,18 +142,106 @@ async def test_sandbox_path_still_enforces_restrictions():
     )
     agent = _SumAgent(llm=llm)
     result = await agent.compute()
-    # The blocked-import cell errors and the agent recovers to return_result(1);
-    # the run completing at all proves the validation error was surfaced, not raised.
     assert result == 1
 
+    output = _failed_output(agent, "c1")
+    assert output.stdout == ""
+    assert output.stderr == ""
+    assert "subprocess" in output.error
+    assert "not allowed" in output.error.lower() or "restricted" in output.error.lower()
+    assert "Traceback" not in output.error
 
-async def test_sandboxed_codeact_reports_cell_error_and_continues():
+
+async def test_sandboxed_codeact_reports_rich_cell_error_and_continues():
     llm = FakeLLMClient(
         scripted_responses=[
-            _resp("", tool_calls=[_exec("raise ValueError('deliberate')")]),
+            _resp(
+                "",
+                tool_calls=[
+                    _exec(
+                        "import sys\n"
+                        "print('before failure')\n"
+                        "print('warning', file=sys.stderr)\n"
+                        "text = 'abc'\n"
+                        "start = text.index('missing')"
+                    )
+                ],
+            ),
             _resp("", tool_calls=[_ret(result=7)]),
         ]
     )
     agent = _SumAgent(llm=llm)
     result = await agent.compute()
+
     assert result == 7
+    output = _failed_output(agent, "c1")
+    assert output.stdout == "before failure\n"
+    assert output.stderr == "warning\n"
+    assert "Cell In[1], line 5" in output.error
+    assert "start = text.index('missing')" in output.error
+    assert "ValueError: substring not found" in output.error
+
+
+async def test_sandboxed_codeact_converts_indirect_system_exit():
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _resp("", tool_calls=[_exec("exit_type = SystemExit\nraise exit_type")]),
+            _resp("", tool_calls=[_ret(result=8)]),
+        ]
+    )
+    agent = _SumAgent(llm=llm)
+
+    assert await agent.compute() == 8
+    output = _failed_output(agent, "c1")
+    assert "RuntimeError: SystemExit raised inside generated code" in output.error
+
+
+async def test_custom_formatter_receives_worker_rendered_diagnostic():
+    """Custom formatters run parent-side and can consume the worker traceback."""
+
+    class TransportFormatter:
+        def format(
+            self,
+            error,
+            code=None,
+            *,
+            line_offset=0,
+            max_error=None,
+            tail_chars=None,
+        ):
+            from nooa.runtime.sandbox.errors import SandboxExecutionError
+
+            assert isinstance(error, SandboxExecutionError)
+            assert isinstance(error.original_error, ValueError)
+            assert line_offset > 0
+            assert max_error is not None
+            return "CUSTOM\n" + error.diagnostic
+
+    class CustomAgent(Agent, llm=FakeLLMClient()):
+        @strategy(
+            CodeActStrategy(
+                config=CodeActConfig(
+                    execution_backend="sandbox", cell_timeout=15.0, sandbox=_SANDBOX
+                ),
+                error_formatter=TransportFormatter(),
+            )
+        )
+        async def compute(self) -> int:
+            """Recover after a failed sandbox cell."""
+            ...
+
+    code = "text = 'abc'\ntext.index('missing')"
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _resp("", tool_calls=[_exec(code, call_id="custom-failure")]),
+            _resp("", tool_calls=[_ret(result=9)]),
+        ]
+    )
+    agent = CustomAgent(llm=llm)
+
+    assert await agent.compute() == 9
+    output = _failed_output(agent, "custom-failure")
+    assert output.error.startswith("CUSTOM\nTraceback (most recent call last):")
+    assert "Cell In[1], line 2" in output.error
+    assert "text.index('missing')" in output.error
+    assert output.error.endswith("ValueError: substring not found")

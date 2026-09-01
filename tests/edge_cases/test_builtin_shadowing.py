@@ -117,9 +117,9 @@ return result
     error_events = [
         e
         for e in agent_instance.event_manager.values()
-        if e.event_type == "Error" and "NameError" in getattr(e, "content", "")
+        if e.event_type == "PythonOutput" and "NameError" in getattr(e, "error", "")
     ]
-    assert error_events, "Expected NameError feedback for the legacy reasoning() call"
+    assert error_events, "Expected NameError execution output for the legacy reasoning() call"
 
 
 def test_multiple_params_none_reserved():

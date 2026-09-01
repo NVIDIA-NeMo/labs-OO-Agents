@@ -190,7 +190,7 @@ def test_type_info_includes_classmethods():
 
 
 def test_instance_values_swallows_unexpected_exception():
-    """__instance_values__ swallows RuntimeError from a broken property."""
+    """doc() preserves property docs without propagating property errors."""
     from nooa.agentdoc import doc
 
     class BrokenAgent(Agent, llm=_TEST_LLM):
@@ -204,8 +204,8 @@ def test_instance_values_swallows_unexpected_exception():
     # doc() calls __instance_values__ internally; must not raise
     result = doc(agent)
     assert isinstance(result, str)
-    # The broken property should not appear in the output at all
-    assert "broken" not in result
+    # The type-level property remains documented, but is never evaluated.
+    assert "broken: str" in result
     assert "RuntimeError" not in result
 
 

@@ -22,7 +22,7 @@ import io
 import linecache
 import types
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from nooa.events import _NO_RETURN, ExecutionResult, ExecutionSignal
 
@@ -114,8 +114,9 @@ async def run_cell_source(
     defined_methods: dict[str, Any] = {}
     try:
         with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
+            source_code = code
             try:
-                tree = ast.parse(code)
+                tree = ast.parse(code, filename=cell_filename)
             except SyntaxError as exc:
                 return build_result(error=exc)
 
@@ -185,12 +186,13 @@ async def run_cell_source(
             )
 
             exec(compile(wrapper, cell_filename, "exec"), namespace)
-            result_value = await namespace["__repl_wrapper__"]()
-
-            # Persist captured locals into the namespace for the next cell.
-            captured = namespace.pop("__repl_captured_locals__", {})
-            for k, v in captured.items():
-                namespace[k] = v
+            try:
+                result_value = await namespace["__repl_wrapper__"]()
+            finally:
+                # Keep REPL state even when the cell raises or returns via signal.
+                captured = namespace.pop("__repl_captured_locals__", {})
+                for k, v in captured.items():
+                    namespace[k] = v
 
             if has_explicit_return:
                 returned_value = result_value
@@ -198,7 +200,7 @@ async def run_cell_source(
                 returned_value = result_value
 
             # Re-bind top-level function defs so helpers persist by name.
-            func_defs = [
+            func_defs: list[ast.stmt] = [
                 n for n in tree.body if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
             ]
             if func_defs:
@@ -206,11 +208,20 @@ async def run_cell_source(
                     compile(ast.Module(body=func_defs, type_ignores=[]), cell_filename, "exec"),
                     namespace,
                 )
+                # Persisted helpers are compiled directly from the cell AST, not
+                # through the async wrapper. Keep their source cache aligned with
+                # those original line numbers for later-cell tracebacks.
+                linecache.cache[cell_filename] = (
+                    len(source_code),
+                    None,
+                    source_code.splitlines(keepends=True),
+                    cell_filename,
+                )
             for name, src in method_sources.items():
                 fn = namespace.get(name)
                 if callable(fn):
                     with contextlib.suppress(AttributeError, TypeError):
-                        fn._generated_source = src
+                        cast(Any, fn)._generated_source = src
             defined_methods = {
                 name: namespace[name] for name in method_sources if callable(namespace.get(name))
             }

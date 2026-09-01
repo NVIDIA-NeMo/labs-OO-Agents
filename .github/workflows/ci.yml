@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -34,8 +37,72 @@ jobs:
           python-version: "3.12"
       - name: Sync
         run: uv sync --all-extras --no-extra sandbox
+      # tests/tools/test_shell_tools_modern.py skipif-drops 145 tests when `rg`
+      # is not on PATH. ubuntu-latest does not ship ripgrep, so without this
+      # step those tests silently skip and the job passes vacuously. See #65.
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
       - name: Unit tests (no live API calls)
-        run: uv run pytest -q -m "not integration and not stress"
+        run: uv run pytest -q -m "not integration and not stress and not sandbox"
+      # Sandbox containment tests fork a real worker to exercise the OS-level
+      # sandbox (Landlock, seccomp, RLIMIT, cell timeouts, broker-pipe
+      # boundary). They need no credentials and skipif-degrade on kernels
+      # without the relevant capabilities, so ubuntu-latest runs them for
+      # real. Kept out of the unit-test step because forking a worker is
+      # heavier than a unit test. See #78.
+      - name: Sandbox containment tests
+        run: uv run pytest -q -m sandbox
+
+  python-313-error-compat:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: Sync
+        run: uv sync --all-extras --no-extra sandbox
+      # Traceback source markers differ between supported CPython releases.
+      # Keep the formatter, delivery strategies, and DTO boundary compatible
+      # without duplicating the entire Python 3.12 suite.
+      - name: Python 3.13 error-context compatibility
+        run: |
+          uv run pytest -q \
+            tests/test_error_formatting.py \
+            tests/test_error_line_numbers.py \
+            tests/edge_cases/test_builtin_shadowing.py \
+            tests/runtime/sandbox/test_error_serialization.py \
+            tests/strategies/test_codeact_pure_python_coverage.py \
+            tests/strategies/test_strategies_coverage.py \
+            tests/test_event_backend_roundtrip.py
+
+  macos-sandbox-ipc:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Sync
+        run: uv sync --all-extras --no-extra sandbox
+      # macOS cannot enforce Linux Landlock/seccomp guardrails, but the process
+      # boundary, broker, serialization, and CodeAct recovery paths are portable.
+      # Capability-marked containment checks skip individually.
+      - name: macOS sandbox process and error transport
+        run: |
+          uv run pytest -q -m sandbox \
+            tests/runtime/sandbox/test_executor.py \
+            tests/runtime/sandbox/test_codeact_sandbox.py
 
   build:
     runs-on: ubuntu-latest
@@ -52,7 +119,7 @@ jobs:
       - name: Build all packages
         run: |
           rm -rf dist
-          for pkg in nooa nooa-cli nooa-memory nooa-bench; do
+          for pkg in nooa nooa-cli nooa-acp nooa-memory nooa-bench; do
             uv build --no-sources --package "$pkg" --out-dir dist
           done
       - name: Upload wheels
@@ -62,26 +129,79 @@ jobs:
           path: dist/
           retention-days: 7
 
+  # Proves the committed viewer bundle is exactly what building the committed
+  # source produces. dist/ is 424 KB of minified JS that no reviewer can read,
+  # so without this the bundle is an unreviewable trust input that any
+  # contributor could poison independently of the TypeScript they submit. With
+  # it, dist/ is a derived value CI re-derives from scratch on every PR, and the
+  # only way into the viewer is through a reviewable source diff.
+  #
+  # This job is only meaningful if it cannot be skipped: for `pull_request`,
+  # GitHub runs the workflow as written in the PR, so a PR may delete this job.
+  # It must be a REQUIRED status check on main — otherwise a PR that removes it
+  # merges green. See also CODEOWNERS on package*.json: `npm run build` executes
+  # vite.config.ts and every plugin in node_modules, which `--ignore-scripts`
+  # does not cover, so a lockfile change is arbitrary code execution here.
   frontend-build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
-      - name: Build the trace viewer
+          # Exact pin: this job's output IS the security property, so the
+          # toolchain producing it should not float. Output was verified
+          # byte-identical on 20.19.5 and 22.20.0, so a bump is safe.
+          # Floor is now react-router 8.3.0's `engines.node: >=22.22.0` — the
+          # only release patching GHSA-qwww-vcr4-c8h2 — so this cannot go back
+          # below 22.22.0 without reintroducing that advisory.
+          node-version: "22.23.2"
+      - name: Rebuild the viewer bundle from source
         working-directory: src/nooa/viewer/frontend-react
         run: |
+          set -euo pipefail
           npm ci --ignore-scripts
+          # Build into an EMPTY dist/. Two reasons, both load-bearing:
+          #  1. A file that is committed but that the build does not produce
+          #     (i.e. smuggled in) then shows up as deleted rather than silently
+          #     surviving untouched.
+          #  2. The build must not see the artifact it is being checked against.
+          #     src/index.css carries `@source not '../dist'` so Tailwind skips
+          #     it; wiping dist/ means the check holds even if that regresses.
+          rm -rf dist
           npm run build
-      - name: Fail if dist/ is stale
+          # Audit trail: the hashes CI derived, readable in the job log.
+          sha256sum dist/index.html dist/assets/*
+      - name: Fail if committed dist/ is not exactly what the build produced
         run: |
-          if ! git diff --quiet src/nooa/viewer/frontend-react/dist/; then
-            echo "ERROR: frontend-react/dist/ is stale. Run 'npm run build' and commit dist/."
-            git diff --stat src/nooa/viewer/frontend-react/dist/
+          set -euo pipefail
+          DIST=src/nooa/viewer/frontend-react/dist
+          # Guard against a vacuous pass. `git status --porcelain <path>` warns
+          # on stderr and prints NOTHING when the path does not resolve, which
+          # reads as success — so a wrong path or a relocated dist/ would report
+          # a clean build having verified nothing. Same failure mode the
+          # gitleaks job guards against below. Assert we are looking at real,
+          # tracked files before trusting an empty result.
+          test -d "$DIST" \
+            || { echo "::error::$DIST does not exist — the build did not produce it"; exit 1; }
+          test "$(git ls-files -- "$DIST" | wc -l)" -gt 0 \
+            || { echo "::error::no tracked files under $DIST — the check would pass vacuously"; exit 1; }
+          # `git status --porcelain`, not `git diff`: git diff only reports
+          # tracked-and-modified files, so it passes a PR that ADDS a file to
+          # dist/. Porcelain reports ' M' modified, '??' produced-but-uncommitted
+          # and ' D'/'AD' committed-but-not-produced — all three are failures.
+          CHANGES=$(git status --porcelain -- "$DIST")
+          if [ -n "$CHANGES" ]; then
+            echo "::error::dist/ does not match a clean rebuild of the committed source."
+            echo "$CHANGES"
+            echo
+            echo "If you changed the viewer UI, rebuild and commit the result:"
+            echo "  cd src/nooa/viewer/frontend-react && npm ci --ignore-scripts && rm -rf dist && npm run build"
             exit 1
           fi
+          echo "OK — committed dist/ is reproducible from source."
 
   secret-scan:
     runs-on: ubuntu-latest

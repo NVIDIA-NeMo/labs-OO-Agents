@@ -1,10 +1,15 @@
-# CyberGym PoC reproducers are submission evidence: byte-exact fuzzer inputs that
-# only trigger their target crash if preserved verbatim. Many are PDFs, which git
-# and pre-commit both misdetect as text because their headers are ASCII.
+# CyberGym PoC archives are submission evidence containing byte-exact fuzzer
+# inputs that must be preserved verbatim.
 #
 # Marking them binary stops end-of-line normalization on add/checkout no matter
 # what a collaborator's core.autocrlf is set to, and suppresses textual diff/merge.
 # The pre-commit `exclude` in .pre-commit-config.yaml covers the hook side.
 #
-# Scoped to submissions/ only — output.txt and result.txt stay diffable text.
+# Keep the legacy directory rule so removals remain binary when diffed against
+# older revisions. The ZIP rule covers the current artifact format.
 **/submissions/** binary
+**/submissions.zip binary
+
+# Trajectories are large generated records. Store them in Git LFS and suppress
+# noisy textual diffs; logs and verifier results remain normally diffable.
+**/trajectory.json filter=lfs diff=lfs merge=lfs -text

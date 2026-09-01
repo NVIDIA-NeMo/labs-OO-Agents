@@ -5,7 +5,8 @@
 from unittest.mock import MagicMock
 
 from nooa import Agent
-from nooa.events import LLMOutput, Task
+from nooa.context_blocks import ResultStatus
+from nooa.events import LLMOutput, PythonOutput, Task
 from nooa.runtime.event_manager import EventManager
 from nooa.runtime.events import EventsApi
 from nooa.unifiedllm import FakeLLMClient
@@ -229,6 +230,37 @@ class TestEventManagerQuery:
 
         recent = manager.filter(limit=10)
         assert len(recent) == 1
+
+    def test_filter_by_execution_status_returns_recent_failures(self):
+        manager = EventManager()
+        manager.add(
+            PythonOutput(
+                tool_call_id="one",
+                execution_count=1,
+                execution_status=ResultStatus.ERROR,
+                error="first",
+            )
+        )
+        manager.add(
+            PythonOutput(
+                tool_call_id="two",
+                execution_count=2,
+                execution_status=ResultStatus.COMPLETE,
+            )
+        )
+        manager.add(
+            PythonOutput(
+                tool_call_id="three",
+                execution_count=3,
+                execution_status=ResultStatus.ERROR,
+                error="latest",
+            )
+        )
+
+        failures = manager.filter(type="PythonOutput", execution_status="error", limit=1)
+
+        assert len(failures) == 1
+        assert failures[0].execution_count == 3
 
     def test_filter_by_call_returns_events_with_call_id(self):
         """filter(call_id=...) should return events with that call_id."""

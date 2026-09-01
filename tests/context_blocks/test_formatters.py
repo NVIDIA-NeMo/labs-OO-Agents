@@ -33,6 +33,7 @@ def _tool_call_block(
     name: str,
     arguments: dict,
     result_content: str | None = None,
+    reasoning_items: list[dict] | None = None,
 ) -> ResolvedBlock:
     """Helper: ResolvedBlock carrying a ToolCallEvent."""
     result = (
@@ -40,7 +41,13 @@ def _tool_call_block(
         if result_content is not None
         else None
     )
-    event = ToolCallEvent(tool_call_id=tool_call_id, name=name, arguments=arguments, result=result)
+    event = ToolCallEvent(
+        tool_call_id=tool_call_id,
+        name=name,
+        arguments=arguments,
+        reasoning_items=reasoning_items,
+        result=result,
+    )
     return ResolvedBlock(key=key, content="", role=Role.ASSISTANT, event=event)
 
 
@@ -367,6 +374,33 @@ class TestEndToEndPipelines:
         result = AnthropicProviderFormatter().format(messages)
         assert "# Persona" in result["system"]
         assert result["messages"][0]["content"] == "Hello"
+
+    def test_reasoning_items_survive_tool_call_pipeline(self):
+        reasoning_item = {
+            "id": "rs_123",
+            "type": "reasoning",
+            "encrypted_content": "encrypted-state",
+            "summary": [],
+        }
+        blocks = [
+            _tool_call_block(
+                tool_call_id="call_123",
+                name="search",
+                arguments={"query": "weather"},
+                result_content="sunny",
+                reasoning_items=[reasoning_item],
+            )
+        ]
+
+        messages = XMLBlockFormatter().format(blocks)
+        openai_input = OpenAIProviderFormatter().format(messages)
+        responses_input = ResponsesProviderFormatter().format(messages)
+
+        openai_tool_call = next(message for message in openai_input if "tool_calls" in message)
+        assert openai_tool_call["reasoning_items"] == [reasoning_item]
+        reasoning_index = responses_input.index(reasoning_item)
+        assert responses_input[reasoning_index + 1]["type"] == "function_call"
+        assert responses_input[reasoning_index + 2]["type"] == "function_call_output"
 
 
 class TestBlockFormatterFormatEvent:

@@ -90,6 +90,14 @@ Viewer main routes, journal and OTLP stores, OTLP ingest, stress coverage, image
 
 ## Running Tests
 
+### Prerequisites
+
+- `ripgrep` (`rg`) and `grep` must be on `PATH`. The 145 tests in
+  `tests/tools/test_shell_tools_modern.py` skipif-away without them, and a
+  clean skip is indistinguishable from a pass in the summary line. Install
+  with `apt install ripgrep` on Debian/Ubuntu or `brew install ripgrep` on
+  macOS.
+
 ```bash
 uv run pytest                          # all tests
 uv run pytest tests/runtime/ -v        # single directory

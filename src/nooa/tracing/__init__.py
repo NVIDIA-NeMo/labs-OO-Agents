@@ -16,6 +16,9 @@ Usage::
 
     # JSONL only (no viewer required)
     enable_tracing(exporters=[exporters.jsonl()])
+
+    # Compact portable file (OTLP spans + content-addressed message journal)
+    enable_tracing(exporters=[exporters.journal_file("./traces")])
 """
 
 from __future__ import annotations

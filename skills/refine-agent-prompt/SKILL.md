@@ -176,10 +176,14 @@ Read the method docstring as if you're the LLM seeing it fresh:
 - Does it repeat tool usage already shown in Skills or context blocks?
   Replace with a pointer: "See `doc(self.bash)` for shell commands."
 - Are the output rules (format, structure) specific and unambiguous?
-- Does `{user_message}` appear as a template substitution? That's correct.
-- **Are raw `{argument}` substitutions duplicated in the prefill?**
-  Check `=== PREFILL ===` — inputs are already printed there. Repeating
-  `{user_message}` in the body is redundant if the prefill already shows it.
+- **Does a raw method argument such as `{user_message}` appear as a template
+  substitution?** That is usually a bug. Check `=== PREFILL ===`: CodeAct
+  already shows arguments under truncation limits, and Predict serializes them
+  with size caps. Interpolation duplicates the raw value without those
+  protections and moves untrusted data into the instruction channel.
+- Use docstring interpolation for trusted instance configuration such as
+  `{self._instructions}` and bounded computed metadata the signature cannot
+  show—not to repeat ordinary parameters.
 
 **Tradeoff:** shorter prompts are cheaper, but the LLM may miss instructions that only
 appear in context blocks it skims. Keep critical constraints in the task prompt even if
@@ -231,6 +235,11 @@ async def classify_intent(self, msg: str) -> Intent:
 Pydantic models render field types, defaults, and docstrings automatically in `<self>`
 and Referenced Types — the LLM gets a clear schema without extra documentation effort.
 
+Use `Field` constraints and validators for rules that depend only on the
+returned value. If correctness depends on a file, database row, API response,
+or saved artifact, enforce that with a deterministic Python gate before the
+orchestrator accepts the result.
+
 ---
 
 ### Are context blocks vs inline `{doc(...)}` used correctly?
@@ -239,19 +248,23 @@ The task prompt can embed tool docs inline or store them in a persistent context
 
 - **Short-running methods** (< 1 min, few turns): inline `{doc(self.tool)}` is fine.
 - **Long-running methods** (many turns, large context, at risk of summarization):
-  prefer `self.context["key"] = doc(self.tool)` so the docs persist across summarization.
+  prefer `self.context["key"] = Context(doc(self.tool), prefix=True)` so the
+  docs persist across summarization in the stable prompt prefix.
 
 ```python
+from nooa import Context
+
 # Inline (good for short tasks):
 async def respond(self, user_message: str) -> None:
-    """{doc(self.bash)}
-    Message: {user_message}
+    """Answer the user using the shell API below.
+
+    {doc(self.bash)}
     """
 
 # Context block (good for long tasks):
-def __init__(self, ...):
-    ...
-    self.context["bash_docs"] = doc(self.bash)
+def __init__(self, **kwargs):
+    super().__init__(**kwargs)
+    self.context["bash_docs"] = Context(doc(self.bash), prefix=True)
 ```
 
 **Tradeoff:** context blocks add overhead every turn; inline is paid once at task start.

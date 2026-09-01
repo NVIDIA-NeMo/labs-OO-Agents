@@ -8,7 +8,6 @@ Tests focus on:
 - Generation lock edge cases
 - Lifetime edge cases
 - Child agent edge cases
-- Task wrapper edge cases
 - Signal edge cases
 - Sandbox edge cases
 """

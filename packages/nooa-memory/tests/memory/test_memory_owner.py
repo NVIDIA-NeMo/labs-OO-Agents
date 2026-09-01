@@ -154,3 +154,37 @@ def test_reflection_never_merges_foreign_duplicates(shared_path):
     mgr_b.reflect()  # bob consolidates: now they merge
     bob_active = [m for m in mgr_b.store.all_memories(owner="bob") if m.owner == "bob"]
     assert len(bob_active) == 1
+
+
+def test_spread_does_not_relay_through_foreign_memories(shared_path):
+    """A foreign memory must not relay activation between two visible ones.
+
+    Graph: alice_a -> bob -> alice_c. The only path from alice_a to alice_c
+    runs through bob. The visibility check must drop bob before he enters the
+    next hop's frontier, not merely before the spread write, or alice_c gains
+    activation via a node alice cannot see.
+
+    This asserts on ``_spread`` rather than ``recall`` because the property is
+    not observable at the public API: alice owns alice_c, so she retrieves it
+    directly regardless of the graph. What a relay would change is activation,
+    and therefore ranking.
+    """
+    alice, mgr_a, bob, mgr_b = _pair(shared_path)
+    aid = alice.remember("the ingest pipeline config lives in configs/ingest.yaml", type="info")
+    bid = bob.remember("bob's secret analysis of quarterly numbers", type="info")
+    cid = alice.remember("the office coffee machine needs descaling monthly", type="info")
+
+    mgr_a.store.add_edge(aid, bid)  # alice -> bob
+    mgr_a.store.add_edge(bid, cid)  # bob -> alice, reachable only through bob
+
+    spread = mgr_a.retrieval._spread
+
+    # The two-hop path is live when unscoped: without this the scoped
+    # assertion below would pass simply because nothing was reachable.
+    unscoped = spread({aid: 1.0}, hops=2, owner=None)
+    assert bid in unscoped
+    assert cid in unscoped
+
+    scoped = spread({aid: 1.0}, hops=2, owner=mgr_a.owner)
+    assert bid not in scoped  # bob must not be activated
+    assert cid not in scoped  # ...nor anything reachable only through bob

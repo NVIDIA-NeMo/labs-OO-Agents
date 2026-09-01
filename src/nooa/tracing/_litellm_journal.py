@@ -607,6 +607,10 @@ class MessageJournalCallback(CustomLogger):
         }
         if span_id:
             record["span_id"] = span_id
+        self._send_call(session_id, record)
+
+    def _send_call(self, session_id: str, record: dict) -> None:
+        """Publish a completed call record to every HTTP destination."""
         with self._lock:
             destinations = list(self._destinations)
         for dest in destinations:
@@ -635,3 +639,59 @@ class MessageJournalCallback(CustomLogger):
         self, kwargs: dict, response_obj: Any, start_time: Any, end_time: Any
     ) -> None:
         self.log_failure_event(kwargs, response_obj, start_time, end_time)
+
+
+class FileMessageJournalCallback(MessageJournalCallback):
+    """Write the existing journal protocol to a :class:`JournalFileWriter`.
+
+    The message normalization and call correlation intentionally reuse the
+    HTTP callback implementation so live and file journals have identical
+    payload semantics.
+    """
+
+    def __init__(self, writer: Any) -> None:
+        CustomLogger.__init__(self)
+        self._call_inputs: dict[str, tuple[list[dict], str | None]] = {}
+        self._lock = threading.Lock()
+        self._writers: dict[Any, int] = {writer: 1}
+        self._sent_hashes: dict[Any, dict[str, set[str]]] = {writer: {}}
+
+    def add_writer(self, writer: Any) -> None:
+        with self._lock:
+            self._writers[writer] = self._writers.get(writer, 0) + 1
+            self._sent_hashes.setdefault(writer, {})
+
+    def remove_writer(self, writer: Any) -> None:
+        with self._lock:
+            refcount = self._writers.get(writer, 0) - 1
+            if refcount <= 0:
+                self._writers.pop(writer, None)
+                self._sent_hashes.pop(writer, None)
+            else:
+                self._writers[writer] = refcount
+
+    def has_writers(self) -> bool:
+        with self._lock:
+            return bool(self._writers)
+
+    def _send_new_blocks(self, session_id: str, blocks: dict[str, str]) -> None:
+        if not blocks:
+            return
+        with self._lock:
+            for writer in self._writers:
+                sent = self._sent_hashes.setdefault(writer, {}).setdefault(session_id, set())
+                new_entries = [
+                    {"hash": h, "content": content}
+                    for h, content in blocks.items()
+                    if h not in sent
+                ]
+                # Mark hashes only after the append succeeds.  A disk-full or
+                # serialization failure must remain retryable on the next call.
+                writer.append_blocks(session_id, new_entries)
+                sent.update(entry["hash"] for entry in new_entries)
+
+    def _send_call(self, session_id: str, record: dict) -> None:
+        with self._lock:
+            writers = list(self._writers)
+        for writer in writers:
+            writer.append_call(session_id, record)

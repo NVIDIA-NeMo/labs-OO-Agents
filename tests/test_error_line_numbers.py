@@ -144,6 +144,24 @@ e = c.get("foo")
         print(f"wrapper_line_offset = {result.wrapper_line_offset}")
 
     @pytest.mark.asyncio
+    async def test_unvalidated_syntax_error_uses_cell_filename(self, test_agent):
+        """Parser failures identify the execution cell, not ``<unknown>``."""
+        code = "value = (1 + )"
+
+        result = await test_agent.runtime.execute_code(
+            code,
+            execution_count=17,
+            validate=False,
+            wrap_in_function=True,
+        )
+
+        assert isinstance(result.error, SyntaxError)
+        assert result.error.filename == "Cell In[17]"
+        formatted = format_error_for_llm(result.error, code)
+        assert "Cell In[17], line 1" in formatted
+        assert "<unknown>" not in formatted
+
+    @pytest.mark.asyncio
     async def test_syntax_error_line_number(self, test_agent):
         """Syntax errors should also have correct line numbers."""
         code = """\
@@ -634,6 +652,76 @@ z = 3"""
         assert "line 4" in formatted or "line 2" in formatted, (
             f"Expected 'line 2' or 'line 4' for multi-line, got:\n{formatted}"
         )
+
+
+class TestWrappedBaseExceptionTraceback:
+    """Wrapped process-control exceptions retain their generated-cell context."""
+
+    @pytest.mark.asyncio
+    async def test_actor_system_exit_keeps_adjusted_source_context(self, test_agent):
+        source = "marker = 1\nexit_type = SystemExit\nraise exit_type('bye')"
+        result = await test_agent.runtime.execute_code(
+            source,
+            execution_count=70,
+            wrap_in_function=True,
+        )
+
+        assert result.error is not None
+        formatted = format_error_for_llm(
+            result.error,
+            source,
+            line_offset=result.wrapper_line_offset,
+        )
+        assert "Cell In[70], line 3" in formatted
+        assert "raise exit_type('bye')" in formatted
+        assert "SystemExit: bye" in formatted
+        assert "direct cause" in formatted
+        assert formatted.endswith(
+            "RuntimeError: SystemExit raised inside generated code. Do not use raise "
+            "SystemExit / sys.exit() / exit() / quit() to stop a cell — use break, "
+            "a flag, a helper return, or return_result()."
+        )
+
+
+class TestPersistedHelperTraceback:
+    """Persisted helper frames retain their own source-relative locations."""
+
+    @pytest.mark.asyncio
+    async def test_earlier_helper_uses_original_source_and_line_number(self, test_agent):
+        namespace = {}
+        helper_source = """def boom():
+    marker = "helper"
+    raise ValueError("x")
+"""
+        defined = await test_agent.runtime.execute_code(
+            helper_source,
+            execution_count=71,
+            wrap_in_function=True,
+            builtins=namespace,
+        )
+        namespace.update(defined.captured_locals)
+        namespace.update(defined.defined_methods)
+
+        # A persisted global changes this cell's wrapper offset. That offset must
+        # apply only to Cell In[73], never to the direct-compiled helper in Cell In[71].
+        namespace["persisted"] = 1
+        failed = await test_agent.runtime.execute_code(
+            "boom()",
+            execution_count=73,
+            wrap_in_function=True,
+            builtins=namespace,
+        )
+
+        assert failed.error is not None
+        formatted = format_error_for_llm(
+            failed.error,
+            "boom()",
+            line_offset=failed.wrapper_line_offset,
+        )
+        assert "Cell In[73], line 1" in formatted
+        assert "Cell In[71], line 3, in boom" in formatted
+        assert 'raise ValueError("x")' in formatted
+        assert "Cell In[71], line 1, in boom" not in formatted
 
 
 class TestFormatterDirectly:

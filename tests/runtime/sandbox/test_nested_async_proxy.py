@@ -24,7 +24,7 @@ from nooa.runtime.sandbox.config import SandboxConfig
 from nooa.runtime.sandbox.executor import SandboxedExecutor
 from nooa.unifiedllm import FakeLLMClient
 
-pytestmark = pytest.mark.integration
+pytestmark = pytest.mark.sandbox
 
 
 class _AsyncTool:

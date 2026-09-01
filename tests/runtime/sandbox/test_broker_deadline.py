@@ -25,7 +25,7 @@ from nooa.runtime.sandbox.config import SandboxConfig
 from nooa.runtime.sandbox.executor import SandboxedExecutor
 from nooa.unifiedllm import FakeLLMClient
 
-pytestmark = pytest.mark.integration
+pytestmark = pytest.mark.sandbox
 
 # cell_timeout=1.0 + timeout_grace_s=2.0 -> hard deadline 3.0s.
 _CELL_TIMEOUT = 1.0

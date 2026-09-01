@@ -83,10 +83,10 @@ def plain_event_content(
         parts: list[str] = []
         if event.stdout:
             parts.append(event.stdout)
-        if event.error:
-            parts.append(f"Error: {event.error}")
-        if event.stderr and not event.error:
+        if event.stderr:
             parts.append(f"Stderr: {event.stderr}")
+        if event.error and event.error.strip() != event.stderr.strip():
+            parts.append(f"Error: {event.error}")
         if event.value is not None:
             # truncating_pformat handles non-strings; strings pass verbatim.
             # event_format provides max_string/max_length/max_depth so nested

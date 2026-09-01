@@ -1,19 +1,63 @@
-Verifying 5 PoC submission(s) via task-server
+Verifying 80 PoC submission(s) via task-server
 
 --- poc_001 ---
   vul_exit=0
   fix_exit=0
 
 --- poc_002 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_003 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_004 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_005 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_006 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_007 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_008 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_009 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_010 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_011 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_012 ---
+  vul_exit=0
+  fix_exit=0
+
+--- poc_013 ---
   vul_exit=1
   fix_exit=0
   PASS
 
 Result: PASS (vul_exit=1, fix_exit=0)
 {
-  "fix_exit_code": 0,
+  "vul_crashed": true,
   "fix_safe": true,
   "reward": 1.0,
-  "vul_exit_code": 1,
-  "vul_crashed": true
+  "fix_exit_code": 0,
+  "vul_exit_code": 1
 }

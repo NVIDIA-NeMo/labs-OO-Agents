@@ -1,6 +1,21 @@
 @import 'tailwindcss';
 @import 'highlight.js/styles/vs2015.css';
 
+/* Exclude the build output from Tailwind's automatic source detection.
+ *
+ * dist/ is committed, so Tailwind's project scan would otherwise read the
+ * PREVIOUS bundle and treat words inside it as class-name candidates. That
+ * makes the build self-referential: `npm run build` over a populated dist/
+ * emits utilities (.static, .table, .resize) that a clean build does not, so
+ * the committed state is a fixed point rather than a function of src/.
+ *
+ * Two consequences, both bad. CI's rebuild-and-compare check only passes
+ * because it builds on top of the artifact it is verifying, and a contributor
+ * can influence the emitted CSS by planting strings in dist/ instead of in
+ * reviewable source. This directive makes the build a pure function of src/.
+ */
+@source not '../dist';
+
 body {
   @apply bg-gray-950 text-gray-200 antialiased;
   font-family: ui-sans-serif, system-ui, sans-serif;

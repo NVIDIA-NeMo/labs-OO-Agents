@@ -62,6 +62,8 @@ from nooa.runtime.hooks import call_after_hook, call_before_hook
 
 logger = logging.getLogger(__name__)
 
+_MISSING = object()
+
 
 @contextmanager
 def _harness_metrics_lifecycle(should_trace: bool):
@@ -401,6 +403,12 @@ _current_method_var: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "current_method", default=None
 )
 _current_llm_var: contextvars.ContextVar[Any] = contextvars.ContextVar("current_llm", default=None)
+_current_llm_model_name_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_llm_model_name", default=None
+)
+_current_llm_selection_source_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_llm_selection_source", default=None
+)
 
 # Context variable for the resolved truncation config for the current generation call.
 # Set by _execute_with_generation() so that method-level @strategy(truncation=...)
@@ -1551,9 +1559,14 @@ class ActorRuntime:
             if not isinstance(sys.stdin, BlockedStdinWrapper):
                 sys.stdin = BlockedStdinWrapper(sys.stdin)
 
+            # Use the execution-cell filename for parser diagnostics as well as
+            # compiled runtime tracebacks.
+            cell_filename = f"Cell In[{execution_count}]"
+
             # Parse AST to find method definitions
+            source_code = code
             try:
-                tree = ast.parse(code)
+                tree = ast.parse(code, filename=cell_filename)
             except SyntaxError as e:
                 result = ExecutionResult(stdout="", error=e, defined_methods={})
                 return result
@@ -1602,8 +1615,6 @@ class ActorRuntime:
             captured_locals: dict[str, Any] = {}
             wrapper_line_offset = 0  # Lines of wrapper before user code (for error adjustment)
 
-            # Use Jupyter-style "Cell In[N]" as filename for better error messages
-            cell_filename = f"Cell In[{execution_count}]"
             try:
                 if wrap_in_function:
                     # REPL mode: wrap entire code in async function to capture return
@@ -1698,6 +1709,22 @@ class ActorRuntime:
                     if func_defs:
                         func_tree = ast.Module(body=func_defs, type_ignores=[])
                         exec(compile(func_tree, cell_filename, "exec"), exec_globals)
+                        # Persisted helpers are compiled directly from the cell
+                        # AST, not through the async wrapper. Keep their source
+                        # cache aligned with those original line numbers.
+                        linecache.cache[cell_filename] = (
+                            len(source_code),
+                            None,
+                            source_code.splitlines(keepends=True),
+                            cell_filename,
+                        )
+                        # The wrapper's finally block captured the wrapped
+                        # function objects. Persist the direct-compiled versions
+                        # instead so later calls use source-relative line numbers.
+                        for node in func_defs:
+                            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                                if node.name in exec_globals:
+                                    captured_locals[node.name] = exec_globals[node.name]
 
                     # Attach source code to defined functions for has_ellipsis_body() detection
                     for method_name, method_code in method_sources.items():
@@ -1953,6 +1980,14 @@ class ActorRuntime:
         if hasattr(strategy, "prefill") and getattr(strategy, "prefill") is not None:  # noqa: B009
             strategy_kwargs["has_prefill"] = True
 
+        llm_model_name = _current_llm_model_name_var.get()
+        llm_selection_source = _current_llm_selection_source_var.get()
+        llm_kwargs = {}
+        if llm_model_name is not None:
+            llm_kwargs["llm.model_name"] = llm_model_name
+        if llm_selection_source is not None:
+            llm_kwargs["llm.selection_source"] = llm_selection_source
+
         # Call generation hooks (skip for non-traceable strategies like TemplateStrategy)
         should_trace = strategy.traceable
         hook_context = None
@@ -1965,6 +2000,7 @@ class ActorRuntime:
                 generation_id=generation_id,
                 parent_generation_id=parent_generation_id,
                 agent_call_id=self._agent_call_id,
+                **llm_kwargs,
                 **strategy_kwargs,  # Add strategy config parameters
             )
 
@@ -2530,13 +2566,18 @@ class ActorRuntime:
         method_name: str,
     ) -> Any:
         """Execute a method that needs LLM generation."""
+        base_method = getattr(method, "__func__", method)
+        try:
+            has_user_llm_param = "llm" in inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            has_user_llm_param = False
+
         # Extract framework parameters (don't pass to generated method)
         call_strategy = kwargs.pop("_strategy", None)
-        call_llm = kwargs.pop("llm", None)
+        call_llm = kwargs.pop("llm", _MISSING) if not has_user_llm_param else _MISSING
         call_session_locals = kwargs.pop("_session_locals", None)
 
         # Get strategy with priority: call-level > decorator > default
-        base_method = getattr(method, "__func__", method)
         decorator_strategy = getattr(base_method, "_plan_strategy", None)
 
         # DEBUG: Log strategy retrieval for nested method debugging
@@ -2557,11 +2598,25 @@ class ActorRuntime:
 
         strategy = call_strategy or decorator_strategy or get_default_strategy()
 
-        # Resolve LLM client with priority: call-level > @strategy decorator > agent's default
+        # Resolve LLM client with priority: call-level > @strategy decorator > agent's default.
+        # A @strategy(llm=...) value may be a callable resolved against the agent
+        # instance; only invoke it when it would actually be used, so a call-level
+        # override doesn't trigger someone else's resolver side effects.
         plan_llm = getattr(base_method, "_plan_llm", None)
-        llm_client = call_llm or plan_llm or getattr(self.agent, "_llm", None)
+        if call_llm is not _MISSING and call_llm is not None:
+            llm_client = call_llm
+            llm_selection_source = "call_site"
+        elif plan_llm is not None:
+            from nooa.method_llm import resolve_method_llm
+
+            llm_client = resolve_method_llm(plan_llm, self.agent, method_name)
+            llm_selection_source = "decorator"
+        else:
+            llm_client = getattr(self.agent, "_llm", None)
+            llm_selection_source = "agent_default"
         if llm_client is None:
             raise RuntimeError(f"No LLM client available for {method_name}")
+        llm_model_name = getattr(llm_client, "model", "") or ""
 
         # Resolve truncation config: method-level @strategy(truncation=...) > agent-level
         method_truncation = getattr(base_method, "_strategy_truncation", None)
@@ -2605,6 +2660,10 @@ class ActorRuntime:
                 generation_id=generation_id,
                 parent_generation_id=parent_generation_id,
                 agent_call_id=self._agent_call_id,
+                **{
+                    "llm.model_name": llm_model_name,
+                    "llm.selection_source": llm_selection_source,
+                },
                 **strategy_kwargs,  # Add strategy config parameters
             )
 
@@ -2699,6 +2758,10 @@ class ActorRuntime:
                 call_token = _current_call_var.set(call)
                 method_token = _current_method_var.set(method)
                 llm_token = _current_llm_var.set(llm_client)
+                llm_model_name_token = _current_llm_model_name_var.set(llm_model_name)
+                llm_selection_source_token = _current_llm_selection_source_var.set(
+                    llm_selection_source
+                )
                 truncation_token = _current_truncation_config_var.set(resolved_truncation)
                 event_format_token = _current_event_format_var.set(
                     resolved_truncation.event_format.model_dump()
@@ -2739,6 +2802,8 @@ class ActorRuntime:
                     _current_call_var.reset(call_token)
                     _current_method_var.reset(method_token)
                     _current_llm_var.reset(llm_token)
+                    _current_llm_model_name_var.reset(llm_model_name_token)
+                    _current_llm_selection_source_var.reset(llm_selection_source_token)
                     _current_truncation_config_var.reset(truncation_token)
                     _current_event_format_var.reset(event_format_token)
                     _decorator_context_var.reset(decorator_ctx_token)

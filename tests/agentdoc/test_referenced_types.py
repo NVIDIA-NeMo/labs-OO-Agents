@@ -168,6 +168,31 @@ def test_doc_includes_referenced_types():
     assert main_class_pos < ref_section_pos
 
 
+def test_instance_hidden_field_type_not_in_referenced_types():
+    """Instance-hidden field types must not leak through referenced docs."""
+    from nooa.agentdoc import spec
+
+    class Secret:
+        def reveal(self) -> str:
+            """Sensitive API."""
+            return "secret"
+
+    class Holder:
+        secret: Secret
+
+        def __init__(self):
+            self.secret = Secret()
+
+    holder = Holder()
+    spec(holder, "secret", hidden=True)
+    output = doc(holder)
+
+    assert "secret" not in output.lower()
+    assert "class Secret" not in output
+    assert "reveal" not in output
+    assert "## Referenced Types" not in output
+
+
 def test_doc_no_referenced_types_if_none():
     """Test that Referenced Types section is omitted if no custom types."""
     output = doc(SimpleClass)
@@ -255,8 +280,8 @@ def test_doc_callable_includes_referenced_types():
     assert "rows: list[dict]" in output
 
 
-def test_doc_callable_concise_no_referenced_types():
-    """doc(callable, concise=True) should NOT show referenced types."""
+def test_doc_callable_concise_uses_default_reference_depth():
+    """concise shortens docstrings without changing the default reference depth."""
     from pydantic import BaseModel
 
     class QueryRequest(BaseModel):
@@ -268,12 +293,13 @@ def test_doc_callable_concise_no_referenced_types():
 
     output = doc(query_function, concise=True)
 
-    # Should show the function signature with qualified name
     assert "query_function(request: QueryRequest) -> str" in output
+    assert "## Referenced Types" in output
+    assert "class QueryRequest(BaseModel):" in output
 
-    # Should NOT show Referenced Types section
-    assert "## Referenced Types" not in output
-    assert "### QueryRequest" not in output
+    without_references = doc(query_function, concise=True, inline_depth=0)
+    assert "## Referenced Types" not in without_references
+    assert "class QueryRequest(BaseModel):" not in without_references
 
 
 if __name__ == "__main__":

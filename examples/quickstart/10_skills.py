@@ -9,6 +9,7 @@ uv run python examples/quickstart/10_skills.py
 from pathlib import Path
 
 from nooa import TextSkill
+from nooa.skill_registry import SkillRegistry
 from nooa.util.quickstart import *
 
 ASSETS = Path(__file__).parent.parent / "assets"
@@ -16,6 +17,8 @@ ASSETS = Path(__file__).parent.parent / "assets"
 
 class FrontendAgent(Agent, llm=llm):
     """Agent with a single file-based skill."""
+
+    frontend_design: TextSkill
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -27,14 +30,16 @@ class FrontendAgent(Agent, llm=llm):
 
 
 class GenericAgent(Agent, llm=llm):
-    """Agent that loads all skills from a directory by scanning for SKILL.md."""
+    """Agent that registers and activates a model-facing skill."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Load every subdirectory containing a SKILL.md as a TextSkill
-        for entry in sorted(ASSETS.iterdir()):
-            if entry.is_dir() and (entry / "SKILL.md").exists():
-                setattr(self, entry.name.replace("-", "_"), TextSkill(path=entry))
+        self.skills = SkillRegistry(self)
+        self.skills.register(
+            "local.frontend_design",
+            TextSkill(path=ASSETS / "frontend-design"),
+        )
+        self.skills.activate(["local.frontend_design"])
 
     async def respond(self, prompt: str) -> str:
         """Respond to a user message."""

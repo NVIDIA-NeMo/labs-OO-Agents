@@ -296,6 +296,10 @@ class RenderedMessage(BaseModel):
     tool_call: ToolCallInfo | None = Field(
         default=None, description="Assistant tool-call payload, if any"
     )
+    reasoning_items: list[dict[str, Any]] | None = Field(
+        default=None,
+        description="Opaque provider reasoning state associated with an assistant tool call",
+    )
     tool_call_id: str | None = Field(
         default=None, description="Tool-call id this message is a result for"
     )

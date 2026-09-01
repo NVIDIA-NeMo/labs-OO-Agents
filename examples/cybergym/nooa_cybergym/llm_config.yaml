@@ -1,13 +1,24 @@
-
-# Picked up by NOOA via NEMO_OO_LLM_CONFIG=/app/nooa_cybergym/llm_config.yaml
-# (set by Dockerfile and reinforced by the host runner).
-
+# Model aliases used by the CyberGym portfolio. Set OPENAI_BASE_URL (or
+# OPENAI_API_BASE) to an OpenAI-compatible gateway exposing these identifiers;
+# util.make_llm supplies that endpoint and OPENAI_API_KEY to each client.
 models:
-
-  openai/gpt-5.5:
-    model_name: openai/gpt-5.5
-    api_base: https://api.openai.com/v1
+  glm-5.2:
+    model_name: openai/nvidia/zai-org/glm-5.2
+    api_base: https://inference-api.nvidia.com/v1
     api_key_env: OPENAI_API_KEY
     context_window: 272000
-    max_tokens: 64000
-    client_type: responses
+    max_tokens: 32768
+
+  nvidia/nemotron-3-ultra:
+    model_name: openai/nvidia/nvidia/nemotron-3-ultra
+    api_base: https://inference-api.nvidia.com/v1
+    api_key_env: OPENAI_API_KEY
+    context_window: 272000
+    max_tokens: 32768
+
+  deepseek-v4-flash:
+    model_name: openai/nvidia/deepseek-ai/deepseek-v4-flash
+    api_base: https://inference-api.nvidia.com/v1
+    api_key_env: OPENAI_API_KEY
+    context_window: 272000
+    max_tokens: 32768

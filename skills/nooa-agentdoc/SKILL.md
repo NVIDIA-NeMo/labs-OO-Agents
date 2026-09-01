@@ -1,6 +1,6 @@
 ---
 name: nooa-agentdoc
-description: Make NVIDIA OO agent types render beautiful documentation for the LLM — doc(), spec(), hidden, Annotated field descriptions, and pformat/pprint tuning. Use when designing Pydantic models/dataclasses the LLM will see, controlling what appears in doc(self), hiding internals, adding field descriptions, fixing noisy or missing type docs, or tuning value truncation.
+description: Make NOOA agent types render useful documentation for the LLM — doc(), spec(), hidden, Annotated field descriptions, and pformat/pprint tuning. Use when designing Pydantic models/dataclasses the LLM will see, controlling what appears in doc(self), hiding internals, adding field descriptions, fixing noisy or missing type docs, or tuning value truncation.
 compatibility: nooa package (agentdoc ships inside it — import from nooa.agentdoc)
 ---
 
@@ -114,7 +114,12 @@ doc(a, b, c)                      # multiple objects, one deduped Referenced Typ
 doc(obj, inline_depth=2)          # expand referenced types transitively
 ```
 
-Progressive-disclosure patterns: `{doc(self)}` in a docstring for the agent's full API; `doc(item)` in CodeAct when a factory returns `Any`; pin `self.context["tool_guide"] = doc(self.tool)` for repeated use. Agents also honor `__type_info__`/`__instance_values__` — that's why `doc(agent_instance)` shows user state but not framework internals.
+Progressive-disclosure patterns: `{doc(self)}` in a docstring for the agent's
+full API; `doc(item)` in CodeAct when a factory returns `Any`; pin stable,
+repeated tool guidance (after `from nooa import Context`) with
+`self.context["tool_guide"] = Context(doc(self.tool), prefix=True)`. Agents also
+honor `__type_info__`/`__instance_values__` — that's why `doc(agent_instance)`
+shows user state but not framework internals.
 
 `methods(obj)` and `variables(obj)` (auto-injected in CodeAct) are lighter-weight listings — note they hide **all** `_`-prefixed names regardless of `@spec(hidden=False)`, unlike `doc()`.
 

@@ -1,3 +1,4 @@
+import { assertOk } from './http';
 import type {
   PaginatedTraceResponse,
   TraceResponse,
@@ -27,13 +28,13 @@ export async function fetchTraces(params: {
   if (params.sort_dir) searchParams.set('sort_dir', params.sort_dir);
 
   const res = await fetch(`/api/traces?${searchParams}`);
-  if (!res.ok) throw new Error(`Failed to fetch traces: ${res.statusText}`);
+  assertOk(res, 'Failed to fetch traces');
   return res.json();
 }
 
 export async function fetchTrace(sessionId: string): Promise<TraceResponse> {
   const res = await fetch(`/api/trace?session_id=${encodeURIComponent(sessionId)}`);
-  if (!res.ok) throw new Error(`Failed to fetch trace: ${res.statusText}`);
+  assertOk(res, 'Failed to fetch trace');
   return res.json();
 }
 
@@ -44,7 +45,7 @@ export async function fetchTraceResource(
   const res = await fetch(`/api/trace/resource?session_id=${encodeURIComponent(sessionId)}`, {
     signal,
   });
-  if (!res.ok) throw new Error(`Failed to fetch trace resource: ${res.statusText}`);
+  assertOk(res, 'Failed to fetch trace resource');
   return res.json();
 }
 
@@ -52,7 +53,7 @@ export async function deleteTrace(sessionId: string): Promise<void> {
   const res = await fetch(`/api/traces/${encodeURIComponent(sessionId)}`, {
     method: 'DELETE',
   });
-  if (!res.ok) throw new Error(`Failed to delete trace: ${res.statusText}`);
+  assertOk(res, 'Failed to delete trace');
 }
 
 // OTLP attribute parsing
@@ -102,12 +103,24 @@ function nsDuration(startStr: string | undefined, endStr: string | undefined): n
   }
 }
 
+const VIEWER_PLUGIN_ATTR = 'nooa.viewer.plugin';
+const LEGACY_VIEWER_PLUGIN_ATTR = 'nemo_oo_agents.viewer.plugin';
+
+function getViewerPlugin(attrs: Record<string, unknown>): string | undefined {
+  const canonicalPlugin = attrs[VIEWER_PLUGIN_ATTR];
+  if (typeof canonicalPlugin === 'string') return canonicalPlugin;
+
+  // Keep imported traces from the pre-NOOA rename readable.
+  const legacyPlugin = attrs[LEGACY_VIEWER_PLUGIN_ATTR];
+  return typeof legacyPlugin === 'string' ? legacyPlugin : undefined;
+}
+
 /**
  * Derive the viewer plugin type, using span.name for more specific grouping
  * when the plugin is a generic category (e.g. "method" -> "method.handle").
  */
 function derivePluginType(attrs: Record<string, unknown>, spanName: string | undefined): string {
-  const plugin = attrs['nemo_oo_agents.viewer.plugin'] as string | undefined;
+  const plugin = getViewerPlugin(attrs);
   if (!plugin) return spanName || 'unknown';
 
   // For method/method_call plugins, the span name (e.g. "method.handle")

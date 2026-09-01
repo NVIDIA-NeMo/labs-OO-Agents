@@ -163,7 +163,10 @@ def create_standalone_wrapper(
     Args:
         func: Original async function with an ellipsis body.
         strategy: GenerationStrategy instance resolved from the decorator.
-        llm: Optional explicit LLM from ``@strategy(..., llm=...)``.
+        llm: Optional explicit LLM client from ``@strategy(..., llm=...)``.
+            Always a client, never a resolver callable: standalone functions
+            have no agent instance to bind one against, so ``@strategy``
+            rejects callables here at decoration time.
 
     Returns:
         Async callable with the same signature as *func*.

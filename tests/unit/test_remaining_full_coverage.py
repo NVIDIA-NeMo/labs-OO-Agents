@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import os
+import runpy
 import sys
 import types
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -758,12 +759,23 @@ class TestSQLiteSessionLocking:
 class TestSQLiteModuleLevelAssertions:
     """Lines 48, 72: module-level assertions during import verify Event union structure."""
 
+    @staticmethod
+    def _execute_sqlite_module() -> None:
+        """Execute sqlite.py without reloading the canonical imported module.
+
+        Reloading ``nooa.storage.sqlite`` replaces exception classes in the
+        module globals while already-imported callers retain the old class
+        objects. That contaminates later tests whose exception handlers were
+        established during collection. A private run-path exercises the same
+        module-level assertions without changing process-wide import state.
+        """
+        import nooa.storage.sqlite as sqlite_mod
+
+        runpy.run_path(sqlite_mod.__file__, run_name="_nooa_sqlite_assertion_probe")
+
     def test_event_union_unwrap_assertion(self):
         """Line 48: _CONTEXT_BLOCKS_TYPES has >= 3 types from Event union."""
-        import importlib
         import typing
-
-        import nooa.storage.sqlite as sqlite_mod
 
         original_get_args = typing.get_args
 
@@ -774,20 +786,12 @@ class TestSQLiteModuleLevelAssertions:
                 return result[:2]  # Force < 3 to trigger assertion
             return result
 
-        try:
-            with patch.object(typing, "get_args", side_effect=fake_get_args):
-                with pytest.raises(
-                    AssertionError, match="Failed to unwrap context_blocks Event union"
-                ):
-                    importlib.reload(sqlite_mod)
-        finally:
-            # Always restore module even if assertion doesn't match
-            importlib.reload(sqlite_mod)
+        with patch.object(typing, "get_args", side_effect=fake_get_args):
+            with pytest.raises(AssertionError, match="Failed to unwrap context_blocks Event union"):
+                self._execute_sqlite_module()
 
     def test_duplicate_event_type_assertion(self):
         """Line 72: duplicate event_type key in _CORE_TYPES raises AssertionError."""
-        import importlib
-
         from nooa.events import Task
 
         # Patch Task's event_type default to collide with Message's "Message" key.
@@ -797,15 +801,9 @@ class TestSQLiteModuleLevelAssertions:
         Task.model_fields["event_type"].default = "Message"  # collides with Message
         try:
             with pytest.raises(AssertionError, match="Duplicate event_type key"):
-                import nooa.storage.sqlite as sqlite_mod
-
-                importlib.reload(sqlite_mod)
+                self._execute_sqlite_module()
         finally:
             Task.model_fields["event_type"].default = original_default
-            # Reload to restore clean state
-            import nooa.storage.sqlite as sqlite_mod
-
-            importlib.reload(sqlite_mod)
 
 
 # =============================================================================

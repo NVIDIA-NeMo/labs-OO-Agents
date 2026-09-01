@@ -14,6 +14,7 @@ import pytest
 
 from nooa import Agent
 from nooa.runtime.sandbox.config import SandboxConfig
+from nooa.runtime.sandbox.errors import SandboxExecutionError
 from nooa.runtime.sandbox.executor import SandboxedExecutor
 from nooa.runtime.sandbox.readonly import (
     ReadOnlyView,
@@ -124,20 +125,21 @@ def _executor() -> SandboxedExecutor:
     )
 
 
-@pytest.mark.integration
+@pytest.mark.sandbox
 @pytest.mark.asyncio
 async def test_cell_mutating_module_dict_fails_loud():
     ex = _executor()
     try:
         r = await ex.run_cell("SHARED_DICT['n'] = 99", execution_count=1)
-        assert r.error is not None
+        assert isinstance(r.error, SandboxExecutionError)
+        assert r.error.original_type == "SandboxStateError"
+        assert isinstance(r.error.original_error, SandboxStateError)
         assert "module-level state" in str(r.error)
-        assert type(r.error).__name__ == "SandboxStateError"
     finally:
         await ex.aclose()
 
 
-@pytest.mark.integration
+@pytest.mark.sandbox
 @pytest.mark.asyncio
 async def test_cell_mutating_module_list_fails_loud():
     ex = _executor()
@@ -148,7 +150,7 @@ async def test_cell_mutating_module_list_fails_loud():
         await ex.aclose()
 
 
-@pytest.mark.integration
+@pytest.mark.sandbox
 @pytest.mark.asyncio
 async def test_cell_reading_module_state_still_works():
     ex = _executor()

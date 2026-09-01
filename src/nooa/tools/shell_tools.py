@@ -43,12 +43,19 @@ from nooa.tools._results import StreamDone, StreamEvent
 
 
 class FileWrite:
-    """Result of a write/replace operation."""
+    """Result of a write/replace operation.
 
-    def __init__(self, path: str, message: str, diff: str = ""):
+    ``new_text`` is the text as it was actually written, after any
+    normalization the write applied. Observers report from it so what they
+    record matches what landed on disk. It is deliberately left out of
+    ``__str__`` — the agent already knows the text it asked for.
+    """
+
+    def __init__(self, path: str, message: str, diff: str = "", new_text: str = ""):
         self.path = path
         self.message = message
         self.diff = diff
+        self.new_text = new_text
 
     def __str__(self) -> str:
         parts = [self.message]
@@ -65,11 +72,27 @@ class Match:
 
     Pass any ``Match`` to ``self.shell.replace(match, new_text)``. Print it to
     view numbered lines. Slice with ``match[start:end]`` (1-indexed inclusive
-    line numbers) to narrow the region before replacing.
+    line numbers) to narrow the region before replacing. ``resolved_path`` is
+    required so the anchor remains bound to that file if the shell cwd changes.
     """
 
-    def __init__(self, path: str, start: int, end: int, text: str):
+    def __init__(
+        self,
+        path: str,
+        start: int,
+        end: int,
+        text: str,
+        *,
+        resolved_path: str | Path,
+    ):
         self._path = path
+        anchor = Path(resolved_path)
+        if not anchor.is_absolute():
+            # resolve() on a relative path resolves against the *process* cwd,
+            # which is not the shell cwd — so a relative anchor would silently
+            # point at a different file. Fail loudly instead.
+            raise ValueError(f"Match.resolved_path must be absolute, got {str(resolved_path)!r}")
+        self._resolved_path = str(anchor.resolve())
         self._start = start
         self._end = end
         self._text = text
@@ -78,6 +101,11 @@ class Match:
     def path(self) -> str:
         """File path."""
         return self._path
+
+    @property
+    def resolved_path(self) -> str:
+        """Canonical file path captured when this match was created."""
+        return self._resolved_path
 
     @property
     def start(self) -> int:
@@ -122,7 +150,13 @@ class Match:
             idx_start = start - self._start
             idx_end = stop - self._start + 1
             text = "".join(lines[idx_start:idx_end])
-            return Match(self._path, start, stop, text)
+            return Match(
+                self._path,
+                start,
+                stop,
+                text,
+                resolved_path=self._resolved_path,
+            )
 
         raise TypeError(f"indices must be int or slice, not {type(key).__name__}")
 
@@ -143,6 +177,7 @@ class ShellResult(str):
     stdout: str
     stderr: str
     returncode: int
+    timed_out: bool
     success: bool
     matches: list[Match] | None
 
@@ -152,11 +187,13 @@ class ShellResult(str):
         stderr: str = "",
         returncode: int = 0,
         matches: list[Match] | None = None,
+        timed_out: bool = False,
     ):
         obj = super().__new__(cls, stdout)
         obj.stdout = stdout
         obj.stderr = stderr
         obj.returncode = returncode
+        obj.timed_out = timed_out
         obj.success = returncode == 0
         obj.matches = matches
         return obj
@@ -340,14 +377,8 @@ class ShellTools(Skill):
         await self._session.close()
 
     def _resolve_path(self, path: str) -> Path:
-        """Resolve a file-operation path and require it to remain inside cwd."""
-        root = self.cwd.resolve()
-        resolved = (root / path).resolve()
-        try:
-            resolved.relative_to(root)
-        except ValueError as exc:
-            raise ValueError(f"path escapes ShellTools cwd: {path}") from exc
-        return resolved
+        """Resolve a file-operation path relative to cwd when not absolute."""
+        return (self.cwd / path).resolve()
 
     async def run(
         self,
@@ -376,7 +407,9 @@ class ShellTools(Skill):
         """
         session = await self._get_session()
         run_cmd = self._with_stdin(command, stdin)
-        stdout, stderr, code, _timed = await session.run_with_timeout_flag(run_cmd, timeout=timeout)
+        stdout, stderr, code, timed_out = await session.run_with_timeout_flag(
+            run_cmd, timeout=timeout
+        )
         # Track cwd changes for read/replace/write_file path resolution
         pwd_out, _, _, _ = await session.run_with_timeout_flag("pwd", timeout=5.0)
         if pwd_out.strip():
@@ -390,13 +423,15 @@ class ShellTools(Skill):
         if matches:
             print(
                 f"# self.shell.run({command!r:.60}) found {len(matches)} match(es).\n"
-                f"# Edit directly: m = <result>.matches[0]; await self.shell.replace(m, new_text)"
+                "# Edit directly: m = <result>.matches[0]; "
+                "await self.shell.replace(m, new_text)"
             )
 
         return ShellResult(
             stdout=stdout,
             stderr=stderr,
             returncode=code,
+            timed_out=timed_out,
             matches=matches,
         )
 
@@ -487,7 +522,7 @@ class ShellTools(Skill):
             return None
 
         anchors: list[tuple[str, int]] = []
-        file_cache: dict[str, list[str]] = {}
+        file_cache: dict[str, tuple[Path, list[str]]] = {}
         for raw in rg_out.splitlines():
             raw = raw.strip()
             if not raw:
@@ -550,13 +585,22 @@ class ShellTools(Skill):
             if mpath not in file_cache:
                 try:
                     resolved = self._resolve_path(mpath)
-                    file_cache[mpath] = resolved.read_text().splitlines(keepends=True)
+                    lines = resolved.read_text().splitlines(keepends=True)
+                    file_cache[mpath] = (resolved, lines)
                 except (OSError, ValueError):
                     return None
-            lines = file_cache[mpath]
+            resolved, lines = file_cache[mpath]
             if not (1 <= line_no <= len(lines)):
                 return None
-            out.append(Match(mpath, line_no, line_no, lines[line_no - 1]))
+            out.append(
+                Match(
+                    mpath,
+                    line_no,
+                    line_no,
+                    lines[line_no - 1],
+                    resolved_path=resolved,
+                )
+            )
         return out
 
     @staticmethod
@@ -647,7 +691,7 @@ class ShellTools(Skill):
 
     async def read(
         self,
-        path: Annotated[str, spec(description="File path (relative to cwd)")],
+        path: Annotated[str, spec(description="File path (relative to cwd or absolute)")],
         lines: Annotated[
             tuple[int, int] | None,
             spec(description="(start, end) 1-indexed inclusive, or None for whole file"),
@@ -660,7 +704,7 @@ class ShellTools(Skill):
         Slice with match[start:end] to narrow the region.
 
         Args:
-            path: File path (relative to cwd).
+            path: File path (relative to cwd or absolute).
             lines: Optional (start, end) range, 1-indexed inclusive.
 
         Returns:
@@ -676,9 +720,9 @@ class ShellTools(Skill):
             start = max(1, start)
             end = min(total, end)
             text = "".join(all_lines[start - 1 : end])
-            return Match(str(path), start, end, text)
+            return Match(str(path), start, end, text, resolved_path=resolved)
 
-        return Match(str(path), 1, total, content)
+        return Match(str(path), 1, total, content, resolved_path=resolved)
 
     async def replace(
         self,
@@ -708,7 +752,7 @@ class ShellTools(Skill):
         """
         if isinstance(target, Match):
             new_text = old_or_new
-            resolved = self._resolve_path(target.path)
+            resolved = Path(target.resolved_path)
             content = resolved.read_text()
             all_lines = content.splitlines(keepends=True)
 
@@ -725,6 +769,7 @@ class ShellTools(Skill):
                 path=target.path,
                 message=f"Edited {target.path} (replaced lines {target.start}-{target.end})",
                 diff=diff,
+                new_text=new_text,
             )
 
         elif isinstance(target, str):
@@ -756,20 +801,21 @@ class ShellTools(Skill):
                 path=target,
                 message=f"Edited {target}",
                 diff=f"--- a/{target}\n+++ b/{target}",
+                new_text=new,
             )
         else:
             raise TypeError(f"target must be a Match or file path str, got {type(target).__name__}")
 
     async def write_file(
         self,
-        path: Annotated[str, spec(description="File path (relative to cwd)")],
+        path: Annotated[str, spec(description="File path (relative to cwd or absolute)")],
         content: Annotated[str, spec(description="Full file content")],
     ) -> FileWrite:
         """
         Create or overwrite a file with content (no shell quoting needed).
 
         Args:
-            path: File path (relative to cwd).
+            path: File path (relative to cwd or absolute).
             content: Full file content.
         """
         resolved = self._resolve_path(path)
@@ -779,4 +825,5 @@ class ShellTools(Skill):
         return FileWrite(
             path=path,
             message=f"Created {path} ({line_count} lines)",
+            new_text=content,
         )

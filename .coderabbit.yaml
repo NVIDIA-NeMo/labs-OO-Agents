@@ -1,0 +1,7 @@
+reviews:
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - ".*"
+    auto_incremental_review: true

@@ -11,9 +11,8 @@ from __future__ import annotations
 import ast
 import asyncio
 import concurrent.futures
+import copy
 import json
-import os
-import re
 import types
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -553,31 +552,14 @@ def _load_mcp_config(mcp_file: Path | None = None) -> dict[str, dict]:
     return {}
 
 
-_ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+def _prepare_server_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Copy an untrusted server config without interpreting its values.
 
-
-def _expand_env(value: Any) -> Any:
-    """Expand ${VAR} references in MCP config strings."""
-    if isinstance(value, str):
-        missing: list[str] = []
-
-        def replace_var(match: re.Match[str]) -> str:
-            name = match.group(1)
-            if name not in os.environ:
-                missing.append(name)
-                return match.group(0)
-            return os.environ[name]
-
-        expanded = _ENV_VAR_PATTERN.sub(replace_var, value)
-        if missing:
-            names = ", ".join(sorted(set(missing)))
-            raise ValueError(f"Unset environment variable(s) in MCP config: {names}")
-        return expanded
-    if isinstance(value, list):
-        return [_expand_env(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _expand_env(item) for key, item in value.items()}
-    return value
+    MCP configuration can come from a repository-local ``.mcp.json`` or
+    ``config.toml``. In particular, ``${VAR}`` placeholders must remain literal
+    so repository data cannot read values from the host environment.
+    """
+    return copy.deepcopy(config)
 
 
 class MCPTool:
@@ -697,6 +679,10 @@ class MCPTool:
             )
             headers = dict(ctx.get("headers") or {})
             headers["Authorization"] = f"{token.token_type} {token.access_token}"
+            # Without the configured timeout the rebuilt client silently falls
+            # back to the 60s factory default, so a server deliberately given a
+            # longer one starts failing after its first token refresh.
+            timeout = ctx.get("tool_call_timeout")
             self._client = create_mcp_client(
                 transport=ctx.get("transport"),
                 url=server_url,
@@ -704,10 +690,56 @@ class MCPTool:
                 args=ctx.get("args"),
                 env=ctx.get("env"),
                 headers=headers,
+                **({"tool_call_timeout": timeout} if timeout is not None else {}),
             )
             return True
         except Exception:
             return False
+
+
+def _create_tool_instance(
+    server_name: str,
+    client: Any,
+    tools_result: Any,
+    refresh_ctx: dict[str, Any] | None = None,
+) -> MCPTool:
+    """Build the dynamic per-server tool class from a completed ``list_tools``.
+
+    Shared by the sync and async factories: from here on the work is pure CPU
+    on an already-connected client, so it is identical either way.
+
+    ``refresh_ctx`` is stashed on the instance so ``_call_tool`` can
+    transparently refresh the OAuth token and retry once on a 401 mid-session —
+    cached access tokens can expire between connect and call.
+    """
+    tool_specs = []
+    for tool in tools_result.tools:
+        input_schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
+        tool_specs.append(
+            MCPToolSpec(
+                name=tool.name,
+                description=tool.description or "",
+                input_schema=input_schema,
+                required=set(input_schema.get("required", [])),
+            )
+        )
+
+    dynamic_class = _make_dynamic_class(server_name, tool_specs, MCPTool)
+    instance = object.__new__(dynamic_class)
+    instance.__init__(client, server_name, refresh_ctx=refresh_ctx)
+    return instance
+
+
+async def _list_server_tools(server_name: str, client: Any) -> Any:
+    """Connect once for discovery and preserve the useful cause of TaskGroup errors."""
+    try:
+        async with client.connect_to_server() as session:
+            return await session.list_tools()
+    except Exception as exc:
+        details = _describe_exceptions([exc])
+        raise RuntimeError(
+            f"Could not connect to MCP server {server_name!r}" + (f": {details}" if details else "")
+        ) from exc
 
 
 class MCPManager:
@@ -748,6 +780,89 @@ class MCPManager:
         config = _load_mcp_config(mcp_file)
         config.update(servers or {})
         return list(config.keys())
+
+    @staticmethod
+    async def create_stdio_server(
+        server_name: str,
+        command: str,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        tool_call_timeout: timedelta = timedelta(seconds=60),
+    ) -> MCPTool:
+        """Create an MCP tool from explicit stdio config, from inside an event loop.
+
+        :meth:`create_from_server` is synchronous. Called with a loop already
+        running, it hands the coroutine to a worker thread and blocks on the
+        result, which stalls the caller's loop for the whole connect and
+        ``list_tools`` round trip. A host that is itself serving over that loop
+        — the ACP server on stdin/stdout, for instance — goes unresponsive for
+        as long as the MCP server takes to start.
+
+        This awaits the connection in the caller's loop instead, so the host
+        keeps serving while an MCP server comes up. It covers stdio only: no
+        config file lookup and no OAuth, because neither applies to a local
+        subprocess. Use :meth:`create_from_server` for everything else.
+
+        Args:
+            server_name: Name for the generated tool class and its methods.
+            command: Executable to launch.
+            args: Arguments passed to ``command``.
+            env: Extra environment for the subprocess.
+            tool_call_timeout: Per-call timeout for the generated methods.
+
+        Returns:
+            An MCPTool instance with one method per tool on the server.
+        """
+        client = create_mcp_client(
+            transport="stdio",
+            command=command,
+            args=args,
+            env=env,
+            tool_call_timeout=tool_call_timeout,
+        )
+        tools_result = await _list_server_tools(server_name, client)
+        refresh_ctx = {
+            "server_url": "",
+            "tool_call_timeout": tool_call_timeout,
+            "transport": "stdio",
+            "command": command,
+            "args": args,
+            "env": env,
+        }
+        return _create_tool_instance(server_name, client, tools_result, refresh_ctx)
+
+    @staticmethod
+    async def create_url_server(
+        server_name: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        transport: Literal["sse", "streamable-http"] = "streamable-http",
+        tool_call_timeout: timedelta = timedelta(seconds=60),
+    ) -> MCPTool:
+        """Create an HTTP or SSE MCP tool from trusted, explicit client configuration.
+
+        Interactive hosts such as ACP already receive a resolved URL and headers
+        from their client. This async factory connects and lists tools without
+        routing through the synchronous config/OAuth wrapper.
+        """
+        if transport not in ("sse", "streamable-http"):
+            raise ValueError(f"Unsupported URL MCP transport {transport!r}")
+        resolved_headers = dict(headers or {})
+        client = create_mcp_client(
+            transport=transport,
+            url=url,
+            headers=resolved_headers,
+            tool_call_timeout=tool_call_timeout,
+        )
+        tools_result = await _list_server_tools(server_name, client)
+        refresh_ctx = {
+            "server_url": url,
+            "tool_call_timeout": tool_call_timeout,
+            "headers": resolved_headers,
+            "transport": transport,
+        }
+        return _create_tool_instance(server_name, client, tools_result, refresh_ctx)
 
     @staticmethod
     def create_from_server(
@@ -811,7 +926,7 @@ class MCPManager:
         # Load config from .mcp.json
         configured_servers = _load_mcp_config(mcp_file)
         configured_servers.update(servers or {})
-        config_server = _expand_env(configured_servers.get(server_name, {}).copy())
+        config_server = _prepare_server_config(configured_servers.get(server_name, {}))
 
         # Merge provided args with config (provided args take precedence): start
         # from the config headers, then let caller-supplied headers override them
@@ -920,24 +1035,9 @@ class MCPManager:
 
         # Parse tools
         assert tools_result is not None, "tools_result must be set by connect or OAuth retry"
-        tool_specs = []
-        for tool in tools_result.tools:
-            input_schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
-            required = set(input_schema.get("required", []))
-            tool_specs.append(
-                MCPToolSpec(
-                    name=tool.name,
-                    description=tool.description or "",
-                    input_schema=input_schema,
-                    required=required,
-                )
-            )
-
-        # Generate dynamic class and create instance. Stash a refresh context so
-        # _call_tool can transparently refresh the OAuth token + retry once on a
-        # 401 mid-session (cached access tokens expire between connect and call).
         refresh_ctx = {
             "server_url": url or config_server.get("url") or "",
+            "tool_call_timeout": tool_call_timeout,
             "redirect_uri": oauth_redirect_uri,
             "client_id": oauth_client_id,
             "scope": oauth_scope,
@@ -947,7 +1047,4 @@ class MCPManager:
             "args": args,
             "env": env,
         }
-        dynamic_class = _make_dynamic_class(server_name, tool_specs, MCPTool)
-        instance = object.__new__(dynamic_class)
-        instance.__init__(client, server_name, refresh_ctx=refresh_ctx)
-        return instance
+        return _create_tool_instance(server_name, client, tools_result, refresh_ctx)

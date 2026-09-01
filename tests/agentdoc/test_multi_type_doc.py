@@ -95,6 +95,28 @@ class TestMultiTypeDoc:
         assert "value_a: str" in result
         assert "value_b: int" in result
 
+    def test_doc_multiple_instances_preserves_referenced_types(self):
+        """Multi-instance docs discover the same contract types as type docs."""
+
+        class Inner(BaseModel):
+            value: str
+
+        class Outer(BaseModel):
+            inner: Inner
+
+        class RuntimeDetail:
+            detail: str = "runtime"
+
+        outer = Outer(inner=Inner(value="x"))
+        outer.__pydantic_extra__ = {"detail": RuntimeDetail()}
+        result = doc(outer, SimpleA(value_a="a"), inline_depth=1)
+
+        assert "class Outer(BaseModel):" in result
+        assert "class SimpleA(BaseModel):" in result
+        assert "## Referenced Types" in result
+        assert result.count("class Inner(BaseModel):") == 1
+        assert result.count("class RuntimeDetail:") == 1
+
     def test_doc_multiple_types_list(self):
         """doc([Type1, Type2]) flattens and documents both."""
         result = doc([SimpleA, SimpleB])
@@ -166,12 +188,14 @@ class TestTypeDepthParameter:
         assert "## Referenced Types" not in result
 
     def test_inline_depth_one_direct_references(self):
-        """inline_depth=1 shows direct referenced types."""
-        result = doc(Customer, inline_depth=1)
+        """inline_depth=1 includes direct references but not their references."""
+        # Order -> Customer -> Address
+        result = doc(Order, inline_depth=1)
 
-        assert "class Customer" in result
+        assert "class Order" in result
         assert "## Referenced Types" in result
-        assert "class Address" in result
+        assert "class Customer" in result
+        assert "class Address" not in result
 
     def test_inline_depth_two_transitive_references(self):
         """inline_depth=2 shows transitive referenced types."""
@@ -183,6 +207,15 @@ class TestTypeDepthParameter:
         assert "class Customer" in result
         assert "class Address" in result  # Transitive through Customer
 
+    def test_inline_depth_bounds_multi_object_references(self):
+        """Multi-object docs use the same direct-versus-transitive semantics."""
+        direct = doc(Order, SimpleA, inline_depth=1)
+        transitive = doc(Order, SimpleA, inline_depth=2)
+
+        assert "class Customer" in direct
+        assert "class Address" not in direct
+        assert "class Address" in transitive
+
     def test_inline_depth_default_with_concise_false(self):
         """Default inline_depth=1 when concise=False."""
         result = doc(Customer)  # concise=False is default
@@ -191,10 +224,18 @@ class TestTypeDepthParameter:
         assert "class Address" in result
 
     def test_inline_depth_default_with_concise_true(self):
-        """Default inline_depth=0 when concise=True."""
+        """Default inline_depth=1 is independent of concise docstrings."""
         result = doc(Customer, concise=True)
 
-        assert "## Referenced Types" not in result
+        assert "## Referenced Types" in result
+        assert "class Address" in result
+
+    @pytest.mark.parametrize("invalid_depth", [None, -1, 1.5, "1", True])
+    def test_inline_depth_rejects_non_nonnegative_integers(self, invalid_depth):
+        """inline_depth accepts only non-negative integers."""
+        error = ValueError if invalid_depth == -1 else TypeError
+        with pytest.raises(error, match="inline_depth must be a non-negative integer"):
+            doc(Customer, inline_depth=invalid_depth)
 
     def test_inline_depth_override_with_concise_true(self):
         """Explicit inline_depth overrides concise=True default."""

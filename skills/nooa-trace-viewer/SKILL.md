@@ -1,6 +1,6 @@
 ---
 name: nooa-trace-viewer
-description: Run and use the NVIDIA OO Agents trace viewer — the web UI + OTLP receiver for browsing agent traces and eval results. Use when starting the viewer, importing/exporting/deleting traces, querying the viewer's REST API, or wiring an agent run so traces show up at localhost:5001.
+description: Run and use the NOOA trace viewer — the web UI + OTLP receiver for browsing agent traces and eval results. Use when starting the viewer, importing/exporting/deleting traces, querying the viewer's REST API, or wiring an agent run so traces show up at localhost:5001.
 compatibility: nooa package with the [viewer] extra (fastapi, uvicorn); nooa-cli for the `nooa` commands
 ---
 
@@ -49,6 +49,18 @@ Trace-detail features worth knowing:
 - **Playground** — re-run an LLM turn with a different model/temperature and diff the output.
 - **Batch ID chip** in the header (copyable) — groups imported/eval runs; filter the list with `/traces?batch_id=…`.
 - Keyboard: `j`/`k` navigate, `/` search, `?` shows all shortcuts. URL captures view state, so links are shareable; add `&embed=true` to embed.
+
+## Viewer plugin metadata
+
+The viewer selects a registered span renderer from the `nooa.viewer.plugin`
+OpenTelemetry span attribute. Core NOOA tracing sets this automatically for
+method, generation, code-execution, and tool-execution spans. Code that adds a
+new renderer in `src/nooa/viewer/frontend-react/src/components/plugins/index.ts`
+can select it for custom spans by setting the same attribute on those spans.
+
+Older imported traces may still carry the pre-NOOA key
+`nemo_oo_agents.viewer.plugin`; the viewer accepts that as a compatibility
+fallback, but new span producers should write `nooa.viewer.plugin`.
 
 ## Import, export, delete
 

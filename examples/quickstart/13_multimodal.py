@@ -54,7 +54,7 @@ class ImageDescriber(Agent, llm=llm):
 
 
 # ---------------------------------------------------------------------------
-# PredictStrategy agent — single-shot structured output with image
+# PredictStrategy agent — structured output with no tool loop; validation may retry
 # ---------------------------------------------------------------------------
 class ImageAnalysis(BaseModel):
     """Structured analysis of an image."""

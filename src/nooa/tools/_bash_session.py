@@ -14,6 +14,7 @@ Architecture:
 """
 
 import asyncio
+import base64
 import logging
 import os
 import secrets
@@ -221,6 +222,25 @@ class BashSession:
             finally:
                 self._running_init = False
 
+    def _build_script(self, command: str, sentinel: str) -> str:
+        """Compose the wire script: the command, then the control-channel protocol.
+
+        The command is base64'd and decoded inside bash, so bash's parser never
+        reads it as shell text. Parsing it directly is unsafe; the
+        protocol lines travel on the same stdin. An unbalanced quote, paren or
+        heredoc in the command will consume them as string content. A command
+        that reads a bare stdin (``cat``) swallows the same lines as input;
+        the redirect from /dev/null prevents this.
+
+        The payload travels in a here-string so command length is bounded by memory
+        rather than ARG_MAX.
+        """
+        protocol = f"_nemo_ec=$?\necho $_nemo_ec >&3\npwd >&3\necho {sentinel} >&3\n"
+        # b64encode, not encodebytes: the latter wraps at 76 characters, and a
+        # newline inside the here-string would split the payload across lines.
+        blob = base64.b64encode(command.encode()).decode()
+        return f'eval "$(base64 -d <<<{blob})" </dev/null\n{protocol}'
+
     def _ensure_lock_on_current_loop(self) -> None:
         """Recreate the lock if the event loop changed since it was created."""
         if (
@@ -266,7 +286,7 @@ class BashSession:
         sentinel = f"__CTRL_{secrets.token_hex(8)}__"
 
         # Command runs normally; exit code + cwd + sentinel go to fd 3.
-        script = f"{command}\n_nemo_ec=$?\necho $_nemo_ec >&3\npwd >&3\necho {sentinel} >&3\n"
+        script = self._build_script(command, sentinel)
 
         ctrl_lines, stdout, stderr, timed_out = await self._send_and_wait(script, sentinel, timeout)
 
@@ -322,7 +342,7 @@ class BashSession:
 
         self._last_command = command
         sentinel = f"__CTRL_{secrets.token_hex(8)}__"
-        script = f"{command}\n_nemo_ec=$?\necho $_nemo_ec >&3\npwd >&3\necho {sentinel} >&3\n"
+        script = self._build_script(command, sentinel)
 
         proc = self._process
         ctrl = self._control_reader

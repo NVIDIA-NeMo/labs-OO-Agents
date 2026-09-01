@@ -123,6 +123,29 @@ def command(port: int, host: str, db_path_opt: str | None):
     click.secho("  NVIDIA OO Agents Viewer", fg="cyan", bold=True)
     click.echo(f"  URL:  http://localhost:{port}")
     click.echo(f"  DB:   {db_path}")
+
+    # When a token is configured the viewer is reachable from other machines.
+    # Print the one-time bootstrap link: opening it trades the token for a
+    # session cookie, after which plain deep links work for that browser.
+    token = os.environ.get("NOOA_VIEWER_AUTH_TOKEN", "").strip()
+    if token:
+        import socket as _socket
+        from urllib.parse import quote
+
+        # gethostname()/getfqdn()/AI_CANONNAME all return the short name when
+        # the fully-qualified one comes from a DNS search domain, and a short
+        # name usually will not resolve from a colleague's machine. There is no
+        # reliable way to derive it, so let the operator state it.
+        public_host = os.environ.get("NOOA_VIEWER_PUBLIC_HOST", "").strip() or _socket.gethostname()
+        # Percent-encode: a '#' in the token would otherwise start the URL
+        # fragment, so the browser would send only the part before it and the
+        # bootstrap would fail with a confusing 401. '&', '+' and '/' break it
+        # in subtler ways. safe="" encodes everything not URL-unreserved.
+        click.echo(f"  Share: http://{public_host}:{port}/?token={quote(token, safe='')}")
+        click.secho(
+            "         Anyone who opens this link can read every trace and use the playground.",
+            fg="yellow",
+        )
     click.echo()
 
     try:
