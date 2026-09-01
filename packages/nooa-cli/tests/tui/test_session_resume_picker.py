@@ -11,12 +11,32 @@ from nooa_cli.tui.resume_picker import (
     ResumePickerTurn,
     _clip,
     _row_fragments,
+    _semantic_preview_selection,
     literal_match,
     render_resume_picker,
 )
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from rich.cells import cell_len
+
+
+def test_semantic_preview_selection_removes_user_and_agent_chrome() -> None:
+    rendered_selection = (
+        "▔▔▔▔▔▔▔▔\n"
+        " ❯ hello world   \n"
+        "   continued   \n"
+        "▁▁▁▁▁▁▁▁\n"
+        "OO:\n"
+        "answer text"
+    )
+
+    assert _semantic_preview_selection(rendered_selection) == (
+        "hello world\ncontinued\nanswer text"
+    )
+
+
+def test_semantic_preview_selection_preserves_partial_plain_text() -> None:
+    assert _semantic_preview_selection("partial OO: text") == "partial OO: text"
 
 
 def row(id: str, title: str, **kw) -> ResumePickerRow:
@@ -169,6 +189,16 @@ def test_tab_cycles_only_list_and_preview() -> None:
     assert picker.active_control == "list"
     picker.focus_previous()
     assert picker.active_control == "preview"
+
+
+def test_resume_picker_shows_copy_status_in_its_footer() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker(
+        [row("1", "one")], app, selection_status=lambda: "Copied 12 characters"
+    )
+
+    assert picker._help_text() == "Copied 12 characters"
 
 
 def test_options_mode_selects_and_changes_filter_and_sort() -> None:
@@ -623,7 +653,7 @@ def test_preview_mouse_drag_selects_and_copies() -> None:
 
     assert copied
     assert app.clipboard.set_text.call_args.args[0] == copied[0]
-    assert picker._preview_model(20).selected_text() == copied[0]
+    assert picker._preview_model(20).selected_text() == ""
 
 
 @pytest.mark.asyncio
@@ -672,9 +702,9 @@ async def test_real_prompt_toolkit_preview_drag_survives_redraw_between_packets(
         harness._pipe.send_text("\x1b[<0;12;22m")
         await harness.wait_for(lambda: not picker.preview_control.dragging)
 
-        selected = picker._preview_model(79).selected_text()
+        selected = harness.app._app.clipboard.get_data().text
         assert selected == "lpha beta "
-        assert harness.app._app.clipboard.get_data().text == selected
+        assert picker._preview_model(79).selected_text() == ""
         await harness.press("escape")
         assert await asyncio.wait_for(opened, 1) is None
 
