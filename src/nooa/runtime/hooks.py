@@ -31,7 +31,7 @@ import logging
 import sys
 import time
 from collections.abc import Iterator
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -409,6 +409,26 @@ class CompositeInstrumentationHooks:
             except (Exception, asyncio.CancelledError):
                 logger.warning("Hook %s failed", hook_name, exc_info=True)
 
+    @contextmanager
+    def activate_agent_call(self, context: Any) -> Iterator[None]:
+        """Reactivate each child's matching agent-call context."""
+
+        contexts = (
+            context.children
+            if isinstance(context, _CompositeHookContext) and context.owner is self
+            else ()
+        )
+        with ExitStack() as stack:
+            for index, hook in enumerate(self.hooks):
+                child_context = contexts[index] if index < len(contexts) else None
+                if not isinstance(hook, AgentCallContextActivator) or child_context is None:
+                    continue
+                try:
+                    stack.enter_context(hook.activate_agent_call(child_context))
+                except (Exception, asyncio.CancelledError):
+                    logger.warning("Hook activate_agent_call failed", exc_info=True)
+            yield
+
     def before_agent_call(
         self,
         agent: Any,
@@ -756,6 +776,9 @@ def activate_agent_call_context(
     hooks_token = _instrumentation_hooks_var.set(hooks) if hooks is not None else None
     try:
         active_hooks = hooks if hooks is not None else get_hooks()
+        if isinstance(context, _OwnedHookContext):
+            active_hooks = context.owner
+            context = context.child
         if not isinstance(active_hooks, AgentCallContextActivator) or context is None:
             yield
             return
@@ -763,7 +786,7 @@ def activate_agent_call_context(
         try:
             manager = active_hooks.activate_agent_call(context)
             manager.__enter__()
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             logger.warning("Hook activate_agent_call failed", exc_info=True)
             yield
             return
@@ -773,13 +796,13 @@ def activate_agent_call_context(
         except BaseException:
             try:
                 manager.__exit__(*sys.exc_info())
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 logger.warning("Hook activate_agent_call cleanup failed", exc_info=True)
             raise
         else:
             try:
                 manager.__exit__(None, None, None)
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 logger.warning("Hook activate_agent_call cleanup failed", exc_info=True)
     finally:
         if hooks_token is not None:
