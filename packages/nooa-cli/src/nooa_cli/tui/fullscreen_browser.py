@@ -175,11 +175,16 @@ class SelectablePreviewControl(FormattedTextControl):
         self._autoscroll_timer: asyncio.TimerHandle | None = None
         super().__init__(self._text, focusable=True, show_cursor=False)
 
-    def create_content(self, width: int, height: int):
-        viewport = (max(1, width), max(1, height or 1))
-        if viewport != self.viewport:
-            self.cancel_drag()
-        self.viewport = viewport
+    def create_content(self, width: int, height: int | None):
+        # prompt_toolkit calls ``create_content(width, None)`` while measuring a
+        # preferred height.  That is not a rendered one-row viewport: treating
+        # it as one cancels an active drag during the redraw triggered by mouse
+        # down, before the terminal can deliver the following move event.
+        if height is not None:
+            viewport = (max(1, width), max(1, height))
+            if viewport != self.viewport:
+                self.cancel_drag()
+            self.viewport = viewport
         self._fragment_cache.clear()
         return super().create_content(width, height)
 

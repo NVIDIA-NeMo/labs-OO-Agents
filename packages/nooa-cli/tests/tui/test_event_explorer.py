@@ -137,6 +137,25 @@ def test_event_explorer_renders_shared_session_events() -> None:
     assert "test-model" in (rows[1].markdown or "")
 
 
+def test_event_explorer_collapses_multiline_user_message_summary() -> None:
+    row = build_event_rows(
+        SimpleNamespace(
+            items=lambda: [
+                (
+                    "2",
+                    _FakeEvent(
+                        "SessionUserMessage",
+                        content="first line\n\nexport UV_PYTHON=value",
+                    ),
+                )
+            ]
+        )
+    )[0]
+
+    assert row.summary == "first line export UV_PYTHON=value"
+    assert "\n" not in row.summary
+
+
 def test_event_explorer_renders_generic_events_as_markdown_sections() -> None:
     row = build_event_rows(
         SimpleNamespace(
