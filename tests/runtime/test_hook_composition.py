@@ -251,6 +251,40 @@ def test_composite_reactivates_each_child_agent_call_context() -> None:
     ]
 
 
+def test_composite_isolates_child_activation_cleanup_failure() -> None:
+    calls: list[tuple[Any, ...]] = []
+
+    class CleanupFailingHooks(RecordingHooks):
+        def before_agent_call(self, **kwargs: Any) -> str:
+            return "cleanup-context"
+
+        @contextmanager
+        def activate_agent_call(self, context: Any):
+            yield
+            raise RuntimeError("cleanup failed")
+
+    failing = CleanupFailingHooks("failing", calls)
+    healthy = RecordingHooks("healthy", calls)
+    hooks = CompositeInstrumentationHooks(failing, healthy)  # type: ignore[arg-type]
+    context = hooks.before_agent_call(
+        agent=None,
+        method_name="stream",
+        args=(),
+        kwargs={},
+        call_id="call-1",
+        parent_call_id=None,
+    )
+
+    with hooks.activate_agent_call(context):
+        calls.append(("body", "completed"))
+
+    assert ("body", "completed") in calls
+
+    with pytest.raises(ValueError, match="agent failed"):
+        with hooks.activate_agent_call(context):
+            raise ValueError("agent failed")
+
+
 def test_after_uses_originating_single_hook_when_active_hook_changes() -> None:
     calls: list[tuple[Any, ...]] = []
     original = RecordingHooks("original", calls)

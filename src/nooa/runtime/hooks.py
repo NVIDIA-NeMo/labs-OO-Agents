@@ -31,7 +31,7 @@ import logging
 import sys
 import time
 from collections.abc import Iterator
-from contextlib import AbstractContextManager, ExitStack, contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -418,16 +418,34 @@ class CompositeInstrumentationHooks:
             if isinstance(context, _CompositeHookContext) and context.owner is self
             else ()
         )
-        with ExitStack() as stack:
-            for index, hook in enumerate(self.hooks):
-                child_context = contexts[index] if index < len(contexts) else None
-                if not isinstance(hook, AgentCallContextActivator) or child_context is None:
-                    continue
-                try:
-                    stack.enter_context(hook.activate_agent_call(child_context))
-                except (Exception, asyncio.CancelledError):
-                    logger.warning("Hook activate_agent_call failed", exc_info=True)
+        managers: list[AbstractContextManager[None]] = []
+        for index, hook in enumerate(self.hooks):
+            child_context = contexts[index] if index < len(contexts) else None
+            if not isinstance(hook, AgentCallContextActivator) or child_context is None:
+                continue
+            try:
+                manager = hook.activate_agent_call(child_context)
+                manager.__enter__()
+                managers.append(manager)
+            except (Exception, asyncio.CancelledError):
+                logger.warning("Hook activate_agent_call failed", exc_info=True)
+
+        try:
             yield
+        except BaseException:
+            exception_info = sys.exc_info()
+            for manager in reversed(managers):
+                try:
+                    manager.__exit__(*exception_info)
+                except (Exception, asyncio.CancelledError):
+                    logger.warning("Hook activate_agent_call cleanup failed", exc_info=True)
+            raise
+        else:
+            for manager in reversed(managers):
+                try:
+                    manager.__exit__(None, None, None)
+                except (Exception, asyncio.CancelledError):
+                    logger.warning("Hook activate_agent_call cleanup failed", exc_info=True)
 
     def before_agent_call(
         self,
