@@ -139,10 +139,11 @@ async def test_shared_explorer_f2_toggles_native_selection_and_cancels_drag() ->
         opened = asyncio.create_task(harness.app.open_subview(view))
         await harness.wait_for(lambda: isinstance(harness.app.active_subview, ExplorerBrowser))
         browser = harness.app.active_subview
-        await harness.wait_for(lambda: browser.preview_control.viewport == (79, 9))
+        await harness.wait_for(lambda: browser.preview_control.viewport[1] >= 2)
 
         # Start a drag so F2 must cancel it.
-        harness._pipe.send_text("\x1b[<0;2;15M")
+        preview_row = _first_preview_terminal_row(harness, browser)
+        harness._pipe.send_text(f"\x1b[<0;2;{preview_row + 1}M")
         await harness.wait_for(lambda: browser.preview_control.dragging)
 
         await harness.press("f2")
@@ -612,6 +613,30 @@ def test_explorer_query_change_clears_cached_detail_matches() -> None:
 
     assert browser.model._last_detail_match_lines == []
 
+def _first_preview_terminal_row(harness, browser) -> int:
+    """Locate the preview pane's first terminal row (0-based) via hit-testing.
+
+    Layout rows shift when the shared browser adds or removes separators, so
+    drag tests must not hardcode SGR coordinates.
+    """
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+    handlers = harness.app._app.renderer.mouse_handlers.mouse_handlers
+    for y in range(len(handlers)):
+        browser.preview_control.cancel_drag()
+        try:
+            handlers[y][1](
+                MouseEvent(Point(1, y), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+            )
+        except (IndexError, KeyError):
+            continue
+        if browser.preview_control.dragging:
+            browser.preview_control.cancel_drag()
+            return y
+    raise AssertionError("preview pane not found on screen")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["event", "todo"])
 async def test_shared_explorers_copy_drag_from_terminal_mouse_packets(kind: str) -> None:
@@ -656,21 +681,21 @@ async def test_shared_explorers_copy_drag_from_terminal_mouse_packets(kind: str)
         opened = asyncio.create_task(harness.app.open_subview(view))
         await harness.wait_for(lambda: isinstance(harness.app.active_subview, ExplorerBrowser))
         browser = harness.app.active_subview
-        await harness.wait_for(lambda: browser.preview_control.viewport == (79, 9))
-
-        # SGR coordinates are one-based. The preview occupies terminal rows
-        # 15..23. Packets go through prompt_toolkit's key-binding dispatcher,
-        # rather than calling the UIControl directly.
-        harness._pipe.send_text("\x1b[<0;2;15M")
+        await harness.wait_for(lambda: browser.preview_control.viewport[1] >= 2)
+        preview_row = _first_preview_terminal_row(harness, browser)
+        # SGR coordinates are one-based. Packets go through prompt_toolkit's
+        # key-binding dispatcher, rather than calling the UIControl directly.
+        first = preview_row + 1
+        harness._pipe.send_text(f"\x1b[<0;2;{first}M")
         await harness.wait_for(lambda: browser.preview_control.dragging)
-        harness._pipe.send_text("\x1b[<32;10;15M")
+        harness._pipe.send_text(f"\x1b[<32;10;{first}M")
         await harness.wait_for(
             lambda: bool(
                 browser._detail_transcript
                 and browser._detail_transcript.selected_text()
             )
         )
-        harness._pipe.send_text("\x1b[<0;10;15m")
+        harness._pipe.send_text(f"\x1b[<0;10;{first}m")
         await harness.wait_for(lambda: not browser.preview_control.dragging)
 
         assert harness.app._app.clipboard.get_data().text
