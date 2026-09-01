@@ -586,6 +586,23 @@ def test_preview_search_highlights_and_cycles_transcript_matches() -> None:
     assert picker.preview_search_position() == (1, 2)
 
 
+def test_preview_measurement_redraw_does_not_cancel_drag() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row("1", "one", turns=(ResumePickerTurn("agent", "alpha beta"),))], app)
+    picker.preview_control.create_content(20, 3)
+    picker.preview_control.mouse_handler(
+        MouseEvent(Point(0, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+
+    # Focus changes invalidate the application after mouse-down. prompt_toolkit
+    # asks controls for their preferred height before the next mouse packet.
+    picker.preview_control.create_content(20, None)
+
+    assert picker.preview_control.viewport == (20, 3)
+    assert picker.preview_control.dragging
+
+
 def test_preview_mouse_drag_selects_and_copies() -> None:
     app = MagicMock()
     app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
@@ -607,6 +624,59 @@ def test_preview_mouse_drag_selects_and_copies() -> None:
     assert copied
     assert app.clipboard.set_text.call_args.args[0] == copied[0]
     assert picker._preview_model(20).selected_text() == copied[0]
+
+
+@pytest.mark.asyncio
+async def test_real_prompt_toolkit_preview_drag_survives_redraw_between_packets(
+    monkeypatch,
+) -> None:
+    from nooa_cli.tui import session_manager as sm
+
+    from .tui_app_harness import MutableRecordingOutput, TUIHarness
+
+    session = SimpleNamespace(
+        id="session-1",
+        name="one",
+        model="m",
+        agent="A",
+        working_dir=str(Path.cwd()),
+        started_at=1,
+        last_active=2,
+        turn_count=1,
+    )
+    monkeypatch.setattr(
+        sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: [session])
+    )
+    monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
+    monkeypatch.setattr(
+        sm.SessionManager,
+        "load_turns",
+        classmethod(
+            lambda cls, value, limit=12: [SimpleNamespace(role="agent", content="alpha beta gamma")]
+        ),
+    )
+
+    async with TUIHarness(output=MutableRecordingOutput(80, 24), full_screen=True) as harness:
+        opened = asyncio.create_task(harness.app.open_session_resume_dialog())
+        await harness.wait_for(lambda: harness.app._resume_picker is not None)
+        picker = harness.app._resume_picker
+        await harness.wait_for(lambda: picker.preview_control.viewport == (79, 9))
+
+        # SGR coordinates are one-based. Send each packet separately so the
+        # focus-changing mouse-down is followed by a real render measurement
+        # before the drag and release packets arrive.
+        harness._pipe.send_text("\x1b[<0;3;22M")
+        await harness.wait_for(lambda: picker.preview_control.dragging)
+        harness._pipe.send_text("\x1b[<32;12;22M")
+        await harness.wait_for(lambda: bool(picker._preview_model(79).selected_text()))
+        harness._pipe.send_text("\x1b[<0;12;22m")
+        await harness.wait_for(lambda: not picker.preview_control.dragging)
+
+        selected = picker._preview_model(79).selected_text()
+        assert selected == "lpha beta "
+        assert harness.app._app.clipboard.get_data().text == selected
+        await harness.press("escape")
+        assert await asyncio.wait_for(opened, 1) is None
 
 
 @pytest.mark.asyncio
