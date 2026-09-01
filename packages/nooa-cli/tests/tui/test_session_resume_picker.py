@@ -178,6 +178,14 @@ def test_selection_can_inspect_attached_but_cannot_resume_it() -> None:
     assert "✓  other" in render_resume_picker(model, 80, 20)
 
 
+def test_resume_picker_specializes_shared_explorer_browser() -> None:
+    from nooa_cli.tui.fullscreen_browser import ExplorerBrowser
+
+    assert issubclass(ResumePicker, ExplorerBrowser)
+    assert ResumePicker.preview_selection is ExplorerBrowser.preview_selection
+    assert ResumePicker.focus_initial is ExplorerBrowser.focus_initial
+
+
 def test_tab_cycles_only_list_and_preview() -> None:
     app = MagicMock()
     app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)

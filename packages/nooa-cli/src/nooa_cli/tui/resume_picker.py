@@ -16,7 +16,7 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
 from rich.cells import cell_len, split_graphemes
 
-from .fullscreen_browser import SelectablePreviewControl, build_fullscreen_browser
+from .fullscreen_browser import ExplorerBrowser, SelectablePreviewControl, build_fullscreen_browser
 from .terminal_safety import sanitize_live_text
 
 
@@ -582,8 +582,16 @@ class _PickerButtonControl(FormattedTextControl):
         return NotImplemented
 
 
-class ResumePicker:
-    CONTROL_ORDER = ("list", "preview")
+class ResumePicker(ExplorerBrowser):
+    """Session-specific ExplorerBrowser with asynchronous replay previews."""
+
+    @property
+    def model(self) -> ResumePickerModel:
+        return self._resume_model
+
+    @model.setter
+    def model(self, value: ResumePickerModel) -> None:
+        self._resume_model = value
 
     def __init__(
         self,
@@ -664,41 +672,10 @@ class ResumePicker:
             small_text=self._small_text,
         )
 
-    def _small_text(self):
-        size = self.app.output.get_size()
-        return [
-            (
-                "class:fullscreen-browser.muted",
-                f"Need 48 x 13; now {size.columns} x {size.rows}",
-            )
-        ]
-
     def _query_changed(self) -> None:
         self.model.set_query(self.buffer.text)
         self._prepare_current_preview()
         self.invalidate()
-
-    def _search_label(self):
-        style = "class:fullscreen-browser.search-label"
-        if self.active_control == "list" and self.option_cursor is None:
-            style += " class:fullscreen-browser.control-focused"
-        return [(style, "[Search: ")]
-
-    def _search_close(self):
-        style = "class:fullscreen-browser.search-label"
-        if self.active_control == "list" and self.option_cursor is None:
-            style += " class:fullscreen-browser.control-focused"
-        return [(style, "]")]
-
-    def _active_rail(self, area: str):
-        active = self.active_control == area
-        style = (
-            "class:fullscreen-browser.active-rail-active"
-            if active
-            else "class:fullscreen-browser.active-rail"
-        )
-        glyph = "▌" if active else "│"
-        return [(style, "\n".join([glyph] * max(1, self.app.output.get_size().rows)))]
 
     @property
     def mouse_support(self) -> bool:
@@ -771,14 +748,6 @@ class ResumePicker:
         self.preview_header_control._fragment_cache.clear()
         self.app.invalidate()
 
-    def focus_initial(self) -> None:
-        size = self.app.output.get_size()
-        if size.columns >= 48 and size.rows >= 13:
-            self.active_control = "list"
-            self.app.layout.focus(self.query_control)
-        else:
-            self.app.layout.focus(self.small_control)
-
     def activate_control(self, name: str) -> None:
         self.active_control = name
         controls = {
@@ -822,15 +791,8 @@ class ResumePicker:
         self.invalidate()
         return True
 
-    def focus_next(self) -> None:
-        self.option_cursor = None
-        index = (self.CONTROL_ORDER.index(self.active_control) + 1) % len(self.CONTROL_ORDER)
-        self.activate_control(self.CONTROL_ORDER[index])
-
     def focus_previous(self) -> None:
-        self.option_cursor = None
-        index = (self.CONTROL_ORDER.index(self.active_control) - 1) % len(self.CONTROL_ORDER)
-        self.activate_control(self.CONTROL_ORDER[index])
+        self.focus_next(-1)
 
     def move_horizontal(self, delta: int) -> None:
         if self.option_cursor is not None:
@@ -938,6 +900,14 @@ class ResumePicker:
             return
         self._preview_tasks[key] = loop.create_task(prepare())
 
+    def _preview_transcript(self, width: int, height: int):
+        """Provide the asynchronously prepared replay to ExplorerBrowser."""
+        return self._preview_model(width)
+
+    def _selected_preview_text(self, transcript: Any) -> str:
+        """Strip replay-only chrome while using the shared copy lifecycle."""
+        return _semantic_preview_selection(transcript.selected_text())
+
     def preview_text(self, width: int, height: int):
         row = self.model.current
         if row is None:
@@ -960,26 +930,6 @@ class ResumePicker:
             return 0, 0
         transcript.set_search(self.model.query, width=max(1, width), height=max(1, height))
         return transcript.search_position
-
-    def preview_selection(self, action: str, x: int, y: int) -> None:
-        width, height = self.preview_control.viewport
-        transcript = self._preview_model(width)
-        if transcript is None:
-            return
-        if action == "cancel":
-            transcript.clear_selection()
-        elif action == "start":
-            transcript.begin_selection(x=x, y=y, width=width, height=height)
-        else:
-            transcript.update_selection(x=x, y=y, width=width, height=height)
-        if action == "finish":
-            selected = _semantic_preview_selection(transcript.selected_text())
-            transcript.clear_selection()
-            if selected:
-                self.app.clipboard.set_text(selected)
-                if self._selection_copy_callback is not None:
-                    self._selection_copy_callback(selected)
-        self.invalidate()
 
     def _reset_preview(self) -> None:
         row = self.model.current
