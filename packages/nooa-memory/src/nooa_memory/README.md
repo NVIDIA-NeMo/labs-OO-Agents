@@ -5,8 +5,7 @@ Agents. Toggle it on per agent; it changes no core framework code. Its defining
 idea: **the agent authors and curates its own memories** through native tools —
 rather than a harness extracting them behind the agent's back.
 
-- Runnable demos + measured results: [`examples/memory_bench/`](../../../examples/memory_bench/)
-  and the quickstart [`examples/quickstart/12_memory.py`](../../../../examples/quickstart/12_memory.py).
+- Runnable demo: [`examples/quickstart/12_memory.py`](../../../../examples/quickstart/12_memory.py).
 
 ---
 
@@ -300,8 +299,8 @@ def my_llm_reconciler(cluster):                 # list[Memory] (old->new) -> (cu
     ...
 ```
 
-See `examples/memory_bench/reflecting.py` (`make_llm_reasoner`) and `longmemeval.py`
-(`make_llm_reconciler`) for working implementations.
+The stubs above are the contract. [`examples/quickstart/12_memory.py`](../../../../examples/quickstart/12_memory.py)
+shows the deterministic (no-LLM) reflection path.
 
 **When does reflection help?** Empirically (real gpt-5.4):
 
@@ -397,8 +396,9 @@ agent.event_manager.on("MemoryWritten", lambda e: print("wrote", e.memory_id, e.
 
 ## When does memory help?
 
-Measured with real gpt-5.4 + text-embedding-3-large (see
-[`examples/memory_bench/`](../../../examples/memory_bench/)):
+Measured internally with gpt-5.4 + text-embedding-3-large (the bench harness is
+not published in this repository). For a runnable offline demo see
+[`examples/quickstart/12_memory.py`](../../../../examples/quickstart/12_memory.py):
 
 | demo | what it isolates | result |
 |---|---|---|
@@ -446,5 +446,5 @@ Tests: [`tests/memory/`](../../tests/memory/).
 - `numpy`/`sqlite-vec` backends are exact/brute-force — fine to ~10⁵ vectors; beyond
   that prefer a Chroma backend.
 
-See [`examples/memory_bench/`](../../../examples/memory_bench/) for runnable
-benchmarks and measured behavior.
+See [`examples/quickstart/12_memory.py`](../../../../examples/quickstart/12_memory.py)
+for a runnable demo.
