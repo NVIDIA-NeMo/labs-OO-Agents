@@ -699,16 +699,21 @@ async def test_real_prompt_toolkit_preview_drag_survives_redraw_between_packets(
         await harness.wait_for(lambda: harness.app._resume_picker is not None)
         picker = harness.app._resume_picker
         await harness.wait_for(lambda: picker.preview_control.viewport == (79, 9))
+        # The preview renders off-thread; wait for the model before dragging so
+        # the packets can never race the async preview preparation.
+        await harness.wait_for(lambda: picker._preview_model(79) is not None)
 
         # SGR coordinates are one-based. Send each packet separately so the
         # focus-changing mouse-down is followed by a real render measurement
         # before the drag and release packets arrive.
         harness._pipe.send_text("\x1b[<0;3;22M")
-        await harness.wait_for(lambda: picker.preview_control.dragging)
+        await harness.wait_for(lambda: picker.preview_control.dragging, timeout=5.0)
         harness._pipe.send_text("\x1b[<32;12;22M")
-        await harness.wait_for(lambda: bool(picker._preview_model(79).selected_text()))
+        await harness.wait_for(
+            lambda: bool(picker._preview_model(79).selected_text()), timeout=5.0
+        )
         harness._pipe.send_text("\x1b[<0;12;22m")
-        await harness.wait_for(lambda: not picker.preview_control.dragging)
+        await harness.wait_for(lambda: not picker.preview_control.dragging, timeout=5.0)
 
         selected = harness.app._app.clipboard.get_data().text
         assert selected == "lpha beta "
@@ -1039,21 +1044,26 @@ async def test_full_application_screen_keeps_picker_help_visible(
                 )
             )
         harness.app._app.invalidate()
-        await harness.wait_for(
-            lambda: (
-                harness.app._app.renderer.last_rendered_screen is not None
-                and any(
-                    cell.char.strip()
-                    for line in harness.app._app.renderer.last_rendered_screen.data_buffer.values()
-                    for cell in line.values()
-                )
+
+        def rendered_lines() -> list[str]:
+            screen = harness.app._app.renderer.last_rendered_screen
+            if screen is None:
+                return []
+            return [
+                "".join(screen.data_buffer[y][x].char for x in range(width)).rstrip()
+                for y in range(height)
+            ]
+
+        if usable:
+            # The preview renders off-thread; wait until the prepared replay is
+            # actually on screen so a stale "Preparing…" frame can't be read.
+            await harness.wait_for(
+                lambda: any("preview for session-19" in line for line in rendered_lines()),
+                timeout=5.0,
             )
-        )
-        screen = harness.app._app.renderer.last_rendered_screen
-        visible = [
-            "".join(screen.data_buffer[y][x].char for x in range(width)).rstrip()
-            for y in range(height)
-        ]
+        else:
+            await harness.wait_for(lambda: any(line.strip() for line in rendered_lines()))
+        visible = rendered_lines()
         if usable:
             joined = "\n".join(visible)
             assert "20 sessions" in joined
