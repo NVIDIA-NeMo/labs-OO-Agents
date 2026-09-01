@@ -90,7 +90,22 @@ def test_explorer_browser_collapses_multiline_rows() -> None:
 
     text = "".join(fragment[1] for fragment in browser.list_text(80, 4))
 
-    assert text.splitlines() == ["first line second line", "❯ first line second line"]
+    assert text.splitlines() == ["  first line second line", "❯ first line second line"]
+
+
+def test_explorer_browser_reserves_marker_column_for_alignment() -> None:
+    browser = _browser()
+    browser.view.format_row = lambda _row, _width: "aligned content"
+    browser.list_control.viewport = (80, 2)
+
+    text = "".join(fragment[1] for fragment in browser.list_text(80, 2)).splitlines()
+
+    assert len(text) == 2
+    # Content must start at the same column in both rows; only the marker
+    # glyph differs, so highlighting cannot shift text by one column.
+    assert text[1].startswith("❯ aligned content")
+    assert text[0].startswith("  aligned content")
+    assert text[0].index("aligned") == text[1].index("aligned")
 
 
 def test_explorer_browser_mouse_wheel_scrolls_list_without_moving_selection() -> None:

@@ -731,8 +731,18 @@ class ExplorerBrowser:
                 " class:fullscreen-browser.selected" if selected else ""
             )
             marker = "❯ " if selected else "  "
-            text = marker + self.view.format_row(self.model.rows[row_index], max(1, width - 2))
-            text = " ".join(sanitize_live_text(text).split())[:width]
+            # The marker owns a reserved 2-cell column so row content starts at
+            # the same offset whether or not the row is selected. Collapsing
+            # runs over the row text alone — a leading marker would be eaten
+            # and highlighted text would shift right by one on selection.
+            text = (
+                marker
+                + " ".join(
+                    sanitize_live_text(
+                        self.view.format_row(self.model.rows[row_index], max(1, width - 2))
+                    ).split()
+                )
+            )[:width]
             query = self.buffer.text.casefold().strip()
             if not query:
                 output.append((base, text))
