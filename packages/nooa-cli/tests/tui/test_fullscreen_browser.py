@@ -500,3 +500,68 @@ def test_explorer_query_change_clears_cached_detail_matches() -> None:
     browser.model.edit_query("alpha")
 
     assert browser.model._last_detail_match_lines == []
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["event", "todo"])
+async def test_shared_explorers_copy_drag_from_terminal_mouse_packets(kind: str) -> None:
+    """Exact mouse bindings must win over the subview text wildcard binding."""
+    from nooa_cli.tui.event_explorer import EventExplorerView
+    from nooa_cli.tui.todo_explorer import TodoExplorerRow, TodoExplorerView
+
+    from .tui_app_harness import MutableRecordingOutput, TUIHarness
+
+    if kind == "event":
+        event = MagicMock()
+        event.items.return_value = [
+            (
+                "event-1",
+                MagicMock(
+                    event_type="PythonOutput",
+                    model_dump=lambda: {
+                        "event_type": "PythonOutput",
+                        "stdout": "alpha beta gamma",
+                    },
+                ),
+            )
+        ]
+        view = EventExplorerView(event)
+    else:
+        view = TodoExplorerView(
+            [
+                TodoExplorerRow(
+                    id="todo-123",
+                    title="Copy me",
+                    status="open",
+                    deps=(),
+                    created_at="now",
+                    notes="alpha beta gamma",
+                    comments=(),
+                    search_text="Copy me alpha beta gamma",
+                )
+            ]
+        )
+
+    async with TUIHarness(output=MutableRecordingOutput(80, 24), full_screen=True) as harness:
+        opened = asyncio.create_task(harness.app.open_subview(view))
+        await harness.wait_for(lambda: isinstance(harness.app.active_subview, ExplorerBrowser))
+        browser = harness.app.active_subview
+        await harness.wait_for(lambda: browser.preview_control.viewport == (79, 9))
+
+        # SGR coordinates are one-based. The preview occupies terminal rows
+        # 15..23. Packets go through prompt_toolkit's key-binding dispatcher,
+        # rather than calling the UIControl directly.
+        harness._pipe.send_text("\x1b[<0;2;15M")
+        await harness.wait_for(lambda: browser.preview_control.dragging)
+        harness._pipe.send_text("\x1b[<32;10;15M")
+        await harness.wait_for(
+            lambda: bool(
+                browser._detail_transcript
+                and browser._detail_transcript.selected_text()
+            )
+        )
+        harness._pipe.send_text("\x1b[<0;10;15m")
+        await harness.wait_for(lambda: not browser.preview_control.dragging)
+
+        assert harness.app._app.clipboard.get_data().text
+        await harness.press("escape")
+        await asyncio.wait_for(opened, 1)
