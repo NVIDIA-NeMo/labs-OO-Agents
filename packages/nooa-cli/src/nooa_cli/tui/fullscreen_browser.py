@@ -29,15 +29,19 @@ from prompt_toolkit.widgets import Frame
 from .fullscreen_transcript import FullscreenTranscriptModel
 from .terminal_safety import sanitize_live_text
 
-_MULTILINE_RUN_RE = re.compile(r"\s*\n\s*")
+_MULTILINE_RUN_RE = re.compile(r"[^\S\n\r]*(?:\r\n|\n|\r)+[^\S\n\r]*")
 
 
 def _collapse_multiline(text: str) -> str:
-    """Flatten embedded newlines/tabs in a list row without touching padding.
+    """Flatten embedded line breaks in a list row without touching padding.
 
     ``format_row`` output is padded for column alignment; collapsing *all*
-    whitespace would shred those columns. Only line-boundary whitespace is
-    normalized so a hostile multiline row still renders as one line.
+    whitespace would shred those columns. Only line-boundary whitespace
+    (``\n``, ``\r\n``, and bare ``\r``) is normalized so a hostile
+    multiline row still renders as one line. Must run on the *raw* row text:
+    ``sanitize_live_text`` renders control characters as visible escapes
+    (a real ``\r`` becomes the two characters ``\\r``), after which the
+    line break can no longer be recognized.
     """
     return _MULTILINE_RUN_RE.sub(" ", text).strip()
 
@@ -753,8 +757,8 @@ class ExplorerBrowser:
             # and highlighted text would shift right by one on selection.
             text = (
                 marker
-                + _collapse_multiline(
-                    sanitize_live_text(
+                + sanitize_live_text(
+                    _collapse_multiline(
                         self.view.format_row(self.model.rows[row_index], max(1, width - 2))
                     )
                 )

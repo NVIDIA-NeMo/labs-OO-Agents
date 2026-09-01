@@ -2639,6 +2639,10 @@ class TUIApplication:
 
         @kb.add(Keys.Vt100MouseEvent, filter=subview_active, eager=True)
         def _(event):
+            # Global F6 native-selection mode defers to the terminal first;
+            # otherwise the active view owns routing when it enables mouse.
+            if self._is_fullscreen and not self._fullscreen_mouse_navigation:
+                return NotImplemented
             view = self._active_subview
             if view is not None and getattr(view, "mouse_support", True):
                 return vt100_mouse_handler(event)
@@ -2646,6 +2650,8 @@ class TUIApplication:
 
         @kb.add(Keys.WindowsMouseEvent, filter=subview_active, eager=True)
         def _(event):
+            if self._is_fullscreen and not self._fullscreen_mouse_navigation:
+                return NotImplemented
             view = self._active_subview
             if view is not None and getattr(view, "mouse_support", True):
                 return windows_mouse_handler(event)
