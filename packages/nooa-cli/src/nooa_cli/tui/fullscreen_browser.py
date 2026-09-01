@@ -783,6 +783,10 @@ class ExplorerBrowser:
             return [("class:fullscreen-browser.empty", "No item selected")]
         return transcript.formatted_text(width=max(1, width), height=max(1, height))
 
+    def _selected_preview_text(self, transcript: FullscreenTranscriptModel) -> str:
+        """Return semantic text for the shared preview-selection lifecycle."""
+        return transcript.selected_text()
+
     def preview_selection(self, action: str, x: int, y: int) -> None:
         width, height = self.preview_control.viewport
         transcript = self._preview_transcript(width, height)
@@ -795,7 +799,7 @@ class ExplorerBrowser:
         else:
             transcript.update_selection(x=x, y=y, width=width, height=height)
         if action == "finish":
-            selected = transcript.selected_text()
+            selected = self._selected_preview_text(transcript)
             transcript.clear_selection()
             if selected:
                 self.app.clipboard.set_text(selected)
