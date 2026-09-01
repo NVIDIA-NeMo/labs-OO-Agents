@@ -408,6 +408,29 @@ def _preview_lines(row: ResumePickerRow | None, width: int) -> list[list[tuple[s
     return lines
 
 
+def _semantic_preview_selection(text: str) -> str:
+    """Remove conversation-preview chrome from selected text."""
+    output: list[str] = []
+    in_user_bar = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and set(stripped) <= {"▔"}:
+            in_user_bar = True
+            continue
+        if stripped and set(stripped) <= {"▁"}:
+            in_user_bar = False
+            continue
+        if in_user_bar or line.startswith(" ❯ "):
+            if line.startswith(" ❯ "):
+                line = line[3:]
+            elif in_user_bar and line.startswith("   "):
+                line = line[3:]
+            output.append(line.rstrip())
+        elif stripped != "OO:":
+            output.append(line)
+    return "\n".join(output).strip("\n")
+
+
 def render_resume_picker(model: ResumePickerModel, width: int, height: int) -> str:
     """Render a deterministic text snapshot used by unit tests and narrow fallbacks."""
     if width < 48 or height < 13:
@@ -568,10 +591,12 @@ class ResumePicker:
         app: Any,
         *,
         selection_copy_callback: Callable[[str], None] | None = None,
+        selection_status: Callable[[], str] | None = None,
     ):
         self.app = app
         self.model = ResumePickerModel(rows)
         self._selection_copy_callback = selection_copy_callback
+        self._selection_status = selection_status
         self._preview_models: dict[tuple[str, int], Any] = {}
         self._preview_tasks: dict[tuple[str, int], Any] = {}
         self.native_selection = False
@@ -687,6 +712,9 @@ class ResumePicker:
         self.invalidate()
 
     def _help_text(self):
+        copy_status = self._selection_status() if self._selection_status is not None else ""
+        if copy_status:
+            return copy_status
         columns = self.app.output.get_size().columns
         if self.option_cursor is not None:
             if columns < 72:
@@ -945,7 +973,8 @@ class ResumePicker:
         else:
             transcript.update_selection(x=x, y=y, width=width, height=height)
         if action == "finish":
-            selected = transcript.selected_text()
+            selected = _semantic_preview_selection(transcript.selected_text())
+            transcript.clear_selection()
             if selected:
                 self.app.clipboard.set_text(selected)
                 if self._selection_copy_callback is not None:
