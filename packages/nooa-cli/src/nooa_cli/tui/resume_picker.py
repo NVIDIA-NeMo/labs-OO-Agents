@@ -767,6 +767,9 @@ class ResumePicker(ExplorerBrowser):
         self.small_control = FormattedTextControl(
             [("class:fullscreen-browser.too-small", "Terminal too small")], focusable=True
         )
+        # The session list fills its pane like every other browser (the
+        # shell's compact five-row default capped it short of the divider).
+        self.picker_list_height = Dimension(min=1, preferred=5, weight=1)
         self.container = build_fullscreen_browser(
             app=self.app,
             title_control=self.title_control,
@@ -781,6 +784,7 @@ class ResumePicker(ExplorerBrowser):
             active_rail=self._active_rail,
             small_control=self.small_control,
             small_text=self._small_text,
+            list_height=self.picker_list_height,
         )
 
     def _query_changed(self) -> None:
