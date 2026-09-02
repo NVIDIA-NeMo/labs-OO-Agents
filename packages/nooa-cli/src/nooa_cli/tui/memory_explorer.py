@@ -160,9 +160,10 @@ class MemoryExplorerView(ExplorerView):
         self._forget = forget
         self._mark_done = mark_done
         # Destructive actions arm on the first press and fire on the second
-        # press of the same key on the same row, so no invisible pane/query
-        # state can trigger an unconfirmed forget or mark-done.
-        self._pending_confirm: tuple[str, str] | None = None
+        # press of the same key on the same row within the gesture window,
+        # so no invisible pane/query state — and no stale arm from minutes
+        # ago — can trigger an unconfirmed forget or mark-done.
+        self._pending_confirm: tuple[str, str, float] | None = None
         model = ExplorerModel(rows)
         title = "Memory Explorer"
         if last_reflection:
@@ -269,22 +270,30 @@ class MemoryExplorerView(ExplorerView):
                 lines.append(f"  → {target_id[:8]} {edge_type} ({weight:.2f})")
         return lines
 
+    _CONFIRM_WINDOW_SECONDS = 10.0
+
     def _consume_confirmation(self, action: str, row: Any) -> bool:
         """Return True when this press confirms the pending armed action.
 
         The first press of an action key arms it; the same key on the same
         row must follow within the gesture window to fire. Any other key
-        (including typing "f"/"d" into the search buffer) disarms.
+        (including typing "f"/"d" into the search buffer) disarms, and an
+        arm older than the window expires instead of firing.
         """
         pending = self._pending_confirm
         self._pending_confirm = None
-        return pending == (action, id(row))
+        if pending is None:
+            return False
+        pending_action, row_id, armed_at = pending
+        if pending_action != action or row_id != id(row):
+            return False
+        return (time.time() - armed_at) <= self._CONFIRM_WINDOW_SECONDS
 
     def pending_confirmation_hint(self) -> str:
         pending = self._pending_confirm
         if pending is None:
             return ""
-        action, row_id = pending
+        action, row_id, _armed_at = pending
         row = next((row for row in self.model.rows if id(row) == row_id), None)
         if row is None:
             self._pending_confirm = None
@@ -298,7 +307,7 @@ class MemoryExplorerView(ExplorerView):
             return "ignored"
         if action == "text:f":
             if not self._consume_confirmation(action, row):
-                self._pending_confirm = (action, id(row))
+                self._pending_confirm = (action, id(row), time.time())
                 return "handled"
             self._forget(row.id)
             self.model.rows.remove(row)
@@ -311,7 +320,7 @@ class MemoryExplorerView(ExplorerView):
                 self._pending_confirm = None
                 return "ignored"
             if not self._consume_confirmation(action, row):
-                self._pending_confirm = (action, id(row))
+                self._pending_confirm = (action, id(row), time.time())
                 return "handled"
             self._mark_done(row.id)
             # The search tag mirrors the CURRENT status (todo:open / todo:dropped
