@@ -15,7 +15,6 @@ from .explorer_base import (
     ExplorerOption,
     ExplorerView,
     highlight_style_code,
-    highlight_terms,
     search_terms,
     wrap_plain_line,
 )
@@ -811,7 +810,7 @@ def detail_match_lines(row: EventExplorerRow, width: int, query: str) -> list[in
     if not terms:
         return []
     lower_terms = [term.lower() for term in terms]
-    lines = wrapped_detail_lines(row, width)
+    lines = _styled_plain_lines(row, width)
     matches: list[int] = []
     for i, line in enumerate(lines):
         lower = line.lower()
@@ -832,7 +831,7 @@ def detail_match_occurrences(
         "|".join(re.escape(t) for t in sorted(terms, key=len, reverse=True)), re.IGNORECASE
     )
     matches: list[tuple[int, int]] = []
-    for line_no, line in enumerate(wrapped_detail_lines(row, width)):
+    for line_no, line in enumerate(_styled_plain_lines(row, width)):
         for occurrence_no, _match in enumerate(pattern.finditer(line)):
             matches.append((line_no, occurrence_no))
     return matches
@@ -942,32 +941,10 @@ def _style_event_header_line(lines: list[str], width: int) -> list[str]:
     return styled
 
 
-def highlighted_detail_lines(
-    row: EventExplorerRow,
-    width: int,
-    query: str = "",
-    current_match_line: int | None = None,
-    current_match_occurrence: int | None = None,
-) -> list[str]:
-    """Return detail lines with code and Python-repr event syntax highlighted."""
+def _styled_detail_lines(row: EventExplorerRow, width: int) -> list[str]:
+    """Return the detail pane's styled rendering (markdown or syntax colors)."""
     width = max(int(width), 20)
     lines: list[str] = []
-    terms = search_terms(query)
-
-    def mark(line: str) -> str:
-        line_no = len(lines)
-        if current_match_line is not None and line_no == current_match_line:
-            return highlight_terms_with_current(line, terms, current_match_occurrence)
-        return highlight_terms(line, terms)
-
-    if terms:
-        # Search navigation is computed from wrapped plain text. Use the same
-        # representation for search rendering so the selected occurrence index
-        # stays correct even when many matches share one line.
-        for line in wrapped_detail_lines(row, width):
-            lines.append(mark(line))
-        return lines
-
     if row.markdown is not None:
         rendered_lines = _render_markdown(row.markdown, width).splitlines() or [""]
         return _style_event_header_line(rendered_lines, width)
@@ -981,4 +958,95 @@ def highlighted_detail_lines(
     lines.append("event:")
     rendered = _highlight_syntax(row.detail, width, "python")
     lines.extend(rendered.splitlines() or [""])
+    return lines
+
+
+def _styled_plain_lines(row: EventExplorerRow, width: int) -> list[str]:
+    """The styled rendering as plain text — the search-navigation substrate."""
+    return [_strip_ansi(line) for line in _styled_detail_lines(row, width)]
+
+
+def _plain_offset_map(styled: str) -> list[int]:
+    """Map each plain-text character index to its position in a styled string.
+
+    ANSI escape sequences are skipped so search highlighting can locate term
+    matches in the *visible* text of an already-styled line.
+    """
+    import re as _re
+
+    escapes = [m.span() for m in _re.finditer(r"\x1b\[[0-9;]*m", styled)]
+    mapping: list[int] = []
+    cursor = 0
+    for start, stop in escapes:
+        mapping.extend(range(cursor, start))
+        cursor = stop
+    mapping.extend(range(cursor, len(styled)))
+    return mapping
+
+
+def _highlight_line_terms(
+    styled: str, terms: list[str], *, current_occurrence: int | None = None
+) -> str:
+    """Insert search-match SGRs into an already-styled line.
+
+    Terms are located in the line's visible text; the match style wraps the
+    matched span in place, so markdown/syntax colors survive searching.
+    """
+    import re as _re
+
+    if not terms:
+        return styled
+    offsets = _plain_offset_map(styled)
+    plain = "".join(styled[index] for index in offsets)
+    pattern = _re.compile(
+        "|".join(_re.escape(t) for t in sorted(terms, key=len, reverse=True)),
+        _re.IGNORECASE,
+    )
+    insertions: list[tuple[int, str]] = []
+    occurrence = 0
+    for match in pattern.finditer(plain):
+        current = current_occurrence is not None and occurrence == current_occurrence
+        start, stop = offsets[match.start()], offsets[match.end() - 1] + 1
+        insertions.append((start, highlight_style_code(current=current)))
+        insertions.append((stop, "\x1b[0m"))
+        occurrence += 1
+    if not insertions:
+        return styled
+    out: list[str] = []
+    cursor = 0
+    for position, text in sorted(insertions, key=lambda item: item[0]):
+        out.append(styled[cursor:position])
+        out.append(text)
+        cursor = position
+    out.append(styled[cursor:])
+    return "".join(out)
+
+
+def highlighted_detail_lines(
+    row: EventExplorerRow,
+    width: int,
+    query: str = "",
+    current_match_line: int | None = None,
+    current_match_occurrence: int | None = None,
+) -> list[str]:
+    """Return detail lines with code and Python-repr event syntax highlighted.
+
+    With a search query, match highlights are layered on top of the same
+    styled rendering used without one, so the pane keeps its colors while
+    searching. Search navigation and rendering share the styled substrate,
+    keeping the selected occurrence index correct.
+    """
+    width = max(int(width), 20)
+    styled = _styled_detail_lines(row, width)
+    terms = search_terms(query)
+    if not terms:
+        return styled
+    lines: list[str] = []
+    for line_no, line in enumerate(styled):
+        if current_match_line is not None and line_no == current_match_line:
+            lines.append(
+                _highlight_line_terms(line, terms, current_occurrence=current_match_occurrence)
+            )
+        else:
+            lines.append(_highlight_line_terms(line, terms))
     return lines

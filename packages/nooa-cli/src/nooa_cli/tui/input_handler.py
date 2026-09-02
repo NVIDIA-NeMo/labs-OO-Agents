@@ -277,7 +277,10 @@ def create_prompt_style() -> Style:
 
             "fullscreen-browser.separator": COLORS["surface2"],
             "fullscreen-browser.active-rail": COLORS["surface1"],
-            "fullscreen-browser.active-rail-active": "",
+            # The active pane's rail is the one deliberate accent in the
+            # browser: the theme's highlight color (lavender on mocha),
+            # switching with the active palette.
+            "fullscreen-browser.active-rail-active": f"{COLORS['lavender']} bold",
 
             "fullscreen-browser.preview": "",
             "fullscreen-browser.preview-user": f"bg:{COLORS['surface2']}",
