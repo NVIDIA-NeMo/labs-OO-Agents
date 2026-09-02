@@ -160,6 +160,56 @@ async def test_shared_explorer_f2_toggles_native_selection_and_cancels_drag() ->
 
 
 @pytest.mark.asyncio
+async def test_subview_alt_chords_do_not_close_the_view() -> None:
+    """Alt-chords flow through their bindings; only a lone Esc closes.
+
+    Regression for the eager bare-Escape swallowing every Alt/Meta chord:
+    Option+Backspace used to close the view instead of deleting in the
+    search buffer.
+    """
+    from types import SimpleNamespace
+
+    from nooa_cli.tui.todo_explorer import TodoExplorerView
+
+    from .tui_app_harness import MutableRecordingOutput, TUIHarness
+
+    view = TodoExplorerView(
+        [
+            SimpleNamespace(
+                id="t1",
+                title="Row",
+                status="open",
+                deps=(),
+                created_at="now",
+                notes="note",
+                comments=(),
+                search_text="Row",
+            )
+        ]
+    )
+    async with TUIHarness(output=MutableRecordingOutput(80, 24), full_screen=True) as harness:
+        opened = asyncio.create_task(harness.app.open_subview(view))
+        await harness.wait_for(lambda: isinstance(harness.app.active_subview, ExplorerBrowser))
+        await harness.type_keys("abc")
+        await harness.wait_for(lambda: view.model.query == "abc")
+
+        # Alt+Backspace in one read: deletes, view stays open.
+        harness._pipe.send_text("\x1b\x7f")
+        await asyncio.sleep(0.3)
+        assert harness.app.active_subview is not None, "Alt+Backspace closed the view"
+        assert view.model.query == "ab"
+
+        # Alt+X in one read: absorbed (typed through its own binding), view stays open.
+        harness._pipe.send_text("\x1bx")
+        await asyncio.sleep(0.3)
+        assert harness.app.active_subview is not None, "Alt+X closed the view"
+
+        # A lone Esc still closes the view.
+        harness._pipe.send_text("\x1b")
+        await asyncio.wait_for(opened, 2)
+
+
+@pytest.mark.asyncio
 async def test_preview_autoscroll_extends_selection_between_ticks() -> None:
     """Edge autoscroll must extend the selection, not just scroll the preview."""
     import asyncio as _asyncio
