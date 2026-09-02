@@ -159,6 +159,10 @@ class MemoryExplorerView(ExplorerView):
     ) -> None:
         self._forget = forget
         self._mark_done = mark_done
+        # Destructive actions arm on the first press and fire on the second
+        # press of the same key on the same row, so no invisible pane/query
+        # state can trigger an unconfirmed forget or mark-done.
+        self._pending_confirm: tuple[str, str] | None = None
         model = ExplorerModel(rows)
         title = "Memory Explorer"
         if last_reflection:
@@ -170,8 +174,8 @@ class MemoryExplorerView(ExplorerView):
             no_match_message="No memories matching {query!r}.",
             list_ratio=0.4,
             actions={
-                "forget": "f forget",
-                "done": "d todo done",
+                "forget": "f×2 forget",
+                "done": "d×2 todo done",
             },
         )
         super().__init__(model, config)
@@ -269,10 +273,37 @@ class MemoryExplorerView(ExplorerView):
                 lines.append(f"  → {target_id[:8]} {edge_type} ({weight:.2f})")
         return lines
 
+    def _consume_confirmation(self, action: str, row: Any) -> bool:
+        """Return True when this press confirms the pending armed action.
+
+        The first press of an action key arms it; the same key on the same
+        row must follow within the gesture window to fire. Any other key
+        (including typing "f"/"d" into the search buffer) disarms.
+        """
+        pending = self._pending_confirm
+        self._pending_confirm = None
+        return pending == (action, id(row))
+
+    def pending_confirmation_hint(self) -> str:
+        pending = self._pending_confirm
+        if pending is None:
+            return ""
+        action, row_id = pending
+        row = next((row for row in self.model.rows if id(row) == row_id), None)
+        if row is None:
+            self._pending_confirm = None
+            return ""
+        verb = "forget" if action == "text:f" else "mark done"
+        title = (getattr(row, "title", None) or row.id)[:40]
+        return f"Press {action[-1]} again to {verb} {title!r}"
+
     def handle_action(self, action: str, row: Any) -> SubviewKeyResult:
         if row is None:
             return "ignored"
         if action == "text:f":
+            if not self._consume_confirmation(action, row):
+                self._pending_confirm = (action, id(row))
+                return "handled"
             self._forget(row.id)
             self.model.rows.remove(row)
             self.model.set_query(self.model.query)  # rebuild matches without the row
@@ -280,6 +311,9 @@ class MemoryExplorerView(ExplorerView):
         if action == "text:d":
             if row.type != "todo" or row.status == "done":
                 return "ignored"
+            if not self._consume_confirmation(action, row):
+                self._pending_confirm = (action, id(row))
+                return "handled"
             self._mark_done(row.id)
             # The search tag mirrors the CURRENT status (todo:open / todo:dropped
             # — see build_memory_rows), so replace whatever tag the row was
@@ -289,4 +323,5 @@ class MemoryExplorerView(ExplorerView):
             row.search_text = row.search_text.replace(old_tag, "todo:done", 1)
             self.model.set_query(self.model.query)
             return "handled"
+        self._pending_confirm = None
         return "ignored"

@@ -105,6 +105,9 @@ def test_action_d_marks_todo_done_round_trip() -> None:
     todo = next(r for r in view.model.rows if r.id == ids["todo"])
     # Route through the real key path: "d" arrives as a text key.
     view.model.cursor = view.model.matches.index(view.model.rows.index(todo))
+    # Destructive actions arm on the first press and fire on the second.
+    assert view.handle_key("text", "d") == "handled"
+    assert calls["done"] == []
     assert view.handle_key("text", "d") == "handled"
 
     assert calls["done"] == [ids["todo"]]
@@ -120,12 +123,37 @@ def test_action_d_marks_todo_done_round_trip() -> None:
     assert calls["done"] == [ids["todo"]]
 
 
+def test_destructive_action_disarms_on_any_other_key() -> None:
+    """A first press only arms; a different key must disarm, never fire.
+
+    Regression for the unconfirmed destructive fire: one 'f' press used to
+    permanently forget a memory with no confirmation.
+    """
+    agent, mgr, ids = _seeded_manager()
+    view, calls = _view(agent, mgr)
+
+    skill = next(r for r in view.model.rows if r.id == ids["skill"])
+    view.model.cursor = view.model.matches.index(view.model.rows.index(skill))
+    assert view.handle_key("text", "f") == "handled"
+    assert calls["forgot"] == []
+    assert "again to forget" in view.pending_confirmation_hint()
+
+    # A different key disarms instead of firing.
+    assert view.handle_key("text", "x") == "ignored"
+    assert view.handle_key("text", "f") == "handled"  # re-arms
+    assert calls["forgot"] == []
+    assert view.handle_key("text", "f") == "handled"  # now fires
+    assert calls["forgot"] == [ids["skill"]]
+
+
 def test_action_f_forgets_memory_round_trip() -> None:
     agent, mgr, ids = _seeded_manager()
     view, calls = _view(agent, mgr)
 
     skill = next(r for r in view.model.rows if r.id == ids["skill"])
     view.model.cursor = view.model.matches.index(view.model.rows.index(skill))
+    assert view.handle_key("text", "f") == "handled"
+    assert calls["forgot"] == []
     assert view.handle_key("text", "f") == "handled"
 
     assert calls["forgot"] == [ids["skill"]]
@@ -202,6 +230,9 @@ def test_action_d_on_dropped_todo_keeps_search_text_consistent() -> None:
 
     todo = next(r for r in view.model.rows if r.id == ids["todo"])
     assert "todo:dropped" in todo.search_text  # row built from the dropped state
+    # Destructive actions arm on the first press and fire on the second.
+    assert view.handle_action("text:d", todo) == "handled"
+    assert calls["done"] == []
     assert view.handle_action("text:d", todo) == "handled"
 
     assert calls["done"] == [ids["todo"]]

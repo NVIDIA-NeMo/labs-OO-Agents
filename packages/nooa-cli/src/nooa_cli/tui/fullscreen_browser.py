@@ -620,6 +620,11 @@ class ExplorerBrowser:
         copy_status = self._selection_status() if self._selection_status is not None else ""
         if copy_status:
             return copy_status
+        confirm_hint = getattr(self.view, "pending_confirmation_hint", None)
+        if callable(confirm_hint):
+            hint = confirm_hint()
+            if hint:
+                return hint
         if self.option_cursor is not None:
             return "Options · ←→ select · ↑↓/Space change · Enter/Esc done"
         actions = " · ".join(self.view.config.actions.values())

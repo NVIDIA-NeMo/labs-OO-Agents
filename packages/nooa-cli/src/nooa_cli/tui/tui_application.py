@@ -2493,6 +2493,29 @@ class TUIApplication:
                 count = picker.buffer.document.find_previous_word_beginning()
                 picker.buffer.delete_before_cursor(count=abs(count or -1))
 
+        # Non-eager absorber for every other Alt/Meta chord: without it, a
+        # chord like Alt+X falls back to the bare-Esc binding below (prompt_
+        # toolkit's retry loop fires the longest prefix match), canceling the
+        # picker instead of ignoring the chord. A standalone Esc still fires
+        # after the VT prefix timeout.
+        @kb.add("escape", Keys.Any, filter=resume_picker_active)
+        def _(event):
+            last = event.key_sequence[-1] if event.key_sequence else None
+            if last is not None and (
+                last.key == Keys.Backspace or last.data in ("\x7f", "\b")
+            ):
+                picker = self._resume_picker
+                if (
+                    picker is not None
+                    and picker.active_control == "list"
+                    and picker.option_cursor is None
+                ):
+                    count = picker.buffer.document.find_previous_word_beginning()
+                    picker.buffer.delete_before_cursor(count=abs(count or -1))
+
+        # Non-eager so the Alt+Backspace word-delete chord above can win the
+        # prefix race; a standalone Esc still fires after the VT parser times
+        # out on the prefix (ttimeoutlen is already shortened for this).
         @kb.add("escape", filter=resume_picker_active)
         def _(event):
             picker = self._resume_picker
@@ -2678,9 +2701,28 @@ class TUIApplication:
         def _(event):
             self._insert_bracketed_paste(event.current_buffer, event.data)
 
+        # Alt/Meta chords arrive as an ESC-prefixed second key in one read.
+        # prompt_toolkit gives EAGER bindings priority and discards longer
+        # matches, so the moment ESC enters the key buffer this binding fires
+        # immediately — which used to cancel the view on every Alt-chord
+        # (Option+Backspace deleted the dialog instead of a character).
+        # Keep Escape eager (a non-eager variant loses the ESC prefix to the
+        # eager Keys.Any wildcard above, which swallows it as text) but
+        # swallow it when the same read carried more keys: this Esc is the
+        # prefix of a chord, not a close gesture. The pending keys then flow
+        # through their own bindings — Alt+Backspace deletes in the search
+        # buffer, Alt+letter types, mouse packets route to the view.
         @kb.add("escape", filter=subview_active, eager=True)
         def _(event):
-            self._subview_key(event, "escape")
+            pending = [
+                kp
+                for kp in event.key_processor.input_queue
+                if kp.key is not Keys.CPRResponse
+            ]
+            if not pending:
+                self._subview_key(event, "escape")
+                return
+            # Chord continuation pending: absorb this Esc only.
 
         @kb.add("q", filter=subview_active, eager=True)
         def _(event):
