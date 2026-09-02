@@ -174,6 +174,28 @@ def _write_trajectory(agent: Any) -> None:
     logger.info("Trajectory written → %s (%d events)", out, len(events))
 
 
+def _write_behavior_report(model: str, agent_type: str) -> None:
+    """Write deterministic interface-behavior metrics beside the trajectory.
+
+    Behavior analysis is observability only: malformed or missing artifacts must
+    never turn a completed benchmark task into a failure.
+    """
+    trajectory = LOGS_DIR / "trajectory.json"
+    try:
+        from nooa_bench.behavior_analyzer import analyze_trajectory
+
+        change_id = os.environ.get("NOOA_INTERFACE_CHANGE_ID", "baseline")
+        report = analyze_trajectory(
+            trajectory, model=model, agent_type=agent_type, change_id=change_id
+        )
+        out = LOGS_DIR / "behavior.json"
+        out.write_text(json.dumps(report.to_dict(), indent=2))
+    except Exception as e:  # noqa: BLE001 - analysis must not fail the benchmark
+        logger.warning("Could not write interface behavior report: %s", e)
+        return
+    logger.info("Behavior report written → %s", out)
+
+
 def _write_answer(result: dict[str, Any]) -> None:
     """Write the agent's answer to /app/answer.txt for Harbor's verifier."""
     answer = result.get("answer") or result.get("response", "")
@@ -230,6 +252,7 @@ async def _run(
         result.update(get_task_tokens())
         _write_result(result, model, agent_type)
         _write_trajectory(agent)
+        _write_behavior_report(model, agent_type)
         _write_answer(result)
 
         if result.get("success"):

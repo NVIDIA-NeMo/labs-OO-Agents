@@ -707,6 +707,7 @@ async def test_connect_prompts_for_missing_secret_and_saves_it(tmp_path, monkeyp
     project_dir = tmp_path / ".nooa"
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
     monkeypatch.delenv("NVIDIA_INFERENCE_API_KEY", raising=False)
+    monkeypatch.delenv("NVIDIA_INTERNAL_API_KEY", raising=False)
     monkeypatch.setattr(
         "nooa_cli.tui.model_catalog.fetch_model_catalog",
         lambda *_args, **_kwargs: (
@@ -748,6 +749,7 @@ async def test_connect_cancel_after_secret_prompt_does_not_save_secret(
     project_dir = tmp_path / ".nooa"
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
     monkeypatch.delenv("NVIDIA_INFERENCE_API_KEY", raising=False)
+    monkeypatch.delenv("NVIDIA_INTERNAL_API_KEY", raising=False)
     monkeypatch.setattr(
         "nooa_cli.tui.model_catalog.fetch_model_catalog",
         lambda *_args, **_kwargs: (
@@ -778,6 +780,7 @@ async def test_connect_cancel_alias_replacement_does_not_save_secret(tmp_path, m
     project_dir = tmp_path / ".nooa"
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
     monkeypatch.delenv("NVIDIA_INFERENCE_API_KEY", raising=False)
+    monkeypatch.delenv("NVIDIA_INTERNAL_API_KEY", raising=False)
     project_dir.mkdir(parents=True)
     (project_dir / "llm_config.yaml").write_text(
         "models:\n"

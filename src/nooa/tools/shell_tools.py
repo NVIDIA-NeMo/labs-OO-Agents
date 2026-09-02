@@ -42,6 +42,39 @@ from nooa.tools._bash_session import BashSession
 from nooa.tools._results import StreamDone, StreamEvent
 
 
+class PathResolutionError(FileNotFoundError):
+    """A path failure with the resolution base made explicit."""
+
+    def __init__(
+        self,
+        operation: str,
+        requested_path: str | Path,
+        resolved_path: str | Path,
+        *,
+        base_name: str,
+        base_path: str | Path,
+        reason: str | None = None,
+    ) -> None:
+        resolved = Path(resolved_path)
+        self.reason = reason or ("not_a_file" if resolved.exists() else "not_found")
+        self.code = "PATH_NOT_FILE" if self.reason == "not_a_file" else "PATH_NOT_FOUND"
+        self.operation = operation
+        self.requested_path = str(requested_path)
+        self.resolved_path = str(resolved)
+        self.base_name = base_name
+        self.base_path = str(base_path)
+        self.message = (
+            f"[{self.code}] {operation}: path is {self.reason.replace('_', ' ')}: "
+            f"{self.requested_path!r}; resolved to {self.resolved_path!r} against "
+            f"{base_name}={self.base_path!r}"
+        )
+        super().__init__(self.message)
+        self.filename = self.resolved_path
+
+    def __str__(self) -> str:
+        return self.message
+
+
 class FileWrite:
     """Result of a write/replace operation.
 
