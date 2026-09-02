@@ -134,6 +134,65 @@ def test_filter_and_sort_reuse_cached_query_matches(monkeypatch) -> None:
     model.toggle_filter()
 
 
+@pytest.mark.asyncio
+async def test_resume_list_fills_its_pane_on_tall_terminals() -> None:
+    """The session list grows with the terminal instead of capping at 5."""
+    from nooa_cli.tui import session_manager as sm
+
+    sessions = [
+        SimpleNamespace(
+            id=f"s{i:08d}",
+            name=f"Session {i}",
+            model="m",
+            agent="A",
+            working_dir=str(Path.cwd()),
+            started_at=1,
+            last_active=float(100 + i),
+            turn_count=1,
+        )
+        for i in range(12)
+    ]
+    sm.SessionManager.list_sessions = classmethod(lambda cls, limit=None: sessions)
+    sm.SessionManager.is_active = classmethod(lambda cls, value: False)
+    sm.SessionManager.load_turns = classmethod(
+        lambda cls, value, limit=12: [SimpleNamespace(role="agent", content="x")]
+    )
+
+    from .tui_app_harness import MutableRecordingOutput, TUIHarness
+
+    async with TUIHarness(output=MutableRecordingOutput(100, 40), full_screen=True) as harness:
+        opened = asyncio.create_task(harness.app.open_session_resume_dialog())
+        await harness.wait_for(lambda: harness.app._resume_picker is not None)
+        picker = harness.app._resume_picker
+        await harness.wait_for(lambda: picker.list_control.viewport[1] > 5)
+
+        screen = harness.app._app.renderer.last_rendered_screen
+        rows = [
+            "".join(line[x].char for x in sorted(line)).rstrip()
+            for _y, line in sorted(screen.data_buffer.items())
+        ]
+        # Sessions run from the header to the list separator: the pane holds
+        # more than the old five-row cap.
+        session_rows = [r for r in rows if "Session" in r and "✓" in r]
+        assert len(session_rows) > 5
+        await harness.press("escape")
+        await asyncio.wait_for(opened, 2)
+
+
+def test_home_and_end_route_through_shared_handle_key() -> None:
+    """Home/End jump the list through the shared dispatch, like explorers."""
+    from nooa_cli.tui.fullscreen_browser import ExplorerBrowser
+
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    assert ResumePicker.handle_key is ExplorerBrowser.handle_key  # shared dispatch
+    picker = ResumePicker([row(str(i), f"title {i}") for i in range(6)], app)
+    assert picker.handle_key("end") == "handled"
+    assert picker.model.selected == 5
+    assert picker.handle_key("home") == "handled"
+    assert picker.model.selected == 0
+
+
 def test_home_and_end_jump_the_session_list() -> None:
     """Home/End jump to the first/last session like every explorer."""
     app = MagicMock()
