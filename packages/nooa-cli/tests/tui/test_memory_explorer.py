@@ -123,6 +123,30 @@ def test_action_d_marks_todo_done_round_trip() -> None:
     assert calls["done"] == [ids["todo"]]
 
 
+def test_armed_confirm_does_not_leak_across_rows() -> None:
+    """Arming on row A must never fire on row B.
+
+    The arm is keyed to (action, id(row)); moving to another row and
+    pressing the same key re-arms the new row instead of firing.
+    """
+    agent, mgr, ids = _seeded_manager()
+    view, calls = _view(agent, mgr)
+    rows = list(view.model.rows)
+
+    first = rows[0]
+    second = rows[1]
+    # Arm on the first row.
+    assert view.handle_action("text:f", first) == "handled"
+    assert calls["forgot"] == []
+    # Press f on a different row: re-arms that row, never fires on either.
+    assert view.handle_action("text:f", second) == "handled"
+    assert calls["forgot"] == []
+    # A second press on the second row fires exactly there.
+    assert view.handle_action("text:f", second) == "handled"
+    assert calls["forgot"] == [second.id]
+    assert first.id in {r.id for r in view.model.rows}
+
+
 def test_destructive_action_disarms_on_any_other_key() -> None:
     """A first press only arms; a different key must disarm, never fire.
 
