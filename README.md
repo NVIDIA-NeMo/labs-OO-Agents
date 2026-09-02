@@ -140,7 +140,7 @@ NOOA validates generated code (AST checks) and applies module deny-lists before 
 
 ### 1. Choose a model
 
-Choose from supported hosted or local [LiteLLM-supported](https://docs.litellm.ai/) model:
+Choose from supported hosted or local [LiteLLM-supported](https://docs.litellm.ai/) models:
 
 ```python
 from nooa.unifiedllm.registry import get_llm_client
@@ -150,6 +150,9 @@ llm = get_llm_client("gpt-5-mini")                                              
 llm = get_llm_client("ollama_chat/qwen3:1.7b", api_base="http://localhost:11434")   # Ollama    (no key)
 llm = get_llm_client("hosted_vllm/Qwen/Qwen3-1.7B", api_base="http://localhost:8000/v1")  # vLLM (no key)
 ```
+
+For setup details and the differences between Ollama and vLLM API key/base URL
+handling, see [Running NOOA With Local Models](docs/local-models.md).
 
 ### 2. Your first agent
 
