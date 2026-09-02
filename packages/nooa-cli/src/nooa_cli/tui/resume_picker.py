@@ -158,7 +158,6 @@ class ResumePickerModel:
         self.state_filter: Literal["detached", "attached", "all"] = "detached"
         self.sort_updated = True
         self.selected = self.list_offset = 0
-        self.preview_offset = 10**9
         self._query_matches: list[tuple[int, str, tuple[int, ...]] | None] = []
         self._matches: list[FieldMatch] = []
         self.set_query("")
@@ -250,7 +249,6 @@ class ResumePickerModel:
         ids = [match.row.id for match in self._matches]
         self.selected = ids.index(previous_id) if previous_id in ids else 0
         self.list_offset = min(self.list_offset, self.selected)
-        self.preview_offset = 10**9
 
     def cycle_filter(self, delta: int = 1) -> None:
         filters: tuple[Literal["detached", "attached", "all"], ...] = (
@@ -274,23 +272,19 @@ class ResumePickerModel:
         if not self._matches or not delta:
             return
         self.selected = (self.selected + delta) % len(self._matches)
-        self.preview_offset = 10**9
 
     def jump_home(self) -> None:
         if self._matches:
             self.selected = 0
             self.list_offset = 0
-            self.preview_offset = 10**9
 
     def jump_end(self) -> None:
         if self._matches:
             self.selected = len(self._matches) - 1
-            self.preview_offset = 10**9
 
     def select(self, index: int) -> None:
         if 0 <= index < len(self._matches) and index != self.selected:
             self.selected = index
-            self.preview_offset = 10**9
 
     def ensure_selection_visible(self, rows: int) -> None:
         rows = max(1, rows)
@@ -312,11 +306,6 @@ class ResumePickerModel:
         maximum = max(0, len(self._matches) - max(1, rows))
         self.list_offset = min(maximum, max(0, self.list_offset + delta))
 
-    def scroll_preview(self, delta: int, line_count: int, height: int) -> None:
-        maximum = max(0, line_count - max(1, height))
-        current = min(self.preview_offset, maximum)
-        self.preview_offset = min(maximum, max(0, current + delta))
-
 
 def _clip(text: str, width: int) -> str:
     width = max(0, width)
@@ -332,23 +321,6 @@ def _clip(text: str, width: int) -> str:
         kept.append(text[start:stop])
         used += cells
     return "".join(kept) + "…"
-
-
-def _wrap(text: str, width: int) -> list[str]:
-    """Wrap sanitized text by terminal cells while preserving grapheme clusters."""
-    width = max(1, width)
-    result: list[str] = []
-    for source in sanitize_live_text(text).splitlines() or [""]:
-        line, used = [], 0
-        for start, stop, cells in split_graphemes(source)[0]:
-            cluster = source[start:stop]
-            if line and used + cells > width:
-                result.append("".join(line))
-                line, used = [], 0
-            line.append(cluster)
-            used += cells
-        result.append("".join(line))
-    return result
 
 
 def _field_fragments(
@@ -481,41 +453,6 @@ def _row_fragments(
     ]
 
 
-def _preview_lines(row: ResumePickerRow | None, width: int) -> list[list[tuple[str, str]]]:
-    """Render transcript turns using the same visual language as live scrollback."""
-    if row is None:
-        return [[("class:fullscreen-browser.empty", "No session selected")]]
-    if not row.turns:
-        return [[("class:fullscreen-browser.empty", "No conversation preview")]]
-    lines: list[list[tuple[str, str]]] = []
-    width = max(1, width)
-    for turn in row.turns:
-        if turn.role == "user":
-            edge = "▔" * width
-            lines.append([("class:fullscreen-browser.preview-user-edge", edge)])
-            for index, text in enumerate(_wrap(turn.content, max(1, width - 4))):
-                prompt = "❯ " if index == 0 else "  "
-                content = _clip(f" {prompt}{text}", width)
-                lines.append(
-                    [
-                        (
-                            "class:fullscreen-browser.preview-user",
-                            content + " " * max(0, width - cell_len(content)),
-                        )
-                    ]
-                )
-            lines.append([("class:fullscreen-browser.preview-user-edge", "▁" * width)])
-        else:
-            lines.append([("class:fullscreen-browser.preview-agent", "OO:")])
-            lines.extend(
-                [("class:fullscreen-browser.preview", text)] for text in _wrap(turn.content, width)
-            )
-            lines.append([])
-    if lines and not lines[-1]:
-        lines.pop()
-    return lines
-
-
 def _semantic_preview_selection(text: str) -> str:
     """Remove conversation-preview chrome from selected text."""
     output: list[str] = []
@@ -537,59 +474,6 @@ def _semantic_preview_selection(text: str) -> str:
         elif stripped != "OO:":
             output.append(line)
     return "\n".join(output).strip("\n")
-
-
-def render_resume_picker(model: ResumePickerModel, width: int, height: int) -> str:
-    """Render a deterministic text snapshot used by unit tests and narrow fallbacks."""
-    if width < 48 or height < 13:
-        return f"Terminal too small\nNeed 48 x 13; now {width} x {height}"
-    separator = "─" * width
-    filt = {
-        "detached": "✓ Not attached",
-        "attached": "✗ Attached",
-        "all": "✓/✗ All",
-    }[model.state_filter]
-    sort = "Recent activity" if model.sort_updated else "Creation date"
-    lines = [
-        _clip(f"Resume a previous session · {len(model.matches)} sessions", width),
-        _clip(f"[Search: {model.query}] [Filter: {filt}] [Sort: {sort}]", width),
-        _clip(
-            "Tab/Shift-Tab focus · arrows navigate · Space/↵ activate · Esc cancel",
-            width,
-        ),
-        separator,
-    ]
-    list_height = min(5, max(1, height - 10))
-    model.ensure_selection_visible(list_height)
-    for index, match in model.visible(list_height):
-        lines.extend(
-            "".join(text for _, text in row)
-            for row in _row_fragments(
-                match, index == model.selected, width, sort_updated=model.sort_updated
-            )
-        )
-    lines.extend(
-        [
-            separator,
-            _clip(
-                f"Preview · {_single_line(model.current.title) if model.current else 'No selection'}",
-                width,
-            ),
-        ]
-    )
-    preview = _preview_lines(model.current, width)
-    preview_height = max(1, height - len(lines) - 2)
-    maximum = max(0, len(preview) - preview_height)
-    start = min(model.preview_offset, maximum)
-    lines.extend(
-        "".join(text for _, text in line) for line in preview[start : start + preview_height]
-    )
-    lines.extend(
-        [
-            separator,
-        ]
-    )
-    return "\n".join(lines[:height])
 
 
 class _PickerControl(FormattedTextControl):
