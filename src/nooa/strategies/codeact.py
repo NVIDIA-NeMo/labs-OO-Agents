@@ -763,6 +763,16 @@ Standard Python builtins and agent instance (`self`) are available."""
         session_holder: dict[str, Any],
     ) -> Any:
         """Body of :meth:`execute`; ``session_holder`` receives the session for teardown."""
+        # Activate doc()/preview adapters for installed libs (pandas, numpy, …) so
+        # argument inspection and pprint() in cells render structural, bounded
+        # previews instead of truncated reprs. Idempotent and installed-gated.
+        try:
+            from nooa.agentdoc.adapters import register_all
+
+            register_all()
+        except Exception:  # noqa: BLE001 — adapters are advisory; never block execution
+            pass
+
         # Return type is pre-resolved by _execute_with_generation (handles PEP 563).
         return_type = call.return_type
         if return_type is None:

@@ -1488,6 +1488,23 @@ def _format_value(
         )
         return
 
+    # Registered value previews (numpy arrays, pandas frames, …): a preview
+    # extractor renders a structural, bounded preview instead of the truncated
+    # repr below. Returning None (or raising) declines and falls through.
+    from nooa.agentdoc.registry import PreviewBudget, get_preview_extractor
+
+    preview_extractor = get_preview_extractor(_object)
+    if preview_extractor is not None:
+        try:
+            preview = preview_extractor(
+                _object, PreviewBudget(max_length=max_length, max_string=max_string)
+            )
+        except Exception:
+            preview = None
+        if preview is not None:
+            _stream.write(preview)
+            return
+
     # Fallback to repr for other types (numpy arrays, pandas frames, custom classes, …).
     # When the repr is over budget, emit the truncation 3.0 marker family —
     # same shape as the rest of the renderer, prefixed with the actual type
@@ -1612,6 +1629,21 @@ def _format_shallow(_object: Any, max_string: int | None) -> str:
         return f"{brackets[0]}{type_name}: {len(_object)} items{brackets[1]}"
     if isinstance(_object, str):
         return _format_string(_object, max_string)
+
+    # Registered value previews apply at the depth limit too: without this, a
+    # large array/frame nested at max_depth would dump its full repr.
+    from nooa.agentdoc.registry import PreviewBudget, get_preview_extractor
+
+    preview_extractor = get_preview_extractor(_object)
+    if preview_extractor is not None:
+        try:
+            preview = preview_extractor(
+                _object, PreviewBudget(max_length=None, max_string=max_string)
+            )
+        except Exception:
+            preview = None
+        if preview is not None:
+            return preview
 
     try:
         return repr(_object)
