@@ -47,6 +47,15 @@ SIGNAL_DESCRIPTIONS: dict[str, str] = {
 }
 
 
+RATE_DESCRIPTIONS: dict[str, str] = {
+    "self_reference_rate": "Python cells containing at least one self reference",
+    "execution_error_rate": "Execution attempts that ended in error",
+    "execution_recovery_rate": "Execution errors linked to a successful retry",
+    "text_only_recovery_rate": "Text-only replies followed by recovered execution",
+    "completion_rate": "Whether the trajectory contains a completion call",
+}
+
+
 @dataclass(frozen=True)
 class BehaviorReport:
     """Allowlisted aggregate metrics for one trajectory; never contains event payloads."""
@@ -70,7 +79,7 @@ class _CodeSignals(ast.NodeVisitor):
     def __init__(self) -> None:
         self.paths: list[tuple[str, ...]] = []
         self.calls: list[tuple[str, ...]] = []
-        self.has_gather = False
+        self.parallel_delegations = 0
         self.shell_argv_calls = 0
 
     @staticmethod
@@ -94,7 +103,15 @@ class _CodeSignals(ast.NodeVisitor):
         if path:
             self.calls.append(path)
             if path[-1] == "gather":
-                self.has_gather = True
+                delegated_args = sum(
+                    1
+                    for child in node.args
+                    if isinstance(child, ast.Call)
+                    and self._path(child.func)[:1] == ("self",)
+                    and self._path(child.func)[-1:] in {("delegate",), ("spawn",)}
+                )
+                if delegated_args >= 2:
+                    self.parallel_delegations += 1
             if (
                 _is_prefix(path, ("self", "shell"))
                 and path[-1] in {"run", "run_stream"}
@@ -156,8 +173,8 @@ def _analyze_code(code: str) -> dict[str, int]:
 
     if visitor.shell_argv_calls:
         out["shell_argv_commands"] = visitor.shell_argv_calls
-    if visitor.has_gather and out.get("delegations", 0) >= 2:
-        out["parallel_delegations"] = 1
+    if visitor.parallel_delegations:
+        out["parallel_delegations"] = visitor.parallel_delegations
     return out
 
 

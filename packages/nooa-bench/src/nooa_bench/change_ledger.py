@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from nooa_bench.behavior_analyzer import SIGNAL_DESCRIPTIONS
+from nooa_bench.behavior_analyzer import RATE_DESCRIPTIONS, SIGNAL_DESCRIPTIONS
 
 _DIRECTIONS = {"increase", "decrease", "non_decreasing", "non_increasing", "unchanged"}
 _STATUSES = {"proposed", "implemented", "reverted"}
@@ -42,9 +42,7 @@ def load_change_ledger(path: str | Path) -> dict[str, Any]:
             raise ValueError(f"change {change_id!r} has no benchmark slices")
         for expectation in change["trace_expectations"]:
             signal = expectation.get("signal")
-            if signal not in SIGNAL_DESCRIPTIONS and signal not in {
-                "self_reference_rate", "execution_error_rate", "text_only_recovery_rate", "completion_rate"
-            }:
+            if signal not in SIGNAL_DESCRIPTIONS and signal not in RATE_DESCRIPTIONS:
                 raise ValueError(f"change {change_id!r} references unknown signal {signal!r}")
             if expectation.get("direction") not in _DIRECTIONS:
                 raise ValueError(f"change {change_id!r} has invalid expected direction")

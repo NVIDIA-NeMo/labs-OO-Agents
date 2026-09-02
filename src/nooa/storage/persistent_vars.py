@@ -39,9 +39,15 @@ class PersistentVars:
             raise AttributeError(f"No var {key!r}") from None
 
     def __setattr__(self, key: str, value: Any) -> None:
+        if any(key in cls.__dict__ for cls in type(self).__mro__):
+            raise AttributeError(
+                f"{key!r} is reserved by PersistentVars; use set({key!r}, value)"
+            )
         self._owner.vars[key] = value
 
     def __delattr__(self, key: str) -> None:
+        if any(key in cls.__dict__ for cls in type(self).__mro__):
+            raise AttributeError(f"{key!r} is reserved by PersistentVars")
         try:
             del self._owner.vars[key]
         except KeyError:
@@ -61,6 +67,10 @@ class PersistentVars:
     def get(self, key: str, default: Any = None) -> Any:
         """Return a value, or ``default`` when its name is absent."""
         return self._owner.vars.get(key, default)
+
+    def set(self, key: str, value: Any) -> None:
+        """Store a value by key, including names reserved by helper methods."""
+        self._owner.vars[key] = value
 
     def clear(self) -> None:
         """Remove every value from this scope."""

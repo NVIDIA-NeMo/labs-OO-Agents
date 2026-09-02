@@ -267,3 +267,32 @@ def test_behavior_report_is_content_free_with_sensitive_inputs() -> None:
     assert all(isinstance(value, int) for value in payload["signals"].values())
     assert all(isinstance(value, float) for value in payload["rates"].values())
     assert payload["signals"]["recovered_path_resolution_errors"] == 1
+
+
+def test_parallel_delegations_must_be_arguments_of_the_same_gather() -> None:
+    report = analyze_events([_cell("""
+self.delegate('one')
+self.delegate('two')
+await asyncio.gather(fetch_a(), fetch_b())
+""")])
+    assert report.signals["delegations"] == 2
+    assert report.signals["parallel_delegations"] == 0
+
+
+def test_change_ledger_accepts_every_published_rate(tmp_path: Path) -> None:
+    from nooa_bench.behavior_analyzer import RATE_DESCRIPTIONS
+
+    ledger = {
+        "schema_version": 1,
+        "changes": [{
+            "id": "all-rates", "status": "implemented", "component": "test",
+            "hypothesis": "catalogs agree", "deterministic_checks": ["unit"],
+            "trace_expectations": [
+                {"signal": name, "direction": "unchanged"} for name in RATE_DESCRIPTIONS
+            ],
+            "benchmark_slices": ["all"],
+        }],
+    }
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(ledger))
+    assert load_change_ledger(path) == ledger

@@ -9,7 +9,7 @@ and its API is published to LLM context via doc(self.todo).
 
 import uuid as _uuid
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
@@ -46,11 +46,13 @@ TodoVars = PersistentVars
 class Todo(BaseModel):
     """A managed task; blocking is derived from unfinished dependencies."""
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
 
     id: str = Field(default_factory=lambda: _uuid.uuid4().hex[:8], description="Stable task ID")
     title: str = Field(default="", description="Short action-oriented description")
-    status: str = Field(default="open", description="Stored status: open or done")
+    status: Literal["open", "done"] = Field(
+        default="open", description="Stored status; blocking is derived from dependencies"
+    )
     deps: list[str] = Field(default_factory=list, description="IDs of prerequisite todos")
     vars: Annotated[SnapshotVars, hidden] = Field(default_factory=SnapshotVars)
     created_at: str = Field(
@@ -164,6 +166,11 @@ class TodoManager(Skill):
         self._todos.clear()
         self._order.clear()
         for raw in data.get("todos", []):
+            if isinstance(raw, dict):
+                raw = dict(raw)
+                raw["status"] = {"blocked": "open", "COMPLETED": "done"}.get(
+                    raw.get("status"), raw.get("status", "open")
+                )
             t = Todo.model_validate(raw)
             self._todos[t.id] = t
             self._order.append(t.id)
@@ -727,4 +734,4 @@ class TodoManager(Skill):
         while selected and len(output) > max_chars:
             selected.pop()
             output = render(selected)
-        return output
+        return self._bounded_status(output, max_chars)
