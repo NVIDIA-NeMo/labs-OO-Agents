@@ -12,7 +12,6 @@ from nooa_cli.tui.resume_picker import (
     _clip,
     _row_fragments,
     _semantic_preview_selection,
-    literal_match,
     render_resume_picker,
 )
 from prompt_toolkit.data_structures import Point
@@ -72,10 +71,37 @@ def test_model_searches_title_and_full_recent_conversation() -> None:
     )
     model.set_query("resume")
     assert model.matches[0].row.title == "resume feature"
-    assert literal_match("RESUME", "resume feature") is not None
-    assert literal_match("rsm", "resume feature") is None
     model.set_query("deep needle")
     assert [match.row.id for match in model.matches] == ["2"]
+
+
+def test_resume_search_uses_word_and_semantics_like_explorers() -> None:
+    """Multi-word queries match scattered terms, like every explorer.
+
+    The old phrase matcher required the whole query contiguously; the shared
+    word-AND contract requires every term somewhere in the searched fields.
+    """
+    model = ResumePickerModel(
+        [
+            row(
+                "scattered",
+                "alpha in the title",
+                turns=(ResumePickerTurn("agent", "and beta in the reply"),),
+            ),
+            row(
+                "contiguous",
+                "unrelated title",
+                turns=(ResumePickerTurn("agent", "contains alpha beta together"),),
+            ),
+            row("neither", "nothing here"),
+        ]
+    )
+    model.set_query("alpha beta")
+
+    # Both rows match; the scattered row proves terms can hit different fields.
+    assert sorted(match.row.id for match in model.matches) == ["contiguous", "scattered"]
+    scattered = next(match for match in model.matches if match.row.id == "scattered")
+    assert scattered.positions, "cross-field match must carry highlight positions"
 
 
 def test_search_excludes_noncontiguous_and_hidden_metadata_matches() -> None:
@@ -99,13 +125,85 @@ def test_filter_and_sort_reuse_cached_query_matches(monkeypatch) -> None:
     model = ResumePickerModel([row("one", "needle"), row("two", "other", attached=True)])
     model.set_query("needle")
 
-    def unexpected_match(query: str, value: str):
+    def unexpected_match(terms: list[str], value: str):
         raise AssertionError("filter/sort must not rescan transcript search fields")
 
-    monkeypatch.setattr(picker_module, "literal_match", unexpected_match)
+    monkeypatch.setattr(picker_module, "_term_hits", unexpected_match)
     model.toggle_filter()
     model.toggle_sort()
     model.toggle_filter()
+
+
+@pytest.mark.asyncio
+async def test_resume_list_fills_its_pane_on_tall_terminals() -> None:
+    """The session list grows with the terminal instead of capping at 5."""
+    from nooa_cli.tui import session_manager as sm
+
+    sessions = [
+        SimpleNamespace(
+            id=f"s{i:08d}",
+            name=f"Session {i}",
+            model="m",
+            agent="A",
+            working_dir=str(Path.cwd()),
+            started_at=1,
+            last_active=float(100 + i),
+            turn_count=1,
+        )
+        for i in range(12)
+    ]
+    sm.SessionManager.list_sessions = classmethod(lambda cls, limit=None: sessions)
+    sm.SessionManager.is_active = classmethod(lambda cls, value: False)
+    sm.SessionManager.load_turns = classmethod(
+        lambda cls, value, limit=12: [SimpleNamespace(role="agent", content="x")]
+    )
+
+    from .tui_app_harness import MutableRecordingOutput, TUIHarness
+
+    async with TUIHarness(output=MutableRecordingOutput(100, 40), full_screen=True) as harness:
+        opened = asyncio.create_task(harness.app.open_session_resume_dialog())
+        await harness.wait_for(lambda: harness.app._resume_picker is not None)
+        picker = harness.app._resume_picker
+        await harness.wait_for(lambda: picker.list_control.viewport[1] > 5)
+
+        screen = harness.app._app.renderer.last_rendered_screen
+        rows = [
+            "".join(line[x].char for x in sorted(line)).rstrip()
+            for _y, line in sorted(screen.data_buffer.items())
+        ]
+        # Sessions run from the header to the list separator: the pane holds
+        # more than the old five-row cap.
+        session_rows = [r for r in rows if "Session" in r and "✓" in r]
+        assert len(session_rows) > 5
+        await harness.press("escape")
+        await asyncio.wait_for(opened, 2)
+
+
+def test_home_and_end_route_through_shared_handle_key() -> None:
+    """Home/End jump the list through the shared dispatch, like explorers."""
+    from nooa_cli.tui.fullscreen_browser import ExplorerBrowser
+
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    assert ResumePicker.handle_key is ExplorerBrowser.handle_key  # shared dispatch
+    picker = ResumePicker([row(str(i), f"title {i}") for i in range(6)], app)
+    assert picker.handle_key("end") == "handled"
+    assert picker.model.selected == 5
+    assert picker.handle_key("home") == "handled"
+    assert picker.model.selected == 0
+
+
+def test_home_and_end_jump_the_session_list() -> None:
+    """Home/End jump to the first/last session like every explorer."""
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row(str(i), f"title {i}") for i in range(6)], app)
+
+    picker.model.jump_end()
+    assert picker.model.selected == 5
+    picker.model.jump_home()
+    assert picker.model.selected == 0
+    assert picker.model.list_offset == 0
 
 
 def test_state_filter_defaults_to_detached_and_cycles_all_states() -> None:
@@ -195,7 +293,7 @@ def test_tab_cycles_only_list_and_preview() -> None:
     assert picker.active_control == "preview"
     picker.focus_next()
     assert picker.active_control == "list"
-    picker.focus_previous()
+    picker.focus_next(-1)
     assert picker.active_control == "preview"
 
 
@@ -214,11 +312,11 @@ def test_options_mode_selects_and_changes_filter_and_sort() -> None:
     app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
     picker = ResumePicker([row("1", "one")], app)
     picker.toggle_options()
-    assert picker.option_cursor == "filter"
+    assert picker.option_cursor == 0  # Filter option row
     picker.change_option()
     assert picker.model.state_filter == "attached"
     picker.move_option(1)
-    assert picker.option_cursor == "sort"
+    assert picker.option_cursor == 1  # Sort option row
     picker.change_option()
     assert picker.model.sort_updated is False
     assert picker.close_options()
@@ -245,17 +343,17 @@ def test_only_selected_option_is_highlighted_in_options_mode() -> None:
     app = MagicMock()
     app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
     picker = ResumePicker([row("1", "one")], app)
-    assert "control-focused" not in picker.filter_control._text()[0][0]
-    assert "control-focused" not in picker.sort_control._text()[0][0]
+    assert "control-focused" not in picker.option_controls[0]._text()[0][0]
+    assert "control-focused" not in picker.option_controls[1]._text()[0][0]
     picker.toggle_options()
     assert "control-focused" not in picker._search_label()[0][0]
     assert "control-focused" not in picker._search_close()[0][0]
     assert "control-focused" not in picker.query_window.style()
-    assert "control-focused" in picker.filter_control._text()[0][0]
-    assert "control-focused" not in picker.sort_control._text()[0][0]
+    assert "control-focused" in picker.option_controls[0]._text()[0][0]
+    assert "control-focused" not in picker.option_controls[1]._text()[0][0]
     picker.move_option(1)
-    assert "control-focused" not in picker.filter_control._text()[0][0]
-    assert "control-focused" in picker.sort_control._text()[0][0]
+    assert "control-focused" not in picker.option_controls[0]._text()[0][0]
+    assert "control-focused" in picker.option_controls[1]._text()[0][0]
 
 
 def test_active_rail_marks_only_current_area() -> None:
@@ -360,6 +458,53 @@ def test_header_columns_align_with_row_columns() -> None:
     assert cell_len(header[: header.index("last agent message")]) == cell_len(
         first[: first.index("answer for one")]
     )
+
+
+def test_query_terms_deduplicate_for_match_counts() -> None:
+    """Repeated query terms count occurrences once, not per repetition."""
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+    model = FullscreenTranscriptModel(show_trailing_blank=False)
+    model.append("alpha one\nmid\nalpha two")
+    model.set_search("alpha alpha", width=30, height=4)
+
+    _position, total = model.search_position
+    assert total == 2  # not 4
+
+
+def test_row_highlights_every_occurrence_of_each_term() -> None:
+    """A term appearing twice in the best field highlights both positions."""
+    model = ResumePickerModel(
+        [row("1", "beta first and beta second")]
+    )
+    model.set_query("beta")
+
+    match = model.matches[0]
+    assert len(match.positions) >= 8  # both "beta" occurrences (4 cells each)
+
+
+def test_rows_rank_by_term_coverage_before_position() -> None:
+    """A row covering all terms in one field outranks a split-field row."""
+    model = ResumePickerModel(
+        [
+            # alpha lives in the title, beta in the conversation: no single
+            # field covers both terms.
+            row(
+                "split",
+                "alpha here",
+                turns=(ResumePickerTurn("agent", "beta answer"),),
+            ),
+            # Both terms in one conversation line.
+            row(
+                "together",
+                "also unrelated",
+                turns=(ResumePickerTurn("agent", "alpha beta in one line"),),
+            ),
+        ]
+    )
+    model.set_query("alpha beta")
+
+    assert [match.row.id for match in model.matches] == ["together", "split"]
 
 
 def test_row_shows_snippet_when_match_is_clipped_or_in_conversation() -> None:
@@ -626,7 +771,8 @@ async def test_filter_change_prepares_new_preview_without_blocking(monkeypatch) 
         return FullscreenTranscriptModel(show_trailing_blank=False)
 
     monkeypatch.setattr(ResumePicker, "_build_preview_model", staticmethod(build_preview))
-    picker.cycle_filter()
+    # Change the filter through the shared option, as the UI does.
+    picker.view.options[0].move(1)
 
     key = ("attached", 40)
     assert key in picker._preview_tasks
@@ -865,7 +1011,7 @@ async def test_real_prompt_toolkit_routes_search_navigation_and_cancel(monkeypat
         picker.buffer.text = ""
         await harness.wait_for(lambda: picker.model.query == "")
         await harness.press("c-o")
-        await harness.wait_for(lambda: picker.option_cursor == "filter")
+        await harness.wait_for(lambda: picker.option_cursor == 0)
         await harness.type_keys("x")
         await harness.press("option-backspace")
         await asyncio.sleep(0)
@@ -877,7 +1023,7 @@ async def test_real_prompt_toolkit_routes_search_navigation_and_cancel(monkeypat
         await harness.wait_for(lambda: picker.model.state_filter == "all")
         assert {match.row.id for match in picker.model.matches} == {"session-1", "session-2"}
         await harness.press("right")
-        await harness.wait_for(lambda: picker.option_cursor == "sort")
+        await harness.wait_for(lambda: picker.option_cursor == 1)
         await harness.type_keys(" ")
         await harness.wait_for(lambda: not picker.model.sort_updated)
         await harness.press("enter")
@@ -918,7 +1064,7 @@ async def test_ctrl_c_cancels_picker_while_options_are_open(monkeypatch) -> None
         opened = asyncio.create_task(harness.app.open_session_resume_dialog())
         await harness.wait_for(lambda: harness.app._resume_picker is not None)
         await harness.press("c-o")
-        await harness.wait_for(lambda: harness.app._resume_picker.option_cursor == "filter")
+        await harness.wait_for(lambda: harness.app._resume_picker.option_cursor == 0)
         await harness.press("c-c")
         assert await asyncio.wait_for(opened, 1) is None
         assert harness.app._resume_picker is None

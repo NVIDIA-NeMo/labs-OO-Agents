@@ -73,14 +73,7 @@ class JobExplorerView(ExplorerView):
     def __init__(self, snapshots: Iterable[JobProjection]) -> None:
         rows = build_job_rows(snapshots)
         model = ExplorerModel(rows)
-        config = ExplorerConfig(
-            title="Job Explorer",
-            detail_pane_name="job output",
-            empty_message="No background jobs.",
-            no_match_message="No jobs matching {query!r}.",
-            list_ratio=0.4,
-            actions={},
-        )
+        config = ExplorerConfig(title="Job Explorer", actions={})
         super().__init__(model, config)
         self.configure_row_options(
             filters=(

@@ -26,6 +26,7 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
 from prompt_toolkit.widgets import Frame
 
+from .explorer_base import highlight_terms
 from .fullscreen_transcript import FullscreenTranscriptModel
 from .terminal_safety import sanitize_live_text
 
@@ -619,6 +620,11 @@ class ExplorerBrowser:
         copy_status = self._selection_status() if self._selection_status is not None else ""
         if copy_status:
             return copy_status
+        confirm_hint = getattr(self.view, "pending_confirmation_hint", None)
+        if callable(confirm_hint):
+            hint = confirm_hint()
+            if hint:
+                return hint
         if self.option_cursor is not None:
             return "Options · ←→ select · ↑↓/Space change · Enter/Esc done"
         actions = " · ".join(self.view.config.actions.values())
@@ -656,7 +662,12 @@ class ExplorerBrowser:
     def _preview_header(self):
         row = self.model.current
         title = getattr(row, "title", None) or getattr(row, "event_type", None) or "No selection"
-        return [("class:fullscreen-browser.heading", f"Preview · {title}")]
+        suffix = ""
+        if self._detail_transcript is not None and self.buffer.text.strip():
+            position, total = self._detail_transcript.search_position
+            if total:
+                suffix = f" · match {position}/{total}"
+        return [("class:fullscreen-browser.heading", f"Preview · {title}{suffix}")]
 
     def _small_text(self):
         size = self.app.output.get_size()
@@ -763,22 +774,34 @@ class ExplorerBrowser:
                     )
                 )
             )[:width]
-            query = self.buffer.text.casefold().strip()
+            query = self.buffer.text.strip()
             if not query:
                 output.append((base, text))
                 continue
-            folded = text.casefold()
+            # Word-AND rows can match terms scattered across the row, so
+            # every term gets its own highlight span instead of one span for
+            # the whole query (which a multi-word query would never find).
+            # A case-insensitive regex keeps the match offsets in the
+            # original text: casefold() can expand characters (ß -> ss) and
+            # desynchronize folded offsets from the row being sliced.
+            import re as _re
+
+            spans: list[tuple[int, int]] = []
+            for term in dict.fromkeys(query.split()):
+                for found in _re.finditer(_re.escape(term), text, _re.IGNORECASE):
+                    spans.append((found.start(), found.end()))
+            if not spans:
+                output.append((base, text))
+                continue
+            spans.sort()
             cursor = 0
-            while True:
-                found = folded.find(query, cursor)
-                if found < 0:
-                    output.append((base, text[cursor:]))
-                    break
-                output.append((base, text[cursor:found]))
-                output.append(
-                    (base + " class:fullscreen-browser.match", text[found : found + len(query)])
-                )
-                cursor = found + len(query)
+            for start, stop in spans:
+                if start < cursor:
+                    continue
+                output.append((base, text[cursor:start]))
+                output.append((base + " class:fullscreen-browser.match", text[start:stop]))
+                cursor = stop
+            output.append((base, text[cursor:]))
         return output or [("class:fullscreen-browser.empty", "No matching items")]
 
     def _preview_transcript(self, width: int, height: int) -> FullscreenTranscriptModel | None:
@@ -786,6 +809,13 @@ class ExplorerBrowser:
         if row is None:
             return None
         lines = tuple(self.view.detail_lines(row, max(1, width)))
+        # Views that don't highlight search matches themselves get the
+        # browser's generic term highlighting so every explorer's detail pane
+        # shows matches the same way.
+        if not getattr(self.view, "handles_search_highlighting", False):
+            terms = [term for term in self.buffer.text.split() if term.strip()]
+            if terms:
+                lines = tuple(highlight_terms(line, terms) for line in lines)
         key = (row, max(1, width), lines)
         if self._detail_transcript_key != key:
             if self._detail_transcript_key is not None:
@@ -798,13 +828,21 @@ class ExplorerBrowser:
             self._detail_transcript_key = key
         transcript = self._detail_transcript
         assert transcript is not None
+        # The transcript's own search powers preview match navigation
+        # (reveal + current-match cycling) for every browser, matching /resume.
+        transcript.set_search(self.buffer.text, width=max(1, width), height=max(1, height))
         self.model._last_detail_line_count = len(transcript._display_rows(max(1, width)))
         self.model._last_detail_visible_lines = max(1, height)
         self.model.clamp_detail_offset(height)
-        transcript.jump_to_start(width=max(1, width))
-        transcript.scroll_visual_lines(
-            self.model.detail_offset, width=max(1, width), height=max(1, height)
-        )
+        # With a search active, set_search has already revealed the current
+        # match — re-anchoring to detail_offset here would clobber that reveal
+        # (the matched text scrolled out of view while the count kept working).
+        # Without a query, honor the model's detail scroll offset as before.
+        if not self.buffer.text.strip():
+            transcript.jump_to_start(width=max(1, width))
+            transcript.scroll_visual_lines(
+                self.model.detail_offset, width=max(1, width), height=max(1, height)
+            )
         return transcript
 
     def preview_text(self, width: int, height: int):
@@ -837,14 +875,47 @@ class ExplorerBrowser:
                     self._selection_copy_callback(selected)
         self.invalidate()
 
+    def _scroll_detail_pane(self, delta: int) -> None:
+        """Scroll the preview pane on the live viewport.
+
+        While a search is active the detail transcript owns its viewport
+        (the model offset is never applied, so `scroll_detail` would be a
+        no-op); scroll the transcript directly instead. Without a query the
+        model offset drives scrolling as before.
+        """
+        if self.buffer.text.strip():
+            width, height = self.preview_control.viewport
+            transcript = self._preview_transcript(width, height)
+            if transcript is not None:
+                transcript.scroll_visual_lines(
+                    delta, width=max(1, width), height=max(1, height)
+                )
+                return
+        self.model.scroll_detail(delta)
+
     def navigate_vertical(self, delta: int) -> None:
+        """Shared navigation contract (same as /resume).
+
+        List focus moves between matching rows; preview focus steps between
+        the detail's search matches (wrapping), scrolling when there is no
+        query or no matches.
+        """
         if self.option_cursor is not None:
             self.change_option(delta)
-        elif self.active_control == "list":
+            return
+        if self.active_control == "list":
             self._list_offset_detached = False
-            self.model.move_or_scroll(delta)
-        else:
-            self.model.move_or_scroll(delta)
+            self.model.move(delta)
+            self.invalidate()
+            return
+        width, height = self.preview_control.viewport
+        transcript = self._preview_transcript(width, height)
+        if transcript is not None and transcript.move_search_match(
+            delta, width=max(1, width), height=max(1, height)
+        ):
+            self.invalidate()
+            return
+        self._scroll_detail_pane(delta)
         self.invalidate()
 
     def page(self, delta: int) -> None:
@@ -857,7 +928,7 @@ class ExplorerBrowser:
             self._list_offset_detached = False
             self.model.move(delta * max(1, amount))
         else:
-            self.model.scroll_detail(delta * max(1, amount))
+            self._scroll_detail_pane(delta * max(1, amount))
         self.invalidate()
 
     def select_visible(self, y: int) -> None:
@@ -874,7 +945,7 @@ class ExplorerBrowser:
             self.list_offset = min(maximum, max(0, self.list_offset + delta))
             self._list_offset_detached = True
         else:
-            self.model.scroll_detail(delta)
+            self._scroll_detail_pane(delta)
         self.invalidate()
 
     def handle_key(self, action: str, value: str = ""):

@@ -80,6 +80,19 @@ def search_terms(query: str) -> list[str]:
     return [term for term in query.split() if term.strip()]
 
 
+def matches_all_terms(terms: list[str], text: str) -> bool:
+    """Shared word-AND search contract for every fullscreen browser.
+
+    A query matches when *every* whitespace-separated term occurs
+    (case-insensitively) somewhere in the searchable text. All explorers and
+    the resume picker use this rule so search behaves identically everywhere.
+    """
+    if not terms:
+        return True
+    folded = text.casefold()
+    return all(term.casefold() in folded for term in terms)
+
+
 def highlight_terms(text: str, terms: list[str], *, current: bool = False) -> str:
     """Highlight search terms in text using ANSI colors."""
     if not terms:
@@ -239,12 +252,12 @@ class ExplorerModel:
     def set_query(self, query: str) -> None:
         """Update search query and refilter matches."""
         self.query = query
-        words = [w.lower() for w in query.split() if w.strip()]
+        terms = [w for w in query.split() if w.strip()]
         self.matches = [
             i
             for i, row in enumerate(self.rows)
             if self._filter_predicate(row)
-            and (not words or all(word in row.search_text.lower() for word in words))
+            and matches_all_terms(terms, row.search_text)
         ]
         if self._sort_key is not None:
             self.matches.sort(
@@ -293,32 +306,15 @@ class ExplorerModel:
         self.search_line_cursor = 0
 
     def move_or_scroll(self, delta: int) -> None:
-        if self.search_active and self._last_detail_match_lines:
-            if self._move_detail_match(delta):
-                return
-            old_cursor = self.cursor
-            self.move(delta)
-            if self.cursor != old_cursor:
-                self._last_detail_match_lines = []
-                self.search_line_cursor = 0 if delta > 0 else 10**9
-        elif self.focus == "list":
+        """Shared navigation contract: list focus moves rows; detail scrolls.
+
+        Preview-match stepping is owned by the browser's transcript search
+        (like /resume), not by the model.
+        """
+        if self.focus == "list":
             self.move(delta)
         else:
             self.scroll_detail(delta)
-
-    def _move_detail_match(self, delta: int) -> bool:
-        if not self._last_detail_match_lines:
-            return False
-        count = len(self._last_detail_match_lines)
-        next_cursor = self.search_line_cursor + delta
-        if not 0 <= next_cursor < count:
-            return False
-        self.search_line_cursor = next_cursor
-        line = self._last_detail_match_lines[self.search_line_cursor]
-        visible = max(self._last_detail_visible_lines, 1)
-        self.detail_offset = max(line - visible // 2, 0)
-        self.clamp_detail_offset(visible)
-        return True
 
     def jump_home(self) -> None:
         self.cursor = 0
@@ -355,18 +351,10 @@ class ExplorerConfig:
 
     Attributes:
         title: Explorer title shown in header bar.
-        detail_pane_name: Label for the detail focus (e.g. "dialog", "event text").
-        empty_message: Shown when no rows exist.
-        no_match_message: Template for no search results (gets .format(query=...)).
-        list_ratio: Fraction of body height for the list pane (0.0-1.0).
         actions: Custom action names mapped to descriptions (for footer hints).
     """
 
     title: str = "Explorer"
-    detail_pane_name: str = "detail"
-    empty_message: str = "No items."
-    no_match_message: str = "No matches for {query!r}."
-    list_ratio: float = 0.33
     actions: dict[str, str] = field(default_factory=dict)
 
 
@@ -526,6 +514,10 @@ class ExplorerView(ExplorerInteraction):
     def format_row(self, row: Any, width: int) -> str:
         """Format a single row for the list. Override in subclasses."""
         return str(row)[:width]
+
+    # Views that embed their own search highlighting in detail_lines (with
+    # occurrence navigation) opt out of the browser's generic highlighting.
+    handles_search_highlighting: bool = False
 
     def detail_lines(self, row: Any, width: int) -> list[str]:
         """Return detail lines for the selected row. Override in subclasses."""

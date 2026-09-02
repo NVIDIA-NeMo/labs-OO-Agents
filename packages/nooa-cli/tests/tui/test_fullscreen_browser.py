@@ -129,7 +129,7 @@ async def test_shared_explorer_f2_toggles_native_selection_and_cancels_drag() ->
                 status="open",
                 deps=(),
                 created_at="now",
-                notes="alpha beta gamma",
+                description="alpha beta gamma",
                 comments=(),
                 search_text="F2 me alpha beta gamma",
             )
@@ -157,6 +157,56 @@ async def test_shared_explorer_f2_toggles_native_selection_and_cancels_drag() ->
 
         await harness.press("escape")
         await asyncio.wait_for(opened, 1)
+
+
+@pytest.mark.asyncio
+async def test_subview_alt_chords_do_not_close_the_view() -> None:
+    """Alt-chords flow through their bindings; only a lone Esc closes.
+
+    Regression for the eager bare-Escape swallowing every Alt/Meta chord:
+    Option+Backspace used to close the view instead of deleting in the
+    search buffer.
+    """
+    from types import SimpleNamespace
+
+    from nooa_cli.tui.todo_explorer import TodoExplorerView
+
+    from .tui_app_harness import MutableRecordingOutput, TUIHarness
+
+    view = TodoExplorerView(
+        [
+            SimpleNamespace(
+                id="t1",
+                title="Row",
+                status="open",
+                deps=(),
+                created_at="now",
+                description="note",
+                comments=(),
+                search_text="Row",
+            )
+        ]
+    )
+    async with TUIHarness(output=MutableRecordingOutput(80, 24), full_screen=True) as harness:
+        opened = asyncio.create_task(harness.app.open_subview(view))
+        await harness.wait_for(lambda: isinstance(harness.app.active_subview, ExplorerBrowser))
+        await harness.type_keys("abc")
+        await harness.wait_for(lambda: view.model.query == "abc")
+
+        # Alt+Backspace in one read: deletes, view stays open.
+        harness._pipe.send_text("\x1b\x7f")
+        await asyncio.sleep(0.3)
+        assert harness.app.active_subview is not None, "Alt+Backspace closed the view"
+        assert view.model.query == "ab"
+
+        # Alt+X in one read: absorbed (typed through its own binding), view stays open.
+        harness._pipe.send_text("\x1bx")
+        await asyncio.sleep(0.3)
+        assert harness.app.active_subview is not None, "Alt+X closed the view"
+
+        # A lone Esc still closes the view.
+        harness._pipe.send_text("\x1b")
+        await asyncio.wait_for(opened, 2)
 
 
 @pytest.mark.asyncio
@@ -203,6 +253,57 @@ def test_explorer_browser_reserves_marker_column_for_alignment() -> None:
     assert text[1].startswith("❯ aligned content")
     assert text[0].startswith("  aligned content")
     assert text[0].index("aligned") == text[1].index("aligned")
+
+
+def test_explorer_detail_highlight_is_shared_across_views() -> None:
+    """Every explorer's detail pane highlights search terms the same way.
+
+    The event explorer embeds its own styled highlighting (with occurrence
+    navigation); the others previously showed no highlighting at all while
+    searching. The shared browser now applies generic term highlighting to
+    views that do not handle it themselves.
+    """
+    browser = _browser()
+    browser.view.handles_search_highlighting = False
+    browser.view.detail_lines = lambda _row, _width: ["notes: the error text"]
+    browser.model.rows.clear()
+    browser.model.rows.append(MagicMock(search_text="error notes", title="Row"))
+    browser.model.set_query("error")
+    browser.buffer.text = "error"
+    browser.preview_control.viewport = (60, 4)
+    assert browser.model.current is not None, "fixture row must match the query"
+
+    transcript = browser._preview_transcript(60, 4)
+
+    assert transcript is not None
+    assert "48;2;" in transcript._records[0].ansi  # truecolor match background
+    # Views that own their highlighting keep the browser out of it.
+    browser.view.handles_search_highlighting = True
+    browser._detail_transcript_key = None
+    transcript = browser._preview_transcript(60, 4)
+    assert transcript is not None
+    assert "48;2;" not in transcript._records[0].ansi
+
+
+def test_explorer_browser_highlights_each_search_term_separately() -> None:
+    """Word-AND queries highlight every term span, not the whole query.
+
+    Regression for the whole-query substring highlight, which found nothing
+    whenever a multi-word query matched scattered terms across a row.
+    """
+    browser = _browser()
+    browser.model.rows.clear()
+    browser.model.rows.append(MagicMock(search_text="alpha beta", title="Row"))
+    browser.model.set_query("alpha beta")
+    browser.view.format_row = lambda _row, _width: "alpha content beta content"
+    browser.buffer.text = "alpha beta"
+
+    fragments = browser.list_text(80, 1)
+
+    spans = [text for style, text in fragments if "match" in str(style)]
+    assert spans == ["alpha", "beta"]
+    joined = "".join(text for _style, text in fragments)
+    assert joined.endswith("alpha content beta content")
 
 
 def test_explorer_browser_mouse_wheel_scrolls_list_without_moving_selection() -> None:
@@ -373,7 +474,7 @@ async def test_todo_explorer_is_wrapped_in_shared_fullscreen_browser() -> None:
         status="open",
         deps=[],
         created_at="2026-08-27 18:00",
-        notes="Use the Resume Picker shell.",
+        description="Use the shared browser shell.",
         comments=[],
         search_text="Ship reusable browser",
     )
@@ -555,7 +656,7 @@ def test_explorer_browser_handle_key_scroll_up_detail() -> None:
 
 
 def test_explorer_browser_navigate_vertical_jumps_search_matches() -> None:
-    """When search is active, up/down jumps between matches instead of moving list selection."""
+    """List focus moves between matching rows even while search is active."""
 
     class _MatchRow:
         search_text = "alpha beta alpha"
@@ -564,7 +665,7 @@ def test_explorer_browser_navigate_vertical_jumps_search_matches() -> None:
 
     browser = _browser()
     browser.model.rows.clear()
-    browser.model.rows.append(_MatchRow())
+    browser.model.rows.extend([_MatchRow(), _MatchRow()])
     browser.model.set_query("")
     browser.list_control.viewport = (80, 4)
     browser.preview_control.viewport = (80, 4)
@@ -576,14 +677,140 @@ def test_explorer_browser_navigate_vertical_jumps_search_matches() -> None:
 
     assert browser.model.search_active is True
 
-    # Populate match lines (as detail_lines would)
-    browser.model._last_detail_match_lines = [0, 2]
-    browser.model._last_detail_visible_lines = 4
-
-    # Down should jump to match, not move cursor
+    # List focus always moves between matching rows (the /resume contract);
+    # detail matches are stepped from preview focus only.
     browser.navigate_vertical(1)
-    assert browser.model.search_line_cursor == 1
-    assert browser.model.cursor == 0  # selection stays
+    assert browser.model.cursor == 1
+    browser.navigate_vertical(-1)
+    assert browser.model.cursor == 0
+
+
+def test_detail_pane_scrolls_while_searching() -> None:
+    """Wheel/page scrolling works on the preview pane with a query active.
+
+    Regression for the search-reveal fix freezing the pane: while a query
+    is active the transcript owns the viewport, so wheel gestures must
+    scroll the transcript instead of mutating an offset that is never
+    applied.
+    """
+    browser = _browser()
+
+    class _Row:
+        search_text = "gamma deep"
+        title = "Row"
+
+    browser.model.rows.clear()
+    browser.model.rows.append(_Row())
+    browser.model.set_query("gamma")
+    browser.buffer.text = "gamma"
+    # The matched term sits mid-content so the reveal leaves room to scroll
+    # in both directions.
+    browser.view.detail_lines = lambda _row, _width: [
+        f"line {i}" if i != 30 else "gamma match here" for i in range(60)
+    ]
+    browser.preview_control.viewport = (50, 6)
+    browser.active_control = "preview"
+
+    transcript = browser._preview_transcript(50, 6)
+    assert transcript is not None
+    before = transcript.top_row(width=50, height=6)
+
+    browser.mouse_scroll("preview", 3)
+    after = transcript.top_row(width=50, height=6)
+    assert after == before + 3
+
+    browser.page(1)
+    assert transcript.top_row(width=50, height=6) == after + 6
+
+
+def test_searching_detail_reveals_the_matched_text() -> None:
+    """The matched text must be visible in the preview while searching.
+
+    Regression for the viewport stomp: _preview_transcript re-anchored the
+    viewport from the model's detail offset on every render, clobbering
+    set_search's match reveal — the match count worked but the matched
+    lines scrolled out of view (event 36 in a live session).
+    """
+    browser = _browser()
+
+    class _Row:
+        search_text = "error deep"
+        title = "Row"
+
+    browser.model.rows.clear()
+    browser.model.rows.append(_Row())
+    browser.model.set_query("error")
+    browser.buffer.text = "error"
+    # Detail long enough that the match sits far below the first page.
+    browser.view.detail_lines = lambda _row, _width: (
+        [f"line {i}" for i in range(30)] + ["content with error here"]
+    )
+    browser.preview_control.viewport = (50, 6)
+
+    transcript = browser._preview_transcript(50, 6)
+    assert transcript is not None
+    formatted = transcript.formatted_text(width=50, height=6)
+    visible = "".join(text for _style, text, *_ in formatted)
+    assert "error" in visible
+    # A second render (as happens on every repaint) must keep the reveal.
+    transcript = browser._preview_transcript(50, 6)
+    formatted = transcript.formatted_text(width=50, height=6)
+    visible = "".join(text for _style, text, *_ in formatted)
+    assert "error" in visible
+
+
+def test_explorer_detail_header_shows_match_position() -> None:
+    """The preview header reports the current search match (like /resume)."""
+    browser = _browser()
+
+    class _MatchRow:
+        search_text = "error here"
+        title = "Row"
+
+    browser.model.rows.clear()
+    browser.model.rows.append(_MatchRow())
+    browser.model.set_query("error")
+    browser.buffer.text = "error"
+    browser.view.detail_lines = lambda _row, _width: ["the error happened", "no match", "again error"]
+    browser.preview_control.viewport = (50, 4)
+
+    browser._preview_transcript(50, 4)
+    position, total = browser._detail_transcript.search_position
+    assert total >= 2
+    header = "".join(text for _style, text in browser._preview_header())
+    assert f"match {position}/{total}" in header
+    # Stepping a match updates the header position; match stepping is a
+    # preview-focus gesture.
+    browser.activate_control("preview")
+    browser.navigate_vertical(1)
+    position, _total = browser._detail_transcript.search_position
+    header = "".join(text for _style, text in browser._preview_header())
+    assert f"match {position}/{total}" in header
+
+
+def test_explorer_browser_preview_focus_steps_detail_matches() -> None:
+    """Preview-focus up/down cycles the detail's search matches (like /resume)."""
+    browser = _browser()
+
+    class _MatchRow:
+        search_text = "alpha beta alpha"
+        title = "Match Row"
+
+    browser.model.rows.clear()
+    browser.model.rows.append(_MatchRow())
+    browser.model.set_query("")
+    browser.buffer.text = "alpha"
+    browser.view.detail_lines = lambda _row, _width: ["alpha one", "mid", "alpha two"]
+    browser.preview_control.viewport = (40, 4)
+    browser.active_control = "preview"
+
+    browser.navigate_vertical(1)
+
+    transcript = browser._preview_transcript(40, 4)
+    assert transcript is not None
+    position, total = transcript.search_position
+    assert total >= 2
+    assert position == 2
 
 
 def test_explorer_browser_search_match_boundary_moves_to_next_row() -> None:
@@ -596,11 +823,9 @@ def test_explorer_browser_search_match_boundary_moves_to_next_row() -> None:
 
     browser.navigate_vertical(1)
 
+    # Unified contract: list focus moves rows; stale cached detail matches
+    # from the previous row must not steer navigation.
     assert browser.model.cursor == 1
-    assert browser.model._last_detail_match_lines == []
-    assert browser.model.search_line_cursor == 0
-
-    # A second move before rendering must not reuse the previous row's matches.
     browser.navigate_vertical(1)
     assert browser.model.cursor == 2
 
@@ -670,7 +895,7 @@ async def test_shared_explorers_copy_drag_from_terminal_mouse_packets(kind: str)
                     status="open",
                     deps=(),
                     created_at="now",
-                    notes="alpha beta gamma",
+                    description="alpha beta gamma",
                     comments=(),
                     search_text="Copy me alpha beta gamma",
                 )

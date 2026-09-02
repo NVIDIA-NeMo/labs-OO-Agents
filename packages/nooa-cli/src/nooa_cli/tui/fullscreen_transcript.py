@@ -193,8 +193,11 @@ class FullscreenTranscriptModel:
         if normalized == self._search_query:
             return
         self._search_query = normalized
+        # Deduplicate repeated terms ("alpha alpha") so match counts and
+        # navigation visits reflect distinct occurrences.
+        terms = list(dict.fromkeys(term for term in normalized.split() if term))
         matches: list[_SearchMatch] = []
-        if normalized:
+        if terms:
             for record in self._records:
                 folded_parts: list[str] = []
                 source: list[int] = []
@@ -203,13 +206,20 @@ class FullscreenTranscriptModel:
                     folded_parts.append(folded)
                     source.extend([index] * len(folded))
                 folded_text = "".join(folded_parts)
-                cursor = 0
-                while (found := folded_text.find(normalized, cursor)) >= 0:
-                    stop = found + len(normalized)
-                    matches.append(
-                        _SearchMatch(record.record_id, source[found], source[stop - 1] + 1)
-                    )
-                    cursor = stop
+                record_matches: list[_SearchMatch] = []
+                # Word-AND search highlights every term occurrence, matching
+                # the list filtering contract; each occurrence is its own
+                # navigation stop.
+                for term in terms:
+                    cursor = 0
+                    while (found := folded_text.find(term, cursor)) >= 0:
+                        stop = found + len(term)
+                        record_matches.append(
+                            _SearchMatch(record.record_id, source[found], source[stop - 1] + 1)
+                        )
+                        cursor = stop
+                record_matches.sort(key=lambda match: (match.start, match.stop))
+                matches.extend(record_matches)
         self._search_matches = tuple(matches)
         self._search_cursor = 0
         if matches:
@@ -232,11 +242,16 @@ class FullscreenTranscriptModel:
             return
         match = self._search_matches[self._search_cursor]
         rows = self._display_rows(max(1, width))
-        for row in rows:
+        for index, row in enumerate(rows):
             if row.anchor.record_id != match.record_id:
                 continue
             if any(start < match.stop and stop > match.start for start, stop in row.source_spans):
-                self._viewport = ViewportState(False, row.anchor)
+                # Center the match vertically when context exists above it,
+                # so the reveal shows before/after context instead of pinning
+                # the match to the pane's first row. Early matches clamp to
+                # the content start.
+                top = max(0, index - max(1, height) // 2)
+                self._viewport = ViewportState(False, rows[top].anchor)
                 return
 
     def cursor_position(self, *, width: int, height: int = 1) -> Point:

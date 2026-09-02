@@ -2493,6 +2493,33 @@ class TUIApplication:
                 count = picker.buffer.document.find_previous_word_beginning()
                 picker.buffer.delete_before_cursor(count=abs(count or -1))
 
+        # Non-eager absorber for every other Alt/Meta chord: without it, a
+        # chord like Alt+X falls back to the bare-Esc binding below (prompt_
+        # toolkit's retry loop fires the longest prefix match), canceling the
+        # picker instead of ignoring the chord. A standalone Esc still fires
+        # after the VT prefix timeout.
+        @kb.add("escape", Keys.Any, filter=resume_picker_active)
+        def _(event):
+            last = event.key_sequence[-1] if event.key_sequence else None
+            if last is None:
+                return
+            # Cursor-position reports arriving in the same read as an Esc
+            # must reach the CPR handler — absorbing them stalls layout.
+            if any(kp.key == Keys.CPRResponse for kp in event.key_sequence):
+                return
+            if last.key == Keys.Backspace or last.data in ("\x7f", "\b"):
+                picker = self._resume_picker
+                if (
+                    picker is not None
+                    and picker.active_control == "list"
+                    and picker.option_cursor is None
+                ):
+                    count = picker.buffer.document.find_previous_word_beginning()
+                    picker.buffer.delete_before_cursor(count=abs(count or -1))
+
+        # Non-eager so the Alt+Backspace word-delete chord above can win the
+        # prefix race; a standalone Esc still fires after the VT parser times
+        # out on the prefix (ttimeoutlen is already shortened for this).
         @kb.add("escape", filter=resume_picker_active)
         def _(event):
             picker = self._resume_picker
@@ -2516,64 +2543,42 @@ class TUIApplication:
             if selected is not None:
                 self._finish_resume_picker(selected)
 
-        @kb.add("up", filter=resume_picker_active, eager=True)
-        @kb.add("c-p", filter=resume_picker_active, eager=True)
-        def _(event):
-            if self._resume_picker is not None:
-                self._resume_picker.navigate_vertical(-1)
-                event.app.invalidate()
+        # Navigation and options dispatch through the shared
+        # ExplorerBrowser.handle_key via the picker's view facade — the same
+        # code path every explorer uses. Only the lifecycle keys above stay
+        # host-bound: finishing the dialog is a host concern.
+        _picker_key_map = {
+            "up": ("up", ""),
+            "c-p": ("up", ""),
+            "down": ("down", ""),
+            "c-n": ("down", ""),
+            "left": ("left", ""),
+            "right": ("right", ""),
+            "tab": ("tab", ""),
+            "s-tab": ("s-tab", ""),
+            " ": ("space", ""),
+            "c-o": ("options", ""),
+            "home": ("home", ""),
+            "end": ("end", ""),
+            "pageup": ("page_up", ""),
+            "pagedown": ("page_down", ""),
+        }
 
-        @kb.add("down", filter=resume_picker_active, eager=True)
-        @kb.add("c-n", filter=resume_picker_active, eager=True)
-        def _(event):
-            if self._resume_picker is not None:
-                self._resume_picker.navigate_vertical(1)
-                event.app.invalidate()
-
-        @kb.add("left", filter=resume_picker_active, eager=True)
-        def _(event):
-            if self._resume_picker is not None:
-                self._resume_picker.move_horizontal(-1)
-
-        @kb.add("right", filter=resume_picker_active, eager=True)
-        def _(event):
-            if self._resume_picker is not None:
-                self._resume_picker.move_horizontal(1)
-
-        @kb.add("tab", filter=resume_picker_active, eager=True)
-        def _(event):
-            if self._resume_picker is not None:
-                self._resume_picker.focus_next()
-
-        @kb.add("s-tab", filter=resume_picker_active, eager=True)
-        def _(event):
-            if self._resume_picker is not None:
-                self._resume_picker.focus_previous()
-
-        @kb.add(" ", filter=resume_picker_active, eager=True)
-        def _(event):
+        def _picker_handle_key(event, action: str) -> None:
             picker = self._resume_picker
             if picker is None:
                 return
-            if picker.option_cursor is not None:
-                picker.change_option()
-            elif picker.active_control == "list":
-                picker.buffer.insert_text(" ")
+            result = normalize_key_result(picker.handle_key(action, ""))
+            if result == "close":
+                selected = picker.view.pending_input
+                self._finish_resume_picker(selected)
+            event.app.invalidate()
 
-        @kb.add("c-o", filter=resume_picker_active, eager=True)
-        def _(event):
-            if self._resume_picker is not None:
-                self._resume_picker.toggle_options()
+        for _key, (_action, _value) in _picker_key_map.items():
 
-        @kb.add("pageup", filter=resume_picker_active, eager=True)
-        def _(event):
-            if self._resume_picker is not None:
-                self._resume_picker.page(-1)
-
-        @kb.add("pagedown", filter=resume_picker_active, eager=True)
-        def _(event):
-            if self._resume_picker is not None:
-                self._resume_picker.page(1)
+            @kb.add(_key, filter=resume_picker_active, eager=True)
+            def _(event, _action=_action):
+                _picker_handle_key(event, _action)
 
         input_selection_active = (
             Condition(lambda: self.input_buffer.selection_state is not None) & subview_inactive
@@ -2678,9 +2683,37 @@ class TUIApplication:
         def _(event):
             self._insert_bracketed_paste(event.current_buffer, event.data)
 
+        # Alt/Meta chords arrive as an ESC-prefixed second key in one read.
+        # prompt_toolkit gives EAGER bindings priority and discards longer
+        # matches, so the moment ESC enters the key buffer this binding fires
+        # immediately — which used to cancel the view on every Alt-chord
+        # (Option+Backspace deleted the dialog instead of a character).
+        # Keep Escape eager (a non-eager variant loses the ESC prefix to the
+        # eager Keys.Any wildcard above, which swallows it as text) but
+        # swallow it when the same read carried more keys: this Esc is the
+        # prefix of a chord, not a close gesture. The pending keys then flow
+        # through their own bindings — Alt+Backspace deletes in the search
+        # buffer, Alt+letter types, mouse packets route to the view.
         @kb.add("escape", filter=subview_active, eager=True)
         def _(event):
-            self._subview_key(event, "escape")
+            pending = [
+                kp
+                for kp in event.key_processor.input_queue
+                if kp.key is not Keys.CPRResponse
+            ]
+            if not pending:
+                # A CPR report may share this read (it pairs with the Esc in
+                # VT input, e.g. after a cursor-position request). Closing on
+                # it would be spurious; absorb the Esc and let the CPR reach
+                # its own handler. Only a truly lone Esc closes.
+                queue_has_cpr = any(
+                    kp.key is Keys.CPRResponse
+                    for kp in event.key_processor.input_queue
+                )
+                if not queue_has_cpr:
+                    self._subview_key(event, "escape")
+                return
+            # Chord continuation pending: absorb this Esc only.
 
         @kb.add("q", filter=subview_active, eager=True)
         def _(event):
