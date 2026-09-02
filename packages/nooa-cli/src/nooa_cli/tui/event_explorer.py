@@ -15,6 +15,7 @@ from .explorer_base import (
     ExplorerOption,
     ExplorerView,
     highlight_style_code,
+    matches_all_terms,
     search_terms,
     wrap_plain_line,
 )
@@ -95,12 +96,12 @@ class EventExplorerModel:
 
     def set_query(self, query: str) -> None:
         self.query = query
-        words = [w.lower() for w in query.split() if w.strip()]
+        terms = [w for w in query.split() if w.strip()]
         self.matches = [
             i
             for i, row in enumerate(self.rows)
             if row.event_type in self.enabled_types
-            and (not words or all(word in row.search_text.lower() for word in words))
+            and matches_all_terms(terms, row.search_text)
         ]
         if self.sort_mode == "type":
             self.matches.sort(key=lambda index: (self.rows[index].event_type, index))

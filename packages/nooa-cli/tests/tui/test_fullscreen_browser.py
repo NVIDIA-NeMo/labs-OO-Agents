@@ -205,6 +205,27 @@ def test_explorer_browser_reserves_marker_column_for_alignment() -> None:
     assert text[0].index("aligned") == text[1].index("aligned")
 
 
+def test_explorer_browser_highlights_each_search_term_separately() -> None:
+    """Word-AND queries highlight every term span, not the whole query.
+
+    Regression for the whole-query substring highlight, which found nothing
+    whenever a multi-word query matched scattered terms across a row.
+    """
+    browser = _browser()
+    browser.model.rows.clear()
+    browser.model.rows.append(MagicMock(search_text="alpha beta", title="Row"))
+    browser.model.set_query("alpha beta")
+    browser.view.format_row = lambda _row, _width: "alpha content beta content"
+    browser.buffer.text = "alpha beta"
+
+    fragments = browser.list_text(80, 1)
+
+    spans = [text for style, text in fragments if "match" in str(style)]
+    assert spans == ["alpha", "beta"]
+    joined = "".join(text for _style, text in fragments)
+    assert joined.endswith("alpha content beta content")
+
+
 def test_explorer_browser_mouse_wheel_scrolls_list_without_moving_selection() -> None:
     browser = _browser()
     browser.model.rows.extend(
