@@ -781,13 +781,15 @@ class ExplorerBrowser:
             # Word-AND rows can match terms scattered across the row, so
             # every term gets its own highlight span instead of one span for
             # the whole query (which a multi-word query would never find).
-            folded = text.casefold()
+            # A case-insensitive regex keeps the match offsets in the
+            # original text: casefold() can expand characters (ß -> ss) and
+            # desynchronize folded offsets from the row being sliced.
+            import re as _re
+
             spans: list[tuple[int, int]] = []
-            for term in dict.fromkeys(term.casefold() for term in query.split()):
-                cursor = 0
-                while (found := folded.find(term, cursor)) >= 0:
-                    spans.append((found, found + len(term)))
-                    cursor = found + len(term)
+            for term in dict.fromkeys(query.split()):
+                for found in _re.finditer(_re.escape(term), text, _re.IGNORECASE):
+                    spans.append((found.start(), found.end()))
             if not spans:
                 output.append((base, text))
                 continue
