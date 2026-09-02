@@ -110,6 +110,39 @@ def literal_match(query: str, text: str) -> tuple[int, tuple[int, ...]] | None:
     return -found, positions
 
 
+def _term_hits(
+    terms: list[str], text: str
+) -> tuple[set[str], int, tuple[int, ...]] | None:
+    """Locate query terms in one field, in original-text coordinates.
+
+    Returns the distinct terms hit, the earliest hit position, and the
+    original-text positions of every hit (for row highlighting).
+    """
+    parts: list[str] = []
+    source: list[int] = []
+    for index, char in enumerate(text):
+        folded = char.casefold()
+        parts.append(folded)
+        source.extend([index] * len(folded))
+    target = "".join(parts)
+    hit: set[str] = set()
+    earliest: int | None = None
+    positions: list[int] = []
+    for term in terms:
+        needle = term.casefold()
+        found = target.find(needle)
+        if found < 0:
+            continue
+        hit.add(needle)
+        if earliest is None or found < earliest:
+            earliest = found
+        positions.extend(source[found : found + len(needle)])
+    if not hit:
+        return None
+    assert earliest is not None
+    return hit, earliest, tuple(dict.fromkeys(positions))
+
+
 class ResumePickerModel:
     def __init__(self, rows: list[ResumePickerRow]) -> None:
         self.rows = rows
@@ -152,16 +185,29 @@ class ResumePickerModel:
         self.query = query
         normalized_query = query.strip()
         if normalized_query:
+            # Word-AND matching, shared with the explorers: every term must
+            # occur somewhere across the row's fields (title, preview, or
+            # conversation). The best field — most terms covered, earliest —
+            # provides the ranking score and highlight positions.
+            terms = [term for term in normalized_query.split() if term.strip()]
+            needed = {term.casefold() for term in terms}
             query_matches: list[tuple[int, str, tuple[int, ...]] | None] = []
             for fields in self._search_fields:
-                candidates = []
+                best: tuple[int, int, str, tuple[int, ...]] | None = None
+                covered: set[str] = set()
                 for field, value in fields.items():
-                    result = literal_match(normalized_query, value)
-                    if result is not None:
-                        candidates.append((result[0], field, result[1]))
-                query_matches.append(
-                    max(candidates, key=lambda item: item[0]) if candidates else None
-                )
+                    hits = _term_hits(terms, value)
+                    if hits is None:
+                        continue
+                    hit, earliest, positions = hits
+                    covered.update(hit)
+                    candidate = (len(hit), -earliest, field, positions)
+                    if best is None or candidate[:2] > best[:2]:
+                        best = candidate
+                if best is not None and covered == needed:
+                    query_matches.append((best[1], best[2], best[3]))
+                else:
+                    query_matches.append(None)
             self._query_matches = query_matches
         else:
             self._query_matches = [(0, "", ()) for _row in self.rows]

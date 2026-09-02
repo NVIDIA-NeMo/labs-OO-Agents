@@ -80,6 +80,19 @@ def search_terms(query: str) -> list[str]:
     return [term for term in query.split() if term.strip()]
 
 
+def matches_all_terms(terms: list[str], text: str) -> bool:
+    """Shared word-AND search contract for every fullscreen browser.
+
+    A query matches when *every* whitespace-separated term occurs
+    (case-insensitively) somewhere in the searchable text. All explorers and
+    the resume picker use this rule so search behaves identically everywhere.
+    """
+    if not terms:
+        return True
+    folded = text.casefold()
+    return all(term.casefold() in folded for term in terms)
+
+
 def highlight_terms(text: str, terms: list[str], *, current: bool = False) -> str:
     """Highlight search terms in text using ANSI colors."""
     if not terms:
@@ -239,12 +252,12 @@ class ExplorerModel:
     def set_query(self, query: str) -> None:
         """Update search query and refilter matches."""
         self.query = query
-        words = [w.lower() for w in query.split() if w.strip()]
+        terms = [w for w in query.split() if w.strip()]
         self.matches = [
             i
             for i, row in enumerate(self.rows)
             if self._filter_predicate(row)
-            and (not words or all(word in row.search_text.lower() for word in words))
+            and matches_all_terms(terms, row.search_text)
         ]
         if self._sort_key is not None:
             self.matches.sort(
