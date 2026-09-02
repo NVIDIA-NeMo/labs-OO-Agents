@@ -11,12 +11,32 @@ from nooa_cli.tui.resume_picker import (
     ResumePickerTurn,
     _clip,
     _row_fragments,
+    _semantic_preview_selection,
     literal_match,
     render_resume_picker,
 )
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from rich.cells import cell_len
+
+
+def test_semantic_preview_selection_removes_user_and_agent_chrome() -> None:
+    rendered_selection = (
+        "▔▔▔▔▔▔▔▔\n"
+        " ❯ hello world   \n"
+        "   continued   \n"
+        "▁▁▁▁▁▁▁▁\n"
+        "OO:\n"
+        "answer text"
+    )
+
+    assert _semantic_preview_selection(rendered_selection) == (
+        "hello world\ncontinued\nanswer text"
+    )
+
+
+def test_semantic_preview_selection_preserves_partial_plain_text() -> None:
+    assert _semantic_preview_selection("partial OO: text") == "partial OO: text"
 
 
 def row(id: str, title: str, **kw) -> ResumePickerRow:
@@ -158,6 +178,14 @@ def test_selection_can_inspect_attached_but_cannot_resume_it() -> None:
     assert "✓  other" in render_resume_picker(model, 80, 20)
 
 
+def test_resume_picker_specializes_shared_explorer_browser() -> None:
+    from nooa_cli.tui.fullscreen_browser import ExplorerBrowser
+
+    assert issubclass(ResumePicker, ExplorerBrowser)
+    assert ResumePicker.preview_selection is ExplorerBrowser.preview_selection
+    assert ResumePicker.focus_initial is ExplorerBrowser.focus_initial
+
+
 def test_tab_cycles_only_list_and_preview() -> None:
     app = MagicMock()
     app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
@@ -169,6 +197,16 @@ def test_tab_cycles_only_list_and_preview() -> None:
     assert picker.active_control == "list"
     picker.focus_previous()
     assert picker.active_control == "preview"
+
+
+def test_resume_picker_shows_copy_status_in_its_footer() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker(
+        [row("1", "one")], app, selection_status=lambda: "Copied 12 characters"
+    )
+
+    assert picker._help_text() == "Copied 12 characters"
 
 
 def test_options_mode_selects_and_changes_filter_and_sort() -> None:
@@ -324,6 +362,47 @@ def test_header_columns_align_with_row_columns() -> None:
     )
 
 
+def test_row_shows_snippet_when_match_is_clipped_or_in_conversation() -> None:
+    """Listed rows must show *why* they matched.
+
+    The default preview column clips long newest-agent messages, and
+    conversation-field matches are never displayed at all — both left the
+    match count visible but the matches themselves invisible.
+    """
+    model = ResumePickerModel(
+        [
+            row(
+                "clipped",
+                "Clipped preview",
+                turns=(
+                    ResumePickerTurn("agent", "a" * 90 + " needle hidden past the clip"),
+                ),
+            ),
+            row(
+                "conversation",
+                "Conversation match",
+                turns=(
+                    ResumePickerTurn("user", "completely unrelated opening question"),
+                    ResumePickerTurn("agent", "needle appears much later in the conversation"),
+                ),
+            ),
+        ]
+    )
+    model.set_query("needle")
+
+    fragments = {
+        match.row.id: _row_fragments(match, selected=False, width=120)[0]
+        for match in model.matches
+    }
+    joined = {rid: "".join(text for _style, text in frags) for rid, frags in fragments.items()}
+
+    # The matched text (with match styling) is visible on both rows.
+    for rid, row_fragments in fragments.items():
+        assert any("match" in str(style) for style, _t in row_fragments), rid
+    assert "needle" in joined["clipped"]
+    assert "needle" in joined["conversation"]
+
+
 def test_selection_marker_moves_before_viewport_scrolls() -> None:
     model = ResumePickerModel([row(str(index), f"title {index}") for index in range(5)])
     first = [
@@ -347,7 +426,9 @@ def test_live_preview_reports_empty_conversation() -> None:
     app = MagicMock()
     app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
     picker = ResumePicker([row("empty", "Empty", turns=())], app)
-    assert picker.preview_text(40, 5) == [("class:fullscreen-browser.empty", "No conversation preview")]
+    assert picker.preview_text(40, 5) == [
+        ("class:fullscreen-browser.empty", "No conversation preview")
+    ]
 
 
 def test_preview_uses_live_scrollback_visual_language() -> None:
@@ -489,6 +570,44 @@ async def test_picker_excludes_empty_sessions(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_resume_picker_f2_temporarily_restores_native_selection(monkeypatch) -> None:
+    from nooa_cli.tui import session_manager as sm
+
+    from .tui_app_harness import TUIHarness
+
+    session = SimpleNamespace(
+        id="resumable",
+        name="kept",
+        model="m",
+        agent="A",
+        working_dir=str(Path.cwd()),
+        last_active=2,
+        turn_count=1,
+    )
+    monkeypatch.setattr(
+        sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: [session])
+    )
+    monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
+    monkeypatch.setattr(
+        sm.SessionManager,
+        "load_turns",
+        classmethod(lambda cls, value, limit=12: [SimpleNamespace(role="agent", content="copy")]),
+    )
+    async with TUIHarness() as harness:
+        opened = asyncio.create_task(harness.app.open_session_resume_dialog())
+        await harness.wait_for(lambda: harness.app._resume_picker is not None)
+        assert bool(harness.app._app.mouse_support()) is True
+
+        await harness.press("f2")
+        await harness.wait_for(lambda: not bool(harness.app._app.mouse_support()))
+
+        await harness.press("f2")
+        await harness.wait_for(lambda: bool(harness.app._app.mouse_support()))
+        await harness.press("escape")
+        assert await asyncio.wait_for(opened, 1) is None
+
+
+@pytest.mark.asyncio
 async def test_filter_change_prepares_new_preview_without_blocking(monkeypatch) -> None:
     import threading
 
@@ -546,6 +665,23 @@ def test_preview_search_highlights_and_cycles_transcript_matches() -> None:
     assert picker.preview_search_position() == (1, 2)
 
 
+def test_preview_measurement_redraw_does_not_cancel_drag() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row("1", "one", turns=(ResumePickerTurn("agent", "alpha beta"),))], app)
+    picker.preview_control.create_content(20, 3)
+    picker.preview_control.mouse_handler(
+        MouseEvent(Point(0, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+
+    # Focus changes invalidate the application after mouse-down. prompt_toolkit
+    # asks controls for their preferred height before the next mouse packet.
+    picker.preview_control.create_content(20, None)
+
+    assert picker.preview_control.viewport == (20, 3)
+    assert picker.preview_control.dragging
+
+
 def test_preview_mouse_drag_selects_and_copies() -> None:
     app = MagicMock()
     app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
@@ -567,6 +703,110 @@ def test_preview_mouse_drag_selects_and_copies() -> None:
     assert copied
     assert app.clipboard.set_text.call_args.args[0] == copied[0]
     assert picker._preview_model(20).selected_text() == ""
+
+
+@pytest.mark.asyncio
+async def test_real_prompt_toolkit_preview_drag_survives_redraw_between_packets(
+    monkeypatch,
+) -> None:
+    from nooa_cli.tui import session_manager as sm
+
+    from .tui_app_harness import MutableRecordingOutput, TUIHarness
+
+    session = SimpleNamespace(
+        id="session-1",
+        name="one",
+        model="m",
+        agent="A",
+        working_dir=str(Path.cwd()),
+        started_at=1,
+        last_active=2,
+        turn_count=1,
+    )
+    monkeypatch.setattr(
+        sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: [session])
+    )
+    monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
+    monkeypatch.setattr(
+        sm.SessionManager,
+        "load_turns",
+        classmethod(
+            lambda cls, value, limit=12: [SimpleNamespace(role="agent", content="alpha beta gamma")]
+        ),
+    )
+
+    async with TUIHarness(output=MutableRecordingOutput(80, 24), full_screen=True) as harness:
+        opened = asyncio.create_task(harness.app.open_session_resume_dialog())
+        await harness.wait_for(lambda: harness.app._resume_picker is not None)
+        picker = harness.app._resume_picker
+        await harness.wait_for(lambda: picker.preview_control.viewport[1] >= 2)
+        width = picker.preview_control.viewport[0]
+        # The preview renders off-thread; wait for the model before dragging so
+        # the packets can never race the async preview preparation.
+        await harness.wait_for(lambda: picker._preview_model(width) is not None)
+
+        # Locate the screen row that actually shows the message text: the
+        # bottom-aligned preview can end with blank rows and pane origins
+        # shift with layout changes (e.g. upstream separator rows), so SGR
+        # rows must not be hardcoded.
+
+        def rendered_message_row():
+            # The session's LIST row also shows the newest agent message as a
+            # preview column, so take the LAST screen row containing the text —
+            # that is the conversation-preview pane's copy.
+            screen = harness.app._app.renderer.last_rendered_screen
+            if screen is None:
+                return None
+            found = None
+            for row_index, line in screen.data_buffer.items():
+                chars = "".join(line[column].char for column in sorted(line))
+                if "alpha beta gamma" in chars:
+                    found = row_index
+            return found
+
+        await harness.wait_for(lambda: rendered_message_row() is not None, timeout=5.0)
+        # SGR coordinates are one-based. Send each packet separately so the
+        # focus-changing mouse-down is followed by a real render measurement
+        # before the drag and release packets arrive.
+        down = rendered_message_row() + 1
+        harness._pipe.send_text(f"\x1b[<0;3;{down}M")
+        await harness.wait_for(lambda: picker.preview_control.dragging, timeout=5.0)
+        harness._pipe.send_text(f"\x1b[<32;12;{down}M")
+        await harness.wait_for(
+            lambda: bool(picker._preview_model(width).selected_text()), timeout=5.0
+        )
+        harness._pipe.send_text(f"\x1b[<0;12;{down}m")
+        await harness.wait_for(lambda: not picker.preview_control.dragging, timeout=5.0)
+
+        selected = harness.app._app.clipboard.get_data().text
+        assert selected
+        assert picker._preview_model(width).selected_text() == ""
+        await harness.press("escape")
+        assert await asyncio.wait_for(opened, 1) is None
+
+
+@pytest.mark.asyncio
+async def test_resume_f2_native_selection_cancels_edge_autoscroll() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker(
+        [row("1", "one", turns=(ResumePickerTurn("agent", "\n".join(map(str, range(20)))),))],
+        app,
+    )
+    picker.preview_control.create_content(20, 3)
+    scrolls: list[tuple[str, int]] = []
+    picker.mouse_scroll = lambda pane, delta: scrolls.append((pane, delta))  # type: ignore[method-assign]
+    picker.preview_control.mouse_handler(
+        MouseEvent(Point(0, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+    picker.preview_control.mouse_handler(
+        MouseEvent(Point(3, 2), MouseEventType.MOUSE_MOVE, MouseButton.LEFT, frozenset())
+    )
+
+    picker.toggle_native_selection()
+    assert picker.mouse_support is False
+    await asyncio.sleep(0.4)
+    assert scrolls == []
 
 
 @pytest.mark.asyncio
@@ -867,21 +1107,26 @@ async def test_full_application_screen_keeps_picker_help_visible(
                 )
             )
         harness.app._app.invalidate()
-        await harness.wait_for(
-            lambda: (
-                harness.app._app.renderer.last_rendered_screen is not None
-                and any(
-                    cell.char.strip()
-                    for line in harness.app._app.renderer.last_rendered_screen.data_buffer.values()
-                    for cell in line.values()
-                )
+
+        def rendered_lines() -> list[str]:
+            screen = harness.app._app.renderer.last_rendered_screen
+            if screen is None:
+                return []
+            return [
+                "".join(screen.data_buffer[y][x].char for x in range(width)).rstrip()
+                for y in range(height)
+            ]
+
+        if usable:
+            # The preview renders off-thread; wait until the prepared replay is
+            # actually on screen so a stale "Preparing…" frame can't be read.
+            await harness.wait_for(
+                lambda: any("preview for session-19" in line for line in rendered_lines()),
+                timeout=5.0,
             )
-        )
-        screen = harness.app._app.renderer.last_rendered_screen
-        visible = [
-            "".join(screen.data_buffer[y][x].char for x in range(width)).rstrip()
-            for y in range(height)
-        ]
+        else:
+            await harness.wait_for(lambda: any(line.strip() for line in rendered_lines()))
+        visible = rendered_lines()
         if usable:
             joined = "\n".join(visible)
             assert "20 sessions" in joined

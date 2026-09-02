@@ -137,6 +137,25 @@ def test_event_explorer_renders_shared_session_events() -> None:
     assert "test-model" in (rows[1].markdown or "")
 
 
+def test_event_explorer_collapses_multiline_user_message_summary() -> None:
+    row = build_event_rows(
+        SimpleNamespace(
+            items=lambda: [
+                (
+                    "2",
+                    _FakeEvent(
+                        "SessionUserMessage",
+                        content="first line\n\nexport UV_PYTHON=value",
+                    ),
+                )
+            ]
+        )
+    )[0]
+
+    assert row.summary == "first line export UV_PYTHON=value"
+    assert "\n" not in row.summary
+
+
 def test_event_explorer_renders_generic_events_as_markdown_sections() -> None:
     row = build_event_rows(
         SimpleNamespace(
@@ -466,6 +485,31 @@ def test_event_explorer_search_highlights_matches_inside_detail_text() -> None:
     assert f"{highlight_style_code()}alpha\x1b[0m" in joined
 
 
+def test_event_explorer_search_keeps_styled_detail_colors() -> None:
+    """Searching must not strip the detail pane's syntax colors.
+
+    Regression for the searched path rendering wrapped *plain* text, which
+    drained all color from the detail view while a query was active.
+    """
+    row = build_event_rows(
+        SimpleNamespace(
+            items=lambda: [("1", _FakeEvent("ToolCallEvent", name="run", arguments={"cmd": "ls"}))]
+        )
+    )[0]
+
+    styled = highlighted_detail_lines(row, width=80)
+    searched = highlighted_detail_lines(row, width=80, query="run")
+
+    without = [line for line in "\n".join(styled).splitlines() if "\x1b[" in line]
+    with_query = [line for line in "\n".join(searched).splitlines() if "\x1b[" in line]
+    # Non-match styling (syntax colors) must survive the search.
+    assert with_query, "search dropped all styling"
+    assert any(
+        code in "".join(with_query) and code not in highlight_style_code()
+        for code in ("\x1b[38;", "\x1b[48;")
+    )
+
+
 def test_event_explorer_renders_execute_python_event_as_formatted_markdown() -> None:
     row = build_event_rows(
         SimpleNamespace(
@@ -788,7 +832,9 @@ async def test_tui_app_event_explorer_routes_real_mouse_wheel_to_detail() -> Non
 
 
 def test_event_explorer_has_in_app_mouse_scroll_bindings() -> None:
-    source = Path("packages/nooa-cli/src/nooa_cli/tui/tui_application.py").read_text()
+    # Resolve from this test file so the check works from any cwd
+    # (repo root or packages/nooa-cli).
+    source = (Path(__file__).parents[2] / "src/nooa_cli/tui/tui_application.py").read_text()
 
     assert "open_event_explorer" in source
     assert "Keys.ScrollDown" in source

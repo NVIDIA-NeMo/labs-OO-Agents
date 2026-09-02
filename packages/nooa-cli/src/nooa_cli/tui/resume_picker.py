@@ -7,6 +7,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Literal
 
 from prompt_toolkit.buffer import Buffer
@@ -16,7 +17,7 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
 from rich.cells import cell_len, split_graphemes
 
-from .fullscreen_browser import build_fullscreen_browser
+from .fullscreen_browser import ExplorerBrowser, SelectablePreviewControl, build_fullscreen_browser
 from .terminal_safety import sanitize_live_text
 
 
@@ -332,6 +333,39 @@ def _row_title_width(width: int) -> int:
     return min(30, max(10, max(0, width - 16) // 3))
 
 
+def _match_snippet(match: FieldMatch, available: int) -> tuple[str, tuple[int, ...]] | None:
+    """Return preview-column text that makes an invisible match visible.
+
+    The row normally shows the start of the newest agent message, which can
+    clip the matched text away — or the match may live in the conversation
+    field, which the row never displays. In both cases show the matched line
+    so every listed session shows *why* it matched.
+    """
+    row = match.row
+    positions = match.positions
+    if not positions:
+        return None
+    if match.field == "conversation":
+        text = "\n".join(sanitize_live_text(turn.content) for turn in row.turns)
+    elif match.field == "preview" and positions[0] >= max(available - 2, 0):
+        text = row.preview
+    else:
+        return None
+    first = positions[0]
+    if match.field == "conversation":
+        start = text.rfind("\n", 0, first) + 1
+        stop = text.find("\n", first)
+        stop = len(text) if stop < 0 else stop
+        # Long conversation lines would still clip the match away; shift the
+        # window toward the match instead of starting at the line beginning.
+        if first - start > 40:
+            start = first - 24
+    else:
+        start = max(0, first - 24)
+        stop = len(text)
+    return text[start:stop], tuple(p - start for p in positions if start <= p < stop)
+
+
 def _row_fragments(
     match: FieldMatch, selected: bool, width: int, *, sort_updated: bool = True
 ) -> list[list[tuple[str, str]]]:
@@ -356,14 +390,20 @@ def _row_fragments(
     )
     title_cells = cell_len("".join(text for _style, text in title))
     title.append((base, " " * max(0, title_width - title_cells) + "  "))
-    preview_positions = match.positions if match.field == "preview" else ()
+    available = max(0, width - 15 - title_width - 2)
+    snippet = _match_snippet(match, available)
+    if snippet is not None:
+        preview_text, preview_positions = snippet
+    else:
+        preview_text = row.preview
+        preview_positions = match.positions if match.field == "preview" else ()
     return [
         _clip_fragments(
             [
                 (base, prefix),
                 *title,
                 *_field_fragments(
-                    row.preview,
+                    preview_text,
                     base + " class:fullscreen-browser.meta",
                     preview_positions,
                 ),
@@ -406,6 +446,29 @@ def _preview_lines(row: ResumePickerRow | None, width: int) -> list[list[tuple[s
     if lines and not lines[-1]:
         lines.pop()
     return lines
+
+
+def _semantic_preview_selection(text: str) -> str:
+    """Remove conversation-preview chrome from selected text."""
+    output: list[str] = []
+    in_user_bar = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and set(stripped) <= {"▔"}:
+            in_user_bar = True
+            continue
+        if stripped and set(stripped) <= {"▁"}:
+            in_user_bar = False
+            continue
+        if in_user_bar or line.startswith(" ❯ "):
+            if line.startswith(" ❯ "):
+                line = line[3:]
+            elif in_user_bar and line.startswith("   "):
+                line = line[3:]
+            output.append(line.rstrip())
+        elif stripped != "OO:":
+            output.append(line)
+    return "\n".join(output).strip("\n")
 
 
 def render_resume_picker(model: ResumePickerModel, width: int, height: int) -> str:
@@ -462,12 +525,11 @@ def render_resume_picker(model: ResumePickerModel, width: int, height: int) -> s
 
 
 class _PickerControl(FormattedTextControl):
-    def __init__(self, picker: ResumePicker, kind: Literal["list", "preview"]):
+    """Resume list control; preview gestures use SelectablePreviewControl."""
+
+    def __init__(self, picker: ResumePicker):
         self.picker = picker
-        self.kind = kind
         self.viewport = (1, 1)
-        self._dragging = False
-        self._drag_moved = False
         super().__init__(self._text, focusable=True, show_cursor=False)
 
     def create_content(self, width: int, height: int):
@@ -477,66 +539,39 @@ class _PickerControl(FormattedTextControl):
 
     def _text(self):
         width, height = self.viewport
-        if self.kind == "list":
-            output = []
-            for index, match in self.picker.model.visible(height):
-                for row_line in _row_fragments(
-                    match,
-                    index == self.picker.model.selected,
-                    width,
-                    sort_updated=self.picker.model.sort_updated,
-                ):
-                    if output:
-                        output.append(("", "\n"))
-                    output.extend(row_line)
-            if not output:
-                output = [("class:fullscreen-browser.empty", "No matching sessions")]
-            return output
-
-        return self.picker.preview_text(width, height)
+        output = []
+        for index, match in self.picker.model.visible(height):
+            for row_line in _row_fragments(
+                match,
+                index == self.picker.model.selected,
+                width,
+                sort_updated=self.picker.model.sort_updated,
+            ):
+                if output:
+                    output.append(("", "\n"))
+                output.extend(row_line)
+        return output or [("class:fullscreen-browser.empty", "No matching sessions")]
 
     def mouse_handler(self, mouse_event: MouseEvent):
         if (
             MouseModifier.ALT in mouse_event.modifiers
             or MouseModifier.SHIFT in mouse_event.modifiers
+            or not self.picker.mouse_support
         ):
-            self._dragging = False
             return NotImplemented
         if mouse_event.event_type is MouseEventType.SCROLL_UP:
-            self.picker.mouse_scroll(self.kind, -3)
+            self.picker.mouse_scroll("list", -3)
             return None
         if mouse_event.event_type is MouseEventType.SCROLL_DOWN:
-            self.picker.mouse_scroll(self.kind, 3)
+            self.picker.mouse_scroll("list", 3)
             return None
         if (
             mouse_event.event_type is MouseEventType.MOUSE_DOWN
             and mouse_event.button is MouseButton.LEFT
         ):
-            self.picker.activate_control(self.kind)
-            if self.kind == "list":
-                self.picker.select(self.picker.model.list_offset + mouse_event.position.y)
-            else:
-                self._dragging = True
-                self._drag_moved = False
-                self.picker.preview_selection(
-                    "start", mouse_event.position.x, mouse_event.position.y
-                )
+            self.picker.activate_control("list")
+            self.picker.select(self.picker.model.list_offset + mouse_event.position.y)
             return None
-        if self.kind == "preview" and self._dragging:
-            if mouse_event.event_type is MouseEventType.MOUSE_MOVE:
-                self._drag_moved = True
-                self.picker.preview_selection(
-                    "extend", mouse_event.position.x, mouse_event.position.y
-                )
-                return None
-            if mouse_event.event_type is MouseEventType.MOUSE_UP:
-                self._dragging = False
-                action = "finish" if self._drag_moved else "cancel"
-                self._drag_moved = False
-                self.picker.preview_selection(
-                    action, mouse_event.position.x, mouse_event.position.y
-                )
-                return None
         return NotImplemented
 
 
@@ -588,8 +623,39 @@ class _PickerButtonControl(FormattedTextControl):
         return NotImplemented
 
 
-class ResumePicker:
-    CONTROL_ORDER = ("list", "preview")
+class ResumePicker(ExplorerBrowser):
+    """Session-specific ExplorerBrowser with asynchronous replay previews.
+
+    The host owns this picker's key dispatch (it never routes through
+    ``ExplorerBrowser.handle_key``), but inherited helpers dereference
+    ``self.view``. Expose a minimal facade so an accidental inherited call
+    degrades gracefully instead of raising ``AttributeError``.
+    """
+
+    class _ViewFacade:
+        config = SimpleNamespace(actions={})
+        options: tuple[Any, ...] = ()
+        item_name = "session"
+
+        @staticmethod
+        def handle_key(_action: str, _value: str = "") -> str:
+            return "handled"
+
+        @staticmethod
+        def handle_action(_action: str, _row: Any) -> str:
+            return "ignored"
+
+    @property
+    def view(self) -> ResumePicker._ViewFacade:
+        return self._view_facade
+
+    @property
+    def model(self) -> ResumePickerModel:
+        return self._resume_model
+
+    @model.setter
+    def model(self, value: ResumePickerModel) -> None:
+        self._resume_model = value
 
     def __init__(
         self,
@@ -597,12 +663,16 @@ class ResumePicker:
         app: Any,
         *,
         selection_copy_callback: Callable[[str], None] | None = None,
+        selection_status: Callable[[], str] | None = None,
     ):
         self.app = app
+        self._view_facade = ResumePicker._ViewFacade()
         self.model = ResumePickerModel(rows)
         self._selection_copy_callback = selection_copy_callback
+        self._selection_status = selection_status
         self._preview_models: dict[tuple[str, int], Any] = {}
         self._preview_tasks: dict[tuple[str, int], Any] = {}
+        self.native_selection = False
         self.active_control = "list"
         self.option_cursor: Literal["filter", "sort"] | None = None
         self.buffer = Buffer(multiline=False)
@@ -642,8 +712,8 @@ class ResumePicker:
             [search, Window(FormattedTextControl(" "), width=1, height=1), selectors],
             padding=0,
         )
-        self.list_control = _PickerControl(self, "list")
-        self.preview_control = _PickerControl(self, "preview")
+        self.list_control = _PickerControl(self)
+        self.preview_control = SelectablePreviewControl(self)
 
         self.title_control = FormattedTextControl(self._title)
         self.list_header_control = FormattedTextControl(self._list_header)
@@ -667,51 +737,34 @@ class ResumePicker:
             small_text=self._small_text,
         )
 
-    def _small_text(self):
-        size = self.app.output.get_size()
-        return [
-            (
-                "class:fullscreen-browser.muted",
-                f"Need 48 x 13; now {size.columns} x {size.rows}",
-            )
-        ]
-
     def _query_changed(self) -> None:
         self.model.set_query(self.buffer.text)
         self._prepare_current_preview()
         self.invalidate()
 
-    def _search_label(self):
-        style = "class:fullscreen-browser.search-label"
-        if self.active_control == "list" and self.option_cursor is None:
-            style += " class:fullscreen-browser.control-focused"
-        return [(style, "[Search: ")]
+    @property
+    def mouse_support(self) -> bool:
+        """Disable mouse reporting while terminal-native selection is active."""
+        return not self.native_selection
 
-    def _search_close(self):
-        style = "class:fullscreen-browser.search-label"
-        if self.active_control == "list" and self.option_cursor is None:
-            style += " class:fullscreen-browser.control-focused"
-        return [(style, "]")]
-
-    def _active_rail(self, area: str):
-        active = self.active_control == area
-        style = (
-            "class:fullscreen-browser.active-rail-active"
-            if active
-            else "class:fullscreen-browser.active-rail"
-        )
-        glyph = "▌" if active else "│"
-        return [(style, "\n".join([glyph] * max(1, self.app.output.get_size().rows)))]
+    def toggle_native_selection(self) -> None:
+        """Switch between application selection and terminal-native selection."""
+        self.preview_control.cancel_drag()
+        self.native_selection = not self.native_selection
+        self.invalidate()
 
     def _help_text(self):
+        copy_status = self._selection_status() if self._selection_status is not None else ""
+        if copy_status:
+            return copy_status
         columns = self.app.output.get_size().columns
         if self.option_cursor is not None:
             if columns < 72:
                 return "Options · ←→ select · ↑↓/Space change · Esc done"
             return "Options · ←→ select · ↑↓/Space change · Enter/Esc done"
         if columns < 72:
-            return "Type search · Ctrl-O options · ↵ resume · Esc"
-        return "Type search · Ctrl-O options · Tab panes · ↑↓ move · ↵ resume · Esc"
+            return "Ctrl-O options · F2 native · ↵ resume · Esc"
+        return "Ctrl-O options · Tab panes · F2 native · ↵ resume · Esc"
 
     def _title(self):
         count = len(self.model.matches)
@@ -760,14 +813,6 @@ class ResumePicker:
         self.preview_header_control._fragment_cache.clear()
         self.app.invalidate()
 
-    def focus_initial(self) -> None:
-        size = self.app.output.get_size()
-        if size.columns >= 48 and size.rows >= 13:
-            self.active_control = "list"
-            self.app.layout.focus(self.query_control)
-        else:
-            self.app.layout.focus(self.small_control)
-
     def activate_control(self, name: str) -> None:
         self.active_control = name
         controls = {
@@ -811,15 +856,8 @@ class ResumePicker:
         self.invalidate()
         return True
 
-    def focus_next(self) -> None:
-        self.option_cursor = None
-        index = (self.CONTROL_ORDER.index(self.active_control) + 1) % len(self.CONTROL_ORDER)
-        self.activate_control(self.CONTROL_ORDER[index])
-
     def focus_previous(self) -> None:
-        self.option_cursor = None
-        index = (self.CONTROL_ORDER.index(self.active_control) - 1) % len(self.CONTROL_ORDER)
-        self.activate_control(self.CONTROL_ORDER[index])
+        self.focus_next(-1)
 
     def move_horizontal(self, delta: int) -> None:
         if self.option_cursor is not None:
@@ -927,6 +965,14 @@ class ResumePicker:
             return
         self._preview_tasks[key] = loop.create_task(prepare())
 
+    def _preview_transcript(self, width: int, height: int):
+        """Provide the asynchronously prepared replay to ExplorerBrowser."""
+        return self._preview_model(width)
+
+    def _selected_preview_text(self, transcript: Any) -> str:
+        """Strip replay-only chrome while using the shared copy lifecycle."""
+        return _semantic_preview_selection(transcript.selected_text())
+
     def preview_text(self, width: int, height: int):
         row = self.model.current
         if row is None:
@@ -949,26 +995,6 @@ class ResumePicker:
             return 0, 0
         transcript.set_search(self.model.query, width=max(1, width), height=max(1, height))
         return transcript.search_position
-
-    def preview_selection(self, action: str, x: int, y: int) -> None:
-        width, height = self.preview_control.viewport
-        transcript = self._preview_model(width)
-        if transcript is None:
-            return
-        if action == "cancel":
-            transcript.clear_selection()
-        elif action == "start":
-            transcript.begin_selection(x=x, y=y, width=width, height=height)
-        else:
-            transcript.update_selection(x=x, y=y, width=width, height=height)
-        if action == "finish":
-            selected = transcript.selected_text()
-            transcript.clear_selection()
-            if selected:
-                self.app.clipboard.set_text(selected)
-                if self._selection_copy_callback is not None:
-                    self._selection_copy_callback(selected)
-        self.invalidate()
 
     def _reset_preview(self) -> None:
         row = self.model.current
@@ -1017,6 +1043,7 @@ class ResumePicker:
 
     def close(self) -> None:
         """Cancel preview preparation when the picker is dismissed."""
+        self.preview_control.cancel_drag()
         for task in self._preview_tasks.values():
             task.cancel()
         self._preview_tasks.clear()

@@ -4,12 +4,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import re
 from collections.abc import Callable
 from typing import Any
 
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.filters import Condition
-from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.layout import (
     BufferControl,
     ConditionalContainer,
@@ -25,11 +26,67 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
 from prompt_toolkit.widgets import Frame
 
-from .terminal_safety import (
-    project_prompt_toolkit_ansi,
-    sanitize_live_text,
-    sanitize_transcript_ansi,
-)
+from .fullscreen_transcript import FullscreenTranscriptModel
+from .terminal_safety import sanitize_live_text
+
+_MULTILINE_RUN_RE = re.compile(r"[^\S\n\r]*(?:\r\n|\n|\r)+[^\S\n\r]*")
+
+
+def _collapse_multiline(text: str) -> str:
+    """Flatten embedded line breaks in a list row without touching padding.
+
+    ``format_row`` output is padded for column alignment; collapsing *all*
+    whitespace would shred those columns. Only line-boundary whitespace
+    (``\n``, ``\r\n``, and bare ``\r``) is normalized so a hostile
+    multiline row still renders as one line. Must run on the *raw* row text:
+    ``sanitize_live_text`` renders control characters as visible escapes
+    (a real ``\r`` becomes the two characters ``\\r``), after which the
+    line break can no longer be recognized.
+    """
+    return _MULTILINE_RUN_RE.sub(" ", text).strip()
+
+
+class _DragCaptureFloatContainer(FloatContainer):
+    """Float container that resolves preview drags released over sibling controls."""
+
+    def __init__(self, *args: Any, preview_control: Any, **kwargs: Any) -> None:
+        self._preview_control = preview_control
+        super().__init__(*args, **kwargs)
+
+    def write_to_screen(
+        self,
+        screen: Any,
+        mouse_handlers: Any,
+        write_position: Any,
+        parent_style: str,
+        erase_bg: bool,
+        z_index: int | None,
+    ) -> None:
+        super().write_to_screen(
+            screen, mouse_handlers, write_position, parent_style, erase_bg, z_index
+        )
+        wrappers: dict[Any, Any] = {}
+        for y in range(write_position.ypos, write_position.ypos + write_position.height):
+            row = mouse_handlers.mouse_handlers[y]
+            for x in range(write_position.xpos, write_position.xpos + write_position.width):
+                handler = row[x]
+                wrapper = wrappers.get(handler)
+                if wrapper is None:
+
+                    def wrapper(mouse_event: MouseEvent, handler=handler):
+                        control = self._preview_control
+                        if (
+                            mouse_event.event_type is MouseEventType.MOUSE_DOWN
+                            and mouse_event.button is MouseButton.LEFT
+                        ):
+                            control.cancel_drag()
+                        result = handler(mouse_event)
+                        if control.handle_external_mouse(mouse_event):
+                            return None
+                        return result
+
+                    wrappers[handler] = wrapper
+                row[x] = wrapper
 
 
 def build_fullscreen_browser(
@@ -104,7 +161,9 @@ def build_fullscreen_browser(
         ],
         padding=0,
     )
-    main = FloatContainer(content=main_body, floats=floats or [])
+    main = _DragCaptureFloatContainer(
+        content=main_body, floats=floats or [], preview_control=preview_control
+    )
     small = HSplit(
         [
             Window(small_control, height=1),
@@ -119,10 +178,151 @@ def build_fullscreen_browser(
     return DynamicContainer(responsive)
 
 
+class SelectablePreviewControl(FormattedTextControl):
+    """Shared preview pane with ordinary drag-to-copy and edge autoscroll."""
+
+    def __init__(self, owner: Any) -> None:
+        self.owner = owner
+        self.viewport = (1, 1)
+        self._dragging = False
+        self._drag_origin = (0, 0)
+        self._drag_position = (0, 0)
+        self._drag_moved = False
+        self._autoscroll_direction = 0
+        self._autoscroll_timer: asyncio.TimerHandle | None = None
+        super().__init__(self._text, focusable=True, show_cursor=False)
+
+    def create_content(self, width: int, height: int | None):
+        # prompt_toolkit calls ``create_content(width, None)`` while measuring a
+        # preferred height.  That is not a rendered one-row viewport: treating
+        # it as one cancels an active drag during the redraw triggered by mouse
+        # down, before the terminal can deliver the following move event.
+        if height is not None:
+            viewport = (max(1, width), max(1, height))
+            if viewport != self.viewport:
+                self.cancel_drag()
+            self.viewport = viewport
+        self._fragment_cache.clear()
+        return super().create_content(width, height)
+
+    def _text(self):
+        return self.owner.preview_text(*self.viewport)
+
+    def mouse_handler(self, mouse_event: MouseEvent):
+        if (
+            MouseModifier.ALT in mouse_event.modifiers
+            or MouseModifier.SHIFT in mouse_event.modifiers
+            or not getattr(self.owner, "mouse_support", True)
+        ):
+            self.cancel_drag()
+            return NotImplemented
+        if mouse_event.event_type is MouseEventType.SCROLL_UP:
+            self.owner.mouse_scroll("preview", -3)
+            return None
+        if mouse_event.event_type is MouseEventType.SCROLL_DOWN:
+            self.owner.mouse_scroll("preview", 3)
+            return None
+        x, y = mouse_event.position.x, mouse_event.position.y
+        if (
+            mouse_event.event_type is MouseEventType.MOUSE_DOWN
+            and mouse_event.button is MouseButton.LEFT
+        ):
+            self.cancel_drag()
+            self.owner.activate_control("preview")
+            self._dragging = True
+            self._drag_origin = self._drag_position = (x, y)
+            self._drag_moved = False
+            self.owner.preview_selection("start", x, y)
+            return None
+        if self._dragging and mouse_event.event_type is MouseEventType.MOUSE_MOVE:
+            if mouse_event.button is MouseButton.NONE:
+                self._finish_drag(x, y, moved=True)
+                return None
+            self._drag_position = (x, y)
+            self._drag_moved = self._drag_moved or self._drag_position != self._drag_origin
+            self._set_autoscroll(self._edge_direction(y))
+            self.owner.preview_selection("extend", x, y)
+            return None
+        if self._dragging and mouse_event.event_type is MouseEventType.MOUSE_UP:
+            moved = self._drag_moved or self._drag_position != (x, y)
+            self._finish_drag(x, y, moved=moved)
+            return None
+        return NotImplemented
+
+    def _edge_direction(self, y: int) -> int:
+        height = self.viewport[1]
+        if height == 1:
+            return 0
+        if height < 4:
+            top, bottom = y, height - 1 - y
+            return -1 if top < bottom else 1 if bottom < top else 0
+        return -1 if y < 2 else 1 if y >= height - 2 else 0
+
+    def _finish_drag(self, x: int, y: int, *, moved: bool) -> None:
+        self._dragging = False
+        self._drag_moved = False
+        self._drag_position = (x, y)
+        self._set_autoscroll(0)
+        self.owner.preview_selection("finish" if moved else "cancel", x, y)
+
+    @property
+    def dragging(self) -> bool:
+        """Whether this control currently owns an application selection drag."""
+        return self._dragging
+
+    def cancel_drag(self) -> None:
+        """Cancel an active drag and its timer without clearing retained selection."""
+        self._dragging = False
+        self._drag_moved = False
+        self._set_autoscroll(0)
+
+    def handle_external_mouse(self, mouse_event: MouseEvent) -> bool:
+        """Resolve a release routed to another control in the browser."""
+        if not self._dragging:
+            return False
+        if (
+            MouseModifier.ALT in mouse_event.modifiers
+            or MouseModifier.SHIFT in mouse_event.modifiers
+        ):
+            self.cancel_drag()
+            return False
+        if mouse_event.event_type is MouseEventType.MOUSE_UP or (
+            mouse_event.event_type is MouseEventType.MOUSE_MOVE
+            and mouse_event.button is MouseButton.NONE
+        ):
+            self._finish_drag(*self._drag_position, moved=True)
+            return True
+        return False
+
+    def _set_autoscroll(self, direction: int, *, delay: float = 0.35) -> None:
+        if direction == self._autoscroll_direction and self._autoscroll_timer is not None:
+            return
+        self._autoscroll_direction = direction
+        if self._autoscroll_timer is not None:
+            self._autoscroll_timer.cancel()
+            self._autoscroll_timer = None
+        if not direction or not self._dragging:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._autoscroll_timer = loop.call_later(delay, self._autoscroll_tick)
+
+    def _autoscroll_tick(self) -> None:
+        self._autoscroll_timer = None
+        if not self._dragging or not self._autoscroll_direction:
+            return
+        self.owner.mouse_scroll("preview", self._autoscroll_direction)
+        self.owner.preview_selection("extend", *self._drag_position)
+        self._set_autoscroll(self._autoscroll_direction, delay=0.12)
+
+
 class _BrowserPaneControl(FormattedTextControl):
-    def __init__(self, browser: ExplorerBrowser, pane: str) -> None:
+    """List control; selection gestures deliberately remain native to the list."""
+
+    def __init__(self, browser: ExplorerBrowser) -> None:
         self.browser = browser
-        self.pane = pane
         self.viewport = (1, 1)
         super().__init__(self._text, focusable=True, show_cursor=False)
 
@@ -132,31 +332,27 @@ class _BrowserPaneControl(FormattedTextControl):
         return super().create_content(width, height)
 
     def _text(self):
-        return (
-            self.browser.list_text(*self.viewport)
-            if self.pane == "list"
-            else self.browser.preview_text(*self.viewport)
-        )
+        return self.browser.list_text(*self.viewport)
 
     def mouse_handler(self, mouse_event: MouseEvent):
         if (
             MouseModifier.ALT in mouse_event.modifiers
             or MouseModifier.SHIFT in mouse_event.modifiers
+            or not getattr(self.browser, "mouse_support", True)
         ):
             return NotImplemented
         if mouse_event.event_type is MouseEventType.SCROLL_UP:
-            self.browser.mouse_scroll(self.pane, -3)
+            self.browser.mouse_scroll("list", -3)
             return None
         if mouse_event.event_type is MouseEventType.SCROLL_DOWN:
-            self.browser.mouse_scroll(self.pane, 3)
+            self.browser.mouse_scroll("list", 3)
             return None
         if (
             mouse_event.event_type is MouseEventType.MOUSE_DOWN
             and mouse_event.button is MouseButton.LEFT
         ):
-            self.browser.activate_control(self.pane)
-            if self.pane == "list":
-                self.browser.select_visible(mouse_event.position.y)
+            self.browser.activate_control("list")
+            self.browser.select_visible(mouse_event.position.y)
             return None
         return NotImplemented
 
@@ -270,9 +466,22 @@ class ExplorerBrowser:
     def mouse_support(self) -> bool:
         return bool(getattr(self.view, "mouse_support", True))
 
-    def __init__(self, view: Any, app: Any) -> None:
+    def __init__(
+        self,
+        view: Any,
+        app: Any,
+        *,
+        selection_copy_callback: Callable[[str], None] | None = None,
+        selection_status: Callable[[], str] | None = None,
+    ) -> None:
         self.view = view
         self.app = app
+        self._selection_copy_callback = selection_copy_callback
+        self._selection_status = selection_status
+        self._detail_transcript: FullscreenTranscriptModel | None = None
+        # The row object itself is retained in the key so a recycled
+        # ``id(row)`` can never alias a stale transcript.
+        self._detail_transcript_key: tuple[Any, int, tuple[str, ...]] | None = None
         self.title = view.title
         self.active_control = "list"
         self.option_cursor: int | None = None
@@ -292,8 +501,8 @@ class ExplorerBrowser:
                 else ""
             ),
         )
-        self.list_control = _BrowserPaneControl(self, "list")
-        self.preview_control = _BrowserPaneControl(self, "preview")
+        self.list_control = _BrowserPaneControl(self)
+        self.preview_control = SelectablePreviewControl(self)
         self.option_controls = [
             _BrowserOptionControl(self, index) for index in range(len(view.options))
         ]
@@ -407,11 +616,14 @@ class ExplorerBrowser:
         ]
 
     def _help_text(self):
+        copy_status = self._selection_status() if self._selection_status is not None else ""
+        if copy_status:
+            return copy_status
         if self.option_cursor is not None:
             return "Options · ←→ select · ↑↓/Space change · Enter/Esc done"
         actions = " · ".join(self.view.config.actions.values())
         suffix = f" · {actions}" if actions else ""
-        return f"Type search · Ctrl-O options · Tab panes · ↑↓ move · Esc close{suffix}"
+        return f"Type search · Ctrl-O options · Tab panes · ↑↓ move · F2 native · Esc close{suffix}"
 
     def _search_label(self):
         style = "class:fullscreen-browser.search-label"
@@ -539,8 +751,18 @@ class ExplorerBrowser:
                 " class:fullscreen-browser.selected" if selected else ""
             )
             marker = "❯ " if selected else "  "
-            text = marker + self.view.format_row(self.model.rows[row_index], max(1, width - 2))
-            text = sanitize_live_text(text.replace("\n", " ").replace("\r", " "))[:width]
+            # The marker owns a reserved 2-cell column so row content starts at
+            # the same offset whether or not the row is selected. Collapsing
+            # runs over the row text alone — a leading marker would be eaten
+            # and highlighted text would shift right by one on selection.
+            text = (
+                marker
+                + sanitize_live_text(
+                    _collapse_multiline(
+                        self.view.format_row(self.model.rows[row_index], max(1, width - 2))
+                    )
+                )
+            )[:width]
             query = self.buffer.text.casefold().strip()
             if not query:
                 output.append((base, text))
@@ -559,16 +781,61 @@ class ExplorerBrowser:
                 cursor = found + len(query)
         return output or [("class:fullscreen-browser.empty", "No matching items")]
 
-    def preview_text(self, width: int, height: int):
+    def _preview_transcript(self, width: int, height: int) -> FullscreenTranscriptModel | None:
         row = self.model.current
         if row is None:
-            return [("class:fullscreen-browser.empty", "No item selected")]
-        lines = self.view.detail_lines(row, max(1, width))
-        self.model._last_detail_line_count = len(lines)
+            return None
+        lines = tuple(self.view.detail_lines(row, max(1, width)))
+        key = (row, max(1, width), lines)
+        if self._detail_transcript_key != key:
+            if self._detail_transcript_key is not None:
+                self.preview_control.cancel_drag()
+            transcript = FullscreenTranscriptModel(
+                show_trailing_blank=False, align_short_content_bottom=False
+            )
+            transcript.append("\n".join(lines))
+            self._detail_transcript = transcript
+            self._detail_transcript_key = key
+        transcript = self._detail_transcript
+        assert transcript is not None
+        self.model._last_detail_line_count = len(transcript._display_rows(max(1, width)))
         self.model._last_detail_visible_lines = max(1, height)
         self.model.clamp_detail_offset(height)
-        selected = lines[self.model.detail_offset : self.model.detail_offset + height]
-        return ANSI(project_prompt_toolkit_ansi(sanitize_transcript_ansi("\n".join(selected))))
+        transcript.jump_to_start(width=max(1, width))
+        transcript.scroll_visual_lines(
+            self.model.detail_offset, width=max(1, width), height=max(1, height)
+        )
+        return transcript
+
+    def preview_text(self, width: int, height: int):
+        transcript = self._preview_transcript(width, height)
+        if transcript is None:
+            return [("class:fullscreen-browser.empty", "No item selected")]
+        return transcript.formatted_text(width=max(1, width), height=max(1, height))
+
+    def _selected_preview_text(self, transcript: FullscreenTranscriptModel) -> str:
+        """Return semantic text for the shared preview-selection lifecycle."""
+        return transcript.selected_text()
+
+    def preview_selection(self, action: str, x: int, y: int) -> None:
+        width, height = self.preview_control.viewport
+        transcript = self._preview_transcript(width, height)
+        if transcript is None:
+            return
+        if action == "cancel":
+            transcript.clear_selection()
+        elif action == "start":
+            transcript.begin_selection(x=x, y=y, width=width, height=height)
+        else:
+            transcript.update_selection(x=x, y=y, width=width, height=height)
+        if action == "finish":
+            selected = self._selected_preview_text(transcript)
+            transcript.clear_selection()
+            if selected:
+                self.app.clipboard.set_text(selected)
+                if self._selection_copy_callback is not None:
+                    self._selection_copy_callback(selected)
+        self.invalidate()
 
     def navigate_vertical(self, delta: int) -> None:
         if self.option_cursor is not None:
@@ -611,6 +878,11 @@ class ExplorerBrowser:
         self.invalidate()
 
     def handle_key(self, action: str, value: str = ""):
+        if action == "native_selection":
+            self.preview_control.cancel_drag()
+            result = self.view.handle_key(action, value)
+            self.invalidate()
+            return result
         if action == "escape":
             if self.close_options():
                 return "handled"
@@ -694,4 +966,5 @@ class ExplorerBrowser:
         self.focus_initial()
 
     def on_close(self) -> None:
+        self.preview_control.cancel_drag()
         self.view.on_close()
