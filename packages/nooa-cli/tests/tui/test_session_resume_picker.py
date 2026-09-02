@@ -136,7 +136,7 @@ def test_filter_and_sort_reuse_cached_query_matches(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_resume_list_fills_its_pane_on_tall_terminals() -> None:
+async def test_resume_list_fills_its_pane_on_tall_terminals(monkeypatch) -> None:
     """The session list grows with the terminal instead of capping at 5."""
     from nooa_cli.tui import session_manager as sm
 
@@ -153,10 +153,21 @@ async def test_resume_list_fills_its_pane_on_tall_terminals() -> None:
         )
         for i in range(12)
     ]
-    sm.SessionManager.list_sessions = classmethod(lambda cls, limit=None: sessions)
-    sm.SessionManager.is_active = classmethod(lambda cls, value: False)
-    sm.SessionManager.load_turns = classmethod(
-        lambda cls, value, limit=12: [SimpleNamespace(role="agent", content="x")]
+    # Patch through monkeypatch: bare classmethod assignments leaked the
+    # fake sessions into every later test (the memory-sidecars test then
+    # saw s00000001... sessions that were never cleaned up).
+    monkeypatch.setattr(
+        sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: sessions)
+    )
+    monkeypatch.setattr(
+        sm.SessionManager, "is_active", classmethod(lambda cls, value: False)
+    )
+    monkeypatch.setattr(
+        sm.SessionManager,
+        "load_turns",
+        classmethod(
+            lambda cls, value, limit=12: [SimpleNamespace(role="agent", content="x")]
+        ),
     )
 
     from .tui_app_harness import MutableRecordingOutput, TUIHarness
