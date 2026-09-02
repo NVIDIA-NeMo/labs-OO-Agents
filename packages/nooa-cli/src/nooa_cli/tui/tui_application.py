@@ -2588,6 +2588,20 @@ class TUIApplication:
             if self._resume_picker is not None:
                 self._resume_picker.toggle_options()
 
+        @kb.add("home", filter=resume_picker_active, eager=True)
+        def _(event):
+            picker = self._resume_picker
+            if picker is not None:
+                picker.model.jump_home()
+                picker.invalidate()
+
+        @kb.add("end", filter=resume_picker_active, eager=True)
+        def _(event):
+            picker = self._resume_picker
+            if picker is not None:
+                picker.model.jump_end()
+                picker.invalidate()
+
         @kb.add("pageup", filter=resume_picker_active, eager=True)
         def _(event):
             if self._resume_picker is not None:
