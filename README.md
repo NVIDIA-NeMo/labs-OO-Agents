@@ -1,24 +1,38 @@
+<div align="center">
 
+<br />
 
-  
+<!-- Absolute URLs, not repo-relative paths: this README is also the PyPI
+     long_description, and PyPI renders it standalone with no assets/
+     directory alongside it, so relative paths 404 there. -->
+<picture>
+  <source
+    media="(prefers-color-scheme: dark)"
+    srcset="https://raw.githubusercontent.com/NVIDIA-NeMo/labs-OO-Agents/main/assets/nvidia-labs-object-oriented-agents-dark.svg"
+  >
+  <source
+    media="(prefers-color-scheme: light)"
+    srcset="https://raw.githubusercontent.com/NVIDIA-NeMo/labs-OO-Agents/main/assets/nvidia-labs-object-oriented-agents-light.svg"
+  >
+  <img
+    alt="NVIDIA-labs Object Oriented Agents"
+    src="https://raw.githubusercontent.com/NVIDIA-NeMo/labs-OO-Agents/main/assets/nvidia-labs-object-oriented-agents-light.svg"
+    width="820"
+  >
+</picture>
 
+<p align="center"><b>A Pythonic way to build AI agents.</b></p>
 
+[![NVIDIA](https://img.shields.io/badge/NVIDIA-76B900?logo=nvidia&logoColor=white)](https://www.nvidia.com/)
+[![Paper](https://img.shields.io/badge/paper-arXiv-b31b1b?logo=arxiv&logoColor=white)](https://arxiv.org/abs/2607.20709)
+[![Blog](https://img.shields.io/badge/blog-NVIDIA-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/blog/six-agent-harness-capabilities-for-higher-model-performance/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/LICENSE)
 
+**[Docs](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/README.md)** &nbsp;·&nbsp; **[Quick Start](#quick-start)** &nbsp;·&nbsp; **[Notebook Tutorials](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/notebook_tutorials/README.md)** &nbsp;·&nbsp; **[Examples](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md)** &nbsp;·&nbsp; **[Paper](https://arxiv.org/abs/2607.20709)** &nbsp;·&nbsp; **[Blog](https://developer.nvidia.com/blog/six-agent-harness-capabilities-for-higher-model-performance/)**
 
+<br />
 
-
-**A Pythonic way to build AI agents.**
-
-[NVIDIA](https://www.nvidia.com/)
-[Paper](https://arxiv.org/abs/2607.20709)
-[Blog](https://developer.nvidia.com/blog/six-agent-harness-capabilities-for-higher-model-performance/)
-[License](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/LICENSE)
-
-**[Docs](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/README.md)**  ·  **[Quick Start](#quick-start)**  ·  **[Notebook Tutorials](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/notebook_tutorials/README.md)**  ·  **[Examples](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md)**  ·  **[Paper](https://arxiv.org/abs/2607.20709)**  ·  **[Blog](https://developer.nvidia.com/blog/six-agent-harness-capabilities-for-higher-model-performance/)**
-
-  
-
-
+</div>
 
 
 NVIDIA-labs Object Oriented Agents (NOOA) is a model-agnostic Python framework designed to support reliable AI agent development. Many agent frameworks represent prompts, tools, callbacks, and workflows as separate abstractions. NOOA offers an alternative object-oriented interface that brings these concepts together in a Python class. NOOA lets developers express an agent’s state, capabilities, prompts, and typed interfaces through a single Python class:
@@ -46,14 +60,14 @@ class SupportAgent(Agent):
 **What's happening here:**
 
 - **Agents are Python objects.** Fields are state, methods are capabilities, docstrings are prompts, type annotations are contracts.
-- `...` **bodies are LLM-driven.** A method with `...` becomes an agentic loop; a real body stays deterministic Python.
+- **`...` bodies are LLM-driven.** A method with `...` becomes an agentic loop; a real body stays deterministic Python.
 - **Generation commits one result.** Deterministic generators are supported, but generated streams need a separate stream contract and are rejected clearly.
 - **Code as action.** The model acts by writing Python in a Jupyter-style REPL with access to `self`, imports, and helpers — Python methods and type annotations supply the callable interfaces, reducing the need to write separate tool-schema definitions.
 - **Pythonic and agent-ready.** Typed I/O with auto-retry, live-object arguments passed by reference, and model-callable context and event APIs — designed around agent-oriented Python workflows.
 
 This design supports familiar Python testing, tracing, refactoring, and version-control workflows — **just like the rest of your software**. Read [the paper](https://arxiv.org/abs/2607.20709) for the design principles and evaluation results.
 
-Want to see how the pieces compose? Take the **[10-minute tour](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/tour.md)**, from one thinking method through tools, typed contracts, deterministic orchestration, and object composition.
+Want to see how the pieces compose? Take the [**10-minute tour**](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/tour.md), from one thinking method through tools, typed contracts, deterministic orchestration, and object composition.
 
 ## Installation
 
@@ -68,10 +82,10 @@ uv add nooa
 
 Or with pip: `pip install nooa`.
 
-**Optional sub-packages** — CLI, ACP, memory, benchmarks, evaluation pipeline
+<details>
+<summary><b>Optional sub-packages</b> — CLI, ACP, memory, benchmarks, evaluation pipeline</summary>
 
-  
-
+<br />
 
 The CLI, ACP, memory, and benchmark packages are separate distributions. Install
 them by name, or pull them in as extras of the core package:
@@ -85,14 +99,12 @@ uv add nooa-bench               # or: uv add "nooa[bench]"
 uv add "nooa[cli,memory]"       # several at once
 ```
 
-
-| Package       | Extra          | What it adds                                                                                    |
-| ------------- | -------------- | ----------------------------------------------------------------------------------------------- |
-| `nooa-cli`    | `nooa[cli]`    | the `nooa` command, trace viewer, eval runner                                                   |
-| `nooa-acp`    | `nooa[acp]`    | coding agent for Agent Client Protocol hosts such as Zed — [setup](packages/nooa-acp/README.md) |
-| `nooa-memory` | `nooa[memory]` | long-term memory subsystem (`MemoryManager`)                                                    |
-| `nooa-bench`  | `nooa[bench]`  | `BenchAgent` and the Harbor benchmark runner                                                    |
-
+| Package | Extra | What it adds |
+|---|---|---|
+| `nooa-cli` | `nooa[cli]` | the `nooa` command, trace viewer, eval runner |
+| `nooa-acp` | `nooa[acp]` | coding agent for Agent Client Protocol hosts such as Zed — [setup](packages/nooa-acp/README.md) |
+| `nooa-memory` | `nooa[memory]` | long-term memory subsystem (`MemoryManager`) |
+| `nooa-bench` | `nooa[bench]` | `BenchAgent` and the Harbor benchmark runner |
 
 `eval_pipeline` is not published to PyPI — install it from the repo:
 
@@ -100,12 +112,12 @@ uv add "nooa[cli,memory]"       # several at once
 uv add "eval_pipeline @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@main#subdirectory=util/eval_pipeline"
 ```
 
+</details>
 
+<details>
+<summary><b>Installing from source</b> — track <code>main</code> or pin a tag</summary>
 
-**Installing from source** — track `main` or pin a tag
-
-  
-
+<br />
 
 ```bash
 # latest development state
@@ -115,21 +127,20 @@ uv add "nooa @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@main"
 uv add "nooa @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@v0.0.7"
 ```
 
-
+</details>
 
 ## Quick Start
 
-
-
 ### ⚠️ Before Starting: safety note
-
 NOOA is **research software**, and agents can be configured to execute LLM-generated code. We welcome contributions and fixes, but expect rough edges. LLM-generated code may take dangerous or unwanted actions, including sending private data to uncontrolled locations, deleting files, or modifying its environments.  Ensure you run NOOA agents in a sandboxed environment isolated from your primary filesystem, such as [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell).
+
 
 NOOA validates generated code (AST checks) and applies module deny-lists before execution. **These are defense-in-depth guardrails, not a containment boundary.** They exist to keep generated code from freezing the event loop and to catch common mistakes early — not to stop code that is actively trying to escape. A static checker over Python cannot provide that guarantee: `open()` gives arbitrary file access, `importlib` can load modules straight from a path, and reflection reaches the rest. **The containment boundary is OS-level isolation** — always run agents that execute generated code inside a sandbox such as a container, VM, or [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell). Do not rely on the in-process validators alone.
 
+
 ### 1. Choose a model
 
-Choose from supported hosted or local [LiteLLM-supported](https://docs.litellm.ai/) models:
+Choose from supported hosted or local [LiteLLM-supported](https://docs.litellm.ai/) model:
 
 ```python
 from nooa.unifiedllm.registry import get_llm_client
@@ -139,8 +150,6 @@ llm = get_llm_client("gpt-5-mini")                                              
 llm = get_llm_client("ollama_chat/qwen3:1.7b", api_base="http://localhost:11434")   # Ollama    (no key)
 llm = get_llm_client("hosted_vllm/Qwen/Qwen3-1.7B", api_base="http://localhost:8000/v1")  # vLLM (no key)
 ```
-
-For setup details and more details on how to run local models, see [Running NOOA With Local Models](docs/local-models.md).
 
 ### 2. Your first agent
 
@@ -177,9 +186,9 @@ uv run python examples/quickstart/01_first_generation_method.py
 
 Rename `analyze_feedback` to `analyze_feedback_briefly` and the output changes — your method name, parameters, and docstring *are* the prompt.
 
-Prefer a guided notebook path? Start with the **[notebook tutorials](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/notebook_tutorials/README.md)**, which walk through the same ideas in Colab-friendly steps, with more notebooks planned.
+Prefer a guided notebook path? Start with the [**notebook tutorials**](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/notebook_tutorials/README.md), which walk through the same ideas in Colab-friendly steps, with more notebooks planned.
 
-Ready to run something specific? Use the **[examples catalog](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md)** to find quickstarts for structured output, tools, strategies, tracing, context blocks, MCP, and more.
+Ready to run something specific? Use the [**examples catalog**](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md) to find quickstarts for structured output, tools, strategies, tracing, context blocks, MCP, and more.
 
 ### 3. See what your agent is doing
 
@@ -200,8 +209,6 @@ If the viewer isn't running, tracing is silently disabled — no configuration n
 - **[Paper](https://arxiv.org/abs/2607.20709)** — design principles, harness details, capability tests, and SWE-bench Verified / Terminal-Bench 2.0 results.
 - **[Blog post](https://developer.nvidia.com/blog/six-agent-harness-capabilities-for-higher-model-performance/)** — Six Agent Harness Capabilities for Higher Model Performance.
 - **[AGENTS.md](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/AGENTS.md)** — conventions used inside this repo (helpful when reading the source).
-
-
 
 ## Contributing
 
@@ -245,8 +252,6 @@ If you use NVIDIA-labs Object Oriented Agents in your research, please cite:
   year   = {2026},
 }
 ```
-
-
 
 ## License
 
