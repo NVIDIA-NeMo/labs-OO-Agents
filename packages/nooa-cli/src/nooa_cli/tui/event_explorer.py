@@ -386,8 +386,10 @@ def _searchable_markdown(markdown: str | None) -> str:
     if not markdown:
         return ""
     lines = markdown.splitlines()
-    # Drop the leading header line (" [tag] Type · timestamp · id=…").
-    if lines and lines[0].lstrip().startswith("["):
+    # Drop the leading header line ("**[tag]** *Type* · timestamp · id=…").
+    # Rich markdown emphasis wraps the tag in **…**, so match the bolded
+    # form (a bare "[" never matches and the strip never fired).
+    if lines and lines[0].lstrip().startswith("**["):
         lines = lines[1:]
     # Drop the trailing metadata footer (everything from the last rule).
     for index in range(len(lines) - 1, -1, -1):
@@ -462,6 +464,9 @@ _NOISE_FIELDS = {
     "trace_id",
     "span_id",
     "tool_call_id",
+    # Provider reasoning blobs (KBs per tool call) are opaque chrome in the
+    # detail pane — never dump them into the repr or search text.
+    "reasoning_items",
 }
 
 _RENDERED_FIELD_ORDER = {

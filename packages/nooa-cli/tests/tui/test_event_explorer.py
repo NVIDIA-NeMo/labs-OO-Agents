@@ -474,6 +474,8 @@ def test_event_explorer_view_highlights_selected_occurrence_on_same_line() -> No
 
 def test_event_search_text_excludes_markdown_chrome() -> None:
     """Timestamps and ids in the markdown header/footer must not match."""
+    from nooa_cli.tui.event_explorer import _event_markdown, _searchable_markdown
+
     row = build_event_rows(
         SimpleNamespace(items=lambda: [("1", _FakeEvent("TUIUserInput", text="hello"))])
     )[0]
@@ -482,6 +484,11 @@ def test_event_search_text_excludes_markdown_chrome() -> None:
     assert "timestamp" not in row.search_text.lower()
     # The rendered markdown content itself remains searchable.
     assert "hello" in row.search_text
+    # The header strip actually fires: the bolded header line is gone.
+    markdown = _event_markdown("1", _FakeEvent("TUIUserInput", text="hello"), "TUIUserInput")
+    searchable = _searchable_markdown(markdown)
+    assert markdown is not None and markdown.splitlines()[0].startswith("**[")
+    assert "2026" not in searchable or "hello" in searchable
 
 
 def test_event_explorer_search_ignores_empty_field_names() -> None:
