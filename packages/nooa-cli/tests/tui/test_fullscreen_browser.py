@@ -635,6 +635,33 @@ def test_explorer_browser_navigate_vertical_jumps_search_matches() -> None:
     assert browser.model.cursor == 0
 
 
+def test_explorer_detail_header_shows_match_position() -> None:
+    """The preview header reports the current search match (like /resume)."""
+    browser = _browser()
+
+    class _MatchRow:
+        search_text = "error here"
+        title = "Row"
+
+    browser.model.rows.clear()
+    browser.model.rows.append(_MatchRow())
+    browser.model.set_query("error")
+    browser.buffer.text = "error"
+    browser.view.detail_lines = lambda _row, _width: ["the error happened", "no match", "again error"]
+    browser.preview_control.viewport = (50, 4)
+
+    browser._preview_transcript(50, 4)
+    position, total = browser._detail_transcript.search_position
+    assert total >= 2
+    header = "".join(text for _style, text in browser._preview_header())
+    assert f"match {position}/{total}" in header
+    # Stepping a match updates the header position.
+    browser.navigate_vertical(1)
+    position, _total = browser._detail_transcript.search_position
+    header = "".join(text for _style, text in browser._preview_header())
+    assert f"match {position}/{total}" in header
+
+
 def test_explorer_browser_preview_focus_steps_detail_matches() -> None:
     """Preview-focus up/down cycles the detail's search matches (like /resume)."""
     browser = _browser()
