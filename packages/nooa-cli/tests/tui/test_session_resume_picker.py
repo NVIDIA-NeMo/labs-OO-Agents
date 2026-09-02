@@ -134,6 +134,19 @@ def test_filter_and_sort_reuse_cached_query_matches(monkeypatch) -> None:
     model.toggle_filter()
 
 
+def test_home_and_end_jump_the_session_list() -> None:
+    """Home/End jump to the first/last session like every explorer."""
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row(str(i), f"title {i}") for i in range(6)], app)
+
+    picker.model.jump_end()
+    assert picker.model.selected == 5
+    picker.model.jump_home()
+    assert picker.model.selected == 0
+    assert picker.model.list_offset == 0
+
+
 def test_state_filter_defaults_to_detached_and_cycles_all_states() -> None:
     detached = row("detached", "Detached")
     attached = row("attached", "Attached", attached=True, last_active=30)
