@@ -875,6 +875,24 @@ class ExplorerBrowser:
                     self._selection_copy_callback(selected)
         self.invalidate()
 
+    def _scroll_detail_pane(self, delta: int) -> None:
+        """Scroll the preview pane on the live viewport.
+
+        While a search is active the detail transcript owns its viewport
+        (the model offset is never applied, so `scroll_detail` would be a
+        no-op); scroll the transcript directly instead. Without a query the
+        model offset drives scrolling as before.
+        """
+        if self.buffer.text.strip():
+            width, height = self.preview_control.viewport
+            transcript = self._preview_transcript(width, height)
+            if transcript is not None:
+                transcript.scroll_visual_lines(
+                    delta, width=max(1, width), height=max(1, height)
+                )
+                return
+        self.model.scroll_detail(delta)
+
     def navigate_vertical(self, delta: int) -> None:
         """Shared navigation contract (same as /resume).
 
@@ -897,7 +915,7 @@ class ExplorerBrowser:
         ):
             self.invalidate()
             return
-        self.model.scroll_detail(delta)
+        self._scroll_detail_pane(delta)
         self.invalidate()
 
     def page(self, delta: int) -> None:
@@ -910,7 +928,7 @@ class ExplorerBrowser:
             self._list_offset_detached = False
             self.model.move(delta * max(1, amount))
         else:
-            self.model.scroll_detail(delta * max(1, amount))
+            self._scroll_detail_pane(delta * max(1, amount))
         self.invalidate()
 
     def select_visible(self, y: int) -> None:
@@ -927,7 +945,7 @@ class ExplorerBrowser:
             self.list_offset = min(maximum, max(0, self.list_offset + delta))
             self._list_offset_detached = True
         else:
-            self.model.scroll_detail(delta)
+            self._scroll_detail_pane(delta)
         self.invalidate()
 
     def handle_key(self, action: str, value: str = ""):

@@ -685,6 +685,44 @@ def test_explorer_browser_navigate_vertical_jumps_search_matches() -> None:
     assert browser.model.cursor == 0
 
 
+def test_detail_pane_scrolls_while_searching() -> None:
+    """Wheel/page scrolling works on the preview pane with a query active.
+
+    Regression for the search-reveal fix freezing the pane: while a query
+    is active the transcript owns the viewport, so wheel gestures must
+    scroll the transcript instead of mutating an offset that is never
+    applied.
+    """
+    browser = _browser()
+
+    class _Row:
+        search_text = "gamma deep"
+        title = "Row"
+
+    browser.model.rows.clear()
+    browser.model.rows.append(_Row())
+    browser.model.set_query("gamma")
+    browser.buffer.text = "gamma"
+    # The matched term sits mid-content so the reveal leaves room to scroll
+    # in both directions.
+    browser.view.detail_lines = lambda _row, _width: [
+        f"line {i}" if i != 30 else "gamma match here" for i in range(60)
+    ]
+    browser.preview_control.viewport = (50, 6)
+    browser.active_control = "preview"
+
+    transcript = browser._preview_transcript(50, 6)
+    assert transcript is not None
+    before = transcript.top_row(width=50, height=6)
+
+    browser.mouse_scroll("preview", 3)
+    after = transcript.top_row(width=50, height=6)
+    assert after == before + 3
+
+    browser.page(1)
+    assert transcript.top_row(width=50, height=6) == after + 6
+
+
 def test_searching_detail_reveals_the_matched_text() -> None:
     """The matched text must be visible in the preview while searching.
 

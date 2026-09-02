@@ -97,6 +97,30 @@ def _single_line(text: str) -> str:
     return " ".join(sanitize_live_text(text).split())
 
 
+# Folded-text memo: casefold expansion of a field is deterministic, and rows
+# are immutable, so per-keystroke search reuses the expansion instead of
+# rebuilding a per-character map over every conversation for every keystroke.
+_FOLD_CACHE: dict[str, tuple[str, list[int]]] = {}
+_FOLD_CACHE_MAX = 4096
+
+
+def _folded_with_source(text: str) -> tuple[str, list[int]]:
+    cached = _FOLD_CACHE.get(text)
+    if cached is not None:
+        return cached
+    parts: list[str] = []
+    source: list[int] = []
+    for index, char in enumerate(text):
+        folded = char.casefold()
+        parts.append(folded)
+        source.extend([index] * len(folded))
+    entry = ("".join(parts), source)
+    if len(_FOLD_CACHE) >= _FOLD_CACHE_MAX:
+        _FOLD_CACHE.clear()
+    _FOLD_CACHE[text] = entry
+    return entry
+
+
 def _term_hits(
     terms: list[str], text: str
 ) -> tuple[set[str], int, tuple[int, ...]] | None:
@@ -105,13 +129,7 @@ def _term_hits(
     Returns the distinct terms hit, the earliest hit position, and the
     original-text positions of every hit (for row highlighting).
     """
-    parts: list[str] = []
-    source: list[int] = []
-    for index, char in enumerate(text):
-        folded = char.casefold()
-        parts.append(folded)
-        source.extend([index] * len(folded))
-    target = "".join(parts)
+    target, source = _folded_with_source(text)
     hit: set[str] = set()
     earliest: int | None = None
     positions: list[int] = []
