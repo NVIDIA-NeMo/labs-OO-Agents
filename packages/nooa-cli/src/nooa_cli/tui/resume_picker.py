@@ -244,23 +244,31 @@ class ResumePickerModel:
         self.selected = ids.index(previous_id) if previous_id in ids else 0
         self.list_offset = min(self.list_offset, self.selected)
 
+    def set_filter(self, value: Literal["detached", "attached", "all"]) -> None:
+        """Apply a filter value and restart the list from the top."""
+        self.state_filter = value
+        self.selected = self.list_offset = 0
+        self._rebuild_matches()
+
     def cycle_filter(self, delta: int = 1) -> None:
         filters: tuple[Literal["detached", "attached", "all"], ...] = (
             "detached",
             "attached",
             "all",
         )
-        self.state_filter = filters[(filters.index(self.state_filter) + delta) % len(filters)]
-        self.selected = self.list_offset = 0
-        self._rebuild_matches()
+        self.set_filter(filters[(filters.index(self.state_filter) + delta) % len(filters)])
 
     def toggle_filter(self) -> None:
         self.cycle_filter()
 
-    def toggle_sort(self) -> None:
-        self.sort_updated = not self.sort_updated
+    def set_sort(self, updated: bool) -> None:
+        """Apply a sort direction and restart the list from the top."""
+        self.sort_updated = updated
         self.selected = self.list_offset = 0
         self._rebuild_matches()
+
+    def toggle_sort(self) -> None:
+        self.set_sort(not self.sort_updated)
 
     def move(self, delta: int) -> None:
         if not self._matches or not delta:
@@ -602,9 +610,6 @@ class ResumePicker(ExplorerBrowser):
         self._preview_models: dict[tuple[str, int], Any] = {}
         self._preview_tasks: dict[tuple[str, int], Any] = {}
         self.native_selection = False
-        # The session list fills its pane like every other browser (the
-        # shell's compact five-row default capped it short of the divider).
-        self.picker_list_height = Dimension(min=1, preferred=5, weight=1)
         super().__init__(
             self._view_facade,
             app,
@@ -621,16 +626,12 @@ class ResumePicker(ExplorerBrowser):
         """
 
         def on_filter(value: str) -> None:
-            self.model.state_filter = value  # type: ignore[assignment]
-            self.model.selected = self.model.list_offset = 0
-            self.model._rebuild_matches()
+            self.model.set_filter(value)  # type: ignore[arg-type]
             self._prepare_current_preview()
             self.invalidate()
 
         def on_sort(value: str) -> None:
-            self.model.sort_updated = value == "updated"
-            self.model.selected = self.model.list_offset = 0
-            self.model._rebuild_matches()
+            self.model.set_sort(value == "updated")
             self._prepare_current_preview()
             self.invalidate()
 

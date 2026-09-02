@@ -142,7 +142,7 @@ def test_invalid_action_disarms_the_pending_confirm() -> None:
     assert calls["forgot"] == [ids["skill"]]
 
 
-def test_stale_arm_expires_instead_of_firing() -> None:
+def test_stale_arm_expires_instead_of_firing(monkeypatch) -> None:
     """An arm older than the gesture window re-arms, never fires.
 
     The docstring always promised a gesture window; without one, an f armed
@@ -152,19 +152,25 @@ def test_stale_arm_expires_instead_of_firing() -> None:
     view, calls = _view(agent, mgr)
     skill = next(r for r in view.model.rows if r.id == ids["skill"])
 
-    # Arm, then simulate the window elapsing.
+    # Arm, then shrink the window to zero: the stale arm does not fire,
+    # it re-arms fresh.
     assert view.handle_action("text:f", skill) == "handled"
-    assert view._pending_confirm is not None
-    _action, _row_id, armed_at = view._pending_confirm
-    view._pending_confirm = (_action, _row_id, armed_at - view._CONFIRM_WINDOW_SECONDS - 1)
-
-    # The stale arm does not fire: it re-arms fresh.
+    monkeypatch.setattr(view, "_CONFIRM_WINDOW_SECONDS", 0.0)
     assert view.handle_action("text:f", skill) == "handled"
     assert calls["forgot"] == []
 
-    # A prompt second press (fresh window) fires.
+    # A prompt second press (fresh window restored) fires.
+    monkeypatch.setattr(view, "_CONFIRM_WINDOW_SECONDS", 10.0)
     assert view.handle_action("text:f", skill) == "handled"
     assert calls["forgot"] == [ids["skill"]]
+
+    # The boundary is inclusive: an arm exactly at the window edge still
+    # confirms.
+    todo = next(r for r in view.model.rows if r.id == ids["todo"])
+    assert view.handle_action("text:d", todo) == "handled"
+    monkeypatch.setattr(view, "_CONFIRM_WINDOW_SECONDS", 10.0)
+    assert view.handle_action("text:d", todo) == "handled"
+    assert calls["done"] == [ids["todo"]]
 
 
 def test_armed_confirm_does_not_leak_across_rows() -> None:
