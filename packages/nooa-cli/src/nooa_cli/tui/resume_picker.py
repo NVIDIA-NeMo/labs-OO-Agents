@@ -90,26 +90,6 @@ def _single_line(text: str) -> str:
     return " ".join(sanitize_live_text(text).split())
 
 
-def literal_match(query: str, text: str) -> tuple[int, tuple[int, ...]] | None:
-    """Find one case-insensitive contiguous match in original-text coordinates."""
-    query = query.casefold().strip()
-    parts: list[str] = []
-    source: list[int] = []
-    for index, char in enumerate(text):
-        folded = char.casefold()
-        parts.append(folded)
-        source.extend([index] * len(folded))
-    target = "".join(parts)
-    if not query:
-        return 0, ()
-    found = target.find(query)
-    if found < 0:
-        return None
-    stop = found + len(query)
-    positions = tuple(dict.fromkeys(source[found:stop]))
-    return -found, positions
-
-
 def _term_hits(
     terms: list[str], text: str
 ) -> tuple[set[str], int, tuple[int, ...]] | None:

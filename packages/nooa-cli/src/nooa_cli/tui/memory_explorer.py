@@ -169,10 +169,6 @@ class MemoryExplorerView(ExplorerView):
             title = f"{title} — {last_reflection}"
         config = ExplorerConfig(
             title=title,
-            detail_pane_name="memory detail",
-            empty_message="No memories.",
-            no_match_message="No memories matching {query!r}.",
-            list_ratio=0.4,
             actions={
                 "forget": "f×2 forget",
                 "done": "d×2 todo done",
