@@ -6,6 +6,10 @@ local backends use different shapes:
 - Ollama: `ollama_chat/<model>`, base URL without `/v1`, no API key.
 - vLLM: `hosted_vllm/<model>`, base URL with `/v1`, optional API key.
 
+You may also route either backend through an OpenAI-compatible `/v1` endpoint
+with an `openai/` model string. The shapes below are the recommended defaults:
+they match LiteLLM's provider adapters and the repository's compatibility tests.
+
 ## Ollama
 
 ```bash
