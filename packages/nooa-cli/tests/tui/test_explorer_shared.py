@@ -306,7 +306,7 @@ class TestTodoExplorer:
         todo1.status = "open"
         todo1.deps = []
         todo1.created_at = "2025-01-01 12:00"
-        todo1.notes = "Important fix"
+        todo1.description = "Important fix"
         todo1.comments = []
         todo_mgr.list_todos.return_value = [todo1]
 
@@ -324,7 +324,7 @@ class TestTodoExplorer:
         todo1.status = "open"
         todo1.deps = []
         todo1.created_at = "2025-01-01 12:00"
-        todo1.notes = ""
+        todo1.description = ""
         todo1.comments = []
         todo_mgr.list_todos.return_value = [todo1]
 

@@ -3,8 +3,8 @@
 """Single long-lived ``prompt_toolkit.Application`` owning the whole TUI.
 
 This is the "Plan C" rewrite: one Application that holds output
-scrollback, the type-ahead queue region, the input buffer, and the
-status line. No ``patch_stdout`` and no per-turn ``prompt_async`` —
+scrollback, queued-command status, the input buffer, and the status line.
+No ``patch_stdout`` and no per-turn ``prompt_async`` —
 so no handoff race that drops the first keystroke after the agent
 finishes.
 
@@ -1383,7 +1383,8 @@ class TUIApplication:
         )
 
         # Queue chrome is a pure projection of runtime state plus the short
-        # admission→transcript visibility handoff.
+        # admission→transcript visibility handoff. Host chrome may show payloads
+        # to the human; agent-facing Channel.status() remains counts-only.
         def _queue_pending() -> list[str]:
             return self._pending_input_display()
 
@@ -1629,7 +1630,7 @@ class TUIApplication:
 
         # Active bottom region (top → bottom):
         #   status (spinner + optional badges)
-        #   queued command/type-ahead lines
+        #   queued command lines
         #   session rule — always visible while at the transcript tail
         #   input composer (one padding row above and below the input)
         #   completions (only while completing)
@@ -3216,13 +3217,26 @@ class TUIApplication:
         # the represented suffix with the individual handoff rows, while
         # retaining any runtime-owned prefix and every earlier queue item.
         tail = pending[-1]
+        # A lagging runtime snapshot can contain only the earliest handoffs;
+        # expand that represented prefix before adding newer optimistic rows.
         for represented in range(len(handoff), 0, -1):
-            combined = "\n".join(handoff[:represented])
+            represented_handoff = handoff[:represented]
+            combined = "\n".join(represented_handoff)
             if tail == combined:
                 return pending[:-1] + handoff_display
             suffix = f"\n{combined}"
             if tail.endswith(suffix):
                 return pending[:-1] + [tail[: -len(suffix)]] + handoff_display
+
+        for represented in range(len(handoff), 0, -1):
+            represented_handoff = handoff[-represented:]
+            represented_display = handoff_display[-represented:]
+            combined = "\n".join(represented_handoff)
+            if tail == combined:
+                return pending[:-1] + represented_display
+            suffix = f"\n{combined}"
+            if tail.endswith(suffix):
+                return pending[:-1] + [tail[: -len(suffix)]] + represented_display
         return pending + handoff_display
 
     def submit_message(
@@ -3307,13 +3321,30 @@ class TUIApplication:
 
     def complete_pending_input_handoff(self, text: str) -> None:
         """Retire the submissions represented by one consumed queue item."""
-        for represented in range(len(self._pending_input_handoff), 0, -1):
-            combined = "\n".join(
-                handoff.text for handoff in self._pending_input_handoff[:represented]
+        combined = ""
+        prefixes: list[str] = []
+        for handoff in self._pending_input_handoff:
+            combined = f"{combined}\n{handoff.text}" if prefixes else handoff.text
+            prefixes.append(combined)
+
+        consumed = next(
+            (index for index, candidate in enumerate(prefixes, 1) if candidate == text),
+            None,
+        )
+        if consumed is None:
+            # A runtime-owned prefix may precede the TUI submissions. Prefer
+            # the longest suffix so repeated handoffs cannot match too early.
+            consumed = next(
+                (
+                    index
+                    for index in range(len(prefixes), 0, -1)
+                    if text.endswith(f"\n{prefixes[index - 1]}")
+                ),
+                None,
             )
-            if text == combined or text.endswith(f"\n{combined}"):
-                del self._pending_input_handoff[:represented]
-                break
+        if consumed is not None:
+            del self._pending_input_handoff[:consumed]
+
         else:
             # A callback can arrive after another consumer has advanced the
             # queue. Retire the matching admission without dropping older rows.

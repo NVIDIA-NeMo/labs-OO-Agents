@@ -46,4 +46,4 @@ async def test_fake_agent_receives_notification_and_runs_script():
     result = await agent.handle({"user_messages": ["hi"]})
     assert received == ["hi"]
     assert agent.messages_received == ["hi"]
-    assert result.kind == "GET_USER_INPUT"
+    assert result.kind == "NEED_INPUT"

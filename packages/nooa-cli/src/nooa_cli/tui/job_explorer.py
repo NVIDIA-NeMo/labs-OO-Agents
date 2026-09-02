@@ -26,6 +26,7 @@ type JobProjection = JobSnapshot | AgentJobSummary
 class JobExplorerRow:
     """One background job in the explorer list."""
 
+    job_id: str
     channel: str
     label: str
     state: str
@@ -40,17 +41,20 @@ def build_job_rows(snapshots: Iterable[JobProjection] | None) -> list[JobExplore
     rows: list[JobExplorerRow] = []
     for snapshot in snapshots or ():
         values = list(snapshot.values)
+        job_id = snapshot.job_id or snapshot.name
         search_parts = [
+            job_id,
             snapshot.name,
             snapshot.label,
-            snapshot.state,
+            str(snapshot.state),
             *[str(value) for value in values[-20:]],
         ]
         rows.append(
             JobExplorerRow(
+                job_id=job_id,
                 channel=snapshot.name,
                 label=snapshot.label,
-                state=snapshot.state,
+                state=str(snapshot.state),
                 delivered=len(values),
                 queued=snapshot.queued,
                 values=values,
@@ -97,8 +101,9 @@ class JobExplorerView(ExplorerView):
             "failed": "✗",
             "cancelled": "⊘",
         }.get(row.state, "?")
+        display_id = row.job_id if len(row.job_id) <= 12 else f"{row.job_id[:11]}…"
         line = (
-            f"{state_icon} {row.channel:<20} {row.state:<10} "
+            f"{state_icon} {display_id:<12} {row.channel:<16} {row.state:<10} "
             f"delivered={row.delivered:<6} queued={row.queued}"
         )
         if row.label != row.channel:
@@ -108,6 +113,7 @@ class JobExplorerView(ExplorerView):
     def detail_lines(self, row: JobExplorerRow, width: int) -> list[str]:
         width = max(int(width), 20)
         lines: list[str] = [
+            f"Job ID: {row.job_id}",
             f"Channel: {row.channel}",
             f"Label: {row.label}",
             f"State: {row.state}",

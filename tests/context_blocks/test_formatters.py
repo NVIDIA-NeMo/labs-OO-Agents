@@ -464,3 +464,20 @@ class TestResponsesProviderFormatterImages:
         # Fail fast instead of emitting an empty image_url the API rejects opaquely.
         with pytest.raises(ValueError, match="no 'url'"):
             ResponsesProviderFormatter().format(self._image_message({"detail": "high"}))
+
+
+def test_synthetic_inline_return_is_observable_but_not_replayed_to_provider():
+    event = ToolCallEvent(
+        tool_call_id="inline_1",
+        name="return_result",
+        arguments={"result": 42},
+        result=ToolResult(tool_call_id="inline_1", content="accepted"),
+        metadata={"synthetic": True, "synthetic_type": "codeact_inline_return"},
+    )
+    block = ResolvedBlock(key="completion", content="", role=Role.ASSISTANT, event=event)
+
+    from nooa.context_blocks.formatter import _event_block_to_messages
+
+    assert _event_block_to_messages(block, wrap_content=None) == []
+    rendered = XMLBlockFormatter().format([block])
+    assert all(message.tool_call is None for message in rendered)
