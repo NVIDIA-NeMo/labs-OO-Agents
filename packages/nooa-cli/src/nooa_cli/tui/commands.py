@@ -562,6 +562,21 @@ class ModelCommand(Command):
                     )
                 )
             return CommandResult.err(f"Failed to switch model: {e}")
+        except BaseException as e:  # noqa: BLE001 — ownership must resolve on cancel too
+            # Cancellation is a BaseException in Python 3.13: if the probe is
+            # cancelled after _begin_model_validation took over the startup
+            # prompt ownership, nothing would ever reject or release the
+            # deferred prompts. Resolve ownership on the way out, then
+            # propagate the cancellation to the caller.
+            if model_validation_started:
+                self._mark_model_check_failed(
+                    HealthCheckResult(
+                        ok=False,
+                        error_message=f"Model validation cancelled: {e}",
+                        blocking=True,
+                    )
+                )
+            raise
         self.config.default_model = selected
         self._mark_model_ready(selected)
         try:
