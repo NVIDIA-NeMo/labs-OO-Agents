@@ -1153,9 +1153,10 @@ def _update_token_calibration(
 class UnifiedLLM(ABC):
     _registry_config: dict[str, Any] | None
 
-    def __init__(self, model: str, **config):
+    def __init__(self, model: str, context_window: int | None = None, **config: Any) -> None:
         self.model = model
         self.config = config
+        self._context_window = context_window
         self._registry_config = None
         # Cache control injection — shared by CompletionClient and ResponsesClient
         self.cache_control_injection_points: list[dict[str, Any]] = (
@@ -1329,7 +1330,7 @@ class UnifiedLLM(ABC):
         """Get context window size (max input tokens).
 
         Resolution order:
-        1. Explicit ``context_window`` config passed to the client constructor
+        1. Explicit ``context_window`` passed to the client constructor
         2. Registry config (if created via get_llm_client())
         3. Registry lookup by model name or model_name field
         4. litellm model info (for known models)
@@ -1338,10 +1339,10 @@ class UnifiedLLM(ABC):
         Returns:
             Maximum input tokens for this model, or None if unknown.
         """
-        # First, honor explicit direct-client config.
-        cw = self.config.get("context_window")
-        if cw is not None:
-            return cw
+        # First, honor explicit direct-client metadata. This is stored outside
+        # self.config so it cannot be serialized into provider API requests.
+        if self._context_window is not None:
+            return self._context_window
 
         # Then check registry config (set by get_llm_client()).
         if self._registry_config is not None:
@@ -1744,6 +1745,7 @@ class CompletionClient(UnifiedLLM):
         http_config: HttpConfig | None = None,
         # use system as default for cache_control_injection_points
         cache_control_injection_points: list[dict[str, Any]] | None = None,
+        context_window: int | None = None,
         **config,
     ):
         """
@@ -1768,9 +1770,11 @@ class CompletionClient(UnifiedLLM):
                 enable prompt caching (for example: {"role": "system"} or
                 {"role": "tool", "position": "last"}). Applied to all calls.
                 Note: Do NOT manually add cache_control to message content when using this.
+            context_window: Optional model context-window metadata used for local
+                context budgeting. It is never sent to the inference API.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
-        super().__init__(model, **config)
+        super().__init__(model, context_window=context_window, **config)
         self.retry_config = retry_config or RetryConfig()
         self._http_config = http_config or HttpConfig()
         self._http = _ClientHttp.for_completion(self.model, self.config, self._http_config)
@@ -2247,6 +2251,7 @@ class ResponsesClient(UnifiedLLM):
         retry_config: RetryConfig | None = None,
         http_config: HttpConfig | None = None,
         cache_control_injection_points: list[dict[str, Any]] | None = None,
+        context_window: int | None = None,
         **config,
     ):
         """
@@ -2272,9 +2277,11 @@ class ResponsesClient(UnifiedLLM):
             cache_control_injection_points: Optional list of role/position rules to
                 enable prompt caching (for example: {"role": "system"} or
                 {"role": "tool", "position": "last"}). Applied to all calls.
+            context_window: Optional model context-window metadata used for local
+                context budgeting. It is never sent to the inference API.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
-        super().__init__(model, **config)
+        super().__init__(model, context_window=context_window, **config)
         self.retry_config = retry_config or RetryConfig()
         self._http_config = http_config or HttpConfig()
         self._http = _ClientHttp.for_responses(self.model, self.config, self._http_config)
