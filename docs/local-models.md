@@ -1,14 +1,17 @@
 # Local Models
 
-NOOA uses LiteLLM model strings through `get_llm_client()`. The two common
-local backends use different shapes:
+NOOA uses LiteLLM model strings through `get_llm_client()`. Any
+OpenAI-compatible endpoint can be used with an `openai/` model string,
+`api_base="<endpoint>/v1"`, and whatever API key that endpoint requires.
+
+Two common local backends also have provider-specific LiteLLM routes:
 
 - Ollama: `ollama_chat/<model>`, base URL without `/v1`, no API key.
 - vLLM: `hosted_vllm/<model>`, base URL with `/v1`, optional API key.
 
-You may also route either backend through an OpenAI-compatible `/v1` endpoint
-with an `openai/` model string. The shapes below are the recommended defaults:
-they match LiteLLM's provider adapters and the repository's compatibility tests.
+The provider-specific shapes below are the recommended defaults for Ollama and
+vLLM because they match LiteLLM's provider adapters and the repository's
+compatibility tests.
 
 ## Ollama
 
