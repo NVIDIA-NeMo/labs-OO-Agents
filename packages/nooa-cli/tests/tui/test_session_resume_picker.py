@@ -234,7 +234,7 @@ def test_tab_cycles_only_list_and_preview() -> None:
     assert picker.active_control == "preview"
     picker.focus_next()
     assert picker.active_control == "list"
-    picker.focus_previous()
+    picker.focus_next(-1)
     assert picker.active_control == "preview"
 
 
