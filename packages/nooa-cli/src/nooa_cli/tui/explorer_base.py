@@ -540,6 +540,10 @@ class ExplorerView(ExplorerInteraction):
         """Format a single row for the list. Override in subclasses."""
         return str(row)[:width]
 
+    # Views that embed their own search highlighting in detail_lines (with
+    # occurrence navigation) opt out of the browser's generic highlighting.
+    handles_search_highlighting: bool = False
+
     def detail_lines(self, row: Any, width: int) -> list[str]:
         """Return detail lines for the selected row. Override in subclasses."""
         return [str(row)]

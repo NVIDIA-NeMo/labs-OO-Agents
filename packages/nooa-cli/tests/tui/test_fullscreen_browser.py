@@ -205,6 +205,36 @@ def test_explorer_browser_reserves_marker_column_for_alignment() -> None:
     assert text[0].index("aligned") == text[1].index("aligned")
 
 
+def test_explorer_detail_highlight_is_shared_across_views() -> None:
+    """Every explorer's detail pane highlights search terms the same way.
+
+    The event explorer embeds its own styled highlighting (with occurrence
+    navigation); the others previously showed no highlighting at all while
+    searching. The shared browser now applies generic term highlighting to
+    views that do not handle it themselves.
+    """
+    browser = _browser()
+    browser.view.handles_search_highlighting = False
+    browser.view.detail_lines = lambda _row, _width: ["notes: the error text"]
+    browser.model.rows.clear()
+    browser.model.rows.append(MagicMock(search_text="error notes", title="Row"))
+    browser.model.set_query("error")
+    browser.buffer.text = "error"
+    browser.preview_control.viewport = (60, 4)
+    assert browser.model.current is not None, "fixture row must match the query"
+
+    transcript = browser._preview_transcript(60, 4)
+
+    assert transcript is not None
+    assert "48;2;" in transcript._records[0].ansi  # truecolor match background
+    # Views that own their highlighting keep the browser out of it.
+    browser.view.handles_search_highlighting = True
+    browser._detail_transcript_key = None
+    transcript = browser._preview_transcript(60, 4)
+    assert transcript is not None
+    assert "48;2;" not in transcript._records[0].ansi
+
+
 def test_explorer_browser_highlights_each_search_term_separately() -> None:
     """Word-AND queries highlight every term span, not the whole query.
 
