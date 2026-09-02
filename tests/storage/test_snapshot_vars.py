@@ -4,6 +4,8 @@
 
 import logging
 
+import pytest
+
 from nooa.storage.json_snapshot import (  # noqa: F401
     snapshot_from_dict,
     snapshot_to_dict,
@@ -170,3 +172,17 @@ class TestSnapshotVarsMappingHelpers:
         assert "bad" not in v
         v.setdefault("good", 7)
         assert v["good"] == 7
+
+
+def test_persistent_vars_reserved_names_require_key_api() -> None:
+    from nooa.tools.todo import Todo
+
+    todo = Todo(title="x")
+    for name in ("keys", "items", "get", "set", "clear"):
+        with pytest.raises(AttributeError, match="reserved"):
+            setattr(todo.v, name, "hidden")
+        todo.v.set(name, f"value-{name}")
+        assert todo.v.get(name) == f"value-{name}"
+    assert callable(todo.v.items)
+    todo.v.normal = 42
+    assert todo.v.normal == 42

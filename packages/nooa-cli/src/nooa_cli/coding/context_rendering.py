@@ -54,11 +54,18 @@ class SafeDelegationPrefill:
         return f"print({text!r})"
 
 
-def render_delegated_context(value: Any, *, max_chars: int = 8_000, max_depth: int = 4) -> str:
+def render_delegated_context(
+    value: Any, *, max_chars: int = 8_000, max_depth: int = 4, max_nodes: int = 200
+) -> str:
     """Render untrusted context without arbitrary repr calls or obvious secrets."""
     seen: set[int] = set()
+    nodes_remaining = max_nodes
 
     def clean(item: Any, depth: int, key: str = "") -> Any:
+        nonlocal nodes_remaining
+        if nodes_remaining <= 0:
+            return "<node limit>"
+        nodes_remaining -= 1
         if _is_sensitive_key(key):
             return "[REDACTED]"
         if item is None or isinstance(item, (bool, int, float)):
@@ -76,9 +83,14 @@ def render_delegated_context(value: Any, *, max_chars: int = 8_000, max_depth: i
                 try:
                     if isinstance(item, Mapping):
                         result = {}
-                        for index, (raw_key, child) in enumerate(item.items()):
-                            if index >= 25:
-                                result["..."] = "items truncated"
+                        iterator = iter(item.items())
+                        for _index in range(25):
+                            if nodes_remaining <= 0:
+                                result["..."] = "node limit"
+                                break
+                            try:
+                                raw_key, child = next(iterator)
+                            except StopIteration:
                                 break
                             safe_key = (
                                 raw_key
@@ -86,9 +98,21 @@ def render_delegated_context(value: Any, *, max_chars: int = 8_000, max_depth: i
                                 else f"<{type(raw_key).__name__}>"
                             )
                             result[safe_key] = clean(child, depth + 1, safe_key)
+                        else:
+                            result["..."] = "items truncated"
                         return result
-                    values = [clean(child, depth + 1) for child in item[:25]]
-                    if len(item) > 25:
+                    values = []
+                    iterator = iter(item)
+                    for _index in range(25):
+                        if nodes_remaining <= 0:
+                            values.append("<node limit>")
+                            break
+                        try:
+                            child = next(iterator)
+                        except StopIteration:
+                            break
+                        values.append(clean(child, depth + 1))
+                    else:
                         values.append("<items truncated>")
                     return values
                 except Exception:
@@ -97,7 +121,17 @@ def render_delegated_context(value: Any, *, max_chars: int = 8_000, max_depth: i
                 seen.remove(identity)
         if isinstance(item, BaseModel):
             try:
-                return clean(item.model_dump(mode="json"), depth + 1)
+                # Read already-validated field values directly. ``model_dump`` can
+                # invoke user serializers and eagerly traverse an arbitrarily large
+                # graph before this function's own depth/node budgets take effect.
+                raw_values = object.__getattribute__(item, "__dict__")
+                fields = type(item).model_fields
+                values = {
+                    name: raw_values[name]
+                    for name in fields
+                    if name in raw_values
+                }
+                return clean(values, depth + 1)
             except Exception:
                 pass
         return f"<{type(item).__name__}>"

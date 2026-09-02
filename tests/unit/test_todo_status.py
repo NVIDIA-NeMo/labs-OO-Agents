@@ -406,3 +406,14 @@ def test_with_todo_makes_open_delegated_todo_active() -> None:
 
     assert worker_manager.active() is not None
     assert worker_manager.active().id == todo.id
+
+
+def test_status_bounds_framing_when_no_rows_fit() -> None:
+    manager = TodoManager()
+    for index in range(1_000):
+        manager.add(f"todo {index}")
+
+    output = manager.status(max_items=0, max_chars=200)
+
+    assert len(output) <= 200
+    assert "1000 open" in output
