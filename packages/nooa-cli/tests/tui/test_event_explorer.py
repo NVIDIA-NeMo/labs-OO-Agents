@@ -472,6 +472,18 @@ def test_event_explorer_view_highlights_selected_occurrence_on_same_line() -> No
     assert "".join(lines).count(f"{highlight_style_code(current=True)}alpha\x1b[0m") == 1
 
 
+def test_event_search_text_excludes_markdown_chrome() -> None:
+    """Timestamps and ids in the markdown header/footer must not match."""
+    row = build_event_rows(
+        SimpleNamespace(items=lambda: [("1", _FakeEvent("TUIUserInput", text="hello"))])
+    )[0]
+
+    # The markdown header carries a timestamp; searching it must not match.
+    assert "timestamp" not in row.search_text.lower()
+    # The rendered markdown content itself remains searchable.
+    assert "hello" in row.search_text
+
+
 def test_event_explorer_search_ignores_empty_field_names() -> None:
     """Searching must not match the *names* of empty fields.
 
@@ -530,12 +542,11 @@ def test_event_explorer_search_keeps_styled_detail_colors() -> None:
     searched = highlighted_detail_lines(row, width=80, query="run")
 
     with_query = [line for line in "\n".join(searched).splitlines() if "\x1b[" in line]
-    # Non-match styling (syntax colors) must survive the search.
+    # Non-match styling (syntax colors) must survive the search: strip the
+    # search-highlight prefix itself and require another SGR to remain.
     assert with_query, "search dropped all styling"
-    assert any(
-        code in "".join(with_query) and code not in highlight_style_code()
-        for code in ("\x1b[38;", "\x1b[48;")
-    )
+    non_match_styles = "".join(with_query).replace(highlight_style_code(), "")
+    assert "\x1b[38;" in non_match_styles or "\x1b[48;" in non_match_styles
 
 
 def test_event_explorer_renders_execute_python_event_as_formatted_markdown() -> None:

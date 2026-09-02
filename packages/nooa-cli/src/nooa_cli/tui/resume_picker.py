@@ -117,13 +117,15 @@ def _term_hits(
     positions: list[int] = []
     for term in terms:
         needle = term.casefold()
-        found = target.find(needle)
-        if found < 0:
+        cursor = 0
+        while (found := target.find(needle, cursor)) >= 0:
+            hit.add(needle)
+            if earliest is None or found < earliest:
+                earliest = found
+            positions.extend(source[found : found + len(needle)])
+            cursor = found + len(needle)
+        if needle not in hit:
             continue
-        hit.add(needle)
-        if earliest is None or found < earliest:
-            earliest = found
-        positions.extend(source[found : found + len(needle)])
     if not hit:
         return None
     assert earliest is not None
@@ -175,10 +177,12 @@ class ResumePickerModel:
             # Word-AND matching, shared with the explorers: every term must
             # occur somewhere across the row's fields (title, preview, or
             # conversation). The best field — most terms covered, earliest —
-            # provides the ranking score and highlight positions.
+            # provides the ranking score and highlight positions. The score
+            # keeps the coverage count so rows with all terms in one field
+            # outrank rows whose terms are split across fields.
             terms = [term for term in normalized_query.split() if term.strip()]
             needed = {term.casefold() for term in terms}
-            query_matches: list[tuple[int, str, tuple[int, ...]] | None] = []
+            query_matches: list[tuple[int, int, str, tuple[int, ...]] | None] = []
             for fields in self._search_fields:
                 best: tuple[int, int, str, tuple[int, ...]] | None = None
                 covered: set[str] = set()
@@ -192,12 +196,12 @@ class ResumePickerModel:
                     if best is None or candidate[:2] > best[:2]:
                         best = candidate
                 if best is not None and covered == needed:
-                    query_matches.append((best[1], best[2], best[3]))
+                    query_matches.append((best[0], best[1], best[2], best[3]))
                 else:
                     query_matches.append(None)
             self._query_matches = query_matches
         else:
-            self._query_matches = [(0, "", ()) for _row in self.rows]
+            self._query_matches = [(0, 0, "", ()) for _row in self.rows]
         self._rebuild_matches(previous_id)
 
     def _rebuild_matches(self, previous_id: str | None = None) -> None:
@@ -211,12 +215,14 @@ class ResumePickerModel:
             query_match = self._query_matches[index]
             if query_match is None:
                 continue
-            score, field, positions = query_match
+            coverage, score, field, positions = query_match
             stamp = row.last_active if self.sort_updated else row.created_at
             ranked.append(
                 (
                     -stamp,
-                    -score if self.query.strip() else 0,
+                    # Ascending sort: negate coverage so the most-covered
+                    # field ranks first, then the earliest match position.
+                    (-coverage, -score) if self.query.strip() else (0, 0),
                     index,
                     FieldMatch(row, field or None, positions),
                 )
