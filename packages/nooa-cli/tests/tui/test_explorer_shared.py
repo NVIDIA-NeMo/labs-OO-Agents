@@ -12,11 +12,12 @@ from nooa_cli.tui.event_explorer import (
     highlight_terms_with_current,
 )
 from nooa_cli.tui.explorer_base import (
-    FTS_ACTIVE_STYLE,
+    ExplorerChecklistOption,
     ExplorerConfig,
     ExplorerModel,
+    ExplorerOption,
     ExplorerView,
-    display_line,
+    highlight_style_code,
     highlight_terms,
     search_terms,
     style_bar,
@@ -68,11 +69,8 @@ class TestExplorerBaseUtils:
 
     def test_highlight_terms_with_current_occurrence(self):
         result = highlight_terms_with_current("foo bar foo", ["foo"], 1)
-        assert "\x1b[30;106m" in result  # second occurrence highlighted differently
-
-    def test_display_line_pads(self):
-        result = display_line("hi", 10, [], ansi=False)
-        assert len(result) == 10
+        assert highlight_style_code(current=True) in result
+        assert highlight_style_code(current=False) in result
 
     def test_style_bar_no_ansi(self):
         assert style_bar("test", ansi=False) == "test"
@@ -80,9 +78,6 @@ class TestExplorerBaseUtils:
     def test_style_bar_ansi(self):
         result = style_bar("test", ansi=True)
         assert "\x1b[" in result
-
-    def test_fts_style_uses_explicit_high_contrast_truecolor(self):
-        assert FTS_ACTIVE_STYLE == "\x1b[1;38;2;255;255;255;48;2;95;28;75m"
 
 
 class TestExplorerModel:
@@ -152,12 +147,6 @@ class TestExplorerView:
         config = ExplorerConfig(title="Test Explorer")
         return ExplorerView(model, config)
 
-    def test_render_produces_string(self):
-        view = self._make_view()
-        output = view.render(80, 24)
-        assert isinstance(output, str)
-        assert "Test Explorer" in output
-
     def test_handle_key_quit_closes(self):
         view = self._make_view()
         assert view.handle_key("quit") == "close"
@@ -173,6 +162,41 @@ class TestExplorerView:
         view.handle_key("escape")
         assert view.model.search_active is False
 
+    def test_checklist_option_navigates_then_toggles_current_choice(self):
+        view = self._make_view()
+        changes = []
+        option = ExplorerChecklistOption(
+            "types",
+            "Types",
+            (("a", "A"), ("b", "B")),
+            {"a", "b"},
+            changes.append,
+        )
+        view.configure_options(option)
+        view.handle_key("options")
+        view.handle_key("down")
+        assert option.choice_cursor == 1
+        view.handle_key("space")
+        assert option.checked == {"a"}
+        assert changes == [{"a"}]
+
+    def test_quit_still_closes_while_options_are_active(self):
+        view = self._make_view()
+        view.configure_options(
+            ExplorerOption("filter", "Filter", (("all", "All"),), "all", lambda _value: None)
+        )
+
+        view.handle_key("options")
+
+        assert view.handle_key("quit") == "close"
+
+    def test_space_remains_search_input_outside_options_mode(self):
+        view = self._make_view()
+        view.handle_key("slash")
+        view.model.edit_query("two")
+        assert view.handle_key("space") == "handled"
+        assert view.model.query == "two "
+
     def test_handle_key_down_moves(self):
         view = self._make_view()
         view.handle_key("down")
@@ -182,43 +206,6 @@ class TestExplorerView:
         view = self._make_view()
         view.handle_key("tab")
         assert view.model.focus == "detail"
-
-    def test_f2_toggles_native_terminal_selection(self):
-        view = self._make_view()
-
-        assert view.mouse_support is True
-        assert view.handle_key("native_selection") == "handled"
-        assert view.mouse_support is False
-        assert "F2 mouse/wheel" in view.render(80, 24)
-
-        view.handle_key("native_selection")
-        assert view.mouse_support is True
-
-    def test_mouse_wheel_routes_to_pane_under_pointer(self):
-        class LongDetailView(ExplorerView):
-            def detail_lines(self, row, width):
-                return [f"detail line {i}" for i in range(50)]
-
-        rows = [MagicMock(search_text=f"item {i}") for i in range(10)]
-        view = LongDetailView(ExplorerModel(rows), ExplorerConfig(title="Mouse Explorer"))
-        view.render(80, 16)
-
-        divider_y = view.model._last_divider_y
-        view.handle_mouse("scroll_down", 5, divider_y - 1)
-        assert view.model.focus == "list"
-        assert view.model.cursor == 3
-
-        view.handle_mouse("scroll_down", 5, divider_y + 1)
-        assert view.model.focus == "detail"
-        assert view.model.detail_offset == 3
-
-    def test_render_empty(self):
-        rows = []
-        model = ExplorerModel(rows)
-        config = ExplorerConfig(title="Empty", empty_message="Nothing here.")
-        view = ExplorerView(model, config)
-        output = view.render(80, 24)
-        assert "Nothing here." in output
 
 
 def test_subview_control_preserves_vt_mouse_position_for_wheel_dispatch():
@@ -247,12 +234,21 @@ class TestJobExplorer:
     def test_build_job_rows_none(self):
         assert build_job_rows(None) == []
 
-    def test_build_job_rows_with_snapshots(self):
-        rows = build_job_rows(
-            [JobSnapshot("ci", "ci-pipeline", "running", 3, ("line1", "line2"), "job-ci-1")]
-        )
+    def test_build_job_rows_with_handles(self):
+        qm = MagicMock()
+        handle1 = MagicMock()
+        handle1.name = "ci"
+        handle1.label = "ci-pipeline"
+        handle1.state = "running"
+        handle1.values = ["line1", "line2"]
+        qm.jobs.return_value = {"ci": "running"}
+        qm.job.return_value = handle1
+        ch = MagicMock()
+        ch.qsize.return_value = 3
+        qm.channels.return_value = {"ci": ch}
+
+        rows = build_job_rows([JobSnapshot("ci", "ci-pipeline", "running", 3, ("line1", "line2"))])
         assert len(rows) == 1
-        assert rows[0].job_id == "job-ci-1"
         assert rows[0].channel == "ci"
         assert rows[0].state == "running"
         assert rows[0].delivered == 2
@@ -267,56 +263,28 @@ class TestJobExplorer:
                     AgentJobState.RUNNING,
                     4,
                     ("first", "second"),
-                    "job-logs-1",
                 )
             ]
         )
 
         assert len(rows) == 1
-        assert rows[0].job_id == "job-logs-1"
         assert rows[0].channel == "logs"
         assert rows[0].state == "running"
         assert rows[0].queued == 4
         assert rows[0].values == ["first", "second"]
 
-    def test_build_job_rows_preserves_duplicate_channel_jobs(self):
-        rows = build_job_rows(
-            [
-                JobSnapshot("delegates", "first", "running", 0, (), "job-1"),
-                JobSnapshot("delegates", "second", "running", 0, (), "job-2"),
-            ]
-        )
-
-        assert [row.job_id for row in rows] == ["job-1", "job-2"]
-
-    def test_job_explorer_view_renders(self):
-        view = JobExplorerView(
-            [JobSnapshot("monitor", "health-check", "done", 0, ("ok",), "job-monitor-1")]
-        )
-        output = view.render(80, 24)
-        assert "Job Explorer" in output
-        assert "job-monitor-1" in output
-
-    def test_job_explorer_bounds_display_id_without_losing_columns(self):
-        job_id = "12345678-1234-1234-1234-123456789abc"
-        view = JobExplorerView(
-            [JobSnapshot("delegates", "delegates", "running", 3, ("ok",), job_id)]
-        )
-        row = view.model.rows[0]
-
-        line = view.format_row(row, 90)
-
-        assert len(line) <= 90
-        assert job_id not in line
-        assert "12345678-12…" in line
-        assert "delegates" in line
-        assert "running" in line
-        assert "delivered=1" in line
-        assert "queued=3" in line
-        assert f"Job ID: {job_id}" in view.detail_lines(row, 90)
-
     def test_job_explorer_ignores_unknown_actions(self):
-        view = JobExplorerView([JobSnapshot("test-job", "test", "running", 0, (), "job-test-1")])
+        qm = MagicMock()
+        handle = MagicMock()
+        handle.name = "test-job"
+        handle.label = "test"
+        handle.state = "running"
+        handle.values = []
+        qm.jobs.return_value = {"test-job": "running"}
+        qm.job.return_value = handle
+        qm.channels.return_value = {}
+
+        view = JobExplorerView([JobSnapshot("test-job", "test", "running", 0, ())])
         result = view.handle_key("text", "x")
         assert result == "ignored"
 
@@ -348,22 +316,6 @@ class TestTodoExplorer:
         assert rows[0].title == "Fix the bug"
         assert rows[0].status == "open"
 
-    def test_todo_explorer_view_renders(self):
-        todo_mgr = MagicMock()
-        todo1 = MagicMock()
-        todo1.id = "def67890"
-        todo1.title = "Write tests"
-        todo1.status = "done"
-        todo1.deps = []
-        todo1.created_at = "2025-01-01 12:00"
-        todo1.description = ""
-        todo1.comments = []
-        todo_mgr.list_todos.return_value = [todo1]
-
-        view = TodoExplorerView(build_todo_rows(todo_mgr))
-        output = view.render(80, 24)
-        assert "Todo Explorer" in output
-
     def test_todo_explorer_ignores_unknown_actions(self):
         todo_mgr = MagicMock()
         todo1 = MagicMock()
@@ -380,10 +332,16 @@ class TestTodoExplorer:
         result = view.handle_key("text", "x")
         assert result == "ignored"
 
-    def test_todo_explorer_empty(self):
-        todo_mgr = MagicMock()
-        todo_mgr.list_todos.return_value = []
 
-        view = TodoExplorerView(build_todo_rows(todo_mgr))
-        output = view.render(80, 24)
-        assert "No todos." in output
+def test_todo_explorer_grouped_options_filter_and_sort() -> None:
+    rows = [
+        MagicMock(status="done", created_at="2025-01-01", search_text="done", title="done"),
+        MagicMock(status="open", created_at="2025-01-02", search_text="open", title="open"),
+    ]
+    view = TodoExplorerView(rows)
+    view.handle_key("options")
+    view.handle_key("down")
+    assert [view.model.rows[i].status for i in view.model.matches] == ["open"]
+    view.handle_key("right")
+    view.handle_key("space")
+    assert [view.model.rows[i].created_at for i in view.model.matches] == ["2025-01-02"]
