@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from typing import Any, Literal
 
 from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.layout import BufferControl, VSplit, Window
+from prompt_toolkit.layout import VSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
@@ -22,6 +22,7 @@ from .fullscreen_browser import (
     ExplorerBrowser,
     SelectablePreviewControl,
     _BrowserOptionControl,
+    _BrowserSearchControl,
     build_fullscreen_browser,
 )
 from .terminal_safety import sanitize_live_text
@@ -250,6 +251,17 @@ class ResumePickerModel:
             return
         self.selected = (self.selected + delta) % len(self._matches)
         self.preview_offset = 10**9
+
+    def jump_home(self) -> None:
+        if self._matches:
+            self.selected = 0
+            self.list_offset = 0
+            self.preview_offset = 10**9
+
+    def jump_end(self) -> None:
+        if self._matches:
+            self.selected = len(self._matches) - 1
+            self.preview_offset = 10**9
 
     def select(self, index: int) -> None:
         if 0 <= index < len(self._matches) and index != self.selected:
@@ -607,17 +619,6 @@ class _PickerControl(FormattedTextControl):
         return NotImplemented
 
 
-class _PickerSearchControl(BufferControl):
-    def __init__(self, picker: ResumePicker, buffer: Buffer):
-        self.picker = picker
-        super().__init__(buffer)
-
-    def mouse_handler(self, mouse_event: MouseEvent):
-        if mouse_event.event_type is MouseEventType.MOUSE_DOWN:
-            self.picker.activate_control("list")
-        return super().mouse_handler(mouse_event)
-
-
 class ResumePicker(ExplorerBrowser):
     """Session-specific ExplorerBrowser with asynchronous replay previews.
 
@@ -677,7 +678,7 @@ class ResumePicker(ExplorerBrowser):
         self.option_cursor: int | None = None
         self.buffer = Buffer(multiline=False)
         self.buffer.on_text_changed += lambda _: self._query_changed()
-        self.query_control = _PickerSearchControl(self, self.buffer)
+        self.query_control = _BrowserSearchControl(self, self.buffer)
         self.query_window = Window(
             self.query_control,
             width=Dimension(min=4, weight=1),
