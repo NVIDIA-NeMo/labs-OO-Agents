@@ -632,3 +632,14 @@ def test_delegated_context_does_not_invoke_pydantic_serializers():
 
     assert rendered == '"<node limit>"'
     assert serializer_calls == []
+
+
+def test_delegated_context_keeps_snapshot_backed_models_opaque():
+    from nooa_cli.coding.context_rendering import render_delegated_context
+
+    from nooa.tools.todo import Todo
+
+    todo = Todo(title="Investigate empty parser input", vars={"a": 1})
+    rendered = render_delegated_context(todo)
+    assert rendered == '"<Todo>"'
+    assert "Investigate empty parser input" not in rendered

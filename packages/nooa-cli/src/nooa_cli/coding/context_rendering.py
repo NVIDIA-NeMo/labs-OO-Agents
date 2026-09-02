@@ -121,10 +121,18 @@ def render_delegated_context(
                 seen.remove(identity)
         if isinstance(item, BaseModel):
             try:
+                # Snapshot-backed models (e.g. Todo, whose ``vars`` is SnapshotVars)
+                # already travel to the subagent through the structured channel;
+                # rendering their payload here would duplicate task state into the
+                # untrusted text blob. Keep them opaque.
+                from nooa.storage.snapshot_vars import SnapshotVars
+
+                raw_values = object.__getattribute__(item, "__dict__")
+                if any(isinstance(value, SnapshotVars) for value in raw_values.values()):
+                    return f"<{type(item).__name__}>"
                 # Read already-validated field values directly. ``model_dump`` can
                 # invoke user serializers and eagerly traverse an arbitrarily large
                 # graph before this function's own depth/node budgets take effect.
-                raw_values = object.__getattribute__(item, "__dict__")
                 fields = type(item).model_fields
                 values = {
                     name: raw_values[name]
