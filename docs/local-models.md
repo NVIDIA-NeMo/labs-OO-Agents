@@ -83,16 +83,5 @@ llm = get_llm_client("local-ollama")
 llm = get_llm_client("local-vllm")
 ```
 
-## Smoke Tests
-
-```bash
-uv run pytest -o addopts='' tests/provider_compat/test_provider_compat.py -m provider_compat_ollama
-uv run pytest -o addopts='' tests/provider_compat/test_provider_compat.py -m provider_compat_vllm
-```
-
-Override defaults with `NOOA_TEST_OLLAMA_MODEL`,
-`NOOA_TEST_OLLAMA_BASE_URL`, `NOOA_TEST_VLLM_MODEL`,
-`NOOA_TEST_VLLM_BASE_URL`, and `NOOA_TEST_VLLM_API_KEY`.
-
 References: [LiteLLM Ollama](https://docs.litellm.ai/docs/providers/ollama),
 [LiteLLM vLLM](https://docs.litellm.ai/docs/providers/vllm).
