@@ -832,10 +832,15 @@ class ExplorerBrowser:
         self.model._last_detail_line_count = len(transcript._display_rows(max(1, width)))
         self.model._last_detail_visible_lines = max(1, height)
         self.model.clamp_detail_offset(height)
-        transcript.jump_to_start(width=max(1, width))
-        transcript.scroll_visual_lines(
-            self.model.detail_offset, width=max(1, width), height=max(1, height)
-        )
+        # With a search active, set_search has already revealed the current
+        # match — re-anchoring to detail_offset here would clobber that reveal
+        # (the matched text scrolled out of view while the count kept working).
+        # Without a query, honor the model's detail scroll offset as before.
+        if not self.buffer.text.strip():
+            transcript.jump_to_start(width=max(1, width))
+            transcript.scroll_visual_lines(
+                self.model.detail_offset, width=max(1, width), height=max(1, height)
+            )
         return transcript
 
     def preview_text(self, width: int, height: int):
