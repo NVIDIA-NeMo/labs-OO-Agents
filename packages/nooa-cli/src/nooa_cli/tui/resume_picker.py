@@ -591,7 +591,9 @@ class ResumePicker(ExplorerBrowser):
 
     def _option_window_width(self, index: int) -> Dimension:
         widths = (Dimension(min=17, preferred=20), Dimension(min=10, preferred=18))
-        return widths[index]
+        # Future option rows fall back to the shared default width rather
+        # than raising on the two-entry tuple.
+        return widths[index] if index < len(widths) else Dimension(min=12, preferred=22)
 
     def __init__(
         self,

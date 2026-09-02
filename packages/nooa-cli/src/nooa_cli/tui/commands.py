@@ -511,7 +511,11 @@ class ModelCommand(Command):
                 TextOutput(f"Current model: {self.config.default_model}", "info")
             )
         selected = args[0]
-        model_validation_started = False
+        # Ownership of the deferred startup prompts needs resolving only
+        # while the probe is in flight. The switch phase below has already
+        # produced a healthy probe; cancelling THERE must not publish a
+        # failed health (the agent may already be on the new model).
+        probe_in_flight = False
         try:
             from nooa.interactive import apply_model_limits
             from nooa_cli.tui.config import UnresolvedModelError, get_llm_for_model
@@ -534,8 +538,9 @@ class ModelCommand(Command):
                     ],
                 )
             self._begin_model_validation()
-            model_validation_started = True
+            probe_in_flight = True
             health = await probe_llm(candidate)
+            probe_in_flight = False
             if not health.ok:
                 self._mark_model_check_failed(health)
                 outputs = [
@@ -553,7 +558,7 @@ class ModelCommand(Command):
 
             await self.agent_run_async(_switch)
         except Exception as e:
-            if model_validation_started:
+            if probe_in_flight:
                 self._mark_model_check_failed(
                     HealthCheckResult(
                         ok=False,
@@ -562,13 +567,23 @@ class ModelCommand(Command):
                     )
                 )
             return CommandResult.err(f"Failed to switch model: {e}")
-        except BaseException as e:  # noqa: BLE001 — ownership must resolve on cancel too
+        except asyncio.CancelledError as e:
             # Cancellation is a BaseException in Python 3.13: if the probe is
             # cancelled after _begin_model_validation took over the startup
             # prompt ownership, nothing would ever reject or release the
             # deferred prompts. Resolve ownership on the way out, then
             # propagate the cancellation to the caller.
-            if model_validation_started:
+            if probe_in_flight:
+                self._mark_model_check_failed(
+                    HealthCheckResult(
+                        ok=False,
+                        error_message=f"Model validation cancelled: {e}",
+                        blocking=True,
+                    )
+                )
+            raise
+        except BaseException as e:  # noqa: BLE001 — resolve ownership for Ctrl-C etc.
+            if probe_in_flight:
                 self._mark_model_check_failed(
                     HealthCheckResult(
                         ok=False,

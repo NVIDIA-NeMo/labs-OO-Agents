@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import datetime
 import json
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
@@ -968,7 +969,11 @@ def _style_event_header_line(lines: list[str], width: int) -> list[str]:
 # Cache entries hold the row itself alongside its lines so a recycled
 # ``id(row)`` can never alias a fresh row onto stale rendered lines
 # (EventExplorerRow is an eq-dataclass, so the row cannot key the dict).
-_STYLE_CACHE: dict[tuple[int, int], tuple[EventExplorerRow, list[str]]] = {}
+# LRU memo: eviction drops only the least-recently-used entry (a full clear
+# at capacity would re-trigger render storms for the still-live keys), and
+# entries retain the row so a recycled ``id(row)`` can never alias a fresh
+# row onto stale lines.
+_STYLE_CACHE: OrderedDict[tuple[int, int], tuple[EventExplorerRow, list[str]]] = OrderedDict()
 _STYLE_CACHE_MAX = 64
 
 
@@ -984,10 +989,11 @@ def _styled_detail_lines(row: EventExplorerRow, width: int) -> list[str]:
     key = (id(row), width)
     cached = _STYLE_CACHE.get(key)
     if cached is not None and cached[0] is row:
+        _STYLE_CACHE.move_to_end(key)
         return cached[1]
     lines = _render_styled_detail_lines(row, width)
-    if len(_STYLE_CACHE) >= _STYLE_CACHE_MAX:
-        _STYLE_CACHE.clear()
+    while len(_STYLE_CACHE) >= _STYLE_CACHE_MAX:
+        _STYLE_CACHE.popitem(last=False)
     _STYLE_CACHE[key] = (row, lines)
     return lines
 

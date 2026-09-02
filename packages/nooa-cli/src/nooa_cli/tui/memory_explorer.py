@@ -287,13 +287,17 @@ class MemoryExplorerView(ExplorerView):
         pending_action, row_id, armed_at = pending
         if pending_action != action or row_id != id(row):
             return False
-        return (time.time() - armed_at) <= self._CONFIRM_WINDOW_SECONDS
+        return (time.monotonic() - armed_at) <= self._CONFIRM_WINDOW_SECONDS
 
     def pending_confirmation_hint(self) -> str:
         pending = self._pending_confirm
         if pending is None:
             return ""
-        action, row_id, _armed_at = pending
+        action, row_id, armed_at = pending
+        # An expired arm cannot fire — the next press re-arms. Do not keep
+        # promising a confirm that no longer applies.
+        if time.monotonic() - armed_at > self._CONFIRM_WINDOW_SECONDS:
+            return ""
         row = next((row for row in self.model.rows if id(row) == row_id), None)
         if row is None:
             self._pending_confirm = None
@@ -307,7 +311,7 @@ class MemoryExplorerView(ExplorerView):
             return "ignored"
         if action == "text:f":
             if not self._consume_confirmation(action, row):
-                self._pending_confirm = (action, id(row), time.time())
+                self._pending_confirm = (action, id(row), time.monotonic())
                 return "handled"
             self._forget(row.id)
             self.model.rows.remove(row)
@@ -320,7 +324,7 @@ class MemoryExplorerView(ExplorerView):
                 self._pending_confirm = None
                 return "ignored"
             if not self._consume_confirmation(action, row):
-                self._pending_confirm = (action, id(row), time.time())
+                self._pending_confirm = (action, id(row), time.monotonic())
                 return "handled"
             self._mark_done(row.id)
             # The search tag mirrors the CURRENT status (todo:open / todo:dropped
