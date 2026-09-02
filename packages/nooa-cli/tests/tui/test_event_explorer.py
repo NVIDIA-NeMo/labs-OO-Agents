@@ -476,6 +476,40 @@ def test_event_explorer_view_highlights_selected_occurrence_on_same_line() -> No
     assert "".join(lines).count(f"{highlight_style_code(current=True)}alpha\x1b[0m") == 1
 
 
+def test_event_explorer_search_ignores_empty_field_names() -> None:
+    """Searching must not match the *names* of empty fields.
+
+    A PythonOutput event always has an ``error`` key, but usually an empty
+    one. Searching "error" matched every PythonOutput event via the raw repr
+    in search_text — even when no error occurred.
+    """
+    rows = build_event_rows(
+        SimpleNamespace(
+            items=lambda: [
+                (
+                    "1",
+                    _FakeEvent(
+                        "PythonOutput",
+                        stdout="all good",
+                        stderr="",
+                        error="",
+                        execution_status="complete",
+                    ),
+                ),
+                (
+                    "2",
+                    _FakeEvent("PythonOutput", error="NameError: boom"),
+                ),
+            ]
+        )
+    )
+
+    model = EventExplorerModel(rows)
+    model.set_query("error")
+
+    assert [row.tag for row in (rows[i] for i in model.matches)] == ["2"]
+
+
 def test_event_explorer_search_highlights_matches_inside_detail_text() -> None:
     row = build_event_rows(
         SimpleNamespace(items=lambda: [("1", _FakeEvent("TUIUserInput", text="find alpha here"))])
@@ -497,10 +531,8 @@ def test_event_explorer_search_keeps_styled_detail_colors() -> None:
         )
     )[0]
 
-    styled = highlighted_detail_lines(row, width=80)
     searched = highlighted_detail_lines(row, width=80, query="run")
 
-    without = [line for line in "\n".join(styled).splitlines() if "\x1b[" in line]
     with_query = [line for line in "\n".join(searched).splitlines() if "\x1b[" in line]
     # Non-match styling (syntax colors) must survive the search.
     assert with_query, "search dropped all styling"

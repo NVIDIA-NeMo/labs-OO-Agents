@@ -26,6 +26,7 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
 from prompt_toolkit.widgets import Frame
 
+from .explorer_base import highlight_terms
 from .fullscreen_transcript import FullscreenTranscriptModel
 from .terminal_safety import sanitize_live_text
 
@@ -796,6 +797,13 @@ class ExplorerBrowser:
         if row is None:
             return None
         lines = tuple(self.view.detail_lines(row, max(1, width)))
+        # Views that don't highlight search matches themselves get the
+        # browser's generic term highlighting so every explorer's detail pane
+        # shows matches the same way.
+        if not getattr(self.view, "handles_search_highlighting", False):
+            terms = [term for term in self.buffer.text.split() if term.strip()]
+            if terms:
+                lines = tuple(highlight_terms(line, terms) for line in lines)
         key = (row, max(1, width), lines)
         if self._detail_transcript_key != key:
             if self._detail_transcript_key is not None:
