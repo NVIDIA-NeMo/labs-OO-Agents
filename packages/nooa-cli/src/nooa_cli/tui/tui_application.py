@@ -2501,9 +2501,13 @@ class TUIApplication:
         @kb.add("escape", Keys.Any, filter=resume_picker_active)
         def _(event):
             last = event.key_sequence[-1] if event.key_sequence else None
-            if last is not None and (
-                last.key == Keys.Backspace or last.data in ("\x7f", "\b")
-            ):
+            if last is None:
+                return
+            # Cursor-position reports arriving in the same read as an Esc
+            # must reach the CPR handler — absorbing them stalls layout.
+            if any(kp.key == Keys.CPRResponse for kp in event.key_sequence):
+                return
+            if last.key == Keys.Backspace or last.data in ("\x7f", "\b"):
                 picker = self._resume_picker
                 if (
                     picker is not None
@@ -2698,7 +2702,16 @@ class TUIApplication:
                 if kp.key is not Keys.CPRResponse
             ]
             if not pending:
-                self._subview_key(event, "escape")
+                # A CPR report may share this read (it pairs with the Esc in
+                # VT input, e.g. after a cursor-position request). Closing on
+                # it would be spurious; absorb the Esc and let the CPR reach
+                # its own handler. Only a truly lone Esc closes.
+                queue_has_cpr = any(
+                    kp.key is Keys.CPRResponse
+                    for kp in event.key_processor.input_queue
+                )
+                if not queue_has_cpr:
+                    self._subview_key(event, "escape")
                 return
             # Chord continuation pending: absorb this Esc only.
 

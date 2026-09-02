@@ -123,6 +123,25 @@ def test_action_d_marks_todo_done_round_trip() -> None:
     assert calls["done"] == [ids["todo"]]
 
 
+def test_invalid_action_disarms_the_pending_confirm() -> None:
+    """An action key that cannot apply still interrupts the armed gesture.
+
+    Press f (arms), press d on a non-todo row (ignored), press f again: the
+    final press must re-arm, not fire.
+    """
+    agent, mgr, ids = _seeded_manager()
+    view, calls = _view(agent, mgr)
+    skill = next(r for r in view.model.rows if r.id == ids["skill"])
+
+    assert view.handle_action("text:f", skill) == "handled"  # arm
+    assert view.handle_action("text:d", skill) == "ignored"  # invalid action
+    assert calls["forgot"] == []
+    assert view.handle_action("text:f", skill) == "handled"  # re-arm, not fire
+    assert calls["forgot"] == []
+    assert view.handle_action("text:f", skill) == "handled"  # now fires
+    assert calls["forgot"] == [ids["skill"]]
+
+
 def test_armed_confirm_does_not_leak_across_rows() -> None:
     """Arming on row A must never fire on row B.
 
