@@ -47,7 +47,6 @@ def test_input_uses_terminal_background_across_themes() -> None:
         "fullscreen-browser.preview-agent",
         "fullscreen-browser.footer",
         "fullscreen-browser.control-focused",
-        "fullscreen-browser.active-rail-active",
     ],
 )
 def test_fullscreen_browser_standard_text_uses_terminal_default_foreground(style_name: str) -> None:
@@ -123,6 +122,25 @@ def test_inline_code_spans_follow_the_active_theme() -> None:
     finally:
         theme.set_theme(original)
         frontend._console.refresh_theme()
+
+
+def test_active_pane_rail_uses_theme_highlight_color() -> None:
+    """The active-pane rail is the theme's highlight color and follows the palette."""
+    app = TUIApplication()
+
+    def rail_color() -> str:
+        attrs = app._app.style.get_attrs_for_style_str("class:fullscreen-browser.active-rail-active")
+        return attrs.color or ""
+
+    original = theme.get_theme()
+    try:
+        assert rail_color() == theme.COLORS["lavender"].lstrip("#")
+        theme.set_theme("latte")
+        app.refresh_style()
+        assert rail_color() == theme.COLORS["lavender"].lstrip("#")
+    finally:
+        theme.set_theme(original)
+        app.refresh_style()
 
 
 async def test_theme_command_refreshes_and_persists_selection(tmp_path, monkeypatch) -> None:
