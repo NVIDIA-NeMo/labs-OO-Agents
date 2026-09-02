@@ -23,6 +23,7 @@ import re
 from typing import Any
 
 from nooa.agentdoc._info import REQUIRED, CallableInfo, ModuleInfo, TypeInfo
+from nooa.agentdoc._introspection import _slot_names
 from nooa.agentdoc._metadata import is_expand_false
 from nooa.agentdoc._structured import _ClassRef, _InstanceRef
 from nooa.agentdoc.protocols import SupportsInstanceValues
@@ -489,7 +490,7 @@ def _is_structured_instance(obj: Any, *, respect_custom_repr: bool = True) -> bo
             slot
             for klass in obj_type.__mro__
             if klass is not object
-            for slot in getattr(klass, "__slots__", ())
+            for slot in _slot_names(klass)
             if not slot.startswith("_")
         )
 
@@ -1226,7 +1227,7 @@ def _extract_instance_values(obj: Any, type_info: TypeInfo) -> dict[str, Any]:
     # Collect slot names for __slots__-based classes (no __dict__)
     _slots: set[str] = set()
     for cls in obj_type.__mro__:
-        slots = getattr(cls, "__slots__", ())
+        slots = _slot_names(cls)
         if isinstance(slots, str):
             _slots.add(slots)
         else:

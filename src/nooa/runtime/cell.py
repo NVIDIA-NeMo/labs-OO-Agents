@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from types import MappingProxyType, ModuleType
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -85,6 +85,14 @@ class CellOutputs:
     def __len__(self) -> int:
         """Return the number of recorded non-empty outputs."""
         return len(self._values)
+
+    def __iter__(self) -> Iterator[Any]:
+        """Iterate recorded outputs in execution order."""
+        return iter(self._values.values())
+
+    def __contains__(self, index: object) -> bool:
+        """Report whether an execution number has a recorded output."""
+        return index in self._values
 
     @property
     def last(self) -> Any:

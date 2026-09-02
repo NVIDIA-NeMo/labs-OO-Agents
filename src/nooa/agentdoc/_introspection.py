@@ -11,6 +11,12 @@ from nooa.agentdoc._structured import _ClassRef, _InstanceRef
 _MISSING = object()
 
 
+def _slot_names(klass: type) -> tuple[str, ...]:
+    """Normalize ``__slots__`` so a single string is one name, not characters."""
+    slots = getattr(klass, "__slots__", ())
+    return (slots,) if isinstance(slots, str) else tuple(slots)
+
+
 def _instance_dict(obj: Any) -> dict[str, Any] | None:
     """Return an instance ``__dict__`` without invoking ``__getattr__``."""
     try:
@@ -106,7 +112,7 @@ def _is_structured_instance(obj: Any, *, respect_custom_repr: bool = True) -> bo
             slot
             for klass in obj_type.__mro__
             if klass is not object
-            for slot in getattr(klass, "__slots__", ())
+            for slot in _slot_names(klass)
             if not slot.startswith("_")
         )
 
