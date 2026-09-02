@@ -2,11 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 from .library_writing_lib import SkillWriting
 from .method_writing_lib import MethodWriting
-from .shell_tools import Match, ShellResult, ShellTools
+from .shell_tools import Match, PathResolutionError, ShellResult, ShellTools
 from .todo import Todo, TodoManager
 
 __all__ = [
     "Match",
+    "PathResolutionError",
     "ShellResult",
     "ShellTools",
     "SkillWriting",

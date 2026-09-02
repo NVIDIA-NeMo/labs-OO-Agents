@@ -15,10 +15,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from nooa.agentdoc import hidden, spec
 from nooa.skill import Skill
 from nooa.tools._bash_session import BashSession
-from nooa.tools.shell_tools import Match
+from nooa.tools.shell_tools import Match, PathResolutionError
 
 logger = logging.getLogger(__name__)
 
@@ -122,19 +124,29 @@ class ReferenceSearchResult:
         return self.text
 
 
-@dataclass
-class RepoResult:
-    query: Annotated[str, spec(description="Search query or symbol name")]
-    lines: Annotated[list[str], spec(description="Display lines: file:line: context")]
-    matches: Annotated[
-        list[Match],
-        spec(description="ShellTools-compatible anchors; pass an item to self.shell.replace()"),
-    ] = field(default_factory=list)
-    total_matches: Annotated[int, spec(description="Total matches found")] = 0
-    truncated: Annotated[bool, spec(description="True if results were capped")] = False
+class RepoResult(BaseModel):
+    """Repository symbol/reference matches and their display metadata."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    query: str = Field(description="Search query or symbol name")
+    lines: list[str] = Field(description="Display lines: file:line: context")
+    matches: list[Match] = Field(
+        default_factory=list,
+        description="ShellTools-compatible anchors; pass an item to self.shell.replace()",
+    )
+    total_matches: int = Field(default=0, description="Total matches found")
+    truncated: bool = Field(default=False, description="True if results were capped")
+    diagnostic: PathResolutionError | None = Field(
+        default=None,
+        description="Structured path failure, including resolved path and base",
+    )
 
     @property
     def text(self) -> str:
+        """Human-readable search results or diagnostic."""
+        if self.diagnostic is not None:
+            return str(self.diagnostic)
         if not self.lines:
             return f'No matches for "{self.query}" found.'
         parts = list(self.lines)
@@ -451,6 +463,11 @@ class RepoTools(Skill):
         ``await self.shell.replace(result[0], new_text)`` to edit a hit.
         """
         resolved = self._resolve(path)
+        if not resolved.exists():
+            diagnostic = PathResolutionError(
+                "symbols", path, resolved, base_name="self.repo.root", base_path=self._root
+            )
+            return RepoResult(query=path, lines=[], diagnostic=diagnostic)
         query_lower = query.lower()
 
         if resolved.is_file():
@@ -500,6 +517,12 @@ class RepoTools(Skill):
         Returns printable lines plus editable ``Match`` anchors; use
         ``await self.shell.replace(result[0], new_text)`` to edit a hit.
         """
+        resolved = self._resolve(path)
+        if not resolved.exists():
+            diagnostic = PathResolutionError(
+                "refs", path, resolved, base_name="self.repo.root", base_path=self._root
+            )
+            return RepoResult(query=name, lines=[], diagnostic=diagnostic)
         result = await self._search_references(name, path=path, max_results=max_results)
         return RepoResult(
             query=name,

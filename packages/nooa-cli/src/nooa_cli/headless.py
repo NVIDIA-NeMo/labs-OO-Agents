@@ -302,7 +302,7 @@ async def run_headless(
                 usage=usage,
             )
             raise _TurnFinished(final)
-        blocked = result.kind in {RespondReason.NEED_INPUT, RespondReason.GET_USER_INPUT}
+        blocked = result.kind == RespondReason.NEED_INPUT
         final = HeadlessResult(
             session_id=session_id,
             run_id=run_id,
