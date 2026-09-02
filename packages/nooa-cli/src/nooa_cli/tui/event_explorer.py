@@ -208,6 +208,10 @@ class EventExplorerView(ExplorerView):
 
     item_name = "event"
     list_heading = "  id       event type              summary"
+    # detail_lines embeds its own styled search highlighting with
+    # occurrence navigation (search_line_cursor), so it opts out of the
+    # browser's generic term highlighting.
+    handles_search_highlighting = True
 
     def __init__(self, event_manager: Any) -> None:
         super().__init__(
@@ -344,6 +348,8 @@ class EventExplorerView(ExplorerView):
 
 
 def _event_to_mapping(event: Any) -> dict[str, Any]:
+    if isinstance(event, dict):
+        return event
     if hasattr(event, "model_dump"):
         try:
             return event.model_dump()
@@ -402,6 +408,27 @@ def _extract_fenced_code(text: str) -> tuple[str, str] | None:
         return None
     language = match.group(1).strip() or "python"
     return match.group(2).rstrip("\n"), language
+
+
+def _searchable_detail(event: Any, event_type: str) -> str:
+    """Repr dump restricted to fields a user can actually see.
+
+    ``_format_detail`` includes every field — even empty and noise ones — so
+    searching it matches field *names*: a PythonOutput event with an empty
+    ``error`` would match the query "error". Only non-empty, non-noise fields
+    participate in search text.
+    """
+    data = _event_to_mapping(event)
+    fields = [
+        (key, value)
+        for key, value in data.items()
+        if key != "event_type"
+        and key not in _NOISE_FIELDS
+        and not _is_empty_event_field(value)
+    ]
+    if not fields:
+        return ""
+    return f"{event_type}(" + ", ".join(f"{key}={value!r}" for key, value in fields) + ")"
 
 
 def _event_code(event: Any, event_type: str) -> tuple[str | None, str]:
@@ -790,7 +817,10 @@ def build_event_rows(event_manager: Any) -> list[EventExplorerRow]:
         detail = _format_detail(str(tag), event)
         code, code_language = _event_code(event, event_type)
         markdown = _event_markdown(str(tag), event, event_type)
-        search_text = f"{tag} {event_type} {summary} {detail} {code or ''} {markdown or ''}"
+        search_text = (
+            f"{tag} {event_type} {summary} "
+            f"{_searchable_detail(event, event_type)} {code or ''} {markdown or ''}"
+        )
         rows.append(
             EventExplorerRow(
                 tag=str(tag),
