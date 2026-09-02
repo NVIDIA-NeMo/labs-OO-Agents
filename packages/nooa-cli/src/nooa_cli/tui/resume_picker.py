@@ -17,7 +17,13 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
 from rich.cells import cell_len, split_graphemes
 
-from .fullscreen_browser import ExplorerBrowser, SelectablePreviewControl, build_fullscreen_browser
+from .explorer_base import ExplorerOption
+from .fullscreen_browser import (
+    ExplorerBrowser,
+    SelectablePreviewControl,
+    _BrowserOptionControl,
+    build_fullscreen_browser,
+)
 from .terminal_safety import sanitize_live_text
 
 
@@ -612,43 +618,6 @@ class _PickerSearchControl(BufferControl):
         return super().mouse_handler(mouse_event)
 
 
-class _PickerButtonControl(FormattedTextControl):
-    def __init__(self, picker: ResumePicker, kind: Literal["filter", "sort"]):
-        self.picker = picker
-        self.kind = kind
-        super().__init__(self._text, focusable=False, show_cursor=False)
-
-    def _text(self):
-        focused = self.picker.option_cursor == self.kind
-        style = "class:fullscreen-browser.control" + (
-            " class:fullscreen-browser.control-focused" if focused else ""
-        )
-        if self.kind == "filter":
-            value = {
-                "detached": "✓ Not attached",
-                "attached": "✗ Attached",
-                "all": "✓/✗ All",
-            }[self.picker.model.state_filter]
-            return [(style, f"[Filter: {value}]")]
-        value = "Recent activity" if self.picker.model.sort_updated else "Creation date"
-        return [(style, f"[Sort: {value}]")]
-
-    def mouse_handler(self, mouse_event: MouseEvent):
-        if (
-            mouse_event.event_type is MouseEventType.MOUSE_DOWN
-            and mouse_event.button is MouseButton.LEFT
-        ):
-            self.picker.option_cursor = self.kind
-            if self.kind == "filter":
-                self.picker.cycle_filter()
-            else:
-                self.picker.toggle_sort()
-            self.picker.option_cursor = None
-            self.picker.invalidate()
-            return None
-        return NotImplemented
-
-
 class ResumePicker(ExplorerBrowser):
     """Session-specific ExplorerBrowser with asynchronous replay previews.
 
@@ -660,8 +629,10 @@ class ResumePicker(ExplorerBrowser):
 
     class _ViewFacade:
         config = SimpleNamespace(actions={})
-        options: tuple[Any, ...] = ()
         item_name = "session"
+
+        def __init__(self, options: tuple[ExplorerOption, ...] = ()) -> None:
+            self.options = options
 
         @staticmethod
         def handle_key(_action: str, _value: str = "") -> str:
@@ -692,15 +663,18 @@ class ResumePicker(ExplorerBrowser):
         selection_status: Callable[[], str] | None = None,
     ):
         self.app = app
-        self._view_facade = ResumePicker._ViewFacade()
         self.model = ResumePickerModel(rows)
+        # Real option rows drive the shared option controls and the inherited
+        # options mode; their callbacks mirror the model's cycle/toggle
+        # semantics (restart from the top, refresh the prepared preview).
+        self._view_facade = ResumePicker._ViewFacade(self._build_view_options())
         self._selection_copy_callback = selection_copy_callback
         self._selection_status = selection_status
         self._preview_models: dict[tuple[str, int], Any] = {}
         self._preview_tasks: dict[tuple[str, int], Any] = {}
         self.native_selection = False
         self.active_control = "list"
-        self.option_cursor: Literal["filter", "sort"] | None = None
+        self.option_cursor: int | None = None
         self.buffer = Buffer(multiline=False)
         self.buffer.on_text_changed += lambda _: self._query_changed()
         self.query_control = _PickerSearchControl(self, self.buffer)
@@ -714,8 +688,7 @@ class ResumePicker(ExplorerBrowser):
                 else ""
             ),
         )
-        self.filter_control = _PickerButtonControl(self, "filter")
-        self.sort_control = _PickerButtonControl(self, "sort")
+        self.option_controls = [_BrowserOptionControl(self, index) for index in range(2)]
         self.search_label_control = FormattedTextControl(self._search_label)
         self.search_close_control = FormattedTextControl(self._search_close)
         search = VSplit(
@@ -728,9 +701,9 @@ class ResumePicker(ExplorerBrowser):
         )
         selectors = VSplit(
             [
-                Window(self.filter_control, width=Dimension(min=17, preferred=20), height=1),
+                Window(self.option_controls[0], width=Dimension(min=17, preferred=20), height=1),
                 Window(FormattedTextControl(" "), width=1, height=1),
-                Window(self.sort_control, width=Dimension(min=10, preferred=18), height=1),
+                Window(self.option_controls[1], width=Dimension(min=10, preferred=18), height=1),
             ],
             padding=0,
         )
@@ -765,6 +738,49 @@ class ResumePicker(ExplorerBrowser):
             small_control=self.small_control,
             small_text=self._small_text,
             list_height=self.picker_list_height,
+        )
+
+    def _build_view_options(self) -> tuple[ExplorerOption, ...]:
+        """The picker's filter/sort controls as real shared option rows.
+
+        The callbacks preserve the model's filter/sort semantics (restart from
+        the top of the list, refresh the prepared preview) while the shared
+        option controls and options mode handle rendering and navigation.
+        """
+
+        def on_filter(value: str) -> None:
+            self.model.state_filter = value  # type: ignore[assignment]
+            self.model.selected = self.model.list_offset = 0
+            self.model._rebuild_matches()
+            self._prepare_current_preview()
+            self.invalidate()
+
+        def on_sort(value: str) -> None:
+            self.model.sort_updated = value == "updated"
+            self.model.selected = self.model.list_offset = 0
+            self.model._rebuild_matches()
+            self._prepare_current_preview()
+            self.invalidate()
+
+        return (
+            ExplorerOption(
+                key="filter",
+                label="Filter",
+                choices=(
+                    ("detached", "✓ Not attached"),
+                    ("attached", "✗ Attached"),
+                    ("all", "✓/✗ All"),
+                ),
+                value=self.model.state_filter,
+                on_change=on_filter,
+            ),
+            ExplorerOption(
+                key="sort",
+                label="Sort",
+                choices=(("updated", "Recent activity"), ("created", "Creation date")),
+                value="updated" if self.model.sort_updated else "created",
+                on_change=on_sort,
+            ),
         )
 
     def _query_changed(self) -> None:
@@ -834,8 +850,8 @@ class ResumePicker(ExplorerBrowser):
     def invalidate(self) -> None:
         self.list_control._fragment_cache.clear()
         self.preview_control._fragment_cache.clear()
-        self.filter_control._fragment_cache.clear()
-        self.sort_control._fragment_cache.clear()
+        for control in self.option_controls:
+            control._fragment_cache.clear()
         self.search_label_control._fragment_cache.clear()
         self.search_close_control._fragment_cache.clear()
         self.title_control._fragment_cache.clear()
@@ -851,40 +867,6 @@ class ResumePicker(ExplorerBrowser):
         }
         self.app.layout.focus(controls[name])
         self.invalidate()
-
-    def toggle_options(self) -> None:
-        """Enter or leave the inline filter/sort options mode."""
-        self.active_control = "list"
-        if self.option_cursor is None:
-            self.option_cursor = "filter"
-            self.app.layout.focus(self.list_control)
-        else:
-            self.option_cursor = None
-            self.app.layout.focus(self.query_control)
-        self.invalidate()
-
-    def move_option(self, delta: int) -> None:
-        if self.option_cursor is None or not delta:
-            return
-        self.option_cursor = "sort" if delta > 0 else "filter"
-        self.invalidate()
-
-    def change_option(self, delta: int = 1) -> None:
-        if self.option_cursor == "filter":
-            self.model.cycle_filter(delta)
-            self._prepare_current_preview()
-        elif self.option_cursor == "sort" and delta:
-            self.model.toggle_sort()
-            self._prepare_current_preview()
-        self.invalidate()
-
-    def close_options(self) -> bool:
-        if self.option_cursor is None:
-            return False
-        self.option_cursor = None
-        self.app.layout.focus(self.query_control)
-        self.invalidate()
-        return True
 
     def focus_previous(self) -> None:
         self.focus_next(-1)
@@ -914,16 +896,6 @@ class ResumePicker(ExplorerBrowser):
                 self.scroll_preview(delta)
             else:
                 self.invalidate()
-
-    def cycle_filter(self) -> None:
-        self.model.toggle_filter()
-        self._prepare_current_preview()
-        self.invalidate()
-
-    def toggle_sort(self) -> None:
-        self.model.toggle_sort()
-        self._prepare_current_preview()
-        self.invalidate()
 
     def page(self, delta: int) -> None:
         if self.active_control == "list":
