@@ -532,16 +532,19 @@ class Completer:
 
         items: list[CompletionItem] = []
         icons = {"running": "⏳", "done": "✅", "failed": "❌", "cancelled": "⏹"}
-        for name, state in sorted(qm.jobs().items()):
-            if partial and not name.lower().startswith(partial):
+        for handle in sorted(qm.handles(), key=lambda item: item.job_id):
+            candidates = (handle.job_id.lower(), handle.name.lower(), handle.label.lower())
+            if partial and not any(candidate.startswith(partial) for candidate in candidates):
                 continue
-            handle = qm.job(name)
-            buf = f" ({len(handle.values)} delivered)" if handle and handle.values else ""
+            buf = f" ({len(handle.values)} delivered)" if handle.values else ""
             items.append(
                 CompletionItem(
-                    text=prefix + name,
-                    display=prefix + name,
-                    description=f"{icons.get(state, '?')} {state}{buf}",
+                    text=prefix + handle.job_id,
+                    display=prefix + handle.job_id,
+                    description=(
+                        f"{icons.get(handle.state, '?')} {handle.state} · "
+                        f"{handle.label} → {handle.name}{buf}"
+                    ),
                 )
             )
         return items
@@ -599,7 +602,11 @@ class Completer:
         if etype == "ToolCallEvent":
             name = getattr(event, "name", "?")
             args = getattr(event, "arguments", {})
-            if name == "execute_python" and isinstance(args, dict) and "code" in args:
+            if (
+                name in {"execute_python", "python_cell"}
+                and isinstance(args, dict)
+                and "code" in args
+            ):
                 for line in args["code"].split("\n"):
                     s = line.strip()
                     if s and not s.startswith("#"):

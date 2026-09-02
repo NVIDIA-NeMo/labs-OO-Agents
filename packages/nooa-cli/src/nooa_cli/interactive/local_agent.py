@@ -626,18 +626,16 @@ class LocalAgentRunner:
     def _job_snapshots_on_owner(self) -> tuple[JobSnapshot, ...]:
         snapshots: list[JobSnapshot] = []
         channels = self._queue_manager.channels()
-        for name, state in self._queue_manager.jobs().items():
-            handle = self._queue_manager.job(name)
-            if handle is None:
-                continue
-            channel = channels.get(name)
+        for handle in self._queue_manager.handles():
+            channel = channels.get(handle.name)
             snapshots.append(
                 JobSnapshot(
                     name=handle.name,
                     label=handle.label,
-                    state=state,
+                    state=handle.state,
                     queued=channel.qsize() if channel is not None else 0,
                     values=tuple(str(value) for value in handle.values),
+                    job_id=handle.job_id,
                 )
             )
         return tuple(snapshots)
@@ -1229,6 +1227,7 @@ class LocalAgentRunner:
                 AgentJobState(snapshot.state),
                 snapshot.queued,
                 tuple(str(value) for value in snapshot.values),
+                snapshot.job_id,
             )
             for snapshot in snapshots
         )

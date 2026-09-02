@@ -142,6 +142,16 @@ class InternalCodingAgent(CodingAgent):
 nooa tui --agent internal_agents:InternalCodingAgent
 ```
 
+The TUI uses the single-tool CodeAct agent by default. To temporarily use the
+legacy multi-tool agent instead:
+
+```bash
+nooa tui --legacy-agent
+```
+
+Custom agents remain available through ``--agent MODULE:CLASS``; this option
+cannot be combined with ``--legacy-agent``.
+
 Private or organization-specific model registries stay outside this package.
 Place the registry at `.nooa/llm_config.yaml` for automatic project-local
 discovery, or pass a downloaded file explicitly:

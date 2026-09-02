@@ -217,6 +217,11 @@ def _event_block_to_messages(
 
     if isinstance(block.event, ToolCallEvent):
         event = block.event
+        if event.metadata.get("synthetic_type") == "codeact_inline_return":
+            # This framework-only observability marker was never sent by the model.
+            # Replaying it as assistant/tool history can violate provider reasoning
+            # chains, especially when opaque reasoning_items are in use.
+            return []
         messages: list[RenderedMessage] = [
             RenderedMessage(
                 role=Role.ASSISTANT,

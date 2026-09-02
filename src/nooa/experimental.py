@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Experimental strategies — not actively maintained.
+"""Compatibility imports for experimental and promoted strategies.
 
-These strategies are importable but not part of the recommended API.
-Importing any of them is silent; instantiating emits a FutureWarning.
+Most strategies here are not part of the recommended API and warn when
+instantiated. ``CodeActExperimental`` is retained as a warning-free compatibility
+factory because its single-tool behavior is now used by supported products.
 
 Usage:
     from nooa.experimental import PurePythonStrategy
@@ -22,6 +23,13 @@ def _warn_experimental(name: str) -> None:
         FutureWarning,
         stacklevel=3,
     )
+
+
+def CodeActExperimental(*args: Any, **kwargs: Any) -> Any:
+    """Compatibility factory for the supported single-tool CodeAct strategy."""
+    from nooa.strategies import CodeActExperimental as _Cls
+
+    return _Cls(*args, **kwargs)
 
 
 def PurePythonStrategy(*args: Any, **kwargs: Any) -> Any:
@@ -49,6 +57,7 @@ def ReflexionStrategy(*args: Any, **kwargs: Any) -> Any:
 
 
 __all__ = [
+    "CodeActExperimental",
     "CodeActLiteStrategy",
     "PurePythonStrategy",
     "ReflexionStrategy",

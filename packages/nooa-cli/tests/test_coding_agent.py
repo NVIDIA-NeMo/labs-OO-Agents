@@ -2,12 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shared coding-agent construction and repository instructions."""
 
-from pathlib import Path
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 from nooa_cli.coding import CodingAgent, discover_agent_instruction_files
+from nooa_cli.coding.delegation import CodingWorker
+from nooa_cli.tui.bootstrap import _instantiate_custom_agent
 
+from nooa.agentdoc import doc
 from nooa.skill import Skill, get_slash_commands, slash_command
 from nooa.unifiedllm import FakeLLMClient
 
@@ -36,6 +39,8 @@ async def test_coding_agent_uses_observed_shell_and_instruction_context(tmp_path
         assert "run the focused tests" in str(agent.context["repository_instructions"])
         assert "nemo.shell" in agent.skills.activated()
         assert "nemo.repo" in agent.skills.activated()
+        assert "nemo.methodwriting" in agent.skills.activated()
+        assert "asyncio.gather" in doc(agent.methodwriting)
     finally:
         await agent.close()
 
@@ -162,41 +167,25 @@ async def test_coding_agent_owns_session_naming(tmp_path):
 
 
 def test_repository_instructions_are_read_boundedly(tmp_path, monkeypatch):
-    """The cap must bound the read, not just what is kept.
-
-    Truncating after read_text() still pulls a workspace-controlled file into
-    memory in full. The budget also has to cover the rendered text — headers,
-    separators, truncation markers — or the declared total is not the real one.
-    """
+    """The renderer passes a bounded content budget to its safe file reader."""
     from nooa_cli.coding import instructions
 
     (tmp_path / ".git").mkdir()
-    reads: list[int | None] = []
-    real_open = Path.open
+    (tmp_path / "AGENTS.md").write_text("placeholder")
+    reads: list[int] = []
 
-    def spying_open(self, *args, **kwargs):
-        stream = real_open(self, *args, **kwargs)
-        real_read = stream.read
+    def fake_read(path, limit):
+        reads.append(limit)
+        return "x" * limit, True
 
-        def read(size=-1):
-            reads.append(size)
-            return real_read(size)
-
-        stream.read = read  # type: ignore[method-assign]
-        return stream
-
-    monkeypatch.setattr(Path, "open", spying_open)
     monkeypatch.setattr(instructions, "_MAX_INSTRUCTION_FILE_CHARS", 100)
-    (tmp_path / "AGENTS.md").write_text("x" * 10_000)
+    monkeypatch.setattr(instructions, "_read_instruction_file", fake_read)
 
     rendered = instructions.render_agent_instructions(tmp_path)
 
-    # Positive sizes only: an unbounded .read() records -1, which satisfies
-    # any `<= limit` assertion and made this test pass against the very
-    # regression it names.
-    assert reads == [101], reads
+    assert reads == [100]
     assert "[... truncated ...]" in rendered
-    assert len(rendered) < 1_000
+    assert len(rendered) <= instructions._MAX_INSTRUCTION_TOTAL_CHARS
 
 
 async def test_a_directly_assigned_protected_attribute_is_still_protected(tmp_path):
@@ -229,3 +218,417 @@ async def test_a_directly_assigned_protected_attribute_is_still_protected(tmp_pa
         agent.skills.register("nemo.shell", shell)
     finally:
         await agent.close()
+
+
+async def test_coding_worker_inherits_repository_instructions(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "AGENTS.md").write_text("worker must run focused tests")
+
+    worker = CodingWorker(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        assert "worker must run focused tests" in str(worker.context["repository_instructions"])
+    finally:
+        await worker.close()
+
+
+async def test_coding_agent_delegates_with_same_model_and_workspace(tmp_path, monkeypatch):
+    """TUI/ACP coding hosts expose the tested context-isolated worker primitive."""
+    observed = {}
+
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            observed.update(kwargs)
+
+        async def investigate(self, objective: str, supplied_context=None) -> str:
+            observed.update(objective=objective, supplied_context=supplied_context)
+            return "review complete"
+
+        async def close(self) -> None:
+            observed["closed"] = True
+
+    monkeypatch.setattr(CodingAgent, "_worker_type", FakeWorker)
+    llm = FakeLLMClient()
+    agent = CodingAgent(llm=llm, cwd=tmp_path)
+    try:
+        todos = [agent.todo.add("Review empty-input handling")]
+        result = await agent.delegate("review parser", todos)
+        assert result == "review complete"
+        assert observed.pop("supplied_context") is todos
+        assert observed == {
+            "llm": llm,
+            "cwd": agent.shell.cwd,
+            "init_command": None,
+            "objective": "review parser",
+            "closed": True,
+        }
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_coding_agent_delegate_todo_preserves_supplemental_context(tmp_path, monkeypatch):
+    """Todo and caller context remain separately accessible to the worker."""
+    observed = {}
+
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            self.todo = kwargs["todo"]
+
+        async def investigate(self, objective: str, supplied_context=None) -> str:
+            observed.update(objective=objective, supplied_context=supplied_context)
+            self.todo.comment(supplied_context["todo"], "worker finding")
+            return "review complete"
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(CodingAgent, "_worker_type", FakeWorker)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        task = agent.todo.add("review parser")
+        report = await agent.delegate(task, {"path": "parser.py"})
+
+        assert report == "review complete"
+        assert observed["objective"] == task.title
+        assert observed["supplied_context"]["todo"] is not task
+        assert observed["supplied_context"]["context"] == {"path": "parser.py"}
+        assert [comment.body for comment in task.comments] == ["worker finding"]
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_coding_agent_delegate_merges_todo_description_and_vars(tmp_path, monkeypatch):
+    """A Todo delegation is isolated while running and merged before return."""
+    observed = {}
+
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            observed.update(kwargs)
+            self.todo = kwargs["todo"]
+
+        async def investigate(self, objective: str, supplied_context=None) -> str:
+            delegated = self.todo.list_todos()[0]
+            observed.update(
+                objective=objective,
+                supplied_context=supplied_context,
+                delegated=delegated,
+                active=self.todo.active(),
+            )
+            self.todo.comment(delegated, "worker finding")
+            self.todo.set_var(delegated, "path", "parser.py")
+            return "review complete"
+
+        async def close(self) -> None:
+            observed["closed"] = True
+
+    monkeypatch.setattr(CodingAgent, "_worker_type", FakeWorker)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        task = agent.todo.add("review parser", description="focus on errors")
+        original_identity = id(task)
+
+        report = await agent.delegate(task)
+
+        assert report == "review complete"
+        assert observed["objective"] == task.title
+        assert observed["supplied_context"] is observed["delegated"]
+        assert observed["delegated"] is not task
+        assert observed["active"] is observed["delegated"]
+        assert id(agent.todo.get(task)) == original_identity
+        assert [comment.body for comment in task.comments] == ["worker finding"]
+        assert task.v.path == "parser.py"
+        assert observed["closed"] is True
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_coding_agent_delegate_does_not_merge_failed_todo(tmp_path, monkeypatch):
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            self.todo = kwargs["todo"]
+
+        async def investigate(self, objective: str, supplied_context=None) -> str:
+            delegated = self.todo.list_todos()[0]
+            self.todo.comment(delegated, "partial finding")
+            raise RuntimeError("worker failed")
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(CodingAgent, "_worker_type", FakeWorker)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        task = agent.todo.add("review parser")
+        with pytest.raises(RuntimeError, match="worker failed"):
+            await agent.delegate(task)
+        assert task.comments == []
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_coding_agent_delegate_does_not_merge_when_close_fails(tmp_path, monkeypatch):
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            self.todo = kwargs["todo"]
+
+        async def investigate(self, objective: str, supplied_context=None) -> str:
+            self.todo.comment(self.todo.list_todos()[0], "worker finding")
+            return "review complete"
+
+        async def close(self) -> None:
+            raise RuntimeError("close failed")
+
+    monkeypatch.setattr(CodingAgent, "_worker_type", FakeWorker)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        task = agent.todo.add("review parser")
+        with pytest.raises(RuntimeError, match="close failed"):
+            await agent.delegate(task)
+        assert task.comments == []
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_coding_agent_spawn_merges_todo_before_notification(tmp_path, monkeypatch):
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            self.todo = kwargs["todo"]
+
+        async def investigate(self, objective: str, supplied_context=None) -> str:
+            self.todo.comment(self.todo.list_todos()[0], "background finding")
+            return "done"
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(CodingAgent, "_worker_type", FakeWorker)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        task = agent.todo.add("review parser. Inspect errors")
+        handle = agent.spawn(task)
+        notification = await agent.delegates.get()
+
+        assert notification == {
+            "objective": "review parser. Inspect errors",
+            "report": "done",
+            "todo_id": task.id,
+        }
+        assert [comment.body for comment in task.comments] == ["background finding"]
+        assert handle.label == "review parser."
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_coding_agent_rejects_unmanaged_todo(tmp_path):
+    from nooa.tools import Todo
+
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        with pytest.raises(ValueError, match="not managed"):
+            await agent.delegate(Todo(title="foreign"))
+    finally:
+        await agent.close()
+
+
+def test_coding_agent_delegation_labels_are_concise() -> None:
+    objective = (
+        "Architecture/simplicity review of PR #189. Do not edit. "
+        "Review every abstraction and report exact file and line references."
+    )
+
+    assert CodingAgent._delegation_label(objective) == "Architecture/simplicity review of PR #189."
+    assert CodingAgent._delegation_label("first line\nsecond line") == "first line"
+    assert CodingAgent._delegation_label(objective, "  API   review  ") == "API review"
+    assert CodingAgent._delegation_label("x" * 100) == f"{'x' * 79}…"
+    assert CodingAgent._delegation_label("   ") == "Delegated task"
+
+
+async def test_coding_agent_spawns_delegation_in_background(tmp_path):
+    """Background delegation keeps its full objective but displays a short label."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+    objective = "review parser. Do not edit. Report every finding with exact lines."
+
+    class TestAgent(CodingAgent):
+        async def delegate(self, received_objective: str, supplied_context=None) -> str:
+            assert received_objective == objective
+            assert supplied_context == {"path": "parser.py"}
+            started.set()
+            await release.wait()
+            return "review complete"
+
+    agent = TestAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        handle = agent.spawn(objective, {"path": "parser.py"})
+        assert handle.label == "review parser."
+        assert handle.description.startswith("Finite coding delegate.")
+        assert "delegates channel" in agent.queue_manager.status()
+        assert handle.state == "running"
+        await started.wait()
+        assert agent.delegates.status() == ""
+
+        release.set()
+        assert await agent.delegates.get() == {
+            "objective": objective,
+            "report": "review complete",
+        }
+        await asyncio.sleep(0)
+        assert handle.state == "done"
+    finally:
+        await agent.close()
+
+
+def test_coding_agent_prompt_exposes_bounded_delegation(tmp_path):
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        rendered = doc(agent)
+        assert (CodingAgent.__doc__ or "").startswith(
+            "You are a careful software-development agent working in one local repository."
+        )
+        assert "spawn" in rendered
+        prompt = CodingAgent.__doc__ or ""
+        assert "prefer it over awaiting ``delegate()``" in prompt
+        assert 'notification["delegates"]' in prompt
+        assert "Never poll a spawned handle" in prompt
+        assert "asyncio.sleep()" in prompt
+        assert "immediately return ``WAIT``" in prompt
+        assert "will invoke a new turn when the report arrives" in prompt
+        assert "serialize" in prompt
+        assert "mutations" in prompt
+    finally:
+        # This sync test does not start shell work; close is covered elsewhere.
+        pass
+
+
+def test_custom_coding_agent_receives_workspace_extension_arguments(tmp_path):
+    captured = {}
+
+    class CustomAgent:
+        def __init__(self, *, llm, storage, cwd, skills_dirs, summarization):
+            captured.update(
+                llm=llm,
+                storage=storage,
+                cwd=cwd,
+                skills_dirs=skills_dirs,
+                summarization=summarization,
+            )
+
+    llm = object()
+    storage = object()
+    skills_dirs = [tmp_path / "skills"]
+    summarization = object()
+    agent = _instantiate_custom_agent(
+        CustomAgent,
+        llm=llm,
+        storage=storage,
+        working_directory=tmp_path,
+        skills_dirs=skills_dirs,
+        summarization=summarization,
+    )
+
+    assert isinstance(agent, CustomAgent)
+    assert captured == {
+        "llm": llm,
+        "storage": storage,
+        "cwd": tmp_path,
+        "skills_dirs": skills_dirs,
+        "summarization": summarization,
+    }
+
+
+def test_delegated_context_tolerates_hostile_collection_protocols():
+    from collections.abc import Mapping, Sequence
+
+    from nooa_cli.coding.context_rendering import SafeDelegationPrefill, render_delegated_context
+
+    class HostileMapping(Mapping):
+        def __getitem__(self, key):
+            raise RuntimeError("untrusted mapping access")
+
+        def __iter__(self):
+            raise RuntimeError("untrusted mapping iteration")
+
+        def __len__(self):
+            raise RuntimeError("untrusted mapping length")
+
+    class HostileSequence(Sequence):
+        def __getitem__(self, index):
+            raise RuntimeError("untrusted sequence access")
+
+        def __len__(self):
+            raise RuntimeError("untrusted sequence length")
+
+    assert render_delegated_context(HostileMapping()) == '"<HostileMapping>"'
+    assert render_delegated_context(HostileSequence()) == '"<HostileSequence>"'
+
+    call = SimpleNamespace(
+        method_name="delegate",
+        bound_parameters=lambda: {
+            "objective": "inspect safely",
+            "supplied_context": HostileSequence(),
+        },
+    )
+    code = SafeDelegationPrefill().get_code(call)
+    assert code is not None
+    assert "HostileSequence" in code
+
+
+def test_repository_instruction_read_failures_are_logged(tmp_path, monkeypatch, caplog):
+    from nooa_cli.coding import instructions
+
+    (tmp_path / ".git").mkdir()
+    path = tmp_path / "AGENTS.md"
+    path.write_text("placeholder")
+
+    def fail_read(_path, _limit):
+        raise OSError("secure reads unavailable")
+
+    monkeypatch.setattr(instructions, "_read_instruction_file", fail_read)
+
+    assert instructions.render_agent_instructions(tmp_path) == ""
+    assert f"Skipping repository instructions from {path}" in caplog.text
+    assert "secure reads unavailable" in caplog.text
+
+
+def test_delegated_context_bounds_traversal_before_serialization():
+    from nooa_cli.coding.context_rendering import render_delegated_context
+
+    class CountingDict(dict):
+        visits = 0
+
+        def items(self):
+            for item in super().items():
+                type(self).visits += 1
+                yield item
+
+    value = CountingDict({str(i): CountingDict({str(j): j for j in range(25)}) for i in range(25)})
+    rendered = render_delegated_context(value, max_nodes=30, max_chars=8_000)
+
+    assert "node limit" in rendered
+    assert CountingDict.visits <= 55
+
+
+def test_delegated_context_does_not_invoke_pydantic_serializers():
+    from nooa_cli.coding.context_rendering import render_delegated_context
+    from pydantic import BaseModel, field_serializer
+
+    serializer_calls: list[int] = []
+
+    class Context(BaseModel):
+        payload: list[int]
+
+        @field_serializer("payload")
+        def serialize_payload(self, value):
+            serializer_calls.append(len(value))
+            return value
+
+    value = Context(payload=list(range(100_000)))
+    rendered = render_delegated_context(value, max_nodes=1)
+
+    assert rendered == '"<node limit>"'
+    assert serializer_calls == []

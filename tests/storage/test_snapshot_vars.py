@@ -4,6 +4,8 @@
 
 import logging
 
+import pytest
+
 from nooa.storage.json_snapshot import (  # noqa: F401
     snapshot_from_dict,
     snapshot_to_dict,
@@ -106,6 +108,40 @@ class TestTodoVarsIntegration:
         t.v.commits = ["abc"]
         assert t.vars["commits"] == ["abc"]
 
+    def test_agent_and_todo_vars_share_one_proxy_class(self):
+        from nooa.interactive import AgentVars
+        from nooa.storage import PersistentVars
+        from nooa.tools.todo import Todo, TodoVars
+
+        todo = Todo(title="x")
+        assert AgentVars is PersistentVars
+        assert TodoVars is PersistentVars
+        assert type(todo.v) is PersistentVars
+
+    def test_todo_vars_inspection_and_cleanup_api(self):
+        from nooa.agentdoc import doc
+        from nooa.tools.todo import Todo, TodoVars
+
+        todo = Todo(title="x", vars={"commit": "abc", "passed": True})
+        assert todo.v.keys() == ["commit", "passed"]
+        assert todo.v.items() == [("commit", "abc"), ("passed", True)]
+        assert todo.v.get("commit") == "abc"
+        assert todo.v.get("missing", "fallback") == "fallback"
+
+        rendered = doc(TodoVars)
+        assert rendered.startswith("class PersistentVars:")
+        assert "Choose the scope deliberately:" in rendered
+        assert 'todo.v.commit = "abc123"' in rendered
+        assert "``self.v``" in rendered
+        assert "``todo.v``" in rendered
+        assert "def keys(self) -> list[str]" in rendered
+        assert "def items(self) -> list[tuple[str, Any]]" in rendered
+        assert "def get(self, key: str, default: Any = None) -> Any" in rendered
+        assert "def clear(self) -> None" in rendered
+
+        todo.v.clear()
+        assert todo.v.keys() == []
+
     def test_todo_dict_vars_filters_unserializable(self):
         from nooa.tools.todo import Todo
 
@@ -136,3 +172,17 @@ class TestSnapshotVarsMappingHelpers:
         assert "bad" not in v
         v.setdefault("good", 7)
         assert v["good"] == 7
+
+
+def test_persistent_vars_reserved_names_require_key_api() -> None:
+    from nooa.tools.todo import Todo
+
+    todo = Todo(title="x")
+    for name in ("keys", "items", "get", "set", "clear"):
+        with pytest.raises(AttributeError, match="reserved"):
+            setattr(todo.v, name, "hidden")
+        todo.v.set(name, f"value-{name}")
+        assert todo.v.get(name) == f"value-{name}"
+    assert callable(todo.v.items)
+    todo.v.normal = 42
+    assert todo.v.normal == 42

@@ -58,6 +58,31 @@ def test_persistent_vars_proxy(agent):
     with pytest.raises(AttributeError):
         _ = agent.v.cursor
     assert isinstance(agent.v, AgentVars)
+    assert type(agent.v).__name__ == "PersistentVars"
+
+
+def test_persistent_vars_inspection_and_cleanup_api(agent):
+    agent.v.cursor = 3
+    agent.v.plan = "draft"
+
+    assert agent.v.keys() == ["cursor", "plan"]
+    assert agent.v.items() == [("cursor", 3), ("plan", "draft")]
+    assert agent.v.get("cursor") == 3
+    assert agent.v.get("missing", "fallback") == "fallback"
+
+    rendered = doc(type(agent.v))
+    assert rendered.startswith("class PersistentVars:")
+    assert "Choose the scope deliberately:" in rendered
+    assert 'self.v.user_name = "Ada"' in rendered
+    assert "``self.v``" in rendered
+    assert "``todo.v``" in rendered
+    assert "def keys(self) -> list[str]" in rendered
+    assert "def items(self) -> list[tuple[str, Any]]" in rendered
+    assert "def get(self, key: str, default: Any = None) -> Any" in rendered
+    assert "def clear(self) -> None" in rendered
+
+    agent.v.clear()
+    assert agent.v.keys() == []
 
 
 def test_message_records_event_and_renders(agent):
@@ -116,6 +141,11 @@ def test_respond_result_requires_explanation():
     assert result.kind is RespondReason.DONE
     with pytest.raises(ValidationError):
         RespondResult(kind=RespondReason.DONE, explanation="   ")
+
+
+def test_respond_result_rejects_removed_get_user_input_reason():
+    with pytest.raises(ValidationError):
+        RespondResult(kind="GET_USER_INPUT", explanation="legacy reason")
 
 
 def test_install_summarizer_none_policy_is_noop(agent):

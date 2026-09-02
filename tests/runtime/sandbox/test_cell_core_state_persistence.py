@@ -46,3 +46,17 @@ async def test_assignments_persist_after_execution_signal():
     resumed = await run_cell_source("answer + 1", namespace, execution_count=2)
     assert resumed.error is None
     assert resumed.returned_value == 42
+
+
+def test_cell_outputs_iteration_and_membership_have_distinct_semantics():
+    from nooa.runtime.cell import CellOutputs
+
+    outputs = CellOutputs()
+    outputs._record(2, "second")
+    outputs._record(5, "fifth")
+
+    assert list(outputs) == ["second", "fifth"]
+    assert 2 in outputs
+    assert 5 in outputs
+    assert 1 not in outputs
+    assert "second" not in outputs

@@ -30,6 +30,7 @@ from nooa.agentdoc import doc
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
 from nooa.storage.markers import nosnapshot
+from nooa.storage.persistent_vars import PersistentVars
 from nooa.storage.snapshot_vars import SnapshotVars
 
 with hidden:
@@ -95,10 +96,9 @@ class RespondReason(StrEnum):
     DONE = "DONE"
     NEED_INPUT = "NEED_INPUT"
     WAIT = "WAIT"
-    GET_USER_INPUT = "GET_USER_INPUT"
 
 
-RespondKind = Literal["DONE", "NEED_INPUT", "WAIT", "GET_USER_INPUT"]
+RespondKind = Literal["DONE", "NEED_INPUT", "WAIT"]
 
 
 class RespondResult(BaseModel):
@@ -112,8 +112,6 @@ class RespondResult(BaseModel):
           human input before continuing the current request.
         * ``RespondReason.WAIT`` — the agent is waiting for a background job or
           non-user queue/event before it can continue.
-        * ``RespondReason.GET_USER_INPUT`` — legacy spelling for waiting on
-          human input; prefer ``DONE`` or ``NEED_INPUT``.
 
       All stop reasons use the same dispatcher wake path: race every declared
       queue/event channel and re-enter ``handle()`` with the first arrival.
@@ -303,46 +301,8 @@ def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
     )
 
 
-class AgentVars:
-    """Attribute-access proxy for an agent's persistent ``vars`` dict.
-
-    Mirrors ``TodoVars``: write ``self.v.spec = "..."`` instead of
-    ``self.vars["spec"] = "..."``. Reads and writes go straight
-    through to ``self.vars`` so snapshot serialization is unaffected.
-
-    Use for variables that need to survive across turns and across
-    sessions but aren't tied to a specific todo. (For per-todo state,
-    use ``self.todo.<id>.v`` — same shape, narrower scope.)
-
-    Values are snapshot-backed: assigning something that can't be
-    snapshot-serialized (a live client, socket, callable, ...) logs a
-    warning and is **not stored** — it won't survive ``/exit`` + resume.
-    Store serializable data (dict/str/number/Pydantic model) instead.
-    """
-
-    def __init__(self, agent: Any):
-        object.__setattr__(self, "_agent", agent)
-
-    def __getattr__(self, key: str) -> Any:
-        try:
-            return self._agent.vars[key]
-        except KeyError:
-            raise AttributeError(f"No var {key!r} on agent") from None
-
-    def __setattr__(self, key: str, value: Any) -> None:
-        self._agent.vars[key] = value
-
-    def __delattr__(self, key: str) -> None:
-        try:
-            del self._agent.vars[key]
-        except KeyError:
-            raise AttributeError(f"No var {key!r} on agent") from None
-
-    def __contains__(self, key: str) -> bool:
-        return key in self._agent.vars
-
-    def __repr__(self) -> str:
-        return repr(self._agent.vars)
+# Backward-compatible import name; both agent.v and todo.v use PersistentVars.
+AgentVars = PersistentVars
 
 
 @hidden
@@ -395,8 +355,8 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         self._user_messages_in = self.queue_manager.queue("user_messages")
         self.user_messages = self._user_messages_in.reader
         self.producers = ProducersSkill()
-        # Surface pending-queue counts (and a short preview of each item)
-        # to the LLM every turn — the agent reads queue depth straight
+        # Surface payload-free pending-queue counts to the LLM every turn —
+        # the agent reads queue depth straight
         # from the ``queues`` context block. Composed via
         # ``QueueManager.status()`` so adding new channels Just Works.
         from nooa import Context
@@ -416,13 +376,15 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
             self.context["web"] = Context(doc(self.web), prefix=True)
 
     @property
-    def v(self) -> AgentVars:
+    def v(self) -> PersistentVars:
         """Attribute-access proxy for ``self.vars`` — the agent's
         persistent variable dict.
 
-        Use for state that should survive across turns and sessions
-        but isn't tied to a specific todo. Snapshot-backed via
-        ``self.vars``.
+        Use for durable cross-task state such as agent identity, stable
+        preferences, environment facts, and long-running coordination. Put
+        task-specific plans, findings, artifacts, and checkpoints on the relevant
+        Todo's ``v`` proxy. Keep transient scratch data in cell locals.
+        Snapshot-backed via ``self.vars``.
 
         Usage::
 
@@ -432,12 +394,11 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
             del self.v.cursor
 
         Compare:
-        - REPL locals → cleared between turns.
-        - ``self.v.k = v`` → snapshot-backed, survives turns + sessions.
-        - ``self.todo.<t>.v.k = v`` → same as ``self.v`` but scoped to
-          one todo.
+        - ``self.v.k = v`` → durable cross-task identity/long-running state.
+        - ``todo.v.k = v`` → durable work state scoped to one task.
+        - REPL locals → transient scratch state for the current work session.
         """
-        return AgentVars(self)
+        return PersistentVars(self)
 
     def message(self, text: str, *, echo: bool = False) -> None:
         """Send a Markdown message to the user.
@@ -525,10 +486,11 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
         ## Work ethic
 
-        Do ALL the work before returning. Use as many ``execute_python``
-        calls as needed — explore, implement, test, iterate. A turn that
+        Do ALL the work before returning. Use as many execution cells
+        as needed — explore, implement, test, iterate. A turn that
         returns after one or two cells when the task clearly needs more
-        is a bug. The only reasons to call ``return_result`` are:
+        is a bug, except when yielding for a live background dependency.
+        The only reasons to call ``return_result`` are:
 
         1. You have genuinely completed everything the user asked for.
         2. You need user input to proceed (ambiguity, confirmation).
@@ -538,9 +500,10 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
         End the turn with exactly one ``return_result(REASON_ENUM, explanation="...")``.
         ``explanation`` is required and must be non-empty. The host records and renders it as the
-        visible stop reason, so be specific and user-facing: if waiting on a
-        job/queue, name which job and why; if asking for input, say what input
-        is needed and why.
+        visible stop status, so keep it terse and factual. It is not the user reply:
+        send answers and questions through ``self.message()`` first. If waiting on a
+        job or queue, name which one and why. For ``NEED_INPUT``, summarize why input
+        is needed after sending the actual question through ``self.message()``.
 
         - Request complete; wait for the next user message::
 
@@ -558,8 +521,6 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         declared queue/event channel and re-enters ``handle()`` with the first
         arrival. Use ``kind`` to say why you are stopping, not to select a
         different queue primitive.
-
-
 
         ## Available queues
 
