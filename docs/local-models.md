@@ -39,7 +39,7 @@ Ollama. For smaller hardware, substitute a smaller pulled model.
 ## vLLM
 
 ```bash
-vllm serve Qwen/Qwen3.6-27B --host 0.0.0.0 --port 8000
+vllm serve Qwen/Qwen3.6-27B --host 127.0.0.1 --port 8000
 ```
 
 ```bash
@@ -66,6 +66,9 @@ llm = get_llm_client(
     api_key="token-abc123",
 )
 ```
+
+Bind vLLM to `0.0.0.0` only when the server is protected by authentication and
+network access controls.
 
 ## Aliases
 
