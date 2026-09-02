@@ -593,3 +593,42 @@ def test_repository_instruction_read_failures_are_logged(tmp_path, monkeypatch, 
     assert instructions.render_agent_instructions(tmp_path) == ""
     assert f"Skipping repository instructions from {path}" in caplog.text
     assert "secure reads unavailable" in caplog.text
+
+
+def test_delegated_context_bounds_traversal_before_serialization():
+    from nooa_cli.coding.context_rendering import render_delegated_context
+
+    class CountingDict(dict):
+        visits = 0
+
+        def items(self):
+            for item in super().items():
+                type(self).visits += 1
+                yield item
+
+    value = CountingDict({str(i): CountingDict({str(j): j for j in range(25)}) for i in range(25)})
+    rendered = render_delegated_context(value, max_nodes=30, max_chars=8_000)
+
+    assert "node limit" in rendered
+    assert CountingDict.visits <= 55
+
+
+def test_delegated_context_does_not_invoke_pydantic_serializers():
+    from nooa_cli.coding.context_rendering import render_delegated_context
+    from pydantic import BaseModel, field_serializer
+
+    serializer_calls: list[int] = []
+
+    class Context(BaseModel):
+        payload: list[int]
+
+        @field_serializer("payload")
+        def serialize_payload(self, value):
+            serializer_calls.append(len(value))
+            return value
+
+    value = Context(payload=list(range(100_000)))
+    rendered = render_delegated_context(value, max_nodes=1)
+
+    assert rendered == '"<node limit>"'
+    assert serializer_calls == []
