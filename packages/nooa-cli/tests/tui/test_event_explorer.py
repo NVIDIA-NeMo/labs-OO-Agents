@@ -485,6 +485,31 @@ def test_event_explorer_search_highlights_matches_inside_detail_text() -> None:
     assert f"{highlight_style_code()}alpha\x1b[0m" in joined
 
 
+def test_event_explorer_search_keeps_styled_detail_colors() -> None:
+    """Searching must not strip the detail pane's syntax colors.
+
+    Regression for the searched path rendering wrapped *plain* text, which
+    drained all color from the detail view while a query was active.
+    """
+    row = build_event_rows(
+        SimpleNamespace(
+            items=lambda: [("1", _FakeEvent("ToolCallEvent", name="run", arguments={"cmd": "ls"}))]
+        )
+    )[0]
+
+    styled = highlighted_detail_lines(row, width=80)
+    searched = highlighted_detail_lines(row, width=80, query="run")
+
+    without = [line for line in "\n".join(styled).splitlines() if "\x1b[" in line]
+    with_query = [line for line in "\n".join(searched).splitlines() if "\x1b[" in line]
+    # Non-match styling (syntax colors) must survive the search.
+    assert with_query, "search dropped all styling"
+    assert any(
+        code in "".join(with_query) and code not in highlight_style_code()
+        for code in ("\x1b[38;", "\x1b[48;")
+    )
+
+
 def test_event_explorer_renders_execute_python_event_as_formatted_markdown() -> None:
     row = build_event_rows(
         SimpleNamespace(

@@ -362,6 +362,47 @@ def test_header_columns_align_with_row_columns() -> None:
     )
 
 
+def test_row_shows_snippet_when_match_is_clipped_or_in_conversation() -> None:
+    """Listed rows must show *why* they matched.
+
+    The default preview column clips long newest-agent messages, and
+    conversation-field matches are never displayed at all — both left the
+    match count visible but the matches themselves invisible.
+    """
+    model = ResumePickerModel(
+        [
+            row(
+                "clipped",
+                "Clipped preview",
+                turns=(
+                    ResumePickerTurn("agent", "a" * 90 + " needle hidden past the clip"),
+                ),
+            ),
+            row(
+                "conversation",
+                "Conversation match",
+                turns=(
+                    ResumePickerTurn("user", "completely unrelated opening question"),
+                    ResumePickerTurn("agent", "needle appears much later in the conversation"),
+                ),
+            ),
+        ]
+    )
+    model.set_query("needle")
+
+    fragments = {
+        match.row.id: _row_fragments(match, selected=False, width=120)[0]
+        for match in model.matches
+    }
+    joined = {rid: "".join(text for _style, text in frags) for rid, frags in fragments.items()}
+
+    # The matched text (with match styling) is visible on both rows.
+    for rid, row_fragments in fragments.items():
+        assert any("match" in str(style) for style, _t in row_fragments), rid
+    assert "needle" in joined["clipped"]
+    assert "needle" in joined["conversation"]
+
+
 def test_selection_marker_moves_before_viewport_scrolls() -> None:
     model = ResumePickerModel([row(str(index), f"title {index}") for index in range(5)])
     first = [

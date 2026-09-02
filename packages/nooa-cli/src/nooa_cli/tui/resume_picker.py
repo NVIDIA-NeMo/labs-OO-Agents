@@ -333,6 +333,39 @@ def _row_title_width(width: int) -> int:
     return min(30, max(10, max(0, width - 16) // 3))
 
 
+def _match_snippet(match: FieldMatch, available: int) -> tuple[str, tuple[int, ...]] | None:
+    """Return preview-column text that makes an invisible match visible.
+
+    The row normally shows the start of the newest agent message, which can
+    clip the matched text away — or the match may live in the conversation
+    field, which the row never displays. In both cases show the matched line
+    so every listed session shows *why* it matched.
+    """
+    row = match.row
+    positions = match.positions
+    if not positions:
+        return None
+    if match.field == "conversation":
+        text = "\n".join(sanitize_live_text(turn.content) for turn in row.turns)
+    elif match.field == "preview" and positions[0] >= max(available - 2, 0):
+        text = row.preview
+    else:
+        return None
+    first = positions[0]
+    if match.field == "conversation":
+        start = text.rfind("\n", 0, first) + 1
+        stop = text.find("\n", first)
+        stop = len(text) if stop < 0 else stop
+        # Long conversation lines would still clip the match away; shift the
+        # window toward the match instead of starting at the line beginning.
+        if first - start > 40:
+            start = first - 24
+    else:
+        start = max(0, first - 24)
+        stop = len(text)
+    return text[start:stop], tuple(p - start for p in positions if start <= p < stop)
+
+
 def _row_fragments(
     match: FieldMatch, selected: bool, width: int, *, sort_updated: bool = True
 ) -> list[list[tuple[str, str]]]:
@@ -357,14 +390,20 @@ def _row_fragments(
     )
     title_cells = cell_len("".join(text for _style, text in title))
     title.append((base, " " * max(0, title_width - title_cells) + "  "))
-    preview_positions = match.positions if match.field == "preview" else ()
+    available = max(0, width - 15 - title_width - 2)
+    snippet = _match_snippet(match, available)
+    if snippet is not None:
+        preview_text, preview_positions = snippet
+    else:
+        preview_text = row.preview
+        preview_positions = match.positions if match.field == "preview" else ()
     return [
         _clip_fragments(
             [
                 (base, prefix),
                 *title,
                 *_field_fragments(
-                    row.preview,
+                    preview_text,
                     base + " class:fullscreen-browser.meta",
                     preview_positions,
                 ),
