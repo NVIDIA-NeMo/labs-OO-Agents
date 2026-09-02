@@ -10,8 +10,6 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Literal
 
-from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.layout import VSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
@@ -20,10 +18,6 @@ from rich.cells import cell_len, split_graphemes
 from .explorer_base import ExplorerOption
 from .fullscreen_browser import (
     ExplorerBrowser,
-    SelectablePreviewControl,
-    _BrowserOptionControl,
-    _BrowserSearchControl,
-    build_fullscreen_browser,
 )
 from .terminal_safety import sanitize_live_text
 
@@ -541,11 +535,18 @@ class ResumePicker(ExplorerBrowser):
 
         config = SimpleNamespace(actions={})
         item_name = "session"
+        title = "Resume a previous session"
 
         def __init__(self, picker: ResumePicker, options: tuple[ExplorerOption, ...]) -> None:
             self._picker = picker
             self.options = options
             self.pending_input: str | None = None
+
+        @property
+        def model(self) -> ResumePickerModel:
+            # The shared construction seeds the search buffer from
+            # ``view.model.query``; the picker's model is the real one.
+            return self._picker.model
 
         def handle_key(self, _action: str, _value: str = "") -> str:
             return "handled"
@@ -562,6 +563,12 @@ class ResumePicker(ExplorerBrowser):
     def view(self) -> ResumePicker._ViewFacade:
         return self._view_facade
 
+    @view.setter
+    def view(self, value: ResumePicker._ViewFacade) -> None:
+        # The shared construction assigns the facade passed to
+        # super().__init__; keep it in the same slot the property reads.
+        self._view_facade = value
+
     @property
     def model(self) -> ResumePickerModel:
         return self._resume_model
@@ -569,6 +576,14 @@ class ResumePicker(ExplorerBrowser):
     @model.setter
     def model(self, value: ResumePickerModel) -> None:
         self._resume_model = value
+
+    def _create_list_control(self) -> Any:
+        # The picker's list renders its compact FieldMatch rows.
+        return _PickerControl(self)
+
+    def _option_window_width(self, index: int) -> Dimension:
+        widths = (Dimension(min=17, preferred=20), Dimension(min=10, preferred=18))
+        return widths[index]
 
     def __init__(
         self,
@@ -584,76 +599,17 @@ class ResumePicker(ExplorerBrowser):
         # options mode; their callbacks mirror the model's cycle/toggle
         # semantics (restart from the top, refresh the prepared preview).
         self._view_facade = ResumePicker._ViewFacade(self, self._build_view_options())
-        self._selection_copy_callback = selection_copy_callback
-        self._selection_status = selection_status
         self._preview_models: dict[tuple[str, int], Any] = {}
         self._preview_tasks: dict[tuple[str, int], Any] = {}
         self.native_selection = False
-        self.active_control = "list"
-        self.option_cursor: int | None = None
-        self.buffer = Buffer(multiline=False)
-        self.buffer.on_text_changed += lambda _: self._query_changed()
-        self.query_control = _BrowserSearchControl(self, self.buffer)
-        self.query_window = Window(
-            self.query_control,
-            width=Dimension(min=4, weight=1),
-            height=1,
-            style=lambda: (
-                "class:fullscreen-browser.control-focused"
-                if self.active_control == "list" and self.option_cursor is None
-                else ""
-            ),
-        )
-        self.option_controls = [_BrowserOptionControl(self, index) for index in range(2)]
-        self.search_label_control = FormattedTextControl(self._search_label)
-        self.search_close_control = FormattedTextControl(self._search_close)
-        search = VSplit(
-            [
-                Window(self.search_label_control, width=9, height=1),
-                self.query_window,
-                Window(self.search_close_control, width=1, height=1),
-            ],
-            padding=0,
-        )
-        selectors = VSplit(
-            [
-                Window(self.option_controls[0], width=Dimension(min=17, preferred=20), height=1),
-                Window(FormattedTextControl(" "), width=1, height=1),
-                Window(self.option_controls[1], width=Dimension(min=10, preferred=18), height=1),
-            ],
-            padding=0,
-        )
-        controls = VSplit(
-            [search, Window(FormattedTextControl(" "), width=1, height=1), selectors],
-            padding=0,
-        )
-        self.list_control = _PickerControl(self)
-        self.preview_control = SelectablePreviewControl(self)
-
-        self.title_control = FormattedTextControl(self._title)
-        self.list_header_control = FormattedTextControl(self._list_header)
-        self.preview_header_control = FormattedTextControl(self._preview_header)
-        self.small_control = FormattedTextControl(
-            [("class:fullscreen-browser.too-small", "Terminal too small")], focusable=True
-        )
         # The session list fills its pane like every other browser (the
         # shell's compact five-row default capped it short of the divider).
         self.picker_list_height = Dimension(min=1, preferred=5, weight=1)
-        self.container = build_fullscreen_browser(
-            app=self.app,
-            title_control=self.title_control,
-            help_control=FormattedTextControl(
-                self._help_text, style="class:fullscreen-browser.footer"
-            ),
-            controls=controls,
-            list_header_control=self.list_header_control,
-            list_control=self.list_control,
-            preview_header_control=self.preview_header_control,
-            preview_control=self.preview_control,
-            active_rail=self._active_rail,
-            small_control=self.small_control,
-            small_text=self._small_text,
-            list_height=self.picker_list_height,
+        super().__init__(
+            self._view_facade,
+            app,
+            selection_copy_callback=selection_copy_callback,
+            selection_status=selection_status,
         )
 
     def _build_view_options(self) -> tuple[ExplorerOption, ...]:
@@ -762,18 +718,6 @@ class ResumePicker(ExplorerBrowser):
                 ),
             )
         ]
-
-    def invalidate(self) -> None:
-        self.list_control._fragment_cache.clear()
-        self.preview_control._fragment_cache.clear()
-        for control in self.option_controls:
-            control._fragment_cache.clear()
-        self.search_label_control._fragment_cache.clear()
-        self.search_close_control._fragment_cache.clear()
-        self.title_control._fragment_cache.clear()
-        self.list_header_control._fragment_cache.clear()
-        self.preview_header_control._fragment_cache.clear()
-        self.app.invalidate()
 
     def navigate_vertical(self, delta: int) -> None:
         if self.option_cursor is not None:
