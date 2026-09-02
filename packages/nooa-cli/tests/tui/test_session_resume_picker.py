@@ -398,6 +398,10 @@ def test_preview_scroll_is_independent_and_selection_resets_to_tail() -> None:
     selected = picker.model.selected
     picker.move(1)
     assert picker.model.selected != selected
+    # The new row's preview resets to the tail, not the scrolled position.
+    transcript2 = picker._preview_model(60)
+    assert transcript2 is not None
+    assert transcript2.viewport.follows_tail is True
 
 
 def test_mouse_wheel_routes_to_list_and_preview_separately() -> None:
