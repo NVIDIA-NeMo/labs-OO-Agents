@@ -240,11 +240,16 @@ class FullscreenTranscriptModel:
             return
         match = self._search_matches[self._search_cursor]
         rows = self._display_rows(max(1, width))
-        for row in rows:
+        for index, row in enumerate(rows):
             if row.anchor.record_id != match.record_id:
                 continue
             if any(start < match.stop and stop > match.start for start, stop in row.source_spans):
-                self._viewport = ViewportState(False, row.anchor)
+                # Center the match vertically when context exists above it,
+                # so the reveal shows before/after context instead of pinning
+                # the match to the pane's first row. Early matches clamp to
+                # the content start.
+                top = max(0, index - max(1, height) // 2)
+                self._viewport = ViewportState(False, rows[top].anchor)
                 return
 
     def cursor_position(self, *, width: int, height: int = 1) -> Point:
