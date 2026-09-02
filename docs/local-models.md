@@ -21,25 +21,25 @@ ollama serve
 
 ```bash
 # another shell
-ollama pull qwen3:1.7b
+ollama pull qwen3.6:27b
 ```
 
 ```python
 from nooa.unifiedllm.registry import get_llm_client
 
 llm = get_llm_client(
-    "ollama_chat/qwen3:1.7b",
+    "ollama_chat/qwen3.6:27b",
     api_base="http://localhost:11434",
 )
 ```
 
 Use a model name shown by `ollama list`. Do not pass an API key for normal local
-Ollama.
+Ollama. For smaller hardware, substitute a smaller pulled model.
 
 ## vLLM
 
 ```bash
-vllm serve Qwen/Qwen3-1.7B --host 0.0.0.0 --port 8000
+vllm serve Qwen/Qwen3.6-27B --host 0.0.0.0 --port 8000
 ```
 
 ```bash
@@ -51,7 +51,7 @@ curl http://localhost:8000/v1/models
 from nooa.unifiedllm.registry import get_llm_client
 
 llm = get_llm_client(
-    "hosted_vllm/Qwen/Qwen3-1.7B",
+    "hosted_vllm/Qwen/Qwen3.6-27B",
     api_base="http://localhost:8000/v1",
 )
 ```
@@ -61,7 +61,7 @@ Use the id from `/v1/models` after `hosted_vllm/`. If vLLM was started with
 
 ```python
 llm = get_llm_client(
-    "hosted_vllm/Qwen/Qwen3-1.7B",
+    "hosted_vllm/Qwen/Qwen3.6-27B",
     api_base="http://localhost:8000/v1",
     api_key="token-abc123",
 )
@@ -74,11 +74,11 @@ Put repeated local config in `.nooa/llm_config.yaml`:
 ```yaml
 models:
   local-ollama:
-    model_name: ollama_chat/qwen3:1.7b
+    model_name: ollama_chat/qwen3.6:27b
     api_base: http://localhost:11434
 
   local-vllm:
-    model_name: hosted_vllm/Qwen/Qwen3-1.7B
+    model_name: hosted_vllm/Qwen/Qwen3.6-27B
     api_base: http://localhost:8000/v1
     # api_key_env: VLLM_API_KEY  # only when vLLM requires auth
 ```
