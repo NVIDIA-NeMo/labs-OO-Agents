@@ -129,7 +129,7 @@ async def test_shared_explorer_f2_toggles_native_selection_and_cancels_drag() ->
                 status="open",
                 deps=(),
                 created_at="now",
-                notes="alpha beta gamma",
+                description="alpha beta gamma",
                 comments=(),
                 search_text="F2 me alpha beta gamma",
             )
@@ -181,7 +181,7 @@ async def test_subview_alt_chords_do_not_close_the_view() -> None:
                 status="open",
                 deps=(),
                 created_at="now",
-                notes="note",
+                description="note",
                 comments=(),
                 search_text="Row",
             )
@@ -474,7 +474,7 @@ async def test_todo_explorer_is_wrapped_in_shared_fullscreen_browser() -> None:
         status="open",
         deps=[],
         created_at="2026-08-27 18:00",
-        notes="Use the Resume Picker shell.",
+        description="Use the shared browser shell.",
         comments=[],
         search_text="Ship reusable browser",
     )
@@ -855,7 +855,7 @@ async def test_shared_explorers_copy_drag_from_terminal_mouse_packets(kind: str)
                     status="open",
                     deps=(),
                     created_at="now",
-                    notes="alpha beta gamma",
+                    description="alpha beta gamma",
                     comments=(),
                     search_text="Copy me alpha beta gamma",
                 )
