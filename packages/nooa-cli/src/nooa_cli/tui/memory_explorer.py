@@ -306,6 +306,9 @@ class MemoryExplorerView(ExplorerView):
             return "handled"
         if action == "text:d":
             if row.type != "todo" or row.status == "done":
+                # An action key that cannot apply still interrupts the armed
+                # gesture — the next f/d press must arm, not confirm.
+                self._pending_confirm = None
                 return "ignored"
             if not self._consume_confirmation(action, row):
                 self._pending_confirm = (action, id(row))

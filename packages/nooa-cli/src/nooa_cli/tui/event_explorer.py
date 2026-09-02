@@ -375,6 +375,28 @@ def _extract_fenced_code(text: str) -> tuple[str, str] | None:
     return match.group(2).rstrip("\n"), language
 
 
+def _searchable_markdown(markdown: str | None) -> str:
+    """Markdown stripped of the header line and metadata footer.
+
+    ``_event_markdown`` always emits a header line and a metadata footer
+    containing timestamps and ids. Those are chrome, not content; leaving
+    them in search text would let noise fields (timestamp, id) match a
+    query again even though ``_searchable_detail`` excludes them.
+    """
+    if not markdown:
+        return ""
+    lines = markdown.splitlines()
+    # Drop the leading header line (" [tag] Type · timestamp · id=…").
+    if lines and lines[0].lstrip().startswith("["):
+        lines = lines[1:]
+    # Drop the trailing metadata footer (everything from the last rule).
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index].strip().startswith("---"):
+            lines = lines[:index]
+            break
+    return "\n".join(lines)
+
+
 def _searchable_detail(event: Any, event_type: str) -> str:
     """Repr dump restricted to fields a user can actually see.
 
@@ -784,7 +806,8 @@ def build_event_rows(event_manager: Any) -> list[EventExplorerRow]:
         markdown = _event_markdown(str(tag), event, event_type)
         search_text = (
             f"{tag} {event_type} {summary} "
-            f"{_searchable_detail(event, event_type)} {code or ''} {markdown or ''}"
+            f"{_searchable_detail(event, event_type)} {code or ''} "
+            f"{_searchable_markdown(markdown)}"
         )
         rows.append(
             EventExplorerRow(
@@ -980,6 +1003,20 @@ def _plain_offset_map(styled: str) -> list[int]:
     return mapping
 
 
+def _active_sgr_before(styled: str, position: int) -> str:
+    """Return the SGR state active at *position* (excluding resets)."""
+    import re as _re
+
+    active: list[str] = []
+    for match in _re.finditer(r"\x1b\[([0-9;]*)m", styled[:position]):
+        codes = match.group(1)
+        if codes == "0" or codes == "":
+            active.clear()
+        else:
+            active.append(match.group(0))
+    return "".join(active)
+
+
 def _highlight_line_terms(
     styled: str, terms: list[str], *, current_occurrence: int | None = None
 ) -> str:
@@ -1004,7 +1041,11 @@ def _highlight_line_terms(
         current = current_occurrence is not None and occurrence == current_occurrence
         start, stop = offsets[match.start()], offsets[match.end() - 1] + 1
         insertions.append((start, highlight_style_code(current=current)))
-        insertions.append((stop, "\x1b[0m"))
+        # Reapply the styling that was active at the match boundary: a
+        # match inside a styled token must not strip the token's remaining
+        # characters of their color.
+        active_style = _active_sgr_before(styled, start)
+        insertions.append((stop, f"\x1b[0m{active_style}" if active_style else "\x1b[0m"))
         occurrence += 1
     if not insertions:
         return styled

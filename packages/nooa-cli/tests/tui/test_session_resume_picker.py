@@ -460,6 +460,53 @@ def test_header_columns_align_with_row_columns() -> None:
     )
 
 
+def test_query_terms_deduplicate_for_match_counts() -> None:
+    """Repeated query terms count occurrences once, not per repetition."""
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+    model = FullscreenTranscriptModel(show_trailing_blank=False)
+    model.append("alpha one\nmid\nalpha two")
+    model.set_search("alpha alpha", width=30, height=4)
+
+    _position, total = model.search_position
+    assert total == 2  # not 4
+
+
+def test_row_highlights_every_occurrence_of_each_term() -> None:
+    """A term appearing twice in the best field highlights both positions."""
+    model = ResumePickerModel(
+        [row("1", "beta first and beta second")]
+    )
+    model.set_query("beta")
+
+    match = model.matches[0]
+    assert len(match.positions) >= 8  # both "beta" occurrences (4 cells each)
+
+
+def test_rows_rank_by_term_coverage_before_position() -> None:
+    """A row covering all terms in one field outranks a split-field row."""
+    model = ResumePickerModel(
+        [
+            # alpha lives in the title, beta in the conversation: no single
+            # field covers both terms.
+            row(
+                "split",
+                "alpha here",
+                turns=(ResumePickerTurn("agent", "beta answer"),),
+            ),
+            # Both terms in one conversation line.
+            row(
+                "together",
+                "also unrelated",
+                turns=(ResumePickerTurn("agent", "alpha beta in one line"),),
+            ),
+        ]
+    )
+    model.set_query("alpha beta")
+
+    assert [match.row.id for match in model.matches] == ["together", "split"]
+
+
 def test_row_shows_snippet_when_match_is_clipped_or_in_conversation() -> None:
     """Listed rows must show *why* they matched.
 

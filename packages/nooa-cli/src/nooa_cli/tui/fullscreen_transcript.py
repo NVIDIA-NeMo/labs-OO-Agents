@@ -193,7 +193,9 @@ class FullscreenTranscriptModel:
         if normalized == self._search_query:
             return
         self._search_query = normalized
-        terms = [term for term in normalized.split() if term]
+        # Deduplicate repeated terms ("alpha alpha") so match counts and
+        # navigation visits reflect distinct occurrences.
+        terms = list(dict.fromkeys(term for term in normalized.split() if term))
         matches: list[_SearchMatch] = []
         if terms:
             for record in self._records:

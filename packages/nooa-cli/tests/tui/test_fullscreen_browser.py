@@ -741,7 +741,9 @@ def test_explorer_detail_header_shows_match_position() -> None:
     assert total >= 2
     header = "".join(text for _style, text in browser._preview_header())
     assert f"match {position}/{total}" in header
-    # Stepping a match updates the header position.
+    # Stepping a match updates the header position; match stepping is a
+    # preview-focus gesture.
+    browser.activate_control("preview")
     browser.navigate_vertical(1)
     position, _total = browser._detail_transcript.search_position
     header = "".join(text for _style, text in browser._preview_header())
