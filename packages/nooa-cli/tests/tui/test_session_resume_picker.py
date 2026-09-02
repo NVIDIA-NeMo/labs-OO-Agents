@@ -12,11 +12,12 @@ from nooa_cli.tui.resume_picker import (
     _clip,
     _row_fragments,
     _semantic_preview_selection,
-    render_resume_picker,
 )
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from rich.cells import cell_len
+
+from .resume_picker_snapshot import render_resume_picker
 
 
 def test_semantic_preview_selection_removes_user_and_agent_chrome() -> None:
@@ -370,16 +371,22 @@ def test_active_rail_marks_only_current_area() -> None:
 
 
 def test_preview_scroll_is_independent_and_selection_resets_to_tail() -> None:
+    """Preview scrolling lives on the transcript; moving rows resets it to the tail."""
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
     turns = tuple(ResumePickerTurn("user", f"message {index}") for index in range(12))
-    model = ResumePickerModel([row("1", "one", turns=turns), row("2", "two", turns=turns)])
-    model.scroll_preview(-3, line_count=30, height=5)
-    assert model.preview_offset == 22
-    selected = model.selected
-    model.list_offset = 0
-    model.move(1)
-    assert model.selected != selected
-    assert model.preview_offset == 10**9
-    assert model.list_offset == 0
+    picker = ResumePicker([row("1", "one", turns=turns), row("2", "two", turns=turns)], app)
+    picker.preview_control.viewport = (60, 5)
+
+    transcript = picker._preview_model(60)
+    assert transcript is not None
+    picker.scroll_preview(-3)
+    top = transcript.top_row(width=60, height=5)
+    assert top > 0
+
+    selected = picker.model.selected
+    picker.move(1)
+    assert picker.model.selected != selected
 
 
 def test_mouse_wheel_routes_to_list_and_preview_separately() -> None:
