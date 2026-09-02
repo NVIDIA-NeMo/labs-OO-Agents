@@ -662,7 +662,12 @@ class ExplorerBrowser:
     def _preview_header(self):
         row = self.model.current
         title = getattr(row, "title", None) or getattr(row, "event_type", None) or "No selection"
-        return [("class:fullscreen-browser.heading", f"Preview · {title}")]
+        suffix = ""
+        if self._detail_transcript is not None and self.buffer.text.strip():
+            position, total = self._detail_transcript.search_position
+            if total:
+                suffix = f" · match {position}/{total}"
+        return [("class:fullscreen-browser.heading", f"Preview · {title}{suffix}")]
 
     def _small_text(self):
         size = self.app.output.get_size()
