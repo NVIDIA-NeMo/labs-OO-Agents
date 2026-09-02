@@ -635,6 +635,42 @@ def test_explorer_browser_navigate_vertical_jumps_search_matches() -> None:
     assert browser.model.cursor == 0
 
 
+def test_searching_detail_reveals_the_matched_text() -> None:
+    """The matched text must be visible in the preview while searching.
+
+    Regression for the viewport stomp: _preview_transcript re-anchored the
+    viewport from the model's detail offset on every render, clobbering
+    set_search's match reveal — the match count worked but the matched
+    lines scrolled out of view (event 36 in a live session).
+    """
+    browser = _browser()
+
+    class _Row:
+        search_text = "error deep"
+        title = "Row"
+
+    browser.model.rows.clear()
+    browser.model.rows.append(_Row())
+    browser.model.set_query("error")
+    browser.buffer.text = "error"
+    # Detail long enough that the match sits far below the first page.
+    browser.view.detail_lines = lambda _row, _width: (
+        [f"line {i}" for i in range(30)] + ["content with error here"]
+    )
+    browser.preview_control.viewport = (50, 6)
+
+    transcript = browser._preview_transcript(50, 6)
+    assert transcript is not None
+    formatted = transcript.formatted_text(width=50, height=6)
+    visible = "".join(text for _style, text, *_ in formatted)
+    assert "error" in visible
+    # A second render (as happens on every repaint) must keep the reveal.
+    transcript = browser._preview_transcript(50, 6)
+    formatted = transcript.formatted_text(width=50, height=6)
+    visible = "".join(text for _style, text, *_ in formatted)
+    assert "error" in visible
+
+
 def test_explorer_detail_header_shows_match_position() -> None:
     """The preview header reports the current search match (like /resume)."""
     browser = _browser()
