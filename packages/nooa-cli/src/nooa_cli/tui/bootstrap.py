@@ -311,7 +311,7 @@ async def bootstrap(
     blocking_llm_health = None
     llm = None
     try:
-        from nooa.unifiedllm import FakeLLMClient, MODELS
+        from nooa.unifiedllm import MODELS, FakeLLMClient
 
         if config.tui.default_model == DEFAULT_MODEL and DEFAULT_MODEL not in MODELS:
             from .health_check import no_models_configured_health
