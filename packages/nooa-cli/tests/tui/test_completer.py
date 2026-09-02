@@ -105,6 +105,13 @@ def test_session_id_completion_excludes_empty_sessions(completer, monkeypatch):
     assert [item.text for item in completer.complete("/session delete ")] == [
         "/session delete used-ses"
     ]
+    # The /resume alias completes session ids like /session resume.
+    assert [item.text for item in completer.complete("/resume ")] == [
+        "/resume used-ses"
+    ]
+    assert [item.text for item in completer.complete("/resume used")] == [
+        "/resume used-ses"
+    ]
 
 
 def test_slash_case_insensitive(completer):
