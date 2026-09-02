@@ -1,23 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""ShellTools — persistent shell + file ops with grep that hands you editable Match objects.
+"""Persistent shell and file operations with editable ``Match`` anchors.
 
-Identical surface to v4 (run / read / replace / write_file). The one addition:
-when ``run()`` executes a *pure search* (a bare grep/rg/egrep with no
-output-mangling pipe or anchor-dropping flag), the result still prints as the
-exact bytes the agent's command produced — but it ALSO carries a parsed
-``.matches`` list of ``Match`` objects, ready to hand straight to ``replace()``.
-
-The agent sees no new method and no changed output. Under the hood we run the
-equivalent ``rg --json`` purely to harvest anchors, and attach the matches ONLY
-when we can prove the anchor set is trustworthy. Any divergence, any unhandled
-flag, any pipe -> ``.matches`` is ``None`` (fail-closed). An incomplete gate can
-only ever *miss* an opportunity to help; it can never produce a wrong anchor.
-
-Motivation: in the SWE-bench bake-off the agent issued ~12 search calls/session
-and used the structured ``.matches()`` path 0 times — it greps and eyeballs
-text. Making every safe grep an on-ramp to a Match-based edit attacks the #1
-error class (string-escaping in inline edits) for free.
+Plain grep/rg searches and simple read-only ``sed -n`` ranges can attach
+verified ``Match`` objects to ``ShellResult.matches``. Commands whose output
+cannot be mapped back to source lines unambiguously remain ordinary shell
+results with ``matches=None``.
 
 Attach to an agent::
 
@@ -170,8 +158,8 @@ class ShellResult(str):
     return code as named fields — so failures can't be missed (a crashing
     command with empty stdout no longer prints as blank).
 
-    ``.matches`` is a ``list[Match]`` when the command was a pure search and the
-    anchors are trustworthy; otherwise ``None``.
+    ``.matches`` is a ``list[Match]`` when a grep/rg search or simple
+    read-only ``sed -n`` range yields trustworthy anchors; otherwise ``None``.
     """
 
     stdout: str
@@ -226,6 +214,7 @@ _ANCHOR_BREAKING_FLAGS = set("oclLABCDzZP")
 _MANGLING_PIPE = re.compile(r"\|\s*(sed|awk|cut|sort|uniq|tr|head|tail|wc|xargs|rev)\b")
 
 _SEARCH_HEAD = re.compile(r"^\s*(grep|egrep|rg)\b")
+_SED_RANGE = re.compile(r"^(?P<start>[1-9]\d*)(?:,(?P<end>[1-9]\d*))?p$")
 _LONG_ANCHOR_BREAKING = (
     "--pcre2",
     "--null-data",
@@ -259,6 +248,70 @@ _SAFE_TAIL_PIPE = re.compile(r"\|\s*(head|tail)(\s+-[0-9n]+)?\s*$")
 
 # Pattern: find ... | xargs grep ... (content search via xargs)
 _XARGS_GREP = re.compile(r"find\s+.+\|\s*xargs\s+grep")
+
+
+def _parse_sed_range_command(cmd: str) -> tuple[str, int, int] | None:
+    """Parse a safe, read-only numeric ``sed`` range, or return ``None``.
+
+    Accepted commands contain one print expression and one file, for example
+    ``sed -n '10,20p' file.py``. Shell composition, transformations, stdin,
+    multiple files/expressions, and non-numeric addresses are rejected.
+    """
+    cmd = cmd.strip()
+    if "&&" in cmd:
+        segments = cmd.split("&&")
+        if len(segments) != 2:
+            return None
+        try:
+            prefix = shlex.split(segments[0])
+        except ValueError:
+            return None
+        if len(prefix) != 2 or prefix[0] not in ("cd", "pushd"):
+            return None
+        cmd = segments[1].strip()
+    try:
+        parts = shlex.split(cmd)
+    except ValueError:
+        return None
+    if not parts or parts[0] != "sed" or any(token in cmd for token in ("|", "&&", ";")):
+        return None
+
+    quiet = False
+    expression: str | None = None
+    operands: list[str] = []
+    index = 1
+    while index < len(parts):
+        part = parts[index]
+        if part in ("-n", "--quiet", "--silent"):
+            if quiet:
+                return None
+            quiet = True
+        elif part == "-e":
+            if expression is not None or index + 1 >= len(parts):
+                return None
+            index += 1
+            expression = parts[index]
+        elif part == "--":
+            operands.extend(parts[index + 1 :])
+            break
+        elif part.startswith("-"):
+            return None
+        elif expression is None:
+            expression = part
+        else:
+            operands.append(part)
+        index += 1
+
+    if not quiet or expression is None or len(operands) != 1:
+        return None
+    match = _SED_RANGE.fullmatch(expression)
+    if match is None:
+        return None
+    start = int(match.group("start"))
+    end = int(match.group("end") or start)
+    if end < start:
+        return None
+    return operands[0], start, end
 
 
 def is_pure_search_command(cmd: str) -> bool:
@@ -310,33 +363,13 @@ def is_pure_search_command(cmd: str) -> bool:
 
 class ShellTools(Skill):
     """
-    Persistent shell + file ops, with grep that hands you editable Match objects.
+    Persistent shell and file operations with editable ``Match`` anchors.
 
-    Four methods — no new tools to learn:
-        run(command, stdin=, timeout=)  — shell command (cd/env/cwd persist)
-        read(path, lines=)             — view a file/region -> Match
-        replace(match_or_path, ...)    — edit at a Match anchor, or by unique string
-        write_file(path, content)      — create/overwrite a file
+    Plain grep/rg searches and simple ``sed -n 'START,ENDp' FILE`` reads expose
+    verified anchors through ``ShellResult.matches``. Use ``read()`` directly
+    when you already know the file and line range.
 
-    Grep that you can edit from directly. When run() executes a plain search
-    (grep/rg/egrep), the result still prints the EXACT bytes your command
-    produced — and it also carries ``.matches``, a list of Match objects you can
-    pass straight to replace(). No re-grep, no parsing the text yourself::
-
-        r = await shell.run("grep -rn 'def foo' src/")
-        print(r)                          # byte-accurate grep output, unchanged
-        await shell.replace(r.matches[0], new_code)   # edit the first hit
-
-    ``r.matches`` is ``None`` (not an error — just "no structured anchors") when
-    the command isn't a verifiable plain search: anything piped into
-    sed/awk/cut/sort/head, context/count/only-matching/files-only flags
-    (-A/-B/-C/-c/-o/-l), PCRE (-P), or grep without -n. In those cases use the
-    text in ``r``/``r.stdout`` as usual. The matches are attached ONLY when they
-    provably equal what your own grep reported — so they are never wrong, only
-    sometimes absent.
-
-    Editing without a search — view a region, then replace it (no copy-paste of
-    the old text, so no quoting/escaping mistakes)::
+    View a region, then replace it without copying or escaping the old text::
 
         region = await shell.read("f.py", lines=(10, 25))  # -> Match
         print(region)                                       # numbered lines
@@ -376,9 +409,13 @@ class ShellTools(Skill):
         """Terminate the underlying bash session owned by this shell."""
         await self._session.close()
 
-    def _resolve_path(self, path: str) -> Path:
-        """Resolve a file-operation path relative to cwd when not absolute."""
-        return (self.cwd / path).resolve()
+    def _resolve_path(self, path: str, root: Path | None = None) -> Path:
+        """Resolve a file-operation path relative to ``root`` when not absolute.
+
+        ``root`` defaults to the current cwd. Callers that captured a cwd
+        alongside a command pass it explicitly so resolution cannot drift.
+        """
+        return ((root if root is not None else self.cwd) / path).resolve()
 
     async def run(
         self,
@@ -395,10 +432,9 @@ class ShellTools(Skill):
         Pass a payload as stdin= instead of heredocs. Result is a str subclass
         with .stdout / .stderr / .returncode / .success.
 
-        If the command is a pure search (grep/rg/egrep, no mangling pipe or
-        anchor-dropping flag), the result also carries .matches — a list of
-        Match objects you can pass straight to replace(). The printed output is
-        always the exact bytes your command produced.
+        Pure grep/rg searches and simple read-only ``sed -n`` numeric ranges
+        also expose verified ``Match`` anchors through ``.matches``. The
+        printed output is always the exact bytes your command produced.
 
         Args:
             command: Shell command to execute.
@@ -407,18 +443,25 @@ class ShellTools(Skill):
         """
         session = await self._get_session()
         run_cmd = self._with_stdin(command, stdin)
-        stdout, stderr, code, timed_out = await session.run_with_timeout_flag(
+        # run_with_cwd reports the cwd under the same lock as the command, so
+        # `command_cwd` is the directory *this* command ended in even when other
+        # run() calls are in flight. A separate `pwd` round-trip would not be:
+        # a concurrent `cd` can land in between and be misattributed here.
+        stdout, stderr, code, timed_out, command_cwd = await session.run_with_cwd(
             run_cmd, timeout=timeout
         )
         # Track cwd changes for read/replace/write_file path resolution
-        pwd_out, _, _, _ = await session.run_with_timeout_flag("pwd", timeout=5.0)
-        if pwd_out.strip():
-            self.cwd = Path(pwd_out.strip())
+        self.cwd = command_cwd
 
         matches: list[Match] | None = None
-        _is_search = stdin is None and is_pure_search_command(command)
-        if _is_search:
+        if stdin is None and is_pure_search_command(command):
             matches = await self._harvest_matches(command, stdout)
+        elif (
+            stdin is None
+            and code == 0
+            and (sed_range := _parse_sed_range_command(command)) is not None
+        ):
+            matches = self._harvest_sed_range(sed_range, stdout, command_cwd)
 
         if matches:
             print(
@@ -446,10 +489,6 @@ class ShellTools(Skill):
         the chunk) incrementally, then a final ``StreamDone`` (``.returncode``,
         ``.timed_out``) once the command completes. Runs in the persistent
         session, like ``run``.
-
-        This is what ``pyp.arun(self.shell, ...)`` consumes to stream output::
-
-            fails = await self.pyp.arun(self.shell, "make test").grep("FAIL").collect()
         """
         session = await self._get_session()
         timed_out = False
@@ -476,6 +515,57 @@ class ShellTools(Skill):
             f"({command}) < $__nemo_in; __nemo_rc=$?; rm -f $__nemo_in; "
             f"( exit $__nemo_rc )"
         )
+
+    def _harvest_sed_range(
+        self, parsed: tuple[str, int, int], displayed_stdout: str, cwd: Path
+    ) -> list[Match] | None:
+        """Return one verified anchor for a parsed ``sed`` range.
+
+        ``cwd`` is the directory the sed command actually ran in, captured with
+        the command itself — not re-read afterwards.
+        """
+        path, start, requested_end = parsed
+        root = cwd.resolve()
+        try:
+            resolved = self._resolve_path(path, root)
+            if not resolved.is_file():
+                return None
+            lines = resolved.read_text().splitlines(keepends=True)
+        except (OSError, UnicodeError, ValueError):
+            return None
+        if start > len(lines):
+            return [] if displayed_stdout == "" else None
+        end = min(requested_end, len(lines))
+        # BashSession strips the command's output, so blank lines at either edge
+        # of the range were never shown. Anchoring the full range would let
+        # replace() delete lines the agent never saw, so narrow to the span that
+        # actually produced the output.
+        first, last = start, end
+        while first <= last and not lines[first - 1].strip():
+            first += 1
+        while last >= first and not lines[last - 1].strip():
+            last -= 1
+        if first > last:
+            # The range is entirely blank: sed printed nothing visible, so there
+            # is nothing to anchor.
+            return [] if displayed_stdout == "" else None
+        text = "".join(lines[first - 1 : last])
+        # Compare the same representation BashSession displayed, while retaining
+        # the source bytes in the Match.
+        if text.strip() != displayed_stdout:
+            return None
+        try:
+            normalized = str(resolved.relative_to(root))
+        except ValueError:
+            # File ops may sit outside cwd (#172), and `root` comes from bash's
+            # logical `pwd`, so the two can also disagree through a symlink.
+            # Display the absolute path rather than let a read-only command
+            # raise out of run().
+            normalized = str(resolved)
+        # `normalized` is only for display; `resolved_path` is what read/replace
+        # act on, so the anchor stays bound to the file sed read even if the
+        # shell cds afterwards.
+        return [Match(normalized, first, last, text, resolved_path=resolved)]
 
     async def _harvest_matches(self, command: str, displayed_stdout: str) -> list[Match] | None:
         """Run the rg --json equivalent and parse anchors — fail-closed.
