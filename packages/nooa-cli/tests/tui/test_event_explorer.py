@@ -62,7 +62,13 @@ def test_event_explorer_builds_rows_and_full_text_searches() -> None:
     assert [rows[i].tag for i in model.matches] == ["2", "3"]
 
 
-def test_event_explorer_search_boundary_clears_cached_occurrences() -> None:
+def test_event_explorer_list_focus_moves_rows_while_searching() -> None:
+    """List focus moves between matching rows even while search is active.
+
+    The old occurrence-jumping machinery (move_search_occurrence and friends)
+    was removed with the unified navigation contract; this pins the live
+    behavior it was replaced by.
+    """
     rows = build_event_rows(
         SimpleNamespace(
             items=lambda: [
@@ -75,20 +81,13 @@ def test_event_explorer_search_boundary_clears_cached_occurrences() -> None:
     model = EventExplorerModel(rows)
     model.set_query("alpha")
     model.search_active = True
-    model._last_detail_match_lines = [0]
-    model._last_detail_match_occurrences = [(0, 0), (0, 1)]
-    model.search_line_cursor = 1
 
-    model.move_search_occurrence(1)
-
+    model.move_or_scroll(1)
     assert model.cursor == 1
-    assert model._last_detail_match_lines == []
-    assert model._last_detail_match_occurrences == []
-    assert model.search_line_cursor == 0
-
-    # A second move before rendering must not reuse the previous event's matches.
-    model.move_search_occurrence(1)
+    model.move_or_scroll(1)
     assert model.cursor == 2
+    model.move_or_scroll(-1)
+    assert model.cursor == 1
 
 
 def test_event_explorer_query_change_clears_cached_occurrences() -> None:
@@ -101,15 +100,12 @@ def test_event_explorer_query_change_clears_cached_occurrences() -> None:
         )
     )
     model = EventExplorerModel(rows)
-    model._last_detail_match_lines = [0]
-    model._last_detail_match_occurrences = [(0, 0), (0, 1)]
 
     model.edit_query("beta")
 
     assert model._last_detail_match_lines == []
     assert model._last_detail_match_occurrences == []
-    model.move_search_occurrence(1)
-    assert model.cursor == 1
+    assert model.search_line_cursor == 0
 
 
 def test_event_explorer_renders_shared_session_events() -> None:
