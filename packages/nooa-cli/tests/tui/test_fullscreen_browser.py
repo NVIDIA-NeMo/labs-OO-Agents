@@ -606,7 +606,7 @@ def test_explorer_browser_handle_key_scroll_up_detail() -> None:
 
 
 def test_explorer_browser_navigate_vertical_jumps_search_matches() -> None:
-    """When search is active, up/down jumps between matches instead of moving list selection."""
+    """List focus moves between matching rows even while search is active."""
 
     class _MatchRow:
         search_text = "alpha beta alpha"
@@ -615,7 +615,7 @@ def test_explorer_browser_navigate_vertical_jumps_search_matches() -> None:
 
     browser = _browser()
     browser.model.rows.clear()
-    browser.model.rows.append(_MatchRow())
+    browser.model.rows.extend([_MatchRow(), _MatchRow()])
     browser.model.set_query("")
     browser.list_control.viewport = (80, 4)
     browser.preview_control.viewport = (80, 4)
@@ -627,14 +627,37 @@ def test_explorer_browser_navigate_vertical_jumps_search_matches() -> None:
 
     assert browser.model.search_active is True
 
-    # Populate match lines (as detail_lines would)
-    browser.model._last_detail_match_lines = [0, 2]
-    browser.model._last_detail_visible_lines = 4
-
-    # Down should jump to match, not move cursor
+    # List focus always moves between matching rows (the /resume contract);
+    # detail matches are stepped from preview focus only.
     browser.navigate_vertical(1)
-    assert browser.model.search_line_cursor == 1
-    assert browser.model.cursor == 0  # selection stays
+    assert browser.model.cursor == 1
+    browser.navigate_vertical(-1)
+    assert browser.model.cursor == 0
+
+
+def test_explorer_browser_preview_focus_steps_detail_matches() -> None:
+    """Preview-focus up/down cycles the detail's search matches (like /resume)."""
+    browser = _browser()
+
+    class _MatchRow:
+        search_text = "alpha beta alpha"
+        title = "Match Row"
+
+    browser.model.rows.clear()
+    browser.model.rows.append(_MatchRow())
+    browser.model.set_query("")
+    browser.buffer.text = "alpha"
+    browser.view.detail_lines = lambda _row, _width: ["alpha one", "mid", "alpha two"]
+    browser.preview_control.viewport = (40, 4)
+    browser.active_control = "preview"
+
+    browser.navigate_vertical(1)
+
+    transcript = browser._preview_transcript(40, 4)
+    assert transcript is not None
+    position, total = transcript.search_position
+    assert total >= 2
+    assert position == 2
 
 
 def test_explorer_browser_search_match_boundary_moves_to_next_row() -> None:
@@ -647,11 +670,9 @@ def test_explorer_browser_search_match_boundary_moves_to_next_row() -> None:
 
     browser.navigate_vertical(1)
 
+    # Unified contract: list focus moves rows; stale cached detail matches
+    # from the previous row must not steer navigation.
     assert browser.model.cursor == 1
-    assert browser.model._last_detail_match_lines == []
-    assert browser.model.search_line_cursor == 0
-
-    # A second move before rendering must not reuse the previous row's matches.
     browser.navigate_vertical(1)
     assert browser.model.cursor == 2
 

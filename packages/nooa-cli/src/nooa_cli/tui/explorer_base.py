@@ -306,15 +306,12 @@ class ExplorerModel:
         self.search_line_cursor = 0
 
     def move_or_scroll(self, delta: int) -> None:
-        if self.search_active and self._last_detail_match_lines:
-            if self._move_detail_match(delta):
-                return
-            old_cursor = self.cursor
-            self.move(delta)
-            if self.cursor != old_cursor:
-                self._last_detail_match_lines = []
-                self.search_line_cursor = 0 if delta > 0 else 10**9
-        elif self.focus == "list":
+        """Shared navigation contract: list focus moves rows; detail scrolls.
+
+        Preview-match stepping is owned by the browser's transcript search
+        (like /resume), not by the model.
+        """
+        if self.focus == "list":
             self.move(delta)
         else:
             self.scroll_detail(delta)
