@@ -16,8 +16,9 @@ import types
 import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast, get_type_hints
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from pydantic import BaseModel
@@ -2684,47 +2685,26 @@ class ActorRuntime:
                 # Use strategy's execute() method directly
                 from nooa.strategies.current_call import CurrentCall
 
-                # Expand {placeholders} in method docstring using call arguments
+                # Build the call from the original method so annotation metadata and
+                # pre-ellipsis source are extracted by the same path used by prompt
+                # inspection. Runtime-only state is overlaid below.
+                original_method = getattr(method, "_original", method)
+                parent_id = self._agent_call_stack[-2] if len(self._agent_call_stack) >= 2 else None
+                call = CurrentCall.from_method(
+                    original_method,
+                    args=args,
+                    kwargs=kwargs,
+                    parent_id=parent_id,
+                )
+
+                # Preserve the runtime's docstring expansion behavior. from_method()
+                # has already mapped positional arguments into call.kwargs.
                 raw_docstring = getattr(method, "__doc__", None)
                 expanded_docstring = None
                 if raw_docstring:
-                    # Build context: map parameter names to argument values
-                    sig = inspect.signature(method)
-                    param_names = list(sig.parameters.keys())[1:]  # Skip 'self'
-                    arg_context = dict(zip(param_names, args, strict=False))
-                    arg_context.update(kwargs)
                     expanded_docstring = await self.expand_variables(
-                        raw_docstring, extra_context=arg_context, error_mode="silent"
+                        raw_docstring, extra_context=call.kwargs, error_mode="silent"
                     )
-
-                # Build CurrentCall for the strategy
-                # Map positional args to parameter names for kwargs (like from_method does)
-                sig = inspect.signature(method)
-                param_names = [p for p in sig.parameters.keys() if p != "self"]
-                merged_kwargs = dict(kwargs)
-                for i, value in enumerate(args):
-                    if i < len(param_names):
-                        param_name = param_names[i]
-                        if param_name not in merged_kwargs:
-                            merged_kwargs[param_name] = value
-
-                # Extract return type annotation — use get_type_hints to
-                # resolve PEP 563 stringified annotations.
-                return_type = None
-                try:
-                    hints = get_type_hints(method, include_extras=True)
-                    return_annotation = hints.get("return", inspect.Signature.empty)
-                except (NameError, TypeError, AttributeError):
-                    return_annotation = sig.return_annotation
-                if return_annotation is not inspect.Signature.empty:
-                    return_type = return_annotation
-
-                # Extract pre-ellipsis code (setup code before ... marker)
-                # Use _original if method was wrapped by metaclass
-                from nooa.ellipsis_detection import get_pre_ellipsis_code
-
-                original_method = getattr(method, "_original", method)
-                pre_ellipsis_code = get_pre_ellipsis_code(original_method)
 
                 # Use the call_id already pushed by the wrapper so events added
                 # during this call have metadata["call_id"] matching the agent
@@ -2733,24 +2713,11 @@ class ActorRuntime:
                 # _prepare_context uses _agent_call_id (the stack value) for
                 # EventQuery.current_call() filtering, not current_call.id.
                 call_id = self._agent_call_id or str(uuid4())
-                call = CurrentCall(
+                call = replace(
+                    call,
                     id=call_id,
-                    method_name=method_name,
-                    decorator="plan",
-                    signature=str(sig),
                     docstring=expanded_docstring,
-                    args=args,
-                    kwargs=merged_kwargs,
-                    parent_id=self._agent_call_stack[-2]
-                    if len(self._agent_call_stack) >= 2
-                    else None,
-                    is_async=inspect.iscoroutinefunction(method),
-                    return_type=return_type,
-                    pre_ellipsis_code=pre_ellipsis_code,
                     session_locals=call_session_locals,
-                    # Authoritative ordered names from the live signature (excludes
-                    # 'self') so format_parameters_as_code never re-parses the string.
-                    param_names=[p for p in sig.parameters if p != "self"],
                 )
 
                 # Store current call context in context vars for RuntimeServices.generate()
