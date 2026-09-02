@@ -965,8 +965,35 @@ def _style_event_header_line(lines: list[str], width: int) -> list[str]:
     return styled
 
 
+# Cache entries hold the row itself alongside its lines so a recycled
+# ``id(row)`` can never alias a fresh row onto stale rendered lines
+# (EventExplorerRow is an eq-dataclass, so the row cannot key the dict).
+_STYLE_CACHE: dict[tuple[int, int], tuple[EventExplorerRow, list[str]]] = {}
+_STYLE_CACHE_MAX = 64
+
+
 def _styled_detail_lines(row: EventExplorerRow, width: int) -> list[str]:
-    """Return the detail pane's styled rendering (markdown or syntax colors)."""
+    """Return the memoized styled rendering (markdown or syntax colors).
+
+    Detail rendering walks the same markdown up to three times per paint
+    (match lines, occurrences, highlighted output) and again on measurement;
+    Rich renders of large event payloads dominate that cost. The rendering
+    is a pure function of (row, width) and rows are immutable, so cache it.
+    """
+    width = max(int(width), 20)
+    key = (id(row), width)
+    cached = _STYLE_CACHE.get(key)
+    if cached is not None and cached[0] is row:
+        return cached[1]
+    lines = _render_styled_detail_lines(row, width)
+    if len(_STYLE_CACHE) >= _STYLE_CACHE_MAX:
+        _STYLE_CACHE.clear()
+    _STYLE_CACHE[key] = (row, lines)
+    return lines
+
+
+def _render_styled_detail_lines(row: EventExplorerRow, width: int) -> list[str]:
+    """Render the detail pane's styled lines (uncached)."""
     width = max(int(width), 20)
     lines: list[str] = []
     if row.markdown is not None:
