@@ -240,11 +240,11 @@ def test_options_mode_selects_and_changes_filter_and_sort() -> None:
     app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
     picker = ResumePicker([row("1", "one")], app)
     picker.toggle_options()
-    assert picker.option_cursor == "filter"
+    assert picker.option_cursor == 0  # Filter option row
     picker.change_option()
     assert picker.model.state_filter == "attached"
     picker.move_option(1)
-    assert picker.option_cursor == "sort"
+    assert picker.option_cursor == 1  # Sort option row
     picker.change_option()
     assert picker.model.sort_updated is False
     assert picker.close_options()
@@ -271,17 +271,17 @@ def test_only_selected_option_is_highlighted_in_options_mode() -> None:
     app = MagicMock()
     app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
     picker = ResumePicker([row("1", "one")], app)
-    assert "control-focused" not in picker.filter_control._text()[0][0]
-    assert "control-focused" not in picker.sort_control._text()[0][0]
+    assert "control-focused" not in picker.option_controls[0]._text()[0][0]
+    assert "control-focused" not in picker.option_controls[1]._text()[0][0]
     picker.toggle_options()
     assert "control-focused" not in picker._search_label()[0][0]
     assert "control-focused" not in picker._search_close()[0][0]
     assert "control-focused" not in picker.query_window.style()
-    assert "control-focused" in picker.filter_control._text()[0][0]
-    assert "control-focused" not in picker.sort_control._text()[0][0]
+    assert "control-focused" in picker.option_controls[0]._text()[0][0]
+    assert "control-focused" not in picker.option_controls[1]._text()[0][0]
     picker.move_option(1)
-    assert "control-focused" not in picker.filter_control._text()[0][0]
-    assert "control-focused" in picker.sort_control._text()[0][0]
+    assert "control-focused" not in picker.option_controls[0]._text()[0][0]
+    assert "control-focused" in picker.option_controls[1]._text()[0][0]
 
 
 def test_active_rail_marks_only_current_area() -> None:
@@ -652,7 +652,8 @@ async def test_filter_change_prepares_new_preview_without_blocking(monkeypatch) 
         return FullscreenTranscriptModel(show_trailing_blank=False)
 
     monkeypatch.setattr(ResumePicker, "_build_preview_model", staticmethod(build_preview))
-    picker.cycle_filter()
+    # Change the filter through the shared option, as the UI does.
+    picker.view.options[0].move(1)
 
     key = ("attached", 40)
     assert key in picker._preview_tasks
@@ -891,7 +892,7 @@ async def test_real_prompt_toolkit_routes_search_navigation_and_cancel(monkeypat
         picker.buffer.text = ""
         await harness.wait_for(lambda: picker.model.query == "")
         await harness.press("c-o")
-        await harness.wait_for(lambda: picker.option_cursor == "filter")
+        await harness.wait_for(lambda: picker.option_cursor == 0)
         await harness.type_keys("x")
         await harness.press("option-backspace")
         await asyncio.sleep(0)
@@ -903,7 +904,7 @@ async def test_real_prompt_toolkit_routes_search_navigation_and_cancel(monkeypat
         await harness.wait_for(lambda: picker.model.state_filter == "all")
         assert {match.row.id for match in picker.model.matches} == {"session-1", "session-2"}
         await harness.press("right")
-        await harness.wait_for(lambda: picker.option_cursor == "sort")
+        await harness.wait_for(lambda: picker.option_cursor == 1)
         await harness.type_keys(" ")
         await harness.wait_for(lambda: not picker.model.sort_updated)
         await harness.press("enter")
@@ -944,7 +945,7 @@ async def test_ctrl_c_cancels_picker_while_options_are_open(monkeypatch) -> None
         opened = asyncio.create_task(harness.app.open_session_resume_dialog())
         await harness.wait_for(lambda: harness.app._resume_picker is not None)
         await harness.press("c-o")
-        await harness.wait_for(lambda: harness.app._resume_picker.option_cursor == "filter")
+        await harness.wait_for(lambda: harness.app._resume_picker.option_cursor == 0)
         await harness.press("c-c")
         assert await asyncio.wait_for(opened, 1) is None
         assert harness.app._resume_picker is None
