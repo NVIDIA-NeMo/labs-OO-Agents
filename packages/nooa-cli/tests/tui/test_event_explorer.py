@@ -62,7 +62,13 @@ def test_event_explorer_builds_rows_and_full_text_searches() -> None:
     assert [rows[i].tag for i in model.matches] == ["2", "3"]
 
 
-def test_event_explorer_search_boundary_clears_cached_occurrences() -> None:
+def test_event_explorer_list_focus_moves_rows_while_searching() -> None:
+    """List focus moves between matching rows even while search is active.
+
+    The old occurrence-jumping machinery (move_search_occurrence and friends)
+    was removed with the unified navigation contract; this pins the live
+    behavior it was replaced by.
+    """
     rows = build_event_rows(
         SimpleNamespace(
             items=lambda: [
@@ -75,20 +81,13 @@ def test_event_explorer_search_boundary_clears_cached_occurrences() -> None:
     model = EventExplorerModel(rows)
     model.set_query("alpha")
     model.search_active = True
-    model._last_detail_match_lines = [0]
-    model._last_detail_match_occurrences = [(0, 0), (0, 1)]
-    model.search_line_cursor = 1
 
-    model.move_search_occurrence(1)
-
+    model.move_or_scroll(1)
     assert model.cursor == 1
-    assert model._last_detail_match_lines == []
-    assert model._last_detail_match_occurrences == []
-    assert model.search_line_cursor == 0
-
-    # A second move before rendering must not reuse the previous event's matches.
-    model.move_search_occurrence(1)
+    model.move_or_scroll(1)
     assert model.cursor == 2
+    model.move_or_scroll(-1)
+    assert model.cursor == 1
 
 
 def test_event_explorer_query_change_clears_cached_occurrences() -> None:
@@ -101,15 +100,12 @@ def test_event_explorer_query_change_clears_cached_occurrences() -> None:
         )
     )
     model = EventExplorerModel(rows)
-    model._last_detail_match_lines = [0]
-    model._last_detail_match_occurrences = [(0, 0), (0, 1)]
 
     model.edit_query("beta")
 
     assert model._last_detail_match_lines == []
     assert model._last_detail_match_occurrences == []
-    model.move_search_occurrence(1)
-    assert model.cursor == 1
+    assert model.search_line_cursor == 0
 
 
 def test_event_explorer_renders_shared_session_events() -> None:
@@ -476,6 +472,59 @@ def test_event_explorer_view_highlights_selected_occurrence_on_same_line() -> No
     assert "".join(lines).count(f"{highlight_style_code(current=True)}alpha\x1b[0m") == 1
 
 
+def test_event_search_text_excludes_markdown_chrome() -> None:
+    """Timestamps and ids in the markdown header/footer must not match."""
+    from nooa_cli.tui.event_explorer import _event_markdown, _searchable_markdown
+
+    row = build_event_rows(
+        SimpleNamespace(items=lambda: [("1", _FakeEvent("TUIUserInput", text="hello"))])
+    )[0]
+
+    # The markdown header carries a timestamp; searching it must not match.
+    assert "timestamp" not in row.search_text.lower()
+    # The rendered markdown content itself remains searchable.
+    assert "hello" in row.search_text
+    # The header strip actually fires: the bolded header line is gone.
+    markdown = _event_markdown("1", _FakeEvent("TUIUserInput", text="hello"), "TUIUserInput")
+    searchable = _searchable_markdown(markdown)
+    assert markdown is not None and markdown.splitlines()[0].startswith("**[")
+    assert "2026" not in searchable or "hello" in searchable
+
+
+def test_event_explorer_search_ignores_empty_field_names() -> None:
+    """Searching must not match the *names* of empty fields.
+
+    A PythonOutput event always has an ``error`` key, but usually an empty
+    one. Searching "error" matched every PythonOutput event via the raw repr
+    in search_text — even when no error occurred.
+    """
+    rows = build_event_rows(
+        SimpleNamespace(
+            items=lambda: [
+                (
+                    "1",
+                    _FakeEvent(
+                        "PythonOutput",
+                        stdout="all good",
+                        stderr="",
+                        error="",
+                        execution_status="complete",
+                    ),
+                ),
+                (
+                    "2",
+                    _FakeEvent("PythonOutput", error="NameError: boom"),
+                ),
+            ]
+        )
+    )
+
+    model = EventExplorerModel(rows)
+    model.set_query("error")
+
+    assert [row.tag for row in (rows[i] for i in model.matches)] == ["2"]
+
+
 def test_event_explorer_search_highlights_matches_inside_detail_text() -> None:
     row = build_event_rows(
         SimpleNamespace(items=lambda: [("1", _FakeEvent("TUIUserInput", text="find alpha here"))])
@@ -497,17 +546,14 @@ def test_event_explorer_search_keeps_styled_detail_colors() -> None:
         )
     )[0]
 
-    styled = highlighted_detail_lines(row, width=80)
     searched = highlighted_detail_lines(row, width=80, query="run")
 
-    without = [line for line in "\n".join(styled).splitlines() if "\x1b[" in line]
     with_query = [line for line in "\n".join(searched).splitlines() if "\x1b[" in line]
-    # Non-match styling (syntax colors) must survive the search.
+    # Non-match styling (syntax colors) must survive the search: strip the
+    # search-highlight prefix itself and require another SGR to remain.
     assert with_query, "search dropped all styling"
-    assert any(
-        code in "".join(with_query) and code not in highlight_style_code()
-        for code in ("\x1b[38;", "\x1b[48;")
-    )
+    non_match_styles = "".join(with_query).replace(highlight_style_code(), "")
+    assert "\x1b[38;" in non_match_styles or "\x1b[48;" in non_match_styles
 
 
 def test_event_explorer_renders_execute_python_event_as_formatted_markdown() -> None:

@@ -15,6 +15,7 @@ from .explorer_base import (
     ExplorerOption,
     ExplorerView,
     highlight_style_code,
+    matches_all_terms,
     search_terms,
     wrap_plain_line,
 )
@@ -95,12 +96,12 @@ class EventExplorerModel:
 
     def set_query(self, query: str) -> None:
         self.query = query
-        words = [w.lower() for w in query.split() if w.strip()]
+        terms = [w for w in query.split() if w.strip()]
         self.matches = [
             i
             for i, row in enumerate(self.rows)
             if row.event_type in self.enabled_types
-            and (not words or all(word in row.search_text.lower() for word in words))
+            and matches_all_terms(terms, row.search_text)
         ]
         if self.sort_mode == "type":
             self.matches.sort(key=lambda index: (self.rows[index].event_type, index))
@@ -129,49 +130,15 @@ class EventExplorerModel:
         self.detail_offset = 0
         self.search_line_cursor = 0
 
-    def current_search_line(self) -> int | None:
-        if self._last_detail_match_occurrences:
-            match_count = len(self._last_detail_match_occurrences)
-            self.search_line_cursor = min(max(self.search_line_cursor, 0), match_count - 1)
-            return self._last_detail_match_occurrences[self.search_line_cursor][0]
-        if self._last_detail_match_lines:
-            match_count = len(self._last_detail_match_lines)
-            self.search_line_cursor = min(max(self.search_line_cursor, 0), match_count - 1)
-            return self._last_detail_match_lines[self.search_line_cursor]
-        return None
-
-    def center_detail_on_line(self, line: int, visible_lines: int | None = None) -> None:
-        visible = max(
-            visible_lines if visible_lines is not None else self._last_detail_visible_lines, 1
-        )
-        self.detail_offset = max(line - visible // 2, 0)
-        self.clamp_detail_offset(visible)
-
-    def move_search_occurrence(self, delta: int) -> None:
-        if not self.matches:
-            return
-        match_count = len(self._last_detail_match_occurrences) or len(self._last_detail_match_lines)
-        if not match_count:
-            self.move(delta)
-            return
-        next_cursor = self.search_line_cursor + delta
-        if 0 <= next_cursor < match_count:
-            self.search_line_cursor = next_cursor
-            target = self.current_search_line()
-            if target is not None:
-                self.center_detail_on_line(target)
-            return
-        old_cursor = self.cursor
-        self.move(delta)
-        if self.cursor != old_cursor:
-            self._last_detail_match_lines = []
-            self._last_detail_match_occurrences = []
-            self.search_line_cursor = 0 if delta > 0 else 10**9
-
     def move_or_scroll(self, delta: int) -> None:
-        if self.search_active and self.focus == "list":
-            self.move_search_occurrence(delta)
-        elif self.focus == "list":
+        """Match the shared navigation contract: list focus moves rows.
+
+        Detail-match stepping is owned by the browser's preview search (the
+        transcript's move_search_match), exactly like /resume — the old
+        list-focus occurrence jumping made the same arrow keys behave
+        differently in every browser.
+        """
+        if self.focus == "list":
             self.move(delta)
         else:
             self.scroll_detail(delta)
@@ -191,7 +158,11 @@ class EventExplorerModel:
         self.focus = "detail" if self.focus == "list" else "list"
 
     def scroll_detail(self, delta: int) -> None:
-        max_offset = max(self._last_detail_line_count - 1, 0)
+        # Clamp to the last *visible* window (count - visible), like the base
+        # ExplorerModel — the old count-1 clamp let the pane wheel nearly a
+        # full page past the last line.
+        visible = max(self._last_detail_visible_lines, 1)
+        max_offset = max(self._last_detail_line_count - visible, 0)
         self.detail_offset = min(max(self.detail_offset + delta, 0), max_offset)
 
     def page_detail(self, delta: int) -> None:
@@ -207,16 +178,15 @@ class EventExplorerView(ExplorerView):
 
     item_name = "event"
     list_heading = "  id       event type              summary"
+    # detail_lines embeds its own styled search highlighting with
+    # occurrence navigation (search_line_cursor), so it opts out of the
+    # browser's generic term highlighting.
+    handles_search_highlighting = True
 
     def __init__(self, event_manager: Any) -> None:
         super().__init__(
             EventExplorerModel(build_event_rows(event_manager)),
-            ExplorerConfig(
-                title="Event Explorer",
-                detail_pane_name="event detail",
-                empty_message="No events recorded.",
-                no_match_message="No events matching {query!r}.",
-            ),
+            ExplorerConfig(title="Event Explorer"),
         )
         event_types = tuple(sorted(self.model.enabled_types, key=str.casefold))
 
@@ -343,6 +313,8 @@ class EventExplorerView(ExplorerView):
 
 
 def _event_to_mapping(event: Any) -> dict[str, Any]:
+    if isinstance(event, dict):
+        return event
     if hasattr(event, "model_dump"):
         try:
             return event.model_dump()
@@ -403,6 +375,51 @@ def _extract_fenced_code(text: str) -> tuple[str, str] | None:
     return match.group(2).rstrip("\n"), language
 
 
+def _searchable_markdown(markdown: str | None) -> str:
+    """Markdown stripped of the header line and metadata footer.
+
+    ``_event_markdown`` always emits a header line and a metadata footer
+    containing timestamps and ids. Those are chrome, not content; leaving
+    them in search text would let noise fields (timestamp, id) match a
+    query again even though ``_searchable_detail`` excludes them.
+    """
+    if not markdown:
+        return ""
+    lines = markdown.splitlines()
+    # Drop the leading header line ("**[tag]** *Type* · timestamp · id=…").
+    # Rich markdown emphasis wraps the tag in **…**, so match the bolded
+    # form (a bare "[" never matches and the strip never fired).
+    if lines and lines[0].lstrip().startswith("**["):
+        lines = lines[1:]
+    # Drop the trailing metadata footer (everything from the last rule).
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index].strip().startswith("---"):
+            lines = lines[:index]
+            break
+    return "\n".join(lines)
+
+
+def _searchable_detail(event: Any, event_type: str) -> str:
+    """Repr dump restricted to fields a user can actually see.
+
+    ``_format_detail`` includes every field — even empty and noise ones — so
+    searching it matches field *names*: a PythonOutput event with an empty
+    ``error`` would match the query "error". Only non-empty, non-noise fields
+    participate in search text.
+    """
+    data = _event_to_mapping(event)
+    fields = [
+        (key, value)
+        for key, value in data.items()
+        if key != "event_type"
+        and key not in _NOISE_FIELDS
+        and not _is_empty_event_field(value)
+    ]
+    if not fields:
+        return ""
+    return f"{event_type}(" + ", ".join(f"{key}={value!r}" for key, value in fields) + ")"
+
+
 def _event_code(event: Any, event_type: str) -> tuple[str | None, str]:
     if event_type == "ToolCallEvent" and getattr(event, "name", None) in _PYTHON_TOOL_NAMES:
         args = getattr(event, "arguments", {})
@@ -447,6 +464,9 @@ _NOISE_FIELDS = {
     "trace_id",
     "span_id",
     "tool_call_id",
+    # Provider reasoning blobs (KBs per tool call) are opaque chrome in the
+    # detail pane — never dump them into the repr or search text.
+    "reasoning_items",
 }
 
 _RENDERED_FIELD_ORDER = {
@@ -789,7 +809,11 @@ def build_event_rows(event_manager: Any) -> list[EventExplorerRow]:
         detail = _format_detail(str(tag), event)
         code, code_language = _event_code(event, event_type)
         markdown = _event_markdown(str(tag), event, event_type)
-        search_text = f"{tag} {event_type} {summary} {detail} {code or ''} {markdown or ''}"
+        search_text = (
+            f"{tag} {event_type} {summary} "
+            f"{_searchable_detail(event, event_type)} {code or ''} "
+            f"{_searchable_markdown(markdown)}"
+        )
         rows.append(
             EventExplorerRow(
                 tag=str(tag),
@@ -984,6 +1008,20 @@ def _plain_offset_map(styled: str) -> list[int]:
     return mapping
 
 
+def _active_sgr_before(styled: str, position: int) -> str:
+    """Return the SGR state active at *position* (excluding resets)."""
+    import re as _re
+
+    active: list[str] = []
+    for match in _re.finditer(r"\x1b\[([0-9;]*)m", styled[:position]):
+        codes = match.group(1)
+        if codes == "0" or codes == "":
+            active.clear()
+        else:
+            active.append(match.group(0))
+    return "".join(active)
+
+
 def _highlight_line_terms(
     styled: str, terms: list[str], *, current_occurrence: int | None = None
 ) -> str:
@@ -1008,7 +1046,11 @@ def _highlight_line_terms(
         current = current_occurrence is not None and occurrence == current_occurrence
         start, stop = offsets[match.start()], offsets[match.end() - 1] + 1
         insertions.append((start, highlight_style_code(current=current)))
-        insertions.append((stop, "\x1b[0m"))
+        # Reapply the styling that was active at the match boundary: a
+        # match inside a styled token must not strip the token's remaining
+        # characters of their color.
+        active_style = _active_sgr_before(styled, start)
+        insertions.append((stop, f"\x1b[0m{active_style}" if active_style else "\x1b[0m"))
         occurrence += 1
     if not insertions:
         return styled
