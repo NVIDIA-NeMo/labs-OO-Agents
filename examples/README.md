@@ -17,7 +17,7 @@ Most quickstarts use the model selector in
 [`nooa.util.quickstart`](../src/nooa/util/quickstart.py), which chooses a default
 from the provider credentials in your environment. See the root README's
 [Choose a model](../README.md#1-choose-a-model) section when adapting an example
-to use an explicit model. For Ollama and vLLM setup, see
+to use an explicit model. For local LLM setup, see
 [Running NOOA With Local Models](../docs/local-models.md).
 
 NOOA can execute LLM-generated Python. Run code-executing agents in an OS-level
