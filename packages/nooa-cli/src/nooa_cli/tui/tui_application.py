@@ -2539,78 +2539,42 @@ class TUIApplication:
             if selected is not None:
                 self._finish_resume_picker(selected)
 
-        @kb.add("up", filter=resume_picker_active, eager=True)
-        @kb.add("c-p", filter=resume_picker_active, eager=True)
-        def _(event):
-            if self._resume_picker is not None:
-                self._resume_picker.navigate_vertical(-1)
-                event.app.invalidate()
+        # Navigation and options dispatch through the shared
+        # ExplorerBrowser.handle_key via the picker's view facade — the same
+        # code path every explorer uses. Only the lifecycle keys above stay
+        # host-bound: finishing the dialog is a host concern.
+        _picker_key_map = {
+            "up": ("up", ""),
+            "c-p": ("up", ""),
+            "down": ("down", ""),
+            "c-n": ("down", ""),
+            "left": ("left", ""),
+            "right": ("right", ""),
+            "tab": ("tab", ""),
+            "s-tab": ("s-tab", ""),
+            " ": ("space", ""),
+            "c-o": ("options", ""),
+            "home": ("home", ""),
+            "end": ("end", ""),
+            "pageup": ("page_up", ""),
+            "pagedown": ("page_down", ""),
+        }
 
-        @kb.add("down", filter=resume_picker_active, eager=True)
-        @kb.add("c-n", filter=resume_picker_active, eager=True)
-        def _(event):
-            if self._resume_picker is not None:
-                self._resume_picker.navigate_vertical(1)
-                event.app.invalidate()
-
-        @kb.add("left", filter=resume_picker_active, eager=True)
-        def _(event):
-            if self._resume_picker is not None:
-                self._resume_picker.move_horizontal(-1)
-
-        @kb.add("right", filter=resume_picker_active, eager=True)
-        def _(event):
-            if self._resume_picker is not None:
-                self._resume_picker.move_horizontal(1)
-
-        @kb.add("tab", filter=resume_picker_active, eager=True)
-        def _(event):
-            if self._resume_picker is not None:
-                self._resume_picker.focus_next()
-
-        @kb.add("s-tab", filter=resume_picker_active, eager=True)
-        def _(event):
-            if self._resume_picker is not None:
-                self._resume_picker.focus_previous()
-
-        @kb.add(" ", filter=resume_picker_active, eager=True)
-        def _(event):
+        def _picker_handle_key(event, action: str) -> None:
             picker = self._resume_picker
             if picker is None:
                 return
-            if picker.option_cursor is not None:
-                picker.change_option()
-            elif picker.active_control == "list":
-                picker.buffer.insert_text(" ")
+            result = normalize_key_result(picker.handle_key(action, ""))
+            if result == "close":
+                selected = picker.view.pending_input
+                self._finish_resume_picker(selected)
+            event.app.invalidate()
 
-        @kb.add("c-o", filter=resume_picker_active, eager=True)
-        def _(event):
-            if self._resume_picker is not None:
-                self._resume_picker.toggle_options()
+        for _key, (_action, _value) in _picker_key_map.items():
 
-        @kb.add("home", filter=resume_picker_active, eager=True)
-        def _(event):
-            picker = self._resume_picker
-            if picker is not None:
-                picker.model.jump_home()
-                picker.invalidate()
-
-        @kb.add("end", filter=resume_picker_active, eager=True)
-        def _(event):
-            picker = self._resume_picker
-            if picker is not None:
-                picker.model.jump_end()
-                picker.invalidate()
-
-        @kb.add("pageup", filter=resume_picker_active, eager=True)
-        def _(event):
-            if self._resume_picker is not None:
-                self._resume_picker.page(-1)
-
-        @kb.add("pagedown", filter=resume_picker_active, eager=True)
-        def _(event):
-            if self._resume_picker is not None:
-                self._resume_picker.page(1)
+            @kb.add(_key, filter=resume_picker_active, eager=True)
+            def _(event, _action=_action):
+                _picker_handle_key(event, _action)
 
         input_selection_active = (
             Condition(lambda: self.input_buffer.selection_state is not None) & subview_inactive

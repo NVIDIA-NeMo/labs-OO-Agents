@@ -622,25 +622,32 @@ class _PickerControl(FormattedTextControl):
 class ResumePicker(ExplorerBrowser):
     """Session-specific ExplorerBrowser with asynchronous replay previews.
 
-    The host owns this picker's key dispatch (it never routes through
-    ``ExplorerBrowser.handle_key``), but inherited helpers dereference
-    ``self.view``. Expose a minimal facade so an accidental inherited call
-    degrades gracefully instead of raising ``AttributeError``.
+    Navigation and options dispatch through the inherited
+    ``ExplorerBrowser.handle_key`` via the view facade; only the picker's
+    lifecycle keys (Escape/Enter/Ctrl-C) stay host-bound because finishing
+    the dialog is a host concern, not a view action.
     """
 
     class _ViewFacade:
+        """View contract for the shared ``ExplorerBrowser.handle_key``."""
+
         config = SimpleNamespace(actions={})
         item_name = "session"
 
-        def __init__(self, options: tuple[ExplorerOption, ...] = ()) -> None:
+        def __init__(self, picker: ResumePicker, options: tuple[ExplorerOption, ...]) -> None:
+            self._picker = picker
             self.options = options
+            self.pending_input: str | None = None
 
-        @staticmethod
-        def handle_key(_action: str, _value: str = "") -> str:
+        def handle_key(self, _action: str, _value: str = "") -> str:
             return "handled"
 
-        @staticmethod
-        def handle_action(_action: str, _row: Any) -> str:
+        def handle_action(self, action: str, row: Any) -> str:
+            if action == "enter" and row is not None:
+                selected = self._picker.selected_id()
+                if selected is not None:
+                    self.pending_input = selected
+                    return "close"
             return "ignored"
 
     @property
@@ -668,7 +675,7 @@ class ResumePicker(ExplorerBrowser):
         # Real option rows drive the shared option controls and the inherited
         # options mode; their callbacks mirror the model's cycle/toggle
         # semantics (restart from the top, refresh the prepared preview).
-        self._view_facade = ResumePicker._ViewFacade(self._build_view_options())
+        self._view_facade = ResumePicker._ViewFacade(self, self._build_view_options())
         self._selection_copy_callback = selection_copy_callback
         self._selection_status = selection_status
         self._preview_models: dict[tuple[str, int], Any] = {}
@@ -859,29 +866,6 @@ class ResumePicker(ExplorerBrowser):
         self.list_header_control._fragment_cache.clear()
         self.preview_header_control._fragment_cache.clear()
         self.app.invalidate()
-
-    def activate_control(self, name: str) -> None:
-        self.active_control = name
-        controls = {
-            "list": self.query_control,
-            "preview": self.preview_control,
-        }
-        self.app.layout.focus(controls[name])
-        self.invalidate()
-
-    def focus_previous(self) -> None:
-        self.focus_next(-1)
-
-    def move_horizontal(self, delta: int) -> None:
-        if self.option_cursor is not None:
-            self.move_option(delta)
-            return
-        if self.active_control != "list" or not delta:
-            return
-        if delta < 0:
-            self.buffer.cursor_left(count=1)
-        else:
-            self.buffer.cursor_right(count=1)
 
     def navigate_vertical(self, delta: int) -> None:
         if self.option_cursor is not None:
