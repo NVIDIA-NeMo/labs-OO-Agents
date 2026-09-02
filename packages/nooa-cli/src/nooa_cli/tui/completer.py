@@ -227,7 +227,7 @@ class Completer:
                 return self._skill_id_completions(text, prefix)
 
         # Session ID completion
-        for prefix in ("/session resume ", "/session delete "):
+        for prefix in ("/session resume ", "/session delete ", "/resume "):
             if lower.startswith(prefix.lower()):
                 return self._session_id_completions(text, prefix)
 
