@@ -490,6 +490,83 @@ async def test_model_switch_owns_deferred_prompts_before_old_probe_finishes(monk
     app.reject_deferred_messages.assert_not_called()
 
 
+async def test_cancelled_model_probe_still_resolves_deferred_prompt_ownership(monkeypatch):
+    """A cancelled /model probe must not strand deferred startup prompts.
+
+    Cancellation is a BaseException in Python 3.13; the old ``except
+    Exception`` let a cancelled probe skip _mark_model_check_failed after
+    _begin_model_validation had taken prompt ownership, so deferred prompts
+    waited forever.
+    """
+    import asyncio
+
+    from nooa_cli.tui.commands import ModelCommand
+    from nooa_cli.tui.health_check import HealthCheckResult
+    from nooa_cli.tui.session import Session
+
+    old_llm = SimpleNamespace(model="old/model")
+    candidate = SimpleNamespace(model="new/model")
+    agent = SimpleNamespace(
+        llm=old_llm,
+        set_llm=lambda llm: setattr(agent, "llm", llm),
+    )
+    registry = SimpleNamespace(
+        blocking_llm_health=HealthCheckResult(
+            ok=False,
+            error_message="Checking old model.",
+            blocking=True,
+            pending=True,
+        ),
+        llm_health_generation=0,
+        startup_info=SimpleNamespace(llm_ready=False, llm_status="checking"),
+    )
+    app = SimpleNamespace(
+        invalidate=Mock(),
+        set_llm_probe_status=Mock(),
+        release_deferred_messages=Mock(),
+        reject_deferred_messages=Mock(),
+        refresh_transcript_blocks=Mock(return_value=True),
+    )
+    session = Session.__new__(Session)
+    session.agent = agent
+    session.registry = registry
+    session.frontend = SimpleNamespace(render=AsyncMock())
+    session._app = app
+    session._background_tasks = set()
+
+    probe_gate = asyncio.Event()
+
+    async def hanging_probe(llm):
+        await probe_gate.wait()
+        return HealthCheckResult(ok=True)
+
+    monkeypatch.setattr("nooa_cli.tui.health_check.probe_llm", hanging_probe)
+    monkeypatch.setattr("nooa_cli.tui.config.get_llm_for_model", lambda _model: candidate)
+    monkeypatch.setattr("nooa.interactive.apply_model_limits", lambda _agent: None)
+
+    command = ModelCommand(
+        AsyncMock(),
+        SimpleNamespace(default_model="old/model"),
+        agent,
+        registry=registry,
+    )
+    command.frontend._app = app
+    command._persist_tui_setting = lambda _key, _value: Path("settings.yaml")
+    command._agent_run_async = lambda fn: asyncio.sleep(0, result=fn())
+
+    switch_task = asyncio.create_task(command.execute(["new/model"]))
+    await asyncio.sleep(0)
+    assert registry.llm_health_generation == 1  # ownership transferred
+
+    switch_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await switch_task
+
+    # Ownership resolved: deferred prompts were rejected, never stranded.
+    app.reject_deferred_messages.assert_called_once()
+    app.release_deferred_messages.assert_not_called()
+
+
 async def asyncio_wait_for_background_tasks(session) -> None:
     import asyncio
 
