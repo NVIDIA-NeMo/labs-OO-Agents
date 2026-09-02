@@ -821,6 +821,9 @@ class ExplorerBrowser:
             self._detail_transcript_key = key
         transcript = self._detail_transcript
         assert transcript is not None
+        # The transcript's own search powers preview match navigation
+        # (reveal + current-match cycling) for every browser, matching /resume.
+        transcript.set_search(self.buffer.text, width=max(1, width), height=max(1, height))
         self.model._last_detail_line_count = len(transcript._display_rows(max(1, width)))
         self.model._last_detail_visible_lines = max(1, height)
         self.model.clamp_detail_offset(height)
@@ -861,13 +864,28 @@ class ExplorerBrowser:
         self.invalidate()
 
     def navigate_vertical(self, delta: int) -> None:
+        """Shared navigation contract (same as /resume).
+
+        List focus moves between matching rows; preview focus steps between
+        the detail's search matches (wrapping), scrolling when there is no
+        query or no matches.
+        """
         if self.option_cursor is not None:
             self.change_option(delta)
-        elif self.active_control == "list":
+            return
+        if self.active_control == "list":
             self._list_offset_detached = False
-            self.model.move_or_scroll(delta)
-        else:
-            self.model.move_or_scroll(delta)
+            self.model.move(delta)
+            self.invalidate()
+            return
+        width, height = self.preview_control.viewport
+        transcript = self._preview_transcript(width, height)
+        if transcript is not None and transcript.move_search_match(
+            delta, width=max(1, width), height=max(1, height)
+        ):
+            self.invalidate()
+            return
+        self.model.scroll_detail(delta)
         self.invalidate()
 
     def page(self, delta: int) -> None:

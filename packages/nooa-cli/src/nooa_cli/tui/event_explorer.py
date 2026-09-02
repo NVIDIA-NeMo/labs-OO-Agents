@@ -170,9 +170,14 @@ class EventExplorerModel:
             self.search_line_cursor = 0 if delta > 0 else 10**9
 
     def move_or_scroll(self, delta: int) -> None:
-        if self.search_active and self.focus == "list":
-            self.move_search_occurrence(delta)
-        elif self.focus == "list":
+        """Match the shared navigation contract: list focus moves rows.
+
+        Detail-match stepping is owned by the browser's preview search (the
+        transcript's move_search_match), exactly like /resume — the old
+        list-focus occurrence jumping made the same arrow keys behave
+        differently in every browser.
+        """
+        if self.focus == "list":
             self.move(delta)
         else:
             self.scroll_detail(delta)
