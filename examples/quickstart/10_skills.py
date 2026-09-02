@@ -16,7 +16,10 @@ ASSETS = Path(__file__).parent.parent / "assets"
 
 
 class FrontendAgent(Agent, llm=llm):
-    """Agent with a single file-based skill."""
+    """Use self.frontend_design.files to inspect packaged files.
+
+    Use self.frontend_design.shell for file access and script execution.
+    """
 
     frontend_design: TextSkill
 
