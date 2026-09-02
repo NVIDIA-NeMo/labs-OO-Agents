@@ -9,7 +9,11 @@ import pytest
 from nooa_cli.tui.explorer_base import ExplorerConfig, ExplorerModel, ExplorerView
 from nooa_cli.tui.fullscreen_browser import ExplorerBrowser
 from prompt_toolkit.application import Application
-from prompt_toolkit.data_structures import Size
+from prompt_toolkit.application.current import set_app
+from prompt_toolkit.data_structures import Point, Size
+from prompt_toolkit.layout.mouse_handlers import MouseHandlers
+from prompt_toolkit.layout.screen import Screen, WritePosition
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
 from prompt_toolkit.output import DummyOutput
 
 
@@ -50,6 +54,13 @@ def test_explorer_browser_uses_resume_layout_and_search() -> None:
     assert browser.handle_key("escape") == "close"
 
 
+def test_explorer_browser_shows_copy_status_in_its_footer() -> None:
+    browser = _browser()
+    browser._selection_status = lambda: "Copied 12 characters"
+
+    assert browser._help_text() == "Copied 12 characters"
+
+
 def test_explorer_browser_options_and_two_pane_focus() -> None:
     browser = _browser()
     browser.handle_key("options")
@@ -71,6 +82,127 @@ def test_explorer_browser_options_and_two_pane_focus() -> None:
     browser.handle_key("options")
     browser.handle_key("enter")
     assert browser.option_cursor is None
+
+
+def test_explorer_browser_collapses_multiline_rows() -> None:
+    browser = _browser()
+    browser.view.format_row = lambda _row, _width: "first line\n\nsecond\tline"
+
+    text = "".join(fragment[1] for fragment in browser.list_text(80, 4))
+
+    # Newlines flatten so a hostile row stays on one line; intra-line
+    # whitespace (including tab-expanded spaces) is preserved verbatim.
+    assert text.splitlines() == [
+        "  first line second    line",
+        "❯ first line second    line",
+    ]
+
+
+def test_explorer_browser_preserves_row_column_padding() -> None:
+    """Column padding from format_row must survive newline collapsing.
+
+    Regression for whitespace flattening that rendered every padded
+    explorer row (events, jobs, memories) with ragged columns.
+    """
+    browser = _browser()
+    browser.view.format_row = lambda _row, _width: "tag      PythonOutput   did a thing"
+
+    text = "".join(fragment[1] for fragment in browser.list_text(80, 1)).splitlines()[0]
+
+    assert text == "❯ tag      PythonOutput   did a thing"
+
+
+@pytest.mark.asyncio
+async def test_shared_explorer_f2_toggles_native_selection_and_cancels_drag() -> None:
+    """F2 in a shared fullscreen viewer flips mouse support and cancels drags."""
+    from types import SimpleNamespace
+
+    from nooa_cli.tui.todo_explorer import TodoExplorerView
+
+    from .tui_app_harness import MutableRecordingOutput, TUIHarness
+
+    view = TodoExplorerView(
+        [
+            SimpleNamespace(
+                id="todo-1",
+                title="F2 me",
+                status="open",
+                deps=(),
+                created_at="now",
+                notes="alpha beta gamma",
+                comments=(),
+                search_text="F2 me alpha beta gamma",
+            )
+        ]
+    )
+    async with TUIHarness(output=MutableRecordingOutput(80, 24), full_screen=True) as harness:
+        opened = asyncio.create_task(harness.app.open_subview(view))
+        await harness.wait_for(lambda: isinstance(harness.app.active_subview, ExplorerBrowser))
+        browser = harness.app.active_subview
+        await harness.wait_for(lambda: browser.preview_control.viewport[1] >= 2)
+
+        # Start a drag so F2 must cancel it.
+        preview_row = _first_preview_terminal_row(harness, browser)
+        harness._pipe.send_text(f"\x1b[<0;2;{preview_row + 1}M")
+        await harness.wait_for(lambda: browser.preview_control.dragging)
+
+        await harness.press("f2")
+        await harness.wait_for(lambda: not browser.preview_control.dragging)
+        await harness.wait_for(lambda: not bool(harness.app._app.mouse_support()))
+        assert view.native_selection is True
+
+        await harness.press("f2")
+        await harness.wait_for(lambda: bool(harness.app._app.mouse_support()))
+        assert view.native_selection is False
+
+        await harness.press("escape")
+        await asyncio.wait_for(opened, 1)
+
+
+@pytest.mark.asyncio
+async def test_preview_autoscroll_extends_selection_between_ticks() -> None:
+    """Edge autoscroll must extend the selection, not just scroll the preview."""
+    import asyncio as _asyncio
+
+    browser = _browser()
+    browser.view.detail_lines = lambda _row, _width: [f"line {i}" for i in range(20)]
+    browser.preview_control.create_content(20, 3)
+    control = browser.preview_control
+    control.mouse_handler(
+        MouseEvent(Point(0, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+    control.mouse_handler(
+        MouseEvent(Point(3, 2), MouseEventType.MOUSE_MOVE, MouseButton.LEFT, frozenset())
+    )
+    assert control.dragging
+
+    await _asyncio.sleep(0.5)
+    assert browser._detail_transcript is not None
+    assert browser._detail_transcript.selected_text()
+    before = browser.model.detail_offset
+    assert before >= 2
+
+    control.mouse_handler(
+        MouseEvent(Point(3, 2), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
+    )
+    await _asyncio.sleep(0.2)
+    assert browser.model.detail_offset == before
+    assert browser._detail_transcript.selected_text() == ""
+
+
+def test_explorer_browser_reserves_marker_column_for_alignment() -> None:
+    browser = _browser()
+    browser.view.format_row = lambda _row, _width: "aligned content"
+    browser.list_control.viewport = (80, 2)
+
+    text = "".join(fragment[1] for fragment in browser.list_text(80, 2)).splitlines()
+
+    assert len(text) == 2
+    # Content must start at the same column in both rows; only the marker
+    # glyph differs, so highlighting cannot shift text by one column.
+    assert text[1].startswith("❯ aligned content")
+    assert text[0].startswith("  aligned content")
+    assert text[0].index("aligned") == text[1].index("aligned")
 
 
 def test_explorer_browser_mouse_wheel_scrolls_list_without_moving_selection() -> None:
@@ -103,6 +235,130 @@ def test_explorer_browser_search_cursor_uses_left_and_right() -> None:
     assert browser.buffer.cursor_position == 1
     browser.handle_key("right")
     assert browser.buffer.cursor_position == 2
+
+
+def test_preview_short_detail_remains_top_aligned() -> None:
+    browser = _browser()
+    browser.view.detail_lines = lambda _row, _width: ["first", "second"]
+
+    fragments = browser.preview_text(20, 5)
+
+    assert "".join(text for _style, text, *_rest in fragments).startswith("first\nsecond")
+
+
+def test_preview_mouse_drag_copies_and_clears_highlight() -> None:
+    browser = _browser()
+    browser.view.detail_lines = lambda _row, _width: ["\x1b[31malpha\x1b[0m beta", "gamma"]
+    copied: list[str] = []
+    browser._selection_copy_callback = copied.append
+    browser.preview_control.create_content(20, 3)
+
+    browser.preview_control.mouse_handler(
+        MouseEvent(Point(0, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+    browser.preview_control.mouse_handler(
+        MouseEvent(Point(4, 1), MouseEventType.MOUSE_MOVE, MouseButton.LEFT, frozenset())
+    )
+    browser.preview_control.mouse_handler(
+        MouseEvent(Point(4, 1), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
+    )
+
+    assert copied
+    assert browser.app.clipboard.get_data().text == copied[0]
+    assert browser._detail_transcript is not None
+    assert browser._detail_transcript.selected_text() == ""
+    assert "\x1b" not in copied[0]
+
+
+def test_preview_click_clears_selection_and_modifiers_remain_native() -> None:
+    browser = _browser()
+    browser.view.detail_lines = lambda _row, _width: ["alpha beta"]
+    browser.preview_control.create_content(20, 2)
+    control = browser.preview_control
+    control.mouse_handler(
+        MouseEvent(Point(0, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+    control.mouse_handler(
+        MouseEvent(Point(3, 1), MouseEventType.MOUSE_MOVE, MouseButton.LEFT, frozenset())
+    )
+    control.mouse_handler(
+        MouseEvent(Point(3, 1), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
+    )
+    assert browser._detail_transcript is not None
+    assert browser._detail_transcript.selected_text() == ""
+
+    control.mouse_handler(
+        MouseEvent(Point(1, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+    control.mouse_handler(
+        MouseEvent(Point(1, 1), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
+    )
+    assert browser._detail_transcript.selected_text() == ""
+    modified = MouseEvent(
+        Point(0, 0), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset({MouseModifier.ALT})
+    )
+    assert control.mouse_handler(modified) is NotImplemented
+    browser.view.native_selection = True
+    native = MouseEvent(Point(0, 0), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    assert control.mouse_handler(native) is NotImplemented
+
+
+@pytest.mark.asyncio
+async def test_preview_drag_at_vertical_edge_repeats_until_release() -> None:
+    browser = _browser()
+    browser.view.detail_lines = lambda _row, _width: [f"line {i}" for i in range(20)]
+    browser.preview_control.create_content(20, 3)
+    control = browser.preview_control
+    cursor = browser.model.cursor
+    control.mouse_handler(
+        MouseEvent(Point(0, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+    control.mouse_handler(
+        MouseEvent(Point(3, 2), MouseEventType.MOUSE_MOVE, MouseButton.LEFT, frozenset())
+    )
+
+    await asyncio.sleep(0.5)
+    offset = browser.model.detail_offset
+    assert offset >= 2
+    assert browser.model.cursor == cursor
+
+    control.mouse_handler(
+        MouseEvent(Point(3, 2), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
+    )
+    await asyncio.sleep(0.2)
+    assert browser.model.detail_offset == offset
+
+
+@pytest.mark.asyncio
+async def test_preview_release_over_list_finishes_drag_and_stops_autoscroll() -> None:
+    browser = _browser()
+    browser.view.detail_lines = lambda _row, _width: [f"line {i}" for i in range(30)]
+    handlers = MouseHandlers()
+    with set_app(browser.app):
+        browser.container.write_to_screen(
+            Screen(), handlers, WritePosition(0, 0, 100, 24), "", True, None
+        )
+    control = browser.preview_control
+    control.mouse_handler(
+        MouseEvent(Point(0, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+    control.mouse_handler(
+        MouseEvent(
+            Point(3, control.viewport[1] - 1),
+            MouseEventType.MOUSE_MOVE,
+            MouseButton.LEFT,
+            frozenset(),
+        )
+    )
+    assert control.dragging
+
+    handlers.mouse_handlers[5][10](
+        MouseEvent(Point(10, 5), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
+    )
+    assert not control.dragging
+    offset = browser.model.detail_offset
+    await asyncio.sleep(0.4)
+    assert browser.model.detail_offset == offset
 
 
 @pytest.mark.asyncio
@@ -356,3 +612,92 @@ def test_explorer_query_change_clears_cached_detail_matches() -> None:
     browser.model.edit_query("alpha")
 
     assert browser.model._last_detail_match_lines == []
+
+def _first_preview_terminal_row(harness, browser) -> int:
+    """Locate the preview pane's first terminal row (0-based) via hit-testing.
+
+    Layout rows shift when the shared browser adds or removes separators, so
+    drag tests must not hardcode SGR coordinates.
+    """
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+    handlers = harness.app._app.renderer.mouse_handlers.mouse_handlers
+    for y in range(len(handlers)):
+        browser.preview_control.cancel_drag()
+        try:
+            handlers[y][1](
+                MouseEvent(Point(1, y), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+            )
+        except (IndexError, KeyError):
+            continue
+        if browser.preview_control.dragging:
+            browser.preview_control.cancel_drag()
+            return y
+    raise AssertionError("preview pane not found on screen")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["event", "todo"])
+async def test_shared_explorers_copy_drag_from_terminal_mouse_packets(kind: str) -> None:
+    """Exact mouse bindings must win over the subview text wildcard binding."""
+    from nooa_cli.tui.event_explorer import EventExplorerView
+    from nooa_cli.tui.todo_explorer import TodoExplorerRow, TodoExplorerView
+
+    from .tui_app_harness import MutableRecordingOutput, TUIHarness
+
+    if kind == "event":
+        event = MagicMock()
+        event.items.return_value = [
+            (
+                "event-1",
+                MagicMock(
+                    event_type="PythonOutput",
+                    model_dump=lambda: {
+                        "event_type": "PythonOutput",
+                        "stdout": "alpha beta gamma",
+                    },
+                ),
+            )
+        ]
+        view = EventExplorerView(event)
+    else:
+        view = TodoExplorerView(
+            [
+                TodoExplorerRow(
+                    id="todo-123",
+                    title="Copy me",
+                    status="open",
+                    deps=(),
+                    created_at="now",
+                    notes="alpha beta gamma",
+                    comments=(),
+                    search_text="Copy me alpha beta gamma",
+                )
+            ]
+        )
+
+    async with TUIHarness(output=MutableRecordingOutput(80, 24), full_screen=True) as harness:
+        opened = asyncio.create_task(harness.app.open_subview(view))
+        await harness.wait_for(lambda: isinstance(harness.app.active_subview, ExplorerBrowser))
+        browser = harness.app.active_subview
+        await harness.wait_for(lambda: browser.preview_control.viewport[1] >= 2)
+        preview_row = _first_preview_terminal_row(harness, browser)
+        # SGR coordinates are one-based. Packets go through prompt_toolkit's
+        # key-binding dispatcher, rather than calling the UIControl directly.
+        first = preview_row + 1
+        harness._pipe.send_text(f"\x1b[<0;2;{first}M")
+        await harness.wait_for(lambda: browser.preview_control.dragging)
+        harness._pipe.send_text(f"\x1b[<32;10;{first}M")
+        await harness.wait_for(
+            lambda: bool(
+                browser._detail_transcript
+                and browser._detail_transcript.selected_text()
+            )
+        )
+        harness._pipe.send_text(f"\x1b[<0;10;{first}m")
+        await harness.wait_for(lambda: not browser.preview_control.dragging)
+
+        assert harness.app._app.clipboard.get_data().text
+        await harness.press("escape")
+        await asyncio.wait_for(opened, 1)

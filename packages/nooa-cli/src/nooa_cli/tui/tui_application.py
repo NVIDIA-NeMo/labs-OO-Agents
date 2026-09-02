@@ -1706,7 +1706,7 @@ class TUIApplication:
 
         def _subview_mouse_enabled() -> bool:
             if self._resume_picker is not None:
-                return True
+                return bool(self._resume_picker.mouse_support)
             view = self._active_subview
             if view is None:
                 return self._is_fullscreen and self._fullscreen_mouse_navigation
@@ -1844,7 +1844,10 @@ class TUIApplication:
             rows = await asyncio.to_thread(load_rows)
             self._cancel_fullscreen_drag()
             self._resume_picker = ResumePicker(
-                rows, self._app, selection_copy_callback=self._start_fullscreen_selection_copy
+                rows,
+                self._app,
+                selection_copy_callback=self._start_fullscreen_selection_copy,
+                selection_status=lambda: self._transient_status_text,
             )
             self._resume_picker.focus_initial()
             self._app.invalidate()
@@ -2075,7 +2078,12 @@ class TUIApplication:
         if getattr(view, "use_fullscreen_browser", False) and not hasattr(view, "container"):
             from .fullscreen_browser import ExplorerBrowser
 
-            view = ExplorerBrowser(view, self._app)
+            view = ExplorerBrowser(
+                view,
+                self._app,
+                selection_copy_callback=self._start_fullscreen_selection_copy,
+                selection_status=lambda: self._transient_status_text,
+            )
         self._cancel_fullscreen_drag()
         self._active_subview = view
         loop = asyncio.get_running_loop()
@@ -2418,8 +2426,14 @@ class TUIApplication:
             noun = "character" if count == 1 else "characters"
             self._show_transient_status(f"Copied {count} {noun}", style="class:return-to-tail")
         else:
+            # Subview browsers advertise F2 (view-local native selection) in
+            # their footers; the main transcript advertises F6. Point at the
+            # toggle the user can actually see for the view they are in.
+            subview_open = self._resume_picker is not None or self._active_subview is not None
+            native_hint = "F2" if subview_open else "F6"
             self._show_transient_status(
-                f"Copy failed: {result.reason}. Try Option/Alt-drag, or press F6 for native selection."
+                f"Copy failed: {result.reason}. Try Option/Alt-drag, "
+                f"or press {native_hint} for native selection."
             )
 
     def _show_transient_status(
@@ -2616,24 +2630,32 @@ class TUIApplication:
             event.app.invalidate()
 
         mouse_bindings = load_mouse_bindings()
-        vt100_mouse_handler = mouse_bindings.get_bindings_for_keys((Keys.Vt100MouseEvent,))[
-            -1
-        ].handler
-        windows_mouse_handler = mouse_bindings.get_bindings_for_keys((Keys.WindowsMouseEvent,))[
-            -1
-        ].handler
+        vt100_mouse_handler = mouse_bindings.get_bindings_for_keys(
+            (Keys.Vt100MouseEvent,)
+        )[0].handler
+        windows_mouse_handler = mouse_bindings.get_bindings_for_keys(
+            (Keys.WindowsMouseEvent,)
+        )[0].handler
 
         @kb.add(Keys.Vt100MouseEvent, filter=subview_active, eager=True)
         def _(event):
+            # Global F6 native-selection mode defers to the terminal first;
+            # otherwise the active view owns routing when it enables mouse.
             if self._is_fullscreen and not self._fullscreen_mouse_navigation:
                 return NotImplemented
-            return vt100_mouse_handler(event)
+            view = self._active_subview
+            if view is not None and getattr(view, "mouse_support", True):
+                return vt100_mouse_handler(event)
+            return None
 
         @kb.add(Keys.WindowsMouseEvent, filter=subview_active, eager=True)
         def _(event):
             if self._is_fullscreen and not self._fullscreen_mouse_navigation:
                 return NotImplemented
-            return windows_mouse_handler(event)
+            view = self._active_subview
+            if view is not None and getattr(view, "mouse_support", True):
+                return windows_mouse_handler(event)
+            return None
 
         @kb.add(Keys.Any, filter=subview_active, eager=True)
         def _(event):
@@ -2685,9 +2707,12 @@ class TUIApplication:
         def _(event):
             self._subview_key(event, "copy")
 
-        @kb.add("f2", filter=subview_active, eager=True)
+        @kb.add("f2", filter=subview_active | resume_picker_active, eager=True)
         def _(event):
-            self._subview_key(event, "native_selection")
+            if self._resume_picker is not None:
+                self._resume_picker.toggle_native_selection()
+            else:
+                self._subview_key(event, "native_selection")
 
         @kb.add("c-o", filter=subview_active, eager=True)
         def _(event):
