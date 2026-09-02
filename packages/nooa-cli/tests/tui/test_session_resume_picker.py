@@ -12,7 +12,6 @@ from nooa_cli.tui.resume_picker import (
     _clip,
     _row_fragments,
     _semantic_preview_selection,
-    literal_match,
     render_resume_picker,
 )
 from prompt_toolkit.data_structures import Point
@@ -72,8 +71,6 @@ def test_model_searches_title_and_full_recent_conversation() -> None:
     )
     model.set_query("resume")
     assert model.matches[0].row.title == "resume feature"
-    assert literal_match("RESUME", "resume feature") is not None
-    assert literal_match("rsm", "resume feature") is None
     model.set_query("deep needle")
     assert [match.row.id for match in model.matches] == ["2"]
 
@@ -128,10 +125,10 @@ def test_filter_and_sort_reuse_cached_query_matches(monkeypatch) -> None:
     model = ResumePickerModel([row("one", "needle"), row("two", "other", attached=True)])
     model.set_query("needle")
 
-    def unexpected_match(query: str, value: str):
+    def unexpected_match(terms: list[str], value: str):
         raise AssertionError("filter/sort must not rescan transcript search fields")
 
-    monkeypatch.setattr(picker_module, "literal_match", unexpected_match)
+    monkeypatch.setattr(picker_module, "_term_hits", unexpected_match)
     model.toggle_filter()
     model.toggle_sort()
     model.toggle_filter()

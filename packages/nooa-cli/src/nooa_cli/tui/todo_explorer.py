@@ -82,14 +82,7 @@ class TodoExplorerView(ExplorerView):
 
     def __init__(self, rows: Iterable[TodoExplorerRow]) -> None:
         model = ExplorerModel(list(rows))
-        config = ExplorerConfig(
-            title="Todo Explorer",
-            detail_pane_name="todo detail",
-            empty_message="No todos.",
-            no_match_message="No todos matching {query!r}.",
-            list_ratio=0.4,
-            actions={},
-        )
+        config = ExplorerConfig(title="Todo Explorer", actions={})
         super().__init__(model, config)
         self.configure_row_options(
             filters=(

@@ -316,20 +316,6 @@ class ExplorerModel:
         else:
             self.scroll_detail(delta)
 
-    def _move_detail_match(self, delta: int) -> bool:
-        if not self._last_detail_match_lines:
-            return False
-        count = len(self._last_detail_match_lines)
-        next_cursor = self.search_line_cursor + delta
-        if not 0 <= next_cursor < count:
-            return False
-        self.search_line_cursor = next_cursor
-        line = self._last_detail_match_lines[self.search_line_cursor]
-        visible = max(self._last_detail_visible_lines, 1)
-        self.detail_offset = max(line - visible // 2, 0)
-        self.clamp_detail_offset(visible)
-        return True
-
     def jump_home(self) -> None:
         self.cursor = 0
         self.detail_offset = 0
@@ -365,18 +351,10 @@ class ExplorerConfig:
 
     Attributes:
         title: Explorer title shown in header bar.
-        detail_pane_name: Label for the detail focus (e.g. "dialog", "event text").
-        empty_message: Shown when no rows exist.
-        no_match_message: Template for no search results (gets .format(query=...)).
-        list_ratio: Fraction of body height for the list pane (0.0-1.0).
         actions: Custom action names mapped to descriptions (for footer hints).
     """
 
     title: str = "Explorer"
-    detail_pane_name: str = "detail"
-    empty_message: str = "No items."
-    no_match_message: str = "No matches for {query!r}."
-    list_ratio: float = 0.33
     actions: dict[str, str] = field(default_factory=dict)
 
 

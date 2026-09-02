@@ -130,45 +130,6 @@ class EventExplorerModel:
         self.detail_offset = 0
         self.search_line_cursor = 0
 
-    def current_search_line(self) -> int | None:
-        if self._last_detail_match_occurrences:
-            match_count = len(self._last_detail_match_occurrences)
-            self.search_line_cursor = min(max(self.search_line_cursor, 0), match_count - 1)
-            return self._last_detail_match_occurrences[self.search_line_cursor][0]
-        if self._last_detail_match_lines:
-            match_count = len(self._last_detail_match_lines)
-            self.search_line_cursor = min(max(self.search_line_cursor, 0), match_count - 1)
-            return self._last_detail_match_lines[self.search_line_cursor]
-        return None
-
-    def center_detail_on_line(self, line: int, visible_lines: int | None = None) -> None:
-        visible = max(
-            visible_lines if visible_lines is not None else self._last_detail_visible_lines, 1
-        )
-        self.detail_offset = max(line - visible // 2, 0)
-        self.clamp_detail_offset(visible)
-
-    def move_search_occurrence(self, delta: int) -> None:
-        if not self.matches:
-            return
-        match_count = len(self._last_detail_match_occurrences) or len(self._last_detail_match_lines)
-        if not match_count:
-            self.move(delta)
-            return
-        next_cursor = self.search_line_cursor + delta
-        if 0 <= next_cursor < match_count:
-            self.search_line_cursor = next_cursor
-            target = self.current_search_line()
-            if target is not None:
-                self.center_detail_on_line(target)
-            return
-        old_cursor = self.cursor
-        self.move(delta)
-        if self.cursor != old_cursor:
-            self._last_detail_match_lines = []
-            self._last_detail_match_occurrences = []
-            self.search_line_cursor = 0 if delta > 0 else 10**9
-
     def move_or_scroll(self, delta: int) -> None:
         """Match the shared navigation contract: list focus moves rows.
 
@@ -197,7 +158,11 @@ class EventExplorerModel:
         self.focus = "detail" if self.focus == "list" else "list"
 
     def scroll_detail(self, delta: int) -> None:
-        max_offset = max(self._last_detail_line_count - 1, 0)
+        # Clamp to the last *visible* window (count - visible), like the base
+        # ExplorerModel — the old count-1 clamp let the pane wheel nearly a
+        # full page past the last line.
+        visible = max(self._last_detail_visible_lines, 1)
+        max_offset = max(self._last_detail_line_count - visible, 0)
         self.detail_offset = min(max(self.detail_offset + delta, 0), max_offset)
 
     def page_detail(self, delta: int) -> None:
@@ -221,12 +186,7 @@ class EventExplorerView(ExplorerView):
     def __init__(self, event_manager: Any) -> None:
         super().__init__(
             EventExplorerModel(build_event_rows(event_manager)),
-            ExplorerConfig(
-                title="Event Explorer",
-                detail_pane_name="event detail",
-                empty_message="No events recorded.",
-                no_match_message="No events matching {query!r}.",
-            ),
+            ExplorerConfig(title="Event Explorer"),
         )
         event_types = tuple(sorted(self.model.enabled_types, key=str.casefold))
 
