@@ -78,6 +78,35 @@ def test_model_searches_title_and_full_recent_conversation() -> None:
     assert [match.row.id for match in model.matches] == ["2"]
 
 
+def test_resume_search_uses_word_and_semantics_like_explorers() -> None:
+    """Multi-word queries match scattered terms, like every explorer.
+
+    The old phrase matcher required the whole query contiguously; the shared
+    word-AND contract requires every term somewhere in the searched fields.
+    """
+    model = ResumePickerModel(
+        [
+            row(
+                "scattered",
+                "alpha in the title",
+                turns=(ResumePickerTurn("agent", "and beta in the reply"),),
+            ),
+            row(
+                "contiguous",
+                "unrelated title",
+                turns=(ResumePickerTurn("agent", "contains alpha beta together"),),
+            ),
+            row("neither", "nothing here"),
+        ]
+    )
+    model.set_query("alpha beta")
+
+    # Both rows match; the scattered row proves terms can hit different fields.
+    assert sorted(match.row.id for match in model.matches) == ["contiguous", "scattered"]
+    scattered = next(match for match in model.matches if match.row.id == "scattered")
+    assert scattered.positions, "cross-field match must carry highlight positions"
+
+
 def test_search_excludes_noncontiguous_and_hidden_metadata_matches() -> None:
     model = ResumePickerModel(
         [

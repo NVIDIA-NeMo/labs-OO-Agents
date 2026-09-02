@@ -193,8 +193,9 @@ class FullscreenTranscriptModel:
         if normalized == self._search_query:
             return
         self._search_query = normalized
+        terms = [term for term in normalized.split() if term]
         matches: list[_SearchMatch] = []
-        if normalized:
+        if terms:
             for record in self._records:
                 folded_parts: list[str] = []
                 source: list[int] = []
@@ -203,13 +204,20 @@ class FullscreenTranscriptModel:
                     folded_parts.append(folded)
                     source.extend([index] * len(folded))
                 folded_text = "".join(folded_parts)
-                cursor = 0
-                while (found := folded_text.find(normalized, cursor)) >= 0:
-                    stop = found + len(normalized)
-                    matches.append(
-                        _SearchMatch(record.record_id, source[found], source[stop - 1] + 1)
-                    )
-                    cursor = stop
+                record_matches: list[_SearchMatch] = []
+                # Word-AND search highlights every term occurrence, matching
+                # the list filtering contract; each occurrence is its own
+                # navigation stop.
+                for term in terms:
+                    cursor = 0
+                    while (found := folded_text.find(term, cursor)) >= 0:
+                        stop = found + len(term)
+                        record_matches.append(
+                            _SearchMatch(record.record_id, source[found], source[stop - 1] + 1)
+                        )
+                        cursor = stop
+                record_matches.sort(key=lambda match: (match.start, match.stop))
+                matches.extend(record_matches)
         self._search_matches = tuple(matches)
         self._search_cursor = 0
         if matches:

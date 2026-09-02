@@ -763,22 +763,32 @@ class ExplorerBrowser:
                     )
                 )
             )[:width]
-            query = self.buffer.text.casefold().strip()
+            query = self.buffer.text.strip()
             if not query:
                 output.append((base, text))
                 continue
+            # Word-AND rows can match terms scattered across the row, so
+            # every term gets its own highlight span instead of one span for
+            # the whole query (which a multi-word query would never find).
             folded = text.casefold()
+            spans: list[tuple[int, int]] = []
+            for term in dict.fromkeys(term.casefold() for term in query.split()):
+                cursor = 0
+                while (found := folded.find(term, cursor)) >= 0:
+                    spans.append((found, found + len(term)))
+                    cursor = found + len(term)
+            if not spans:
+                output.append((base, text))
+                continue
+            spans.sort()
             cursor = 0
-            while True:
-                found = folded.find(query, cursor)
-                if found < 0:
-                    output.append((base, text[cursor:]))
-                    break
-                output.append((base, text[cursor:found]))
-                output.append(
-                    (base + " class:fullscreen-browser.match", text[found : found + len(query)])
-                )
-                cursor = found + len(query)
+            for start, stop in spans:
+                if start < cursor:
+                    continue
+                output.append((base, text[cursor:start]))
+                output.append((base + " class:fullscreen-browser.match", text[start:stop]))
+                cursor = stop
+            output.append((base, text[cursor:]))
         return output or [("class:fullscreen-browser.empty", "No matching items")]
 
     def _preview_transcript(self, width: int, height: int) -> FullscreenTranscriptModel | None:
