@@ -4423,17 +4423,37 @@ def test_transcript_search_highlights_all_matches_and_reveals_first() -> None:
     model.append("zero\none\nNeedle first\nthree\nfour\nneedle second\nsix")
     model.set_search("NEEDLE", width=20, height=2)
 
+    # Reveals center the match vertically when context exists above it
+    # instead of pinning it to the viewport's first row.
     assert model.search_position == (1, 2)
-    assert model.top_row(width=20, height=2) == 2
+    assert model.top_row(width=20, height=2) == 1
     fragments = model.formatted_text(width=20, height=2)
     assert "Needle" in "".join(text for _style, text in fragments)
     assert any("transcript-search-current" in style for style, text in fragments if text.strip())
 
     assert model.move_search_match(1, width=20, height=2)
     assert model.search_position == (2, 2)
-    assert model.top_row(width=20, height=2) == 5
+    assert model.top_row(width=20, height=2) == 4
     assert model.move_search_match(1, width=20, height=2)
     assert model.search_position == (1, 2)
+
+
+def test_transcript_search_reveal_centers_match_vertically() -> None:
+    """A revealed match shows before/after context, not just the match row."""
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+    model = FullscreenTranscriptModel(show_trailing_blank=False)
+    model.append("\n".join(f"line {i}" for i in range(12)) + "\nneedle\n" + "\n".join(f"tail {i}" for i in range(12)))
+    model.set_search("needle", width=30, height=7)
+
+    top = model.top_row(width=30, height=7)
+    # The match row (12) sits in the middle of the 7-row window.
+    assert top == 9
+    visible = model.formatted_text(width=30, height=7)
+    text = "".join(frag[1] for frag in visible)
+    assert "needle" in text
+    assert "line 10" in text and "line 11" in text  # context above
+    assert "tail 0" in text and "tail 1" in text  # context below
 
 
 def test_transcript_search_distinguishes_current_and_other_matches() -> None:
