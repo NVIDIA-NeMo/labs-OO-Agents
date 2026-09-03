@@ -472,6 +472,44 @@ def test_event_explorer_view_highlights_selected_occurrence_on_same_line() -> No
     assert "".join(lines).count(f"{highlight_style_code(current=True)}alpha\x1b[0m") == 1
 
 
+def test_styled_detail_lines_render_once_per_row_and_width(monkeypatch) -> None:
+    """Detail rendering is memoized: the 3x search chain reuses one render."""
+    from nooa_cli.tui import event_explorer as ee
+
+    row = build_event_rows(
+        SimpleNamespace(items=lambda: [("1", _FakeEvent("TUIUserInput", text="hello world"))])
+    )[0]
+
+    calls = {"n": 0}
+    original = ee._render_styled_detail_lines
+
+    def counting(row, width):
+        calls["n"] += 1
+        return original(row, width)
+
+    monkeypatch.setattr(ee, "_render_styled_detail_lines", counting)
+
+    first = ee._styled_detail_lines(row, 80)
+    second = ee._styled_detail_lines(row, 80)
+    assert first == second
+    assert calls["n"] == 1
+    # A different width renders again (but only once more).
+    ee._styled_detail_lines(row, 60)
+    ee._styled_detail_lines(row, 60)
+    assert calls["n"] == 2
+
+    # The id-recycling guard: a NEW row whose id() may reuse the evicted key's
+    # must never be served the evicted row's lines.
+    other = build_event_rows(
+        SimpleNamespace(items=lambda: [("2", _FakeEvent("TUIUserInput", text="different text"))])
+    )[0]
+    evicted = ee._styled_detail_lines(row, 80)
+    assert "hello world" in "\n".join(evicted)
+    fresh = ee._styled_detail_lines(other, 80)
+    assert "different text" in "\n".join(fresh)
+    assert "hello world" not in "\n".join(fresh)
+
+
 def test_event_search_text_excludes_markdown_chrome() -> None:
     """Timestamps and ids in the markdown header/footer must not match."""
     from nooa_cli.tui.event_explorer import _event_markdown, _searchable_markdown

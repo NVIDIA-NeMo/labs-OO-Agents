@@ -160,9 +160,14 @@ class MemoryExplorerView(ExplorerView):
         self._forget = forget
         self._mark_done = mark_done
         # Destructive actions arm on the first press and fire on the second
-        # press of the same key on the same row, so no invisible pane/query
-        # state can trigger an unconfirmed forget or mark-done.
-        self._pending_confirm: tuple[str, str] | None = None
+        # press of the same key on the same row within the gesture window,
+        # so no invisible pane/query state — and no stale arm from minutes
+        # ago — can trigger an unconfirmed forget or mark-done. The expiry
+        # timer clears the arm at the window edge and repaints via the
+        # browser's on_confirm_expired hook.
+        self._pending_confirm: tuple[str, str, float] | None = None
+        self._confirm_expiry_timer = None
+        self._confirm_expired_callbacks: list[Callable[[], None]] = []
         model = ExplorerModel(rows)
         title = "Memory Explorer"
         if last_reflection:
@@ -269,24 +274,74 @@ class MemoryExplorerView(ExplorerView):
                 lines.append(f"  → {target_id[:8]} {edge_type} ({weight:.2f})")
         return lines
 
+    _CONFIRM_WINDOW_SECONDS = 10.0
+
+    def on_confirm_expired(self, callback: Callable[[], None]) -> None:
+        """Register a repaint hook fired when the armed confirm expires.
+
+        The browser wires this to its invalidate so the footer stops
+        promising a confirm that no longer applies even when no key is
+        pressed during the window.
+        """
+        self._confirm_expired_callbacks.append(callback)
+
+    def _schedule_confirm_expiry(self, armed_at: float) -> None:
+        """Arm a deadline that clears the pending confirm at the window edge."""
+        self._cancel_confirm_expiry()
+        try:
+            import asyncio
+
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # Sync callers (unit tests) self-heal on the next render.
+        delay = max(0.0, self._CONFIRM_WINDOW_SECONDS - (time.monotonic() - armed_at))
+        self._confirm_expiry_timer = loop.call_later(delay, self._confirm_expired)
+
+    def _cancel_confirm_expiry(self) -> None:
+        if self._confirm_expiry_timer is not None:
+            self._confirm_expiry_timer.cancel()
+            self._confirm_expiry_timer = None
+
+    def _confirm_expired(self) -> None:
+        self._confirm_expiry_timer = None
+        if self._pending_confirm is None:
+            return
+        _action, _row_id, armed_at = self._pending_confirm
+        if time.monotonic() - armed_at > self._CONFIRM_WINDOW_SECONDS:
+            self._pending_confirm = None
+            for callback in self._confirm_expired_callbacks:
+                callback()
+
     def _consume_confirmation(self, action: str, row: Any) -> bool:
         """Return True when this press confirms the pending armed action.
 
         The first press of an action key arms it; the same key on the same
         row must follow within the gesture window to fire. Any other key
-        (including typing "f"/"d" into the search buffer) disarms.
+        (including typing "f"/"d" into the search buffer) disarms, and an
+        arm older than the window expires instead of firing.
         """
+        self._cancel_confirm_expiry()
         pending = self._pending_confirm
         self._pending_confirm = None
-        return pending == (action, id(row))
+        if pending is None:
+            return False
+        pending_action, row_id, armed_at = pending
+        if pending_action != action or row_id != id(row):
+            return False
+        return (time.monotonic() - armed_at) <= self._CONFIRM_WINDOW_SECONDS
 
     def pending_confirmation_hint(self) -> str:
         pending = self._pending_confirm
         if pending is None:
             return ""
-        action, row_id = pending
+        action, row_id, armed_at = pending
+        # An expired arm cannot fire — the next press re-arms. Do not keep
+        # promising a confirm that no longer applies.
+        if time.monotonic() - armed_at > self._CONFIRM_WINDOW_SECONDS:
+            return ""
         row = next((row for row in self.model.rows if id(row) == row_id), None)
         if row is None:
+            self._cancel_confirm_expiry()
             self._pending_confirm = None
             return ""
         verb = "forget" if action == "text:f" else "mark done"
@@ -298,7 +353,8 @@ class MemoryExplorerView(ExplorerView):
             return "ignored"
         if action == "text:f":
             if not self._consume_confirmation(action, row):
-                self._pending_confirm = (action, id(row))
+                self._pending_confirm = (action, id(row), time.monotonic())
+                self._schedule_confirm_expiry(self._pending_confirm[2])
                 return "handled"
             self._forget(row.id)
             self.model.rows.remove(row)
@@ -308,10 +364,12 @@ class MemoryExplorerView(ExplorerView):
             if row.type != "todo" or row.status == "done":
                 # An action key that cannot apply still interrupts the armed
                 # gesture — the next f/d press must arm, not confirm.
+                self._cancel_confirm_expiry()
                 self._pending_confirm = None
                 return "ignored"
             if not self._consume_confirmation(action, row):
-                self._pending_confirm = (action, id(row))
+                self._pending_confirm = (action, id(row), time.monotonic())
+                self._schedule_confirm_expiry(self._pending_confirm[2])
                 return "handled"
             self._mark_done(row.id)
             # The search tag mirrors the CURRENT status (todo:open / todo:dropped
@@ -322,5 +380,6 @@ class MemoryExplorerView(ExplorerView):
             row.search_text = row.search_text.replace(old_tag, "todo:done", 1)
             self.model.set_query(self.model.query)
             return "handled"
+        self._cancel_confirm_expiry()
         self._pending_confirm = None
         return "ignored"

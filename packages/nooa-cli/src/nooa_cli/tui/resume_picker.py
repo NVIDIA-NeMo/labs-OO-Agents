@@ -10,8 +10,6 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Literal
 
-from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.layout import VSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
@@ -20,10 +18,6 @@ from rich.cells import cell_len, split_graphemes
 from .explorer_base import ExplorerOption
 from .fullscreen_browser import (
     ExplorerBrowser,
-    SelectablePreviewControl,
-    _BrowserOptionControl,
-    _BrowserSearchControl,
-    build_fullscreen_browser,
 )
 from .terminal_safety import sanitize_live_text
 
@@ -158,7 +152,6 @@ class ResumePickerModel:
         self.state_filter: Literal["detached", "attached", "all"] = "detached"
         self.sort_updated = True
         self.selected = self.list_offset = 0
-        self.preview_offset = 10**9
         self._query_matches: list[tuple[int, str, tuple[int, ...]] | None] = []
         self._matches: list[FieldMatch] = []
         self.set_query("")
@@ -250,7 +243,12 @@ class ResumePickerModel:
         ids = [match.row.id for match in self._matches]
         self.selected = ids.index(previous_id) if previous_id in ids else 0
         self.list_offset = min(self.list_offset, self.selected)
-        self.preview_offset = 10**9
+
+    def set_filter(self, value: Literal["detached", "attached", "all"]) -> None:
+        """Apply a filter value and restart the list from the top."""
+        self.state_filter = value
+        self.selected = self.list_offset = 0
+        self._rebuild_matches()
 
     def cycle_filter(self, delta: int = 1) -> None:
         filters: tuple[Literal["detached", "attached", "all"], ...] = (
@@ -258,39 +256,40 @@ class ResumePickerModel:
             "attached",
             "all",
         )
-        self.state_filter = filters[(filters.index(self.state_filter) + delta) % len(filters)]
-        self.selected = self.list_offset = 0
-        self._rebuild_matches()
+        self.set_filter(filters[(filters.index(self.state_filter) + delta) % len(filters)])
 
     def toggle_filter(self) -> None:
         self.cycle_filter()
 
-    def toggle_sort(self) -> None:
-        self.sort_updated = not self.sort_updated
+    def set_sort(self, updated: bool) -> None:
+        """Apply a sort direction and restart the list from the top."""
+        self.sort_updated = updated
         self.selected = self.list_offset = 0
         self._rebuild_matches()
+
+    def toggle_sort(self) -> None:
+        self.set_sort(not self.sort_updated)
 
     def move(self, delta: int) -> None:
         if not self._matches or not delta:
             return
         self.selected = (self.selected + delta) % len(self._matches)
-        self.preview_offset = 10**9
 
     def jump_home(self) -> None:
         if self._matches:
             self.selected = 0
             self.list_offset = 0
-            self.preview_offset = 10**9
 
     def jump_end(self) -> None:
         if self._matches:
             self.selected = len(self._matches) - 1
-            self.preview_offset = 10**9
+            # Keep the selection on screen: the list renders from
+            # list_offset, so End must scroll it into view too.
+            self.list_offset = max(0, len(self._matches) - 1)
 
     def select(self, index: int) -> None:
         if 0 <= index < len(self._matches) and index != self.selected:
             self.selected = index
-            self.preview_offset = 10**9
 
     def ensure_selection_visible(self, rows: int) -> None:
         rows = max(1, rows)
@@ -312,11 +311,6 @@ class ResumePickerModel:
         maximum = max(0, len(self._matches) - max(1, rows))
         self.list_offset = min(maximum, max(0, self.list_offset + delta))
 
-    def scroll_preview(self, delta: int, line_count: int, height: int) -> None:
-        maximum = max(0, line_count - max(1, height))
-        current = min(self.preview_offset, maximum)
-        self.preview_offset = min(maximum, max(0, current + delta))
-
 
 def _clip(text: str, width: int) -> str:
     width = max(0, width)
@@ -332,23 +326,6 @@ def _clip(text: str, width: int) -> str:
         kept.append(text[start:stop])
         used += cells
     return "".join(kept) + "…"
-
-
-def _wrap(text: str, width: int) -> list[str]:
-    """Wrap sanitized text by terminal cells while preserving grapheme clusters."""
-    width = max(1, width)
-    result: list[str] = []
-    for source in sanitize_live_text(text).splitlines() or [""]:
-        line, used = [], 0
-        for start, stop, cells in split_graphemes(source)[0]:
-            cluster = source[start:stop]
-            if line and used + cells > width:
-                result.append("".join(line))
-                line, used = [], 0
-            line.append(cluster)
-            used += cells
-        result.append("".join(line))
-    return result
 
 
 def _field_fragments(
@@ -481,41 +458,6 @@ def _row_fragments(
     ]
 
 
-def _preview_lines(row: ResumePickerRow | None, width: int) -> list[list[tuple[str, str]]]:
-    """Render transcript turns using the same visual language as live scrollback."""
-    if row is None:
-        return [[("class:fullscreen-browser.empty", "No session selected")]]
-    if not row.turns:
-        return [[("class:fullscreen-browser.empty", "No conversation preview")]]
-    lines: list[list[tuple[str, str]]] = []
-    width = max(1, width)
-    for turn in row.turns:
-        if turn.role == "user":
-            edge = "▔" * width
-            lines.append([("class:fullscreen-browser.preview-user-edge", edge)])
-            for index, text in enumerate(_wrap(turn.content, max(1, width - 4))):
-                prompt = "❯ " if index == 0 else "  "
-                content = _clip(f" {prompt}{text}", width)
-                lines.append(
-                    [
-                        (
-                            "class:fullscreen-browser.preview-user",
-                            content + " " * max(0, width - cell_len(content)),
-                        )
-                    ]
-                )
-            lines.append([("class:fullscreen-browser.preview-user-edge", "▁" * width)])
-        else:
-            lines.append([("class:fullscreen-browser.preview-agent", "OO:")])
-            lines.extend(
-                [("class:fullscreen-browser.preview", text)] for text in _wrap(turn.content, width)
-            )
-            lines.append([])
-    if lines and not lines[-1]:
-        lines.pop()
-    return lines
-
-
 def _semantic_preview_selection(text: str) -> str:
     """Remove conversation-preview chrome from selected text."""
     output: list[str] = []
@@ -537,59 +479,6 @@ def _semantic_preview_selection(text: str) -> str:
         elif stripped != "OO:":
             output.append(line)
     return "\n".join(output).strip("\n")
-
-
-def render_resume_picker(model: ResumePickerModel, width: int, height: int) -> str:
-    """Render a deterministic text snapshot used by unit tests and narrow fallbacks."""
-    if width < 48 or height < 13:
-        return f"Terminal too small\nNeed 48 x 13; now {width} x {height}"
-    separator = "─" * width
-    filt = {
-        "detached": "✓ Not attached",
-        "attached": "✗ Attached",
-        "all": "✓/✗ All",
-    }[model.state_filter]
-    sort = "Recent activity" if model.sort_updated else "Creation date"
-    lines = [
-        _clip(f"Resume a previous session · {len(model.matches)} sessions", width),
-        _clip(f"[Search: {model.query}] [Filter: {filt}] [Sort: {sort}]", width),
-        _clip(
-            "Tab/Shift-Tab focus · arrows navigate · Space/↵ activate · Esc cancel",
-            width,
-        ),
-        separator,
-    ]
-    list_height = min(5, max(1, height - 10))
-    model.ensure_selection_visible(list_height)
-    for index, match in model.visible(list_height):
-        lines.extend(
-            "".join(text for _, text in row)
-            for row in _row_fragments(
-                match, index == model.selected, width, sort_updated=model.sort_updated
-            )
-        )
-    lines.extend(
-        [
-            separator,
-            _clip(
-                f"Preview · {_single_line(model.current.title) if model.current else 'No selection'}",
-                width,
-            ),
-        ]
-    )
-    preview = _preview_lines(model.current, width)
-    preview_height = max(1, height - len(lines) - 2)
-    maximum = max(0, len(preview) - preview_height)
-    start = min(model.preview_offset, maximum)
-    lines.extend(
-        "".join(text for _, text in line) for line in preview[start : start + preview_height]
-    )
-    lines.extend(
-        [
-            separator,
-        ]
-    )
-    return "\n".join(lines[:height])
 
 
 class _PickerControl(FormattedTextControl):
@@ -657,11 +546,18 @@ class ResumePicker(ExplorerBrowser):
 
         config = SimpleNamespace(actions={})
         item_name = "session"
+        title = "Resume a previous session"
 
         def __init__(self, picker: ResumePicker, options: tuple[ExplorerOption, ...]) -> None:
             self._picker = picker
             self.options = options
             self.pending_input: str | None = None
+
+        @property
+        def model(self) -> ResumePickerModel:
+            # The shared construction seeds the search buffer from
+            # ``view.model.query``; the picker's model is the real one.
+            return self._picker.model
 
         def handle_key(self, _action: str, _value: str = "") -> str:
             return "handled"
@@ -678,6 +574,12 @@ class ResumePicker(ExplorerBrowser):
     def view(self) -> ResumePicker._ViewFacade:
         return self._view_facade
 
+    @view.setter
+    def view(self, value: ResumePicker._ViewFacade) -> None:
+        # The shared construction assigns the facade passed to
+        # super().__init__; keep it in the same slot the property reads.
+        self._view_facade = value
+
     @property
     def model(self) -> ResumePickerModel:
         return self._resume_model
@@ -685,6 +587,16 @@ class ResumePicker(ExplorerBrowser):
     @model.setter
     def model(self, value: ResumePickerModel) -> None:
         self._resume_model = value
+
+    def _create_list_control(self) -> Any:
+        # The picker's list renders its compact FieldMatch rows.
+        return _PickerControl(self)
+
+    def _option_window_width(self, index: int) -> Dimension:
+        widths = (Dimension(min=17, preferred=20), Dimension(min=10, preferred=18))
+        # Future option rows fall back to the shared default width rather
+        # than raising on the two-entry tuple.
+        return widths[index] if index < len(widths) else Dimension(min=12, preferred=22)
 
     def __init__(
         self,
@@ -700,76 +612,14 @@ class ResumePicker(ExplorerBrowser):
         # options mode; their callbacks mirror the model's cycle/toggle
         # semantics (restart from the top, refresh the prepared preview).
         self._view_facade = ResumePicker._ViewFacade(self, self._build_view_options())
-        self._selection_copy_callback = selection_copy_callback
-        self._selection_status = selection_status
         self._preview_models: dict[tuple[str, int], Any] = {}
         self._preview_tasks: dict[tuple[str, int], Any] = {}
         self.native_selection = False
-        self.active_control = "list"
-        self.option_cursor: int | None = None
-        self.buffer = Buffer(multiline=False)
-        self.buffer.on_text_changed += lambda _: self._query_changed()
-        self.query_control = _BrowserSearchControl(self, self.buffer)
-        self.query_window = Window(
-            self.query_control,
-            width=Dimension(min=4, weight=1),
-            height=1,
-            style=lambda: (
-                "class:fullscreen-browser.control-focused"
-                if self.active_control == "list" and self.option_cursor is None
-                else ""
-            ),
-        )
-        self.option_controls = [_BrowserOptionControl(self, index) for index in range(2)]
-        self.search_label_control = FormattedTextControl(self._search_label)
-        self.search_close_control = FormattedTextControl(self._search_close)
-        search = VSplit(
-            [
-                Window(self.search_label_control, width=9, height=1),
-                self.query_window,
-                Window(self.search_close_control, width=1, height=1),
-            ],
-            padding=0,
-        )
-        selectors = VSplit(
-            [
-                Window(self.option_controls[0], width=Dimension(min=17, preferred=20), height=1),
-                Window(FormattedTextControl(" "), width=1, height=1),
-                Window(self.option_controls[1], width=Dimension(min=10, preferred=18), height=1),
-            ],
-            padding=0,
-        )
-        controls = VSplit(
-            [search, Window(FormattedTextControl(" "), width=1, height=1), selectors],
-            padding=0,
-        )
-        self.list_control = _PickerControl(self)
-        self.preview_control = SelectablePreviewControl(self)
-
-        self.title_control = FormattedTextControl(self._title)
-        self.list_header_control = FormattedTextControl(self._list_header)
-        self.preview_header_control = FormattedTextControl(self._preview_header)
-        self.small_control = FormattedTextControl(
-            [("class:fullscreen-browser.too-small", "Terminal too small")], focusable=True
-        )
-        # The session list fills its pane like every other browser (the
-        # shell's compact five-row default capped it short of the divider).
-        self.picker_list_height = Dimension(min=1, preferred=5, weight=1)
-        self.container = build_fullscreen_browser(
-            app=self.app,
-            title_control=self.title_control,
-            help_control=FormattedTextControl(
-                self._help_text, style="class:fullscreen-browser.footer"
-            ),
-            controls=controls,
-            list_header_control=self.list_header_control,
-            list_control=self.list_control,
-            preview_header_control=self.preview_header_control,
-            preview_control=self.preview_control,
-            active_rail=self._active_rail,
-            small_control=self.small_control,
-            small_text=self._small_text,
-            list_height=self.picker_list_height,
+        super().__init__(
+            self._view_facade,
+            app,
+            selection_copy_callback=selection_copy_callback,
+            selection_status=selection_status,
         )
 
     def _build_view_options(self) -> tuple[ExplorerOption, ...]:
@@ -781,16 +631,17 @@ class ResumePicker(ExplorerBrowser):
         """
 
         def on_filter(value: str) -> None:
-            self.model.state_filter = value  # type: ignore[assignment]
-            self.model.selected = self.model.list_offset = 0
-            self.model._rebuild_matches()
+            self.model.set_filter(value)  # type: ignore[arg-type]
+            # A filter/sort change can select a different row: reset the
+            # (possibly cached) current preview's viewport so it follows the
+            # tail instead of keeping the previous scroll position.
+            self._reset_preview()
             self._prepare_current_preview()
             self.invalidate()
 
         def on_sort(value: str) -> None:
-            self.model.sort_updated = value == "updated"
-            self.model.selected = self.model.list_offset = 0
-            self.model._rebuild_matches()
+            self.model.set_sort(value == "updated")
+            self._reset_preview()
             self._prepare_current_preview()
             self.invalidate()
 
@@ -817,6 +668,10 @@ class ResumePicker(ExplorerBrowser):
 
     def _query_changed(self) -> None:
         self.model.set_query(self.buffer.text)
+        # Typing a query can swap the selected row, exactly like the filter
+        # and sort handlers: reset the cached current preview so it follows
+        # the tail instead of keeping the previous row's scroll position.
+        self._reset_preview()
         self._prepare_current_preview()
         self.invalidate()
 
@@ -878,18 +733,6 @@ class ResumePicker(ExplorerBrowser):
                 ),
             )
         ]
-
-    def invalidate(self) -> None:
-        self.list_control._fragment_cache.clear()
-        self.preview_control._fragment_cache.clear()
-        for control in self.option_controls:
-            control._fragment_cache.clear()
-        self.search_label_control._fragment_cache.clear()
-        self.search_close_control._fragment_cache.clear()
-        self.title_control._fragment_cache.clear()
-        self.list_header_control._fragment_cache.clear()
-        self.preview_header_control._fragment_cache.clear()
-        self.app.invalidate()
 
     def navigate_vertical(self, delta: int) -> None:
         if self.option_cursor is not None:

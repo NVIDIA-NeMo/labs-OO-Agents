@@ -502,7 +502,7 @@ class ExplorerBrowser:
                 else ""
             ),
         )
-        self.list_control = _BrowserPaneControl(self)
+        self.list_control = self._create_list_control()
         self.preview_control = SelectablePreviewControl(self)
         self.option_controls = [
             _BrowserOptionControl(self, index) for index in range(len(view.options))
@@ -512,14 +512,18 @@ class ExplorerBrowser:
         for index, control in enumerate(self.option_controls):
             if index:
                 option_windows.append(Window(FormattedTextControl(" "), width=1, height=1))
-            option_window = Window(control, width=Dimension(min=12, preferred=22), height=1)
+            option_window = Window(
+                control, width=self._option_window_width(index), height=1
+            )
             self.option_windows.append(option_window)
             option_windows.append(option_window)
+        self.search_label_control = FormattedTextControl(self._search_label)
+        self.search_close_control = FormattedTextControl(self._search_close)
         search = VSplit(
             [
-                Window(FormattedTextControl(self._search_label), width=9, height=1),
+                Window(self.search_label_control, width=9, height=1),
                 self.query_window,
-                Window(FormattedTextControl(self._search_close), width=1, height=1),
+                Window(self.search_close_control, width=1, height=1),
             ],
             padding=0,
         )
@@ -587,6 +591,20 @@ class ExplorerBrowser:
             list_height=self.explorer_list_height,
             floats=dropdown_floats,
         )
+        # Views with a timed confirmation gesture (the memory explorer's
+        # arm/confirm window) hook expiry to a repaint so the footer stops
+        # promising a confirm that no longer applies even without a keypress.
+        register_expiry = getattr(self.view, "on_confirm_expired", None)
+        if callable(register_expiry):
+            register_expiry(self.invalidate)
+
+    def _create_list_control(self) -> Any:
+        """Factory hook: the pane control rendering the list. Subclasses may override."""
+        return _BrowserPaneControl(self)
+
+    def _option_window_width(self, index: int) -> Dimension:
+        """Factory hook: one option button window's width. Subclasses may override."""
+        return Dimension(min=12, preferred=22)
 
     @property
     def active_dropdown(self) -> Any | None:
@@ -687,6 +705,8 @@ class ExplorerBrowser:
             self.preview_control,
             *self.dropdown_controls,
             *self.option_controls,
+            self.search_label_control,
+            self.search_close_control,
             self.title_control,
             self.help_control,
             self.list_header_control,

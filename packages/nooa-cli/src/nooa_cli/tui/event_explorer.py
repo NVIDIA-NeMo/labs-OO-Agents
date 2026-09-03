@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import datetime
 import json
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
@@ -965,8 +966,40 @@ def _style_event_header_line(lines: list[str], width: int) -> list[str]:
     return styled
 
 
+# Cache entries hold the row itself alongside its lines so a recycled
+# ``id(row)`` can never alias a fresh row onto stale rendered lines
+# (EventExplorerRow is an eq-dataclass, so the row cannot key the dict).
+# LRU memo: eviction drops only the least-recently-used entry (a full clear
+# at capacity would re-trigger render storms for the still-live keys), and
+# entries retain the row so a recycled ``id(row)`` can never alias a fresh
+# row onto stale lines.
+_STYLE_CACHE: OrderedDict[tuple[int, int], tuple[EventExplorerRow, list[str]]] = OrderedDict()
+_STYLE_CACHE_MAX = 64
+
+
 def _styled_detail_lines(row: EventExplorerRow, width: int) -> list[str]:
-    """Return the detail pane's styled rendering (markdown or syntax colors)."""
+    """Return the memoized styled rendering (markdown or syntax colors).
+
+    Detail rendering walks the same markdown up to three times per paint
+    (match lines, occurrences, highlighted output) and again on measurement;
+    Rich renders of large event payloads dominate that cost. The rendering
+    is a pure function of (row, width) and rows are immutable, so cache it.
+    """
+    width = max(int(width), 20)
+    key = (id(row), width)
+    cached = _STYLE_CACHE.get(key)
+    if cached is not None and cached[0] is row:
+        _STYLE_CACHE.move_to_end(key)
+        return cached[1]
+    lines = _render_styled_detail_lines(row, width)
+    while len(_STYLE_CACHE) >= _STYLE_CACHE_MAX:
+        _STYLE_CACHE.popitem(last=False)
+    _STYLE_CACHE[key] = (row, lines)
+    return lines
+
+
+def _render_styled_detail_lines(row: EventExplorerRow, width: int) -> list[str]:
+    """Render the detail pane's styled lines (uncached)."""
     width = max(int(width), 20)
     lines: list[str] = []
     if row.markdown is not None:

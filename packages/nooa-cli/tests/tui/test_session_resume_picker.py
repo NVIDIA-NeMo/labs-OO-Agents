@@ -12,11 +12,12 @@ from nooa_cli.tui.resume_picker import (
     _clip,
     _row_fragments,
     _semantic_preview_selection,
-    render_resume_picker,
 )
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from rich.cells import cell_len
+
+from .resume_picker_snapshot import render_resume_picker
 
 
 def test_semantic_preview_selection_removes_user_and_agent_chrome() -> None:
@@ -135,7 +136,7 @@ def test_filter_and_sort_reuse_cached_query_matches(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_resume_list_fills_its_pane_on_tall_terminals() -> None:
+async def test_resume_list_fills_its_pane_on_tall_terminals(monkeypatch) -> None:
     """The session list grows with the terminal instead of capping at 5."""
     from nooa_cli.tui import session_manager as sm
 
@@ -152,10 +153,21 @@ async def test_resume_list_fills_its_pane_on_tall_terminals() -> None:
         )
         for i in range(12)
     ]
-    sm.SessionManager.list_sessions = classmethod(lambda cls, limit=None: sessions)
-    sm.SessionManager.is_active = classmethod(lambda cls, value: False)
-    sm.SessionManager.load_turns = classmethod(
-        lambda cls, value, limit=12: [SimpleNamespace(role="agent", content="x")]
+    # Patch through monkeypatch: bare classmethod assignments leaked the
+    # fake sessions into every later test (the memory-sidecars test then
+    # saw s00000001... sessions that were never cleaned up).
+    monkeypatch.setattr(
+        sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: sessions)
+    )
+    monkeypatch.setattr(
+        sm.SessionManager, "is_active", classmethod(lambda cls, value: False)
+    )
+    monkeypatch.setattr(
+        sm.SessionManager,
+        "load_turns",
+        classmethod(
+            lambda cls, value, limit=12: [SimpleNamespace(role="agent", content="x")]
+        ),
     )
 
     from .tui_app_harness import MutableRecordingOutput, TUIHarness
@@ -370,16 +382,33 @@ def test_active_rail_marks_only_current_area() -> None:
 
 
 def test_preview_scroll_is_independent_and_selection_resets_to_tail() -> None:
+    """Preview scrolling lives on the transcript; moving rows resets it to the tail."""
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
     turns = tuple(ResumePickerTurn("user", f"message {index}") for index in range(12))
-    model = ResumePickerModel([row("1", "one", turns=turns), row("2", "two", turns=turns)])
-    model.scroll_preview(-3, line_count=30, height=5)
-    assert model.preview_offset == 22
-    selected = model.selected
-    model.list_offset = 0
-    model.move(1)
-    assert model.selected != selected
-    assert model.preview_offset == 10**9
-    assert model.list_offset == 0
+    picker = ResumePicker([row("1", "one", turns=turns), row("2", "two", turns=turns)], app)
+    picker.preview_control.viewport = (60, 5)
+
+    transcript = picker._preview_model(60)
+    assert transcript is not None
+    picker.scroll_preview(-3)
+    top = transcript.top_row(width=60, height=5)
+    assert top > 0
+
+    selected = picker.model.selected
+    picker.move(1)
+    assert picker.model.selected != selected
+    # Preload and scroll the new row's transcript, then leave and return:
+    # the reset must act on the CACHED viewport, not just a fresh
+    # tail-positioned one (a first-time transcript trivially follows the tail).
+    transcript2 = picker._preview_model(60)
+    assert transcript2 is not None
+    picker.scroll_preview(-3)
+    assert transcript2.top_row(width=60, height=5) > 0
+    picker.move(-1)
+    picker.move(1)
+    # The cached row's preview resets to the tail.
+    assert transcript2.viewport.follows_tail is True
 
 
 def test_mouse_wheel_routes_to_list_and_preview_separately() -> None:
