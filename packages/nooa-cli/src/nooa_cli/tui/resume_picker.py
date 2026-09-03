@@ -790,9 +790,8 @@ class ResumePicker(ExplorerBrowser):
         order produces the same projected rows and formatted text as a
         whole-history render (verified against a real 1894-turn session).
         """
-        from .frontend import render_history_replay_to_ansi
         from .fullscreen_transcript import FullscreenTranscriptModel
-        from .output import HistoryReplay, HistoryTurn
+        from .output import HistoryTurn
 
         transcript = FullscreenTranscriptModel(show_trailing_blank=False)
         turns = [HistoryTurn(turn.role, turn.content) for turn in row.turns]
@@ -800,21 +799,69 @@ class ResumePicker(ExplorerBrowser):
         for start in range(0, len(turns), _PREVIEW_BUILD_CHUNK_TURNS):
             if cancel is not None and cancel.is_set():
                 return None
-            chunk = turns[start : start + _PREVIEW_BUILD_CHUNK_TURNS]
-            transcript.append(
-                render_history_replay_to_ansi(
-                    HistoryReplay(
-                        turns=chunk,
-                        # The whole-history render prints this header once.
-                        session_id=row.id[:8] if start == 0 else "",
-                        show_header=False,
-                        show_footer=False,
-                    ),
-                    width,
-                )
-            )
+            transcript.append(self._render_preview_chunk(turns, start, row.id, width))
         # Projection is the dominant first-render cost for long histories.
         transcript.formatted_text(width=width, height=max(1, height))
+        return transcript
+
+    @staticmethod
+    def _render_preview_chunk(turns: list[Any], start: int, row_id: str, width: int) -> str:
+        """Render one chunk of the replay to ANSI (pure; safe on any thread)."""
+        from .frontend import render_history_replay_to_ansi
+        from .output import HistoryReplay
+
+        chunk = turns[start : start + _PREVIEW_BUILD_CHUNK_TURNS]
+        return render_history_replay_to_ansi(
+            HistoryReplay(
+                turns=chunk,
+                # The whole-history render prints this header once.
+                session_id=row_id[:8] if start == 0 else "",
+                show_header=False,
+                show_footer=False,
+            ),
+            width,
+        )
+
+    async def _build_preview_progressively(
+        self,
+        row: ResumePickerRow,
+        width: int,
+        height: int,
+        on_chunk: Callable[[Any], None] | None = None,
+    ):
+        """Build the preview with the transcript owned by the UI loop.
+
+        Rendering is pure string work and runs on a worker thread, while
+        every append (and its incremental projection extension) happens on
+        the UI loop. That keeps the transcript single-threaded, so a partial
+        can be published and rendered while later chunks are still rendering
+        instead of showing "Preparing…" for the whole build. ``on_chunk``
+        receives the partial transcript after each chunk; returns None when
+        superseded.
+        """
+        import asyncio
+
+        from .fullscreen_transcript import FullscreenTranscriptModel
+        from .output import HistoryTurn
+
+        transcript = FullscreenTranscriptModel(show_trailing_blank=False)
+        turns = [HistoryTurn(turn.role, turn.content) for turn in row.turns]
+        cancel = self._preview_build_cancel
+        for start in range(0, len(turns), _PREVIEW_BUILD_CHUNK_TURNS):
+            if cancel is not None and cancel.is_set():
+                return None
+            ansi = await asyncio.to_thread(
+                self._render_preview_chunk, turns, start, row.id, width
+            )
+            if cancel is not None and cancel.is_set():
+                return None
+            transcript.append(ansi)
+            # Seed the projection on the first chunk so later appends extend
+            # it incrementally; otherwise the whole-history projection would
+            # land on the UI loop as one multi-second stall at the end.
+            transcript.formatted_text(width=max(1, width), height=max(1, height))
+            if on_chunk is not None:
+                on_chunk(transcript)
         return transcript
 
     def _preview_model(self, width: int):
@@ -867,6 +914,10 @@ class ResumePicker(ExplorerBrowser):
             if pending_key != key:
                 task.cancel()
                 self._preview_tasks.pop(pending_key, None)
+                # A cached entry for a still-pending key can only be a partial
+                # published mid-build; drop it so returning to that row rebuilds
+                # the full history instead of freezing at a prefix.
+                self._preview_models.pop(pending_key, None)
         if self._preview_build_cancel is not None:
             self._preview_build_cancel.set()
 
@@ -878,8 +929,22 @@ class ResumePicker(ExplorerBrowser):
                 if self.model.current is not row:
                     return
                 self._preview_build_cancel = threading.Event()
-                transcript = await asyncio.to_thread(
-                    self._build_preview_model, row, key[1], max(1, height)
+
+                def publish_partial(partial: Any) -> None:
+                    # Runs on the UI loop between chunks: the transcript is
+                    # owned here, so publishing mid-build is safe. Supersede
+                    # drops the partial (see the cancellation loop above), so
+                    # a stale prefix can never freeze as a row's preview.
+                    if self.model.query.strip():
+                        # Recomputing search matches per streamed chunk is
+                        # quadratic for long histories; queried rows keep the
+                        # "Preparing…" frame until the finished preview lands.
+                        return
+                    self._remember_preview(key, partial)
+                    self.invalidate()
+
+                transcript = await self._build_preview_progressively(
+                    row, key[1], max(1, height), on_chunk=publish_partial
                 )
             except asyncio.CancelledError:
                 return
@@ -889,6 +954,15 @@ class ResumePicker(ExplorerBrowser):
                 self._preview_tasks.pop(key, None)
             if transcript is None:
                 return
+            if self.model.query.strip():
+                # A query typed mid-build computed matches over a partial
+                # history; set_search early-returns on an unchanged query, so
+                # recompute over the finished transcript before publishing.
+                query_width, query_height = self.preview_control.viewport
+                transcript.set_search("", width=max(1, query_width), height=max(1, query_height))
+                transcript.set_search(
+                    self.model.query, width=max(1, query_width), height=max(1, query_height)
+                )
             self._remember_preview(key, transcript)
             self.invalidate()
 
