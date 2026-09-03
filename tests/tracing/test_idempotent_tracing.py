@@ -128,13 +128,13 @@ def test_instrumentor_composes_with_and_restores_existing_hooks() -> None:
     from unittest.mock import MagicMock
 
     from nooa.runtime.hooks import CompositeInstrumentationHooks, get_hooks, set_hooks
-    from nooa.tracing import NemoOOAgentsInstrumentor
+    from nooa.tracing import NOOAInstrumentor
 
     existing = MagicMock()
     provider = MagicMock()
     set_hooks(existing)
     try:
-        instrumentor = NemoOOAgentsInstrumentor()
+        instrumentor = NOOAInstrumentor()
         instrumentor.instrument(tracer_provider=provider)
         active = get_hooks()
         assert isinstance(active, CompositeInstrumentationHooks)
@@ -151,11 +151,11 @@ def test_instrumentors_can_be_uninstrumented_out_of_order() -> None:
     from unittest.mock import MagicMock
 
     from nooa.runtime.hooks import CompositeInstrumentationHooks, get_hooks, set_hooks
-    from nooa.tracing import NemoOOAgentsInstrumentor
+    from nooa.tracing import NOOAInstrumentor
 
     provider = MagicMock()
-    first = NemoOOAgentsInstrumentor()
-    second = NemoOOAgentsInstrumentor()
+    first = NOOAInstrumentor()
+    second = NOOAInstrumentor()
     set_hooks(None)
     try:
         first.instrument(tracer_provider=provider)

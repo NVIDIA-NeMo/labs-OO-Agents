@@ -104,7 +104,7 @@ def setup_tracing(temp_trace_dir):
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 
-    from nooa.tracing import NemoOOAgentsInstrumentor
+    from nooa.tracing import NOOAInstrumentor
     from nooa.tracing._otlp_file_exporter import (
         OtlpJsonFileExporter,
     )
@@ -126,7 +126,7 @@ def setup_tracing(temp_trace_dir):
     tracer_provider.add_span_processor(SimpleSpanProcessor(exporter))
 
     # Instrument nooa - this sets hooks
-    NemoOOAgentsInstrumentor().instrument(tracer_provider=tracer_provider)
+    NOOAInstrumentor().instrument(tracer_provider=tracer_provider)
 
     # Return hooks for tests that need to propagate to child tasks
     hooks = get_hooks()

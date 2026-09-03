@@ -115,7 +115,7 @@ exporters = exporters_mod
 # ---------------------------------------------------------------------------
 
 
-class NemoOOAgentsInstrumentor:
+class NOOAInstrumentor:
     """OpenTelemetry instrumentor for NVIDIA OO Agents.
 
     Instruments nooa framework to emit OpenTelemetry spans with
@@ -160,6 +160,10 @@ class NemoOOAgentsInstrumentor:
             set_hooks(compose_hooks(*(hook for hook in current.hooks if hook is not self._hooks)))
         self._hooks = None
         self._is_instrumented = False
+
+
+# Backwards-compatible public spelling retained for existing integrations.
+NemoOOAgentsInstrumentor = NOOAInstrumentor
 
 
 # ---------------------------------------------------------------------------
@@ -334,12 +338,10 @@ def enable_tracing(
     # Instrument nooa hooks; capture the instance for re-registration
     # in future asyncio task contexts (see _re_register_hooks).
     with contextlib.suppress(ImportError):
-        instrumentor = NemoOOAgentsInstrumentor()
+        instrumentor = NOOAInstrumentor()
         instrumentor.instrument(tracer_provider=tracer_provider)
         _hooks = instrumentor._hooks
-        assert _hooks is not None, (
-            "NemoOOAgentsInstrumentor.instrument() should have called set_hooks()"
-        )
+        assert _hooks is not None, "NOOAInstrumentor.instrument() should have called set_hooks()"
 
     # Instrument litellm if available
     _instrument_litellm(tracer_provider)
@@ -514,6 +516,7 @@ def shutdown_traces() -> None:
 # ---------------------------------------------------------------------------
 
 __all__ = [
+    "NOOAInstrumentor",
     "NemoOOAgentsInstrumentor",
     "OtlpJsonFileExporter",
     "OtlpJsonHttpExporter",
