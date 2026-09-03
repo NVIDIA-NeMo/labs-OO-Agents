@@ -283,6 +283,9 @@ class ResumePickerModel:
     def jump_end(self) -> None:
         if self._matches:
             self.selected = len(self._matches) - 1
+            # Keep the selection on screen: the list renders from
+            # list_offset, so End must scroll it into view too.
+            self.list_offset = max(0, len(self._matches) - 1)
 
     def select(self, index: int) -> None:
         if 0 <= index < len(self._matches) and index != self.selected:
@@ -629,11 +632,16 @@ class ResumePicker(ExplorerBrowser):
 
         def on_filter(value: str) -> None:
             self.model.set_filter(value)  # type: ignore[arg-type]
+            # A filter/sort change can select a different row: reset the
+            # (possibly cached) current preview's viewport so it follows the
+            # tail instead of keeping the previous scroll position.
+            self._reset_preview()
             self._prepare_current_preview()
             self.invalidate()
 
         def on_sort(value: str) -> None:
             self.model.set_sort(value == "updated")
+            self._reset_preview()
             self._prepare_current_preview()
             self.invalidate()
 
