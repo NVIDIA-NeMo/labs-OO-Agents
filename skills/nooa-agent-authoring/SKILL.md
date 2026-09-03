@@ -64,9 +64,20 @@ Keys come from `.env` (library use) or `~/.config/nooa/secrets.yaml`.
 4. `class MyAgent(Agent, llm=default)` — class default
 5. **Parent inheritance** — a subagent with no `llm=` of its own inherits from the agent that calls it
 
-The method override also accepts a **callable** taking the agent and returning
-a client, resolved on each call. Use it when the per-method model has to be
-chosen per instance (or per call) rather than fixed at import time:
+The method override accepts three spellings. A **registry alias or model
+string** resolves lazily on the first call per instance (no client constructed
+at import time) — the natural way to pin a method to a cheaper or stronger
+model:
+
+```python
+class SupportAgent(Agent, llm="gpt-5"):
+    @strategy(llm="gpt-5-mini")                 # alias or model string
+    async def summarize(self, text: str) -> str: ...
+```
+
+A **callable** taking the agent and returning a client is resolved on each
+call. Use it when the per-method model has to be chosen per instance (or per
+call) rather than fixed at import time:
 
 ```python
 class Researcher(Agent, llm=fast):
@@ -81,8 +92,8 @@ class Researcher(Agent, llm=fast):
     async def solve(self, problem: str) -> str: ...   # differs per call
 ```
 
-Standalone `@strategy` functions must pass a client, not a callable — they
-have no instance to resolve against.
+Standalone `@strategy` functions may pass a client or an alias string, but
+not a callable — they have no instance to resolve against.
 
 Child agents inherit the parent's LLM by default. Any explicit `llm=` on the child overrides it — that's how you run a cheap model for one phase:
 
