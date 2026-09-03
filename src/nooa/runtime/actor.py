@@ -2608,8 +2608,12 @@ class ActorRuntime:
 
             # Call-site overrides accept the same spellings as the decorator
             # (client, alias string cached per instance, or callable resolved
-            # against the agent), resolved by the same shared path.
-            llm_client = resolve_method_llm(call_llm, self.agent, method_name)
+            # against the agent), resolved by the same shared path. The origin
+            # names the call site so a typo'd alias or a raising resolver
+            # points at the caller's line, not the decorator's.
+            llm_client = resolve_method_llm(
+                call_llm, self.agent, method_name, origin="call-site llm="
+            )
             llm_selection_source = "call_site"
         elif plan_llm is not None:
             from nooa.method_llm import resolve_method_llm

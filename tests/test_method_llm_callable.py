@@ -562,3 +562,180 @@ class TestAliasEndToEnd:
         assert await standalone_summarize("hello") == "standalone-answer"
         assert await standalone_summarize("again") == "standalone-answer"
         assert calls == ["my-alias"], "the wrapper caches the resolved client"
+
+
+class TestAliasReviewHardening:
+    """Edge cases surfaced by the subagent review round."""
+
+    @pytest.mark.asyncio
+    async def test_real_agent_instances_cache_independently(self, monkeypatch) -> None:
+        """Two real Agent instances resolve the same alias to separate clients.
+
+        Guards the lazily-setattr'd per-instance cache in agent.py: if anyone
+        ever gives the annotation a class-level ``= {}`` default, every
+        instance would share one dict and this test catches it.
+        """
+        default = _fake("default")
+        clients = []
+
+        def fake_get(name, **kw):  # noqa: ANN001, ANN003
+            client = _fake(f"resolved-{len(clients)}")
+            clients.append(client)
+            return client
+
+        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", fake_get)
+
+        class Pair(Agent, llm=default):
+            """A pair."""
+
+            @strategy(PredictStrategy(), llm="shared-alias")
+            async def run(self) -> str:
+                """Return a word."""
+                ...
+
+        a, b = Pair(), Pair()
+        assert await a.run() == "resolved-0"
+        assert await b.run() == "resolved-1"
+        assert len(clients) == 2, "each instance must resolve its own client"
+
+    @pytest.mark.asyncio
+    async def test_same_alias_two_methods_one_instance_one_client(self, monkeypatch) -> None:
+        """The cache is keyed on alias, not method — one client per (instance, alias)."""
+        default = _fake("default")
+        calls = []
+
+        def fake_get(name, **kw):  # noqa: ANN001, ANN003
+            calls.append(name)
+            return _fake("aliased", times=2)
+
+        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", fake_get)
+
+        class Twin(Agent, llm=default):
+            """A twin."""
+
+            @strategy(PredictStrategy(), llm="cheap")
+            async def one(self) -> str:
+                """Return a word."""
+                ...
+
+            @strategy(PredictStrategy(), llm="cheap")
+            async def two(self) -> str:
+                """Return another word."""
+                ...
+
+        agent = Twin()
+        assert await agent.one() == "aliased"
+        assert await agent.two() == "aliased"
+        assert calls == ["cheap"], "methods sharing an alias share one client"
+
+    def test_alias_resolving_to_non_client_raises_typeerror(self, monkeypatch) -> None:
+        """get_llm_client returning garbage is caught, not passed to generation."""
+        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", lambda name, **kw: 42)
+
+        with pytest.raises(TypeError, match="resolved to int, not a UnifiedLLM instance"):
+            resolve_method_llm("bad-alias", object(), "method")
+
+    @pytest.mark.asyncio
+    async def test_e2e_alias_failure_names_method_and_leaves_no_poison(self, monkeypatch) -> None:
+        """A failed resolution surfaces at call time naming the method, and a
+        fixed registry re-resolves on the next call (nothing was cached)."""
+        default = _fake("default")
+        state = {"fail": True}
+        calls = []
+
+        def fake_get(name, **kw):  # noqa: ANN001, ANN003
+            calls.append(name)
+            if state["fail"]:
+                raise ValueError("unknown model")
+            return _fake("fixed")
+
+        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", fake_get)
+
+        class Flaky(Agent, llm=default):
+            """A flaky agent."""
+
+            @strategy(PredictStrategy(), llm="flaky-alias")
+            async def run(self) -> str:
+                """Return a word."""
+                ...
+
+        agent = Flaky()
+        with pytest.raises(RuntimeError, match=r"alias 'flaky-alias' for 'run'"):
+            await agent.run()
+
+        state["fail"] = False
+        assert await agent.run() == "fixed"
+        assert calls == ["flaky-alias", "flaky-alias"], "failed resolution must not be cached"
+
+    @pytest.mark.asyncio
+    async def test_call_site_string_skips_decorator_callable(self, monkeypatch) -> None:
+        """A call-site alias must not trigger the decorator's resolver side effects."""
+        aliased = _fake("call-site", times=2)
+        default = _fake("default")
+        resolver_calls = []
+
+        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", lambda name, **kw: aliased)
+
+        class Guarded(Agent, llm=default):
+            """A guarded agent."""
+
+            @strategy(PredictStrategy(), llm=lambda self: _boom())
+            async def run(self) -> str:
+                """Return a word."""
+                ...
+
+        def _boom():
+            resolver_calls.append("invoked")
+            raise AssertionError("decorator resolver must not run")
+
+        agent = Guarded()
+        assert await agent.run(llm="safe-alias") == "call-site"
+        assert resolver_calls == []
+
+    @pytest.mark.asyncio
+    async def test_two_standalone_wrappers_keep_separate_caches(self, monkeypatch) -> None:
+        """Each wrapper closure caches independently — per function, not module."""
+        clients = []
+
+        def fake_get(name, **kw):  # noqa: ANN001, ANN003
+            client = _fake(f"fn-{len(clients)}")
+            clients.append(client)
+            return client
+
+        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", fake_get)
+
+        @strategy(PredictStrategy(), llm="shared")
+        async def first_fn(text: str) -> str:
+            """Return a summary of {text}."""
+            ...
+
+        @strategy(PredictStrategy(), llm="shared")
+        async def second_fn(text: str) -> str:
+            """Return a summary of {text}."""
+            ...
+
+        assert await first_fn("x") == "fn-0"
+        assert await second_fn("x") == "fn-1"
+        assert len(clients) == 2
+
+    @pytest.mark.asyncio
+    async def test_standalone_alias_failure_names_function(self, monkeypatch) -> None:
+        def fake_get(name, **kw):  # noqa: ANN001, ANN003
+            raise ValueError("unknown model")
+
+        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", fake_get)
+
+        @strategy(PredictStrategy(), llm="no-such-alias")
+        async def named_fn(text: str) -> str:
+            """Return a summary of {text}."""
+            ...
+
+        with pytest.raises(
+            RuntimeError,
+            match=r"standalone @strategy\(llm=\.\.\.\) alias 'no-such-alias' for 'named_fn'",
+        ):
+            await named_fn("x")
+
+    def test_call_site_empty_string_rejected_with_targeted_message(self) -> None:
+        with pytest.raises(TypeError, match="empty string"):
+            resolve_method_llm("", object(), "method", origin="call-site llm=")

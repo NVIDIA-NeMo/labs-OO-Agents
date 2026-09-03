@@ -165,11 +165,11 @@ def create_standalone_wrapper(
         strategy: GenerationStrategy instance resolved from the decorator.
         llm: Optional explicit LLM value from ``@strategy(..., llm=...)``.
             A client, or a registry alias / litellm model string (resolved
-            lazily on first call and cached per process, since standalone
-            functions have no agent instance to cache on). Never a resolver
-            callable: standalone functions have no agent instance to bind one
-            against, so ``@strategy`` rejects callables here at decoration
-            time.
+            lazily on first call and cached per wrapper — one decorated
+            function object — since standalone functions have no agent
+            instance to cache on). Never a resolver callable: standalone
+            functions have no agent instance to bind one against, so
+            ``@strategy`` rejects callables here at decoration time.
 
     Returns:
         Async callable with the same signature as *func*.
@@ -202,7 +202,12 @@ def create_standalone_wrapper(
         if isinstance(resolved_llm, str):
             from nooa.method_llm import resolve_alias
 
-            resolved_llm = resolve_alias(resolved_llm, _alias_cache, func.__name__)
+            resolved_llm = resolve_alias(
+                resolved_llm,
+                _alias_cache,
+                func.__name__,
+                origin="standalone @strategy(llm=...)",
+            )
         if resolved_llm is None:
             # Cascade: inherit LLM from a calling agent if we're inside one
             from nooa.runtime.context_vars import _parent_agent_var
