@@ -178,6 +178,10 @@ class Frontend(Protocol):
         """
         ...
 
+    async def open_theme_explorer(self) -> None:
+        """Open the full-screen theme browser."""
+        ...
+
     async def prompt_sensitive(
         self, title: str, message: str, *, link_url: str | None = None
     ) -> str:
@@ -287,6 +291,11 @@ class TerminalFrontend:
         if self._app is None:
             raise RuntimeError("TUI application is not ready.")
         await self._app.open_memory_explorer()
+
+    async def open_theme_explorer(self) -> None:
+        if self._app is None:
+            raise RuntimeError("TUI application is not ready.")
+        await self._app.open_theme_explorer(refresh=self.refresh_theme)
 
     async def open_activity_overlay(self, outputs: list[Output]) -> None:
         if self._app is None:
@@ -701,7 +710,7 @@ class TerminalFrontend:
     def _render_startup_to_string(self, info: StartupInfo, width: int) -> str:
         from rich.console import Console as RichConsole
 
-        from .theme import CATPPUCCIN_THEME
+        from .theme import create_theme
 
         buf = io.StringIO()
         render_width = max(int(width), 1)
@@ -711,7 +720,7 @@ class TerminalFrontend:
             highlight=False,
             force_terminal=True,
             color_system="256",
-            theme=CATPPUCCIN_THEME,
+            theme=create_theme(),
             _environ={"COLUMNS": str(render_width), "LINES": "25"},
         )
         self._print_startup(info, console)

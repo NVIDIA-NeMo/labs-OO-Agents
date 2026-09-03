@@ -196,6 +196,14 @@ idle consolidation without deleting stored memories. Project memory lives at
 `.nooa/memory/memory.sqlite` by default; session memory lives beside the
 session database. Both choices are persisted per agent in `settings.yaml`.
 
+### Themes
+
+Use `/theme` for a full-screen browser with live previews, or `/theme <id>` to
+switch directly. Custom Base16/Base24 YAML themes
+can be installed in `~/.config/nooa/themes/` or `<project>/.nooa/themes/`. See
+[`docs/themes.md`](docs/themes.md) for the schema, semantic color roles, and
+validation rules.
+
 ### MCP servers
 
 Use the TUI commands for the common lifecycle:

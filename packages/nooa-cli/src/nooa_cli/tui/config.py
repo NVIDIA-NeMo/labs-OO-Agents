@@ -105,7 +105,19 @@ class TUIConfig(BaseModel):
     trace_dir: Path | None = None
 
     # Color theme selected by ``/theme`` and restored on the next launch.
-    theme: Literal["mocha", "latte", "vsdark", "vslight"] = "mocha"
+    theme: str = "mocha"
+
+    @field_validator("theme")
+    @classmethod
+    def _validate_theme(cls, value: str) -> str:
+        from .theme import THEMES, reload_themes
+
+        name = str(value).lower()
+        if name not in THEMES:
+            reload_themes()
+        if name not in THEMES:
+            raise ValueError(f"Unknown theme {value!r}. Choose from: {', '.join(THEMES)}")
+        return name
 
     # Vi keybindings in prompt_toolkit input
     vi_mode: bool = False

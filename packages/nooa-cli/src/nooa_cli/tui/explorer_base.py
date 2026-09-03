@@ -44,8 +44,8 @@ def bar_style_code() -> str:
 
 def highlight_style_code(*, current: bool = False) -> str:
     """Return search-match colors for the active TUI theme."""
-    background = COLORS["sky"] if current else COLORS["yellow"]
-    return f"\x1b[38;2;{_rgb(COLORS['crust'])};48;2;{_rgb(background)}m"
+    role = "search_current" if current else "search_match"
+    return f"\x1b[38;2;{_rgb(COLORS[f'{role}_fg'])};48;2;{_rgb(COLORS[f'{role}_bg'])}m"
 
 
 def style_bar(text: str, *, ansi: bool) -> str:
@@ -256,8 +256,7 @@ class ExplorerModel:
         self.matches = [
             i
             for i, row in enumerate(self.rows)
-            if self._filter_predicate(row)
-            and matches_all_terms(terms, row.search_text)
+            if self._filter_predicate(row) and matches_all_terms(terms, row.search_text)
         ]
         if self._sort_key is not None:
             self.matches.sort(
@@ -364,6 +363,7 @@ class ExplorerInteraction:
     use_fullscreen_browser = True
     detail_focus = "detail"
     native_selection = False
+    quit_from_list = False
     options: tuple[ExplorerOptionItem, ...] = ()
     option_cursor: int | None = None
     _options_y = 1
@@ -456,6 +456,7 @@ class ExplorerInteraction:
             self.model.scroll_detail(delta)
         return "handled"
 
+
 class ExplorerView(ExplorerInteraction):
     """Generic in-app explorer subview.
 
@@ -526,6 +527,9 @@ class ExplorerView(ExplorerInteraction):
     def handle_action(self, action: str, row: Any) -> SubviewKeyResult:
         """Handle a custom action on the current row. Override for custom behavior."""
         return "ignored"
+
+    def on_selection_changed(self) -> None:
+        """React after the browser changes the selected row."""
 
     def handle_key(self, action: str, value: str = "") -> SubviewKeyResult:
         model = self.model
