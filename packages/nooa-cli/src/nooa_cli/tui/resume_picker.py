@@ -925,6 +925,7 @@ class ResumePicker(ExplorerBrowser):
             self._preview_build_cancel.set()
 
         async def prepare() -> None:
+            current_prepare_task = asyncio.current_task()
             try:
                 # Dwell gate: navigation away cancels this task during the
                 # delay, so only rows the user actually stop on get built.
@@ -954,7 +955,11 @@ class ResumePicker(ExplorerBrowser):
             except Exception:
                 return
             finally:
-                self._preview_tasks.pop(key, None)
+                # A rapid A→B→A can install a new task under the same key
+                # before cancelled A reaches this finally block. Only remove
+                # the mapping if it still belongs to this coroutine.
+                if self._preview_tasks.get(key) is current_prepare_task:
+                    self._preview_tasks.pop(key, None)
             if transcript is None:
                 return
             if self.model.query.strip():
