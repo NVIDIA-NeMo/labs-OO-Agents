@@ -69,11 +69,13 @@ def _coerce_display_mode(value: Any) -> Any:
 
 
 def _coerce_theme(value: Any) -> str:
-    from .theme import THEMES
+    from .theme import THEMES, reload_themes
 
+    reload_themes()
     name = str(value).lower()
     if name not in THEMES:
-        raise ValueError(f"Unknown theme {value!r}. Choose from: {', '.join(THEMES)}")
+        logger.warning("Unknown persisted theme %r; falling back to mocha", value)
+        return "mocha"
     return name
 
 
@@ -281,8 +283,9 @@ tui:
   # LLM model alias (from the unifiedllm registry) or a litellm model name.
   # default_model: {default_model}
 
-  # Color palette. Prefer /theme <name> so the choice is applied and saved.
-  # theme: mocha               # mocha | latte | vsdark | vslight
+  # Color palette. Use /theme to browse; /theme <id> applies directly.
+  # Custom Base16/Base24 YAML themes load from user/project .nooa/themes/.
+  # theme: mocha
 
   # Show the agent's Python execution panels.
   # show_python: false

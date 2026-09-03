@@ -103,11 +103,48 @@ class TestLayering:
         # null removed the key from the merged dict → field keeps its default.
         assert loaded.tui.agent_spec is None
 
-    def test_invalid_theme_fails_clearly(self, user_dir, project_dir):
+    def test_custom_theme_id_is_valid_after_catalog_reload(
+        self, user_dir, project_dir, monkeypatch
+    ):
+        from nooa_cli.tui import theme
+
+        theme_dir = project_dir / "themes"
+        theme_dir.mkdir()
+        values = {
+            "base00": "181818",
+            "base01": "282828",
+            "base02": "383838",
+            "base03": "585858",
+            "base04": "b8b8b8",
+            "base05": "d8d8d8",
+            "base06": "e8e8e8",
+            "base07": "f8f8f8",
+            "base08": "ab4642",
+            "base09": "dc9656",
+            "base0A": "f7ca88",
+            "base0B": "a1b56c",
+            "base0C": "86c1b9",
+            "base0D": "7cafc2",
+            "base0E": "ba8baf",
+            "base0F": "a16946",
+        }
+        (theme_dir / "ocean.yaml").write_text(yaml.safe_dump({"scheme": "Ocean", **values}))
+        (project_dir / "settings.yaml").write_text("tui:\n  theme: ocean\n")
+        try:
+            theme.reload_themes()
+            assert load_settings(Config()).tui.theme == "ocean"
+        finally:
+            monkeypatch.undo()
+            theme.reload_themes()
+            theme.set_theme("mocha")
+
+    def test_unknown_persisted_theme_falls_back_to_mocha(self, user_dir, project_dir, caplog):
         (project_dir / "settings.yaml").write_text("tui:\n  theme: ultraviolet\n")
 
-        with pytest.raises(ValueError, match="ultraviolet"):
-            load_settings(Config())
+        loaded = load_settings(Config())
+
+        assert loaded.tui.theme == "mocha"
+        assert "Unknown persisted theme 'ultraviolet'" in caplog.text
 
     def test_path_coercion(self, user_dir, project_dir):
         (user_dir / "settings.yaml").write_text(

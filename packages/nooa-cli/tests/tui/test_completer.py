@@ -106,12 +106,16 @@ def test_session_id_completion_excludes_empty_sessions(completer, monkeypatch):
         "/session delete used-ses"
     ]
     # The /resume alias completes session ids like /session resume.
-    assert [item.text for item in completer.complete("/resume ")] == [
-        "/resume used-ses"
-    ]
-    assert [item.text for item in completer.complete("/resume used")] == [
-        "/resume used-ses"
-    ]
+    assert [item.text for item in completer.complete("/resume ")] == ["/resume used-ses"]
+    assert [item.text for item in completer.complete("/resume used")] == ["/resume used-ses"]
+
+
+def test_theme_completion_uses_discovered_theme_ids(completer, monkeypatch) -> None:
+    from nooa_cli.tui import theme
+
+    monkeypatch.setattr(theme, "theme_names", lambda: ("mocha", "custom-night"))
+
+    assert [item.text for item in completer.complete("/theme custom")] == ["/theme custom-night"]
 
 
 def test_slash_case_insensitive(completer):
