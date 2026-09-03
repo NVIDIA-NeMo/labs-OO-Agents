@@ -34,6 +34,7 @@ from nooa.tools._bounded_io import (
     atomic_replace_text,
     iter_lines_keepends,
     read_specific_lines,
+    read_whole_file_checked,
 )
 from nooa.tools.shell_tools import Match, ShellTools
 
@@ -235,6 +236,27 @@ async def test_whole_file_budget_boundary_is_deterministic(tmp_path):
         await sh.read("over.txt")
 
 
+def test_whole_file_read_enforces_budget_when_stat_underreports(tmp_path, monkeypatch):
+    """The byte ceiling must hold even when pathname metadata becomes stale."""
+    path = tmp_path / "growing.txt"
+    path.write_text("x" * 1_000_000)
+
+    class _StaleStat:
+        st_size = 4
+
+    real_stat = Path.stat
+
+    def stale_size_only_for_target(candidate, *args, **kwargs):
+        if candidate == path:
+            return _StaleStat()
+        return real_stat(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stale_size_only_for_target)
+
+    with pytest.raises(FileTooLargeError):
+        read_whole_file_checked(path, 10, hint="raise the limit")
+
+
 @pytest.mark.asyncio
 async def test_ranged_read_is_not_capped_by_the_whole_file_budget(tmp_path):
     """The budget bounds unbounded reads; a range is bounded by construction."""
@@ -316,6 +338,63 @@ async def test_replace_preserves_executable_bit(sh, tmp_path):
 
     assert "echo new" in script.read_text()
     assert stat.S_IMODE(script.stat().st_mode) == before, "atomic swap dropped the mode"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX umask semantics")
+@pytest.mark.asyncio
+async def test_write_file_uses_normal_umask_permissions(sh, tmp_path):
+    """Atomic creation must not silently make ordinary files owner-only."""
+    reference = tmp_path / "reference.txt"
+    reference.write_text("reference")
+    expected_mode = stat.S_IMODE(reference.stat().st_mode)
+
+    await sh.write_file("created.txt", "created")
+
+    assert stat.S_IMODE((tmp_path / "created.txt").stat().st_mode) == expected_mode
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX extended attributes")
+def test_atomic_replace_preserves_existing_extended_attributes(tmp_path):
+    """Replacing an existing file must preserve supported user metadata."""
+    if not all(hasattr(os, name) for name in ("setxattr", "getxattr")):
+        pytest.skip("extended attributes are unavailable")
+    path = tmp_path / "metadata.txt"
+    path.write_text("before")
+    try:
+        os.setxattr(path, b"user.nooa-test", b"preserved")
+    except OSError as exc:
+        pytest.skip(f"filesystem does not support user xattrs: {exc}")
+
+    atomic_replace_text(path, "after")
+
+    assert os.getxattr(path, b"user.nooa-test") == b"preserved"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="directory fsync is POSIX-specific")
+def test_atomic_replace_fsyncs_parent_directory(tmp_path, monkeypatch):
+    """Crash durability requires persisting the directory entry rename."""
+    path = tmp_path / "durable.txt"
+    path.write_text("before")
+    real_fsync = os.fsync
+    fsynced_directory = False
+
+    def tracking_fsync(fd):
+        nonlocal fsynced_directory
+        fsynced_directory |= stat.S_ISDIR(os.fstat(fd).st_mode)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", tracking_fsync)
+
+    atomic_replace_text(path, "after")
+
+    assert fsynced_directory, "the parent directory was not fsynced after os.replace"
+
+
+def test_shell_tools_rejects_nonpositive_file_budget(tmp_path):
+    """A configured byte ceiling must be a meaningful positive bound."""
+    for invalid in (0, -1):
+        with pytest.raises(ValueError, match="max_file_bytes.*positive"):
+            ShellTools(cwd=str(tmp_path), max_file_bytes=invalid)
 
 
 @pytest.mark.asyncio
