@@ -2050,6 +2050,22 @@ class TUIApplication:
             view = await view
         await self.open_subview(view)
 
+    async def open_theme_explorer(self, *, refresh: Callable[[], None] | None = None) -> None:
+        """Open the discovered-theme browser with live preview and saved apply."""
+        from .settings import write_settings_updates
+        from .theme_explorer import ThemeExplorerView
+
+        tui_config = getattr(self._config, "tui", self._config)
+
+        def persist(name: str) -> None:
+            write_settings_updates({("tui", "theme"): name})
+            if tui_config is not None:
+                tui_config.theme = name
+
+        await self.open_subview(
+            ThemeExplorerView(refresh=refresh or self.refresh_style, persist=persist)
+        )
+
     async def open_memory_explorer(self) -> None:
         """Open the host-provided memory explorer view."""
         if self._host_services.open_memory_view is None:
@@ -2638,12 +2654,12 @@ class TUIApplication:
             event.app.invalidate()
 
         mouse_bindings = load_mouse_bindings()
-        vt100_mouse_handler = mouse_bindings.get_bindings_for_keys(
-            (Keys.Vt100MouseEvent,)
-        )[0].handler
-        windows_mouse_handler = mouse_bindings.get_bindings_for_keys(
-            (Keys.WindowsMouseEvent,)
-        )[0].handler
+        vt100_mouse_handler = mouse_bindings.get_bindings_for_keys((Keys.Vt100MouseEvent,))[
+            0
+        ].handler
+        windows_mouse_handler = mouse_bindings.get_bindings_for_keys((Keys.WindowsMouseEvent,))[
+            0
+        ].handler
 
         @kb.add(Keys.Vt100MouseEvent, filter=subview_active, eager=True)
         def _(event):
@@ -2700,9 +2716,7 @@ class TUIApplication:
         @kb.add("escape", filter=subview_active, eager=True)
         def _(event):
             pending = [
-                kp
-                for kp in event.key_processor.input_queue
-                if kp.key is not Keys.CPRResponse
+                kp for kp in event.key_processor.input_queue if kp.key is not Keys.CPRResponse
             ]
             if not pending:
                 # A CPR report may share this read (it pairs with the Esc in
@@ -2710,8 +2724,7 @@ class TUIApplication:
                 # it would be spurious; absorb the Esc and let the CPR reach
                 # its own handler. Only a truly lone Esc closes.
                 queue_has_cpr = any(
-                    kp.key is Keys.CPRResponse
-                    for kp in event.key_processor.input_queue
+                    kp.key is Keys.CPRResponse for kp in event.key_processor.input_queue
                 )
                 if not queue_has_cpr:
                     self._subview_key(event, "escape")

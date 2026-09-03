@@ -46,7 +46,6 @@ def test_input_uses_terminal_background_across_themes() -> None:
         "fullscreen-browser.preview-user",
         "fullscreen-browser.preview-agent",
         "fullscreen-browser.footer",
-        "fullscreen-browser.control-focused",
     ],
 )
 def test_fullscreen_browser_standard_text_uses_terminal_default_foreground(style_name: str) -> None:
@@ -110,18 +109,112 @@ def test_inline_code_spans_follow_the_active_theme() -> None:
     original = theme.get_theme()
     bodies = {}
     try:
-        for name in ("mocha", "latte"):
+        for name in theme.THEMES:
             theme.set_theme(name)
             frontend._console.refresh_theme()
             rendered = frontend._render_output_to_ansi(AgentMessage("see `chip` here"), 40)
-            bodies[name] = next(line for line in rendered.splitlines() if "chip" in line)
-        for name, body in bodies.items():
+            body = next(line for line in rendered.splitlines() if "chip" in line)
+            bodies[name] = body
+            style = frontend._console.console.get_style("markdown.code")
+            assert style.color is not None
+            assert style.bgcolor is not None
+            assert style.color.triplet == tuple(
+                int(theme.COLORS["inline_code_fg"][index : index + 2], 16) for index in (1, 3, 5)
+            )
+            assert style.bgcolor.triplet == tuple(
+                int(theme.COLORS["inline_code_bg"][index : index + 2], 16) for index in (1, 3, 5)
+            )
             assert "\x1b[40m" not in body, (name, body)
             assert "chip" in body
-        assert bodies["mocha"] != bodies["latte"]
+        assert len(set(bodies.values())) == len(theme.THEMES)
     finally:
         theme.set_theme(original)
         frontend._console.refresh_theme()
+
+
+def _relative_luminance(color: str) -> float:
+    channels = [int(color[index : index + 2], 16) / 255 for index in (1, 3, 5)]
+    linear = [
+        channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+        for channel in channels
+    ]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _contrast_ratio(foreground: str, background: str) -> float:
+    lighter, darker = sorted(
+        (_relative_luminance(foreground), _relative_luminance(background)), reverse=True
+    )
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+@pytest.mark.parametrize("name", theme.THEMES)
+def test_each_theme_has_accessible_inline_code_colors(name: str) -> None:
+    palette = theme.THEMES[name]
+    assert _contrast_ratio(palette["inline_code_fg"], palette["inline_code_bg"]) >= 4.5
+    assert _contrast_ratio(palette["inline_code_bg"], palette["base"]) >= 3
+
+
+@pytest.mark.parametrize("name", theme.THEMES)
+def test_semantic_highlight_roles_reach_prompt_toolkit(name: str) -> None:
+    original = theme.get_theme()
+    try:
+        theme.set_theme(name)
+        app = TUIApplication()
+        style = app._app.style
+        palette = theme.THEMES[name]
+
+        selected = style.get_attrs_for_style_str("class:fullscreen-browser.selected")
+        match = style.get_attrs_for_style_str("class:transcript-search-match")
+        current = style.get_attrs_for_style_str("class:transcript-search-current")
+        rail = style.get_attrs_for_style_str("class:fullscreen-browser.active-rail-active")
+
+        assert selected.color == palette["selection_fg"].lstrip("#")
+        assert selected.bgcolor == palette["selection_bg"].lstrip("#")
+        assert match.color == palette["search_match_fg"].lstrip("#")
+        assert match.bgcolor == palette["search_match_bg"].lstrip("#")
+        assert current.color == palette["search_current_fg"].lstrip("#")
+        assert current.bgcolor == palette["search_current_bg"].lstrip("#")
+        assert rail.color == palette["focus_accent"].lstrip("#")
+    finally:
+        theme.set_theme(original)
+
+
+@pytest.mark.parametrize("name", theme.THEMES)
+def test_feedback_roles_reach_rich_theme(name: str) -> None:
+    original = theme.get_theme()
+    try:
+        theme.set_theme(name)
+        rich_theme = theme.create_theme()
+        palette = theme.THEMES[name]
+        for style_name, role in (
+            ("success", "feedback_success"),
+            ("error", "feedback_error"),
+            ("warning", "feedback_warning"),
+            ("info", "feedback_info"),
+        ):
+            color = rich_theme.styles[style_name].color
+            assert color is not None
+            assert color.triplet == tuple(
+                int(palette[role][index : index + 2], 16) for index in (1, 3, 5)
+            )
+    finally:
+        theme.set_theme(original)
+
+
+@pytest.mark.parametrize("name", theme.THEMES)
+def test_semantic_diff_colors_override_pygments_theme(name: str) -> None:
+    from pygments.token import Generic
+
+    palette = theme.THEMES[name]
+    syntax_theme = theme.create_syntax_theme(name)
+
+    assert syntax_theme.get_style_for_token(Generic.Inserted).color.triplet == tuple(
+        int(palette["diff_added"][index : index + 2], 16) for index in (1, 3, 5)
+    )
+    assert syntax_theme.get_style_for_token(Generic.Deleted).color.triplet == tuple(
+        int(palette["diff_removed"][index : index + 2], 16) for index in (1, 3, 5)
+    )
 
 
 def test_active_pane_rail_uses_theme_highlight_color() -> None:
@@ -129,15 +222,17 @@ def test_active_pane_rail_uses_theme_highlight_color() -> None:
     app = TUIApplication()
 
     def rail_color() -> str:
-        attrs = app._app.style.get_attrs_for_style_str("class:fullscreen-browser.active-rail-active")
+        attrs = app._app.style.get_attrs_for_style_str(
+            "class:fullscreen-browser.active-rail-active"
+        )
         return attrs.color or ""
 
     original = theme.get_theme()
     try:
-        assert rail_color() == theme.COLORS["lavender"].lstrip("#")
+        assert rail_color() == theme.COLORS["focus_accent"].lstrip("#")
         theme.set_theme("latte")
         app.refresh_style()
-        assert rail_color() == theme.COLORS["lavender"].lstrip("#")
+        assert rail_color() == theme.COLORS["focus_accent"].lstrip("#")
     finally:
         theme.set_theme(original)
         app.refresh_style()
