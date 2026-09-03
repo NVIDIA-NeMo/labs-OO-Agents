@@ -146,21 +146,28 @@ def test_stale_arm_expires_instead_of_firing(monkeypatch) -> None:
     """An arm older than the gesture window re-arms, never fires.
 
     The docstring always promised a gesture window; without one, an f armed
-    minutes earlier still fired on the next f.
+    minutes earlier still fired on the next f. A controllable monotonic
+    clock drives the elapsed time deterministically — a zero-second window
+    would still confirm when both reads are equal, and immediate presses
+    cannot prove the inclusive boundary.
     """
+    import time as time_module
+
     agent, mgr, ids = _seeded_manager()
     view, calls = _view(agent, mgr)
     skill = next(r for r in view.model.rows if r.id == ids["skill"])
 
-    # Arm, then shrink the window to zero: the stale arm does not fire,
+    clock = {"now": 100.0}
+    monkeypatch.setattr(time_module, "monotonic", lambda: clock["now"])
+
+    # Arm, then advance past the window: the stale arm does not fire,
     # it re-arms fresh.
     assert view.handle_action("text:f", skill) == "handled"
-    monkeypatch.setattr(view, "_CONFIRM_WINDOW_SECONDS", 0.0)
+    clock["now"] += view._CONFIRM_WINDOW_SECONDS + 1
     assert view.handle_action("text:f", skill) == "handled"
     assert calls["forgot"] == []
 
-    # A prompt second press (fresh window restored) fires.
-    monkeypatch.setattr(view, "_CONFIRM_WINDOW_SECONDS", 10.0)
+    # A prompt second press within the fresh arm's window fires.
     assert view.handle_action("text:f", skill) == "handled"
     assert calls["forgot"] == [ids["skill"]]
 
@@ -168,7 +175,7 @@ def test_stale_arm_expires_instead_of_firing(monkeypatch) -> None:
     # confirms.
     todo = next(r for r in view.model.rows if r.id == ids["todo"])
     assert view.handle_action("text:d", todo) == "handled"
-    monkeypatch.setattr(view, "_CONFIRM_WINDOW_SECONDS", 10.0)
+    clock["now"] += view._CONFIRM_WINDOW_SECONDS
     assert view.handle_action("text:d", todo) == "handled"
     assert calls["done"] == [ids["todo"]]
 

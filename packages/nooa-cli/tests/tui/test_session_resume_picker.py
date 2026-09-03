@@ -398,9 +398,16 @@ def test_preview_scroll_is_independent_and_selection_resets_to_tail() -> None:
     selected = picker.model.selected
     picker.move(1)
     assert picker.model.selected != selected
-    # The new row's preview resets to the tail, not the scrolled position.
+    # Preload and scroll the new row's transcript, then leave and return:
+    # the reset must act on the CACHED viewport, not just a fresh
+    # tail-positioned one (a first-time transcript trivially follows the tail).
     transcript2 = picker._preview_model(60)
     assert transcript2 is not None
+    picker.scroll_preview(-3)
+    assert transcript2.top_row(width=60, height=5) > 0
+    picker.move(-1)
+    picker.move(1)
+    # The cached row's preview resets to the tail.
     assert transcript2.viewport.follows_tail is True
 
 
