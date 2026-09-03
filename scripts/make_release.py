@@ -209,7 +209,7 @@ def release_for_tag(tag: str) -> dict[str, Any] | None:
             "--repo",
             GITHUB_REPO,
             "--json",
-            "databaseId,isDraft,targetCommitish,url",
+            "apiUrl,isDraft,targetCommitish,url",
         ],
         check=False,
     )
@@ -220,14 +220,12 @@ def release_for_tag(tag: str) -> dict[str, Any] | None:
         die(f"could not inspect GitHub release {tag}: {detail}")
     try:
         metadata = json.loads(proc.stdout)
-        database_id = metadata["databaseId"]
+        api_url = metadata["apiUrl"]
         draft = metadata["isDraft"]
         target = metadata["targetCommitish"]
         url = metadata["url"]
         if (
-            not isinstance(database_id, int)
-            or isinstance(database_id, bool)
-            or database_id <= 0
+            not isinstance(api_url, str)
             or not isinstance(draft, bool)
             or not isinstance(target, str)
             or not target
@@ -235,8 +233,12 @@ def release_for_tag(tag: str) -> dict[str, Any] | None:
             or not url
         ):
             raise TypeError
+        api_prefix = f"https://api.github.com/repos/{GITHUB_REPO}/releases/"
+        database_id_match = re.fullmatch(rf"{re.escape(api_prefix)}([1-9]\d*)", api_url)
+        if database_id_match is None:
+            raise TypeError
         return {
-            "id": database_id,
+            "id": int(database_id_match.group(1)),
             "draft": draft,
             "target_commitish": target,
             "html_url": url,
