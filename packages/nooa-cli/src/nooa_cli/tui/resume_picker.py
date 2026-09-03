@@ -847,7 +847,8 @@ class ResumePicker(ExplorerBrowser):
         transcript = FullscreenTranscriptModel(show_trailing_blank=False)
         turns = [HistoryTurn(turn.role, turn.content) for turn in row.turns]
         cancel = self._preview_build_cancel
-        for start in range(0, len(turns), _PREVIEW_BUILD_CHUNK_TURNS):
+        starts = list(range(0, len(turns), _PREVIEW_BUILD_CHUNK_TURNS))
+        for chunk_index, start in enumerate(reversed(starts)):
             if cancel is not None and cancel.is_set():
                 return None
             ansi = await asyncio.to_thread(
@@ -855,15 +856,17 @@ class ResumePicker(ExplorerBrowser):
             )
             if cancel is not None and cancel.is_set():
                 return None
-            transcript.append(ansi)
-            # Seed the projection on the first chunk so later appends extend
-            # it incrementally; otherwise the whole-history projection would
-            # land on the UI loop as one multi-second stall at the end.
+            # Disclose bottom-up: publish the newest turns first, then prepend
+            # older chunks. Existing record IDs and viewport anchors stay
+            # fixed, so the newest visible lines do not scroll while loading.
+            if chunk_index == 0:
+                transcript.append(ansi, record_id=start + 1)
+            else:
+                transcript.prepend(ansi, record_id=start + 1)
             transcript.formatted_text(width=max(1, width), height=max(1, height))
             if on_chunk is not None:
                 on_chunk(transcript)
         return transcript
-
     def _preview_model(self, width: int):
         row = self.model.current
         if row is None:

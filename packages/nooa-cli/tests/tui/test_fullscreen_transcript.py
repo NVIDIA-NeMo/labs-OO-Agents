@@ -4483,3 +4483,26 @@ def test_transcript_search_clear_returns_to_tail() -> None:
     assert not any(
         "transcript-search" in style for style, _text in model.formatted_text(width=10, height=2)
     )
+
+
+
+def test_prepend_preserves_visible_tail_and_record_anchor() -> None:
+    """Older history appears above without moving already-visible newer lines."""
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+    model = FullscreenTranscriptModel(show_trailing_blank=False)
+    model.append("new 0\nnew 1\nnew 2\n", record_id=20)
+    before = model.formatted_text(width=20, height=2)
+
+    model.prepend("old 0\nold 1\n", record_id=10)
+
+    assert model.formatted_text(width=20, height=2) == before
+    assert model.text == "old 0\nold 1\nnew 0\nnew 1\nnew 2\n"
+
+    model.scroll_visual_lines(-1, width=20, height=2)
+    anchor = model.viewport.anchor
+    assert anchor is not None and anchor.record_id == 20
+    anchored_before = model.formatted_text(width=20, height=2)
+    model.prepend("oldest\n", record_id=5)
+    assert model.viewport.anchor == anchor
+    assert model.formatted_text(width=20, height=2) == anchored_before
