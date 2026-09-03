@@ -412,6 +412,69 @@ def test_existing_release_must_be_matching_unpublished_draft(mr, monkeypatch):
         mr.validate_existing_release("v1.2.3", sha)
 
 
+def test_release_lookup_uses_draft_aware_gh_command(mr, monkeypatch):
+    metadata = {
+        "databaseId": 7,
+        "isDraft": True,
+        "targetCommitish": "a" * 40,
+        "url": "https://draft",
+    }
+    commands = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(metadata), "")
+
+    monkeypatch.setattr(mr, "run", fake_run)
+
+    assert mr.release_for_tag("v1.2.3") == {
+        "id": 7,
+        "draft": True,
+        "target_commitish": "a" * 40,
+        "html_url": "https://draft",
+    }
+    assert commands == [
+        [
+            "gh",
+            "release",
+            "view",
+            "v1.2.3",
+            "--repo",
+            mr.GITHUB_REPO,
+            "--json",
+            "databaseId,isDraft,targetCommitish,url",
+        ]
+    ]
+
+
+def test_release_lookup_returns_none_when_cli_reports_not_found(mr, monkeypatch):
+    monkeypatch.setattr(
+        mr,
+        "run",
+        lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 1, "", "release not found"),
+    )
+
+    assert mr.release_for_tag("v1.2.3") is None
+
+
+def test_release_lookup_fails_closed_on_api_error_or_invalid_metadata(mr, monkeypatch):
+    monkeypatch.setattr(
+        mr,
+        "run",
+        lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 1, "", "HTTP 403"),
+    )
+    with pytest.raises(mr.ReleaseError, match="HTTP 403"):
+        mr.release_for_tag("v1.2.3")
+
+    monkeypatch.setattr(
+        mr,
+        "run",
+        lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 0, "not-json", ""),
+    )
+    with pytest.raises(mr.ReleaseError, match="invalid release metadata"):
+        mr.release_for_tag("v1.2.3")
+
+
 def test_strict_fast_checks_sync_all_public_ci_dependencies_first(mr, monkeypatch):
     commands = []
 
