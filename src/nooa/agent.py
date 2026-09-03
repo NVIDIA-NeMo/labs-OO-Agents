@@ -469,6 +469,7 @@ class Agent(metaclass=AgentMeta):
                         value = format(value, fmt_spec)
                     parts.append(str(value))
                 except Exception:
+                    logger.debug("Prompt template eval failed for %r", field, exc_info=True)
                     placeholder = field
                     if conversion:
                         placeholder = f"{field}!{conversion}"

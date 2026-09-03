@@ -479,9 +479,22 @@ def create_sync_agent_method_wrapper(
         # nearest traced ancestor — same semantics as the async wrapper.
         _push_agent_call_id(call_id if _tracing_enabled[0] else parent_call_id)
 
-        # Same agent-call event as the async wrapper. The sync wrapper doesn't
-        # set _parent_agent_var, so read it directly for is_top_level.
-        is_top_level = _parent_agent_var.get() is None
+        current_parent = _parent_agent_var.get()
+        is_top_level = current_parent is None
+        is_subagent_call = current_parent is not None and current_parent is not self
+
+        # Clear scoped blocks and events only when entering a different agent —
+        # mirrors the async wrapper so a parent's ScopedContext cannot leak
+        # across agent boundaries through sync method calls.
+        scoped_blocks_token = None
+        scoped_events_token = None
+        if is_subagent_call:
+            scoped_blocks_token = _scoped_blocks_var.set(None)
+            scoped_events_token = _scoped_events_var.set(None)
+
+        # Set parent agent for LLM inheritance — subagents instantiated inside
+        # this sync method can inherit the parent's LLM (mirrors async wrapper).
+        parent_token = _parent_agent_var.set(self)
         try:
             self.event_manager.add(
                 BeforeAgentCall(
@@ -534,6 +547,13 @@ def create_sync_agent_method_wrapper(
                 )
             except Exception:  # noqa: BLE001
                 logger.debug("agent-call: AfterAgentCall emission failed (sync)", exc_info=True)
+            # Reset scoped blocks/events if we cleared them, then the parent
+            # agent context (order mirrors the async wrapper).
+            if scoped_blocks_token is not None:
+                _scoped_blocks_var.reset(scoped_blocks_token)
+            if scoped_events_token is not None:
+                _scoped_events_var.reset(scoped_events_token)
+            _parent_agent_var.reset(parent_token)
             _pop_agent_call_id()
             if hook_context is not None:
                 call_after_hook(

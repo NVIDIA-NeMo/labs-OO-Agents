@@ -43,7 +43,7 @@ def _is_event_loop_thread() -> bool:
         # Compare thread IDs - _thread_id is set when loop starts
         if hasattr(loop, "_thread_id"):
             return bool(getattr(loop, "_thread_id") == current_thread().ident)  # noqa: B009
-        return True  # Assume yes if we can't check
+        return True  # Assume yes if we can't check — get_running_loop() succeeded
     except RuntimeError:
         return False  # No running loop
 

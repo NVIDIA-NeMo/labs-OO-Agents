@@ -719,6 +719,49 @@ class TestScopedBlocksIsolation:
             "_scoped_blocks_var from outer's CodeActStrategy must not leak to inner's PurePythonStrategy"
         )
 
+    async def test_sync_method_clears_scoped_blocks_across_agent_boundary(self):
+        """The sync wrapper mirrors the async wrapper: a parent's ScopedContext
+        must not leak into a *different* agent's sync method.
+
+        Regression test for the review finding on the sync wrapper setting
+        _parent_agent_var without clearing _scoped_blocks_var/_scoped_events_var
+        on cross-agent calls (async wrapper clears them at lines 178-180).
+        """
+        from nooa.context_blocks.scoped import ScopedContext, _scoped_blocks_var
+
+        class _SyncChild(Agent):
+            def peek(self):
+                return _scoped_blocks_var.get()
+
+        class _SyncParent(Agent):
+            async def run(self, child) -> object:
+                with ScopedContext(context={"focus": "parent-only"}):
+                    return child.peek()
+
+        parent = _SyncParent(llm=_llm())
+        child = _SyncChild(llm=_llm())
+
+        assert await parent.run(child) is None, (
+            "parent's ScopedContext must not leak into a different agent's sync method"
+        )
+
+    async def test_sync_method_keeps_scoped_blocks_within_same_agent(self):
+        """Scoped blocks still propagate to the SAME agent's sync methods —
+        clearing happens only when crossing an agent boundary."""
+        from nooa.context_blocks.scoped import ScopedContext, _scoped_blocks_var
+
+        class _SameAgent(Agent):
+            async def run(self) -> object:
+                with ScopedContext(context={"focus": "keep"}):
+                    return self.peek()
+
+            def peek(self):
+                return _scoped_blocks_var.get()
+
+        agent = _SameAgent(llm=_llm())
+
+        assert await agent.run() == {"focus": "keep"}
+
     async def test_async_generator_preserves_scope_only_within_the_same_agent(self):
         """A subagent generator must not hide the cross-agent boundary from nested calls."""
         from nooa.context_blocks import ScopedContext
