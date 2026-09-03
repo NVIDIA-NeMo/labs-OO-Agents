@@ -792,14 +792,14 @@ async def test_filter_change_prepares_new_preview_without_blocking(monkeypatch) 
     started = threading.Event()
     release = threading.Event()
 
-    def build_preview(selected, width, height):
+    async def build_preview(selected, width, height, on_chunk=None):
         from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
 
         started.set()
-        assert release.wait(timeout=1)
+        assert await asyncio.to_thread(release.wait, 1)
         return FullscreenTranscriptModel(show_trailing_blank=False)
 
-    monkeypatch.setattr(ResumePicker, "_build_preview_model", staticmethod(build_preview))
+    monkeypatch.setattr(ResumePicker, "_build_preview_progressively", staticmethod(build_preview))
     # Change the filter through the shared option, as the UI does.
     picker.view.options[0].move(1)
 
@@ -1327,24 +1327,29 @@ async def test_full_application_screen_keeps_picker_help_visible(
 # ---------------------------------------------------------------------------
 
 
-def test_fast_navigation_does_not_stack_preview_builds() -> None:
+def test_fast_navigation_does_not_stack_preview_builds(monkeypatch) -> None:
     """Fast up/down skips past rows without starting one preview build each."""
     import asyncio
 
+    import nooa_cli.tui.resume_picker as rp
+
     app = MagicMock()
     app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    # Widen the dwell so a loaded test box cannot let an intermediate row's
+    # gate elapse mid-burst (asyncio.sleep is only a lower bound).
+    monkeypatch.setattr(rp, "_PREVIEW_DEBOUNCE_SECONDS", 0.5)
     picker = ResumePicker([row(str(i), f"title {i}") for i in range(8)], app)
     picker.preview_control.viewport = (40, 5)
     built: list[str] = []
 
-    def tracking_build(self, selected, width, height):
+    async def tracking_build(self, selected, width, height, on_chunk=None):
         built.append(selected.id)
         from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
 
         return FullscreenTranscriptModel(show_trailing_blank=False)
 
-    original = ResumePicker._build_preview_model
-    ResumePicker._build_preview_model = tracking_build
+    original = ResumePicker._build_preview_progressively
+    ResumePicker._build_preview_progressively = tracking_build
     try:
 
         async def run() -> None:
@@ -1359,7 +1364,7 @@ def test_fast_navigation_does_not_stack_preview_builds() -> None:
 
         asyncio.run(run())
     finally:
-        ResumePicker._build_preview_model = original
+        ResumePicker._build_preview_progressively = original
     # The dwell gate skipped every transiently-visited row; only the stop row built.
     assert built == ["7"]
     assert ("7", 40) in picker._preview_models
@@ -1374,14 +1379,14 @@ def test_superseded_preview_builds_never_enter_the_cache() -> None:
     picker = ResumePicker([row("1", "one"), row("2", "two")], app)
     picker.preview_control.viewport = (40, 5)
 
-    def cancelling_build(self, selected, width, height):
+    async def cancelling_build(self, selected, width, height, on_chunk=None):
         # Simulate a superseded build: the cooperative event is set mid-build.
         if self._preview_build_cancel is not None:
             self._preview_build_cancel.set()
         return None
 
-    original = ResumePicker._build_preview_model
-    ResumePicker._build_preview_model = cancelling_build
+    original = ResumePicker._build_preview_progressively
+    ResumePicker._build_preview_progressively = cancelling_build
     try:
 
         async def run() -> None:
@@ -1391,14 +1396,17 @@ def test_superseded_preview_builds_never_enter_the_cache() -> None:
 
         asyncio.run(run())
     finally:
-        ResumePicker._build_preview_model = original
+        ResumePicker._build_preview_progressively = original
     assert ("2", 40) not in picker._preview_models
 
 
-def test_close_stops_in_flight_preview_build() -> None:
+def test_close_stops_in_flight_preview_build(monkeypatch) -> None:
     """Escape cancels pending tasks and sets the cooperative build event."""
     import asyncio
 
+    import nooa_cli.tui.resume_picker as rp
+
+    monkeypatch.setattr(rp, "_PREVIEW_DEBOUNCE_SECONDS", 0.02)
     app = MagicMock()
     app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
     picker = ResumePicker([row("1", "one")], app)
@@ -1406,7 +1414,7 @@ def test_close_stops_in_flight_preview_build() -> None:
 
     async def run() -> None:
         picker._prepare_current_preview()
-        await asyncio.sleep(0.15)  # past the 0.12s dwell: a build event exists
+        await asyncio.sleep(0.05)  # past the dwell: a build event exists
         event = picker._preview_build_cancel
         assert event is not None and not event.is_set()
         picker.close()
@@ -1438,3 +1446,103 @@ def test_preview_cache_is_bounded_lru() -> None:
     # Newest stays; the oldest visited rows evicted.
     assert ("5", 40) in picker._preview_models
     assert ("1", 40) not in picker._preview_models
+
+    # Revisiting a row refreshes its recency: the next insert evicts the
+    # true least-recently-used row (5) instead of the first-inserted one
+    # (2) — the difference between an LRU and a plain FIFO.
+    async def revisit() -> None:
+        # Back up through cached rows; each _preview_model call simulates the
+        # pane rendering that row, which is what refreshes LRU recency.
+        for _ in range(3):  # rows 4, 3, 2
+            picker.handle_key("up")
+            picker._preview_model(40)
+            await asyncio.sleep(0.02)
+        picker.handle_key("up")  # row 1: a fresh build inserts and must evict row 5
+        picker._preview_model(40)
+        await asyncio.sleep(0.2)
+        await asyncio.gather(*list(picker._preview_tasks.values()), return_exceptions=True)
+
+    asyncio.run(revisit())
+    assert ("2", 40) in picker._preview_models
+    assert ("1", 40) in picker._preview_models
+    assert ("5", 40) not in picker._preview_models
+
+
+def test_preview_builds_display_progressively(monkeypatch) -> None:
+    """The preview pane fills in per chunk instead of waiting for the build."""
+    import asyncio
+
+    import nooa_cli.tui.resume_picker as rp
+
+    monkeypatch.setattr(rp, "_PREVIEW_DEBOUNCE_SECONDS", 0.02)
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    turns = tuple(ResumePickerTurn("agent", f"turn {i}") for i in range(120))
+    picker = ResumePicker([row("1", "one", turns=turns)], app)
+    picker.preview_control.viewport = (40, 5)
+
+    async def run() -> None:
+        observed_counts: list[int] = []
+
+        async def build(self, selected, width, height, on_chunk=None):
+            from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+            transcript = FullscreenTranscriptModel(show_trailing_blank=False)
+            for index in range(3):
+                await asyncio.sleep(0.01)
+                transcript.append(f"chunk {index}\n")
+                if on_chunk is not None:
+                    on_chunk(transcript)
+            return transcript
+
+        monkeypatch.setattr(ResumePicker, "_build_preview_progressively", build)
+        picker._prepare_current_preview()
+        key = ("1", 40)
+        task = picker._preview_tasks[key]
+        # Sample the published transcript while the build is still running.
+        for _ in range(100):
+            cached = picker._preview_models.get(key)
+            if cached is not None and not task.done():
+                observed_counts.append(len(cached._records))
+            if task.done():
+                break
+            await asyncio.sleep(0.005)
+        await asyncio.gather(task, return_exceptions=True)
+        # Without progressive publishing, the first cached entry would only
+        # appear once the build finished (all three records at once).
+        assert 1 in observed_counts, f"no partial was visible mid-build: {observed_counts}"
+        assert len(picker._preview_models[key]._records) == 3
+
+    asyncio.run(run())
+
+
+def test_cancelled_chunked_build_returns_none_at_chunk_boundary(monkeypatch) -> None:
+    """The real chunk loop stops at a chunk boundary once the event is set."""
+    import threading
+
+    import nooa_cli.tui.resume_picker as rp
+
+    # Small chunks so several boundaries exist.
+    monkeypatch.setattr(rp, "_PREVIEW_BUILD_CHUNK_TURNS", 5)
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    turns = tuple(ResumePickerTurn("agent", f"turn {i}") for i in range(50))
+    picker = ResumePicker([row("1", "one", turns=turns)], app)
+
+    cancel = threading.Event()
+    picker._preview_build_cancel = cancel
+    # Cancel after the second chunk has rendered.
+    seen: list[int] = []
+
+    original_render = ResumePicker._render_preview_chunk
+
+    def render_and_cancel(turns_list, start, row_id, width):
+        seen.append(start)
+        if len(seen) == 2:
+            cancel.set()
+        return original_render(turns_list, start, row_id, width)
+
+    monkeypatch.setattr(ResumePicker, "_render_preview_chunk", staticmethod(render_and_cancel))
+    result = picker._build_preview_model(row("1", "one", turns=turns), 40, 5)
+    assert result is None
+    assert len(seen) == 2, f"build did not stop at a chunk boundary: {seen}"
