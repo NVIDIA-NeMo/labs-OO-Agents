@@ -1,0 +1,71 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+set -eu
+
+root="${SCALED_EVALS_INSTALLED_AGENT_ROOT:-/installed-agent}"
+export SCALED_EVALS_INSTALLED_AGENT_ROOT="$root"
+export PYTHONHOME="$root/python"
+export LD_LIBRARY_PATH="$root/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+version="$(cat "$root/VERSION")"
+test "$("$root/bin/nemo-harbor" --version)" = "nemo-harbor $version"
+"$root/bin/nemo-harbor" --help >/dev/null
+"$root/python/bin/python3" - "$version" <<'PY'
+import asyncio
+import importlib.metadata
+import os
+from pathlib import Path
+import sqlite3
+import ssl
+import subprocess
+import sys
+
+import nooa
+import nooa_bench
+import nooa_cli
+import pydantic_core
+import tiktoken
+from nooa.unifiedllm import FakeLLMClient
+from nooa_bench.bench_agent import BenchAgent
+
+expected_version = sys.argv[1]
+root = Path(os.environ["SCALED_EVALS_INSTALLED_AGENT_ROOT"])
+unresolved = []
+for path in (root / "python").rglob("*"):
+    if not path.is_file() or path.is_symlink():
+        continue
+    try:
+        with path.open("rb") as stream:
+            if stream.read(4) != b"\x7fELF":
+                continue
+    except OSError:
+        continue
+    completed = subprocess.run(["ldd", str(path)], capture_output=True, text=True)
+    if "not found" in completed.stdout or "not found" in completed.stderr:
+        unresolved.append(f"{path}:\n{completed.stdout}{completed.stderr}")
+if unresolved:
+    raise RuntimeError("unresolved shared libraries:\n" + "\n".join(unresolved))
+
+for distribution in ("nooa", "nooa-cli", "nooa-bench"):
+    actual = importlib.metadata.version(distribution)
+    if actual != expected_version:
+        raise RuntimeError(
+            f"{distribution} version mismatch: expected {expected_version}, got {actual}"
+        )
+
+with sqlite3.connect(":memory:") as connection:
+    connection.execute("select 1").fetchone()
+ssl.create_default_context()
+agent = BenchAgent(llm=FakeLLMClient())
+
+
+async def exercise_shell() -> None:
+    result = await agent.shell.run("printf nooa-runtime-smoke")
+    await agent.shell.close()
+    if result.returncode != 0 or result.stdout != "nooa-runtime-smoke":
+        raise RuntimeError(f"BenchAgent shell smoke failed: {result!r}")
+
+
+asyncio.run(exercise_shell())
+PY

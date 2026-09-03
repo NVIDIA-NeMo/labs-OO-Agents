@@ -57,9 +57,21 @@ release or uploads to PyPI.
 
 Publishing is the single human approval. `.github/workflows/publish.yml` listens
 for `release: published` and automatically rebuilds, smoke-tests, and uploads
-all five packages to PyPI using Trusted Publishing. Despite their names, the
-current `pypi-*` GitHub Environments have no configured reviewer protection, so
-there is no second approval after **Publish release**.
+all five packages to PyPI using Trusted Publishing. It also builds and
+smoke-tests the version's Bullseye `nooa-bench` Scaled Evals sidecar, publishes
+an `X.Y.Z` tag to `ghcr.io/nvidia-nemo/nooa-bench-agent`, and attaches its
+descriptor, source lock, immutable image digest, and checksums to the GitHub
+Release. Despite their names, the current `pypi-*` GitHub
+Environments have no configured reviewer protection, so there is no second
+approval after **Publish release**.
+
+The GitHub sidecar is deliberately marked `internal-promotion-required`. It is
+not automatically registered with production Scaled Evals: the production path
+must mirror the manifest's exact GHCR digest into the approved registry, sign
+that digest with the internal CI Toolkit, validate the copied runtime, and
+create a new immutable Scaled Evals agent-bundle record. A package release and
+an agent-bundle registration therefore share a version but remain separate
+supply-chain events.
 
 ## Evidence and recovery
 
@@ -127,3 +139,11 @@ with `testpypi-*` environments on TestPyPI.
 
 Every `uses:` entry in `publish.yml` must remain compatible with the NVIDIA
 organization's GitHub Actions allowlist.
+
+The repository's `GITHUB_TOKEN` also needs `packages: write` permission for the
+`build-agent-bundle` job. The workflow grants that job-level permission. On the
+first release, an organization owner may additionally need to allow package
+creation or link the new `nooa-bench-agent` container package to this
+repository. Set its visibility and internal pull access according to NVIDIA's
+registry policy; production automation should always consume the recorded
+digest rather than relying on visibility or a floating tag.

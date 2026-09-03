@@ -1,0 +1,80 @@
+#!/usr/local/bin/python3
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Copy non-glibc shared-library dependencies into the portable runtime."""
+
+from __future__ import annotations
+
+import filecmp
+import shutil
+import subprocess
+from pathlib import Path
+
+RUNTIME = Path("/bundle/runtime")
+PYTHON_RUNTIME = RUNTIME / "python"
+LIB_DIR = RUNTIME / "lib"
+GLIBC_RUNTIME_LIBS = {
+    "ld-linux-x86-64.so.2",
+    "libc.so.6",
+    "libdl.so.2",
+    "libm.so.6",
+    "libpthread.so.0",
+    "libresolv.so.2",
+    "librt.so.1",
+    "libutil.so.1",
+}
+
+
+def is_elf(path: Path) -> bool:
+    if not path.is_file() or path.is_symlink():
+        return False
+    try:
+        with path.open("rb") as stream:
+            return stream.read(4) == b"\x7fELF"
+    except OSError:
+        return False
+
+
+def linked_libraries(path: Path) -> set[Path]:
+    completed = subprocess.run(
+        ["ldd", str(path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode not in (0, 1):
+        raise RuntimeError(f"ldd failed for {path}: {completed.stderr.strip()}")
+    libraries: set[Path] = set()
+    for line in completed.stdout.splitlines():
+        fields = line.strip().split()
+        candidate = fields[2] if len(fields) >= 3 and fields[1] == "=>" else fields[0]
+        if candidate.startswith("/"):
+            libraries.add(Path(candidate))
+    return libraries
+
+
+def main() -> None:
+    dependencies: set[Path] = set()
+    for path in PYTHON_RUNTIME.rglob("*"):
+        if is_elf(path):
+            dependencies.update(linked_libraries(path))
+
+    LIB_DIR.mkdir(parents=True, exist_ok=True)
+    copied: dict[str, Path] = {}
+    for source in sorted(dependencies):
+        if source.name in GLIBC_RUNTIME_LIBS:
+            continue
+        destination = LIB_DIR / source.name
+        previous = copied.get(source.name)
+        if previous is not None:
+            if not filecmp.cmp(previous.resolve(), source.resolve(), shallow=False):
+                raise RuntimeError(f"shared library basename collision: {previous} and {source}")
+            continue
+        shutil.copy2(source.resolve(), destination)
+        copied[source.name] = source
+
+    print(f"bundled {len(copied)} non-glibc shared libraries")
+
+
+if __name__ == "__main__":
+    main()

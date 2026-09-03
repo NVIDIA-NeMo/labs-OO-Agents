@@ -1,0 +1,37 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+set -eu
+
+fail() { printf 'ERROR: %s\n' "$1" >&2; exit 1; }
+
+# Generated alongside descriptor.json by prepare_nooa_bench_bundle.py.
+. /opt/astra-agent/bundle.env
+
+require_value() {
+  name="$1"
+  expected="$2"
+  eval "actual=\${${name}:-}"
+  test "$actual" = "$expected" || fail "${name} mismatch"
+}
+
+require_value ASTRA_AGENT_NAME "$BUNDLE_AGENT_NAME"
+require_value ASTRA_AGENT_VERSION "$BUNDLE_AGENT_VERSION"
+require_value ASTRA_AGENT_PLATFORM "$BUNDLE_AGENT_PLATFORM"
+require_value ASTRA_AGENT_RUNTIME_ABI "$BUNDLE_AGENT_RUNTIME_ABI"
+require_value ASTRA_AGENT_BUNDLE_LAYOUT_VERSION "$BUNDLE_LAYOUT_VERSION"
+require_value ASTRA_AGENT_BUILDER_PROFILE "$BUNDLE_BUILDER_PROFILE"
+require_value ASTRA_AGENT_SOURCE_LOCK_DIGEST "$BUNDLE_SOURCE_LOCK_DIGEST"
+require_value ASTRA_AGENT_BUNDLE_FINGERPRINT "$BUNDLE_FINGERPRINT"
+
+target="${1:-/bundle-output}"
+test -d "$target" || fail "bundle output directory does not exist"
+cp -R /opt/astra-agent/runtime/. "$target/"
+cp /opt/astra-agent/descriptor.json \
+  /opt/astra-agent/source-lock.json \
+  /opt/astra-agent/runtime.sha256 \
+  "$target/"
+(cd "$target" && sha256sum -c --quiet runtime.sha256) \
+  || fail "copied checksum mismatch"
+test -x "$target/bin/nemo-harbor" || fail "entrypoint is not executable"
+SCALED_EVALS_INSTALLED_AGENT_ROOT="$target" "$target/bin/validate-installed"

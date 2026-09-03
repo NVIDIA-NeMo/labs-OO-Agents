@@ -1,4 +1,5 @@
-# Publishes the five workspace packages to PyPI.
+# Publishes the five workspace packages to PyPI and the versioned nooa-bench
+# Scaled Evals sidecar to GHCR.
 #
 # Trigger: a GitHub Release is *published* (the release's tag `vX.Y.Z` is what
 # uv-dynamic-versioning turns into the package version — see RELEASING.md).
@@ -202,6 +203,146 @@ jobs:
             --check-url https://pypi.org/simple/ \
             upload/*
 
+  # Build the Scaled Evals agent sidecar from the same immutable release tag as
+  # the Python distributions. Bullseye is load-bearing: Ubuntu 20.04
+  # SWE-bench task images expose GLIBC 2.31 and cannot load a Bookworm-built
+  # Python runtime. The recorded digest is the immutable identity; deliberately
+  # do not publish a floating `latest` tag.
+  build-agent-bundle:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve and prepare the versioned bundle context
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          case "$RELEASE_TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::release tag must be canonical vX.Y.Z: $RELEASE_TAG"; exit 1 ;;
+          esac
+          VERSION="${RELEASE_TAG#v}"
+          REVISION="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+          test "$REVISION" = "$GITHUB_SHA" \
+            || { echo "::error::release tag does not resolve to GITHUB_SHA"; exit 1; }
+          mkdir -p build
+          python scripts/prepare_nooa_bench_bundle.py \
+            --version "$VERSION" \
+            --source-ref "$RELEASE_TAG" \
+            --revision "$REVISION" \
+            --output build/nooa-bench-agent \
+            > build/nooa-bench-agent-summary.json
+          LOCK_SHA="$(jq -r '.uv_lock_digest | sub("^sha256:"; "")' \
+            build/nooa-bench-agent/source-lock.json)"
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          {
+            echo "version=$VERSION"
+            echo "revision=$REVISION"
+            echo "lock_sha=$LOCK_SHA"
+            echo "image_repository=ghcr.io/$OWNER/nooa-bench-agent"
+            echo "image_ref=ghcr.io/$OWNER/nooa-bench-agent:$VERSION"
+          } >> "$GITHUB_ENV"
+
+      - name: Build and smoke-test the Bullseye bundle
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --platform linux/amd64 \
+            --load \
+            --build-arg "NOOA_VERSION=$version" \
+            --build-arg "NOOA_UV_LOCK_SHA256=$lock_sha" \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.version=$version" \
+            --label "org.opencontainers.image.revision=$revision" \
+            --tag "$image_ref" \
+            build/nooa-bench-agent
+
+          set -a
+          . build/nooa-bench-agent/bundle.env
+          set +a
+          docker run --rm --platform linux/amd64 --user 1000:1000 --read-only \
+            --tmpfs /tmp:rw,exec,uid=1000,gid=1000,mode=1777 \
+            --tmpfs /bundle-output:rw,exec,uid=1000,gid=1000,mode=0755 \
+            -e HOME=/tmp/bundle-home \
+            -e "ASTRA_AGENT_NAME=$BUNDLE_AGENT_NAME" \
+            -e "ASTRA_AGENT_VERSION=$BUNDLE_AGENT_VERSION" \
+            -e "ASTRA_AGENT_PLATFORM=$BUNDLE_AGENT_PLATFORM" \
+            -e "ASTRA_AGENT_RUNTIME_ABI=$BUNDLE_AGENT_RUNTIME_ABI" \
+            -e "ASTRA_AGENT_BUNDLE_LAYOUT_VERSION=$BUNDLE_LAYOUT_VERSION" \
+            -e "ASTRA_AGENT_BUILDER_PROFILE=$BUNDLE_BUILDER_PROFILE" \
+            -e "ASTRA_AGENT_SOURCE_LOCK_DIGEST=$BUNDLE_SOURCE_LOCK_DIGEST" \
+            -e "ASTRA_AGENT_BUNDLE_FINGERPRINT=$BUNDLE_FINGERPRINT" \
+            "$image_ref" /bundle-output
+
+      - name: Publish the immutable image and release metadata
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" \
+            | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker push "$image_ref"
+          IMAGE_DIGEST="$(
+            docker buildx imagetools inspect "$image_ref" \
+              | awk '$1 == "Digest:" {print $2; exit}'
+          )"
+          python - "$IMAGE_DIGEST" <<'PY'
+          import re
+          import sys
+
+          if re.fullmatch(r"sha256:[0-9a-f]{64}", sys.argv[1]) is None:
+              raise SystemExit(f"invalid image digest: {sys.argv[1]}")
+          PY
+
+          mkdir -p agent-bundle-release
+          cp build/nooa-bench-agent/descriptor.json \
+            "agent-bundle-release/nooa-bench-agent-$version-descriptor.json"
+          cp build/nooa-bench-agent/source-lock.json \
+            "agent-bundle-release/nooa-bench-agent-$version-source-lock.json"
+          IMAGE_REPOSITORY="$image_repository" IMAGE_REF="$image_ref" \
+            IMAGE_DIGEST="$IMAGE_DIGEST" \
+            python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          descriptor = json.loads(Path("build/nooa-bench-agent/descriptor.json").read_text())
+          source_lock = json.loads(Path("build/nooa-bench-agent/source-lock.json").read_text())
+          manifest = {
+              "schema_version": 1,
+              "status": "github-release-candidate",
+              **descriptor,
+              "source_revision": source_lock["source_revision"],
+              "source_tree_digest": source_lock["source_tree_digest"],
+              "uv_lock_digest": source_lock["uv_lock_digest"],
+              "image_ref": os.environ["IMAGE_REF"],
+              "image_digest": (
+                  f'{os.environ["IMAGE_REPOSITORY"]}@{os.environ["IMAGE_DIGEST"]}'
+              ),
+              "scaled_evals_signature": None,
+              "qualification": "internal-promotion-required",
+          }
+          output = Path("agent-bundle-release") / (
+              f'nooa-bench-agent-{descriptor["agent_version"]}-manifest.json'
+          )
+          output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+          PY
+          (cd agent-bundle-release && sha256sum *.json > SHA256SUMS)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nooa-bench-agent-bundle
+          path: agent-bundle-release/
+          retention-days: 90
+
   # Attach the built wheels to the GitHub Release so `pip install <url>` and
   # air-gapped consumers get the exact artifacts that went to PyPI.
   attach-to-release:
@@ -225,3 +366,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: gh release upload "$RELEASE_TAG" dist/* --repo "$GITHUB_REPOSITORY"
+
+  attach-agent-bundle-to-release:
+    needs: build-agent-bundle
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: nooa-bench-agent-bundle
+          path: agent-bundle-release/
+      - name: Attach bundle provenance to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$RELEASE_TAG" agent-bundle-release/* \
+            --repo "$GITHUB_REPOSITORY"

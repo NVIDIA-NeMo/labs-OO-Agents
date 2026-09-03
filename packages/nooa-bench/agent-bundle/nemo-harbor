@@ -1,0 +1,15 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+set -eu
+
+root="${SCALED_EVALS_INSTALLED_AGENT_ROOT:-/installed-agent}"
+
+if test "${1:-}" = "--version"; then
+  printf 'nemo-harbor %s\n' "$(cat "$root/VERSION")"
+  exit 0
+fi
+
+export PYTHONHOME="$root/python"
+export LD_LIBRARY_PATH="$root/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$root/python/bin/python3" -m nooa_bench.runner "$@"
