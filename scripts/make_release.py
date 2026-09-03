@@ -220,11 +220,26 @@ def release_for_tag(tag: str) -> dict[str, Any] | None:
         die(f"could not inspect GitHub release {tag}: {detail}")
     try:
         metadata = json.loads(proc.stdout)
+        database_id = metadata["databaseId"]
+        draft = metadata["isDraft"]
+        target = metadata["targetCommitish"]
+        url = metadata["url"]
+        if (
+            not isinstance(database_id, int)
+            or isinstance(database_id, bool)
+            or database_id <= 0
+            or not isinstance(draft, bool)
+            or not isinstance(target, str)
+            or not target
+            or not isinstance(url, str)
+            or not url
+        ):
+            raise TypeError
         return {
-            "id": metadata["databaseId"],
-            "draft": metadata["isDraft"],
-            "target_commitish": metadata["targetCommitish"],
-            "html_url": metadata["url"],
+            "id": database_id,
+            "draft": draft,
+            "target_commitish": target,
+            "html_url": url,
         }
     except (json.JSONDecodeError, KeyError, TypeError):
         die(f"GitHub returned invalid release metadata for {tag}")

@@ -475,6 +475,23 @@ def test_release_lookup_fails_closed_on_api_error_or_invalid_metadata(mr, monkey
         mr.release_for_tag("v1.2.3")
 
 
+def test_release_lookup_rejects_string_draft_state(mr, monkeypatch):
+    metadata = {
+        "databaseId": 7,
+        "isDraft": "false",
+        "targetCommitish": "a" * 40,
+        "url": "https://release",
+    }
+    monkeypatch.setattr(
+        mr,
+        "run",
+        lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 0, json.dumps(metadata), ""),
+    )
+
+    with pytest.raises(mr.ReleaseError, match="invalid release metadata"):
+        mr.release_for_tag("v1.2.3")
+
+
 def test_strict_fast_checks_sync_all_public_ci_dependencies_first(mr, monkeypatch):
     commands = []
 
