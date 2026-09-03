@@ -226,7 +226,15 @@ class BenchAgent(
             self.todo.merge_todo(updated, base=todo_base)
         return result
 
-    @strategy(CodeActExperimental(config=CodeActConfig(max_retries=10)))
+    @_hidden
+    @strategy(
+        CodeActExperimental(config=CodeActConfig(max_retries=10, cell_timeout=1800.0)),
+        context={
+            "state": None,
+            "execution_context": None,
+            "self": Context(expr="doc(type(self), concise=True)", prefix=True),
+        },
+    )
     async def _solve_task(self, description: str) -> TaskResult:
         """Solve the supplied task completely.
 
@@ -255,7 +263,15 @@ class RLMBenchAgent(BenchAgent):
 
     _worker_init_command = _OPTIONAL_TESTBED_ACTIVATE
 
-    @strategy(CodeActExperimental(config=CodeActConfig(max_retries=10)))
+    @_hidden
+    @strategy(
+        CodeActExperimental(config=CodeActConfig(max_retries=10, cell_timeout=1800.0)),
+        context={
+            "state": None,
+            "execution_context": None,
+            "self": Context(expr="doc(type(self), concise=True)", prefix=True),
+        },
+    )
     async def _solve_task(self, description: str) -> TaskResult:
         """Solve the supplied task completely.
 
