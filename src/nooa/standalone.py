@@ -192,24 +192,17 @@ def create_standalone_wrapper(
     # Aliases resolved per (wrapper, alias): standalone functions have no
     # agent instance to cache on, and a fresh stub is built per call, so the
     # wrapper closure is the only stable place to remember a resolved client.
+    # Shared resolution lives in nooa.method_llm.resolve_alias so this path
+    # and the agent-method path report identical errors.
     _alias_cache: dict[str, Any] = {}
 
     @wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
         resolved_llm = llm
         if isinstance(resolved_llm, str):
-            from nooa.unifiedllm import get_llm_client
+            from nooa.method_llm import resolve_alias
 
-            if resolved_llm not in _alias_cache:
-                try:
-                    _alias_cache[resolved_llm] = get_llm_client(resolved_llm)
-                except Exception as exc:
-                    raise RuntimeError(
-                        f"The @strategy(llm={resolved_llm!r}) alias for standalone "
-                        f"function '{func.__name__}' could not be resolved by "
-                        f"get_llm_client: {type(exc).__name__}: {exc}"
-                    ) from exc
-            resolved_llm = _alias_cache[resolved_llm]
+            resolved_llm = resolve_alias(resolved_llm, _alias_cache, func.__name__)
         if resolved_llm is None:
             # Cascade: inherit LLM from a calling agent if we're inside one
             from nooa.runtime.context_vars import _parent_agent_var

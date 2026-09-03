@@ -84,6 +84,64 @@ def _is_llm_client(spec: Any) -> bool:
     return hasattr(spec, "acall")
 
 
+def resolve_alias(
+    alias: str,
+    cache: dict[str, Any] | None,
+    method_name: str,
+    *,
+    origin: str = "@strategy(llm=...)",
+) -> UnifiedLLM:
+    """Resolve a registry alias / litellm model string via ``get_llm_client``.
+
+    Shared by every call site that accepts an alias string — the
+    ``@strategy(llm=...)`` decorator (caching on the agent instance, see
+    :func:`_resolve_alias`) and standalone ``@strategy`` functions (caching
+    in the wrapper closure, since a fresh agent stub is built per call).
+    One resolution path means one error message, one cache policy, and one
+    place to change if client construction ever grows validation.
+
+    Args:
+        alias: Registry key or litellm-supported model string.
+        cache: Caller-owned ``{alias: client}`` dict, or ``None`` to resolve
+            without caching (for owners that cannot host a dict).
+        method_name: Method (or standalone function) name, for error messages.
+        origin: Human-readable source of the alias, for error messages.
+
+    Returns:
+        The resolved :class:`~nooa.unifiedllm.UnifiedLLM`.
+
+    Raises:
+        RuntimeError: If ``get_llm_client`` raises. The original exception
+            is chained, but the message names the method and the alias so a
+            typo'd model name points at the line that named it.
+        TypeError: If resolution returns something that is not a client.
+    """
+    if cache is not None:
+        cached = cache.get(alias)
+        if cached is not None:
+            return cast("UnifiedLLM", cached)
+
+    from nooa.unifiedllm import get_llm_client
+
+    try:
+        client = get_llm_client(alias)
+    except Exception as exc:
+        raise RuntimeError(
+            f"The {origin} alias {alias!r} for '{method_name}' could not be "
+            f"resolved by get_llm_client: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    if not _is_llm_client(client):
+        raise TypeError(
+            f"The {origin} alias {alias!r} for '{method_name}' resolved to "
+            f"{type(client).__name__}, not a UnifiedLLM instance."
+        )
+
+    if cache is not None:
+        cache[alias] = client
+    return client
+
+
 def _resolve_alias(alias: str, agent: Any, method_name: str) -> UnifiedLLM:
     """Resolve a registry alias / litellm model string against *agent*.
 
@@ -98,46 +156,19 @@ def _resolve_alias(alias: str, agent: Any, method_name: str) -> UnifiedLLM:
 
     Returns:
         The resolved :class:`~nooa.unifiedllm.UnifiedLLM`.
-
-    Raises:
-        RuntimeError: If ``get_llm_client`` raises. The original exception
-            is chained, but the message names the method and the alias so a
-            typo'd model name points at the ``@strategy`` line that named it.
     """
-    cacheable = True
     cache = getattr(agent, _INSTANCE_LLM_CACHE_ATTR, None)
-    if not isinstance(cache, dict):
-        # Fresh instance, or a duck-typed stub that refuses new attributes
-        # (e.g. __slots__). Resolve without caching rather than failing the call.
-        cache = {}
-        try:
-            setattr(agent, _INSTANCE_LLM_CACHE_ATTR, cache)
-        except (AttributeError, TypeError):
-            cacheable = False
+    if isinstance(cache, dict):
+        return resolve_alias(alias, cache, method_name)
 
-    cached = cache.get(alias)
-    if cached is not None:
-        return cast("UnifiedLLM", cached)
-
-    from nooa.unifiedllm import get_llm_client
-
+    # Fresh instance, or a duck-typed stub that refuses new attributes
+    # (e.g. __slots__). Resolve without caching rather than failing the call.
     try:
-        client = get_llm_client(alias)
-    except Exception as exc:
-        raise RuntimeError(
-            f"The @strategy(llm={alias!r}) alias for '{method_name}' could not be "
-            f"resolved by get_llm_client: {type(exc).__name__}: {exc}"
-        ) from exc
-
-    if not _is_llm_client(client):
-        raise TypeError(
-            f"The @strategy(llm={alias!r}) alias for '{method_name}' resolved to "
-            f"{type(client).__name__}, not a UnifiedLLM instance."
-        )
-
-    if cacheable:
-        cache[alias] = client
-    return client
+        cache = {}
+        setattr(agent, _INSTANCE_LLM_CACHE_ATTR, cache)
+    except (AttributeError, TypeError):
+        return resolve_alias(alias, None, method_name)
+    return resolve_alias(alias, cache, method_name)
 
 
 def validate_method_llm_spec(spec: Any, func_name: str, *, standalone: bool = False) -> None:
@@ -243,4 +274,4 @@ def resolve_method_llm(spec: Any, agent: Any, method_name: str) -> UnifiedLLM:
     return cast("UnifiedLLM", resolved)
 
 
-__all__ = ["resolve_method_llm", "validate_method_llm_spec"]
+__all__ = ["resolve_alias", "resolve_method_llm", "validate_method_llm_spec"]
