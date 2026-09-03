@@ -70,7 +70,7 @@ at import time) — the natural way to pin a method to a cheaper or stronger
 model:
 
 ```python
-class SupportAgent(Agent, llm="gpt-5"):
+class SupportAgent(Agent, llm=default):       # agent default takes a client
     @strategy(llm="gpt-5-mini")                 # alias or model string
     async def summarize(self, text: str) -> str: ...
 ```
