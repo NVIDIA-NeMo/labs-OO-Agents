@@ -243,7 +243,7 @@ def release_for_tag(tag: str) -> dict[str, Any] | None:
             "target_commitish": target,
             "html_url": url,
         }
-    except (json.JSONDecodeError, KeyError, TypeError):
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         die(f"GitHub returned invalid release metadata for {tag}")
 
 

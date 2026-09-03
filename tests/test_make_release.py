@@ -497,7 +497,9 @@ def test_release_lookup_rejects_string_draft_state(mr, monkeypatch):
     [
         "https://api.github.com/repos/NVIDIA-NeMo/labs-OO-Agents/releases/0",
         "https://api.github.com/repos/NVIDIA-NeMo/labs-OO-Agents/releases/not-an-id",
+        "https://api.github.com/repos/other/repo/releases/7",
         "https://example.com/repos/NVIDIA-NeMo/labs-OO-Agents/releases/7",
+        f"https://api.github.com/repos/NVIDIA-NeMo/labs-OO-Agents/releases/1{'0' * 5000}",
     ],
 )
 def test_release_lookup_rejects_invalid_api_url(mr, monkeypatch, api_url):
