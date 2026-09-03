@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -96,6 +98,20 @@ def _single_line(text: str) -> str:
 # rebuilding a per-character map over every conversation for every keystroke.
 _FOLD_CACHE: dict[str, tuple[str, list[int]]] = {}
 _FOLD_CACHE_MAX = 4096
+
+# Preview transcripts hold a full replay projection each; keep only a few
+# alive so revisited rows reuse their transcript without unbounded growth.
+_PREVIEW_CACHE_MAX = 4
+
+# Dwell delay before a preview build starts. Fast up/down navigation moves
+# past rows in far less than this, so the per-keystroke builds that stacked
+# GIL-heavy threads and starved the UI never start at all.
+_PREVIEW_DEBOUNCE_SECONDS = 0.12
+
+# Turns rendered per chunk in a cancellable preview build. The chunk size
+# only bounds how long a superseded build can keep the GIL after Esc/Enter;
+# output is identical to the whole-history build.
+_PREVIEW_BUILD_CHUNK_TURNS = 50
 
 
 def _folded_with_source(text: str) -> tuple[str, list[int]]:
@@ -612,8 +628,13 @@ class ResumePicker(ExplorerBrowser):
         # options mode; their callbacks mirror the model's cycle/toggle
         # semantics (restart from the top, refresh the prepared preview).
         self._view_facade = ResumePicker._ViewFacade(self, self._build_view_options())
-        self._preview_models: dict[tuple[str, int], Any] = {}
+        # Preview transcripts are large; keep a bounded LRU so revisiting rows
+        # reuses their transcript instead of growing without limit.
+        self._preview_models: OrderedDict[tuple[str, int], Any] = OrderedDict()
         self._preview_tasks: dict[tuple[str, int], Any] = {}
+        # Event for the in-flight preview build thread; superseding or
+        # closing sets it so a stale build stops between chunks.
+        self._preview_build_cancel: threading.Event | None = None
         self.native_selection = False
         super().__init__(
             self._view_facade,
@@ -755,24 +776,97 @@ class ResumePicker(ExplorerBrowser):
         elif self.active_control == "preview":
             self.scroll_preview(delta * max(1, self.preview_control.viewport[1]))
 
-    @staticmethod
-    def _build_preview_model(row: ResumePickerRow, width: int, height: int):
-        from .frontend import render_history_replay_to_ansi
-        from .fullscreen_transcript import FullscreenTranscriptModel
-        from .output import HistoryReplay, HistoryTurn
+    def _build_preview_model(self, row: ResumePickerRow, width: int, height: int):
+        """Render the preview in chunks, stopping early when superseded.
 
-        replay = HistoryReplay(
-            turns=[HistoryTurn(turn.role, turn.content) for turn in row.turns],
-            session_id=row.id[:8],
-            show_header=False,
-            show_footer=False,
-        )
+        ``threading.Event`` cancellation works inside ``asyncio.to_thread``:
+        ``Task.cancel()`` only interrupts the coroutine awaiting the thread,
+        while the thread itself keeps its GIL-bound projection running and
+        starves the UI thread (the slow Esc/Enter after browsing). Polling
+        ``self._preview_build_cancel`` between small chunks bounds a superseded
+        build to one chunk instead of the whole history.
+
+        Chunking is behavior-neutral: rendering per chunk and appending in
+        order produces the same projected rows and formatted text as a
+        whole-history render (verified against a real 1894-turn session).
+        """
+        from .fullscreen_transcript import FullscreenTranscriptModel
+        from .output import HistoryTurn
+
         transcript = FullscreenTranscriptModel(show_trailing_blank=False)
-        transcript.append(render_history_replay_to_ansi(replay, width))
+        turns = [HistoryTurn(turn.role, turn.content) for turn in row.turns]
+        cancel = self._preview_build_cancel
+        for start in range(0, len(turns), _PREVIEW_BUILD_CHUNK_TURNS):
+            if cancel is not None and cancel.is_set():
+                return None
+            transcript.append(self._render_preview_chunk(turns, start, row.id, width))
         # Projection is the dominant first-render cost for long histories.
         transcript.formatted_text(width=width, height=max(1, height))
         return transcript
 
+    @staticmethod
+    def _render_preview_chunk(turns: list[Any], start: int, row_id: str, width: int) -> str:
+        """Render one chunk of the replay to ANSI (pure; safe on any thread)."""
+        from .frontend import render_history_replay_to_ansi
+        from .output import HistoryReplay
+
+        chunk = turns[start : start + _PREVIEW_BUILD_CHUNK_TURNS]
+        return render_history_replay_to_ansi(
+            HistoryReplay(
+                turns=chunk,
+                # The whole-history render prints this header once.
+                session_id=row_id[:8] if start == 0 else "",
+                show_header=False,
+                show_footer=False,
+            ),
+            width,
+        )
+
+    async def _build_preview_progressively(
+        self,
+        row: ResumePickerRow,
+        width: int,
+        height: int,
+        on_chunk: Callable[[Any], None] | None = None,
+    ):
+        """Build the preview with the transcript owned by the UI loop.
+
+        Rendering is pure string work and runs on a worker thread, while
+        every append (and its incremental projection extension) happens on
+        the UI loop. That keeps the transcript single-threaded, so a partial
+        can be published and rendered while later chunks are still rendering
+        instead of showing "Preparing…" for the whole build. ``on_chunk``
+        receives the partial transcript after each chunk; returns None when
+        superseded.
+        """
+        import asyncio
+
+        from .fullscreen_transcript import FullscreenTranscriptModel
+        from .output import HistoryTurn
+
+        transcript = FullscreenTranscriptModel(show_trailing_blank=False)
+        turns = [HistoryTurn(turn.role, turn.content) for turn in row.turns]
+        cancel = self._preview_build_cancel
+        starts = list(range(0, len(turns), _PREVIEW_BUILD_CHUNK_TURNS))
+        for chunk_index, start in enumerate(reversed(starts)):
+            if cancel is not None and cancel.is_set():
+                return None
+            ansi = await asyncio.to_thread(
+                self._render_preview_chunk, turns, start, row.id, width
+            )
+            if cancel is not None and cancel.is_set():
+                return None
+            # Disclose bottom-up: publish the newest turns first, then prepend
+            # older chunks. Existing record IDs and viewport anchors stay
+            # fixed, so the newest visible lines do not scroll while loading.
+            if chunk_index == 0:
+                transcript.append(ansi, record_id=start + 1)
+            else:
+                transcript.prepend(ansi, record_id=start + 1)
+            transcript.formatted_text(width=max(1, width), height=max(1, height))
+            if on_chunk is not None:
+                on_chunk(transcript)
+        return transcript
     def _preview_model(self, width: int):
         row = self.model.current
         if row is None:
@@ -780,15 +874,27 @@ class ResumePicker(ExplorerBrowser):
         key = (row.id, max(1, width))
         transcript = self._preview_models.get(key)
         if transcript is not None:
+            # Most-recently-used preview stays alive; older ones evict first.
+            self._preview_models.move_to_end(key)
             return transcript
         self._prepare_current_preview()
         # Synchronous callers (primarily deterministic unit tests) have no event
         # loop in which to schedule preparation, so retain a direct fallback.
         if key not in self._preview_tasks:
+            # A fresh event mirrors prepare(): a stale *set* event left by an
+            # earlier supersede/close must not cancel the fallback build.
+            self._preview_build_cancel = threading.Event()
             transcript = self._build_preview_model(row, key[1], self.preview_control.viewport[1])
-            self._preview_models[key] = transcript
+            if transcript is not None:
+                self._remember_preview(key, transcript)
             return transcript
         return None
+
+    def _remember_preview(self, key: tuple[str, int], transcript: Any) -> None:
+        """Insert a built preview into the bounded LRU cache."""
+        self._preview_models[key] = transcript
+        while len(self._preview_models) > _PREVIEW_CACHE_MAX:
+            self._preview_models.popitem(last=False)
 
     def _prepare_current_preview(self) -> None:
         import asyncio
@@ -801,16 +907,71 @@ class ResumePicker(ExplorerBrowser):
         if key in self._preview_models or key in self._preview_tasks:
             return
 
+        # Single-flight: only the row the user currently sees gets built.
+        # Superseded tasks are cancelled, so fast up/down navigation cannot
+        # stack one build per keystroke. Task cancellation stops the awaiter,
+        # but the build thread itself keeps its GIL-bound projection running
+        # (the slow Esc/Enter after browsing), so the cooperative event also
+        # tells the in-flight build to stop at its next chunk boundary.
+        for pending_key, task in list(self._preview_tasks.items()):
+            if pending_key != key:
+                task.cancel()
+                self._preview_tasks.pop(pending_key, None)
+                # A cached entry for a still-pending key can only be a partial
+                # published mid-build; drop it so returning to that row rebuilds
+                # the full history instead of freezing at a prefix.
+                self._preview_models.pop(pending_key, None)
+        if self._preview_build_cancel is not None:
+            self._preview_build_cancel.set()
+
         async def prepare() -> None:
+            current_prepare_task = asyncio.current_task()
             try:
-                transcript = await asyncio.to_thread(
-                    self._build_preview_model, row, key[1], max(1, height)
+                # Dwell gate: navigation away cancels this task during the
+                # delay, so only rows the user actually stop on get built.
+                await asyncio.sleep(_PREVIEW_DEBOUNCE_SECONDS)
+                if self.model.current is not row:
+                    return
+                self._preview_build_cancel = threading.Event()
+
+                def publish_partial(partial: Any) -> None:
+                    # Runs on the UI loop between chunks: the transcript is
+                    # owned here, so publishing mid-build is safe. Supersede
+                    # drops the partial (see the cancellation loop above), so
+                    # a stale prefix can never freeze as a row's preview.
+                    if self.model.query.strip():
+                        # Recomputing search matches per streamed chunk is
+                        # quadratic for long histories; queried rows keep the
+                        # "Preparing…" frame until the finished preview lands.
+                        return
+                    self._remember_preview(key, partial)
+                    self.invalidate()
+
+                transcript = await self._build_preview_progressively(
+                    row, key[1], max(1, height), on_chunk=publish_partial
                 )
+            except asyncio.CancelledError:
+                return
             except Exception:
                 return
             finally:
-                self._preview_tasks.pop(key, None)
-            self._preview_models.setdefault(key, transcript)
+                # A rapid A→B→A can install a new task under the same key
+                # before cancelled A reaches this finally block. Only remove
+                # the mapping if it still belongs to this coroutine.
+                if self._preview_tasks.get(key) is current_prepare_task:
+                    self._preview_tasks.pop(key, None)
+            if transcript is None:
+                return
+            if self.model.query.strip():
+                # A query typed mid-build computed matches over a partial
+                # history; set_search early-returns on an unchanged query, so
+                # recompute over the finished transcript before publishing.
+                query_width, query_height = self.preview_control.viewport
+                transcript.set_search("", width=max(1, query_width), height=max(1, query_height))
+                transcript.set_search(
+                    self.model.query, width=max(1, query_width), height=max(1, query_height)
+                )
+            self._remember_preview(key, transcript)
             self.invalidate()
 
         try:
@@ -901,6 +1062,11 @@ class ResumePicker(ExplorerBrowser):
         for task in self._preview_tasks.values():
             task.cancel()
         self._preview_tasks.clear()
+        # Escape/Enter can arrive while a build thread is mid-history; the
+        # cooperative event stops it at the next chunk boundary so closing
+        # (and the resume that follows) is not starved by GIL-bound work.
+        if self._preview_build_cancel is not None:
+            self._preview_build_cancel.set()
 
     def selected_id(self) -> str | None:
         return self.model.current.id if self.model.can_select and self.model.current else None
