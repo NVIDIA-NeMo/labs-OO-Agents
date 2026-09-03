@@ -708,6 +708,51 @@ class FullscreenTranscriptModel:
                 self._extend_index(index, rows, start)
         self._formatted_cache.clear()
 
+    def prepend(
+        self,
+        source: str,
+        *,
+        record_id: int | None = None,
+        copy_actions: dict[str, str] | None = None,
+    ) -> None:
+        """Insert older history without moving anchors in retained newer records."""
+        safe = sanitize_transcript_ansi(source)
+        plain = strip_safe_ansi(safe)
+        if self._records and plain and not plain.endswith("\n"):
+            # The logical join belongs to the new older record; this leaves
+            # the existing first record and all of its viewport anchors intact.
+            safe += "\n"
+            plain += "\n"
+        if record_id is None:
+            record_id = self._next_record_id
+        else:
+            self._next_record_id = max(self._next_record_id, record_id + 1)
+        record = _Record(
+            record_id,
+            safe,
+            plain,
+            False,
+            _hyperlink_spans_from_safe_ansi(safe),
+            self._copy_regions(safe, copy_actions),
+            self._code_selection_regions(safe, plain, copy_actions),
+        )
+        was_empty = not self._records
+        self._records.insert(0, record)
+        if record.plain:
+            self._projectable_record_count += 1
+        self._record_index_cache = None
+        if was_empty:
+            self._ends_newline = record.plain.endswith("\n")
+            self._clear_caches()
+            return
+
+        for width, rows in list(self._projection_cache.items()):
+            rows[0:0] = self._project_record(record, width)
+        # Prefix insertion shifts cached row numbers. Rebuild anchor indexes
+        # lazily if an explicit viewport later asks for one.
+        self._projection_index_cache.clear()
+        self._formatted_cache.clear()
+
     def replace(
         self,
         sources: list[str],

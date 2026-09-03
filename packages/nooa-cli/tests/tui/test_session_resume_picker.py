@@ -1546,3 +1546,42 @@ def test_cancelled_chunked_build_returns_none_at_chunk_boundary(monkeypatch) -> 
     result = picker._build_preview_model(row("1", "one", turns=turns), 40, 5)
     assert result is None
     assert len(seen) == 2, f"build did not stop at a chunk boundary: {seen}"
+
+
+
+def test_progressive_preview_reveals_newest_chunk_first_without_scrolling(monkeypatch) -> None:
+    """Older chunks prepend above a stable visible tail."""
+    import asyncio
+
+    import nooa_cli.tui.resume_picker as rp
+
+    monkeypatch.setattr(rp, "_PREVIEW_BUILD_CHUNK_TURNS", 2)
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=40, rows=8)
+    turns = tuple(ResumePickerTurn("agent", f"turn {index}") for index in range(6))
+    selected = row("1", "one", turns=turns)
+    picker = ResumePicker([selected], app)
+    seen_text: list[str] = []
+    seen_visible: list[str] = []
+
+    async def run() -> None:
+        def on_chunk(transcript) -> None:
+            seen_text.append(transcript.text)
+            seen_visible.append(
+                "".join(
+                    text
+                    for _style, text in transcript.formatted_text(width=40, height=4)
+                )
+            )
+
+        transcript = await picker._build_preview_progressively(
+            selected, 40, 4, on_chunk=on_chunk
+        )
+        assert transcript is not None
+
+    asyncio.run(run())
+    assert len(seen_text) == 3
+    assert "turn 4" in seen_text[0] and "turn 5" in seen_text[0]
+    assert "turn 0" not in seen_text[0]
+    assert seen_text[-1].index("turn 0") < seen_text[-1].index("turn 4")
+    assert seen_visible == [seen_visible[0]] * len(seen_visible)
