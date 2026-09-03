@@ -423,7 +423,7 @@ class TestAliasResolution:
 
         monkeypatch.setattr("nooa.unifiedllm.get_llm_client", fake_get)
 
-        with pytest.raises(RuntimeError, match=r"alias for 'analyze' could not be resolved"):
+        with pytest.raises(RuntimeError, match=r"alias 'no-such-model' for 'analyze'"):
             resolve_method_llm("no-such-model", object(), "analyze")
 
     def test_alias_cache_survives_uncacheable_agent(self, monkeypatch) -> None:
@@ -515,6 +515,32 @@ class TestAliasEndToEnd:
 
         agent = SupportAgent()
         assert await agent.summarize("hello", llm=override) == "override-answer"
+
+    @pytest.mark.asyncio
+    async def test_call_site_accepts_alias_string(self, monkeypatch) -> None:
+        """The call-site spelling shares resolution: a string alias works there too."""
+        aliased = _fake("call-site-alias", times=2)
+        default = _fake("default-answer")
+        calls = []
+
+        def fake_get(name, **kw):  # noqa: ANN001, ANN003
+            calls.append(name)
+            return aliased
+
+        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", fake_get)
+
+        class SupportAgent(Agent, llm=default):
+            """A support agent."""
+
+            @strategy(PredictStrategy())
+            async def summarize(self, text: str) -> str:
+                """Return a one-sentence summary of {text}."""
+                ...
+
+        agent = SupportAgent()
+        assert await agent.summarize("hello", llm="gpt-5-mini") == "call-site-alias"
+        assert await agent.summarize("again", llm="gpt-5-mini") == "call-site-alias"
+        assert calls == ["gpt-5-mini"], "call-site alias is cached per instance"
 
     @pytest.mark.asyncio
     async def test_standalone_function_accepts_alias(self, monkeypatch) -> None:
