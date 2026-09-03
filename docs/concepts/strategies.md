@@ -67,6 +67,10 @@ class ResearchAgent(Agent, llm=fast_llm):
         ...
 ```
 
+The `llm=` override also accepts a registry alias or model string
+(``@strategy(PredictStrategy(), llm="gpt-5-mini")``) — resolved lazily on the
+first call per instance, so declaring it constructs no client at import time.
+
 LLM overrides may also be supplied per instance or per call. Keep model routing
 out of the public method contract unless the application truly needs callers to
 choose it.
