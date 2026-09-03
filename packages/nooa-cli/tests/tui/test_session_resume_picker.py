@@ -1585,3 +1585,37 @@ def test_progressive_preview_reveals_newest_chunk_first_without_scrolling(monkey
     assert "turn 0" not in seen_text[0]
     assert seen_text[-1].index("turn 0") < seen_text[-1].index("turn 4")
     assert seen_visible == [seen_visible[0]] * len(seen_visible)
+
+
+
+def test_rapid_a_b_a_keeps_new_preview_task_tracked(monkeypatch) -> None:
+    """A cancelled old A task must not remove a newly scheduled A task."""
+    import asyncio
+
+    import nooa_cli.tui.resume_picker as rp
+
+    monkeypatch.setattr(rp, "_PREVIEW_DEBOUNCE_SECONDS", 10.0)
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row("a", "A"), row("b", "B")], app)
+    picker.preview_control.viewport = (40, 5)
+
+    async def run() -> None:
+        key = ("a", 40)
+        picker._prepare_current_preview()
+        old_a = picker._preview_tasks[key]
+        picker.move(1)  # A -> B: cancel old A
+        picker.move(-1)  # B -> A: install a fresh A task under the same key
+        new_a = picker._preview_tasks[key]
+        assert new_a is not old_a
+
+        # Let cancelled A and B execute their finally blocks. Neither may pop
+        # the fresh A task that now owns the mapping.
+        await asyncio.sleep(0)
+        assert picker._preview_tasks.get(key) is new_a
+        assert not new_a.done()
+
+        picker.close()
+        await asyncio.gather(old_a, new_a, return_exceptions=True)
+
+    asyncio.run(run())
