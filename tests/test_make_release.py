@@ -414,7 +414,7 @@ def test_existing_release_must_be_matching_unpublished_draft(mr, monkeypatch):
 
 def test_release_lookup_uses_draft_aware_gh_command(mr, monkeypatch):
     metadata = {
-        "databaseId": 7,
+        "apiUrl": f"https://api.github.com/repos/{mr.GITHUB_REPO}/releases/7",
         "isDraft": True,
         "targetCommitish": "a" * 40,
         "url": "https://draft",
@@ -442,7 +442,7 @@ def test_release_lookup_uses_draft_aware_gh_command(mr, monkeypatch):
             "--repo",
             mr.GITHUB_REPO,
             "--json",
-            "databaseId,isDraft,targetCommitish,url",
+            "apiUrl,isDraft,targetCommitish,url",
         ]
     ]
 
@@ -477,8 +477,35 @@ def test_release_lookup_fails_closed_on_api_error_or_invalid_metadata(mr, monkey
 
 def test_release_lookup_rejects_string_draft_state(mr, monkeypatch):
     metadata = {
-        "databaseId": 7,
+        "apiUrl": f"https://api.github.com/repos/{mr.GITHUB_REPO}/releases/7",
         "isDraft": "false",
+        "targetCommitish": "a" * 40,
+        "url": "https://release",
+    }
+    monkeypatch.setattr(
+        mr,
+        "run",
+        lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 0, json.dumps(metadata), ""),
+    )
+
+    with pytest.raises(mr.ReleaseError, match="invalid release metadata"):
+        mr.release_for_tag("v1.2.3")
+
+
+@pytest.mark.parametrize(
+    "api_url",
+    [
+        "https://api.github.com/repos/NVIDIA-NeMo/labs-OO-Agents/releases/0",
+        "https://api.github.com/repos/NVIDIA-NeMo/labs-OO-Agents/releases/not-an-id",
+        "https://api.github.com/repos/other/repo/releases/7",
+        "https://example.com/repos/NVIDIA-NeMo/labs-OO-Agents/releases/7",
+        f"https://api.github.com/repos/NVIDIA-NeMo/labs-OO-Agents/releases/1{'0' * 5000}",
+    ],
+)
+def test_release_lookup_rejects_invalid_api_url(mr, monkeypatch, api_url):
+    metadata = {
+        "apiUrl": api_url,
+        "isDraft": True,
         "targetCommitish": "a" * 40,
         "url": "https://release",
     }
