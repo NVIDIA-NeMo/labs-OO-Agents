@@ -668,6 +668,10 @@ class ResumePicker(ExplorerBrowser):
 
     def _query_changed(self) -> None:
         self.model.set_query(self.buffer.text)
+        # Typing a query can swap the selected row, exactly like the filter
+        # and sort handlers: reset the cached current preview so it follows
+        # the tail instead of keeping the previous row's scroll position.
+        self._reset_preview()
         self._prepare_current_preview()
         self.invalidate()
 

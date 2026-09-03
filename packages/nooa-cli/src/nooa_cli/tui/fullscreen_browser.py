@@ -591,6 +591,12 @@ class ExplorerBrowser:
             list_height=self.explorer_list_height,
             floats=dropdown_floats,
         )
+        # Views with a timed confirmation gesture (the memory explorer's
+        # arm/confirm window) hook expiry to a repaint so the footer stops
+        # promising a confirm that no longer applies even without a keypress.
+        register_expiry = getattr(self.view, "on_confirm_expired", None)
+        if callable(register_expiry):
+            register_expiry(self.invalidate)
 
     def _create_list_control(self) -> Any:
         """Factory hook: the pane control rendering the list. Subclasses may override."""
