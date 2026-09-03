@@ -1319,3 +1319,122 @@ async def test_full_application_screen_keeps_picker_help_visible(
             assert any("Terminal too small" in line for line in visible)
         await harness.press("escape")
         assert await asyncio.wait_for(opened, 1) is None
+
+
+
+# ---------------------------------------------------------------------------
+# Preview build performance: dwell, single-flight, cooperative cancellation
+# ---------------------------------------------------------------------------
+
+
+def test_fast_navigation_does_not_stack_preview_builds() -> None:
+    """Fast up/down skips past rows without starting one preview build each."""
+    import asyncio
+
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row(str(i), f"title {i}") for i in range(8)], app)
+    picker.preview_control.viewport = (40, 5)
+    built: list[str] = []
+
+    def tracking_build(self, selected, width, height):
+        built.append(selected.id)
+        from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+        return FullscreenTranscriptModel(show_trailing_blank=False)
+
+    original = ResumePicker._build_preview_model
+    ResumePicker._build_preview_model = tracking_build
+    try:
+
+        async def run() -> None:
+            # Seven arrow-downs in well under the dwell delay: no build starts
+            # mid-burst, and every superseded task is cancelled.
+            for _ in range(7):
+                picker.handle_key("down")
+                await asyncio.sleep(0.01)
+            assert len(picker._preview_tasks) <= 1
+            await asyncio.sleep(0.2)  # dwell elapses for the row we stopped on
+            await asyncio.gather(*list(picker._preview_tasks.values()), return_exceptions=True)
+
+        asyncio.run(run())
+    finally:
+        ResumePicker._build_preview_model = original
+    # The dwell gate skipped every transiently-visited row; only the stop row built.
+    assert built == ["7"]
+    assert ("7", 40) in picker._preview_models
+
+
+def test_superseded_preview_builds_never_enter_the_cache() -> None:
+    """A co-operatively-cancelled build must not be cached."""
+    import asyncio
+
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row("1", "one"), row("2", "two")], app)
+    picker.preview_control.viewport = (40, 5)
+
+    def cancelling_build(self, selected, width, height):
+        # Simulate a superseded build: the cooperative event is set mid-build.
+        if self._preview_build_cancel is not None:
+            self._preview_build_cancel.set()
+        return None
+
+    original = ResumePicker._build_preview_model
+    ResumePicker._build_preview_model = cancelling_build
+    try:
+
+        async def run() -> None:
+            picker.handle_key("down")
+            await asyncio.sleep(0.2)
+            await asyncio.gather(*list(picker._preview_tasks.values()), return_exceptions=True)
+
+        asyncio.run(run())
+    finally:
+        ResumePicker._build_preview_model = original
+    assert ("2", 40) not in picker._preview_models
+
+
+def test_close_stops_in_flight_preview_build() -> None:
+    """Escape cancels pending tasks and sets the cooperative build event."""
+    import asyncio
+
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row("1", "one")], app)
+    picker.preview_control.viewport = (40, 5)
+
+    async def run() -> None:
+        picker._prepare_current_preview()
+        await asyncio.sleep(0.15)  # past the 0.12s dwell: a build event exists
+        event = picker._preview_build_cancel
+        assert event is not None and not event.is_set()
+        picker.close()
+        assert event.is_set()
+
+    asyncio.run(run())
+    assert not picker._preview_tasks
+
+
+def test_preview_cache_is_bounded_lru() -> None:
+    """Preview transcripts evict oldest-first, bounded to _PREVIEW_CACHE_MAX."""
+    import asyncio
+
+    import nooa_cli.tui.resume_picker as rp
+
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row(str(i), f"title {i}") for i in range(6)], app)
+    picker.preview_control.viewport = (40, 5)
+
+    async def run() -> None:
+        for _ in range(5):
+            picker.handle_key("down")
+            await asyncio.sleep(0.16)
+            await asyncio.gather(*list(picker._preview_tasks.values()), return_exceptions=True)
+
+    asyncio.run(run())
+    assert len(picker._preview_models) == rp._PREVIEW_CACHE_MAX
+    # Newest stays; the oldest visited rows evicted.
+    assert ("5", 40) in picker._preview_models
+    assert ("1", 40) not in picker._preview_models
