@@ -39,7 +39,37 @@ def test_theme_rows_expose_metadata_and_semantic_preview() -> None:
     assert "def greet" in plain and "return" in plain
     assert "Unified diff" in rendered
     assert "-old_value = 1" in plain and "+new_value = 2" in plain
-    assert "\x1b[38;2;" in rendered
+    assert "Input window" in rendered
+    assert "run the tests" in plain and "completion" in plain and "current" in plain
+    assert "Scrollback" in rendered
+    assert "You: how does my message look?" in plain
+    assert "Agent: this is how a reply reads." in plain and "status" in plain
+
+
+def _ansi_rgb(color: str) -> str:
+    value = color.lstrip("#")
+    return ";".join(str(int(value[index : index + 2], 16)) for index in (0, 2, 4))
+
+
+def test_input_window_and_scrollback_preview_use_theme_palette() -> None:
+    rows = build_theme_rows()
+    row = next(r for r in rows if r.id == "latte")
+    rendered = "\n".join(ThemeExplorerView([row]).detail_lines(row, 100))
+    p = row.record.palette
+
+    # The input window previews the accent prompt, primary text on the base
+    # surface, selection styling, and both completion-menu states.
+    assert f"38;2;{_ansi_rgb(p['focus_accent'])}" in rendered
+    assert f"38;2;{_ansi_rgb(p['text_primary'])};48;2;{_ansi_rgb(p['base'])}" in rendered
+    assert f"38;2;{_ansi_rgb(p['selection_fg'])};48;2;{_ansi_rgb(p['selection_bg'])}" in rendered
+    assert f"48;2;{_ansi_rgb(p['surface_raised'])}" in rendered
+
+    # The scrollback preview shows the highlighted user bar, plain agent reply
+    # text, and subtle status text with the exact palette the TUI would use.
+    assert (
+        f"38;2;{_ansi_rgb(p['user_message_fg'])};48;2;{_ansi_rgb(p['user_message_bg'])}" in rendered
+    )
+    assert f"38;2;{_ansi_rgb(p['text_subtle'])}m" in rendered
 
 
 @pytest.mark.parametrize("name", ["latte", "vslight"])
