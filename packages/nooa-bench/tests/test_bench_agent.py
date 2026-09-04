@@ -4,12 +4,14 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from nooa_bench import bench_agent as bench_agent_module
 from nooa_bench.bench_agent import BenchAgent, RLMBenchAgent, TaskResult
 
 from nooa.agentdoc import doc
-from nooa.unifiedllm import FakeLLMClient
+from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
 
 class _FakeShell:
@@ -484,3 +486,58 @@ def test_problem_statement_skips_blank_primary_field():
         )
         == "use this"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
+async def test_solve_task_uses_experimental_single_tool_contract(agent_type, tmp_path):
+    """Bench agents share the experimental TUI agent's context contract.
+
+    The single python_cell tool stays; duplicated framework blocks (state,
+    execution_context, context_usage, strategy prompt) are suppressed; the
+    class docs render once, concisely, as the self block; live cell context and
+    state blocks replace the generic ones.
+    """
+    code = (
+        "return_result(TaskResult(solution_description='done', evidence='ran true', "
+        "command_to_verify='true'))"
+    )
+    llm = FakeLLMClient(
+        scripted_responses=[
+            LLMResponse(
+                raw_response=None,
+                content="",
+                tool_calls=[
+                    ToolCall(id="call_1", name="python_cell", arguments=json.dumps({"code": code}))
+                ],
+                finish_reason="tool_calls",
+                assistant_message={"role": "assistant", "content": ""},
+            )
+        ]
+    )
+    agent = agent_type(llm=llm, working_dir=str(tmp_path))
+    try:
+        result = await agent._solve_task("solve the supplied task")
+        assert result.solution_description == "done"
+
+        assert [tool.name for tool in llm.last_tools or []] == ["python_cell"]
+        system_prompt = "\n".join(
+            str(message.get("content", ""))
+            for message in llm.last_messages
+            if message.get("role") == "system"
+        )
+        rendered = "\n".join(str(m.get("content", "")) for m in llm.last_messages)
+
+        assert "<state" not in system_prompt
+        assert "<execution_context" not in rendered
+        assert "<context_usage" not in rendered
+        assert "<strategy_prompt" not in rendered
+        assert "<python_cell_tools" in system_prompt
+        assert "<python_cell_context" in system_prompt
+        assert "<python_cell_state" in rendered
+        assert "<self" in system_prompt
+        assert "You are an autonomous software engineering agent." in system_prompt
+        assert "Solve the supplied task completely." in rendered
+        assert len(system_prompt) < 20_000
+    finally:
+        await agent.close()
