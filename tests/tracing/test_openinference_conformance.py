@@ -97,7 +97,7 @@ def framework_spans():
         InMemorySpanExporter,
     )
 
-    from nooa.tracing import NemoOOAgentsInstrumentor
+    from nooa.tracing import NOOAInstrumentor
     from nooa.tracing._session import set_session
     from nooa.tracing._session_processor import SessionSpanProcessor
 
@@ -111,7 +111,7 @@ def framework_spans():
     # SessionSpanProcessor stamps session.id; the in-memory exporter captures spans.
     provider.add_span_processor(SessionSpanProcessor())
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    NemoOOAgentsInstrumentor().instrument(tracer_provider=provider)
+    NOOAInstrumentor().instrument(tracer_provider=provider)
     set_session("conformance-session")
     try:
         yield exporter

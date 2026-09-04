@@ -328,14 +328,14 @@ class GenerationStrategy(ABC, metaclass=AgentMeta):
         )
 
         result = None
-        exception = None
+        exception: BaseException | None = None
         try:
             if inspect.iscoroutinefunction(callable_obj):
                 result = await callable_obj(*args, **kwargs)
             else:
                 result = callable_obj(*args, **kwargs)
             return result
-        except Exception as e:
+        except BaseException as e:
             exception = e
             raise
         finally:

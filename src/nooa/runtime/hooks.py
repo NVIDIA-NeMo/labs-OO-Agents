@@ -26,12 +26,14 @@ Usage:
     set_hooks(MyHooks())
 """
 
+import asyncio
 import logging
 import sys
 import time
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
@@ -89,7 +91,7 @@ class InstrumentationHooks(Protocol):
         agent: Any,
         method_name: str,
         result: Any,
-        exception: Exception | None,
+        exception: BaseException | None,
         context: Any,
         **kwargs: Any,
     ) -> None:
@@ -136,7 +138,7 @@ class InstrumentationHooks(Protocol):
         agent: Any,
         method_name: str,
         result: Any,
-        exception: Exception | None,
+        exception: BaseException | None,
         context: Any,
         generation_id: str,
         **kwargs: Any,
@@ -181,7 +183,7 @@ class InstrumentationHooks(Protocol):
         agent: Any,
         code: str,
         result: Any,
-        exception: Exception | None,
+        exception: BaseException | None,
         context: Any,
         execution_id: str,
         **kwargs: Any,
@@ -231,7 +233,7 @@ class InstrumentationHooks(Protocol):
         agent: Any,
         method_name: str,
         result: Any,
-        exception: Exception | None,
+        exception: BaseException | None,
         context: Any,
         invocation_id: str,
         **kwargs: Any,
@@ -282,7 +284,7 @@ class InstrumentationHooks(Protocol):
         tool_name: str,
         arguments: dict[str, Any],
         result: Any,
-        exception: Exception | None,
+        exception: BaseException | None,
         context: Any,
         execution_id: str,
         **kwargs: Any,
@@ -361,6 +363,346 @@ def get_hooks() -> InstrumentationHooks | None:
     return _instrumentation_hooks_var.get()
 
 
+@dataclass(frozen=True, slots=True)
+class _OwnedHookContext:
+    owner: InstrumentationHooks
+    child: Any
+
+
+@dataclass(frozen=True, slots=True)
+class _CompositeHookContext:
+    owner: "CompositeInstrumentationHooks"
+    children: tuple[Any, ...]
+
+
+class CompositeInstrumentationHooks:
+    """Dispatch instrumentation callbacks to multiple independent hooks.
+
+    Before callbacks return one context per child. Matching after callbacks
+    receive only their child's context. A failing child is isolated so it cannot
+    prevent the remaining observers from seeing the lifecycle event.
+    """
+
+    def __init__(self, *hooks: InstrumentationHooks) -> None:
+        self.hooks = hooks
+
+    def _before(self, hook_name: str, **kwargs: Any) -> _CompositeHookContext:
+        contexts: list[Any] = []
+        for hook in self.hooks:
+            try:
+                contexts.append(getattr(hook, hook_name)(**kwargs))
+            except (Exception, asyncio.CancelledError):
+                logger.warning("Hook %s failed", hook_name, exc_info=True)
+                contexts.append(None)
+        return _CompositeHookContext(self, tuple(contexts))
+
+    def _after(self, hook_name: str, context: Any, **kwargs: Any) -> None:
+        contexts = (
+            context.children
+            if isinstance(context, _CompositeHookContext) and context.owner is self
+            else ()
+        )
+        for index, hook in enumerate(self.hooks):
+            try:
+                child_context = contexts[index] if index < len(contexts) else None
+                getattr(hook, hook_name)(context=child_context, **kwargs)
+            except (Exception, asyncio.CancelledError):
+                logger.warning("Hook %s failed", hook_name, exc_info=True)
+
+    @contextmanager
+    def activate_agent_call(self, context: Any) -> Iterator[None]:
+        """Reactivate each child's matching agent-call context."""
+
+        contexts = (
+            context.children
+            if isinstance(context, _CompositeHookContext) and context.owner is self
+            else ()
+        )
+        managers: list[AbstractContextManager[None]] = []
+        for index, hook in enumerate(self.hooks):
+            child_context = contexts[index] if index < len(contexts) else None
+            if not isinstance(hook, AgentCallContextActivator) or child_context is None:
+                continue
+            try:
+                manager = hook.activate_agent_call(child_context)
+                manager.__enter__()
+                managers.append(manager)
+            except (Exception, asyncio.CancelledError):
+                logger.warning("Hook activate_agent_call failed", exc_info=True)
+
+        try:
+            yield
+        except BaseException:
+            exception_info = sys.exc_info()
+            for manager in reversed(managers):
+                try:
+                    manager.__exit__(*exception_info)
+                except (Exception, asyncio.CancelledError):
+                    logger.warning("Hook activate_agent_call cleanup failed", exc_info=True)
+            raise
+        else:
+            for manager in reversed(managers):
+                try:
+                    manager.__exit__(None, None, None)
+                except (Exception, asyncio.CancelledError):
+                    logger.warning("Hook activate_agent_call cleanup failed", exc_info=True)
+
+    def before_agent_call(
+        self,
+        agent: Any,
+        method_name: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        call_id: str,
+        parent_call_id: str | None,
+        **extra_kwargs: Any,
+    ) -> _CompositeHookContext:
+        return self._before(
+            "before_agent_call",
+            agent=agent,
+            method_name=method_name,
+            args=args,
+            kwargs=kwargs,
+            call_id=call_id,
+            parent_call_id=parent_call_id,
+            **extra_kwargs,
+        )
+
+    def after_agent_call(
+        self,
+        agent: Any,
+        method_name: str,
+        result: Any,
+        exception: BaseException | None,
+        context: Any,
+        **kwargs: Any,
+    ) -> None:
+        self._after(
+            "after_agent_call",
+            context,
+            agent=agent,
+            method_name=method_name,
+            result=result,
+            exception=exception,
+            **kwargs,
+        )
+
+    def before_generation(
+        self,
+        agent: Any,
+        method_name: str,
+        strategy: str,
+        generation_id: str,
+        parent_generation_id: str | None,
+        **kwargs: Any,
+    ) -> _CompositeHookContext:
+        return self._before(
+            "before_generation",
+            agent=agent,
+            method_name=method_name,
+            strategy=strategy,
+            generation_id=generation_id,
+            parent_generation_id=parent_generation_id,
+            **kwargs,
+        )
+
+    def after_generation(
+        self,
+        agent: Any,
+        method_name: str,
+        result: Any,
+        exception: BaseException | None,
+        context: Any,
+        generation_id: str,
+        **kwargs: Any,
+    ) -> None:
+        self._after(
+            "after_generation",
+            context,
+            agent=agent,
+            method_name=method_name,
+            result=result,
+            exception=exception,
+            generation_id=generation_id,
+            **kwargs,
+        )
+
+    def before_code_execution(
+        self,
+        agent: Any,
+        code: str,
+        execution_id: str,
+        generation_id: str | None = None,
+        **kwargs: Any,
+    ) -> _CompositeHookContext:
+        return self._before(
+            "before_code_execution",
+            agent=agent,
+            code=code,
+            execution_id=execution_id,
+            generation_id=generation_id,
+            **kwargs,
+        )
+
+    def after_code_execution(
+        self,
+        agent: Any,
+        code: str,
+        result: Any,
+        exception: BaseException | None,
+        context: Any,
+        execution_id: str,
+        **kwargs: Any,
+    ) -> None:
+        self._after(
+            "after_code_execution",
+            context,
+            agent=agent,
+            code=code,
+            result=result,
+            exception=exception,
+            execution_id=execution_id,
+            **kwargs,
+        )
+
+    def before_method_invocation(
+        self,
+        agent: Any,
+        method_name: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        invocation_id: str,
+        **extra_kwargs: Any,
+    ) -> _CompositeHookContext:
+        return self._before(
+            "before_method_invocation",
+            agent=agent,
+            method_name=method_name,
+            args=args,
+            kwargs=kwargs,
+            invocation_id=invocation_id,
+            **extra_kwargs,
+        )
+
+    def after_method_invocation(
+        self,
+        agent: Any,
+        method_name: str,
+        result: Any,
+        exception: BaseException | None,
+        context: Any,
+        invocation_id: str,
+        **kwargs: Any,
+    ) -> None:
+        self._after(
+            "after_method_invocation",
+            context,
+            agent=agent,
+            method_name=method_name,
+            result=result,
+            exception=exception,
+            invocation_id=invocation_id,
+            **kwargs,
+        )
+
+    def before_tool_execution(
+        self,
+        agent: Any,
+        tool_name: str,
+        arguments: dict[str, Any],
+        execution_id: str,
+        generation_id: str | None = None,
+        **kwargs: Any,
+    ) -> _CompositeHookContext:
+        return self._before(
+            "before_tool_execution",
+            agent=agent,
+            tool_name=tool_name,
+            arguments=arguments,
+            execution_id=execution_id,
+            generation_id=generation_id,
+            **kwargs,
+        )
+
+    def after_tool_execution(
+        self,
+        agent: Any,
+        tool_name: str,
+        arguments: dict[str, Any],
+        result: Any,
+        exception: BaseException | None,
+        context: Any,
+        execution_id: str,
+        **kwargs: Any,
+    ) -> None:
+        self._after(
+            "after_tool_execution",
+            context,
+            agent=agent,
+            tool_name=tool_name,
+            arguments=arguments,
+            result=result,
+            exception=exception,
+            execution_id=execution_id,
+            **kwargs,
+        )
+
+    def on_messages_built(
+        self,
+        agent: Any,
+        method_name: str,
+        messages: list[dict[str, Any]],
+        generation_id: str,
+        **kwargs: Any,
+    ) -> None:
+        callback_kwargs = {
+            "agent": agent,
+            "method_name": method_name,
+            "messages": messages,
+            "generation_id": generation_id,
+            **kwargs,
+        }
+        for hook in self.hooks:
+            try:
+                hook.on_messages_built(**callback_kwargs)
+            except (Exception, asyncio.CancelledError):
+                logger.warning("Hook on_messages_built failed", exc_info=True)
+
+
+def compose_hooks(*hooks: InstrumentationHooks | None) -> InstrumentationHooks | None:
+    """Combine hooks without changing callback order or replacing observers."""
+
+    flattened: list[InstrumentationHooks] = []
+    for hook in hooks:
+        if hook is None:
+            continue
+        candidates = hook.hooks if isinstance(hook, CompositeInstrumentationHooks) else (hook,)
+        for candidate in candidates:
+            if not any(candidate is existing for existing in flattened):
+                flattened.append(candidate)
+    if not flattened:
+        return None
+    if len(flattened) == 1:
+        return flattened[0]
+    return CompositeInstrumentationHooks(*flattened)
+
+
+@contextmanager
+def hooks_scope(
+    hooks: InstrumentationHooks, *, compose: bool = True
+) -> Iterator[InstrumentationHooks]:
+    """Install hooks for this context and restore the exact prior value on exit."""
+
+    previous = get_hooks()
+    active = compose_hooks(previous, hooks) if compose else hooks
+    assert active is not None
+    token = _instrumentation_hooks_var.set(active)
+    try:
+        yield active
+    finally:
+        _instrumentation_hooks_var.reset(token)
+
+
 def _record_tracing_overhead(elapsed_s: float) -> None:
     """Record time spent inside tracing hook callbacks, if metrics are active."""
     try:
@@ -391,8 +733,11 @@ def call_before_hook(hook_name: str, **kwargs: Any) -> Any:
         return None
     t0 = time.perf_counter()
     try:
-        return getattr(hooks, hook_name)(**kwargs)
-    except Exception:
+        context = getattr(hooks, hook_name)(**kwargs)
+        if isinstance(context, _CompositeHookContext):
+            return context
+        return _OwnedHookContext(hooks, context)
+    except (Exception, asyncio.CancelledError):
         logger.warning("Hook %s failed", hook_name, exc_info=True)
         return None
     finally:
@@ -412,13 +757,21 @@ def call_after_hook(hook_name: str, context: Any, **kwargs: Any) -> None:
             agent=agent, method_name="process", result=result,
             exception=None, generation_id=gen_id)
     """
-    hooks = get_hooks()
+    if isinstance(context, _OwnedHookContext):
+        hooks = context.owner
+        child_context = context.child
+    elif isinstance(context, _CompositeHookContext):
+        hooks = context.owner
+        child_context = context
+    else:
+        hooks = get_hooks()
+        child_context = context
     if not hooks:
         return
     t0 = time.perf_counter()
     try:
-        getattr(hooks, hook_name)(context=context, **kwargs)
-    except Exception:
+        getattr(hooks, hook_name)(context=child_context, **kwargs)
+    except (Exception, asyncio.CancelledError):
         logger.warning("Hook %s failed", hook_name, exc_info=True)
     finally:
         _record_tracing_overhead(time.perf_counter() - t0)
@@ -441,6 +794,9 @@ def activate_agent_call_context(
     hooks_token = _instrumentation_hooks_var.set(hooks) if hooks is not None else None
     try:
         active_hooks = hooks if hooks is not None else get_hooks()
+        if isinstance(context, _OwnedHookContext):
+            active_hooks = context.owner
+            context = context.child
         if not isinstance(active_hooks, AgentCallContextActivator) or context is None:
             yield
             return
@@ -448,7 +804,7 @@ def activate_agent_call_context(
         try:
             manager = active_hooks.activate_agent_call(context)
             manager.__enter__()
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             logger.warning("Hook activate_agent_call failed", exc_info=True)
             yield
             return
@@ -458,13 +814,13 @@ def activate_agent_call_context(
         except BaseException:
             try:
                 manager.__exit__(*sys.exc_info())
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 logger.warning("Hook activate_agent_call cleanup failed", exc_info=True)
             raise
         else:
             try:
                 manager.__exit__(None, None, None)
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 logger.warning("Hook activate_agent_call cleanup failed", exc_info=True)
     finally:
         if hooks_token is not None:
@@ -474,6 +830,9 @@ def activate_agent_call_context(
 __all__ = [
     "AgentCallContextActivator",
     "InstrumentationHooks",
+    "CompositeInstrumentationHooks",
+    "compose_hooks",
+    "hooks_scope",
     "set_hooks",
     "get_hooks",
     "call_before_hook",

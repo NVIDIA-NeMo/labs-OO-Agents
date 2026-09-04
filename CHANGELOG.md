@@ -11,6 +11,7 @@ to follow semantic versioning.
   Reduced legacy signatures are no longer supported.
 - Breaking: sandboxed user-code failures are exposed as `SandboxExecutionError`;
   inspect `original_type`, `original_error`, and `diagnostic` for worker-side details.
+- Add composable, context-scoped instrumentation hooks and trace-session scopes so hosts can observe NOOA execution without replacing native tracing.
 - Initial public release of NVIDIA Object-Oriented Agents (NOOA).
 - Security: MCP server configurations no longer expand host environment variables
   from `${VAR}` placeholders. Trusted caller code must resolve secrets and pass

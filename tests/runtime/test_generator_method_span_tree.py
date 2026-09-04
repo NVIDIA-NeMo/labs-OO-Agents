@@ -34,7 +34,7 @@ def in_memory_spans(monkeypatch):
         InMemorySpanExporter,
     )
 
-    from nooa.tracing import NemoOOAgentsInstrumentor
+    from nooa.tracing import NOOAInstrumentor
 
     # Keep Agent.__init__ from replacing this fixture-local backend with the
     # automatically discovered dev-viewer backend on the first instantiation.
@@ -43,7 +43,7 @@ def in_memory_spans(monkeypatch):
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    instrumentor = NemoOOAgentsInstrumentor()
+    instrumentor = NOOAInstrumentor()
     instrumentor.instrument(tracer_provider=provider)
     try:
         yield exporter

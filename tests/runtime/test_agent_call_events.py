@@ -13,11 +13,14 @@ mechanism independently of ATIF.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from nooa import Agent, strategy
 from nooa.context_blocks.roles import Role
 from nooa.events import AfterAgentCall, BeforeAgentCall
+from nooa.runtime.hooks import set_hooks
 from nooa.strategies import PredictStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse
 
@@ -51,6 +54,9 @@ class _Agent(Agent, llm=_DEFAULT):
 
     async def boom(self) -> str:
         raise RuntimeError("kaboom")
+
+    async def wait_forever(self) -> None:
+        await asyncio.Event().wait()
 
 
 def _capture(agent: Agent) -> list:
@@ -122,3 +128,34 @@ async def test_agent_call_events_are_runtime_events_and_not_recorded() -> None:
     stored_types = {type(e).__name__ for _, e in agent.event_manager.items()}
     assert "BeforeAgentCall" not in stored_types
     assert "AfterAgentCall" not in stored_types
+
+
+@pytest.mark.asyncio
+async def test_cancellation_is_reported_as_failed_and_re_raised() -> None:
+    hook_exceptions: list[BaseException | None] = []
+
+    class CancellationHooks:
+        def before_agent_call(self, **kwargs):
+            return kwargs["call_id"]
+
+        def after_agent_call(self, *, exception, **kwargs):
+            hook_exceptions.append(exception)
+
+    agent = _Agent(llm=_DEFAULT)
+    events = _capture(agent)
+    hooks = CancellationHooks()
+    set_hooks(hooks)  # type: ignore[arg-type]
+    try:
+        task = asyncio.create_task(agent.wait_forever())
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        set_hooks(None)
+
+    after = next(event for event in events if isinstance(event, AfterAgentCall))
+    assert after.success is False
+    assert after.exception_type == "CancelledError"
+    assert len(hook_exceptions) == 1
+    assert isinstance(hook_exceptions[0], asyncio.CancelledError)

@@ -122,3 +122,55 @@ class TestFlushAndShutdown:
         with tempfile.TemporaryDirectory() as tmpdir:
             enable_tracing(exporters=[exporters.jsonl(tmpdir)])
             flush_traces()  # Should not raise
+
+
+def test_instrumentor_composes_with_and_restores_existing_hooks() -> None:
+    from unittest.mock import MagicMock
+
+    from nooa.runtime.hooks import CompositeInstrumentationHooks, get_hooks, set_hooks
+    from nooa.tracing import NOOAInstrumentor
+
+    existing = MagicMock()
+    provider = MagicMock()
+    set_hooks(existing)
+    try:
+        instrumentor = NOOAInstrumentor()
+        instrumentor.instrument(tracer_provider=provider)
+        active = get_hooks()
+        assert isinstance(active, CompositeInstrumentationHooks)
+        assert active.hooks[0] is existing
+        assert active.hooks[1] is instrumentor._hooks
+
+        instrumentor.uninstrument()
+        assert get_hooks() is existing
+    finally:
+        set_hooks(None)
+
+
+def test_instrumentors_can_be_uninstrumented_out_of_order() -> None:
+    from unittest.mock import MagicMock
+
+    from nooa.runtime.hooks import CompositeInstrumentationHooks, get_hooks, set_hooks
+    from nooa.tracing import NOOAInstrumentor
+
+    provider = MagicMock()
+    first = NOOAInstrumentor()
+    second = NOOAInstrumentor()
+    set_hooks(None)
+    try:
+        first.instrument(tracer_provider=provider)
+        first_hook = first._hooks
+        second.instrument(tracer_provider=provider)
+        second_hook = second._hooks
+
+        first.uninstrument()
+        active = get_hooks()
+        assert active is second_hook or (
+            isinstance(active, CompositeInstrumentationHooks) and active.hooks == (second_hook,)
+        )
+
+        second.uninstrument()
+        assert get_hooks() is None
+        assert first_hook is not get_hooks()
+    finally:
+        set_hooks(None)

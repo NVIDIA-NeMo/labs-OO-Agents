@@ -23,11 +23,10 @@ Three behaviours differ from the non-generator wrappers, deliberately:
   There is no body execution to attribute, so emitting a Before/After pair for
   it would record work that never happened.
 - **Cancellation counts as failure.** `_gen_agent_span` catches `BaseException`,
-  so a cancelled generator reports `success=False`, while the coroutine and sync
-  wrappers catch `Exception` and report a cancelled call as a success. The
-  generator behaviour is the intended one; aligning the older wrappers is out of
-  scope here, so `AfterAgentCall.success` currently means slightly different
-  things depending on whether the method contains `yield`.
+  so a cancelled generator reports `success=False`. The coroutine and sync
+  wrappers do the same, so `AfterAgentCall.success` has one meaning for every
+  method shape. `GeneratorExit` remains excluded because abandoning a generator
+  early is ordinary control flow, not a failure.
 """
 
 import asyncio
@@ -318,7 +317,7 @@ def create_agent_method_wrapper(
                     await _flush_litellm_journal()
 
                 return result
-            except Exception as e:
+            except BaseException as e:
                 exception_caught = e
                 raise
             finally:
@@ -510,7 +509,7 @@ def create_sync_agent_method_wrapper(
 
         hook_context = None
         result = None
-        exception_caught: Exception | None = None
+        exception_caught: BaseException | None = None
         try:
             if _tracing_enabled[0]:
                 hook_context = call_before_hook(
@@ -525,7 +524,7 @@ def create_sync_agent_method_wrapper(
                 )
             result = original_func(self, *args, **kwargs)
             return result
-        except Exception as e:
+        except BaseException as e:
             exception_caught = e
             raise
         finally:

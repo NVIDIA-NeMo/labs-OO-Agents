@@ -1350,6 +1350,7 @@ class ActorRuntime:
         )
 
         result: ExecutionResult | None = None
+        execution_exception: BaseException | None = None
         stdout_token: contextvars.Token[Any] | None = None  # Track for cleanup in finally
         stderr_token: contextvars.Token[Any] | None = None
         stdin_token: contextvars.Token[Any] | None = None
@@ -1514,7 +1515,7 @@ class ActorRuntime:
             # stdout capture and wrapper, so we skip the in-process exec below.
             if sandbox_executor is not None:
                 result = await sandbox_executor.run_cell(code, execution_count=execution_count)
-                return result
+                return cast(ExecutionResult, result)
 
             # Set up stdout/stderr capture BEFORE ast.parse/compile so that
             # SyntaxWarnings (e.g. invalid escape sequences in LLM-generated code)
@@ -1898,6 +1899,9 @@ class ActorRuntime:
                 )
                 return result
 
+        except asyncio.CancelledError as error:
+            execution_exception = error
+            raise
         finally:
             # NOTE: We do NOT restore sys.stdout/sys.stderr here.
             # The ContextVarStream wrappers are transparent (fall through to original
@@ -1932,7 +1936,7 @@ class ActorRuntime:
                 agent=self.agent,
                 code=code,
                 result=result,
-                exception=result.error if result else None,
+                exception=result.error if result else execution_exception,
                 execution_id=execution_id,
                 tool_call_id=tool_call_id,  # LLM's tool call ID for trace correlation
             )
@@ -2015,7 +2019,7 @@ class ActorRuntime:
             # Execute nested strategy directly (we're already in a generation session)
             result = await strategy.execute(self, call)
             return result
-        except Exception as e:
+        except BaseException as e:
             exception_caught = e
             raise
         finally:
@@ -2810,7 +2814,7 @@ class ActorRuntime:
                     _decorator_events_var.reset(decorator_evt_token)
             else:
                 raise TypeError(f"Expected GenerationStrategy instance, got {type(strategy)}")
-        except Exception as e:
+        except BaseException as e:
             exception_caught = e
             raise
         finally:

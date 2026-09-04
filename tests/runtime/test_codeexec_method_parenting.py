@@ -101,7 +101,7 @@ def in_memory_spans():
         InMemorySpanExporter,
     )
 
-    from nooa.tracing import NemoOOAgentsInstrumentor
+    from nooa.tracing import NOOAInstrumentor
 
     exporter = InMemorySpanExporter()
     provider = trace.get_tracer_provider()
@@ -109,7 +109,7 @@ def in_memory_spans():
         provider = TracerProvider()
         trace.set_tracer_provider(provider)
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    NemoOOAgentsInstrumentor().instrument(tracer_provider=provider)
+    NOOAInstrumentor().instrument(tracer_provider=provider)
     yield exporter
     set_hooks(None)
 
