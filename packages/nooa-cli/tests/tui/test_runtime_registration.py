@@ -3,7 +3,11 @@
 
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - platform dependent
+    fcntl = None
+
 import json
 import os
 import signal
@@ -27,6 +31,61 @@ def test_explicit_resume_argv_replaces_short_and_long_forms():
     ) == ["/venv/bin/python", "-m", "nooa_cli", "tui", "--python", "--continue", "new"]
 
 
+def test_explicit_resume_argv_preserves_interpreter_c_before_tui():
+    argv = ["python", "-c", "launch_tui()", "tui", "--continue", "old"]
+    assert explicit_resume_argv(argv, "new") == [
+        "python",
+        "-c",
+        "launch_tui()",
+        "tui",
+        "--continue",
+        "new",
+    ]
+
+
+def test_explicit_resume_argv_requires_tui_command():
+    with pytest.raises(ValueError, match="tui command"):
+        explicit_resume_argv(["python", "-c", "launch_tui()"], "new")
+
+
+def test_publish_rejects_symlinked_lock_without_touching_target(tmp_path: Path):
+    target = tmp_path / "target"
+    target.write_text("keep me")
+    with (
+        patch.dict("os.environ", {"NOOA_TUI_RUNTIME_DIR": str(tmp_path)}),
+        patch("nooa_cli.tui.runtime_registration._source_root", return_value=tmp_path),
+        patch("sys.orig_argv", ["python", "-m", "nooa_cli", "tui"]),
+    ):
+        registration = TUIRuntimeRegistration(
+            session_id="session-1",
+            working_dir=str(tmp_path),
+            original_argv=["python", "-m", "nooa_cli", "tui"],
+        )
+        registration.lock_path.symlink_to(target)
+        with pytest.raises(OSError):
+            registration.publish()
+        registration.close()
+    assert target.read_text() == "keep me"
+
+
+def test_registration_disables_restart_without_fcntl(tmp_path: Path):
+    loop = MagicMock()
+    with (
+        patch.dict("os.environ", {"NOOA_TUI_RUNTIME_DIR": str(tmp_path)}),
+        patch("nooa_cli.tui.runtime_registration._source_root", return_value=tmp_path),
+        patch("sys.orig_argv", ["python", "-m", "nooa_cli", "tui"]),
+        patch("nooa_cli.tui.runtime_registration.fcntl", None),
+    ):
+        registration = TUIRuntimeRegistration(
+            session_id="session-1",
+            working_dir=str(tmp_path),
+            original_argv=["python", "-m", "nooa_cli", "tui"],
+        )
+        assert registration.install_restart_signal(loop, MagicMock()) is False
+        with pytest.raises(OSError, match="POSIX file locking"):
+            registration.publish()
+
+
 def test_registration_publishes_private_record_and_removes_only_its_own(tmp_path: Path):
     with (
         patch.dict("os.environ", {"NOOA_TUI_RUNTIME_DIR": str(tmp_path)}),
@@ -45,7 +104,7 @@ def test_registration_publishes_private_record_and_removes_only_its_own(tmp_path
     assert payload["session_id"] == "session-1"
     assert payload["source_root"] == "/source"
     assert payload["source_revision"] == "abc123"
-    assert payload["argv"][-2:] == ["--continue", "session-1"]
+    assert "argv" not in payload
     assert registration.path.stat().st_mode & 0o777 == 0o600
     assert registration.path.parent.stat().st_mode & 0o777 == 0o700
 
@@ -71,7 +130,11 @@ def test_install_restart_signal_routes_callback_and_restores_handler(tmp_path: P
         patch("nooa_cli.tui.runtime_registration.signal.getsignal", return_value=signal.SIG_DFL),
         patch("nooa_cli.tui.runtime_registration.signal.signal") as set_signal,
     ):
-        registration = TUIRuntimeRegistration(session_id="session-1", working_dir=str(tmp_path))
+        registration = TUIRuntimeRegistration(
+            session_id="session-1",
+            working_dir=str(tmp_path),
+            original_argv=["python", "-m", "nooa_cli", "tui"],
+        )
         assert registration.install_restart_signal(loop, callback)
         registration.close()
 
@@ -93,7 +156,8 @@ def test_update_session_republishes_resume_target(tmp_path: Path):
 
     payload = json.loads(registration.path.read_text())
     assert payload["session_id"] == "new"
-    assert payload["argv"][-2:] == ["--continue", "new"]
+    assert "argv" not in payload
+    assert registration.restart_argv[-2:] == ["--continue", "new"]
     registration.close()
 
 
@@ -109,7 +173,11 @@ def test_publish_fails_closed_without_process_identity(tmp_path: Path):
         patch("nooa_cli.tui.runtime_registration._source_root", return_value=tmp_path),
         patch("nooa_cli.tui.runtime_registration.process_identity", return_value=None),
     ):
-        registration = TUIRuntimeRegistration(session_id="session-1", working_dir=str(tmp_path))
+        registration = TUIRuntimeRegistration(
+            session_id="session-1",
+            working_dir=str(tmp_path),
+            original_argv=["python", "-m", "nooa_cli", "tui"],
+        )
         with pytest.raises(OSError, match="stable process identity"):
             registration.publish()
     assert not registration.path.exists()
@@ -120,7 +188,11 @@ def test_close_releases_lock_when_record_disappeared(tmp_path: Path):
         patch.dict("os.environ", {"NOOA_TUI_RUNTIME_DIR": str(tmp_path)}),
         patch("nooa_cli.tui.runtime_registration._source_root", return_value=tmp_path),
     ):
-        registration = TUIRuntimeRegistration(session_id="session-1", working_dir=str(tmp_path))
+        registration = TUIRuntimeRegistration(
+            session_id="session-1",
+            working_dir=str(tmp_path),
+            original_argv=["python", "-m", "nooa_cli", "tui"],
+        )
         registration.publish()
         registration.path.unlink()
         registration.close()
@@ -128,12 +200,17 @@ def test_close_releases_lock_when_record_disappeared(tmp_path: Path):
     assert not registration.lock_path.exists()
 
 
+@pytest.mark.skipif(fcntl is None, reason="requires POSIX file locking")
 def test_registration_holds_runtime_ownership_lock(tmp_path: Path):
     with (
         patch.dict("os.environ", {"NOOA_TUI_RUNTIME_DIR": str(tmp_path)}),
         patch("nooa_cli.tui.runtime_registration._source_root", return_value=tmp_path),
     ):
-        registration = TUIRuntimeRegistration(session_id="session-1", working_dir=str(tmp_path))
+        registration = TUIRuntimeRegistration(
+            session_id="session-1",
+            working_dir=str(tmp_path),
+            original_argv=["python", "-m", "nooa_cli", "tui"],
+        )
         registration.publish()
         contender = os.open(registration.lock_path, os.O_RDWR)
         try:
