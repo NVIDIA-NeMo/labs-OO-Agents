@@ -215,6 +215,37 @@ def test_orphaned_shared_claim_requires_explicit_recovery(tmp_path, monkeypatch)
     resumed.close()
 
 
+def test_claim_cleanup_failure_still_releases_local_lock(tmp_path, monkeypatch):
+    """A marker unlink error cannot leak the manager's flock descriptor."""
+    import nooa.storage.sqlite as sqlite_storage
+
+    path = tmp_path / "cleanup-failure.db"
+    manager = sqlite_storage.SQLiteStorageManager(path)
+    claim = manager._session_claim
+    assert claim is not None
+    owner_path = claim._owner_path
+    claim_path = sqlite_storage._claim_path(path)
+    original_unlink = sqlite_storage.Path.unlink
+
+    def fail_owner_unlink(target, *args, **kwargs):
+        if target == owner_path:
+            raise PermissionError("owner cleanup denied")
+        return original_unlink(target, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite_storage.Path, "unlink", fail_owner_unlink)
+    manager.close()
+
+    assert manager._lock_fd is None
+    assert manager._session_claim is None
+    # The claim remains fail-closed, but after explicit recovery the released
+    # flock must permit a replacement manager in this same process.
+    monkeypatch.undo()
+    owner_path.unlink()
+    claim_path.rmdir()
+    replacement = sqlite_storage.SQLiteStorageManager(path)
+    replacement.close()
+
+
 def test_old_owner_does_not_remove_replacement_claim(tmp_path):
     """Token checking keeps stale cleanup from deleting a successor's claim."""
     import nooa.storage.sqlite as sqlite_storage
@@ -240,7 +271,9 @@ def test_old_owner_does_not_remove_replacement_claim(tmp_path):
     displaced.rmdir()
 
 
-def test_user_messages_are_thread_safe_when_host_opts_into_cross_thread_access(tmp_path):
+def test_user_messages_are_thread_safe_when_host_opts_into_cross_thread_access(
+    tmp_path,
+):
     store = SessionStore(tmp_path)
     session = store.create(session_id="threaded", check_same_thread=False)
     barrier = threading.Barrier(3)
