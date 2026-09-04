@@ -114,13 +114,14 @@ def _system_browser_available() -> bool:
     if os.environ.get("SANDBOX_VM_ID") and no_display in {"1", "true", "yes", "on"}:
         return False
 
-    # Check headless SSH before consulting webbrowser's process-global registry.
-    # A prior probe can register xdg-open, after which webbrowser.get() succeeds
-    # even though the launcher still cannot display anything in this session.
-    if (
-        os.name == "posix"
-        and os.environ.get("SSH_CONNECTION")
-        and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    # A browser launched from SSH may be rendered locally through X forwarding or
+    # opened by a desktop/IDE bridge, but its ``localhost`` is then ambiguous. In
+    # particular, host browser bridges send the callback to the user's laptop while
+    # this process is listening on the remote host. Prefer the paste-back flow for
+    # every SSH session; it works with or without display forwarding and needs no
+    # tunnel. An explicit browser_open hook can still opt into loopback forwarding.
+    if os.name == "posix" and any(
+        os.environ.get(variable) for variable in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
     ):
         return False
 
@@ -355,7 +356,16 @@ class OAuthHandler:
 
         if self._code_prompt is None:
             raise RuntimeError("Manual OAuth requires a code prompt callback but none was provided")
-        code = _extract_authorization_code(await self._code_prompt(auth_url))
+        try:
+            pasted = await asyncio.wait_for(
+                self._code_prompt(auth_url), timeout=self.config.timeout
+            )
+        except TimeoutError:
+            raise RuntimeError(
+                "OAuth authorization timed out while waiting for the code or callback URL "
+                f"({self.config.timeout:g} seconds). Retry the connection to start a fresh flow."
+            ) from None
+        code = _extract_authorization_code(pasted)
         if not code:
             raise RuntimeError("Authorization code not provided")
         return code
