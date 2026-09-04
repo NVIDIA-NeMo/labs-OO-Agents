@@ -1854,8 +1854,9 @@ class TUIApplication:
             return await done
         finally:
             if self._resume_picker_done is done:
-                if self._resume_picker is not None:
-                    self._resume_picker.close()
+                closing_picker = self._resume_picker
+                if closing_picker is not None:
+                    closing_picker.close()
                 self._resume_picker = None
                 self._resume_picker_done = None
                 try:
@@ -1863,6 +1864,8 @@ class TUIApplication:
                 except ValueError:
                     self._app.layout.focus(self._input_window)
                 self._app.invalidate()
+                if closing_picker is not None:
+                    await closing_picker.wait_closed()
 
     def _finish_resume_picker(self, value: str | None) -> None:
         done = self._resume_picker_done

@@ -1191,3 +1191,39 @@ async def test_session_run_startup_failure_teardown_order(
         "terminal restore",
         "exit message",
     ]
+
+@pytest.mark.asyncio
+async def test_exit_diagnostics_omit_current_task(monkeypatch) -> None:
+    """Exit diagnostics omit their own task while retaining worker visibility."""
+    from types import SimpleNamespace
+
+    from nooa_cli.tui.session import Session
+
+    session = Session.__new__(Session)
+    session._background_tasks = set()
+    output: list[str] = []
+    session._write_terminal_fallback = output.append
+
+    release = asyncio.Event()
+    pending = asyncio.create_task(release.wait(), name="actual-background-work")
+    idle_executor = SimpleNamespace(is_alive=lambda: True, daemon=False, name="asyncio_0", ident=1)
+    real_worker = SimpleNamespace(is_alive=lambda: True, daemon=False, name="other-worker", ident=2)
+    monkeypatch.setattr(
+        threading,
+        "enumerate",
+        lambda: [threading.main_thread(), idle_executor, real_worker],
+    )
+
+    try:
+        session._dump_exit_diagnostics()
+    finally:
+        release.set()
+        await pending
+
+    diagnostic = "".join(output)
+    assert "Pending asyncio tasks (1):" in diagnostic
+    assert "actual-background-work" in diagnostic
+    assert "other-worker" in diagnostic
+    # Executor threads can be idle, but hiding all of them by name would also
+    # hide a genuinely blocked callable that can delay asyncio.run() shutdown.
+    assert "asyncio_0" in diagnostic

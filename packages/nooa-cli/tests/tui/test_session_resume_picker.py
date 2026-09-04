@@ -1619,3 +1619,126 @@ def test_rapid_a_b_a_keeps_new_preview_task_tracked(monkeypatch) -> None:
         await asyncio.gather(old_a, new_a, return_exceptions=True)
 
     asyncio.run(run())
+
+@pytest.mark.asyncio
+async def test_preview_workers_are_serialized_and_close_drains_them(monkeypatch) -> None:
+    """Superseded to_thread chunks never overlap or survive picker teardown."""
+    import threading
+
+    import nooa_cli.tui.resume_picker as rp
+
+    monkeypatch.setattr(rp, "_PREVIEW_DEBOUNCE_SECONDS", 0)
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    turns = (ResumePickerTurn("agent", "preview"),)
+    picker = ResumePicker([row("a", "A", turns=turns), row("b", "B", turns=turns)], app)
+    picker.preview_control.viewport = (40, 5)
+
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    release_second = threading.Event()
+    state_lock = threading.Lock()
+    active = 0
+    max_active = 0
+    started: list[str] = []
+
+    def blocking_render(turns_list, start, row_id, width):
+        nonlocal active, max_active
+        with state_lock:
+            active += 1
+            max_active = max(max_active, active)
+            started.append(row_id)
+        try:
+            if row_id == "a":
+                first_started.set()
+                assert release_first.wait(2)
+            else:
+                second_started.set()
+                assert release_second.wait(2)
+            return f"{row_id}\n"
+        finally:
+            with state_lock:
+                active -= 1
+
+    monkeypatch.setattr(ResumePicker, "_render_preview_chunk", staticmethod(blocking_render))
+
+    picker._prepare_current_preview()
+    for _ in range(100):
+        if first_started.is_set():
+            break
+        await asyncio.sleep(0.005)
+    assert first_started.is_set()
+
+    picker.move(1)
+    await asyncio.sleep(0.05)
+    assert not second_started.is_set(), "replacement render overlapped the stale worker"
+    assert max_active == 1
+
+    release_first.set()
+    for _ in range(100):
+        if second_started.is_set():
+            break
+        await asyncio.sleep(0.005)
+    assert second_started.is_set()
+
+    picker.close()
+    closing = asyncio.create_task(picker.wait_closed())
+    await asyncio.sleep(0)
+    assert not closing.done(), "close forgot the active executor-backed task"
+    release_second.set()
+    await asyncio.wait_for(closing, 1)
+
+    assert max_active == 1
+    assert started == ["a", "b"]
+    assert not picker._all_preview_tasks
+
+
+@pytest.mark.asyncio
+async def test_close_drains_worker_after_preview_task_was_already_cancelled(monkeypatch) -> None:
+    """A second cancellation cannot orphan a superseded executor chunk."""
+    import threading
+
+    import nooa_cli.tui.resume_picker as rp
+
+    monkeypatch.setattr(rp, "_PREVIEW_DEBOUNCE_SECONDS", 0)
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    turns = (ResumePickerTurn("agent", "preview"),)
+    picker = ResumePicker([row("a", "A", turns=turns), row("b", "B", turns=turns)], app)
+    picker.preview_control.viewport = (40, 5)
+
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    worker_finished = threading.Event()
+
+    def blocking_render(turns_list, start, row_id, width):
+        worker_started.set()
+        try:
+            assert release_worker.wait(2)
+            return f"{row_id}\n"
+        finally:
+            worker_finished.set()
+
+    monkeypatch.setattr(ResumePicker, "_render_preview_chunk", staticmethod(blocking_render))
+
+    picker._prepare_current_preview()
+    for _ in range(100):
+        if worker_started.is_set():
+            break
+        await asyncio.sleep(0.005)
+    assert worker_started.is_set()
+
+    picker.move(1)  # First cancellation: supersede A with B.
+    await asyncio.sleep(0)
+    picker.close()  # Second cancellation while A drains its worker.
+    closing = asyncio.create_task(picker.wait_closed())
+    await asyncio.sleep(0.05)
+    assert not closing.done()
+    assert not worker_finished.is_set()
+
+    release_worker.set()
+    await asyncio.wait_for(closing, 1)
+    assert worker_finished.is_set()
+    assert not picker._all_preview_tasks
+    assert not picker._preview_worker_tasks
