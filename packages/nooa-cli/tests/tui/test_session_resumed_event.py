@@ -76,6 +76,33 @@ async def test_on_handler_receives_event():
 
 
 @pytest.mark.asyncio
+async def test_active_session_warning_preserves_recovery_instructions(tmp_path, monkeypatch):
+    """Startup tells users how to reclaim an orphaned cross-sandbox claim."""
+    from nooa_cli.tui import session_manager as session_manager_module
+
+    monkeypatch.setattr(session_manager_module, "SESSIONS_DIR", tmp_path)
+    original = await bootstrap(Config())
+    session_id = original.session_id
+    await original.agent.close()
+    original.session_manager.close()
+    claim_path = tmp_path / f"{session_id}.active"
+    claim_path.mkdir()
+    (claim_path / "owner-orphan.json").write_text('{"pid": 123}')
+
+    fallback = await bootstrap(Config(), resume_session_id=session_id)
+    try:
+        warnings = [output.content for output in fallback.messages]
+        assert any(str(claim_path) in warning for warning in warnings)
+        assert any("remove" in warning and "Starting new" in warning for warning in warnings)
+        assert not fallback.resumed
+    finally:
+        await fallback.agent.close()
+        fallback.session_manager.close()
+        (claim_path / "owner-orphan.json").unlink()
+        claim_path.rmdir()
+
+
+@pytest.mark.asyncio
 async def test_resume_without_snapshot_emits_restored_false(tmp_path, monkeypatch):
     """-c on a session with no snapshot must emit restored=False, not True.
 

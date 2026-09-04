@@ -5,7 +5,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import threading
 from datetime import UTC, datetime
 
@@ -108,6 +111,133 @@ def test_same_live_session_cannot_be_opened_twice(tmp_path):
 
     resumed = store.open("live")
     resumed.close()
+
+
+def test_shared_claim_blocks_open_when_flock_namespace_cannot_see_owner(tmp_path, monkeypatch):
+    """The filesystem claim prevents a second writer even if flock appears free."""
+    import nooa.storage.sqlite as sqlite_storage
+
+    store = SessionStore(tmp_path)
+    session = store.create(session_id="sandbox-live")
+    try:
+        # Simulate a host/sandbox boundary whose flock namespaces do not contend.
+        monkeypatch.setattr(sqlite_storage.fcntl, "flock", lambda *_args: None)
+
+        assert sqlite_storage.is_sqlite_database_active(session.path)
+        with pytest.raises(SessionAlreadyActiveError) as exc_info:
+            store.open(session.id)
+        assert exc_info.value.owner_pid == os.getpid()
+        with pytest.raises(SessionAlreadyActiveError):
+            store.delete(session.id)
+    finally:
+        session.close()
+
+
+def test_shared_claim_is_visible_to_an_independent_process(tmp_path):
+    """A separate process observes the claim even when its flock is disabled."""
+    store = SessionStore(tmp_path)
+    session = store.create(session_id="process-live")
+    script = """
+import sys
+import nooa.storage.sqlite as sqlite_storage
+from nooa.sessions import SessionStore
+from nooa.storage import SessionAlreadyActiveError
+
+sqlite_storage.fcntl.flock = lambda *_args: None
+store = SessionStore(sys.argv[1])
+try:
+    store.open("process-live")
+except SessionAlreadyActiveError:
+    pass
+else:
+    raise SystemExit("independent process opened an active session")
+try:
+    store.delete("process-live")
+except SessionAlreadyActiveError:
+    pass
+else:
+    raise SystemExit("independent process deleted an active session")
+"""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stderr or result.stdout
+    finally:
+        session.close()
+
+
+def test_forked_child_close_does_not_remove_parent_claim(tmp_path, monkeypatch):
+    """A forked copy cannot release the original process's ownership marker."""
+    import nooa.storage.sqlite as sqlite_storage
+
+    path = tmp_path / "fork-safe.db"
+    manager = sqlite_storage.SQLiteStorageManager(path)
+    claim = manager._session_claim
+    assert claim is not None
+    claim_path = sqlite_storage._claim_path(path)
+    parent_pid = os.getpid()
+
+    monkeypatch.setattr(sqlite_storage.os, "getpid", lambda: parent_pid + 1)
+    claim.close()
+    assert claim_path.is_dir()
+
+    monkeypatch.setattr(sqlite_storage.os, "getpid", lambda: parent_pid)
+    manager.close()
+    assert not claim_path.exists()
+
+
+def test_orphaned_shared_claim_requires_explicit_recovery(tmp_path, monkeypatch):
+    """An orphaned claim never silently admits a potentially live old writer."""
+    import nooa.storage.sqlite as sqlite_storage
+
+    store = SessionStore(tmp_path)
+    session = store.create(session_id="orphaned")
+    path = session.path
+    session.close()
+
+    claim_path = sqlite_storage._claim_path(path)
+    claim_path.mkdir()
+    owner_path = claim_path / "owner-unknown.json"
+    owner_path.write_text('{"token": "unknown", "pid": 123}')
+    monkeypatch.setattr(sqlite_storage.fcntl, "flock", lambda *_args: None)
+
+    assert sqlite_storage.is_sqlite_database_active(path)
+    with pytest.raises(SessionAlreadyActiveError, match="remove .*orphaned.active"):
+        store.open("orphaned")
+
+    owner_path.unlink()
+    claim_path.rmdir()
+    resumed = store.open("orphaned")
+    resumed.close()
+
+
+def test_old_owner_does_not_remove_replacement_claim(tmp_path):
+    """Token checking keeps stale cleanup from deleting a successor's claim."""
+    import nooa.storage.sqlite as sqlite_storage
+
+    path = tmp_path / "replaced.db"
+    manager = sqlite_storage.SQLiteStorageManager(path)
+    claim = manager._session_claim
+    assert claim is not None
+    claim_path = sqlite_storage._claim_path(path)
+    displaced = claim_path.with_name("replaced.displaced")
+    claim_path.rename(displaced)
+    claim_path.mkdir()
+    replacement_owner = claim_path / "owner-replacement.json"
+    replacement_owner.write_text('{"token": "replacement", "pid": 456}')
+
+    manager.close()
+
+    assert claim_path.is_dir()
+    assert json.loads(replacement_owner.read_text())["token"] == "replacement"
+    replacement_owner.unlink()
+    claim_path.rmdir()
+    next(displaced.iterdir()).unlink()
+    displaced.rmdir()
 
 
 def test_user_messages_are_thread_safe_when_host_opts_into_cross_thread_access(tmp_path):

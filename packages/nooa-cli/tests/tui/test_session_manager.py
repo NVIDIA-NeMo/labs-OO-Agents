@@ -188,6 +188,20 @@ class TestSessionManagerClose:
             metas = SessionManager.list_sessions()
         assert any(m.id == sid for m in metas)
 
+    def test_live_sandbox_session_is_active_without_shared_flock(self, tmp_path, monkeypatch):
+        """The shared claim exposes activity across independent lock namespaces."""
+        import nooa.storage.sqlite as sqlite_storage
+
+        with patch("nooa_cli.tui.session_manager.SESSIONS_DIR", tmp_path):
+            sm = _make_sm(tmp_path, session_id="sandbox-live")
+            try:
+                # Model host and sandbox kernels that do not share flock state.
+                monkeypatch.setattr(sqlite_storage.fcntl, "flock", lambda *_args: None)
+                assert SessionManager.is_active(sm.session_id)
+            finally:
+                sm.close()
+            assert not SessionManager.is_active(sm.session_id)
+
     def test_close_session_still_accessible(self, tmp_path):
         """After close(), load_turns still works."""
         before = time.time()
