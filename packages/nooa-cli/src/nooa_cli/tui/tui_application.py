@@ -2165,34 +2165,62 @@ class TUIApplication:
         self._cancel_fullscreen_drag()
         self._active_subview = view
         loop = asyncio.get_running_loop()
-        self._active_subview_done = loop.create_future()
+        done: asyncio.Future[None] = loop.create_future()
+        self._active_subview_done = done
         view.on_open()
         if self._subview_control is not None and not hasattr(view, "container"):
             self._app.layout.focus(self._subview_control)
         if self._app.is_running:
             self._app.invalidate()
         try:
-            await self._active_subview_done
+            await done
         finally:
-            active = self._active_subview
-            if active is not None:
-                active.on_close()
+            # Normal key/mouse closure tears down synchronously before the event
+            # handler returns, so prompt_toolkit's own post-key paint sees only
+            # the restored composer. Cancellation/error still needs teardown.
+            if self._active_subview_done is done:
+                self._finish_subview_close(view, done, invalidate=True)
+
+    def _finish_subview_close(
+        self,
+        view: InAppSubview | None,
+        done: asyncio.Future[None] | None,
+        *,
+        invalidate: bool,
+    ) -> None:
+        """Atomically restore the composer after a modal subview.
+
+        State, focus, resize replay, and redraw have one owner. In particular,
+        never publish a final cursorless modal frame followed by a competing
+        composer frame: that race becomes visible as cursor flicker over tmux/SSH.
+        """
+        if view is not None:
+            view.on_close()
+        if self._active_subview is view:
             self._active_subview = None
+        if self._active_subview_done is done:
             self._active_subview_done = None
-            try:
-                self._app.layout.focus(self._input_window)
-            except Exception:
-                pass
-            if self._is_fullscreen and self._resize_reflow.has_pending_replay:
-                # The resize callback observes geometry while a modal subview is
-                # visible, but semantic transcript work stays deferred until the
-                # main view returns. Rebuild before invalidating so the first
-                # restored frame already has the settled projection.
-                self._rebuild_fullscreen_transcript()
-            if self._app.is_running:
-                self._app.invalidate()
-            if not self._is_fullscreen and self._resize_reflow.has_pending_replay:
-                self._schedule_resize_replay()
+        self._resume_input_cursor_following()
+        focus_was_input = self._app.layout.current_window is self._input_window
+        focus_restored = False
+        try:
+            self._app.layout.focus(self._input_window)
+            focus_restored = True
+        except Exception:
+            logger.warning("failed to restore composer focus after closing subview", exc_info=True)
+
+        if self._is_fullscreen and self._resize_reflow.has_pending_replay:
+            # Mutate the transcript projection now, but let the focus change
+            # publish exactly one final frame.
+            self._rebuild_fullscreen_transcript(redraw=False)
+        if invalidate and self._app.is_running and (focus_was_input or not focus_restored):
+            self._app.invalidate()
+        if not self._is_fullscreen and self._resize_reflow.has_pending_replay:
+            self._schedule_resize_replay()
+
+        # Resolve after state/focus are stable so the waiter cannot race cleanup.
+        if done is not None and not done.done():
+            done.set_result(None)
 
     def _prefill_input(self, text: str) -> None:
         escaped = _escape_paste_marker_chars(text)
@@ -2218,16 +2246,28 @@ class TUIApplication:
         return True
 
     def _close_subview(self) -> None:
+        """Close the modal atomically on its owning event loop."""
         done = self._active_subview_done
-        if done is not None and not done.done():
-            done.get_loop().call_soon_threadsafe(done.set_result, None)
+        view = self._active_subview
+        if done is None:
+            self._finish_subview_close(view, None, invalidate=True)
+            return
+        if done.done():
+            return
+
+        def finish() -> None:
+            # A key event already triggers prompt_toolkit's post-handler paint,
+            # so same-loop teardown must not enqueue a second invalidation.
+            self._finish_subview_close(view, done, invalidate=not same_loop)
+
+        try:
+            same_loop = asyncio.get_running_loop() is done.get_loop()
+        except RuntimeError:
+            same_loop = False
+        if same_loop:
+            finish()
         else:
-            active = self._active_subview
-            if active is not None:
-                active.on_close()
-            self._active_subview = None
-        if self._app.is_running:
-            self._app.invalidate()
+            done.get_loop().call_soon_threadsafe(finish)
 
     @property
     def active_subview(self) -> InAppSubview | None:
@@ -2250,7 +2290,8 @@ class TUIApplication:
             self._close_subview()
             if pending_input:
                 self._prefill_input(str(pending_input))
-        elif result == "ignored":
+            return True
+        if result == "ignored":
             return False
         if self._app.is_running:
             self._app.invalidate()
@@ -2269,6 +2310,7 @@ class TUIApplication:
             return False
         if result == "close":
             self._close_subview()
+            return True
         if self._app.is_running:
             self._app.invalidate()
         return True
@@ -4564,7 +4606,7 @@ class TUIApplication:
         else:
             self._app.invalidate()
 
-    def _rebuild_fullscreen_transcript(self) -> None:
+    def _rebuild_fullscreen_transcript(self, *, redraw: bool = True) -> None:
         """Refresh width-sensitive semantic blocks from a one-width cache."""
         self._cancel_fullscreen_drag()
         width = self.transcript_columns()
@@ -4612,7 +4654,8 @@ class TUIApplication:
         )
         self._mark_fullscreen_resize_replayed()
         self._fullscreen_invalidate_count += 1
-        self._finish_fullscreen_resize_redraw()
+        if redraw:
+            self._finish_fullscreen_resize_redraw()
 
     def _main_layout_is_compressed(self, size: tuple[int, int]) -> bool:
         """Return whether optional main-view rows cannot all fit."""
