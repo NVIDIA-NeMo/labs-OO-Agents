@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import gzip
 import io
 import os
 import tarfile
@@ -24,6 +25,7 @@ _MAX_MEMBER_BYTES = 64 * 1024
 _MAX_TOTAL_BYTES = 16 * 1024 * 1024
 _MAX_SCHEMES = 1024
 _MAX_ARCHIVE_MEMBERS = 2048
+_MAX_EXPANDED_ARCHIVE_BYTES = 20 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +98,26 @@ def _fetch_archive(url: str = CATALOG_URL) -> bytes:
     return data
 
 
+class _BoundedReader:
+    """Limit bytes returned from a decompression stream, including tar metadata."""
+
+    def __init__(self, stream, limit: int) -> None:
+        self._stream = stream
+        self._limit = limit
+        self._read = 0
+
+    def read(self, size: int = -1) -> bytes:
+        remaining = self._limit - self._read
+        if remaining < 0:
+            raise ValueError("Theme catalog expands beyond 20 MiB")
+        requested = remaining + 1 if size < 0 else min(size, remaining + 1)
+        data = self._stream.read(requested)
+        self._read += len(data)
+        if self._read > self._limit:
+            raise ValueError("Theme catalog expands beyond 20 MiB")
+        return data
+
+
 def _flatten_document(document: dict[str, object]) -> dict[str, object]:
     """Flatten the current Tinted schema's nested palette for NOOA parsing."""
     palette = document.get("palette")
@@ -114,7 +136,9 @@ def parse_gallery_archive(data: bytes) -> GalleryCatalog:
     seen = 0
     member_count = 0
     try:
-        archive = tarfile.open(fileobj=io.BytesIO(data), mode="r|gz")
+        compressed = io.BytesIO(data)
+        expanded = _BoundedReader(gzip.GzipFile(fileobj=compressed), _MAX_EXPANDED_ARCHIVE_BYTES)
+        archive = tarfile.open(fileobj=expanded, mode="r|")
     except (tarfile.TarError, OSError) as exc:
         raise ValueError(f"Invalid theme catalog archive: {exc}") from exc
     with archive:
