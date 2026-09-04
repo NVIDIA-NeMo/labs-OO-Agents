@@ -22,14 +22,19 @@ from nooa.unifiedllm.unifiedllm import (
     LLMResponse,
     ReasoningCompletionClient,
     ResponsesClient,
+    StreamedBeforeFailing,
     Tool,
     ToolCall,
     UnifiedLLM,
     create_tool_from_callable,
     extract_and_parse_json,
+    stream_to,
 )
 
 __all__ = [
+    # Streaming
+    "stream_to",
+    "StreamedBeforeFailing",
     # Core classes
     "UnifiedLLM",
     "CompletionClient",
