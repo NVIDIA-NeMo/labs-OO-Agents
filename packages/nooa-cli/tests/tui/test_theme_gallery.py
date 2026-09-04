@@ -61,6 +61,35 @@ def _raw_archive(files: dict[str, bytes]) -> bytes:
     return output.getvalue()
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://github.com/tinted-theming/schemes/archive/x.tar.gz",
+        "https://evil.example.com/schemes.tar.gz",
+        "https://github.com.evil.example.com/schemes.tar.gz",
+        "ftp://github.com/schemes.tar.gz",
+    ],
+)
+def test_catalog_url_validation_rejects_unpinned_origins(url: str) -> None:
+    with pytest.raises(ValueError, match="Unexpected theme catalog URL"):
+        theme_gallery._validate_catalog_url(url)
+
+
+def test_catalog_url_validation_accepts_pinned_origins() -> None:
+    theme_gallery._validate_catalog_url(theme_gallery.CATALOG_URL)
+    theme_gallery._validate_catalog_url(
+        "https://codeload.github.com/tinted-theming/schemes/tar.gz/x"
+    )
+
+
+def test_redirect_handler_rejects_offsite_redirect() -> None:
+    handler = theme_gallery._SafeRedirectHandler()
+    with pytest.raises(ValueError, match="Unexpected theme catalog URL"):
+        handler.redirect_request(
+            None, None, 302, "Found", {}, "https://evil.example.com/schemes.tar.gz"
+        )
+
+
 def test_gallery_catalog_is_lazy_on_import(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path))
     monkeypatch.setattr(theme_gallery, "_loaded_catalog", None)
