@@ -25,9 +25,9 @@ from __future__ import annotations
 import asyncio
 import io
 import threading
-import time
 
 import pytest
+from nooa_cli.tui.tui_application import _format_elapsed_duration
 
 from .tui_app_harness import (
     FakeAgent,
@@ -561,39 +561,78 @@ async def test_thinking_status_shows_live_human_readable_elapsed_time():
         agent.block.set()
 
 
-async def test_thinking_status_keeps_animated_spinner():
-    """The live duration supplements rather than replaces the spinner glyph."""
+async def test_thinking_status_animates_at_80ms_with_live_duration():
+    """The animation task drives integrated spinner/timer frames at 80 ms."""
+    agent = FakeAgent()
+    agent.block.clear()
+    sleep_delays: list[float] = []
+    advance = asyncio.Event()
+
+    async def controlled_sleep(delay: float) -> None:
+        sleep_delays.append(delay)
+        await advance.wait()
+        advance.clear()
+
+    async with TUIHarness(agent=agent) as h:
+        h.app._spinner_sleep = controlled_sleep
+        h.app.submit_message("hold the turn")
+        await h.wait_for(lambda: h.app.is_thinking() and sleep_delays == [0.08])
+        h.app._thinking_started_at -= 4
+        assert "⠋ thinking (4s • esc to interrupt)" in h.app.status_text()
+
+        advance.set()
+        await h.wait_for(lambda: h.app._spinner_frame == "⠙")
+        assert sleep_delays == [0.08, 0.08]
+        assert "⠙ thinking (4s • esc to interrupt)" in h.app.status_text()
+        agent.block.set()
+        advance.set()
+
+
+async def test_thinking_duration_boundaries():
+    assert _format_elapsed_duration(59.999) == "59s"
+    assert _format_elapsed_duration(60) == "1m 0s"
+    assert _format_elapsed_duration(3599.999) == "59m 59s"
+    assert _format_elapsed_duration(3600) == "1h 0m 0s"
+
+
+async def test_back_to_back_notification_resets_coalesced_thinking_timer():
+    """A new turn resets timing even when observations coalesce THINKING states."""
     agent = FakeAgent()
     agent.block.clear()
 
     async with TUIHarness(agent=agent) as h:
-        h.app.submit_message("hold the turn")
+        h.app.submit_message("first turn")
         await h.wait_for(h.app.is_thinking)
+        h.app._thinking_started_at -= 30
+        previous_started_at = h.app._thinking_started_at
 
-        h.app._spinner_frame = "⠋"
-        first = h.app.status_text()
-        h.app._spinner_frame = "⠙"
-        second = h.app.status_text()
+        h.app.runtime_notification_received()
 
-        assert "⠋ thinking (" in first
-        assert "⠙ thinking (" in second
-        assert first != second
+        assert h.app.is_thinking()
+        assert h.app._thinking_started_at > previous_started_at
+        assert "thinking (0s • esc to interrupt)" in h.app.status_text()
         agent.block.set()
 
 
-async def test_thinking_timer_repaints_across_minute_boundary():
-    """The timer task invalidates and renders the next whole-second value."""
+async def test_thinking_duration_resets_for_next_turn():
     agent = FakeAgent()
     agent.block.clear()
 
     async with TUIHarness(agent=agent) as h:
-        h.app.submit_message("hold the turn")
+        h.app.submit_message("first turn")
         await h.wait_for(h.app.is_thinking)
-        h.app._thinking_started_at = time.monotonic() - 59.8
-        h.app._ensure_spinner_task()
+        first_started_at = h.app._thinking_started_at
+        assert first_started_at is not None
 
-        await h.wait_for(lambda: "thinking (59s" in _last_screen_text(h.app))
-        await h.wait_for(lambda: "thinking (1m 0s" in _last_screen_text(h.app))
+        agent.block.set()
+        await h.wait_for(lambda: not h.app.is_thinking())
+        assert h.app._thinking_started_at is None
+
+        agent.block.clear()
+        h.app.submit_message("second turn")
+        await h.wait_for(h.app.is_thinking)
+        assert h.app._thinking_started_at is not None
+        assert h.app._thinking_started_at > first_started_at
         agent.block.set()
 
 

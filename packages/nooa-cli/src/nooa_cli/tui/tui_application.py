@@ -1298,6 +1298,7 @@ class TUIApplication:
         self._pulse_frame: str = "·"
         self._pulse_frames = "·•"
         self._spinner_task: asyncio.Task | None = None
+        self._spinner_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
         self._thinking_started_at: float | None = None
         self._command_status_text: str = ""
         self._command_queue_texts: list[str] = []
@@ -3097,7 +3098,7 @@ class TUIApplication:
                     if self._app.is_running:
                         self._app.invalidate()
                     i += 1
-                    await asyncio.sleep(0.08)
+                    await self._spinner_sleep(0.08)
             finally:
                 # Paint once after the agent stops so the live status clears.
                 if self._app.is_running:
@@ -3496,12 +3497,13 @@ class TUIApplication:
         self._ensure_spinner_task()
 
     def runtime_notification_received(self) -> None:
-        """Refresh native chrome after the host dequeues runtime work."""
+        """Refresh native chrome after the host dequeues one turn's work."""
+        thinking_started_at = time.monotonic()
         if self._interrupt_completion_pending:
             # A replacement turn is beginning. Retire the completed turn's
             # optimistic label before rendering any chrome for the new work.
             self._clear_agent_interrupt_status()
-        self._on_dispatcher_dequeued()
+        self._on_dispatcher_dequeued(thinking_started_at)
 
     def runtime_state_changed(self) -> None:
         """Marshal a host-runtime state change onto the UI owner loop."""
@@ -3657,8 +3659,8 @@ class TUIApplication:
         if changed and app is not None and app.is_running:
             app.invalidate()
 
-    def _on_dispatcher_dequeued(self) -> None:
-        """React to a just-dequeued item: redraw queue pane, restart spinner.
+    def _on_dispatcher_dequeued(self, thinking_started_at: float) -> None:
+        """React to a just-dequeued item: reset timing and restart the spinner.
 
         Without this, the queue pane can show stale contents until the
         next event happens to trigger a redraw (spinner tick, user key,
@@ -3672,8 +3674,11 @@ class TUIApplication:
         except RuntimeError:
             on_ui_loop = False
         if ui_loop is not None and not on_ui_loop:
-            ui_loop.call_soon_threadsafe(self._on_dispatcher_dequeued)
+            ui_loop.call_soon_threadsafe(self._on_dispatcher_dequeued, thinking_started_at)
             return
+        # Unlike observations, notifications are not coalesced. Reset here so
+        # back-to-back THINKING turns cannot inherit the previous turn's clock.
+        self._thinking_started_at = thinking_started_at
         if self._app.is_running:
             self._app.invalidate()
         self._ensure_spinner_task()
