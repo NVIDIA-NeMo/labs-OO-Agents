@@ -561,6 +561,26 @@ async def test_thinking_status_shows_live_human_readable_elapsed_time():
         agent.block.set()
 
 
+async def test_thinking_status_keeps_animated_spinner():
+    """The live duration supplements rather than replaces the spinner glyph."""
+    agent = FakeAgent()
+    agent.block.clear()
+
+    async with TUIHarness(agent=agent) as h:
+        h.app.submit_message("hold the turn")
+        await h.wait_for(h.app.is_thinking)
+
+        h.app._spinner_frame = "⠋"
+        first = h.app.status_text()
+        h.app._spinner_frame = "⠙"
+        second = h.app.status_text()
+
+        assert "⠋ • thinking (" in first
+        assert "⠙ • thinking (" in second
+        assert first != second
+        agent.block.set()
+
+
 async def test_thinking_timer_repaints_across_minute_boundary():
     """The timer task invalidates and renders the next whole-second value."""
     agent = FakeAgent()

@@ -5018,7 +5018,14 @@ class TUIApplication:
             started_at = self._thinking_started_at
             elapsed = 0.0 if started_at is None else time.monotonic() - started_at
             duration = _format_elapsed_duration(elapsed)
-            rows.append([("class:status", f"• thinking ({duration} • esc to interrupt)")])
+            rows.append(
+                [
+                    (
+                        "class:status",
+                        f"{self._spinner_frame} • thinking ({duration} • esc to interrupt)",
+                    )
+                ]
+            )
         if self._llm_probe_status_text:
             rows.append([("class:status", f"{self._spinner_frame} {self._llm_probe_status_text}")])
         auxiliary_status = ""
