@@ -117,6 +117,24 @@ def test_parse_gallery_archive_bounds_ignored_expanded_data(monkeypatch) -> None
         parse_gallery_archive(data)
 
 
+def test_parse_gallery_archive_bounds_hidden_pax_metadata(monkeypatch) -> None:
+    output = io.BytesIO()
+    with tarfile.open(
+        fileobj=output,
+        mode="w:gz",
+        format=tarfile.PAX_FORMAT,
+        pax_headers={"comment": "x" * 10_000},
+    ) as archive:
+        payload = b"ignored"
+        info = tarfile.TarInfo("schemes-spec-0.11/notes/readme.txt")
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+    monkeypatch.setattr(theme_gallery, "_MAX_EXPANDED_ARCHIVE_BYTES", 1024)
+
+    with pytest.raises(ValueError, match="expands beyond"):
+        parse_gallery_archive(output.getvalue())
+
+
 def test_oversized_disk_cache_is_replaced_without_parsing(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path))
     monkeypatch.setattr(theme_gallery, "_loaded_catalog", None)
