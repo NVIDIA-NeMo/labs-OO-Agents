@@ -165,16 +165,26 @@ def _base16_palette(data: dict[str, Any]) -> dict[str, str]:
         palette[f"{role}_fg"] = foreground
         palette[f"{role}_bg"] = background
     # The scrollback user bar must always read as highlighted, but stays
-    # neutral: prefer a visible step on the scheme's grayscale ramp (base02,
-    # then base03) with whichever of base00/base07 reads best on it, and fall
-    # back to the already-validated selection pair when no gray step reaches
-    # the required 4.5:1 contrast.
-    user_bg = bases["base02"]
-    if contrast_ratio(user_bg, palette["base"]) < 1.2:
-        user_bg = bases["base03"]
-    user_fg = _contrast_foreground(user_bg, dark, light)
-    if contrast_ratio(user_fg, user_bg) < 4.5:
-        user_fg, user_bg = palette["selection_fg"], palette["selection_bg"]
+    # neutral: use the first grayscale step (base02, then base03) that stays
+    # visibly distinct from the background, pair it with whichever of
+    # base00/base07 reads best, and fall back to the already-validated
+    # selection pair when no step qualifies — either because it blends into
+    # the base or because its best foreground misses the 4.5:1 contrast.
+    user_bg = next(
+        (
+            candidate
+            for candidate in (bases["base02"], bases["base03"])
+            if contrast_ratio(candidate, palette["base"]) >= 1.2
+        ),
+        None,
+    )
+    if user_bg is None:
+        user_fg = palette["selection_fg"]
+        user_bg = palette["selection_bg"]
+    else:
+        user_fg = _contrast_foreground(user_bg, dark, light)
+        if contrast_ratio(user_fg, user_bg) < 4.5:
+            user_fg, user_bg = palette["selection_fg"], palette["selection_bg"]
     palette["user_message_fg"] = user_fg
     palette["user_message_bg"] = user_bg
     # Inline code is bold accent text on the terminal background, not a chip.
