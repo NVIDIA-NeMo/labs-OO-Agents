@@ -16,6 +16,7 @@ from . import theme
 from .explorer_base import ExplorerConfig, ExplorerModel, ExplorerView
 from .theme import SemanticSyntaxTheme, get_theme, set_theme
 from .theme_catalog import ThemeRecord
+from .user_message import render_user_bar
 
 if TYPE_CHECKING:
     from .theme_gallery import GalleryTheme
@@ -151,31 +152,28 @@ class ThemeExplorerView(ExplorerView):
                 ("info", "feedback_info"),
             )
         )
+        # The real input window: '❯ ' prompt in the theme's green, transparent
+        # input text (the terminal program's own background shows through),
+        # selection styling, and the actual completion-menu pair.
         input_window = (
-            _style("› ", p["focus_accent"])
-            # Input text has no background: the real window is transparent and
-            # shows the terminal program's own background color.
-            + _style("run the tests ", p["text_primary"])
+            _style("❯ ", p["green"])
+            + _style("run the tests ", p["text"])
             + _style("selected", p["selection_fg"], p["selection_bg"])
         )
         completions = "  ".join(
             (
-                _style(" completion ", p["text_primary"], p["surface_raised"]),
-                _style(" current ", p["selection_fg"], p["selection_bg"]),
+                _style(" completion ", p["text"], p["surface0"]),
+                _style(" current ", p["mauve"], p["surface2"]),
             )
         )
-        scrollback = "  ".join(
-            (
-                _style(
-                    " You: how does my message look? ",
-                    p["user_message_fg"],
-                    p["user_message_bg"],
-                ),
-                # Agent replies render as plain text over the terminal background.
-                _style("Agent: this is how a reply reads.", p["text_primary"]),
-                _style("status", p["text_subtle"]),
-            )
-        )
+        # The real scrollback: render the exact user-bar artifact the transcript
+        # shows (256-color quantization, '❯ ' prefix, ▔/▁ breathing-room edges),
+        # then a plain agent reply and subtle status text.
+        scrollback = [
+            *render_user_bar("how does my message look?", width, p).rstrip("\n").split("\n"),
+            _style("Agent: this is how a reply reads.", p["text"]),
+            _style("status", p["text_subtle"]),
+        ]
         return [
             f"{row.title} ({row.id})",
             f"Variant: {row.variant}    Source: {row.source}",
@@ -193,7 +191,7 @@ class ThemeExplorerView(ExplorerView):
             completions,
             "",
             "Scrollback",
-            scrollback,
+            *scrollback,
             "",
             _style(" Primary text ", p["text_primary"], p["base"]),
             _style(" Muted text ", p["text_muted"], p["surface_raised"]),
