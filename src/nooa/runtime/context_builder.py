@@ -27,6 +27,8 @@ from nooa.context_blocks import (
     BlockMetadata,
     Context,
     DynamicContext,
+    ExpressionContextBlock,
+    LiteralContextBlock,
     ResolvedBlock,
     Role,
 )
@@ -286,7 +288,7 @@ async def _phase_persistent_blocks(
 
     Protected blocks (framework blocks like system_prompt, self, state) get
     ``user_block=False`` so they survive truncation.  User-set blocks get
-    ``user_block=True``.  All DynamicContext blocks get ``source_dynamic=True``
+    ``user_block=True``.  All expression blocks get ``source_dynamic=True``
     regardless of origin.
 
     Returns:
@@ -296,27 +298,30 @@ async def _phase_persistent_blocks(
     resolved_cache: dict[str, Any] = {}
     protected_keys = context_manager.protected_keys
 
-    for key, value in context_manager._raw_items():
+    for key, block in context_manager._raw_items():
         if context_manager.is_disabled(key):
             continue
 
         is_user = key not in protected_keys
-        is_static = context_manager.is_static(key)
-        if isinstance(value, DynamicContext):
-            # DynamicContext path: resolve via async eval
+        if isinstance(block, ExpressionContextBlock):
+            # Expression path: resolve via async eval. DynamicContext remains
+            # the compatibility input consumed by the shared resolve function.
+            value = DynamicContext(block.expr)
             # resolve_fn returns pre-formatted string (already pprinted if non-string)
             resolved = await resolve_fn(key, value)
             content = resolved if resolved is not None else "None"
             meta = BlockMetadata(
-                expr=value.expr,
+                expr=block.display_expr or block.expr,
                 user_block=is_user,
-                static=is_static,
+                static=block.prefix,
                 source_dynamic=True,
             )
             # Cache the resolved value for __getitem__ access
             resolved_cache[key] = resolved
         else:
-            # Static path: render value through cfg.context_block_format bounds.
+            assert isinstance(block, LiteralContextBlock)
+            value = block.value
+            # Literal path: render value through cfg.context_block_format bounds.
             # Strings pass verbatim; non-strings go through pformat with the
             # supplied structural knobs (max_string / max_length / max_depth).
             if value is None:
@@ -325,7 +330,7 @@ async def _phase_persistent_blocks(
                 kwargs = context_block_format.model_dump() if context_block_format else {}
                 content = _pformat_value(value, unquote_strings=True, **kwargs)
             meta = BlockMetadata(
-                expr=f'self.context["{key}"]', user_block=is_user, static=is_static
+                expr=f'self.context["{key}"]', user_block=is_user, static=block.prefix
             )
 
         blocks = [
