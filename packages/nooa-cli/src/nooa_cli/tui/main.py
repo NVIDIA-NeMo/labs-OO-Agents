@@ -124,10 +124,13 @@ async def main(
 
         from .runtime_registration import TUIRuntimeRegistration
 
-        candidate = TUIRuntimeRegistration(
-            session_id=result.session_id,
-            working_dir=config.agent.working_dir,
-        )
+        try:
+            candidate = TUIRuntimeRegistration(
+                session_id=result.session_id,
+                working_dir=config.agent.working_dir,
+            )
+        except (OSError, ValueError):
+            candidate = None
         restart_event = asyncio.Event()
 
         def _request_restart() -> None:
@@ -135,7 +138,9 @@ async def main(
             restart_requested = True
             restart_event.set()
 
-        if candidate.install_restart_signal(asyncio.get_running_loop(), _request_restart):
+        if candidate is not None and candidate.install_restart_signal(
+            asyncio.get_running_loop(), _request_restart
+        ):
             try:
                 candidate.publish()
             except OSError:
