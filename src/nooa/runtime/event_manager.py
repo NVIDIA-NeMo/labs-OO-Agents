@@ -74,8 +74,8 @@ class EventManager:
     """Unified event pipeline with string-tagged access.
 
     All events flow through add() which:
-    1. Notifies subscribers via on()
-    2. Records event (if record=True)
+    1. Records event (if record=True)
+    2. Notifies subscribers via on()
     3. Assigns a string tag ("1", "2", etc.)
 
     String tags provide stable access:
@@ -101,6 +101,11 @@ class EventManager:
         """
         self._backend: EventBackend = backend if backend is not None else InMemoryBackend()
         self._handlers: dict[str, list[EventHandler]] = defaultdict(list)
+        # Recorded events are notified at most once by this manager. This closes
+        # the acknowledgement-loss window between a durable store and the
+        # caller receiving the assigned tag. Cross-process delivery requires a
+        # durable delivery ledger and is intentionally outside this change.
+        self._notified_event_ids: set[str] = set()
 
         # Runtime event query override (set via set_event_query())
         self._event_query: EventQuery | None = None
@@ -138,32 +143,37 @@ class EventManager:
         if event_format is not None and "truncation_event_format" not in event.metadata:
             event.metadata["truncation_event_format"] = event_format
 
-        # Emit to handlers
-        self._emit(event)
-
         # Runtime events are never recorded, regardless of record parameter
         if event._role == Role.RUNTIME_EVENT:
             record = False
 
-        # Optionally store with assigned tag
-        if record:
-            # Does the event already have a tag? Use it. Otherwise let the
-            # backend allocate one — backend-driven allocation guarantees
-            # that multiple managers writing through the same backend
-            # never hand out the same tag.
-            if isinstance(event, Summary) and event.summary_tag:
-                tag = event.summary_tag
-                self._validate_tag(tag)
-            else:
-                tag = self._backend.allocate_next_tag()
+        if not record:
+            self._emit(event)
+            return str(event.id)
 
-            # Set tag on event and store via backend
-            event.tag = tag
-            self._backend.store(tag, event)
+        # A retry may reach add() after the backend committed the row but
+        # before the original caller received the tag. Reuse the durable tag
+        # instead of appending a second row for the same event identity.
+        existing_tag = self._backend.find_tag(event)
+        if existing_tag is not None:
+            event.tag = existing_tag
+            self._emit_once(event)
+            return existing_tag
 
-            return tag
+        # Backend-driven allocation guarantees that multiple managers writing
+        # through the same backend never hand out the same tag.
+        if isinstance(event, Summary) and event.summary_tag:
+            tag = event.summary_tag
+            self._validate_tag(tag)
+        else:
+            tag = self._backend.allocate_next_tag()
 
-        return str(event.id)
+        # Persist before notifying observers. A failed persistence attempt
+        # therefore cannot expose an event that is absent from the backend.
+        event.tag = tag
+        self._backend.store(tag, event)
+        self._emit_once(event)
+        return tag
 
     def register_event_type(self, cls: type[EventBase]) -> None:
         """Register a custom EventBase subclass for deserialization.
@@ -259,6 +269,18 @@ class EventManager:
                 handler(event)
             except Exception:
                 logger.warning("Wildcard handler %r raised", handler, exc_info=True)
+
+    def _emit_once(self, event: EventBase) -> None:
+        """Notify observers once for a recorded event identity.
+
+        The set is scoped to this manager instance. It prevents duplicate
+        callbacks during retries in one process; durable cross-process
+        delivery acknowledgement is a separate storage concern.
+        """
+        if event.id in self._notified_event_ids:
+            return
+        self._emit(event)
+        self._notified_event_ids.add(event.id)
 
     # === Middleware (intercept) ===
 
@@ -493,8 +515,12 @@ class EventManager:
         Returns:
             True if found and removed, False if not found.
         """
+        event = self._backend.get(key) or self._backend.get_by_id(key)
+
         # Try as tag first
         if self._backend.remove(key):
+            if event is not None:
+                self._notified_event_ids.discard(event.id)
             return True
 
         # Fallback: find tag by UUID, then remove
@@ -502,7 +528,10 @@ class EventManager:
         if event is not None:
             tag = self._backend.find_tag(event)
             if tag:
-                return self._backend.remove(tag)
+                removed = self._backend.remove(tag)
+                if removed:
+                    self._notified_event_ids.discard(event.id)
+                return removed
 
         return False
 
@@ -512,6 +541,7 @@ class EventManager:
         # manager to reset since handlers/middleware/event_query are
         # subscriber state, not event state.
         self._backend.clear()
+        self._notified_event_ids.clear()
 
     # === Archive Operations ===
 

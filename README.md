@@ -200,6 +200,53 @@ uv run nooa start-dev        # trace viewer on http://localhost:5001
 
 If the viewer isn't running, tracing is silently disabled — no configuration needed either way.
 
+### 4. Coordinate resumable operations
+
+For workflows that cross a process boundary, use the durable operation ledger
+to separate execution ownership from the event history:
+
+```python
+from nooa.storage import EffectClass, ExecutionKey, SQLiteStorageManager
+
+storage = SQLiteStorageManager("agent.db")
+store = storage.execution_store
+key = ExecutionKey("workflow-1", "tool-call-1")
+claim = store.claim(key, {"customer_id": "42"}, effect_class=EffectClass.IDEMPOTENT)
+
+if claim.executable:
+    try:
+        result = call_idempotent_service(customer_id="42")
+        store.complete_success(claim, result)
+    except TimeoutError:
+        store.complete_unknown(claim, "service response was ambiguous")
+else:
+    result = claim.record.result
+```
+
+The ledger shares the SQLite storage manager's transaction lock and provides
+stable operation identity, request conflict detection, renewable leases,
+fencing against stale workers, append-only transition history, and terminal
+replay. Expired pure or idempotent work may be reclaimed. Other effect classes
+become `UNKNOWN` for explicit reconciliation instead of being run again.
+
+An `UNKNOWN` operation is not automatically retried. After querying the
+external system or applying a domain-specific reconciliation procedure, resolve
+it explicitly:
+
+```python
+store.reconcile_success(key, {"remote_id": "result-123"})
+# or, only after proving the effect did not happen:
+store.reconcile_failure(key, RuntimeError("remote transaction was rolled back"))
+```
+
+SQLite databases created by earlier NOOA versions are migrated additively. The
+existing event, tag, and snapshot records are preserved while the operation
+ledger tables are added.
+
+This does not claim exactly-once behavior for an arbitrary external service.
+Use the same idempotency key at that service; if the service outcome cannot be
+proved, preserve it as `UNKNOWN`.
+
 ## Learn more
 
 - **[Documentation](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/README.md)** — human-oriented reading paths, core concepts, architecture, and safety guidance.
