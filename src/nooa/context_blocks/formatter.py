@@ -600,6 +600,10 @@ class ResponsesProviderFormatter(ProviderFormatter):
                 if msg.role in (Role.RUNTIME_EVENT, Role.METADATA):
                     continue
                 role = msg.role if msg.role in (Role.USER, Role.ASSISTANT) else Role.USER
+                # Event-sourced replay: only the reasoning items survive on the
+                # LLMOutput event (not the full native ``_batch``), so re-emit
+                # them before a reconstructed assistant message rather than
+                # replaying the original provider ``message`` output item.
                 if role == Role.ASSISTANT and msg.reasoning_items:
                     out.extend(msg.reasoning_items)
                 out.append({"role": role.value, "content": msg.content or ""})

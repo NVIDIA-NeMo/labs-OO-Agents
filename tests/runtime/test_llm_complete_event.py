@@ -142,6 +142,51 @@ class TestLLMCompleteEvent:
         assert ev.generation_id != ""
 
     @pytest.mark.asyncio
+    async def test_cached_tokens_from_responses_input_tokens_details(self) -> None:
+        """Responses API reports cache hits under input_tokens_details.cached_tokens."""
+        recorded: list[LLMComplete] = []
+
+        @strategy(
+            PredictStrategy(),
+            llm=FakeLLMClient(
+                scripted_responses=[
+                    _resp(
+                        content='{"v":1}',
+                        usage={
+                            "input_tokens": 100,
+                            "output_tokens": 20,
+                            "input_tokens_details": {"cached_tokens": 64},
+                        },
+                    )
+                ]
+            ),
+        )
+        async def predict_fn(prompt: str) -> dict:
+            """{prompt}"""
+            ...
+
+        from nooa.standalone import _atif_exporter_var
+
+        class _Capture:
+            def _attach_child(self, em, child_agent_name: str = "") -> None:
+                em.on("LLMComplete", lambda e: recorded.append(e))
+
+            def _detach_child(self, em) -> None:
+                pass
+
+        token = _atif_exporter_var.set(_Capture())
+        try:
+            await predict_fn("hi")
+        finally:
+            _atif_exporter_var.reset(token)
+
+        assert len(recorded) == 1
+        ev = recorded[0]
+        assert ev.prompt_tokens == 100
+        assert ev.completion_tokens == 20
+        assert ev.cached_tokens == 64
+
+    @pytest.mark.asyncio
     async def test_carries_structured_tool_calls(self) -> None:
         """tool_calls list mirrors LLMResponse.tool_calls (canonical ids)."""
         recorded: list[LLMComplete] = []
