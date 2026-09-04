@@ -305,7 +305,12 @@ class SQLiteEventBackend:
     def _try_deserialize(self, data: str, *, context: str) -> EventBase | None:
         try:
             return self._deserialize(data)
-        except (json.JSONDecodeError, UnicodeDecodeError, TypeError, PydanticValidationError) as e:
+        except (
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+            TypeError,
+            PydanticValidationError,
+        ) as e:
             logger.warning("%s: skipping corrupt event data (%s)", context, type(e).__name__)
             return None
 
@@ -389,7 +394,9 @@ class SQLiteEventBackend:
                 if not _is_corruption_error(e):
                     raise
                 logger.warning(
-                    "get(%s): corrupt/unreadable row, skipping (%s)", tag, type(e).__name__
+                    "get(%s): corrupt/unreadable row, skipping (%s)",
+                    tag,
+                    type(e).__name__,
                 )
                 return None
             if row is None:
@@ -446,7 +453,9 @@ class SQLiteEventBackend:
                 if not _is_corruption_error(e):
                     raise
                 logger.warning(
-                    "remove(%s): corrupt/unreadable DB, skipping (%s)", tag, type(e).__name__
+                    "remove(%s): corrupt/unreadable DB, skipping (%s)",
+                    tag,
+                    type(e).__name__,
                 )
                 return False
             if row is None:
@@ -486,7 +495,10 @@ class SQLiteEventBackend:
             except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
                 if not _is_corruption_error(e):
                     raise
-                logger.error("active_tags(): table corrupt, returning empty (%s)", type(e).__name__)
+                logger.error(
+                    "active_tags(): table corrupt, returning empty (%s)",
+                    type(e).__name__,
+                )
                 return []
             return [r[0] for r in rows]
 
@@ -520,7 +532,10 @@ class SQLiteEventBackend:
             except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
                 if not _is_corruption_error(e):
                     raise
-                logger.error("all_events(): query failed due to corruption (%s)", type(e).__name__)
+                logger.error(
+                    "all_events(): query failed due to corruption (%s)",
+                    type(e).__name__,
+                )
                 return
         for (data,) in rows:
             if event := self._try_deserialize(data, context="all_events()"):
@@ -693,10 +708,13 @@ class _SessionClaim:
             raise
 
     def _remove_owned_claim(self) -> None:
-        """Remove only this owner's unguessable marker, then its empty directory."""
+        """Best-effort removal of only this owner's unguessable marker."""
         try:
             self._owner_path.unlink()
         except FileNotFoundError:
+            return
+        except OSError:
+            logger.warning("Could not remove session claim owner %s", self._owner_path)
             return
         try:
             self._claim_path.rmdir()
@@ -811,10 +829,12 @@ def delete_sqlite_database(db_path: str | Path) -> bool:
                 pass
         return existed
     finally:
-        if claim is not None:
-            claim.close()
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
+        try:
+            if claim is not None:
+                claim.close()
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
 
 
 class SQLiteStorageManager:
@@ -980,13 +1000,17 @@ class SQLiteStorageManager:
 
     def _release_session_ownership(self) -> None:
         """Release cross-namespace and local ownership guards once."""
-        if self._session_claim is not None:
-            self._session_claim.close()
-            self._session_claim = None
-        if self._lock_fd is not None:
-            fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
-            os.close(self._lock_fd)
-            self._lock_fd = None
+        claim, self._session_claim = self._session_claim, None
+        lock_fd, self._lock_fd = self._lock_fd, None
+        try:
+            if claim is not None:
+                claim.close()
+        finally:
+            if lock_fd is not None:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(lock_fd)
 
     def close(self) -> None:
         if self._closed:
