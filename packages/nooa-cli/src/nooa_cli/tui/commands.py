@@ -2745,8 +2745,10 @@ class CommandRegistry:
 
             return await prompt_sensitive(
                 "MCP OAuth authorization",
-                "Open the authorization URL shown in scrollback, authorize the server, "
-                "then paste the authorization code or callback URL.",
+                "Open the authorization URL shown in scrollback and authorize the server. "
+                "If the browser then says it cannot reach localhost (common when NOOA runs "
+                "over SSH or in tmux), copy the complete localhost callback URL from the "
+                "browser address bar and paste it here. You may also paste a raw code.",
                 link_url=auth_url,
             )
 
