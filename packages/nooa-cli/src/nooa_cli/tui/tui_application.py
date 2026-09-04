@@ -1298,7 +1298,6 @@ class TUIApplication:
         self._pulse_frame: str = "·"
         self._pulse_frames = "·•"
         self._spinner_task: asyncio.Task | None = None
-        self._spinner_wakeup: asyncio.Event | None = None
         self._thinking_started_at: float | None = None
         self._command_status_text: str = ""
         self._command_queue_texts: list[str] = []
@@ -3076,21 +3075,14 @@ class TUIApplication:
         return task
 
     def _ensure_spinner_task(self) -> None:
-        """Refresh live work status at the cheapest cadence it needs.
-
-        The elapsed thinking timer changes once per second. Animated interrupt
-        and probe statuses retain their smoother 80ms cadence; a wakeup makes
-        transitions into those states immediate even during a timer-only wait.
-        """
+        """Start a background task cycling the spinner frame while live work
+        needs animation. Invalidates the app every 80ms so the status line
+        remains responsive and elapsed thinking time redraws continuously."""
         if self._spinner_task is not None and not self._spinner_task.done():
-            if self._spinner_wakeup is not None:
-                self._spinner_wakeup.set()
             return
 
         async def _animate() -> None:
             i = 0
-            wakeup = asyncio.Event()
-            self._spinner_wakeup = wakeup
             try:
                 while (
                     self.is_thinking()
@@ -3099,33 +3091,21 @@ class TUIApplication:
                 ):
                     self._spinner_frame = self._spinner_frames[i % len(self._spinner_frames)]
                     # Match the command runner's calm half-second dot pulse
-                    # while retaining the interrupt/probe spinner's smoother cadence.
+                    # while retaining the thinking spinner's smoother cadence.
                     pulse_index = int((i * 0.08) / 0.5)
                     self._pulse_frame = self._pulse_frames[pulse_index % len(self._pulse_frames)]
                     if self._app.is_running:
                         self._app.invalidate()
                     i += 1
-
-                    if self._interrupting_agent_turn or self._llm_probe_status_text:
-                        delay = 0.08
-                    else:
-                        started_at = self._thinking_started_at
-                        elapsed = 0.0 if started_at is None else time.monotonic() - started_at
-                        delay = max(0.01, 1.0 - (elapsed % 1.0))
-                    wakeup.clear()
-                    try:
-                        await asyncio.wait_for(wakeup.wait(), timeout=delay)
-                    except TimeoutError:
-                        pass
+                    await asyncio.sleep(0.08)
             finally:
-                self._spinner_wakeup = None
                 # Paint once after the agent stops so the live status clears.
                 if self._app.is_running:
                     self._app.invalidate()
 
         # Agent snapshots may arrive synchronously during construction,
-        # before run_async() establishes the application owner loop.  In that
-        # case the initial render will start the refresher after startup.
+        # before run_async() establishes the application owner loop. In that
+        # case the initial render will start the spinner after startup.
         loop = self._loop
         if loop is None or not loop.is_running():
             return
@@ -4248,7 +4228,6 @@ class TUIApplication:
                     pass
             self._consumer_task = None
             self._spinner_task = None
-            self._spinner_wakeup = None
             self._queued_resize_replay_generation = None
             self._replay_columns_override = None
             self._loop = None
