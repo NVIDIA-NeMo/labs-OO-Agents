@@ -622,6 +622,7 @@ class ResumePicker(ExplorerBrowser):
         selection_copy_callback: Callable[[str], None] | None = None,
         selection_status: Callable[[], str] | None = None,
     ):
+        """Create a session picker with bounded, asynchronously prepared previews."""
         self.app = app
         self.model = ResumePickerModel(rows)
         # Real option rows drive the shared option controls and the inherited
@@ -936,6 +937,7 @@ class ResumePicker(ExplorerBrowser):
             self._preview_models.popitem(last=False)
 
     def _prepare_current_preview(self) -> None:
+        """Schedule one dwell-gated preview build for the currently selected row."""
         import asyncio
 
         row = self.model.current
