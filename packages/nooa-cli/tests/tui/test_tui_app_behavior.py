@@ -636,6 +636,90 @@ async def test_thinking_duration_resets_for_next_turn():
         agent.block.set()
 
 
+async def test_fullscreen_oauth_modal_close_restores_one_stable_composer_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closing OAuth must not paint competing cursorless and composer frames."""
+    from nooa_cli.tui.config import DisplayMode
+
+    url = "https://login.example.test/authorize?state=" + "a" * 500
+    async with TUIHarness(display_mode=DisplayMode.FULLSCREEN) as h:
+        app = h.app
+        assert app is not None
+        prompt = asyncio.create_task(
+            app.prompt_sensitive("OAuth", "Authorize in your browser.", link_url=url)
+        )
+        await h.wait_for(lambda: app.active_subview is not None)
+
+        invalidations = 0
+        original_invalidate = app._app.invalidate
+
+        def count_invalidation() -> None:
+            nonlocal invalidations
+            invalidations += 1
+            original_invalidate()
+
+        monkeypatch.setattr(app._app, "invalidate", count_invalidation)
+        await h.press("escape")
+        assert await asyncio.wait_for(prompt, timeout=1) == ""
+        await h.wait_for(lambda: app.active_subview is None)
+
+        assert invalidations == 1
+        assert app._app.layout.current_window is app._input_window
+        assert app._app.layout.current_buffer is app.input_buffer
+        await h.type_keys("abc")
+        await h.wait_input_equals("abc")
+        assert app._app.layout.current_window is app._input_window
+
+
+async def test_fullscreen_oauth_modal_close_with_pending_resize_redraws_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resize hidden by OAuth settles before one restored composer frame."""
+    from nooa_cli.tui.config import DisplayMode
+
+    output = MutableRecordingOutput(columns=80, rows=40)
+    async with TUIHarness(display_mode=DisplayMode.FULLSCREEN, output=output) as h:
+        app = h.app
+        assert app is not None
+        # Ensure the rebuild path has one width-sensitive transcript block.
+        app.emit_block("OAuth URL behind modal\n", replay=lambda: "OAuth URL behind modal\n")
+        assert app._block_queue is not None
+        await app._block_queue.join()
+
+        prompt = asyncio.create_task(
+            app.prompt_sensitive(
+                "OAuth",
+                "Authorize in your browser.",
+                link_url="https://login.example.test/authorize?state=abc",
+            )
+        )
+        await h.wait_for(lambda: app.active_subview is not None)
+        await h.resize_from_terminal(60, 30)
+        assert app._resize_reflow.has_pending_replay is True
+
+        invalidations = 0
+        original_invalidate = app._app.invalidate
+
+        def count_invalidation() -> None:
+            nonlocal invalidations
+            invalidations += 1
+            original_invalidate()
+
+        monkeypatch.setattr(app._app, "invalidate", count_invalidation)
+        before_rebuilds = app._fullscreen_invalidate_count
+        await h.press("escape")
+        assert await asyncio.wait_for(prompt, timeout=1) == ""
+        await h.wait_for(lambda: app.active_subview is None)
+
+        assert app._fullscreen_invalidate_count == before_rebuilds + 1
+        assert invalidations == 1
+        assert app._resize_reflow.has_pending_replay is False
+        assert app._app.layout.current_window is app._input_window
+        await h.type_keys("z")
+        await h.wait_input_equals("z")
+
+
 async def test_status_text_separates_thinking_and_command_status():
     """Thinking and command statuses render as separated status rows."""
     agent = FakeAgent()
