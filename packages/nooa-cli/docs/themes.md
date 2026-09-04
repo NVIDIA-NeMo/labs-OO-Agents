@@ -2,7 +2,16 @@
 
 NOOA ships four themes: `mocha`, `latte`, `vsdark`, and `vslight`.
 
-Use `/theme` with no arguments to open the full-screen theme browser. Moving through the list previews the complete theme immediately, including syntax-highlighted code and a unified diff. **Enter** applies and saves it, while **Esc** or **q** closes the browser and restores the theme that was active when it opened. `/theme <id>` remains the scriptable shortcut.
+Use `/theme` or `/theme picker` to open the installed-theme browser. Moving through the list previews the complete theme immediately, including syntax-highlighted code and a unified diff. **Enter** applies and saves it, while **Esc** or **q** closes the browser and restores the theme that was active when it opened. `/theme <id>` remains the scriptable shortcut.
+
+The remote gallery is opt-in and performs no network access during startup, completion, or normal picker use:
+
+```text
+/theme update    # download and validate the canonical Tinted scheme catalog
+/theme gallery   # use the cached catalog, or download it once if no cache exists
+```
+
+In the gallery, **Enter** atomically installs the selected source YAML in the user theme directory, then applies and saves it. The catalog comes from the pinned `spec-0.11` branch of [`tinted-theming/schemes`](https://github.com/tinted-theming/schemes), which is also the source behind the [Tinted Gallery](https://tinted-theming.github.io/tinted-gallery/). The downloaded archive is cached under `~/.config/nooa/theme-gallery/`.
 
 ## Semantic color roles
 

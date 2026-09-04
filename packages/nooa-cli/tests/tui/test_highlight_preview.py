@@ -13,7 +13,7 @@ def test_preview_offers_three_accessible_candidates_per_theme() -> None:
         assert candidates[0].name == "Balanced"
         for candidate in candidates:
             assert contrast_ratio(candidate.foreground, candidate.background) >= 4.5
-            assert contrast_ratio(candidate.background, theme.THEMES[theme_name]["base"]) >= 3
+            assert candidate.background == theme.THEMES[theme_name]["base"]
 
 
 def test_balanced_candidate_matches_live_inline_code_palette() -> None:

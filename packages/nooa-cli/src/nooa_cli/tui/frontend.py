@@ -179,7 +179,11 @@ class Frontend(Protocol):
         ...
 
     async def open_theme_explorer(self) -> None:
-        """Open the full-screen theme browser."""
+        """Open the full-screen installed-theme browser."""
+        ...
+
+    async def open_theme_gallery(self, catalog: object) -> None:
+        """Open the full-screen remote-theme gallery."""
         ...
 
     async def prompt_sensitive(
@@ -296,6 +300,11 @@ class TerminalFrontend:
         if self._app is None:
             raise RuntimeError("TUI application is not ready.")
         await self._app.open_theme_explorer(refresh=self.refresh_theme)
+
+    async def open_theme_gallery(self, catalog: object) -> None:
+        if self._app is None:
+            raise RuntimeError("TUI application is not ready.")
+        await self._app.open_theme_gallery(catalog, refresh=self.refresh_theme)
 
     async def open_activity_overlay(self, outputs: list[Output]) -> None:
         if self._app is None:

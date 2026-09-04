@@ -2066,6 +2066,51 @@ class TUIApplication:
             ThemeExplorerView(refresh=refresh or self.refresh_style, persist=persist)
         )
 
+    async def open_theme_gallery(
+        self, catalog: object, *, refresh: Callable[[], None] | None = None
+    ) -> None:
+        """Open the cached remote-theme gallery; Enter installs and applies."""
+        from . import theme
+        from .settings import write_settings_updates
+        from .theme_explorer import ThemeGalleryView
+        from .theme_gallery import GalleryCatalog, install_gallery_theme, rollback_gallery_install
+
+        if not isinstance(catalog, GalleryCatalog):
+            raise TypeError("Invalid theme gallery catalog")
+        tui_config = getattr(self._config, "tui", self._config)
+        refresh_ui = refresh or self.refresh_style
+
+        def install(entry) -> None:
+            existing = theme.THEME_RECORDS.get(entry.id)
+            if existing is not None and existing.source.startswith("project:"):
+                raise ValueError(
+                    f"Theme {entry.id!r} is shadowed by a project theme; remove it first"
+                )
+            installation = install_gallery_theme(entry)
+            try:
+                theme.reload_themes()
+                installed = theme.get_theme_record(entry.id)
+                if not installed.source.startswith("user:"):
+                    raise ValueError(
+                        f"Theme {entry.id!r} was not installed from {installation.path}"
+                    )
+                write_settings_updates({("tui", "theme"): entry.id})
+            except Exception:
+                rollback_gallery_install(installation)
+                theme.reload_themes()
+                raise
+            theme.set_theme(entry.id)
+            if tui_config is not None:
+                tui_config.theme = entry.id
+            try:
+                refresh_ui()
+            except Exception:
+                # Installation and persistence have committed; a repaint failure
+                # must not misreport the transaction as rolled back.
+                pass
+
+        await self.open_subview(ThemeGalleryView(catalog.themes, install=install))
+
     async def open_memory_explorer(self) -> None:
         """Open the host-provided memory explorer view."""
         if self._host_services.open_memory_view is None:
