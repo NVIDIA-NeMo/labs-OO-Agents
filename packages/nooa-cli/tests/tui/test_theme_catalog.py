@@ -210,6 +210,19 @@ def test_base16_user_bar_is_neutral_and_readable() -> None:
     assert validate_palette(palette) is None
 
 
+def test_base16_user_bar_rejects_indistinct_base03() -> None:
+    # Both grayscale steps blend into the background: neither is a visible
+    # highlight, so the user bar falls back to the validated selection pair
+    # instead of rendering an invisible bar.
+    data = _base16(**{"base02": "181818", "base03": "191919"})
+    record = parse_theme(data, fallback_id="base16", source="test")
+    palette = record.palette
+
+    assert palette["user_message_fg"] == palette["selection_fg"]
+    assert palette["user_message_bg"] == palette["selection_bg"]
+    assert contrast_ratio(palette["user_message_fg"], palette["user_message_bg"]) >= 4.5
+
+
 def test_base16_user_bar_falls_back_when_gray_is_unreadable() -> None:
     # #767676 is the WCAG boundary gray: neither base00 (dark) nor base07
     # (light) reaches 4.5:1 on it, so the already-validated selection pair is
