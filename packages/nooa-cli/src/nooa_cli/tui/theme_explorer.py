@@ -153,7 +153,9 @@ class ThemeExplorerView(ExplorerView):
         )
         input_window = (
             _style("› ", p["focus_accent"])
-            + _style("run the tests ", p["text_primary"], p["base"])
+            # Input text has no background: the real window is transparent and
+            # shows the terminal program's own background color.
+            + _style("run the tests ", p["text_primary"])
             + _style("selected", p["selection_fg"], p["selection_bg"])
         )
         completions = "  ".join(
@@ -169,7 +171,8 @@ class ThemeExplorerView(ExplorerView):
                     p["user_message_fg"],
                     p["user_message_bg"],
                 ),
-                _style("Agent: this is how a reply reads.", p["text_primary"], p["base"]),
+                # Agent replies render as plain text over the terminal background.
+                _style("Agent: this is how a reply reads.", p["text_primary"]),
                 _style("status", p["text_subtle"]),
             )
         )
