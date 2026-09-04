@@ -754,6 +754,38 @@ class TestSQLiteSessionLocking:
         ):
             with pytest.raises(RuntimeError, match="connect failed"):
                 SQLiteStorageManager(db_path=db_path)
+        assert not db_path.with_suffix(".active").exists()
+
+    def test_claim_owner_creation_failure_removes_active_directory(self, tmp_path):
+        """Failure before the owner marker exists must remove the empty claim."""
+        import nooa.storage.sqlite as sqlite_storage
+
+        db_path = tmp_path / "owner-failure.db"
+        original_open = sqlite_storage.os.open
+
+        def fail_owner(path, flags, mode=0o777):
+            if str(path).endswith(".json"):
+                raise PermissionError("owner denied")
+            return original_open(path, flags, mode)
+
+        with patch.object(sqlite_storage.os, "open", side_effect=fail_owner):
+            with pytest.raises(PermissionError, match="owner denied"):
+                sqlite_storage.SQLiteStorageManager(db_path=db_path)
+
+        assert not db_path.with_suffix(".active").exists()
+
+    def test_initialization_interrupt_releases_active_claim(self, tmp_path):
+        """Interrupted initialization must not strand a persistent active claim."""
+        from nooa.storage.sqlite import SQLiteStorageManager
+
+        db_path = tmp_path / "interrupted.db"
+        with patch(
+            "nooa.storage.sqlite.sqlite3.connect",
+            side_effect=KeyboardInterrupt,
+        ):
+            with pytest.raises(KeyboardInterrupt):
+                SQLiteStorageManager(db_path=db_path)
+        assert not db_path.with_suffix(".active").exists()
 
 
 class TestSQLiteModuleLevelAssertions:

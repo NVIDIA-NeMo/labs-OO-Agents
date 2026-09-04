@@ -407,10 +407,9 @@ async def bootstrap(
             )
         )
     except SessionAlreadyActiveError as exc:
-        detail = f" (pid {exc.owner_pid})" if exc.owner_pid is not None else ""
         messages.append(
             TextOutput(
-                f"Session {str(resume_id)[:8]!r} is active in another process{detail}; starting new.",
+                f"Could not resume session {str(resume_id)[:8]!r}: {exc} Starting new.",
                 "warning",
             )
         )

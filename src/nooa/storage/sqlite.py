@@ -595,8 +595,8 @@ class SessionAlreadyActiveError(Exception):
     """Raised when a session database is already open in another process.
 
     Attributes:
-        session_id: The session identifier (db filename stem), if known.
-        owner_pid: PID read from the lock file, or None if unavailable/unparseable.
+        session_id: The session identifier (database filename stem), if known.
+        owner_pid: Diagnostic PID recorded by the active owner, if available.
     """
 
     def __init__(
@@ -630,6 +630,90 @@ def _read_lock_pid(lock_path: str) -> int | None:
         return None
 
 
+def _claim_path(db_path: str | Path) -> Path:
+    return Path(db_path).with_suffix(".active")
+
+
+def _read_claim_owner(claim_path: Path) -> int | None:
+    """Return the diagnostic PID from an active-session claim, if readable."""
+    try:
+        owner_path = next(claim_path.glob("owner-*.json"))
+        payload = json.loads(owner_path.read_text(encoding="utf-8"))
+        pid = payload.get("pid")
+        return pid if isinstance(pid, int) else None
+    except (OSError, StopIteration, ValueError, TypeError):
+        return None
+
+
+class _SessionClaim:
+    """Atomic ownership marker visible across sandbox and host namespaces.
+
+    Unlike ``flock``, creating a directory on the shared filesystem remains
+    visible when the sandbox and host use independent lock namespaces. Claims
+    intentionally do not expire: reclaiming on a timeout could admit a second
+    writer while a paused owner is still alive. After an unclean exit, users
+    must remove the ``.active`` directory explicitly.
+    """
+
+    def __init__(self, db_path: str | Path) -> None:
+        self._claim_path = _claim_path(db_path)
+        self._token = uuid.uuid4().hex
+        self._owner_path = self._claim_path / f"owner-{self._token}.json"
+        self._pid = os.getpid()
+        session_id = Path(db_path).stem
+        try:
+            self._claim_path.mkdir(mode=0o755)
+        except FileExistsError:
+            owner_pid = _read_claim_owner(self._claim_path)
+            detail = f" (pid {owner_pid})" if owner_pid is not None else ""
+            raise SessionAlreadyActiveError(
+                f"Session {session_id!r} is already active in another process{detail}. "
+                f"If that process is gone, remove {str(self._claim_path)!r} to reclaim it.",
+                session_id=session_id,
+                owner_pid=owner_pid,
+            ) from None
+
+        try:
+            payload = json.dumps({"token": self._token, "pid": self._pid}).encode()
+            fd = os.open(self._owner_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            try:
+                os.write(fd, payload)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except BaseException:
+            try:
+                self._owner_path.unlink()
+            except FileNotFoundError:
+                pass
+            try:
+                self._claim_path.rmdir()
+            except OSError:
+                pass
+            raise
+
+    def _remove_owned_claim(self) -> None:
+        """Remove only this owner's unguessable marker, then its empty directory."""
+        try:
+            self._owner_path.unlink()
+        except FileNotFoundError:
+            return
+        try:
+            self._claim_path.rmdir()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # Another owner marker means recovery replaced the claim. Never
+            # remove an entry whose random token does not belong to us.
+            logger.warning("Could not remove session claim %s", self._claim_path)
+
+    def close(self) -> None:
+        # A forked child must not remove the parent's claim. The tokenized owner
+        # filename also makes cleanup harmless if recovery replaced the directory.
+        if os.getpid() == self._pid:
+            self._remove_owned_claim()
+
+
 def _acquire_session_lock(lock_path: str) -> int:
     """Acquire an exclusive flock on *lock_path*, returning the held fd.
 
@@ -651,11 +735,7 @@ def _acquire_session_lock(lock_path: str) -> int:
         owner_pid = _read_lock_pid(lock_path)
         session_id = Path(lock_path).stem
         if owner_pid is not None:
-            msg = (
-                f"Session {session_id!r} is already active in another process "
-                f"(pid {owner_pid}). If that process is gone, remove "
-                f"{lock_path!r} to reclaim the session."
-            )
+            msg = f"Session {session_id!r} is already active in another process (pid {owner_pid})."
         else:
             msg = (
                 f"Session {session_id!r} is already active in another process "
@@ -671,10 +751,19 @@ def _acquire_session_lock(lock_path: str) -> int:
 
 
 def is_sqlite_database_active(db_path: str | Path) -> bool:
-    """Return whether an open manager currently holds the database lock."""
+    """Return whether a local lock or shared-filesystem claim is active."""
     path = Path(db_path)
     if str(db_path) == ":memory:":
         return False
+    claim_path = _claim_path(path)
+    try:
+        claim_path.stat()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return True
+    else:
+        return True
     try:
         fd = os.open(path.with_suffix(".lock"), os.O_RDWR)
     except FileNotFoundError:
@@ -693,12 +782,12 @@ def is_sqlite_database_active(db_path: str | Path) -> bool:
 def delete_sqlite_database(db_path: str | Path) -> bool:
     """Delete an inactive SQLite database and its WAL/SHM sidecars.
 
-    The same file lock used by :class:`SQLiteStorageManager` is held for the
-    whole deletion. Attempting to delete a live session therefore raises
-    :class:`SessionAlreadyActiveError` instead of unlinking an open database.
-    The lock file itself is intentionally retained: unlinking a flock target
-    creates a race where another process can lock a different inode at the
-    same path.
+    The same file lock and shared-filesystem claim used by
+    :class:`SQLiteStorageManager` are held for the whole deletion. Attempting
+    to delete a live session therefore raises :class:`SessionAlreadyActiveError`
+    instead of unlinking an open database. The lock file itself is intentionally
+    retained: unlinking a flock target creates a race where another process can
+    lock a different inode at the same path.
 
     Returns:
         True when the main database existed, otherwise false.
@@ -711,7 +800,9 @@ def delete_sqlite_database(db_path: str | Path) -> bool:
 
     lock_path = str(path.with_suffix(".lock"))
     lock_fd = _acquire_session_lock(lock_path)
+    claim: _SessionClaim | None = None
     try:
+        claim = _SessionClaim(path)
         existed = path.exists()
         for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
             try:
@@ -720,6 +811,8 @@ def delete_sqlite_database(db_path: str | Path) -> bool:
                 pass
         return existed
     finally:
+        if claim is not None:
+            claim.close()
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
 
@@ -752,11 +845,19 @@ class SQLiteStorageManager:
         self._db_path = str(db_path)
         self._check_same_thread = check_same_thread
         self._lock_fd: int | None = None
+        self._session_claim: _SessionClaim | None = None
         self._closed = False
 
         if self._db_path != ":memory:":
             lock_path = str(Path(self._db_path).with_suffix(".lock"))
             self._lock_fd = _acquire_session_lock(lock_path)
+            try:
+                self._session_claim = _SessionClaim(self._db_path)
+            except BaseException:
+                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+                os.close(self._lock_fd)
+                self._lock_fd = None
+                raise
 
         self._db_lock = threading.RLock()
 
@@ -765,7 +866,7 @@ class SQLiteStorageManager:
             _ensure_schema(self._conn)
             self._backend = SQLiteEventBackend(self._conn, lock=self._db_lock)
             self._backend._on_io_error = self._reconnect
-        except Exception:
+        except BaseException:
             self.close()
             raise
 
@@ -810,10 +911,11 @@ class SQLiteStorageManager:
             pass
         try:
             new_conn = self._open_connection()
-        except Exception:
-            # Reconnect failed — mark as closed so callers get a clear error
-            # rather than "cannot operate on a closed database".
+        except BaseException:
+            # Reconnect failed after closing the old connection. Release session
+            # ownership immediately; close() remains idempotent afterward.
             self._closed = True
+            self._release_session_ownership()
             raise
         self._conn = new_conn
         self._backend._conn = self._conn
@@ -876,6 +978,16 @@ class SQLiteStorageManager:
         self.restore_snapshot(snapshot_id, agent)
         return True
 
+    def _release_session_ownership(self) -> None:
+        """Release cross-namespace and local ownership guards once."""
+        if self._session_claim is not None:
+            self._session_claim.close()
+            self._session_claim = None
+        if self._lock_fd is not None:
+            fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+            os.close(self._lock_fd)
+            self._lock_fd = None
+
     def close(self) -> None:
         if self._closed:
             return
@@ -892,10 +1004,7 @@ class SQLiteStorageManager:
                     conn.commit()
                     conn.close()
         finally:
-            if self._lock_fd is not None:
-                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
-                os.close(self._lock_fd)
-                self._lock_fd = None
+            self._release_session_ownership()
 
     def __enter__(self) -> Self:
         return self
