@@ -2086,15 +2086,17 @@ class TUIApplication:
                 raise ValueError(
                     f"Theme {entry.id!r} is shadowed by a project theme; remove it first"
                 )
-            install = install_gallery_theme(entry)
+            installation = install_gallery_theme(entry)
             try:
                 theme.reload_themes()
                 installed = theme.get_theme_record(entry.id)
                 if not installed.source.startswith("user:"):
-                    raise ValueError(f"Theme {entry.id!r} was not installed from {install.path}")
+                    raise ValueError(
+                        f"Theme {entry.id!r} was not installed from {installation.path}"
+                    )
                 write_settings_updates({("tui", "theme"): entry.id})
             except Exception:
-                rollback_gallery_install(install)
+                rollback_gallery_install(installation)
                 theme.reload_themes()
                 raise
             theme.set_theme(entry.id)
