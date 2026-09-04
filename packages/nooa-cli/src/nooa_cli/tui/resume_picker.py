@@ -622,6 +622,7 @@ class ResumePicker(ExplorerBrowser):
         selection_copy_callback: Callable[[str], None] | None = None,
         selection_status: Callable[[], str] | None = None,
     ):
+        """Create a session picker with bounded, asynchronously prepared previews."""
         self.app = app
         self.model = ResumePickerModel(rows)
         # Real option rows drive the shared option controls and the inherited
@@ -632,6 +633,17 @@ class ResumePicker(ExplorerBrowser):
         # reuses their transcript instead of growing without limit.
         self._preview_models: OrderedDict[tuple[str, int], Any] = OrderedDict()
         self._preview_tasks: dict[tuple[str, int], Any] = {}
+        # Cancellation of an asyncio.to_thread awaiter does not stop its worker.
+        # Serialize actual render calls so superseded chunks cannot accumulate
+        # and contend for the GIL while the user keeps navigating.
+        import asyncio
+
+        self._preview_worker_lock = asyncio.Lock()
+        # Keep superseded tasks until their non-cancellable executor chunk has
+        # actually drained; the key map alone intentionally forgets them so a
+        # replacement selection can be scheduled immediately.
+        self._all_preview_tasks: set[Any] = set()
+        self._preview_worker_tasks: set[Any] = set()
         # Event for the in-flight preview build thread; superseding or
         # closing sets it so a stale build stops between chunks.
         self._preview_build_cancel: threading.Event | None = None
@@ -822,6 +834,38 @@ class ResumePicker(ExplorerBrowser):
             width,
         )
 
+    async def _render_preview_chunk_bounded(
+        self, turns: list[Any], start: int, row_id: str, width: int
+    ) -> str:
+        """Run at most one preview renderer and drain it before cancellation returns.
+
+        ``asyncio.to_thread`` cancellation normally abandons the executor future.
+        Holding the lock until that future actually finishes prevents later
+        selections from starting concurrent stale renderers.
+        """
+        import asyncio
+
+        async with self._preview_worker_lock:
+            worker = asyncio.create_task(
+                asyncio.to_thread(self._render_preview_chunk, turns, start, row_id, width)
+            )
+            self._preview_worker_tasks.add(worker)
+            worker.add_done_callback(self._preview_worker_tasks.discard)
+            cancelled = False
+            while True:
+                try:
+                    result = await asyncio.shield(worker)
+                    break
+                except asyncio.CancelledError:
+                    # Repeated navigation/close cancellation must not release the
+                    # lock while this non-cancellable callable still owns a worker.
+                    cancelled = True
+                    if worker.done():
+                        break
+            if cancelled:
+                raise asyncio.CancelledError
+            return result
+
     async def _build_preview_progressively(
         self,
         row: ResumePickerRow,
@@ -839,8 +883,6 @@ class ResumePicker(ExplorerBrowser):
         receives the partial transcript after each chunk; returns None when
         superseded.
         """
-        import asyncio
-
         from .fullscreen_transcript import FullscreenTranscriptModel
         from .output import HistoryTurn
 
@@ -851,9 +893,7 @@ class ResumePicker(ExplorerBrowser):
         for chunk_index, start in enumerate(reversed(starts)):
             if cancel is not None and cancel.is_set():
                 return None
-            ansi = await asyncio.to_thread(
-                self._render_preview_chunk, turns, start, row.id, width
-            )
+            ansi = await self._render_preview_chunk_bounded(turns, start, row.id, width)
             if cancel is not None and cancel.is_set():
                 return None
             # Disclose bottom-up: publish the newest turns first, then prepend
@@ -897,6 +937,7 @@ class ResumePicker(ExplorerBrowser):
             self._preview_models.popitem(last=False)
 
     def _prepare_current_preview(self) -> None:
+        """Schedule one dwell-gated preview build for the currently selected row."""
         import asyncio
 
         row = self.model.current
@@ -978,7 +1019,10 @@ class ResumePicker(ExplorerBrowser):
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        self._preview_tasks[key] = loop.create_task(prepare())
+        task = loop.create_task(prepare())
+        self._preview_tasks[key] = task
+        self._all_preview_tasks.add(task)
+        task.add_done_callback(self._all_preview_tasks.discard)
 
     def _preview_transcript(self, width: int, height: int):
         """Provide the asynchronously prepared replay to ExplorerBrowser."""
@@ -1059,7 +1103,8 @@ class ResumePicker(ExplorerBrowser):
     def close(self) -> None:
         """Cancel preview preparation when the picker is dismissed."""
         self.preview_control.cancel_drag()
-        for task in self._preview_tasks.values():
+        tasks = tuple(self._all_preview_tasks)
+        for task in tasks:
             task.cancel()
         self._preview_tasks.clear()
         # Escape/Enter can arrive while a build thread is mid-history; the
@@ -1067,6 +1112,14 @@ class ResumePicker(ExplorerBrowser):
         # (and the resume that follows) is not starved by GIL-bound work.
         if self._preview_build_cancel is not None:
             self._preview_build_cancel.set()
+
+    async def wait_closed(self) -> None:
+        """Wait until cancelled preview tasks have drained their active chunk."""
+        import asyncio
+
+        while self._all_preview_tasks or self._preview_worker_tasks:
+            tasks = tuple(self._all_preview_tasks | self._preview_worker_tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def selected_id(self) -> str | None:
         return self.model.current.id if self.model.can_select and self.model.current else None
