@@ -425,7 +425,8 @@ class Session:
 
         # Pending asyncio tasks
         try:
-            pending = [t for t in asyncio.all_tasks() if not t.done()]
+            current = asyncio.current_task()
+            pending = [t for t in asyncio.all_tasks() if not t.done() and t is not current]
             if pending:
                 lines.append(f"Pending asyncio tasks ({len(pending)}):")
                 for t in pending:
