@@ -12,6 +12,7 @@ import pytest
 from nooa.unifiedllm import (
     MODELS,
     CompletionClient,
+    ResponsesClient,
     RetryConfig,
     ensure_loaded,
     get_llm_client,
@@ -261,6 +262,32 @@ class TestGetLlmClient:
         assert llm.config["reasoning_effort"] == "high"
         assert llm.config["allowed_openai_params"] == ["reasoning_effort"]
         assert llm.config["extra_body"] == {"trace": True}
+
+    def test_registry_preserves_responses_reasoning_state_config(self, tmp_path):
+        """Stateless Responses aliases retain the state-replay parameters."""
+        path = _write_project_config(
+            _project_dir(tmp_path),
+            """\
+            models:
+              reasoning-alias:
+                client_type: responses
+                model_name: openai/gpt-5.6-sol
+                store: false
+                include:
+                  - reasoning.encrypted_content
+                reasoning:
+                  effort: medium
+                  context: all_turns
+            """,
+        )
+        reload_registry(path)
+
+        llm = get_llm_client("reasoning-alias")
+
+        assert isinstance(llm, ResponsesClient)
+        assert llm.config["store"] is False
+        assert llm.config["include"] == ["reasoning.encrypted_content"]
+        assert llm.config["reasoning"] == {"effort": "medium", "context": "all_turns"}
 
     def test_drop_params_default_true(self):
         llm = get_llm_client("gpt-4o-mini")

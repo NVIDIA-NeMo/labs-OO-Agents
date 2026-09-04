@@ -1607,6 +1607,59 @@ def _completion_assistant_message(
     return assistant_message
 
 
+def _responses_output_items(raw_response: Any) -> list[dict[str, Any]]:
+    """Return a detached, replayable copy of every Responses output item.
+
+    OpenAI reasoning continuity depends on replaying the response output items,
+    not just the visible assistant text or function call. Keep the complete
+    batch for direct ``UnifiedLLM`` callers and expose the reasoning subset to
+    the event-sourced agent renderer below.
+    """
+    items: list[dict[str, Any]] = []
+    for item in getattr(raw_response, "output", None) or []:
+        if hasattr(item, "model_dump"):
+            dumped = item.model_dump(exclude_none=True)
+        elif isinstance(item, dict):
+            dumped = copy.deepcopy(item)
+        else:
+            continue
+        if isinstance(dumped, dict):
+            items.append(dumped)
+    return items
+
+
+def _responses_assistant_message(
+    output_items: list[dict[str, Any]],
+    *,
+    content: str,
+    tool_calls: list["ToolCall"] | None = None,
+) -> dict[str, Any]:
+    """Build a chat-shaped message while retaining native Responses state."""
+    message: dict[str, Any] = {
+        "role": "assistant",
+        "content": content,
+        # ``_transform_messages`` recognizes this private compatibility field
+        # and replays the native items verbatim on a subsequent direct call.
+        "_batch": copy.deepcopy(output_items),
+    }
+    reasoning_items = [item for item in output_items if item.get("type") == "reasoning"]
+    if reasoning_items:
+        message["reasoning_items"] = copy.deepcopy(reasoning_items)
+    if tool_calls:
+        message["tool_calls"] = [
+            {
+                "id": tool_call.id,
+                "type": "function",
+                "function": {
+                    "name": tool_call.name,
+                    "arguments": tool_call.arguments,
+                },
+            }
+            for tool_call in tool_calls
+        ]
+    return message
+
+
 def _extract_xml_tool_calls(content: str) -> list["ToolCall"]:
     """Extract tool calls from XML format used by Nemotron/NIM models.
 
@@ -2350,7 +2403,6 @@ class ResponsesClient(UnifiedLLM):
             **self.config,
             **kwargs,
         }
-
         if instructions:
             api_params["instructions"] = instructions
 
@@ -2397,6 +2449,7 @@ class ResponsesClient(UnifiedLLM):
 
         output: list[Any] = raw_response.output  # type: ignore[assignment]
         raw_tool_calls = [item for item in output if item.type == "function_call"]
+        output_items = _responses_output_items(raw_response)
 
         if raw_tool_calls:
             tool_calls = [
@@ -2404,20 +2457,15 @@ class ResponsesClient(UnifiedLLM):
                 for tc in raw_tool_calls
             ]
 
-            assistant_messages = []
-            for item in output:
-                if hasattr(item, "model_dump"):
-                    assistant_messages.append(item.model_dump())
-                else:
-                    assistant_messages.append(item)
-
             return LLMResponse(
                 raw_response=raw_response,
                 content="",
                 tool_calls=tool_calls,
                 finish_reason="tool_calls",
-                assistant_message={"_batch": assistant_messages},
-                reasoning=None,  # Responses API doesn't have reasoning
+                assistant_message=_responses_assistant_message(
+                    output_items, content="", tool_calls=tool_calls
+                ),
+                reasoning=None,
                 usage=usage,
             )
 
@@ -2432,7 +2480,7 @@ class ResponsesClient(UnifiedLLM):
                 content=parsed_content,
                 tool_calls=[],
                 finish_reason=_map_responses_finish_reason(raw_response),
-                assistant_message={"role": "assistant", "content": text_content},
+                assistant_message=_responses_assistant_message(output_items, content=text_content),
                 reasoning=None,
                 usage=usage,
             )
@@ -2442,7 +2490,7 @@ class ResponsesClient(UnifiedLLM):
             content=text_content,
             tool_calls=[],
             finish_reason=_map_responses_finish_reason(raw_response),
-            assistant_message={"role": "assistant", "content": text_content},
+            assistant_message=_responses_assistant_message(output_items, content=text_content),
             reasoning=None,
             usage=usage,
         )
@@ -2481,7 +2529,6 @@ class ResponsesClient(UnifiedLLM):
             **self.config,
             **kwargs,
         }
-
         if instructions:
             api_params["instructions"] = instructions
 
@@ -2528,6 +2575,7 @@ class ResponsesClient(UnifiedLLM):
 
         output: list[Any] = raw_response.output  # type: ignore[assignment]
         raw_tool_calls = [item for item in output if item.type == "function_call"]
+        output_items = _responses_output_items(raw_response)
 
         if raw_tool_calls:
             tool_calls = [
@@ -2535,19 +2583,14 @@ class ResponsesClient(UnifiedLLM):
                 for tc in raw_tool_calls
             ]
 
-            assistant_messages = []
-            for item in output:
-                if hasattr(item, "model_dump"):
-                    assistant_messages.append(item.model_dump())
-                else:
-                    assistant_messages.append(item)
-
             return LLMResponse(
                 raw_response=raw_response,
                 content="",
                 tool_calls=tool_calls,
                 finish_reason="tool_calls",
-                assistant_message={"_batch": assistant_messages},
+                assistant_message=_responses_assistant_message(
+                    output_items, content="", tool_calls=tool_calls
+                ),
                 reasoning=None,
                 usage=usage,
             )
@@ -2563,7 +2606,7 @@ class ResponsesClient(UnifiedLLM):
                 content=parsed_content,
                 tool_calls=[],
                 finish_reason=_map_responses_finish_reason(raw_response),
-                assistant_message={"role": "assistant", "content": text_content},
+                assistant_message=_responses_assistant_message(output_items, content=text_content),
                 reasoning=None,
                 usage=usage,
             )
@@ -2573,7 +2616,7 @@ class ResponsesClient(UnifiedLLM):
             content=text_content,
             tool_calls=[],
             finish_reason=_map_responses_finish_reason(raw_response),
-            assistant_message={"role": "assistant", "content": text_content},
+            assistant_message=_responses_assistant_message(output_items, content=text_content),
             reasoning=None,
             usage=usage,
         )
@@ -2602,6 +2645,14 @@ class ResponsesClient(UnifiedLLM):
                 content = msg.get("content", "")
                 if content:
                     instructions_parts.append(content)
+                continue
+
+            # A previous direct ResponsesClient call carries the complete native
+            # output batch here. Replaying the whole batch is what preserves
+            # reasoning state and any future provider output-item types.
+            batch = msg.get("_batch")
+            if isinstance(batch, list):
+                transformed.extend(copy.deepcopy(item) for item in batch if isinstance(item, dict))
                 continue
 
             # Already in native Responses format (from ResponsesProviderFormatter)
@@ -2643,6 +2694,11 @@ class ResponsesClient(UnifiedLLM):
 
             # Legacy OpenAI format: assistant messages with tool_calls
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                reasoning_items = msg.get("reasoning_items")
+                if isinstance(reasoning_items, list):
+                    transformed.extend(
+                        copy.deepcopy(item) for item in reasoning_items if isinstance(item, dict)
+                    )
                 # Preserve assistant text that precedes tool calls (matches native formatter)
                 if msg.get("content"):
                     transformed.append({"role": "assistant", "content": msg["content"]})
@@ -2660,6 +2716,11 @@ class ResponsesClient(UnifiedLLM):
 
             # User/Assistant text messages → passthrough with cache_control preservation
             if msg.get("role") in ["user", "assistant"]:
+                reasoning_items = msg.get("reasoning_items")
+                if msg.get("role") == "assistant" and isinstance(reasoning_items, list):
+                    transformed.extend(
+                        copy.deepcopy(item) for item in reasoning_items if isinstance(item, dict)
+                    )
                 content = msg.get("content", "")
                 if content is None:
                     content = ""

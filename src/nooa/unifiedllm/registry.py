@@ -37,6 +37,9 @@ YAML schema::
         temperature: 0.0                     # optional
         top_p: 1.0                           # optional
         max_tokens: 4096                     # optional
+        store: false                         # optional Responses API state policy
+        include:                             # optional Responses API output fields
+          - reasoning.encrypted_content
         drop_params: true                    # optional, defaults to true
 
 Set a model to ``null`` in a later layer to remove it.
@@ -385,6 +388,8 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
         "allowed_openai_params",
         "additional_drop_params",
         "extra_body",
+        "store",
+        "include",
     ):
         if key in config and key not in overrides:
             params[key] = config[key]

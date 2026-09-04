@@ -167,6 +167,14 @@ class LLMOutput(EventBase):  # type: ignore[misc]
     content: Annotated[
         str, spec(max_string=None), Field(description="LLM response content (code or JSON)")
     ]
+    reasoning_items: list[dict[str, Any]] | None = Field(
+        default=None,
+        repr=False,
+        description=(
+            "Opaque provider reasoning state that must precede this assistant "
+            "message when conversation history is replayed"
+        ),
+    )
 
 
 class PythonOutput(EventBase):  # type: ignore[misc]

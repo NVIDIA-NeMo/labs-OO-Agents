@@ -43,6 +43,9 @@ class ModelConfig(BaseModel):
     max_tokens: int | None = None
     temperature: float | None = None
     top_p: float | None = None
+    reasoning: dict[str, Any] | None = None
+    store: bool | None = None
+    include: list[str] | None = None
 
     @classmethod
     def from_registry(cls, name: str, raw: dict[str, Any]) -> ModelConfig:

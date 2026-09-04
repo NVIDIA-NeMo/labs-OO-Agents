@@ -298,7 +298,7 @@ class RenderedMessage(BaseModel):
     )
     reasoning_items: list[dict[str, Any]] | None = Field(
         default=None,
-        description="Opaque provider reasoning state associated with an assistant tool call",
+        description="Opaque provider reasoning state associated with an assistant output",
     )
     tool_call_id: str | None = Field(
         default=None, description="Tool-call id this message is a result for"

@@ -158,6 +158,8 @@ def test_slash_case_insensitive(completer):
                 "/reasoning low",
                 "/reasoning medium",
                 "/reasoning high",
+                "/reasoning xhigh",
+                "/reasoning max",
             ],
         ),
         ("/toolbar ", ["/toolbar reset", "/toolbar set"]),

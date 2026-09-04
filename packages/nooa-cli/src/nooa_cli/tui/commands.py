@@ -1019,19 +1019,30 @@ class ReasoningCommand(Command):
 
     @classmethod
     def help_text(cls) -> dict[str, str]:
-        return {"/reasoning [off|low|medium|high]": "Toggle reasoning mode for the current model"}
+        return {
+            "/reasoning [off|low|medium|high|xhigh|max]": (
+                "Set reasoning effort for the current model"
+            )
+        }
 
     def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
+        usage = "Usage: /reasoning [off|low|medium|high|xhigh|max]"
         if len(args) > 1:
-            return False, "Usage: /reasoning [off|low|medium|high]"
-        if args and args[0].lower() not in ("off", "low", "medium", "high"):
-            return False, "Usage: /reasoning [off|low|medium|high]"
+            return False, usage
+        if args and args[0].lower() not in ("off", "low", "medium", "high", "xhigh", "max"):
+            return False, usage
+        if args and args[0].lower() in ("xhigh", "max"):
+            from nooa.unifiedllm.unifiedllm import ResponsesClient
+
+            if not isinstance(self.agent.llm, ResponsesClient):
+                return False, "xhigh and max currently require a Responses API model"
         return True, None
 
     def _get_reasoning_state(self) -> tuple[str, str]:
         """Return (effort_level, client_type) for the current model.
 
-        effort_level is 'off', 'low', 'medium', or 'high'.
+        effort_level is the configured provider effort, with ``none`` displayed
+        as ``off``.
         client_type is 'responses' or 'completion'.
         """
         from nooa.unifiedllm.unifiedllm import ResponsesClient
@@ -1043,7 +1054,8 @@ class ReasoningCommand(Command):
         if is_responses:
             reasoning = llm.config.get("reasoning")
             if reasoning and isinstance(reasoning, dict):
-                return reasoning.get("effort", "off"), client_type
+                effort = str(reasoning.get("effort", "off"))
+                return ("off" if effort == "none" else effort), client_type
             return "off", client_type
         else:
             effort = llm.config.get("reasoning_effort")
@@ -1058,32 +1070,41 @@ class ReasoningCommand(Command):
         llm = self.agent.llm
         is_responses = isinstance(llm, ResponsesClient)
 
-        if level == "off":
-            if is_responses:
-                llm.config.pop("reasoning", None)
-            else:
-                llm.config.pop("reasoning_effort", None)
+        if is_responses:
+            # Keep Responses-only controls such as ``context: all_turns`` when
+            # effort changes. Removing the entire reasoning object would also
+            # restore GPT-5.6's model default (medium), so "off" must be sent as
+            # the explicit API value ``none``.
+            reasoning = llm.config.get("reasoning")
+            updated = dict(reasoning) if isinstance(reasoning, dict) else {}
+            updated["effort"] = "none" if level == "off" else level
+            llm.config["reasoning"] = updated
+        elif level == "off":
+            # Completion providers do not share one explicit "off" value.
+            # Preserve the pre-Responses behavior until provider capabilities
+            # can map this safely.
+            llm.config.pop("reasoning_effort", None)
         else:
-            if is_responses:
-                llm.config["reasoning"] = {"effort": level}
+            llm.config["reasoning_effort"] = level
+            # Ensure the gateway knows this param is allowed.
+            allowed = llm.config.get("allowed_openai_params")
+            if isinstance(allowed, list):
+                if "reasoning_effort" not in allowed:
+                    allowed.append("reasoning_effort")
             else:
-                llm.config["reasoning_effort"] = level
-                # Ensure the gateway knows this param is allowed
-                allowed = llm.config.get("allowed_openai_params")
-                if isinstance(allowed, list):
-                    if "reasoning_effort" not in allowed:
-                        allowed.append("reasoning_effort")
-                else:
-                    llm.config["allowed_openai_params"] = ["reasoning_effort"]
+                llm.config["allowed_openai_params"] = ["reasoning_effort"]
 
     async def execute(self, args: list[str]) -> "CommandResult":
         if not args:
             effort, client_type = self._get_reasoning_state()
             model = self.config.default_model
             status = f"**{effort}**" if effort != "off" else "off"
+            reasoning = getattr(self.agent.llm, "config", {}).get("reasoning")
+            context = reasoning.get("context") if isinstance(reasoning, dict) else None
+            context_status = f"; context: **{context}**" if context else ""
             return CommandResult.ok(
                 TextOutput(
-                    f"Reasoning for {model} ({client_type}): {status}",
+                    f"Reasoning for {model} ({client_type}): {status}{context_status}",
                     "info",
                 )
             )

@@ -1242,7 +1242,15 @@ class ActorRuntime:
         elif not isinstance(content, str):
             # Other non-string types - convert to string representation
             content = str(content)
-        event = LLMOutput(content=content)
+        assistant_message = getattr(response, "assistant_message", None)
+        reasoning_items = (
+            assistant_message.get("reasoning_items")
+            if isinstance(assistant_message, dict) and not response.tool_calls
+            else None
+        )
+        if not isinstance(reasoning_items, list):
+            reasoning_items = None
+        event = LLMOutput(content=content, reasoning_items=reasoning_items)
         event_id = self.event_manager.add(event)
 
         return response, event_id
