@@ -76,6 +76,44 @@ def test_reasoning_rejects_responses_only_levels_for_completion() -> None:
     )
 
 
+def _responses_command_for_model(model: str, config=None):
+    llm = _bare_client(ResponsesClient, config or {})
+    llm.model = model
+    return ReasoningCommand(
+        MagicMock(),
+        SimpleNamespace(default_model=model),
+        SimpleNamespace(llm=llm),
+    )
+
+
+def test_reasoning_rejects_effort_unsupported_by_model() -> None:
+    # GPT-5.4 Pro supports medium/high/xhigh but not max.
+    command = _responses_command_for_model("openai/gpt-5.4-pro")
+
+    ok, msg = command.validate_args(["max"])
+    assert ok is False
+    assert "does not support reasoning 'max'" in msg
+    assert command.validate_args(["high"]) == (True, None)
+
+
+def test_reasoning_off_rejected_when_model_cannot_disable() -> None:
+    # GPT-5 Pro only supports high — it cannot turn reasoning off.
+    command = _responses_command_for_model("openai/gpt-5-pro")
+
+    ok, msg = command.validate_args(["off"])
+    assert ok is False
+    assert "cannot disable reasoning" in msg
+    assert command.validate_args(["high"]) == (True, None)
+
+
+def test_reasoning_unknown_model_allows_classic_efforts() -> None:
+    # An unrecognized model stays permissive for the classic set.
+    command = _responses_command_for_model("some/experimental-model")
+
+    for level in ("off", "low", "medium", "high"):
+        assert command.validate_args([level]) == (True, None)
+
+
 @pytest.mark.asyncio
 async def test_reasoning_status_reports_responses_context_policy() -> None:
     llm = _bare_client(

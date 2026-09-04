@@ -16,9 +16,9 @@ dicts (see ``unifiedllm/registry.py``); this model is the first step.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ModelConfig(BaseModel):
@@ -43,9 +43,46 @@ class ModelConfig(BaseModel):
     max_tokens: int | None = None
     temperature: float | None = None
     top_p: float | None = None
-    reasoning: dict[str, Any] | None = None
-    store: bool | None = None
-    include: list[str] | None = None
+    # OpenAI Responses API reasoning controls, forwarded verbatim to
+    # ``litellm.responses(reasoning=...)``. Typically ``{"effort": "medium",
+    # "context": "all_turns"}``; ``effort`` is the thinking budget
+    # (none/low/medium/high/xhigh/max, model-dependent) and ``context``
+    # selects how much prior reasoning the model may attend to.
+    reasoning: Annotated[
+        dict[str, Any] | None,
+        Field(
+            description=(
+                "OpenAI Responses reasoning controls forwarded to the provider, "
+                "e.g. {'effort': 'medium', 'context': 'all_turns'}."
+            )
+        ),
+    ] = None
+    # OpenAI Responses API server-side state policy. ``store=False`` runs the
+    # session stateless (no server-retained response chain) so the client must
+    # replay the full output — the ZDR-friendly mode this framework uses. Leave
+    # unset to accept the provider default (``store=True`` on OpenAI).
+    store: Annotated[
+        bool | None,
+        Field(
+            description=(
+                "Responses API state policy: False keeps the session stateless "
+                "(client replays history); unset uses the provider default."
+            )
+        ),
+    ] = None
+    # OpenAI Responses API ``include`` list — extra output fields the provider
+    # should return. For stateless reasoning continuity set
+    # ``["reasoning.encrypted_content"]`` so encrypted reasoning items come back
+    # for replay on the next turn.
+    include: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Responses API output fields to include, e.g. "
+                "['reasoning.encrypted_content'] for stateless reasoning replay."
+            )
+        ),
+    ] = None
 
     @classmethod
     def from_registry(cls, name: str, raw: dict[str, Any]) -> ModelConfig:

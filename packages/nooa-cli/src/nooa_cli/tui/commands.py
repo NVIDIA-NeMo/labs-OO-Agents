@@ -1010,6 +1010,39 @@ class ModelsCommand(Command):
         )
 
 
+# Per-model reasoning-effort capabilities. OpenAI reasoning models accept
+# different effort sets, and a value the model rejects only surfaces as a
+# provider 400 on the *next* request — so /reasoning validates against these
+# up front. Keyed by a substring of the resolved model string; the first match
+# wins, and unknown models fall back to a permissive default so any
+# litellm-supported model still works. ``None`` for "off" means the model
+# cannot disable reasoning (e.g. GPT-5 Pro): "off" is reported as unsupported
+# rather than silently sent as an invalid effort.
+_ALL_EFFORTS = ("off", "low", "medium", "high", "xhigh", "max")
+_REASONING_EFFORT_CAPABILITIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # GPT-5.x Pro variants: no "off"; xhigh/max vary by snapshot.
+    ("gpt-5.4-pro", ("medium", "high", "xhigh")),
+    ("gpt-5-pro", ("high",)),
+    ("gpt5-pro", ("high",)),
+    # GPT-5.6 family supports the full effort ladder including none ("off").
+    ("gpt-5.6", ("off", "low", "medium", "high", "xhigh", "max")),
+    ("gpt5.6", ("off", "low", "medium", "high", "xhigh", "max")),
+)
+# Default when the model is unknown: allow the classic set, but not the
+# GPT-5.6-only xhigh/max (those stay gated to Responses clients that name a
+# known-supporting model).
+_DEFAULT_REASONING_EFFORTS = ("off", "low", "medium", "high")
+
+
+def _supported_reasoning_efforts(model: str | None) -> tuple[str, ...]:
+    """Return the effort levels a model accepts, permissive for unknown models."""
+    name = (model or "").lower()
+    for needle, efforts in _REASONING_EFFORT_CAPABILITIES:
+        if needle in name:
+            return efforts
+    return _DEFAULT_REASONING_EFFORTS
+
+
 class ReasoningCommand(Command):
     """Toggle reasoning mode for the current model."""
 
@@ -1025,17 +1058,43 @@ class ReasoningCommand(Command):
             )
         }
 
+    def _model_name(self) -> str | None:
+        """Resolved model string for the active client, for capability lookup."""
+        return getattr(self.agent.llm, "model", None) or self.config.default_model
+
     def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
         usage = "Usage: /reasoning [off|low|medium|high|xhigh|max]"
         if len(args) > 1:
             return False, usage
-        if args and args[0].lower() not in ("off", "low", "medium", "high", "xhigh", "max"):
+        if not args:
+            return True, None
+        level = args[0].lower()
+        if level not in _ALL_EFFORTS:
             return False, usage
-        if args and args[0].lower() in ("xhigh", "max"):
+
+        # xhigh/max are Responses-only controls; reject them for completion
+        # clients before consulting per-model capabilities.
+        if level in ("xhigh", "max"):
             from nooa.unifiedllm.unifiedllm import ResponsesClient
 
             if not isinstance(self.agent.llm, ResponsesClient):
                 return False, "xhigh and max currently require a Responses API model"
+
+        # Capability-gate against what the specific model accepts, so an
+        # unsupported effort is rejected here instead of failing provider
+        # validation on the next request.
+        supported = _supported_reasoning_efforts(self._model_name())
+        if level not in supported:
+            model = self._model_name() or "this model"
+            if level == "off":
+                return (
+                    False,
+                    f"{model} cannot disable reasoning; supported: {', '.join(supported)}",
+                )
+            return (
+                False,
+                f"{model} does not support reasoning '{level}'; supported: {', '.join(supported)}",
+            )
         return True, None
 
     def _get_reasoning_state(self) -> tuple[str, str]:
