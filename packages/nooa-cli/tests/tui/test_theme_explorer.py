@@ -57,18 +57,21 @@ def test_input_window_and_scrollback_preview_use_theme_palette() -> None:
     rendered = "\n".join(ThemeExplorerView([row]).detail_lines(row, 100))
     p = row.record.palette
 
-    # The input window previews the accent prompt, primary text on the base
-    # surface, selection styling, and both completion-menu states.
+    # The input window previews the accent prompt, transparent input text
+    # (foreground only — the real window shows the terminal program's own
+    # background color), selection styling, and both completion-menu states.
     assert f"38;2;{_ansi_rgb(p['focus_accent'])}" in rendered
-    assert f"38;2;{_ansi_rgb(p['text_primary'])};48;2;{_ansi_rgb(p['base'])}" in rendered
+    assert f"38;2;{_ansi_rgb(p['text_primary'])}mrun the tests " in rendered
+    assert f";48;2;{_ansi_rgb(p['base'])}mrun the tests " not in rendered
     assert f"38;2;{_ansi_rgb(p['selection_fg'])};48;2;{_ansi_rgb(p['selection_bg'])}" in rendered
     assert f"48;2;{_ansi_rgb(p['surface_raised'])}" in rendered
 
-    # The scrollback preview shows the highlighted user bar, plain agent reply
-    # text, and subtle status text with the exact palette the TUI would use.
+    # The scrollback preview shows the highlighted user bar, a plain agent
+    # reply over the terminal background, and subtle status text.
     assert (
         f"38;2;{_ansi_rgb(p['user_message_fg'])};48;2;{_ansi_rgb(p['user_message_bg'])}" in rendered
     )
+    assert f"38;2;{_ansi_rgb(p['text_primary'])}mAgent: this is how a reply reads." in rendered
     assert f"38;2;{_ansi_rgb(p['text_subtle'])}m" in rendered
 
 
