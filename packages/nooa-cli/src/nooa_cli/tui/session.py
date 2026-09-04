@@ -352,6 +352,7 @@ class Session:
         self._pending_code: dict[str, str] = {}
         self._background_tasks: set[asyncio.Task] = set()  # fire-and-forget tasks
         self._command_runner = None
+        self._on_session_change: Callable[[str], None] | None = None
 
         # Populated at the start of ``run()``; referenced by the handler
         # methods (``_on_command``, ``_on_user_message_ui``, ``_loud_handler``,
@@ -1655,6 +1656,9 @@ class Session:
         self.registry.session_manager = new_sm
         for cmd in self.registry.commands():
             cmd.session_manager = new_sm
+        on_session_change = getattr(self, "_on_session_change", None)
+        if on_session_change is not None:
+            on_session_change(new_sm.session_id)
         # Start a fresh trace for the new session so it gets its own .jsonl file.
         # Use the first 8 chars of the SQLite session UUID to correlate trace↔storage.
         try:
