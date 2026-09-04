@@ -116,4 +116,65 @@ async def main(
     frontend.init_input(registry)  # terminal-specific: prompt_toolkit completions
     session = build_session(result, frontend, registry, initial_outputs=_initial_outputs)
 
-    await session.run()
+    runtime_registration = None
+    restart_requested = False
+    restart_task = None
+    if result.session_id is not None:
+        import asyncio
+
+        from .runtime_registration import TUIRuntimeRegistration
+
+        candidate = TUIRuntimeRegistration(
+            session_id=result.session_id,
+            working_dir=config.agent.working_dir,
+        )
+        restart_event = asyncio.Event()
+
+        def _request_restart() -> None:
+            nonlocal restart_requested
+            restart_requested = True
+            restart_event.set()
+
+        if candidate.install_restart_signal(asyncio.get_running_loop(), _request_restart):
+            try:
+                candidate.publish()
+            except OSError:
+                candidate.close()
+            else:
+                runtime_registration = candidate
+
+                def _update_runtime_session(session_id: str) -> None:
+                    try:
+                        candidate.update_session(session_id)
+                    except OSError:
+                        candidate.close()
+                        session._on_session_change = None
+
+                session._on_session_change = _update_runtime_session
+
+                async def _exit_when_restart_requested() -> None:
+                    await restart_event.wait()
+                    while session._app is None or not session._app.is_running:
+                        await asyncio.sleep(0.01)
+                    session._app.exit()
+
+                restart_task = asyncio.create_task(
+                    _exit_when_restart_requested(), name="tui-graceful-restart"
+                )
+
+    try:
+        await session.run()
+    finally:
+        if restart_task is not None and not restart_task.done():
+            restart_task.cancel()
+            try:
+                await restart_task
+            except asyncio.CancelledError:
+                pass
+        if runtime_registration is not None:
+            runtime_registration.close()
+
+    if restart_requested and runtime_registration is not None:
+        from .runtime_registration import reexec_tui
+
+        reexec_tui(runtime_registration.restart_argv)

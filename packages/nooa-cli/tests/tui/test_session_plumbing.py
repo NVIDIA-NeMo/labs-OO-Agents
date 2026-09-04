@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from pathlib import Path
 
 import pytest
 from nooa_cli.tui.console import TUIConsole
@@ -752,6 +753,37 @@ async def test_run_command_marks_session_transition_while_cancelling() -> None:
     session._swap_session_manager.assert_awaited_once_with(new_sm)
 
 
+async def test_session_swap_notifies_runtime_registration() -> None:
+    """An external restart must resume the session active after an in-process swap."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nooa_cli.tui.session import Session
+
+    session = Session.__new__(Session)
+    session.agent = MagicMock()
+    session.agent._storage = MagicMock()
+    session.agent.event_manager = MagicMock()
+    session.registry = MagicMock()
+    session.registry.commands.return_value = []
+    session.config = MagicMock()
+    session._session_manager = MagicMock()
+    session._local_agent_runner = MagicMock()
+    session._local_agent_runner.shutdown_queue_manager = AsyncMock()
+    session._local_agent_runner.run_async = AsyncMock(side_effect=lambda function: function())
+    session._app = None
+    session._on_session_change = MagicMock()
+    new_manager = SimpleNamespace(
+        session_id="new-session",
+        agent_db_path=Path("/tmp/new-session.db"),
+        _storage=MagicMock(),
+    )
+
+    await session._swap_session_manager(new_manager)
+
+    session._on_session_change.assert_called_once_with("new-session")
+
+
 async def test_on_command_slash_result_posts_to_queue_without_double_submit() -> None:
     """A slash command returning a result must be delivered to the agent
     exactly once. ``_on_command`` posts the ``SlashCommandResult`` to the
@@ -1191,6 +1223,7 @@ async def test_session_run_startup_failure_teardown_order(
         "terminal restore",
         "exit message",
     ]
+
 
 @pytest.mark.asyncio
 async def test_exit_diagnostics_omit_current_task(monkeypatch) -> None:

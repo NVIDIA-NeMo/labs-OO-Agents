@@ -268,3 +268,13 @@ conversation replay shared by CLI hosts such as the native TUI and ACP. The
 process running an agent owns the writable session handle; other hosts attach
 through their transport or use read-only discovery. Generic event and SQLite
 storage primitives remain in the core `nooa` package.
+
+## Development fleet restarts
+
+A running TUI publishes a private runtime record under
+`${NOOA_TUI_RUNTIME_DIR:-~/.nooa/run/tui}`. On POSIX systems, `SIGUSR1` requests a
+graceful restart: the TUI stops through its normal teardown path, saves its agent
+snapshot, releases the session database, and re-execs the same command with the
+current session ID. The optional `nooa-dev-fleet` package in `nemo-oo-skills` uses
+this contract for branch notifications and coordinated multi-TUI restarts. Do not
+use `SIGKILL`; it bypasses snapshot and session cleanup.
