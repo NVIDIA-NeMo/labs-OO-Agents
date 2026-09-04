@@ -20,6 +20,37 @@ from prompt_toolkit.data_structures import Size
 from prompt_toolkit.output import DummyOutput
 
 
+@pytest.fixture(autouse=True)
+def _restore_global_theme_catalog():
+    """Snapshot the process-global theme catalog and restore it after each test.
+
+    Opening the default theme browser reloads user/project themes from the
+    test-isolated config directories, which drops previously discovered user
+    themes from the shared catalog for the rest of the session. Restoring the
+    snapshot keeps later modules (e.g. input-style parametrization, which is
+    collected against the startup catalog) stable.
+    """
+    snapshot = (
+        dict(theme.THEME_RECORDS),
+        dict(theme.THEMES),
+        dict(theme.SYNTAX_THEMES),
+        theme.THEME_DIAGNOSTICS,
+        theme._active_name,
+    )
+    yield
+    records, palettes, syntax, diagnostics, active = snapshot
+    theme.THEME_RECORDS.clear()
+    theme.THEME_RECORDS.update(records)
+    theme.THEMES.clear()
+    theme.THEMES.update(palettes)
+    theme.SYNTAX_THEMES.clear()
+    theme.SYNTAX_THEMES.update(syntax)
+    theme.THEME_DIAGNOSTICS = diagnostics
+    theme._active_name = active
+    if active in theme.THEMES:
+        theme.set_theme(active)
+
+
 def test_theme_rows_expose_metadata_and_semantic_preview() -> None:
     rows = build_theme_rows()
 
@@ -65,9 +96,20 @@ def test_input_window_and_scrollback_preview_use_theme_palette() -> None:
     assert f"38;2;{_ansi_rgb(p['green'])}m\u276f " in rendered
     assert f"38;2;{_ansi_rgb(p['text'])}mrun the tests " in rendered
     assert f";48;2;{_ansi_rgb(p['base'])}mrun the tests " not in rendered
-    assert f"38;2;{_ansi_rgb(p['selection_fg'])};48;2;{_ansi_rgb(p['selection_bg'])}" in rendered
-    assert f"38;2;{_ansi_rgb(p['text'])};48;2;{_ansi_rgb(p['surface0'])}m completion " in rendered
-    assert f"38;2;{_ansi_rgb(p['mauve'])};48;2;{_ansi_rgb(p['surface2'])}m current " in rendered
+    # Complete fragments (label + reset) bind each assertion to the exact
+    # element it describes, so it cannot match the earlier " selected "
+    # swatch or the later " Muted text " sample.
+    selection = (
+        f"\x1b[38;2;{_ansi_rgb(p['selection_fg'])};48;2;{_ansi_rgb(p['selection_bg'])}"
+        "mselected\x1b[0m"
+    )
+    completion = (
+        f"\x1b[38;2;{_ansi_rgb(p['text'])};48;2;{_ansi_rgb(p['surface0'])}m completion \x1b[0m"
+    )
+    current = f"\x1b[38;2;{_ansi_rgb(p['mauve'])};48;2;{_ansi_rgb(p['surface2'])}m current \x1b[0m"
+    assert selection in rendered
+    assert completion in rendered
+    assert current in rendered
 
     # The scrollback preview embeds the exact artifact the transcript renders:
     # the 256-color quantized user bar with its '❯ ' prefix and breathing-room
@@ -364,8 +406,12 @@ async def test_tui_application_installs_and_applies_gallery_theme(tmp_path, monk
         assert app._config.tui.theme == "base16-remote"
         assert theme.get_theme() == "base16-remote"
     finally:
-        theme.set_theme(original)
+        # Reload under the real directories: the monkeypatched environment is
+        # undone first, so the process-global catalog (including any themes
+        # the user has installed) is fully restored for later test modules.
+        monkeypatch.undo()
         theme.reload_themes()
+        theme.set_theme(original)
 
 
 @pytest.mark.asyncio
@@ -438,6 +484,7 @@ async def test_gallery_install_rolls_back_when_settings_write_fails(tmp_path, mo
         assert yaml.safe_load(target.read_text(encoding="utf-8"))["name"] == "Original"
         assert "settings unavailable" in "\n".join(view.detail_lines(view.model.current, 80))
     finally:
+        monkeypatch.undo()
         theme.reload_themes()
 
 
@@ -507,8 +554,9 @@ async def test_gallery_refresh_failure_does_not_misreport_committed_install(
         assert app._config.tui.theme == entry.id
         assert theme.get_theme() == entry.id
     finally:
-        theme.set_theme(original)
+        monkeypatch.undo()
         theme.reload_themes()
+        theme.set_theme(original)
 
 
 @pytest.mark.asyncio
