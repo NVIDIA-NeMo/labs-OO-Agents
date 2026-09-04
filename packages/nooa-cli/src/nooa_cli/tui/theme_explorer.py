@@ -151,6 +151,28 @@ class ThemeExplorerView(ExplorerView):
                 ("info", "feedback_info"),
             )
         )
+        input_window = (
+            _style("› ", p["focus_accent"])
+            + _style("run the tests ", p["text_primary"], p["base"])
+            + _style("selected", p["selection_fg"], p["selection_bg"])
+        )
+        completions = "  ".join(
+            (
+                _style(" completion ", p["text_primary"], p["surface_raised"]),
+                _style(" current ", p["selection_fg"], p["selection_bg"]),
+            )
+        )
+        scrollback = "  ".join(
+            (
+                _style(
+                    " You: how does my message look? ",
+                    p["user_message_fg"],
+                    p["user_message_bg"],
+                ),
+                _style("Agent: this is how a reply reads.", p["text_primary"], p["base"]),
+                _style("status", p["text_subtle"]),
+            )
+        )
         return [
             f"{row.title} ({row.id})",
             f"Variant: {row.variant}    Source: {row.source}",
@@ -162,6 +184,13 @@ class ThemeExplorerView(ExplorerView):
             "",
             "Feedback and accents",
             feedback,
+            "",
+            "Input window",
+            input_window,
+            completions,
+            "",
+            "Scrollback",
+            scrollback,
             "",
             _style(" Primary text ", p["text_primary"], p["base"]),
             _style(" Muted text ", p["text_muted"], p["surface_raised"]),
