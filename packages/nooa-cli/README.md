@@ -198,8 +198,9 @@ session database. Both choices are persisted per agent in `settings.yaml`.
 
 ### Themes
 
-Use `/theme` for a full-screen browser with live previews, or `/theme <id>` to
-switch directly. Custom Base16/Base24 YAML themes
+Use `/theme` for installed themes, `/theme gallery` for the on-demand Tinted
+catalog, `/theme update` to refresh it, or `/theme <id>` to switch directly.
+Custom Base16/Base24 YAML themes
 can be installed in `~/.config/nooa/themes/` or `<project>/.nooa/themes/`. See
 [`docs/themes.md`](docs/themes.md) for the schema, semantic color roles, and
 validation rules.

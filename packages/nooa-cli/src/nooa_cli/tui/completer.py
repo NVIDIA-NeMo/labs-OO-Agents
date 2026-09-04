@@ -308,13 +308,19 @@ class Completer:
         prefix = "/theme "
         partial = text[len(prefix) :]
         items = []
-        for name in theme_names():
+        choices = (
+            ("picker", "Browse installed themes"),
+            ("gallery", "Browse and install remote themes"),
+            ("update", "Download or refresh the remote catalog"),
+            *((name, f"Switch to {name} theme") for name in theme_names()),
+        )
+        for name, description in choices:
             if name.startswith(partial.lower()):
                 items.append(
                     CompletionItem(
                         text=prefix + name,
                         display=prefix + name,
-                        description=f"Switch to {name} theme",
+                        description=description,
                     )
                 )
         return items

@@ -7,14 +7,18 @@ from __future__ import annotations
 import io
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from rich.console import Console
 from rich.syntax import Syntax
 
 from . import theme
 from .explorer_base import ExplorerConfig, ExplorerModel, ExplorerView
-from .theme import create_syntax_theme, get_theme, set_theme
+from .theme import SemanticSyntaxTheme, get_theme, set_theme
 from .theme_catalog import ThemeRecord
+
+if TYPE_CHECKING:
+    from .theme_gallery import GalleryTheme
 
 
 def _rgb(color: str) -> str:
@@ -22,14 +26,14 @@ def _rgb(color: str) -> str:
     return ";".join(str(int(value[index : index + 2], 16)) for index in (0, 2, 4))
 
 
-def _style(text: str, foreground: str, background: str | None = None) -> str:
-    code = f"38;2;{_rgb(foreground)}"
+def _style(text: str, foreground: str, background: str | None = None, *, bold: bool = False) -> str:
+    code = f"{'1;' if bold else ''}38;2;{_rgb(foreground)}"
     if background is not None:
         code += f";48;2;{_rgb(background)}"
     return f"\x1b[{code}m{text}\x1b[0m"
 
 
-def _syntax_lines(code: str, lexer: str, *, theme_id: str, width: int) -> list[str]:
+def _syntax_lines(code: str, lexer: str, *, record: ThemeRecord, width: int) -> list[str]:
     """Render a compact syntax sample with the same Pygments theme as the TUI."""
     output = io.StringIO()
     console = Console(
@@ -42,7 +46,7 @@ def _syntax_lines(code: str, lexer: str, *, theme_id: str, width: int) -> list[s
         Syntax(
             code,
             lexer,
-            theme=create_syntax_theme(theme_id),
+            theme=SemanticSyntaxTheme(record.syntax_theme, record.palette),
             background_color="default",
             word_wrap=True,
             padding=0,
@@ -130,12 +134,12 @@ class ThemeExplorerView(ExplorerView):
     def detail_lines(self, row: ThemeExplorerRow, width: int) -> list[str]:
         p = row.record.palette
         swatches = "  ".join(
-            _style(f" {label} ", fg, bg)
-            for label, fg, bg in (
-                ("inline code", p["inline_code_fg"], p["inline_code_bg"]),
-                ("selected", p["selection_fg"], p["selection_bg"]),
-                ("match", p["search_match_fg"], p["search_match_bg"]),
-                ("current", p["search_current_fg"], p["search_current_bg"]),
+            _style(f" {label} ", fg, bg, bold=bold)
+            for label, fg, bg, bold in (
+                ("inline code", p["inline_code_fg"], None, True),
+                ("selected", p["selection_fg"], p["selection_bg"], False),
+                ("match", p["search_match_fg"], p["search_match_bg"], False),
+                ("current", p["search_current_fg"], p["search_current_bg"], False),
             )
         )
         feedback = "  ".join(
@@ -166,7 +170,7 @@ class ThemeExplorerView(ExplorerView):
             *_syntax_lines(
                 'def greet(name: str) -> str:\n    return f"Hello, {name}!"',
                 "python",
-                theme_id=row.id,
+                record=row.record,
                 width=width,
             ),
             "",
@@ -174,7 +178,7 @@ class ThemeExplorerView(ExplorerView):
             *_syntax_lines(
                 "@@ -1,2 +1,2 @@\n-old_value = 1\n+new_value = 2",
                 "diff",
-                theme_id=row.id,
+                record=row.record,
                 width=width,
             ),
             "",
@@ -209,3 +213,51 @@ class ThemeExplorerView(ExplorerView):
         if not self._committed and get_theme() != self._opening_theme:
             set_theme(self._opening_theme)
             self._refresh()
+
+
+class ThemeGalleryView(ThemeExplorerView):
+    """Browse remote schemes without mutating the active theme until installation."""
+
+    item_name = "scheme"
+
+    def __init__(
+        self,
+        entries: dict[str, GalleryTheme],
+        *,
+        install: Callable[[GalleryTheme], None],
+    ) -> None:
+        self._entries = entries
+        self._install = install
+        self._install_error = ""
+        super().__init__(build_theme_rows({key: value.record for key, value in entries.items()}))
+        self.title = "Theme Gallery"
+        self.config.title = self.title
+
+    def _preview_current(self) -> None:
+        """The detail pane previews remote colors without registering them globally."""
+
+    def detail_lines(self, row: ThemeExplorerRow, width: int) -> list[str]:
+        lines = super().detail_lines(row, width)
+        lines[-1] = "Enter installs, applies, and saves this theme. Esc or q closes."
+        if self._install_error:
+            lines.extend(
+                (
+                    "",
+                    _style(
+                        f"Install failed: {self._install_error}",
+                        row.record.palette["feedback_error"],
+                    ),
+                )
+            )
+        return lines
+
+    def handle_action(self, action: str, row: ThemeExplorerRow | None) -> str:
+        if action != "enter" or row is None:
+            return "ignored"
+        try:
+            self._install(self._entries[row.id])
+        except Exception as exc:
+            self._install_error = str(exc)
+            return "handled"
+        self._committed = True
+        return "close"

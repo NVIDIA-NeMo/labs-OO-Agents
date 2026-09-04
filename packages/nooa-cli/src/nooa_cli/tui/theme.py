@@ -56,8 +56,8 @@ _MOCHA: dict[str, str] = {
     "base": "#1e1e2e",
     "mantle": "#181825",
     "crust": "#11111b",
-    "inline_code_fg": "#11111b",
-    "inline_code_bg": "#89b4fa",
+    "inline_code_fg": "#89b4fa",
+    "inline_code_bg": "#1e1e2e",
 }
 
 _LATTE: dict[str, str] = {
@@ -87,8 +87,8 @@ _LATTE: dict[str, str] = {
     "base": "#eff1f5",
     "mantle": "#e6e9ef",
     "crust": "#dce0e8",
-    "inline_code_fg": "#ffffff",
-    "inline_code_bg": "#1e66f5",
+    "inline_code_fg": "#1858c7",
+    "inline_code_bg": "#eff1f5",
 }
 
 # VS Code Dark+ — keys mapped to Catppuccin semantic roles
@@ -119,8 +119,8 @@ _VS_DARK: dict[str, str] = {
     "base": "#1e1e1e",
     "mantle": "#181818",
     "crust": "#111111",
-    "inline_code_fg": "#1e1e1e",
-    "inline_code_bg": "#9cdcfe",
+    "inline_code_fg": "#569cd6",
+    "inline_code_bg": "#1e1e1e",
 }
 
 # VS Code Light — keys mapped to Catppuccin semantic roles
@@ -151,8 +151,8 @@ _VS_LIGHT: dict[str, str] = {
     "base": "#ffffff",
     "mantle": "#f8f8f8",
     "crust": "#ececec",
-    "inline_code_fg": "#ffffff",
-    "inline_code_bg": "#005fb8",
+    "inline_code_fg": "#005fb8",
+    "inline_code_bg": "#ffffff",
 }
 
 _BUILTIN_SEMANTICS = {
@@ -418,9 +418,8 @@ def create_theme() -> Theme:
             "spinner.text": c["subtext1"],
             # Code/technical
             "code": c["peach"],
-            # Inline-code chips have dedicated colors: their compact filled
-            # shape needs different contrast than syntax tokens or panels.
-            "markdown.code": f"{c['inline_code_fg']} on {c['inline_code_bg']}",
+            # Inline code stays subtle: bold semantic text, no filled chip.
+            "markdown.code": f"bold {c['inline_code_fg']}",
             "path": c["code_path"],
             "number": c["code_number"],
             # History tags

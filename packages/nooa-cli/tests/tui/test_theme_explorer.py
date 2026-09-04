@@ -29,6 +29,11 @@ def test_theme_rows_expose_metadata_and_semantic_preview() -> None:
     plain = strip_safe_ansi(rendered)
     assert "Semantic highlights" in rendered
     assert "inline code" in rendered
+    inline_rgb = ";".join(
+        str(int(rows[0].record.palette["inline_code_fg"].lstrip("#")[index : index + 2], 16))
+        for index in (0, 2, 4)
+    )
+    assert f"\x1b[1;38;2;{inline_rgb}m inline code " in rendered
     assert "success" in rendered and "error" in rendered
     assert "Syntax-highlighted code" in rendered
     assert "def greet" in plain and "return" in plain
@@ -145,6 +150,324 @@ async def test_theme_command_without_args_opens_browser() -> None:
     assert result.success is True
     assert isinstance(result.outputs[0], TextOutput)
     frontend.open_theme_explorer.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_theme_picker_action_opens_installed_browser() -> None:
+    frontend = MagicMock()
+    frontend.open_theme_explorer = AsyncMock()
+    command = ThemeCommand(frontend, MagicMock(), MagicMock())
+
+    result = await command.execute(["picker"])
+
+    assert result.success is True
+    frontend.open_theme_explorer.assert_awaited_once_with()
+
+
+def test_theme_action_validation_is_local_and_does_not_load_gallery(monkeypatch) -> None:
+    from nooa_cli.tui import theme_gallery
+
+    monkeypatch.setattr(
+        theme_gallery,
+        "ensure_gallery_catalog",
+        lambda: (_ for _ in ()).throw(AssertionError("gallery must remain lazy")),
+    )
+    command = ThemeCommand(MagicMock(), MagicMock(), MagicMock())
+
+    assert command.validate_args(["picker"]) == (True, None)
+    assert command.validate_args(["gallery"]) == (True, None)
+    assert command.validate_args(["update"]) == (True, None)
+
+
+@pytest.mark.asyncio
+async def test_theme_update_downloads_catalog_without_opening_browser(monkeypatch) -> None:
+    from nooa_cli.tui import theme_gallery
+
+    catalog = theme_gallery.GalleryCatalog({"base16-ocean": MagicMock()}, ("bad",))
+    update = MagicMock(return_value=catalog)
+    monkeypatch.setattr(theme_gallery, "update_gallery_catalog", update)
+    frontend = MagicMock()
+    command = ThemeCommand(frontend, MagicMock(), MagicMock())
+
+    result = await command.execute(["update"])
+
+    assert result.success is True
+    assert "1 schemes (1 skipped)" in result.outputs[0].content
+    update.assert_called_once_with()
+    frontend.open_theme_explorer.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_theme_gallery_loads_on_demand_and_opens_browser(monkeypatch) -> None:
+    from nooa_cli.tui import theme_gallery
+
+    catalog = theme_gallery.GalleryCatalog({"base16-ocean": MagicMock()})
+    ensure = MagicMock(return_value=catalog)
+    monkeypatch.setattr(theme_gallery, "ensure_gallery_catalog", ensure)
+    frontend = MagicMock()
+    frontend.open_theme_gallery = AsyncMock()
+    command = ThemeCommand(frontend, MagicMock(), MagicMock())
+
+    result = await command.execute(["gallery"])
+
+    assert result.success is True
+    ensure.assert_called_once_with()
+    frontend.open_theme_gallery.assert_awaited_once_with(catalog)
+
+
+def test_gallery_view_previews_without_changing_active_theme() -> None:
+    from nooa_cli.tui.theme_explorer import ThemeGalleryView
+    from nooa_cli.tui.theme_gallery import GalleryTheme
+
+    original = theme.get_theme()
+    remote = theme.ThemeRecord(
+        "base16-remote",
+        "Remote",
+        dict(theme.THEMES["latte"]),
+        "vs",
+        "light",
+        "gallery:base16",
+    )
+    entry = GalleryTheme(remote.id, "base16", remote, {"name": "Remote"})
+    try:
+        theme.set_theme("mocha")
+        view = ThemeGalleryView({entry.id: entry}, install=MagicMock())
+        view.on_open()
+        assert theme.get_theme() == "mocha"
+        assert "Remote" in "\n".join(view.detail_lines(view.model.current, 80))
+    finally:
+        theme.set_theme(original)
+
+
+def test_gallery_view_keeps_open_and_reports_install_failure() -> None:
+    from nooa_cli.tui.theme_explorer import ThemeGalleryView
+    from nooa_cli.tui.theme_gallery import GalleryTheme
+
+    remote = theme.ThemeRecord(
+        "base16-remote",
+        "Remote",
+        dict(theme.THEMES["latte"]),
+        "vs",
+        "light",
+        "gallery:base16",
+    )
+    entry = GalleryTheme(remote.id, "base16", remote, {"name": "Remote"})
+    view = ThemeGalleryView(
+        {entry.id: entry},
+        install=MagicMock(side_effect=OSError("disk full")),
+    )
+
+    assert view.handle_action("enter", view.model.current) == "handled"
+    assert "Install failed: disk full" in "\n".join(view.detail_lines(view.model.current, 80))
+
+
+@pytest.mark.asyncio
+async def test_tui_application_installs_and_applies_gallery_theme(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import yaml
+    from nooa_cli.tui.config import TUIConfig
+    from nooa_cli.tui.theme_gallery import GalleryCatalog, GalleryTheme
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user"))
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(tmp_path / "project"))
+    remote = theme.ThemeRecord(
+        "base16-remote",
+        "Remote",
+        dict(theme.THEMES["latte"]),
+        "vs",
+        "light",
+        "gallery:base16",
+    )
+    document = {
+        "system": "base16",
+        "name": "Remote",
+        "variant": "light",
+        "palette": {
+            f"base{index:02X}": value
+            for index, value in enumerate(
+                [
+                    "eff1f5",
+                    "e6e9ef",
+                    "dce0e8",
+                    "acb0be",
+                    "6c6f85",
+                    "4c4f69",
+                    "3c3f59",
+                    "24273a",
+                    "d20f39",
+                    "fe640b",
+                    "df8e1d",
+                    "40a02b",
+                    "179299",
+                    "1e66f5",
+                    "8839ef",
+                    "dc8a78",
+                ]
+            )
+        },
+    }
+    entry = GalleryTheme(remote.id, "base16", remote, document)
+    app = object.__new__(TUIApplication)
+    app._config = SimpleNamespace(tui=TUIConfig())
+    app.open_subview = AsyncMock()
+    original = theme.get_theme()
+    try:
+        await app.open_theme_gallery(GalleryCatalog({entry.id: entry}), refresh=MagicMock())
+        view = app.open_subview.await_args.args[0]
+        target = view.model.current
+        assert view.handle_action("enter", target) == "close"
+
+        installed = tmp_path / "user" / "themes" / "base16-remote.yaml"
+        assert installed.exists()
+        assert yaml.safe_load(installed.read_text(encoding="utf-8"))["name"] == "Remote"
+        assert app._config.tui.theme == "base16-remote"
+        assert theme.get_theme() == "base16-remote"
+    finally:
+        theme.set_theme(original)
+        theme.reload_themes()
+
+
+@pytest.mark.asyncio
+async def test_gallery_install_rolls_back_when_settings_write_fails(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import yaml
+    from nooa_cli.tui.config import TUIConfig
+    from nooa_cli.tui.theme_gallery import GalleryCatalog, GalleryTheme
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    user_dir = tmp_path / "user"
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_dir))
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(tmp_path / "project"))
+    target = user_dir / "themes" / "base16-remote.yaml"
+    target.parent.mkdir(parents=True)
+    original_document = {
+        "system": "base16",
+        "name": "Original",
+        "variant": "light",
+        "palette": {
+            f"base{index:02X}": value
+            for index, value in enumerate(
+                [
+                    "eff1f5",
+                    "e6e9ef",
+                    "dce0e8",
+                    "acb0be",
+                    "6c6f85",
+                    "4c4f69",
+                    "3c3f59",
+                    "24273a",
+                    "d20f39",
+                    "fe640b",
+                    "df8e1d",
+                    "40a02b",
+                    "179299",
+                    "1e66f5",
+                    "8839ef",
+                    "dc8a78",
+                ]
+            )
+        },
+    }
+    target.write_text(yaml.safe_dump(original_document), encoding="utf-8")
+    theme.reload_themes()
+    remote = theme.ThemeRecord(
+        "base16-remote",
+        "Replacement",
+        dict(theme.THEMES["latte"]),
+        "vs",
+        "light",
+        "gallery:base16",
+    )
+    replacement_document = {**original_document, "name": "Replacement"}
+    entry = GalleryTheme(remote.id, "base16", remote, replacement_document)
+    app = object.__new__(TUIApplication)
+    app._config = SimpleNamespace(tui=TUIConfig())
+    app.open_subview = AsyncMock()
+    monkeypatch.setattr(
+        "nooa_cli.tui.settings.write_settings_updates",
+        MagicMock(side_effect=OSError("settings unavailable")),
+    )
+
+    await app.open_theme_gallery(GalleryCatalog({entry.id: entry}), refresh=MagicMock())
+    view = app.open_subview.await_args.args[0]
+
+    assert view.handle_action("enter", view.model.current) == "handled"
+    assert yaml.safe_load(target.read_text(encoding="utf-8"))["name"] == "Original"
+    assert "settings unavailable" in "\n".join(view.detail_lines(view.model.current, 80))
+    theme.reload_themes()
+
+
+@pytest.mark.asyncio
+async def test_gallery_refresh_failure_does_not_misreport_committed_install(
+    tmp_path, monkeypatch
+) -> None:
+    from types import SimpleNamespace
+
+    import yaml
+    from nooa_cli.tui.config import TUIConfig
+    from nooa_cli.tui.theme_gallery import GalleryCatalog, GalleryTheme
+    from nooa_cli.tui.tui_application import TUIApplication
+
+    user_dir = tmp_path / "user"
+    project_dir = tmp_path / "project"
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_dir))
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
+    remote = theme.ThemeRecord(
+        "base16-remote", "Remote", dict(theme.THEMES["latte"]), "vs", "light", "gallery:base16"
+    )
+    document = {
+        "system": "base16",
+        "name": "Remote",
+        "variant": "light",
+        "palette": {
+            f"base{index:02X}": value
+            for index, value in enumerate(
+                [
+                    "eff1f5",
+                    "e6e9ef",
+                    "dce0e8",
+                    "acb0be",
+                    "6c6f85",
+                    "4c4f69",
+                    "3c3f59",
+                    "24273a",
+                    "d20f39",
+                    "fe640b",
+                    "df8e1d",
+                    "40a02b",
+                    "179299",
+                    "1e66f5",
+                    "8839ef",
+                    "dc8a78",
+                ]
+            )
+        },
+    }
+    entry = GalleryTheme(remote.id, "base16", remote, document)
+    app = object.__new__(TUIApplication)
+    app._config = SimpleNamespace(tui=TUIConfig())
+    app.open_subview = AsyncMock()
+    original = theme.get_theme()
+    try:
+        await app.open_theme_gallery(
+            GalleryCatalog({entry.id: entry}),
+            refresh=MagicMock(side_effect=RuntimeError("paint failed")),
+        )
+        view = app.open_subview.await_args.args[0]
+
+        assert view.handle_action("enter", view.model.current) == "close"
+        assert (user_dir / "themes" / "base16-remote.yaml").exists()
+        assert (
+            yaml.safe_load((project_dir / "settings.yaml").read_text())["tui"]["theme"] == entry.id
+        )
+        assert app._config.tui.theme == entry.id
+        assert theme.get_theme() == entry.id
+    finally:
+        theme.set_theme(original)
+        theme.reload_themes()
 
 
 @pytest.mark.asyncio

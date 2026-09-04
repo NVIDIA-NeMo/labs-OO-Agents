@@ -115,6 +115,12 @@ def test_theme_completion_uses_discovered_theme_ids(completer, monkeypatch) -> N
 
     monkeypatch.setattr(theme, "theme_names", lambda: ("mocha", "custom-night"))
 
+    assert [item.text for item in completer.complete("/theme ")][:3] == [
+        "/theme picker",
+        "/theme gallery",
+        "/theme update",
+    ]
+    assert [item.text for item in completer.complete("/theme g")] == ["/theme gallery"]
     assert [item.text for item in completer.complete("/theme custom")] == ["/theme custom-night"]
 
 
