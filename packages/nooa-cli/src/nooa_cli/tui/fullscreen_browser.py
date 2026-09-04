@@ -104,6 +104,7 @@ def build_fullscreen_browser(
     small_control: UIControl,
     small_text: Callable[[], Any],
     list_height: Dimension | None = None,
+    list_area_height: Dimension | None = None,
     floats: list[Float] | None = None,
 ) -> DynamicContainer:
     """Build the shared Resume-style title/search/list/preview browser shell."""
@@ -111,7 +112,7 @@ def build_fullscreen_browser(
     def separator() -> Window:
         return Window(char="─", height=1, style="class:fullscreen-browser.separator")
 
-    def area(name: str, body: Any) -> VSplit:
+    def area(name: str, body: Any, *, height: Dimension | None = None) -> VSplit:
         return VSplit(
             [
                 Window(
@@ -122,6 +123,7 @@ def build_fullscreen_browser(
                 body,
             ],
             padding=0,
+            height=height,
         )
 
     main_body = HSplit(
@@ -144,6 +146,7 @@ def build_fullscreen_browser(
                     ],
                     padding=0,
                 ),
+                height=list_area_height,
             ),
             separator(),
             area(
@@ -512,9 +515,7 @@ class ExplorerBrowser:
         for index, control in enumerate(self.option_controls):
             if index:
                 option_windows.append(Window(FormattedTextControl(" "), width=1, height=1))
-            option_window = Window(
-                control, width=self._option_window_width(index), height=1
-            )
+            option_window = Window(control, width=self._option_window_width(index), height=1)
             self.option_windows.append(option_window)
             option_windows.append(option_window)
         self.search_label_control = FormattedTextControl(self._search_label)
@@ -573,7 +574,24 @@ class ExplorerBrowser:
         self.small_control = FormattedTextControl(
             [("class:fullscreen-browser.too-small", "Terminal too small")], focusable=True
         )
-        self.explorer_list_height = Dimension(min=1, preferred=5, weight=1)
+        requested_list_height = getattr(view, "list_height", None)
+        self.explorer_list_height = (
+            Dimension(min=1, preferred=requested_list_height, max=requested_list_height)
+            if requested_list_height is not None
+            else Dimension(min=1, preferred=5, weight=1)
+        )
+        # The pane also contains search, heading, and separator rows. Constrain
+        # the wrapping VSplit because its rail window is otherwise flexible and
+        # lets the pane consume the remaining screen despite a fixed row list.
+        self.explorer_list_area_height = (
+            Dimension(
+                min=requested_list_height + 3,
+                preferred=requested_list_height + 3,
+                max=requested_list_height + 3,
+            )
+            if requested_list_height is not None
+            else None
+        )
         self.container = build_fullscreen_browser(
             app=app,
             title_control=self.title_control,
@@ -589,6 +607,7 @@ class ExplorerBrowser:
             # Explorer lists should consume the full list pane. The Resume
             # Picker keeps the shell's compact five-row default.
             list_height=self.explorer_list_height,
+            list_area_height=self.explorer_list_area_height,
             floats=dropdown_floats,
         )
         # Views with a timed confirmation gesture (the memory explorer's
@@ -617,11 +636,17 @@ class ExplorerBrowser:
     def model(self) -> Any:
         return self.view.model
 
+    def _selection_changed(self) -> None:
+        callback = getattr(self.view, "on_selection_changed", None)
+        if callable(callback):
+            callback()
+
     def _query_changed(self) -> None:
         self.model.edit_query(self.buffer.text)
         self.model.search_active = bool(self.buffer.text.strip())
         self.list_offset = 0
         self._list_offset_detached = False
+        self._selection_changed()
         self.invalidate()
 
     def _title(self):
@@ -907,9 +932,7 @@ class ExplorerBrowser:
             width, height = self.preview_control.viewport
             transcript = self._preview_transcript(width, height)
             if transcript is not None:
-                transcript.scroll_visual_lines(
-                    delta, width=max(1, width), height=max(1, height)
-                )
+                transcript.scroll_visual_lines(delta, width=max(1, width), height=max(1, height))
                 return
         self.model.scroll_detail(delta)
 
@@ -926,6 +949,7 @@ class ExplorerBrowser:
         if self.active_control == "list":
             self._list_offset_detached = False
             self.model.move(delta)
+            self._selection_changed()
             self.invalidate()
             return
         width, height = self.preview_control.viewport
@@ -947,6 +971,7 @@ class ExplorerBrowser:
         if self.active_control == "list":
             self._list_offset_detached = False
             self.model.move(delta * max(1, amount))
+            self._selection_changed()
         else:
             self._scroll_detail_pane(delta * max(1, amount))
         self.invalidate()
@@ -957,6 +982,7 @@ class ExplorerBrowser:
             self.model.cursor = index
             self.model.detail_offset = 0
             self._list_offset_detached = False
+            self._selection_changed()
             self.invalidate()
 
     def mouse_scroll(self, pane: str, delta: int) -> None:
@@ -1026,9 +1052,11 @@ class ExplorerBrowser:
             self.page(-1)
         elif action == "home":
             self.model.jump_home()
+            self._selection_changed()
             self.invalidate()
         elif action == "end":
             self.model.jump_end()
+            self._selection_changed()
             self.invalidate()
         elif action in {"scroll_down", "scroll_up"}:
             delta = 3 if action == "scroll_down" else -3
@@ -1038,6 +1066,8 @@ class ExplorerBrowser:
                 self.buffer.delete_before_cursor()
         elif action in {"quit", "resume", "slash", "j", "k"}:
             text = {"quit": "q", "resume": "r", "slash": "/", "j": "j", "k": "k"}[action]
+            if action == "quit" and getattr(self.view, "quit_from_list", False):
+                return "close"
             if self.active_control == "list":
                 self.buffer.insert_text(text)
             elif action == "quit":

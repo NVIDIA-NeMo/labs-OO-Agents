@@ -241,7 +241,7 @@ def create_key_bindings(vi_mode: bool = False) -> KeyBindings:
 
 
 def create_prompt_style() -> Style:
-    """Create prompt_toolkit style using Catppuccin colors."""
+    """Create a prompt_toolkit style from the active semantic palette."""
     return Style.from_dict(
         {
             # Prompt
@@ -249,9 +249,9 @@ def create_prompt_style() -> Style:
             "prompt.continuation": COLORS["overlay1"],
             "input-area": COLORS["text"],
             "paste-attachment": f"bg:{COLORS['surface0']} {COLORS['subtext1']} italic",
-            "selected": f"bg:{COLORS['surface2']} {COLORS['text']}",
-            "transcript-search-match": f"bg:{COLORS['surface1']} {COLORS['yellow']}",
-            "transcript-search-current": f"bg:{COLORS['yellow']} {COLORS['base']} bold",
+            "selected": f"bg:{COLORS['selection_bg']} {COLORS['selection_fg']}",
+            "transcript-search-match": f"bg:{COLORS['search_match_bg']} {COLORS['search_match_fg']}",
+            "transcript-search-current": f"bg:{COLORS['search_current_bg']} {COLORS['search_current_fg']} bold",
             "return-to-tail": f"bg:{COLORS['surface1']} {COLORS['blue']} bold",
             # Full-screen browsers inherit the terminal's default foreground
             # for ordinary text — the same color scrollback agent messages
@@ -259,29 +259,23 @@ def create_prompt_style() -> Style:
             # and state.
             "fullscreen-browser.title": "bold",
             "fullscreen-browser.row": "",
-            "fullscreen-browser.selected": f"bg:{COLORS['surface2']}",
-
+            "fullscreen-browser.selected": f"bg:{COLORS['selection_bg']} {COLORS['selection_fg']}",
             "fullscreen-browser.unavailable": f"{COLORS['overlay1']} italic",
             "fullscreen-browser.current": COLORS["blue"],
             "fullscreen-browser.attached": COLORS["peach"],
-            "fullscreen-browser.match": f"{COLORS['yellow']} bold underline",
+            "fullscreen-browser.match": f"bg:{COLORS['search_match_bg']} {COLORS['search_match_fg']} bold underline",
             "fullscreen-browser.meta": "",
             "fullscreen-browser.detail": "",
             "fullscreen-browser.search-label": "bold",
             "fullscreen-browser.control": "",
             "fullscreen-browser.dropdown": f"bg:{COLORS['surface0']} {COLORS['text']}",
             "fullscreen-browser.dropdown-frame": f"bg:{COLORS['surface0']} {COLORS['surface2']}",
-            "fullscreen-browser.control-focused": f"bg:{COLORS['surface2']}",
-
+            "fullscreen-browser.control-focused": f"bg:{COLORS['selection_bg']} {COLORS['selection_fg']}",
             "fullscreen-browser.heading": "bold",
-
             "fullscreen-browser.separator": COLORS["surface2"],
             "fullscreen-browser.active-rail": COLORS["surface1"],
-            # The active pane's rail is the one deliberate accent in the
-            # browser: the theme's highlight color (lavender on mocha),
-            # switching with the active palette.
-            "fullscreen-browser.active-rail-active": f"{COLORS['lavender']} bold",
-
+            # The active pane rail uses the theme's semantic focus accent.
+            "fullscreen-browser.active-rail-active": f"{COLORS['focus_accent']} bold",
             "fullscreen-browser.preview": "",
             "fullscreen-browser.preview-user": f"bg:{COLORS['surface2']}",
             "fullscreen-browser.preview-user-edge": COLORS["surface2"],

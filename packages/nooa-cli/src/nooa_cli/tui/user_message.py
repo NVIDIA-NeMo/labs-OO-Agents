@@ -85,8 +85,8 @@ def _hex_to_ansi256(hex_color: str) -> int:
 def render_user_bar(text: str, cols: int, colors: dict[str, str]) -> str:
     """Render one live or resumed user message with highlighted breathing room."""
     width = max(int(cols), 1)
-    foreground = _hex_to_ansi256(colors["text"])
-    background = _hex_to_ansi256(colors["surface2"])
+    foreground = _hex_to_ansi256(colors.get("user_message_fg", colors["text"]))
+    background = _hex_to_ansi256(colors.get("user_message_bg", colors["surface2"]))
     style_on = f"\x1b[38;5;{foreground};48;5;{background}m"
     # Reverse the bar color over SGR's semantic default background. After
     # reversal, the glyph uses the terminal's real background while the rest

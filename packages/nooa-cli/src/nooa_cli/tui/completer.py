@@ -303,12 +303,12 @@ class Completer:
     # ------------------------------------------------------------------
 
     def _theme_completions(self, text: str) -> list[CompletionItem]:
-        from .theme import THEMES
+        from .theme import theme_names
 
         prefix = "/theme "
         partial = text[len(prefix) :]
         items = []
-        for name in THEMES:
+        for name in theme_names():
             if name.startswith(partial.lower()):
                 items.append(
                     CompletionItem(

@@ -1106,8 +1106,6 @@ class ReasoningCommand(Command):
 class ThemeCommand(Command):
     """Switch the color theme."""
 
-    THEMES = ("mocha", "latte", "vsdark", "vslight")
-
     @property
     def name(self) -> str:
         return "theme"
@@ -1117,25 +1115,31 @@ class ThemeCommand(Command):
 
         current = theme_module.get_theme() if hasattr(self, "config") else "?"
         return {
-            "/theme [name]": f"Switch theme (currently {current})",
+            "/theme [name]": f"Browse or switch themes (currently {current})",
         }
 
     def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
+        from .theme import reload_themes
+
+        names = reload_themes()
         if len(args) > 1:
-            return False, f"Usage: /theme [{'|'.join(self.THEMES)}]"
-        if len(args) == 1 and args[0].lower() not in self.THEMES:
-            return False, f"Theme must be one of: {', '.join(self.THEMES)}"
+            return False, f"Usage: /theme [{'|'.join(names)}]"
+        if len(args) == 1 and args[0].lower() not in names:
+            return False, f"Theme must be one of: {', '.join(names)}"
         return True, None
 
     async def execute(self, args: list[str]) -> "CommandResult":
         from . import theme as theme_module
 
         if not args:
-            current = theme_module.get_theme()
-            others = ", ".join(t for t in self.THEMES if t != current)
-            return CommandResult.ok(
-                TextOutput(f"Current theme: {current}  (available: {others})", "info")
-            )
+            open_browser = getattr(self.frontend, "open_theme_explorer", None)
+            if not callable(open_browser):
+                return CommandResult.err("The theme browser requires the terminal TUI.")
+            try:
+                await open_browser()
+            except Exception as exc:
+                return CommandResult.err(f"Theme browser failed: {exc}")
+            return CommandResult.ok(TextOutput("Theme browser closed.", "status"))
 
         name = args[0].lower()
         theme_module.set_theme(name)
