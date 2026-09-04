@@ -28,24 +28,24 @@ class InlineCodePalette:
 
 CANDIDATES: dict[str, tuple[InlineCodePalette, ...]] = {
     "mocha": (
-        InlineCodePalette("Balanced", "blue chip", "#11111b", "#89b4fa"),
-        InlineCodePalette("Cool", "teal chip", "#11111b", "#94e2d5"),
-        InlineCodePalette("Warm", "peach chip", "#11111b", "#fab387"),
+        InlineCodePalette("Balanced", "blue text", "#89b4fa", "#1e1e2e"),
+        InlineCodePalette("Cool", "teal text", "#94e2d5", "#1e1e2e"),
+        InlineCodePalette("Warm", "peach text", "#fab387", "#1e1e2e"),
     ),
     "latte": (
-        InlineCodePalette("Balanced", "blue chip", "#ffffff", "#1e66f5"),
-        InlineCodePalette("Cool", "teal chip", "#ffffff", "#007b83"),
-        InlineCodePalette("Warm", "rose chip", "#ffffff", "#a83f55"),
+        InlineCodePalette("Balanced", "blue text", "#1858c7", "#eff1f5"),
+        InlineCodePalette("Cool", "teal text", "#006f76", "#eff1f5"),
+        InlineCodePalette("Warm", "rose text", "#a83f55", "#eff1f5"),
     ),
     "vsdark": (
-        InlineCodePalette("Balanced", "blue chip", "#1e1e1e", "#9cdcfe"),
-        InlineCodePalette("Cool", "teal chip", "#1e1e1e", "#4ec9b0"),
-        InlineCodePalette("Warm", "peach chip", "#1e1e1e", "#ce9178"),
+        InlineCodePalette("Balanced", "blue text", "#569cd6", "#1e1e1e"),
+        InlineCodePalette("Cool", "teal text", "#4ec9b0", "#1e1e1e"),
+        InlineCodePalette("Warm", "peach text", "#ce9178", "#1e1e1e"),
     ),
     "vslight": (
-        InlineCodePalette("Balanced", "blue chip", "#ffffff", "#005fb8"),
-        InlineCodePalette("Cool", "green chip", "#ffffff", "#107c10"),
-        InlineCodePalette("Warm", "red chip", "#ffffff", "#a31515"),
+        InlineCodePalette("Balanced", "blue text", "#005fb8", "#ffffff"),
+        InlineCodePalette("Cool", "green text", "#107c10", "#ffffff"),
+        InlineCodePalette("Warm", "red text", "#a31515", "#ffffff"),
     ),
 }
 
@@ -69,15 +69,14 @@ def _paint(text: str, candidate: InlineCodePalette, *, enabled: bool) -> str:
     if not enabled:
         return text
     fg = tuple(int(candidate.foreground[index : index + 2], 16) for index in (1, 3, 5))
-    bg = tuple(int(candidate.background[index : index + 2], 16) for index in (1, 3, 5))
-    return f"\x1b[38;2;{fg[0]};{fg[1]};{fg[2]};48;2;{bg[0]};{bg[1]};{bg[2]}m{text}{RESET}"
+    return f"\x1b[1;38;2;{fg[0]};{fg[1]};{fg[2]}m{text}{RESET}"
 
 
 def render(theme: str, selected: int = 0, *, color: bool = True) -> str:
     """Render three inline-code choices for one theme."""
     lines = [
         f"NOOA INLINE-CODE LAB  ·  theme: {theme}",
-        "The actual `inline code` chip is previewed below for every option.",
+        "The actual bold `inline code` text is previewed below for every option.",
         "",
     ]
     for index, candidate in enumerate(CANDIDATES[theme]):
