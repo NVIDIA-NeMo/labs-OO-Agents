@@ -5067,7 +5067,7 @@ class TUIApplication:
                 [
                     (
                         "class:status",
-                        f"{self._spinner_frame} • thinking ({duration} • esc to interrupt)",
+                        f"{self._spinner_frame} thinking ({duration} • esc to interrupt)",
                     )
                 ]
             )

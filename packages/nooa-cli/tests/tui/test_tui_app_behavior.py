@@ -551,13 +551,13 @@ async def test_thinking_status_shows_live_human_readable_elapsed_time():
     async with TUIHarness(agent=agent) as h:
         h.app.submit_message("hold the turn")
         await h.wait_for(h.app.is_thinking)
-        assert "• thinking (0s • esc to interrupt)" in h.app.status_text()
+        assert "thinking (0s • esc to interrupt)" in h.app.status_text()
 
         h.app._thinking_started_at -= 4
-        assert "• thinking (4s • esc to interrupt)" in h.app.status_text()
+        assert "thinking (4s • esc to interrupt)" in h.app.status_text()
 
         h.app._thinking_started_at -= 61
-        assert "• thinking (1m 5s • esc to interrupt)" in h.app.status_text()
+        assert "thinking (1m 5s • esc to interrupt)" in h.app.status_text()
         agent.block.set()
 
 
@@ -575,8 +575,8 @@ async def test_thinking_status_keeps_animated_spinner():
         h.app._spinner_frame = "⠙"
         second = h.app.status_text()
 
-        assert "⠋ • thinking (" in first
-        assert "⠙ • thinking (" in second
+        assert "⠋ thinking (" in first
+        assert "⠙ thinking (" in second
         assert first != second
         agent.block.set()
 
