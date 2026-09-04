@@ -24,7 +24,7 @@ TypeInfoExtractorFunc = Callable[[Any], TypeInfo | tuple[TypeInfo, dict[str, Any
 ModuleInfoExtractorFunc = Callable[[Any], ModuleInfo]
 
 # Global registry: type -> extractor function
-_extractor_registry: dict[type, TypeInfoExtractorFunc] = {}
+_extractor_registry: list[tuple[type, TypeInfoExtractorFunc]] = []
 
 # Global registry: module qualified name -> extractor function
 _module_extractor_registry: dict[str, ModuleInfoExtractorFunc] = {}
@@ -64,7 +64,8 @@ def register_type_info_extractor(
 
     def decorator(func: TypeInfoExtractorFunc) -> TypeInfoExtractorFunc:
         with _registry_lock:
-            _extractor_registry[target_type] = func
+            unregister_type_info_extractor(target_type)
+            _extractor_registry.append((target_type, func))
         return func
 
     return decorator
@@ -88,8 +89,9 @@ def get_type_info_extractor(obj: Any) -> TypeInfoExtractorFunc | None:
     # Check type and all base classes in MRO order
     with _registry_lock:
         for base_type in target_type.__mro__:
-            if base_type in _extractor_registry:
-                return _extractor_registry[base_type]
+            for registered_type, extractor in _extractor_registry:
+                if registered_type is base_type:
+                    return extractor
 
     return None
 
@@ -103,7 +105,9 @@ def unregister_type_info_extractor(target_type: type) -> None:
         target_type: Type to unregister
     """
     with _registry_lock:
-        _extractor_registry.pop(target_type, None)
+        _extractor_registry[:] = [
+            item for item in _extractor_registry if item[0] is not target_type
+        ]
 
 
 def register_module_info_extractor(
