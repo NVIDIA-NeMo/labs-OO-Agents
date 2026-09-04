@@ -1644,6 +1644,7 @@ async def test_preview_workers_are_serialized_and_close_drains_them(monkeypatch)
     started: list[str] = []
 
     def blocking_render(turns_list, start, row_id, width):
+        """Block each fake render so the test can observe worker overlap."""
         nonlocal active, max_active
         with state_lock:
             active += 1
@@ -1713,6 +1714,7 @@ async def test_close_drains_worker_after_preview_task_was_already_cancelled(monk
     worker_finished = threading.Event()
 
     def blocking_render(turns_list, start, row_id, width):
+        """Keep the fake worker alive across both outer-task cancellations."""
         worker_started.set()
         try:
             assert release_worker.wait(2)
