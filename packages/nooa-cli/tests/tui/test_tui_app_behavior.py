@@ -27,6 +27,7 @@ import io
 import threading
 
 import pytest
+from nooa_cli.tui.tui_application import _format_elapsed_duration
 
 from .tui_app_harness import (
     FakeAgent,
@@ -542,6 +543,99 @@ async def test_oauth_modal_ctrl_y_copies_full_authorization_url(monkeypatch):
         assert await prompt == ""
 
 
+async def test_thinking_status_shows_live_human_readable_elapsed_time():
+    """Thinking chrome uses a stable bullet and advances through time units."""
+    agent = FakeAgent()
+    agent.block.clear()
+
+    async with TUIHarness(agent=agent) as h:
+        h.app.submit_message("hold the turn")
+        await h.wait_for(h.app.is_thinking)
+        assert "thinking (0s • esc to interrupt)" in h.app.status_text()
+
+        h.app._thinking_started_at -= 4
+        assert "thinking (4s • esc to interrupt)" in h.app.status_text()
+
+        h.app._thinking_started_at -= 61
+        assert "thinking (1m 5s • esc to interrupt)" in h.app.status_text()
+        agent.block.set()
+
+
+async def test_thinking_status_animates_at_80ms_with_live_duration():
+    """The animation task drives integrated spinner/timer frames at 80 ms."""
+    agent = FakeAgent()
+    agent.block.clear()
+    sleep_delays: list[float] = []
+    advance = asyncio.Event()
+
+    async def controlled_sleep(delay: float) -> None:
+        sleep_delays.append(delay)
+        await advance.wait()
+        advance.clear()
+
+    async with TUIHarness(agent=agent) as h:
+        h.app._spinner_sleep = controlled_sleep
+        h.app.submit_message("hold the turn")
+        await h.wait_for(lambda: h.app.is_thinking() and sleep_delays == [0.08])
+        h.app._thinking_started_at -= 4
+        assert "⠋ thinking (4s • esc to interrupt)" in h.app.status_text()
+
+        advance.set()
+        await h.wait_for(lambda: h.app._spinner_frame == "⠙")
+        assert sleep_delays == [0.08, 0.08]
+        assert "⠙ thinking (4s • esc to interrupt)" in h.app.status_text()
+        agent.block.set()
+        advance.set()
+
+
+async def test_thinking_duration_boundaries():
+    assert _format_elapsed_duration(59.999) == "59s"
+    assert _format_elapsed_duration(60) == "1m 0s"
+    assert _format_elapsed_duration(3599.999) == "59m 59s"
+    assert _format_elapsed_duration(3600) == "1h 0m 0s"
+
+
+async def test_back_to_back_notification_resets_coalesced_thinking_timer():
+    """A new turn resets timing even when observations coalesce THINKING states."""
+    agent = FakeAgent()
+    agent.block.clear()
+
+    async with TUIHarness(agent=agent) as h:
+        h.app.submit_message("first turn")
+        await h.wait_for(h.app.is_thinking)
+        h.app._thinking_started_at -= 30
+        previous_started_at = h.app._thinking_started_at
+
+        h.app.runtime_notification_received()
+
+        assert h.app.is_thinking()
+        assert h.app._thinking_started_at > previous_started_at
+        assert "thinking (0s • esc to interrupt)" in h.app.status_text()
+        agent.block.set()
+
+
+async def test_thinking_duration_resets_for_next_turn():
+    agent = FakeAgent()
+    agent.block.clear()
+
+    async with TUIHarness(agent=agent) as h:
+        h.app.submit_message("first turn")
+        await h.wait_for(h.app.is_thinking)
+        first_started_at = h.app._thinking_started_at
+        assert first_started_at is not None
+
+        agent.block.set()
+        await h.wait_for(lambda: not h.app.is_thinking())
+        assert h.app._thinking_started_at is None
+
+        agent.block.clear()
+        h.app.submit_message("second turn")
+        await h.wait_for(h.app.is_thinking)
+        assert h.app._thinking_started_at is not None
+        assert h.app._thinking_started_at > first_started_at
+        agent.block.set()
+
+
 async def test_status_text_separates_thinking_and_command_status():
     """Thinking and command statuses render as separated status rows."""
     agent = FakeAgent()
@@ -551,9 +645,9 @@ async def test_status_text_separates_thinking_and_command_status():
         await h.wait_for(h.app.is_thinking)
         h.app.set_command_status("· !find ~/dev/* | grep unified")
         status = h.app.status_text()
-        assert "thinking...\n\n· !find" in status
-        assert "thinking...\n· !find" not in status
-        assert "thinking...   · !find" not in status
+        assert "esc to interrupt)\n\n· !find" in status
+        assert "esc to interrupt)\n· !find" not in status
+        assert "esc to interrupt)   · !find" not in status
         agent.block.set()
 
 

@@ -97,6 +97,18 @@ from .terminal_safety import (
 logger = logging.getLogger(__name__)
 
 
+def _format_elapsed_duration(elapsed_seconds: float) -> str:
+    """Format a live elapsed duration using compact whole-second units."""
+    total_seconds = max(0, int(elapsed_seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m {seconds}s"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
 class _ResizeAwareApplication(Application[Any]):
     """Let native replay fold SIGWINCH into its semantic resize transaction."""
 
@@ -1286,6 +1298,8 @@ class TUIApplication:
         self._pulse_frame: str = "·"
         self._pulse_frames = "·•"
         self._spinner_task: asyncio.Task | None = None
+        self._spinner_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+        self._thinking_started_at: float | None = None
         self._command_status_text: str = ""
         self._command_queue_texts: list[str] = []
         # Admitted text remains visible here until its accepted transcript
@@ -3108,8 +3122,8 @@ class TUIApplication:
 
     def _ensure_spinner_task(self) -> None:
         """Start a background task cycling the spinner frame while live work
-        needs animation. Invalidates the app each tick so the status line
-        redraws; exits when the animated statuses clear."""
+        needs animation. Invalidates the app every 80ms so the status line
+        remains responsive and elapsed thinking time redraws continuously."""
         if self._spinner_task is not None and not self._spinner_task.done():
             return
 
@@ -3129,14 +3143,14 @@ class TUIApplication:
                     if self._app.is_running:
                         self._app.invalidate()
                     i += 1
-                    await asyncio.sleep(0.08)
+                    await self._spinner_sleep(0.08)
             finally:
-                # Paint once after the agent stops so "thinking…" clears.
+                # Paint once after the agent stops so the live status clears.
                 if self._app.is_running:
                     self._app.invalidate()
 
         # Agent snapshots may arrive synchronously during construction,
-        # before run_async() establishes the application owner loop.  In that
+        # before run_async() establishes the application owner loop. In that
         # case the initial render will start the spinner after startup.
         loop = self._loop
         if loop is None or not loop.is_running():
@@ -3512,6 +3526,12 @@ class TUIApplication:
                 loop.call_soon_threadsafe(self._on_agent_change, state)
                 return
 
+        is_thinking = state is not None and state.lifecycle is AgentLifecycle.THINKING
+        if is_thinking and self._thinking_started_at is None:
+            self._thinking_started_at = time.monotonic()
+        elif not is_thinking:
+            self._thinking_started_at = None
+
         # Observation teardown is independent from runtime turn cancellation.
         # Only runtime_cancelled() may acknowledge interrupt feedback; otherwise
         # a delayed observation-close callback could retire a newer turn's
@@ -3522,12 +3542,13 @@ class TUIApplication:
         self._ensure_spinner_task()
 
     def runtime_notification_received(self) -> None:
-        """Refresh native chrome after the host dequeues runtime work."""
+        """Refresh native chrome after the host dequeues one turn's work."""
+        thinking_started_at = time.monotonic()
         if self._interrupt_completion_pending:
             # A replacement turn is beginning. Retire the completed turn's
             # optimistic label before rendering any chrome for the new work.
             self._clear_agent_interrupt_status()
-        self._on_dispatcher_dequeued()
+        self._on_dispatcher_dequeued(thinking_started_at)
 
     def runtime_state_changed(self) -> None:
         """Marshal a host-runtime state change onto the UI owner loop."""
@@ -3683,8 +3704,8 @@ class TUIApplication:
         if changed and app is not None and app.is_running:
             app.invalidate()
 
-    def _on_dispatcher_dequeued(self) -> None:
-        """React to a just-dequeued item: redraw queue pane, restart spinner.
+    def _on_dispatcher_dequeued(self, thinking_started_at: float) -> None:
+        """React to a just-dequeued item: reset timing and restart the spinner.
 
         Without this, the queue pane can show stale contents until the
         next event happens to trigger a redraw (spinner tick, user key,
@@ -3698,8 +3719,11 @@ class TUIApplication:
         except RuntimeError:
             on_ui_loop = False
         if ui_loop is not None and not on_ui_loop:
-            ui_loop.call_soon_threadsafe(self._on_dispatcher_dequeued)
+            ui_loop.call_soon_threadsafe(self._on_dispatcher_dequeued, thinking_started_at)
             return
+        # Unlike observations, notifications are not coalesced. Reset here so
+        # back-to-back THINKING turns cannot inherit the previous turn's clock.
+        self._thinking_started_at = thinking_started_at
         if self._app.is_running:
             self._app.invalidate()
         self._ensure_spinner_task()
@@ -5041,7 +5065,17 @@ class TUIApplication:
         ):
             rows.append([("class:status", f"{self._pulse_frame} Interrupting agent turn")])
         elif self.is_thinking():
-            rows.append([("class:status", f"{self._spinner_frame} thinking...")])
+            started_at = self._thinking_started_at
+            elapsed = 0.0 if started_at is None else time.monotonic() - started_at
+            duration = _format_elapsed_duration(elapsed)
+            rows.append(
+                [
+                    (
+                        "class:status",
+                        f"{self._spinner_frame} thinking ({duration} • esc to interrupt)",
+                    )
+                ]
+            )
         if self._llm_probe_status_text:
             rows.append([("class:status", f"{self._spinner_frame} {self._llm_probe_status_text}")])
         auxiliary_status = ""
