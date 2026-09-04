@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import io
 import threading
+import time
 
 import pytest
 
@@ -542,6 +543,40 @@ async def test_oauth_modal_ctrl_y_copies_full_authorization_url(monkeypatch):
         assert await prompt == ""
 
 
+async def test_thinking_status_shows_live_human_readable_elapsed_time():
+    """Thinking chrome uses a stable bullet and advances through time units."""
+    agent = FakeAgent()
+    agent.block.clear()
+
+    async with TUIHarness(agent=agent) as h:
+        h.app.submit_message("hold the turn")
+        await h.wait_for(h.app.is_thinking)
+        assert "• thinking (0s • esc to interrupt)" in h.app.status_text()
+
+        h.app._thinking_started_at -= 4
+        assert "• thinking (4s • esc to interrupt)" in h.app.status_text()
+
+        h.app._thinking_started_at -= 61
+        assert "• thinking (1m 5s • esc to interrupt)" in h.app.status_text()
+        agent.block.set()
+
+
+async def test_thinking_timer_repaints_across_minute_boundary():
+    """The timer task invalidates and renders the next whole-second value."""
+    agent = FakeAgent()
+    agent.block.clear()
+
+    async with TUIHarness(agent=agent) as h:
+        h.app.submit_message("hold the turn")
+        await h.wait_for(h.app.is_thinking)
+        h.app._thinking_started_at = time.monotonic() - 59.8
+        h.app._ensure_spinner_task()
+
+        await h.wait_for(lambda: "thinking (59s" in _last_screen_text(h.app))
+        await h.wait_for(lambda: "thinking (1m 0s" in _last_screen_text(h.app))
+        agent.block.set()
+
+
 async def test_status_text_separates_thinking_and_command_status():
     """Thinking and command statuses render as separated status rows."""
     agent = FakeAgent()
@@ -551,9 +586,9 @@ async def test_status_text_separates_thinking_and_command_status():
         await h.wait_for(h.app.is_thinking)
         h.app.set_command_status("· !find ~/dev/* | grep unified")
         status = h.app.status_text()
-        assert "thinking...\n\n· !find" in status
-        assert "thinking...\n· !find" not in status
-        assert "thinking...   · !find" not in status
+        assert "esc to interrupt)\n\n· !find" in status
+        assert "esc to interrupt)\n· !find" not in status
+        assert "esc to interrupt)   · !find" not in status
         agent.block.set()
 
 
