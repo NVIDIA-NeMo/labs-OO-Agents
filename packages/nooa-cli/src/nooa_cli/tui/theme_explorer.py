@@ -236,6 +236,9 @@ class ThemeGalleryView(ThemeExplorerView):
     def _preview_current(self) -> None:
         """The detail pane previews remote colors without registering them globally."""
 
+    def on_selection_changed(self) -> None:
+        self._install_error = ""
+
     def detail_lines(self, row: ThemeExplorerRow, width: int) -> list[str]:
         lines = super().detail_lines(row, width)
         lines[-1] = "Enter installs, applies, and saves this theme. Esc or q closes."
