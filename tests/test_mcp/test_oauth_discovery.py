@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for RFC 9728 OAuth authorization-server discovery in mcp/oauth.py."""
 
+import asyncio
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -665,10 +666,44 @@ def test_system_browser_available_false_when_no_browser(monkeypatch):
 def test_system_browser_available_true_when_browser_present(monkeypatch):
     """Returns True when webbrowser.get() succeeds without raising."""
     monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_CLIENT", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
     monkeypatch.delenv("SANDBOX_VM_ID", raising=False)
     monkeypatch.delenv("SBX_NO_DISPLAY", raising=False)
     monkeypatch.setattr(oauth.webbrowser, "get", lambda *a, **k: object())
     assert oauth._system_browser_available() is True
+
+
+def test_system_browser_available_false_over_ssh_even_with_forwarded_display(monkeypatch):
+    """A remotely rendered browser cannot reach the SSH host's loopback listener."""
+    monkeypatch.setenv("SSH_CONNECTION", "laptop 123 remote 22")
+    monkeypatch.setenv("DISPLAY", "localhost:10.0")
+    monkeypatch.setattr(oauth.webbrowser, "get", lambda *a, **k: object())
+
+    assert oauth._system_browser_available() is False
+
+
+@pytest.mark.asyncio
+async def test_manual_authorize_times_out_while_waiting_for_paste():
+    """Manual OAuth has the same bounded wait guarantee as loopback OAuth."""
+    waiting = asyncio.Event()
+
+    async def code_prompt(auth_url: str) -> str:
+        await waiting.wait()
+        return "unreachable"
+
+    config = oauth.OAuthConfig(
+        authorization_endpoint="https://maas.example/authorize",
+        token_endpoint="https://maas.example/token",
+        client_id="client-id",
+        redirect_uri="http://localhost:8090/callback",
+        timeout=0.01,
+    )
+
+    with pytest.raises(RuntimeError, match="timed out.*fresh flow"):
+        await oauth.OAuthHandler(config, manual=True, code_prompt=code_prompt).authorize(
+            open_browser=False
+        )
 
 
 @pytest.mark.asyncio
