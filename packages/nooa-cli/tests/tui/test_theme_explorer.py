@@ -14,6 +14,7 @@ from nooa_cli.tui.fullscreen_browser import ExplorerBrowser
 from nooa_cli.tui.output import TextOutput
 from nooa_cli.tui.terminal_safety import strip_safe_ansi
 from nooa_cli.tui.theme_explorer import ThemeExplorerView, build_theme_rows
+from nooa_cli.tui.user_message import render_user_bar
 from prompt_toolkit.application import Application
 from prompt_toolkit.data_structures import Size
 from prompt_toolkit.output import DummyOutput
@@ -42,7 +43,7 @@ def test_theme_rows_expose_metadata_and_semantic_preview() -> None:
     assert "Input window" in rendered
     assert "run the tests" in plain and "completion" in plain and "current" in plain
     assert "Scrollback" in rendered
-    assert "You: how does my message look?" in plain
+    assert "how does my message look?" in plain
     assert "Agent: this is how a reply reads." in plain and "status" in plain
 
 
@@ -57,21 +58,24 @@ def test_input_window_and_scrollback_preview_use_theme_palette() -> None:
     rendered = "\n".join(ThemeExplorerView([row]).detail_lines(row, 100))
     p = row.record.palette
 
-    # The input window previews the accent prompt, transparent input text
-    # (foreground only — the real window shows the terminal program's own
-    # background color), selection styling, and both completion-menu states.
-    assert f"38;2;{_ansi_rgb(p['focus_accent'])}" in rendered
-    assert f"38;2;{_ansi_rgb(p['text_primary'])}mrun the tests " in rendered
+    # The input window matches the real renderers: the '❯ ' prompt uses the
+    # theme's green (class:prompt), input text is foreground-only over the
+    # terminal's own background, selection keeps its filled pair, and the
+    # completion menu uses text-on-surface0 with mauve-on-surface2 current.
+    assert f"38;2;{_ansi_rgb(p['green'])}m\u276f " in rendered
+    assert f"38;2;{_ansi_rgb(p['text'])}mrun the tests " in rendered
     assert f";48;2;{_ansi_rgb(p['base'])}mrun the tests " not in rendered
     assert f"38;2;{_ansi_rgb(p['selection_fg'])};48;2;{_ansi_rgb(p['selection_bg'])}" in rendered
-    assert f"48;2;{_ansi_rgb(p['surface_raised'])}" in rendered
+    assert f"38;2;{_ansi_rgb(p['text'])};48;2;{_ansi_rgb(p['surface0'])}m completion " in rendered
+    assert f"38;2;{_ansi_rgb(p['mauve'])};48;2;{_ansi_rgb(p['surface2'])}m current " in rendered
 
-    # The scrollback preview shows the highlighted user bar, a plain agent
-    # reply over the terminal background, and subtle status text.
-    assert (
-        f"38;2;{_ansi_rgb(p['user_message_fg'])};48;2;{_ansi_rgb(p['user_message_bg'])}" in rendered
-    )
-    assert f"38;2;{_ansi_rgb(p['text_primary'])}mAgent: this is how a reply reads." in rendered
+    # The scrollback preview embeds the exact artifact the transcript renders:
+    # the 256-color quantized user bar with its '❯ ' prefix and breathing-room
+    # edges, followed by a plain agent reply and subtle status text.
+    bar = render_user_bar("how does my message look?", 100, p).rstrip("\n")
+    assert bar in rendered
+    assert "\x1b[38;5;" in rendered
+    assert f"38;2;{_ansi_rgb(p['text'])}mAgent: this is how a reply reads." in rendered
     assert f"38;2;{_ansi_rgb(p['text_subtle'])}m" in rendered
 
 
