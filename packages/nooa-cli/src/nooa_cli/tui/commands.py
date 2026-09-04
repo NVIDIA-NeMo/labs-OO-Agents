@@ -1115,33 +1115,59 @@ class ThemeCommand(Command):
 
         current = theme_module.get_theme() if hasattr(self, "config") else "?"
         return {
-            "/theme [name]": f"Browse or switch themes (currently {current})",
+            "/theme [picker|gallery|update|name]": f"Browse or switch themes (currently {current})",
         }
 
     def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
         from .theme import reload_themes
 
         names = reload_themes()
+        actions = ("picker", "gallery", "update")
         if len(args) > 1:
-            return False, f"Usage: /theme [{'|'.join(names)}]"
-        if len(args) == 1 and args[0].lower() not in names:
-            return False, f"Theme must be one of: {', '.join(names)}"
+            return False, "Usage: /theme [picker|gallery|update|theme-id]"
+        if len(args) == 1 and args[0].lower() not in {*actions, *names}:
+            return False, f"Theme must be an action or one of: {', '.join(names)}"
         return True, None
 
     async def execute(self, args: list[str]) -> "CommandResult":
         from . import theme as theme_module
 
-        if not args:
-            open_browser = getattr(self.frontend, "open_theme_explorer", None)
+        action = args[0].lower() if args else "picker"
+        if action == "update":
+            from .theme_gallery import update_gallery_catalog
+
+            try:
+                catalog = await asyncio.to_thread(update_gallery_catalog)
+            except Exception as exc:
+                return CommandResult.err(f"Theme catalog update failed: {exc}")
+            return CommandResult.ok(
+                TextOutput(
+                    f"Updated theme gallery: {len(catalog.themes)} schemes"
+                    f" ({len(catalog.diagnostics)} skipped).",
+                    "success",
+                )
+            )
+        if action in {"picker", "gallery"}:
+            open_browser = getattr(
+                self.frontend,
+                "open_theme_gallery" if action == "gallery" else "open_theme_explorer",
+                None,
+            )
             if not callable(open_browser):
                 return CommandResult.err("The theme browser requires the terminal TUI.")
             try:
-                await open_browser()
-            except Exception as exc:
-                return CommandResult.err(f"Theme browser failed: {exc}")
-            return CommandResult.ok(TextOutput("Theme browser closed.", "status"))
+                if action == "gallery":
+                    from .theme_gallery import ensure_gallery_catalog
 
-        name = args[0].lower()
+                    catalog = await asyncio.to_thread(ensure_gallery_catalog)
+                    await open_browser(catalog)
+                else:
+                    await open_browser()
+            except Exception as exc:
+                return CommandResult.err(f"Theme {action} failed: {exc}")
+            return CommandResult.ok(TextOutput(f"Theme {action} closed.", "status"))
+
+        name = action
         theme_module.set_theme(name)
         self.config.theme = name
 

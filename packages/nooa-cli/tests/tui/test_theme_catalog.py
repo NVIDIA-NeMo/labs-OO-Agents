@@ -85,7 +85,7 @@ def test_standard_solarized_theme_gets_accessible_derived_highlights() -> None:
 
     for role in ("search_current", "inline_code"):
         assert contrast_ratio(record.palette[f"{role}_fg"], record.palette[f"{role}_bg"]) >= 4.5
-    assert contrast_ratio(record.palette["inline_code_bg"], record.palette["base"]) >= 3
+    assert record.palette["inline_code_bg"] == record.palette["base"]
 
 
 def test_base16_theme_accepts_semantic_overrides() -> None:
@@ -93,8 +93,8 @@ def test_base16_theme_accepts_semantic_overrides() -> None:
         _base16(
             id="custom",
             variant="dark",
-            inline_code_fg="#11111b",
-            inline_code_bg="#89b4fa",
+            inline_code_fg="#89b4fa",
+            inline_code_bg="#181818",
             search_match_fg="#11111b",
             search_current_fg="#11111b",
             diff_added="#a6e3a1",
@@ -105,7 +105,7 @@ def test_base16_theme_accepts_semantic_overrides() -> None:
     )
 
     assert record.id == "custom"
-    assert record.palette["inline_code_bg"] == "#89b4fa"
+    assert record.palette["inline_code_bg"] == "#181818"
     assert record.palette["diff_added"] == "#a6e3a1"
     assert record.source == "test"
 

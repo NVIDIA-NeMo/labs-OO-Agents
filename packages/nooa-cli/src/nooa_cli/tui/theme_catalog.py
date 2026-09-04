@@ -89,8 +89,8 @@ def semanticize(palette: dict[str, str]) -> dict[str, str]:
         "focus_accent": result["lavender"],
         "user_message_fg": result["text"],
         "user_message_bg": result["surface2"],
-        "inline_code_fg": result["text"],
-        "inline_code_bg": result["surface0"],
+        "inline_code_fg": result["blue"],
+        "inline_code_bg": result["base"],
         "code_path": result["teal"],
         "code_number": result["peach"],
     }
@@ -166,6 +166,11 @@ def _base16_palette(data: dict[str, Any]) -> dict[str, str]:
         palette[f"{role}_bg"] = background
     palette["user_message_fg"] = palette["selection_fg"]
     palette["user_message_bg"] = palette["selection_bg"]
+    # Inline code is bold accent text on the terminal background, not a chip.
+    palette["inline_code_fg"] = bases["base0D"]
+    if contrast_ratio(palette["inline_code_fg"], palette["base"]) < 4.5:
+        palette["inline_code_fg"] = palette["text_primary"]
+    palette["inline_code_bg"] = palette["base"]
     base24_keys = {f"base{index:02x}" for index in range(16, 24)}
     focus_candidates = [bases["base0D"], bases["base0B"], bases["base0A"]]
     if base24_keys <= folded.keys():
@@ -198,7 +203,11 @@ def parse_theme(data: dict[str, Any], *, fallback_id: str, source: str) -> Theme
     variant = str(variant_value) if variant_value is not None else ""
     if variant and variant not in {"dark", "light"}:
         raise ValueError("variant must be dark or light")
-    folded_keys = {str(key).lower() for key in data}
+    palette_data = data.get("palette")
+    if palette_data is not None and not isinstance(palette_data, dict):
+        raise ValueError("palette must be a mapping")
+    colors = {**data, **(palette_data or {})}
+    folded_keys = {str(key).lower() for key in colors}
     base24 = {f"base{index:02x}" for index in range(16, 24)}
     present_base24 = base24 & folded_keys
     if present_base24 and present_base24 != base24:
@@ -207,7 +216,7 @@ def parse_theme(data: dict[str, Any], *, fallback_id: str, source: str) -> Theme
     missing = [f"base{index:02X}" for index in range(16) if f"base{index:02x}" not in folded_keys]
     if missing:
         raise ValueError("theme must contain all Base16 base00..base0F colors")
-    palette = _base16_palette(data)
+    palette = _base16_palette(colors)
     for key in SEMANTIC_KEYS:
         if key in data:
             palette[key] = normalize_color(data[key])
@@ -253,7 +262,7 @@ def validate_palette(palette: dict[str, str]) -> None:
         "user message": (palette["user_message_fg"], palette["user_message_bg"]),
         "search match": (palette["search_match_fg"], palette["search_match_bg"]),
         "current search match": (palette["search_current_fg"], palette["search_current_bg"]),
-        "inline code": (palette["inline_code_fg"], palette["inline_code_bg"]),
+        "inline code": (palette["inline_code_fg"], palette["base"]),
         "success": (palette["feedback_success"], palette["base"]),
         "error": (palette["feedback_error"], palette["base"]),
         "warning": (palette["feedback_warning"], palette["base"]),
@@ -268,7 +277,6 @@ def validate_palette(palette: dict[str, str]) -> None:
     ]
     accents = {
         "focus accent": palette["focus_accent"],
-        "inline-code surface": palette["inline_code_bg"],
     }
     failures.extend(
         f"{role} ({contrast_ratio(color, palette['base']):.2f}:1)"

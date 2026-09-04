@@ -96,11 +96,7 @@ def test_agent_message_bodies_use_terminal_default_foreground() -> None:
 
 
 def test_inline_code_spans_follow_the_active_theme() -> None:
-    """Inline ``code`` spans must not keep Rich's fixed cyan-on-black style.
-
-    The default markdown.code style ignores the palette, so light themes
-    rendered unreadable blue-on-black chips.
-    """
+    """Inline ``code`` uses bold theme accent text without a filled chip."""
     from nooa_cli.tui.config import Config
     from nooa_cli.tui.frontend import TerminalFrontend
     from nooa_cli.tui.output import AgentMessage
@@ -117,12 +113,10 @@ def test_inline_code_spans_follow_the_active_theme() -> None:
             bodies[name] = body
             style = frontend._console.console.get_style("markdown.code")
             assert style.color is not None
-            assert style.bgcolor is not None
+            assert style.bold is True
+            assert style.bgcolor is None
             assert style.color.triplet == tuple(
                 int(theme.COLORS["inline_code_fg"][index : index + 2], 16) for index in (1, 3, 5)
-            )
-            assert style.bgcolor.triplet == tuple(
-                int(theme.COLORS["inline_code_bg"][index : index + 2], 16) for index in (1, 3, 5)
             )
             assert "\x1b[40m" not in body, (name, body)
             assert "chip" in body
@@ -151,8 +145,8 @@ def _contrast_ratio(foreground: str, background: str) -> float:
 @pytest.mark.parametrize("name", theme.THEMES)
 def test_each_theme_has_accessible_inline_code_colors(name: str) -> None:
     palette = theme.THEMES[name]
-    assert _contrast_ratio(palette["inline_code_fg"], palette["inline_code_bg"]) >= 4.5
-    assert _contrast_ratio(palette["inline_code_bg"], palette["base"]) >= 3
+    assert _contrast_ratio(palette["inline_code_fg"], palette["base"]) >= 4.5
+    assert palette["inline_code_bg"] == palette["base"]
 
 
 @pytest.mark.parametrize("name", theme.THEMES)
