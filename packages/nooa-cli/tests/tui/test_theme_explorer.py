@@ -259,6 +259,8 @@ def test_gallery_view_keeps_open_and_reports_install_failure() -> None:
 
     assert view.handle_action("enter", view.model.current) == "handled"
     assert "Install failed: disk full" in "\n".join(view.detail_lines(view.model.current, 80))
+    view.on_selection_changed()
+    assert "Install failed" not in "\n".join(view.detail_lines(view.model.current, 80))
 
 
 @pytest.mark.asyncio
@@ -391,13 +393,15 @@ async def test_gallery_install_rolls_back_when_settings_write_fails(tmp_path, mo
         MagicMock(side_effect=OSError("settings unavailable")),
     )
 
-    await app.open_theme_gallery(GalleryCatalog({entry.id: entry}), refresh=MagicMock())
-    view = app.open_subview.await_args.args[0]
+    try:
+        await app.open_theme_gallery(GalleryCatalog({entry.id: entry}), refresh=MagicMock())
+        view = app.open_subview.await_args.args[0]
 
-    assert view.handle_action("enter", view.model.current) == "handled"
-    assert yaml.safe_load(target.read_text(encoding="utf-8"))["name"] == "Original"
-    assert "settings unavailable" in "\n".join(view.detail_lines(view.model.current, 80))
-    theme.reload_themes()
+        assert view.handle_action("enter", view.model.current) == "handled"
+        assert yaml.safe_load(target.read_text(encoding="utf-8"))["name"] == "Original"
+        assert "settings unavailable" in "\n".join(view.detail_lines(view.model.current, 80))
+    finally:
+        theme.reload_themes()
 
 
 @pytest.mark.asyncio
