@@ -205,6 +205,20 @@ def test_token_is_expired_logic():
     assert not no_exp.is_expired()
 
 
+@pytest.mark.parametrize(
+    ("label", "payload"),
+    [("array", "[]"), ("string", '"nope"'), ("null", "null")],
+)
+def test_load_cached_token_ignores_non_object_cache(tmp_path, monkeypatch, label, payload):
+    """A valid-but-non-object cache file must fall back to None, not raise."""
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(tmp_path))
+    cache_file = tmp_path / ".nooa" / "mcp_tokens.json"
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    cache_file.write_text(payload, encoding="utf-8")
+
+    assert oauth._load_cached_token("https://maas.example/mcp") is None
+
+
 def test_token_cache_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(tmp_path))
     url = "https://maas.example/mcp"
