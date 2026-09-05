@@ -155,6 +155,12 @@ def _drive_basic_codeact_turn(
 
 class TestBasicTurn:
     def test_single_codeact_turn_round_trip(self, exporter: AtifExporter) -> None:
+        """One CodeAct turn produces a schema-valid, normative trajectory.
+
+        Covers the whole happy path in one pass: the system/user/agent step
+        shape, tool calls joined to their observation by ``tool_call_id``,
+        and token and cost totals rolled up into ``final_metrics``.
+        """
         exporter.on_task(Task(prompt="Say hello in Python."))
         _drive_basic_codeact_turn(exporter)
 
@@ -179,12 +185,34 @@ class TestBasicTurn:
         assert traj.final_metrics.total_cost_usd == pytest.approx(0.001)
 
     def test_writes_file_atomically(self, exporter: AtifExporter, tmp_path: Path) -> None:
+        """The trajectory reaches its final path through a rename, not a partial write.
+
+        ``_write`` serialises to ``trajectory.json.tmp`` and ``os.replace``s
+        it, so a concurrent reader never sees a half-written document and no
+        ``.tmp`` file is left behind.
+        """
         exporter.on_task(Task(prompt="hi"))
         _drive_basic_codeact_turn(exporter)
         loaded = Trajectory.model_validate_json(exporter.path.read_text())
         assert loaded.agent.name == "test-agent"
         # No leftover .tmp file.
         assert not (tmp_path / "trajectory.json.tmp").exists()
+
+    def test_writes_non_ascii_content_as_utf8(self, exporter: AtifExporter) -> None:
+        """Trajectory text is model output, so non-ASCII is the common case.
+
+        Written without an explicit encoding the file picks up the locale
+        default (cp1252 on Windows), and ``_write`` swallows the resulting
+        UnicodeEncodeError — the run succeeds while the trajectory never
+        reaches disk.
+        """
+        prompt = "Explain: throughput ⇒ latency — “cached” 🚀"
+        exporter.on_task(Task(prompt=prompt))
+        _drive_basic_codeact_turn(exporter, stdout="α ⇒ β\n")
+
+        assert exporter.path.exists(), "trajectory was dropped instead of written"
+        loaded = Trajectory.model_validate_json(exporter.path.read_bytes().decode("utf-8"))
+        assert loaded.steps[1].message == prompt
 
 
 # ---------------------------------------------------------------------------
