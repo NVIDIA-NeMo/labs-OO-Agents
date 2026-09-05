@@ -175,6 +175,16 @@ class LLMOutput(EventBase):  # type: ignore[misc]
             "message when conversation history is replayed"
         ),
     )
+    reasoning_provenance: str | None = Field(
+        default=None,
+        repr=False,
+        description=(
+            "Coarse model-family tag (e.g. 'openai') for reasoning_items. Opaque "
+            "state is only replayed when the current client is the same family; "
+            "on a family switch it is dropped rather than sent to a provider that "
+            "cannot decrypt it."
+        ),
+    )
 
 
 class PythonOutput(EventBase):  # type: ignore[misc]
