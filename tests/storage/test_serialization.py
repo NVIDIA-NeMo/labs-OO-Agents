@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, ConfigDict
 
+from nooa.config.model_config import ModelConfig
 from nooa.errors.storage import DeserializationError, SerializationError
 from nooa.storage.markers import snapshotable
 from nooa.storage.serialization import SKIP, deserialize, serialize
@@ -170,6 +171,33 @@ class TestNoSnapshot:
 
 
 class TestPydantic:
+    def test_model_config_preserves_provider_extras(self):
+        model = ModelConfig(model_name="test", num_retries=7, custom={"stops": ("a", "b")})
+        blob, allowlist = serialize(model)
+        restored = deserialize(blob, allowlist)
+        assert restored == model
+        assert restored.model_extra == model.model_extra
+
+    def test_extra_values_use_recursive_serialization(self):
+        model = ModelConfig(custom={"point": Point(1, 2), "config": Config("localhost")})
+        blob, allowlist = serialize(model)
+        restored = deserialize(blob, allowlist)
+        assert restored.model_extra["custom"]["point"] == Point(1, 2)
+        config = restored.model_extra["custom"]["config"]
+        assert isinstance(config, Config)
+        assert config.host == "localhost"
+
+    def test_nested_extra_class_requires_allowlist(self):
+        model = ModelConfig(custom=Point(1, 2))
+        blob, allowlist = serialize(model)
+        with pytest.raises(DeserializationError, match="not in the allowlist"):
+            deserialize(blob, allowlist - {f"{Point.__module__}.Point"})
+
+    def test_nosnapshot_extra_is_skipped(self):
+        model = ModelConfig(custom=_NoSnapshotThing(), num_retries=7)
+        blob, allowlist = serialize(model)
+        assert deserialize(blob, allowlist).model_extra == {"num_retries": 7}
+
     def test_simple_model_roundtrip(self):
         m = MyModel(name="test", value=42)
         blob, al = serialize(m)
