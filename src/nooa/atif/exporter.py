@@ -1310,7 +1310,13 @@ class AtifExporter:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-            tmp.write_text(self._trajectory.model_dump_json(indent=2, exclude_none=True))
+            # JSON is UTF-8 by definition (RFC 8259 section 8.1). Without an
+            # explicit encoding this uses the locale default, and non-ASCII
+            # model output raises into the swallow below, losing the file.
+            tmp.write_text(
+                self._trajectory.model_dump_json(indent=2, exclude_none=True),
+                encoding="utf-8",
+            )
             os.replace(tmp, self.path)
         except Exception:  # noqa: BLE001
             # Tracing must never break the run; log and move on.

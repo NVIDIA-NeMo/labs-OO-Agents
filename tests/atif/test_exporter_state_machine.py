@@ -186,6 +186,22 @@ class TestBasicTurn:
         # No leftover .tmp file.
         assert not (tmp_path / "trajectory.json.tmp").exists()
 
+    def test_writes_non_ascii_content_as_utf8(self, exporter: AtifExporter) -> None:
+        """Trajectory text is model output, so non-ASCII is the common case.
+
+        Written without an explicit encoding the file picks up the locale
+        default (cp1252 on Windows), and ``_write`` swallows the resulting
+        UnicodeEncodeError — the run succeeds while the trajectory never
+        reaches disk.
+        """
+        prompt = "Explain: throughput ⇒ latency — “cached” 🚀"
+        exporter.on_task(Task(prompt=prompt))
+        _drive_basic_codeact_turn(exporter, stdout="α ⇒ β\n")
+
+        assert exporter.path.exists(), "trajectory was dropped instead of written"
+        loaded = Trajectory.model_validate_json(exporter.path.read_bytes().decode("utf-8"))
+        assert loaded.steps[1].message == prompt
+
 
 # ---------------------------------------------------------------------------
 # Joinability — the original observation-dropping regression must pass by
