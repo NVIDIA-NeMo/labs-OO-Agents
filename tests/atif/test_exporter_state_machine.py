@@ -179,6 +179,12 @@ class TestBasicTurn:
         assert traj.final_metrics.total_cost_usd == pytest.approx(0.001)
 
     def test_writes_file_atomically(self, exporter: AtifExporter, tmp_path: Path) -> None:
+        """The trajectory reaches its final path through a rename, not a partial write.
+
+        ``_write`` serialises to ``trajectory.json.tmp`` and ``os.replace``s
+        it, so a concurrent reader never sees a half-written document and no
+        ``.tmp`` file is left behind.
+        """
         exporter.on_task(Task(prompt="hi"))
         _drive_basic_codeact_turn(exporter)
         loaded = Trajectory.model_validate_json(exporter.path.read_text())
