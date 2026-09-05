@@ -353,6 +353,7 @@ class Session:
         self._background_tasks: set[asyncio.Task] = set()  # fire-and-forget tasks
         self._command_runner = None
         self._on_session_change: Callable[[str], None] | None = None
+        self._restart_pending = False
 
         # Populated at the start of ``run()``; referenced by the handler
         # methods (``_on_command``, ``_on_user_message_ui``, ``_loud_handler``,
@@ -365,6 +366,43 @@ class Session:
         # Own ShellTools for bang (!) commands — avoids cross-loop issues
         # when the agent's shell was created on a different event loop.
         self._bang_shell: ShellTools | None = None
+
+    def request_restart_when_idle(self) -> None:
+        """Latch a restart drain and stop accepting new user-initiated work."""
+        if self._restart_pending:
+            return
+        self._restart_pending = True
+        if self._app is not None:
+            self._app.begin_input_drain("Restart pending; waiting for current work to finish.")
+
+    async def wait_restart_ready(self) -> None:
+        """Wait until work admitted before the restart request settles naturally."""
+        if not self._restart_pending:
+            raise RuntimeError("restart was not requested")
+        while self._app is None or not self._app.is_running:
+            await asyncio.sleep(0.01)
+        self._app.begin_input_drain("Restart pending; waiting for current work to finish.")
+        while True:
+            command_runner = self._command_runner
+            policy = getattr(self, "_local_turn_policy", None)
+            agent_runner = getattr(self, "_local_agent_runner", None)
+            if (
+                self._app.input_drain_idle
+                and (command_runner is None or command_runner.is_idle)
+                and (policy is None or policy.is_idle)
+                and agent_runner is not None
+            ):
+                await agent_runner.run_async(agent_runner.wait_quiescent)
+                # The owner-loop wait establishes a barrier past queue gets.
+                # Recheck UI-side producers in case they admitted work meanwhile.
+                command_runner = self._command_runner
+                if (
+                    self._app.input_drain_idle
+                    and (command_runner is None or command_runner.is_idle)
+                    and (policy is None or policy.is_idle)
+                ):
+                    return
+            await asyncio.sleep(0.01)
 
     @property
     def show_python(self) -> bool:
@@ -627,6 +665,8 @@ class Session:
             defer_submission=self._llm_submission_pending,
         )
         app_ref.append(self._app)
+        if getattr(self, "_restart_pending", False):
+            self._app.begin_input_drain("Restart pending; waiting for current work to finish.")
 
         from .local_turn_policy import LocalTurnPolicy
 

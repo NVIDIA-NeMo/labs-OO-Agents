@@ -68,6 +68,11 @@ class CommandRunner:
     def records(self) -> list[CommandRecord]:
         return list(self._records)
 
+    @property
+    def is_idle(self) -> bool:
+        """Return whether every command admitted so far has finished."""
+        return self._active_work is None and self._queue.empty()
+
     async def run(
         self,
         *,

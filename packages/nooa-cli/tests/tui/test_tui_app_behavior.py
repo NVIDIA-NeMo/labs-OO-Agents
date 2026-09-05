@@ -3215,3 +3215,17 @@ async def test_shutdown_agent_queue_manager_runs_spawn_cleanup_on_agent_loop() -
         await asyncio.wait_for(cleanup_started.wait(), timeout=1.0)
         await asyncio.wait_for(cleanup_done.wait(), timeout=1.0)
         assert agent.queue_manager._handles == []
+
+
+async def test_restart_drain_rejects_new_prompt_slash_and_bang_input():
+    async with TUIHarness() as h:
+        assert h.app is not None
+        h.app.begin_input_drain("Restart pending; waiting for current work to finish.")
+
+        for text in ("new prompt", "/help", "!echo nope"):
+            await h.submit_async(text)
+            await h.wait_output_contains("Restart pending")
+
+        assert h.agent.messages_received == []
+        assert h.app.commands_dispatched() == []
+        assert h.app.last_bang_command() is None
