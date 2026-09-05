@@ -1165,6 +1165,15 @@ class ActorRuntime:
                         "cached_tokens": getattr(_prompt_details, "cached_tokens", None),
                     }
                 )
+            _input_details = getattr(_usage_raw, "input_tokens_details", None)
+            if _input_details is not None:
+                _usage_dict["input_tokens_details"] = (
+                    _input_details
+                    if isinstance(_input_details, dict)
+                    else {
+                        "cached_tokens": getattr(_input_details, "cached_tokens", None),
+                    }
+                )
             _completion_details = getattr(_usage_raw, "completion_tokens_details", None)
             if _completion_details is not None:
                 _usage_dict["completion_tokens_details"] = (
@@ -1202,6 +1211,9 @@ class ActorRuntime:
             _usage_dict.get("cached_tokens")
             or _usage_dict.get("cache_read_input_tokens")
             or (_usage_dict.get("prompt_tokens_details") or {}).get("cached_tokens")
+            # Responses API reports cache hits under input_tokens_details, not
+            # prompt_tokens_details — without this, Responses cache hits read 0.
+            or (_usage_dict.get("input_tokens_details") or {}).get("cached_tokens")
             or 0
         )
         _reasoning_tokens = int(
@@ -1242,7 +1254,18 @@ class ActorRuntime:
         elif not isinstance(content, str):
             # Other non-string types - convert to string representation
             content = str(content)
-        event = LLMOutput(content=content)
+        assistant_message = getattr(response, "assistant_message", None)
+        # Only capture reasoning state for terminal (non-tool) assistant text.
+        # Tool-call turns already replay the complete native output batch via
+        # CodeAct's tool events, so storing it again here would double-replay it.
+        reasoning_items = (
+            assistant_message.get("reasoning_items")
+            if isinstance(assistant_message, dict) and not response.tool_calls
+            else None
+        )
+        if not isinstance(reasoning_items, list):
+            reasoning_items = None
+        event = LLMOutput(content=content, reasoning_items=reasoning_items)
         event_id = self.event_manager.add(event)
 
         return response, event_id

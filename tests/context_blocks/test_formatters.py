@@ -402,6 +402,37 @@ class TestEndToEndPipelines:
         assert responses_input[reasoning_index + 1]["type"] == "function_call"
         assert responses_input[reasoning_index + 2]["type"] == "function_call_output"
 
+    def test_reasoning_items_survive_text_response_pipeline(self):
+        from nooa.events import LLMOutput
+
+        reasoning_item = {
+            "id": "rs_text",
+            "type": "reasoning",
+            "encrypted_content": "encrypted-state",
+            "summary": [],
+        }
+        event = LLMOutput(content="done", reasoning_items=[reasoning_item])
+        blocks = [
+            ResolvedBlock(
+                key="answer",
+                content="done",
+                role=Role.ASSISTANT,
+                event=event,
+            )
+        ]
+
+        messages = XMLBlockFormatter().format(blocks)
+        openai_input = OpenAIProviderFormatter().format(messages)
+        responses_input = ResponsesProviderFormatter().format(messages)
+
+        openai_assistant = next(item for item in openai_input if item.get("role") == "assistant")
+        assert "reasoning_items" not in openai_assistant
+        reasoning_index = responses_input.index(reasoning_item)
+        assert responses_input[reasoning_index + 1] == {
+            "role": "assistant",
+            "content": "done",
+        }
+
 
 class TestBlockFormatterFormatEvent:
     """format_event() still serializes raw events to content strings."""

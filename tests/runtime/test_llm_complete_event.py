@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 from nooa import strategy
-from nooa.events import LLMComplete
+from nooa.events import LLMComplete, LLMOutput
 from nooa.strategies import PredictStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
@@ -27,6 +27,7 @@ def _resp(
     *,
     usage: dict | None = None,
     reasoning: str | None = None,
+    reasoning_items: list[dict] | None = None,
 ) -> LLMResponse:
     finish_reason = "tool_calls" if tool_calls else "stop"
     return LLMResponse(
@@ -34,7 +35,11 @@ def _resp(
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
-        assistant_message={"role": "assistant", "content": content},
+        assistant_message={
+            "role": "assistant",
+            "content": content,
+            **({"reasoning_items": reasoning_items} if reasoning_items else {}),
+        },
         usage=usage,
         reasoning=reasoning,
     )
@@ -137,6 +142,51 @@ class TestLLMCompleteEvent:
         assert ev.generation_id != ""
 
     @pytest.mark.asyncio
+    async def test_cached_tokens_from_responses_input_tokens_details(self) -> None:
+        """Responses API reports cache hits under input_tokens_details.cached_tokens."""
+        recorded: list[LLMComplete] = []
+
+        @strategy(
+            PredictStrategy(),
+            llm=FakeLLMClient(
+                scripted_responses=[
+                    _resp(
+                        content='{"v":1}',
+                        usage={
+                            "input_tokens": 100,
+                            "output_tokens": 20,
+                            "input_tokens_details": {"cached_tokens": 64},
+                        },
+                    )
+                ]
+            ),
+        )
+        async def predict_fn(prompt: str) -> dict:
+            """{prompt}"""
+            ...
+
+        from nooa.standalone import _atif_exporter_var
+
+        class _Capture:
+            def _attach_child(self, em, child_agent_name: str = "") -> None:
+                em.on("LLMComplete", lambda e: recorded.append(e))
+
+            def _detach_child(self, em) -> None:
+                pass
+
+        token = _atif_exporter_var.set(_Capture())
+        try:
+            await predict_fn("hi")
+        finally:
+            _atif_exporter_var.reset(token)
+
+        assert len(recorded) == 1
+        ev = recorded[0]
+        assert ev.prompt_tokens == 100
+        assert ev.completion_tokens == 20
+        assert ev.cached_tokens == 64
+
+    @pytest.mark.asyncio
     async def test_carries_structured_tool_calls(self) -> None:
         """tool_calls list mirrors LLMResponse.tool_calls (canonical ids)."""
         recorded: list[LLMComplete] = []
@@ -223,6 +273,49 @@ class TestLLMCompleteEvent:
         assert ev.completion_tokens == 0
         assert ev.cached_tokens == 0
         assert ev.cost_usd == 0.0
+
+    @pytest.mark.asyncio
+    async def test_text_response_reasoning_state_is_stored_on_llm_output(self) -> None:
+        """Non-tool Responses reasoning items survive event-sourced history."""
+        reasoning_item = {
+            "id": "rs_text",
+            "type": "reasoning",
+            "encrypted_content": "encrypted-state",
+            "summary": [],
+        }
+        event_managers = []
+
+        @strategy(
+            PredictStrategy(),
+            llm=FakeLLMClient(
+                scripted_responses=[
+                    _resp(content='{"answer":"hi"}', reasoning_items=[reasoning_item])
+                ]
+            ),
+        )
+        async def predict_fn() -> dict:
+            """Answer."""
+            ...
+
+        from nooa.standalone import _atif_exporter_var
+
+        class _Capture:
+            def _attach_child(self, em, child_agent_name: str = "") -> None:
+                event_managers.append(em)
+
+            def _detach_child(self, em) -> None:
+                pass
+
+        token = _atif_exporter_var.set(_Capture())
+        try:
+            await predict_fn()
+        finally:
+            _atif_exporter_var.reset(token)
+
+        llm_output = next(
+            event for event in event_managers[0].values() if isinstance(event, LLMOutput)
+        )
+        assert llm_output.reasoning_items == [reasoning_item]
 
 
 class TestAtifExporterContextVar:

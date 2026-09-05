@@ -269,11 +269,15 @@ def _event_block_to_messages(
         else (block.content or "")
     )
     images = getattr(block.event, "images", None) if block.event is not None else None
+    reasoning_items = (
+        getattr(block.event, "reasoning_items", None) if block.event is not None else None
+    )
     return [
         RenderedMessage(
             role=block.role,
             content=content,
             parts=[BlockPart(key=block.key, content=content)],
+            reasoning_items=reasoning_items,
             images=images,
         )
     ]
@@ -596,5 +600,11 @@ class ResponsesProviderFormatter(ProviderFormatter):
                 if msg.role in (Role.RUNTIME_EVENT, Role.METADATA):
                     continue
                 role = msg.role if msg.role in (Role.USER, Role.ASSISTANT) else Role.USER
+                # Event-sourced replay: only the reasoning items survive on the
+                # LLMOutput event (not the full native ``_batch``), so re-emit
+                # them before a reconstructed assistant message rather than
+                # replaying the original provider ``message`` output item.
+                if role == Role.ASSISTANT and msg.reasoning_items:
+                    out.extend(msg.reasoning_items)
                 out.append({"role": role.value, "content": msg.content or ""})
         return out

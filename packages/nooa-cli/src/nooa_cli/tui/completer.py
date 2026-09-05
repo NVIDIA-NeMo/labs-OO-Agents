@@ -191,6 +191,8 @@ class Completer:
                 "low": "Use low reasoning effort",
                 "medium": "Use medium reasoning effort",
                 "high": "Use high reasoning effort",
+                "xhigh": "Use extra-high reasoning effort",
+                "max": "Use maximum reasoning effort",
             },
             "/toolbar ": {
                 "reset": "Restore the default toolbar items",
