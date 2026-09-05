@@ -22,9 +22,10 @@ pytest node ID, e.g. `test_stdout_is_captured[sandbox]`.
 | `PythonOutput` status and ordering | `event_type` sequence, `tool_call_id` | |
 | Runtime exception surfacing | `execution_status is ResultStatus.ERROR` | Status and exception type |
 | Runtime exception source context | `PythonOutput.error` | Frames, source lines and carets; regression guard for #191 |
-| SyntaxError source and caret fidelity | `PythonOutput.error` | **Deferred** — not yet covered |
+| SyntaxError source and caret fidelity | `PythonOutput.error` | Not a parity gap: validation raises before the formatter, so neither backend renders cell location — see #267 |
 | Source line and wrapper-offset fidelity | `PythonOutput.error` | Line numbers pinned per frame |
-| `return_result()` success and failure | method return value | Failure transport **deferred** — not yet covered |
+| `return_result()` success | method return value | Picklable payloads behave identically |
+| `return_result()` failure transport | `PythonOutput.error` | **Backend-specific**: sandbox rejects non-picklable payloads with `CellSerializationError`; in-process returns the live object |
 | Cancellation and timeout | TBD | Parity boundary undefined; see open question |
 
 ## Backend-specific contracts
