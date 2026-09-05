@@ -40,6 +40,9 @@ DEFAULT_TRACE_DIR = "/logs/artifacts/traces"
 DEFAULT_TRAJECTORY_PATH = "/logs/agent/trajectory.json"
 USE_BATCHING = False
 BATCH_REQUEST_TIMEOUT_S = int(os.environ.get("NOOA_CYBERGYM_REQUEST_TIMEOUT_S", "3900"))
+OUTPUT_TOKEN_MARGIN = int(os.environ.get("NOOA_CYBERGYM_OUTPUT_TOKEN_MARGIN", "64000"))
+REASONING_OUTPUT_FLOOR = int(os.environ.get("NOOA_CYBERGYM_REASONING_OUTPUT_FLOOR", "128000"))
+SUMMARY_MAX_OUTPUT_TOKENS = int(os.environ.get("NOOA_CYBERGYM_SUMMARY_MAX_OUTPUT_TOKENS", "16384"))
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +80,9 @@ def _llm_client_kwargs(max_output_tokens: int) -> dict[str, object]:
         "api_base": api_base,
         "api_key": api_key,
         "max_tokens": max_output_tokens,
+        "output_token_margin": OUTPUT_TOKEN_MARGIN,
+        "reasoning_output_floor": REASONING_OUTPUT_FLOOR,
+        "usage_log_path": "/logs/artifacts/llm_usage.jsonl",
     }
     if USE_BATCHING:
         # get_llm_client only copies selected YAML keys from llm_config.yaml.
@@ -105,6 +111,10 @@ def _apply_reasoning_effort(llm, reasoning_effort: str) -> None:
         config["reasoning"] = {"effort": reasoning_effort}
     else:
         config["reasoning_effort"] = reasoning_effort
+        allowed = list(config.get("allowed_openai_params", []))
+        if "reasoning_effort" not in allowed:
+            allowed.append("reasoning_effort")
+        config["allowed_openai_params"] = allowed
 
 
 @hidden
@@ -146,15 +156,42 @@ def _is_responses_llm(llm) -> bool:
 
 @hidden
 def install_summarizer(agent: Agent, llm) -> None:
-    """Install a token-budget summarizer on an agent based on its LLM's context window."""
+    """Install a non-reasoning summarizer triggered by reserved output room."""
+    context_window = llm.context_window
     budget = context_budget(llm, 0.8)
+    summary_llm = make_llm(
+        llm.model,
+        max_tokens=SUMMARY_MAX_OUTPUT_TOKENS,
+        reasoning_effort="none",
+    )
+    summary_config = _llm_config(summary_llm)
+    if summary_config is not None:
+        summary_config.pop("reasoning", None)
+        summary_config.pop("reasoning_effort", None)
+        if _is_responses_llm(summary_llm):
+            summary_config["reasoning"] = {"effort": "none"}
+        else:
+            extra_body = dict(summary_config.get("extra_body", {}))
+            extra_body["thinking"] = {"type": "disabled"}
+            summary_config["extra_body"] = extra_body
     logger.info(
-        "context_window=%s summarizer_budget=%d agent=%s",
-        llm.context_window,
+        "context_window=%s summarizer_budget=%d output_margin=%d reasoning_floor=%d agent=%s",
+        context_window,
         budget,
+        OUTPUT_TOKEN_MARGIN,
+        REASONING_OUTPUT_FLOOR,
         type(agent).__name__,
     )
-    TokenBudgetSummarizer.install(agent, config=TokenBudgetConfig(max_tokens=budget))
+    TokenBudgetSummarizer.install(
+        agent,
+        llm=summary_llm,
+        config=TokenBudgetConfig(
+            max_tokens=budget,
+            context_window=context_window,
+            output_margin=OUTPUT_TOKEN_MARGIN,
+            reasoning_output_floor=REASONING_OUTPUT_FLOOR,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

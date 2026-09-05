@@ -17,6 +17,7 @@ from uuid import uuid4
 import docker
 from cybergym.task.gen_task import generate_task
 from cybergym.task.types import TaskConfig, TaskDifficulty
+from docker.errors import ImageNotFound
 
 ENV_PREFIXES = (
     "NOOA_CYBERGYM_",
@@ -34,6 +35,39 @@ DEFAULT_PROMPT = (
 )
 DEFAULT_MODEL = "glm-5.2"
 DEFAULT_LLM_API_BASE = "https://inference-api.nvidia.com/v1"
+
+
+def require_local_image(client, image: str, *, role: str) -> None:
+    """Fail before task generation when a required image is unavailable."""
+    try:
+        client.images.get(image)
+    except ImageNotFound as exc:
+        raise RuntimeError(f"required {role} image is not local: {image}") from exc
+
+
+def preflight_internal_route(
+    client,
+    *,
+    image: str,
+    network: str,
+    env: dict[str, str],
+    server: str,
+) -> None:
+    """Verify the runner image can reach the task server through the real network."""
+    url = server.rstrip("/") + "/docs"
+    code = (
+        "import urllib.request; "
+        f"r=urllib.request.urlopen({url!r}, timeout=20); "
+        "assert 200 <= r.status < 400, r.status"
+    )
+    client.containers.run(
+        image,
+        command=["python", "-c", code],
+        environment=env,
+        network=network,
+        extra_hosts={"host.docker.internal": "host-gateway"},
+        remove=True,
+    )
 
 
 def load_dotenv(path: Path) -> None:
@@ -236,6 +270,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     load_dotenv(args.dotenv)
+    docker_client = docker.from_env()
+    require_local_image(docker_client, args.image, role="runner")
 
     args.tmp_dir.mkdir(parents=True, exist_ok=True)
     args.log_dir.mkdir(parents=True, exist_ok=True)
@@ -269,6 +305,9 @@ def main(argv: list[str] | None = None) -> int:
     proxy = None
     if args.use_firewall or args.connect_firewall:
         from cybergym.firewall import FirewallProxyManager
+        from cybergym.firewall.proxy import PROXY_IMAGE
+
+        require_local_image(docker_client, PROXY_IMAGE, role="firewall proxy")
 
         extra_domains = [
             d for d in os.environ.get("CYBERGYM_FIREWALL_EXTRA_DOMAINS", "").split(",") if d
@@ -296,6 +335,13 @@ def main(argv: list[str] | None = None) -> int:
             if server_no_proxy not in no_proxy:
                 no_proxy.append(server_no_proxy)
             env["NO_PROXY"] = env["no_proxy"] = ",".join(no_proxy)
+        preflight_internal_route(
+            docker_client,
+            image=args.image,
+            network=network,
+            env=env,
+            server=server,
+        )
 
     task = generate_task(
         TaskConfig(
@@ -336,8 +382,13 @@ def main(argv: list[str] | None = None) -> int:
     if exit_code != 0:
         print(f"nooa_cybergym container exited with {exit_code}; logs: {log_dir}", file=sys.stderr)
         return exit_code
+    final_dir = log_dir / "artifacts" / "final_submission"
+    if not (final_dir / "poc").is_file() or not (final_dir / "selection.json").is_file():
+        print(f"final PoC artifact not found under {final_dir}", file=sys.stderr)
+        return 4
     if not (log_dir / "artifacts" / "output.txt").exists():
-        print(f"warning: output.txt not found under {log_dir / 'artifacts'}", file=sys.stderr)
+        print(f"output.txt not found under {log_dir / 'artifacts'}", file=sys.stderr)
+        return 5
     print(f"agent_id={agent_id}")
     print(f"logs={log_dir}")
     return 0

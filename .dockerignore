@@ -63,6 +63,8 @@ journal/
 examples/
 experiments/
 scratch/
+!examples/cybergym/
+!examples/cybergym/**
 
 # Results and traces
 results/

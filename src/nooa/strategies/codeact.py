@@ -907,6 +907,29 @@ Standard Python builtins and agent instance (`self`) are available."""
                 if response is None:
                     continue
 
+                if response.finish_reason in {
+                    "content_filter",
+                    "error",
+                    "unknown",
+                    "insufficient_system_resource",
+                }:
+                    runtime.event_manager.add(
+                        DebugTrace(
+                            content=(
+                                "Terminal LLM response rejected: "
+                                f"finish_reason={response.finish_reason!r}; "
+                                f"content={response.content!r}; "
+                                f"tool_calls={response.tool_calls!r}"
+                            )
+                        )
+                    )
+                    runtime.event_manager.remove(event_id)
+                    turn_state.is_final = True
+                    raise GenerationError(
+                        "CodeAct rejected a non-success terminal response with "
+                        f"finish_reason={response.finish_reason!r}."
+                    )
+
                 # ── Post-response cleanup (CodeAct) ──────────────────────
                 # Intercept point: strategy-specific response transforms.
                 # Handles text-only→synthetic, comment prepend, tool call
@@ -921,6 +944,13 @@ Standard Python builtins and agent instance (`self`) are available."""
                     )
                     if not isinstance(reasoning_items, list):
                         reasoning_items = None
+                    reasoning_content = (
+                        assistant_message.get("reasoning_content")
+                        if isinstance(assistant_message, dict)
+                        else None
+                    )
+                    if not isinstance(reasoning_content, str):
+                        reasoning_content = None
                     # If the LLM also emitted message content alongside the tool
                     # call(s), preserve it by prepending it as a comment at the
                     # top of the first execute_python code block.
@@ -948,6 +978,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                         return_type,
                         event_id or "",
                         reasoning_items=reasoning_items,
+                        reasoning_content=reasoning_content,
                     )
                     if result.completed:
                         turn_state.success = True
@@ -1225,6 +1256,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         return_type: Any,
         event_id: str,
         reasoning_items: list[dict[str, Any]] | None = None,
+        reasoning_content: str | None = None,
     ) -> _ToolCallsResult:
         """Process tool calls from a single LLM turn.
 
@@ -1267,6 +1299,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     name=tool_call.name,
                     arguments=args,
                     reasoning_items=(reasoning_items if tool_call_index == 0 else None),
+                    reasoning_content=(reasoning_content if tool_call_index == 0 else None),
                     result=None,  # Will be updated after execution
                 )
             )

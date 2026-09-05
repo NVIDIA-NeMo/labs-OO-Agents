@@ -31,6 +31,7 @@ except ImportError:
     from shell_tools import ShellTools  # type: ignore[no-redef]
 
 with hidden:
+    import inspect
     import time
 
     from nooa.errors import GenerationError
@@ -41,9 +42,14 @@ with hidden:
         from util import install_summarizer, make_llm  # type: ignore[no-redef]
 
 try:
-    from .submissions import PocSubmission, SubmissionManager, SubmitResult
+    from .submissions import FinalPocArtifact, PocSubmission, SubmissionManager, SubmitResult
 except ImportError:  # pragma: no cover
-    from submissions import PocSubmission, SubmissionManager, SubmitResult  # type: ignore[no-redef]
+    from submissions import (  # type: ignore[no-redef]
+        FinalPocArtifact,
+        PocSubmission,
+        SubmissionManager,
+        SubmitResult,
+    )
 
 logger = logging.getLogger("nooa_cybergym")
 
@@ -70,7 +76,7 @@ DESCRIPTION_PATH = Path("/workspace/task_data/description.txt")
 DEFAULT_MODEL_NAME = "glm-5.2"
 
 MAX_ITERATIONS = int(os.environ.get("NOOA_CYBERGYM_MAX_ITERATIONS", "300"))
-MAX_OUTPUT_TOKENS = int(os.environ.get("NOOA_CYBERGYM_MAX_OUTPUT_TOKENS", "32768"))
+MAX_OUTPUT_TOKENS = int(os.environ.get("NOOA_CYBERGYM_MAX_OUTPUT_TOKENS", "384000"))
 SOFT_TIMEOUT_SEC = int(os.environ.get("NOOA_CYBERGYM_SOFT_TIMEOUT_SEC", "13920"))
 MIN_EXPLORATION_SEC = int(os.environ.get("NOOA_CYBERGYM_MIN_EXPLORATION_SEC", "1200"))
 MAX_CONCURRENT_EXPANDERS = int(os.environ.get("NOOA_CYBERGYM_MAX_CONCURRENT_EXPANDERS", "2"))
@@ -97,6 +103,13 @@ class Review(BaseModel):
     on_target: bool
     guidance: str
     stop: bool
+    reasoning: str
+
+
+class FinalSelection(BaseModel):
+    """The reviewer model's single final PoC designation."""
+
+    submission_number: int
     reasoning: str
 
 
@@ -437,10 +450,18 @@ class CyberGymAgent(Agent, context={"state": None}):
 
     description: str = ""
     _portfolio: Annotated[Portfolio | None, hidden] = None
+    _active_tasks: Annotated[set[asyncio.Task], hidden]
+    _worker_agents: Annotated[list[Agent], hidden]
+    _stop_event: Annotated[asyncio.Event, hidden]
+    _shutdown_complete: Annotated[bool, hidden]
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.shell = ShellTools(cwd="/workspace")
+        self._active_tasks = set()
+        self._worker_agents = []
+        self._stop_event = asyncio.Event()
+        self._shutdown_complete = False
 
     async def solve(self, instruction: str) -> str:
         """Main solve loop."""
@@ -463,18 +484,23 @@ class CyberGymAgent(Agent, context={"state": None}):
         # Launch finders — one per lane, persistent instances
         finders: list[Finder] = []
         task_to_finder: dict[asyncio.Task, Finder] = {}
-        active: set[asyncio.Task] = set()
+        active = self._active_tasks
 
         for lane in LANES:
             finder = self._make_finder(lane)
             finders.append(finder)
+            self._worker_agents.append(finder)
             t = asyncio.create_task(self._run_finder(finder))
             task_to_finder[t] = finder
             active.add(t)
 
         last_reviewed_families = 0
 
-        while active and (time.monotonic() - started_at) < SOFT_TIMEOUT_SEC:
+        while (
+            active
+            and not self._stop_event.is_set()
+            and (time.monotonic() - started_at) < SOFT_TIMEOUT_SEC
+        ):
             # Memory pressure check
             rss = _get_rss_mb()
             if rss > MEMORY_LIMIT_MB:
@@ -490,6 +516,7 @@ class CyberGymAgent(Agent, context={"state": None}):
                     break
                 self._portfolio.mark_expanded(crash.submission_number)
                 expander, seed = self._make_expander(crash)
+                self._worker_agents.append(expander)
                 active.add(asyncio.create_task(self._run_expander(expander, seed)))
                 active_expander_count += 1
 
@@ -531,10 +558,12 @@ class CyberGymAgent(Agent, context={"state": None}):
                     active.add(t)
                 # Expanders are not respawned
 
-        # Cleanup — cancel without blocking (main.py handles the hard timeout)
-        for task in active:
-            task.cancel()
-        return str(self._portfolio)
+        await self._stop_workers()
+        try:
+            artifact = await self._finalize_portfolio()
+            return f"{self._portfolio}\n\nFinal PoC: {artifact.poc_path} sha256={artifact.sha256}"
+        finally:
+            await self.shutdown()
 
     @hidden
     async def _run_finder(self, finder: Finder) -> None:
@@ -567,13 +596,88 @@ class CyberGymAgent(Agent, context={"state": None}):
     async def _wait(self, active: set[asyncio.Task]) -> set[asyncio.Task]:
         """Wait for any worker to finish or portfolio to change."""
         changed_task = asyncio.create_task(self._portfolio.changed.wait())
-        done, _ = await asyncio.wait(active | {changed_task}, return_when=asyncio.FIRST_COMPLETED)
+        stop_task = asyncio.create_task(self._stop_event.wait())
+        done, _ = await asyncio.wait(
+            active | {changed_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+        )
         if changed_task in done:
             self._portfolio.changed.clear()
             done.discard(changed_task)
         else:
             changed_task.cancel()
+        if stop_task in done:
+            done.discard(stop_task)
+        else:
+            stop_task.cancel()
+        await asyncio.gather(changed_task, stop_task, return_exceptions=True)
         return done
+
+    def request_stop(self) -> None:
+        """Ask the orchestration loop to finish and freeze its final candidate."""
+        self._stop_event.set()
+
+    @hidden
+    async def _select_final(self, current_portfolio_state: str) -> FinalSelection:
+        """Choose exactly one verified crash submission as the final PoC.
+
+        Select only a submission whose status is ``crashed`` and fingerprint kind
+        is ``crash``. Prefer the smallest, most deterministic, patch-relevant
+        trigger. Return its submission number and a concise justification. The
+        selected bytes are frozen and cannot be replaced later.
+        """
+        ...
+
+    async def _finalize_portfolio(self) -> FinalPocArtifact:
+        if self._portfolio is None or self._portfolio.distinct_families == 0:
+            raise RuntimeError("No verified crashing PoC is available for final selection")
+        selection = await self._select_final(str(self._portfolio))
+        return self._portfolio._manager.finalize(
+            selection.submission_number,
+            selection_reason=selection.reasoning,
+        )
+
+    async def _stop_workers(self) -> None:
+        tasks = list(self._active_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._active_tasks.clear()
+
+    async def shutdown(self) -> None:
+        """Cancel workers and close all shells and LLM clients before loop exit."""
+        if self._shutdown_complete:
+            return
+        self._shutdown_complete = True
+        await self._stop_workers()
+        if self._portfolio is not None:
+            await self._portfolio._manager.close()
+        for worker in self._worker_agents:
+            await self._close_resource(getattr(worker, "shell", None))
+            await self._close_agent_llms(worker)
+        await self._close_agent_llms(self)
+
+    @staticmethod
+    async def _close_resource(resource) -> None:
+        close = getattr(resource, "aclose", None) or getattr(resource, "close", None)
+        if close is None:
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+
+    @classmethod
+    async def _close_agent_llms(cls, agent: Agent) -> None:
+        seen: set[int] = set()
+        resources = [getattr(agent, "llm", None)]
+        resources.extend(
+            getattr(summarizer, "llm", None) for summarizer in getattr(agent, "_summarizers", [])
+        )
+        for resource in resources:
+            if resource is None or id(resource) in seen:
+                continue
+            seen.add(id(resource))
+            await cls._close_resource(resource)
 
     @hidden
     async def _review(self, current_portfolio_state: str) -> Review:

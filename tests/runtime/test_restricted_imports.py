@@ -144,8 +144,12 @@ class TestSecurityValidatorRestrictedImports:
         )
         # subprocess is in DEFAULT_BLOCKED_MODULES — should still be blocked
         code = "import subprocess"
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as exc_info:
             validator.validate(code, context)
+        message = str(exc_info.value)
+        assert "use the `shell` tool for commands" in message
+        assert "await self.shell.run(...)" in message
+        assert "your next tool call must retry the command" in message
 
     def test_default_config_allows_os(self, validator):
         """With default RestrictionsConfig (empty deny list), 'os' is allowed."""

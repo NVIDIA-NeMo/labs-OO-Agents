@@ -44,7 +44,10 @@ RUN uv pip install --system --require-hashes -r /tmp/nooa-requirements.txt \
 
 WORKDIR /app
 RUN mkdir -p /logs/artifacts && ln -s /logs/artifacts /app/artifacts
-COPY nooa_cybergym ./nooa_cybergym
-COPY nooa_cybergym/llm_config.yaml ./.nooa/llm_config.yaml
+COPY src/nooa /usr/local/lib/python3.12/site-packages/nooa
+COPY examples/cybergym/nooa_cybergym ./nooa_cybergym
+COPY examples/cybergym/nooa_cybergym/_vendor/code_validator.py /usr/local/lib/python3.12/site-packages/nooa/runtime/code_validator.py
+COPY examples/cybergym/nooa_cybergym/_vendor/shell_tools.py /usr/local/lib/python3.12/site-packages/nooa/tools/shell_tools.py
+COPY examples/cybergym/nooa_cybergym/llm_config.yaml ./.nooa/llm_config.yaml
 
 CMD ["python", "-m", "nooa_cybergym.main", "--help"]

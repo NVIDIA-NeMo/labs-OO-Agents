@@ -10,11 +10,13 @@
 # Root of this example (the directory that contains this scripts/ folder).
 AGENT_REPO="${AGENT_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export AGENT_REPO
+export NOOA_REPO_ROOT="${NOOA_REPO_ROOT:-$(git -C "$AGENT_REPO" rev-parse --show-toplevel)}"
 
 # CyberGym benchmark checkout + data (created by scripts/setup.sh).
 export CYBERGYM_REPO="${CYBERGYM_REPO:-$AGENT_REPO/cybergym_repo}"
 export CYBERGYM_DATA_DIR="${CYBERGYM_DATA_DIR:-$CYBERGYM_REPO/cybergym_data/data}"
 export CYBERGYM_MASK_MAP="${CYBERGYM_MASK_MAP:-$CYBERGYM_REPO/mask_map.json}"
+export XEUS_CYBERGYM_REPO="${XEUS_CYBERGYM_REPO:-/srv/sunchaser/xeus-cybergym}"
 
 # CyberGym submission server.
 export CYBERGYM_SERVER="${CYBERGYM_SERVER:-http://127.0.0.1:8666}"
@@ -34,9 +36,16 @@ if [ -z "${CYBERGYM_API_KEY:-}" ] && [ -f "$AGENT_REPO/.env" ]; then
   unset _cg_line
 fi
 
+if [ -f "$AGENT_REPO/.env" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$AGENT_REPO/.env"
+  set +a
+fi
+
 # Model + agent image.
 export MODEL="${MODEL:-glm-5.2}"
-export REASONING_EFFORT="${REASONING_EFFORT:-xhigh}"
+export REASONING_EFFORT="${REASONING_EFFORT:-max}"
 export RUNNER_IMAGE="${RUNNER_IMAGE:-nooa/nooa-cybergym:latest}"
 
 # Hard per-task wall-clock limit (seconds). The container is killed at this cap.

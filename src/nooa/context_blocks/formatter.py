@@ -226,6 +226,7 @@ def _event_block_to_messages(
                     arguments=event.arguments,
                 ),
                 reasoning_items=event.reasoning_items,
+                reasoning_content=event.reasoning_content,
             )
         ]
         if event.result is not None:
@@ -442,6 +443,8 @@ class OpenAIProviderFormatter(ProviderFormatter):
                 }
                 if msg.reasoning_items:
                     assistant_message["reasoning_items"] = msg.reasoning_items
+                if msg.reasoning_content:
+                    assistant_message["reasoning_content"] = msg.reasoning_content
                 out.append(assistant_message)
             elif msg.tool_call_id is not None:
                 out.append(

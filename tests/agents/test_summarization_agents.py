@@ -212,6 +212,52 @@ class TestTokenBudgetSummarizer:
         )
         assert summarizer._should_summarize(event) is True
 
+    def test_should_summarize_when_remaining_output_room_drops_below_floor(self, test_agent):
+        test_agent.runtime._last_prompt_tokens_actual = 820_000
+        summarizer = TokenBudgetSummarizer(
+            test_agent,
+            config=TokenBudgetConfig(
+                max_tokens=999_999,
+                context_window=1_000_000,
+                output_margin=64_000,
+                reasoning_output_floor=128_000,
+            ),
+        )
+        event = AfterTurn(
+            method_name="test",
+            strategy="CODEACT",
+            generation_id="gen-123",
+            parent_generation_id=None,
+            turn_number=1,
+            is_final=False,
+            success=True,
+        )
+
+        assert summarizer._should_summarize(event) is True
+
+    def test_does_not_summarize_when_reasoning_floor_still_fits(self, test_agent):
+        test_agent.runtime._last_prompt_tokens_actual = 700_000
+        summarizer = TokenBudgetSummarizer(
+            test_agent,
+            config=TokenBudgetConfig(
+                max_tokens=999_999,
+                context_window=1_000_000,
+                output_margin=64_000,
+                reasoning_output_floor=128_000,
+            ),
+        )
+        event = AfterTurn(
+            method_name="test",
+            strategy="CODEACT",
+            generation_id="gen-123",
+            parent_generation_id=None,
+            turn_number=1,
+            is_final=False,
+            success=True,
+        )
+
+        assert summarizer._should_summarize(event) is False
+
     def test_should_not_summarize_from_estimate_when_actual_under_budget(self, test_agent):
         """A local estimate alone does not trigger summarization; actual usage is authoritative."""
         from nooa import ContextWindowStats

@@ -4,11 +4,19 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import inspect
 import json
+import os
 import re
 import shlex
+import shutil
+import tempfile
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -72,6 +80,21 @@ class PocSubmission(BaseModel):
     hypothesis: str
 
 
+class FinalPocArtifact(BaseModel):
+    """Immutable final PoC designation consumed by the official scorer."""
+
+    schema_version: int = 1
+    submission_number: int
+    poc_path: str
+    sha256: str
+    byte_length: int
+    selection_reason: str
+    source_agent: str | None = None
+    source_model: str | None = None
+    hypothesis: str
+    cluster_key: str
+
+
 class KnownFamily(BaseModel):
     """Reviewer-maintained family summary to steer independent attempts."""
 
@@ -88,6 +111,141 @@ class KnownFamily(BaseModel):
 
 def _model_data(model: BaseModel) -> dict:
     return model.model_dump() if hasattr(model, "model_dump") else model.dict()
+
+
+class SubmissionShellCircuitOpen(RuntimeError):
+    """The verifier shell repeatedly lost framing and is no longer trusted."""
+
+
+@dataclass
+class _ShellRequest:
+    command: str
+    future: asyncio.Future[Any]
+
+
+class SubmissionShellOwner:
+    """Single owner for the persistent verifier shell.
+
+    Callers enqueue commands and await futures. Only the worker task can touch
+    the shell, so caller cancellation cannot interrupt or desynchronize an
+    in-flight command. The underlying BashSession supplies a unique per-command
+    control-channel sentinel; timeout or framing loss poisons and replaces the
+    entire ShellTools instance before one retry.
+    """
+
+    def __init__(
+        self,
+        shell: Any,
+        *,
+        shell_factory: Callable[[], Any] | None = None,
+        timeout: float | None = None,
+        max_consecutive_respawns: int = 3,
+    ) -> None:
+        self._shell = shell
+        self._shell_factory = shell_factory or (lambda: ShellTools(cwd="/workspace"))
+        self._timeout = float(
+            timeout
+            if timeout is not None
+            else os.environ.get("NOOA_CYBERGYM_SUBMISSION_TIMEOUT_SEC", "300")
+        )
+        self._max_consecutive_respawns = max_consecutive_respawns
+        self._consecutive_respawns = 0
+        self._queue: asyncio.Queue[_ShellRequest] | None = None
+        self._worker: asyncio.Task[None] | None = None
+
+    async def execute(self, command: str) -> Any:
+        self._ensure_worker()
+        assert self._queue is not None
+        future = asyncio.get_running_loop().create_future()
+        self._queue.put_nowait(_ShellRequest(command=command, future=future))
+        return await future
+
+    async def close(self) -> None:
+        worker = self._worker
+        if worker is not None and not worker.done():
+            worker.cancel()
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
+        await self._close_shell(self._shell)
+        self._worker = None
+        self._queue = None
+
+    def _ensure_worker(self) -> None:
+        if self._worker is not None and not self._worker.done():
+            return
+        self._queue = asyncio.Queue()
+        self._worker = asyncio.create_task(self._run())
+
+    async def _run(self) -> None:
+        assert self._queue is not None
+        while True:
+            request = await self._queue.get()
+            try:
+                if request.future.cancelled():
+                    continue
+                try:
+                    result = await self._execute_with_recovery(request.command)
+                except Exception as exc:
+                    if not request.future.cancelled():
+                        request.future.set_exception(exc)
+                else:
+                    if not request.future.cancelled():
+                        request.future.set_result(result)
+            finally:
+                self._queue.task_done()
+
+    async def _execute_with_recovery(self, command: str) -> Any:
+        if self._consecutive_respawns >= self._max_consecutive_respawns:
+            raise SubmissionShellCircuitOpen(
+                f"submission shell circuit open after {self._consecutive_respawns} respawns"
+            )
+
+        last_error: BaseException | None = None
+        for attempt in range(2):
+            try:
+                result = await self._shell.run(command, timeout=self._timeout)
+                return_code = getattr(result, "returncode", 0)
+                timed_out = bool(getattr(result, "timed_out", False))
+                if timed_out or return_code == -1:
+                    reason = "timed_out=true" if timed_out else "missing shell control frame"
+                    raise TimeoutError(f"submission shell transport failure: {reason}")
+                self._consecutive_respawns = 0
+                return result
+            except asyncio.CancelledError:
+                raise
+            except (
+                TimeoutError,
+                asyncio.IncompleteReadError,
+                asyncio.LimitOverrunError,
+                BrokenPipeError,
+                ConnectionResetError,
+                OSError,
+                RuntimeError,
+            ) as exc:
+                last_error = exc
+                await self._respawn()
+                if attempt == 1:
+                    break
+
+        raise SubmissionShellCircuitOpen(
+            "submission shell failed after one clean-session retry"
+        ) from last_error
+
+    async def _respawn(self) -> None:
+        await self._close_shell(self._shell)
+        self._shell = self._shell_factory()
+        self._consecutive_respawns += 1
+
+    @staticmethod
+    async def _close_shell(shell: Any) -> None:
+        close = getattr(shell, "close", None)
+        if close is None:
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
 
 
 class SubmissionManager:
@@ -112,6 +270,7 @@ class SubmissionManager:
     SUBMIT_SCRIPT = "/workspace/submit.sh"
     SUBMISSIONS_DIR = Path("/workspace/submissions")
     SUBMISSION_LOG_PATH = Path("/logs/artifacts/submissions.jsonl")
+    FINAL_SUBMISSION_DIR = Path("/logs/artifacts/final_submission")
     OUTPUT_LIMIT = 2048
     EXCERPT_LIMIT = 1200
 
@@ -121,8 +280,9 @@ class SubmissionManager:
         *,
         submission_count: int = 0,
         submissions: list[PocSubmission] | None = None,
+        shell_factory: Callable[[], Any] | None = None,
     ) -> None:
-        self.shell = shell
+        self._owner = SubmissionShellOwner(shell, shell_factory=shell_factory)
         self._submission_count = submission_count
         self._submissions = [self._clone_submission(item) for item in submissions or []]
         self._crashed_poc_paths: set[str] = set()
@@ -472,7 +632,7 @@ class SubmissionManager:
     ) -> SubmitResult:
         """Run submit.sh through this manager's shell and parse its JSON output."""
         command = f"bash {shlex.quote(self.SUBMIT_SCRIPT)} {shlex.quote(poc_path)}"
-        result = await self.shell.run(command, timeout=60)
+        result = await self._owner.execute(command)
         stdout = (result.stdout or "").strip()
         payload = self._last_json_object_line(stdout)
         if payload is None:
@@ -494,6 +654,64 @@ class SubmissionManager:
             submission_number=submission_number,
             fingerprint=self.fingerprint_output(status, exit_code, output),
         )
+
+    async def close(self) -> None:
+        """Stop the submission worker and close its private shell."""
+        await self._owner.close()
+
+    def finalize(self, submission_number: int, *, selection_reason: str) -> FinalPocArtifact:
+        """Freeze exactly one model-designated verified crash as an atomic artifact."""
+        selection_reason = " ".join(selection_reason.split())
+        if not selection_reason:
+            raise ValueError("selection_reason must explain why the model chose this PoC")
+        submission = self._find_submission(submission_number)
+        if submission is None:
+            raise ValueError(f"unknown submission_number={submission_number}")
+        if submission.status != "crashed" or submission.fingerprint.kind != "crash":
+            raise ValueError(
+                f"submission_number={submission_number} is not a verified crash candidate"
+            )
+
+        source = Path(submission.submitted_path or submission.original_path)
+        data = source.read_bytes()
+        final_dir = self.FINAL_SUBMISSION_DIR
+        if final_dir.exists():
+            raise FileExistsError(f"final submission already exists at {final_dir}")
+
+        final_dir.parent.mkdir(parents=True, exist_ok=True)
+        stage = Path(tempfile.mkdtemp(prefix=".final_submission-", dir=final_dir.parent))
+        try:
+            poc_path = stage / "poc"
+            poc_path.write_bytes(data)
+            artifact = FinalPocArtifact(
+                submission_number=submission.submission_number,
+                poc_path=str(final_dir / "poc"),
+                sha256=hashlib.sha256(data).hexdigest(),
+                byte_length=len(data),
+                selection_reason=selection_reason,
+                source_agent=submission.source_agent,
+                source_model=submission.source_model,
+                hypothesis=submission.hypothesis,
+                cluster_key=submission.fingerprint.cluster_key,
+            )
+            (stage / "selection.json").write_text(
+                json.dumps(_model_data(artifact), sort_keys=True, separators=(",", ":")) + "\n"
+            )
+            try:
+                os.rename(stage, final_dir)
+            except OSError as exc:
+                if final_dir.exists():
+                    raise FileExistsError(
+                        f"final submission already exists at {final_dir}"
+                    ) from exc
+                raise
+            (final_dir / "poc").chmod(0o444)
+            (final_dir / "selection.json").chmod(0o444)
+            final_dir.chmod(0o555)
+            return artifact
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage)
 
     def _record_result(
         self,

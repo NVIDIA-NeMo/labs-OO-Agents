@@ -615,7 +615,15 @@ class TokenBudgetSummarizer(SummarizationAgent):
             )
             return False
 
-        return actual is not None and actual > self.config.max_tokens
+        if actual is None:
+            return False
+        if (
+            self.config.context_window is not None
+            and self.config.reasoning_output_floor is not None
+        ):
+            remaining_output_room = self.config.context_window - actual - self.config.output_margin
+            return remaining_output_room < self.config.reasoning_output_floor
+        return actual > self.config.max_tokens
 
     @hidden
     @no_trace

@@ -28,6 +28,14 @@ else
   export CYBERGYM_API_KEY="$key"
   echo "    Generated a new CYBERGYM_API_KEY in $ENV_FILE (gitignored)"
 fi
+if grep -qE '^[[:space:]]*(export[[:space:]]+)?SUNCHASER_EVIDENCE_SIGNING_SEED=' "$ENV_FILE"; then
+  echo "    SUNCHASER_EVIDENCE_SIGNING_SEED already present in $ENV_FILE"
+else
+  signing_seed="$(python3 -c 'import base64,os; print(base64.b64encode(os.urandom(32)).decode())')"
+  printf '\n# Ed25519 seed for immutable official-score evidence.\nSUNCHASER_EVIDENCE_SIGNING_SEED=%s\nSUNCHASER_EVIDENCE_KEY_ID=sunchaser-evaluator-v1\n' "$signing_seed" >> "$ENV_FILE"
+  unset signing_seed
+  echo "    Generated a new evidence signing seed in $ENV_FILE (gitignored)"
+fi
 
 echo "==> [3/6] Cloning CyberGym into $CYBERGYM_REPO"
 if [ ! -d "$CYBERGYM_REPO/.git" ]; then
@@ -53,7 +61,7 @@ echo "==> [5/6] Downloading CyberGym server Docker images for the subset"
 (cd "$CYBERGYM_REPO" && python3 scripts/server_data/download_subset.py)
 
 echo "==> [6/6] Installing this runner and building the agent image"
-docker build -f "$AGENT_REPO/Dockerfile" -t "$RUNNER_IMAGE" "$AGENT_REPO"
+docker build -f "$AGENT_REPO/Dockerfile" -t "$RUNNER_IMAGE" "$NOOA_REPO_ROOT"
 
 echo
 echo "==> Setup complete."
