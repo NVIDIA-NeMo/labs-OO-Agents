@@ -755,6 +755,26 @@ def _ingest_one(body: dict, db: sqlite3.Connection) -> dict[str, Any]:
     return {"session_id": session_id, "experiment": experiment, "span_count": span_count}
 
 
+def _ingest_one_atomic(body: dict, db: sqlite3.Connection) -> dict[str, Any]:
+    """Run ``_ingest_one`` in a SAVEPOINT so a failed payload writes nothing.
+
+    ``_ingest_one`` writes as it goes and leaves the commit to its caller, so a
+    payload that raises partway through leaves the rows it already wrote in the
+    open transaction — where the next commit on that connection picks them up.
+    Rolling back to the savepoint discards exactly that payload's writes and
+    nothing else, so the rest of a batch stays committable.
+    """
+    db.execute("SAVEPOINT ingest_one")
+    try:
+        result = _ingest_one(body, db)
+    except Exception:
+        db.execute("ROLLBACK TO ingest_one")
+        raise
+    finally:
+        db.execute("RELEASE ingest_one")
+    return result
+
+
 def ingest(body: dict) -> dict[str, Any]:
     """Ingest an OTLP ExportTraceServiceRequest using the read connection.
 
@@ -762,7 +782,7 @@ def ingest(body: dict) -> dict[str, Any]:
     Use ingest_batch_write() from the writer executor thread instead.
     """
     db = _get_db()
-    result = _ingest_one(body, db)
+    result = _ingest_one_atomic(body, db)
     db.commit()
     return result
 
@@ -813,7 +833,7 @@ def ingest_batch_write_bytes(payloads: list[bytes]) -> list[dict[str, Any]]:
             # /tmp path. _log_oversized_payload() provides the diagnostics needed.
             if len(raw) > 1 * 1024 * 1024:  # 1 MB
                 _log_oversized_payload(body, len(raw))
-            results.append(_ingest_one(body, db))
+            results.append(_ingest_one_atomic(body, db))
         except Exception:
             log.exception("[ingest_batch_write_bytes] Failed to process one payload, skipping")
     db.commit()
@@ -848,7 +868,7 @@ def ingest_batch_write(bodies: list[dict]) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for body in bodies:
         try:
-            results.append(_ingest_one(body, db))
+            results.append(_ingest_one_atomic(body, db))
         except Exception:
             log.exception("[ingest_batch_write] Failed to process one payload, skipping")
     db.commit()
