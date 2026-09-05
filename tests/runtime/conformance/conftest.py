@@ -124,6 +124,10 @@ def codeact_agent(backend: Backend):
                 self.seen_pid = pid
                 return pid
 
+            def helper(self, x: int) -> int:
+                """Double a value, brokered back to the parent from the worker."""
+                return x * 2
+
         return _ConformanceAgent(llm=FakeLLMClient(scripted_responses=scripted_responses))
 
     return _make
