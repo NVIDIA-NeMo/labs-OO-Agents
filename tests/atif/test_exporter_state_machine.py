@@ -155,6 +155,12 @@ def _drive_basic_codeact_turn(
 
 class TestBasicTurn:
     def test_single_codeact_turn_round_trip(self, exporter: AtifExporter) -> None:
+        """One CodeAct turn produces a schema-valid, normative trajectory.
+
+        Covers the whole happy path in one pass: the system/user/agent step
+        shape, tool calls joined to their observation by ``tool_call_id``,
+        and token and cost totals rolled up into ``final_metrics``.
+        """
         exporter.on_task(Task(prompt="Say hello in Python."))
         _drive_basic_codeact_turn(exporter)
 
