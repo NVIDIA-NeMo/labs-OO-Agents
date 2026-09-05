@@ -1260,3 +1260,96 @@ async def test_exit_diagnostics_omit_current_task(monkeypatch) -> None:
     # Executor threads can be idle, but hiding all of them by name would also
     # hide a genuinely blocked callable that can delay asyncio.run() shutdown.
     assert "asyncio_0" in diagnostic
+
+
+@pytest.mark.asyncio
+async def test_restart_waits_for_agent_command_policy_and_callback_work() -> None:
+    from types import SimpleNamespace
+
+    from nooa_cli.tui.session import Session
+
+    session = Session.__new__(Session)
+    session._restart_pending = False
+    app = SimpleNamespace(
+        is_running=True, input_drain_idle=False, begin_input_drain=lambda _r: None
+    )
+    command = SimpleNamespace(is_idle=False)
+    policy = SimpleNamespace(is_idle=False)
+
+    async def wait_agent():
+        while not agent.is_quiescent:
+            await asyncio.sleep(0)
+
+    async def run_agent(fn):
+        return await fn()
+
+    agent = SimpleNamespace(
+        is_quiescent=False,
+        wait_quiescent=wait_agent,
+        run_async=run_agent,
+    )
+    session._app = app
+    session._command_runner = command
+    session._local_turn_policy = policy
+    session._local_agent_runner = agent
+
+    session.request_restart_when_idle()
+    waiter = asyncio.create_task(session.wait_restart_ready())
+    await asyncio.sleep(0.02)
+    assert not waiter.done()
+
+    app.input_drain_idle = True
+    command.is_idle = True
+    policy.is_idle = True
+    agent.is_quiescent = True
+    await asyncio.wait_for(waiter, timeout=1)
+
+
+def test_restart_request_is_idempotent_and_blocks_input_once() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from nooa_cli.tui.session import Session
+
+    session = Session.__new__(Session)
+    session._restart_pending = False
+    session._app = SimpleNamespace(begin_input_drain=Mock())
+
+    session.request_restart_when_idle()
+    session.request_restart_when_idle()
+
+    assert session._restart_pending
+    session._app.begin_input_drain.assert_called_once_with(
+        "Restart pending; waiting for current work to finish."
+    )
+
+
+@pytest.mark.asyncio
+async def test_restart_quiescence_is_sampled_on_agent_owner_loop() -> None:
+    from types import SimpleNamespace
+
+    from nooa_cli.tui.session import Session
+
+    session = Session.__new__(Session)
+    session._restart_pending = True
+    session._app = SimpleNamespace(
+        is_running=True, input_drain_idle=True, begin_input_drain=lambda _reason: None
+    )
+    session._command_runner = None
+    session._local_turn_policy = SimpleNamespace(is_idle=True)
+    owner_samples = 0
+
+    class AgentRunner:
+        async def wait_quiescent(self):
+            return None
+
+        async def run_async(self, fn):
+            nonlocal owner_samples
+            owner_samples += 1
+            return await fn()
+
+    session._local_agent_runner = AgentRunner()
+
+    await asyncio.wait_for(session.wait_restart_ready(), timeout=1)
+
+    assert owner_samples == 1

@@ -257,6 +257,7 @@ class LocalAgentRunner:
         self._notify_cancelled = False
         self._suspend_restart = 0
         self._in_handle = False
+        self._waiting_for_input = False
         self._closed = False
         self._bound = False
         self._lifecycle_state = "active"
@@ -302,6 +303,31 @@ class LocalAgentRunner:
             return self._cancel_requested or (
                 self._task is not None and not self._task.done() and self._in_handle
             )
+
+    @property
+    def is_quiescent(self) -> bool:
+        """Return whether all currently admitted agent work has settled."""
+        with self._lifecycle_lock:
+            task_active = self._task is not None and not self._task.done()
+            return (
+                not self._in_handle
+                and not self._cancel_requested
+                and (not task_active or self._waiting_for_input)
+                and self._user_messages.qsize() == 0
+                and not self.has_pending_work()
+            )
+
+    async def wait_quiescent(self) -> None:
+        """Wait on the owner loop until no admitted work remains."""
+        while True:
+            if self.is_quiescent:
+                # A queue getter can consume an item before its dispatcher
+                # continuation runs.  Yield on this same loop and require a
+                # second idle observation so that claimed work becomes visible.
+                await asyncio.sleep(0)
+                if self.is_quiescent:
+                    return
+            await asyncio.sleep(0.01)
 
     @property
     def cancel_requested(self) -> bool:
@@ -503,18 +529,30 @@ class LocalAgentRunner:
         self._task.add_done_callback(self._on_done)
         self._changed()
 
+    async def _wait_for_input(self, awaitable: Any) -> Any:
+        """Mark the dispatcher idle only while it is blocked for new input."""
+        with self._lifecycle_lock:
+            self._waiting_for_input = True
+        self._changed()
+        try:
+            return await awaitable
+        finally:
+            with self._lifecycle_lock:
+                self._waiting_for_input = False
+            self._changed()
+
     async def _dispatch(self, *, start_with_race: bool) -> None:
         qm = self._queue_manager
         if start_with_race:
             try:
-                items = await qm.race()
+                items = await self._wait_for_input(qm.race())
             except ValueError:
                 return
             if not items:
                 return
             notification = self._drain(qm, items)
         else:
-            item = await self._user_messages.get()
+            item = await self._wait_for_input(self._user_messages.get())
             notification = self._drain(qm, [("user_messages", item)])
         while True:
             if self._on_notification is not None:
@@ -555,7 +593,7 @@ class LocalAgentRunner:
                     f"\x1b[2m{now} waiting — {len(running)} job(s) running:\n{lines}\x1b[0m"
                 )
             try:
-                items = await qm.race()
+                items = await self._wait_for_input(qm.race())
             except ValueError:
                 return
             if running and items:

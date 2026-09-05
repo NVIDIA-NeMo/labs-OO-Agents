@@ -394,3 +394,27 @@ def test_terminal_frontend_escapes_done_status_command_markup():
     )
 
     frontend._console.print_success.assert_called_once_with(r"[command]!echo \[/command][/command]")
+
+
+@pytest.mark.asyncio
+async def test_command_runner_is_idle_only_after_active_and_queued_work_finishes():
+    runner = CommandRunner(AsyncMock())
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def first():
+        entered.set()
+        await release.wait()
+
+    async def second():
+        return None
+
+    first_task = asyncio.create_task(runner.run(kind="slash", text="/first", work=first))
+    await entered.wait()
+    second_task = asyncio.create_task(runner.run(kind="bang", text="!second", work=second))
+    await asyncio.sleep(0)
+
+    assert not runner.is_idle
+    release.set()
+    await asyncio.gather(first_task, second_task)
+    assert runner.is_idle

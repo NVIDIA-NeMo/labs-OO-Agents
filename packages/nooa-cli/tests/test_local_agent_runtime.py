@@ -759,3 +759,40 @@ async def test_stop_falls_back_when_ui_owner_closes_during_schedule() -> None:
     assert runner.closed
     assert runner.worker_loop is None
     assert runner.state.lifecycle is AgentLifecycle.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_quiescent_only_after_active_turn_finishes_naturally() -> None:
+    agent = AgentStub()
+    runner = LocalAgentRunner(agent, emit_text=lambda _text: None, agent_id="local-1")
+
+    assert runner.is_quiescent
+    assert runner.submit("finish this")
+    await asyncio.wait_for(agent.entered.wait(), timeout=1)
+    assert not runner.is_quiescent
+
+    agent.release.set()
+    for _ in range(100):
+        if runner.is_quiescent:
+            break
+        await asyncio.sleep(0.01)
+
+    assert runner.is_quiescent
+    assert agent.notifications == [{"user_messages": ["finish this"]}]
+    await runner.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_wait_quiescent_does_not_return_during_active_turn() -> None:
+    agent = AgentStub()
+    runner = LocalAgentRunner(agent, emit_text=lambda _text: None, agent_id="local-1")
+    assert runner.submit("finish this")
+    await asyncio.wait_for(agent.entered.wait(), timeout=1)
+
+    waiter = asyncio.create_task(runner.wait_quiescent())
+    await asyncio.sleep(0.02)
+    assert not waiter.done()
+
+    agent.release.set()
+    await asyncio.wait_for(waiter, timeout=1)
+    await runner.shutdown()

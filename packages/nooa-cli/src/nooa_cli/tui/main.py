@@ -118,6 +118,7 @@ async def main(
 
     runtime_registration = None
     restart_requested = False
+    restart_ready = False
     restart_task = None
     if result.session_id is not None:
         import asyncio
@@ -134,9 +135,10 @@ async def main(
         restart_event = asyncio.Event()
 
         def _request_restart() -> None:
-            """Latch a signal request onto the running TUI lifecycle."""
+            """Latch a restart request and stop admitting new user work."""
             nonlocal restart_requested
             restart_requested = True
+            session.request_restart_when_idle()
             restart_event.set()
 
         if candidate is not None and candidate.install_restart_signal(
@@ -160,10 +162,11 @@ async def main(
                 session._on_session_change = _update_runtime_session
 
                 async def _exit_when_restart_requested() -> None:
-                    """Exit the running app after a graceful restart is requested."""
+                    """Exit only after pre-request work has settled naturally."""
+                    nonlocal restart_ready
                     await restart_event.wait()
-                    while session._app is None or not session._app.is_running:
-                        await asyncio.sleep(0.01)
+                    await session.wait_restart_ready()
+                    restart_ready = True
                     session._app.exit()
 
                 restart_task = asyncio.create_task(
@@ -182,7 +185,7 @@ async def main(
         if runtime_registration is not None:
             runtime_registration.close()
 
-    if restart_requested and runtime_registration is not None:
+    if restart_requested and restart_ready and runtime_registration is not None:
         from .runtime_registration import reexec_tui
 
         reexec_tui(runtime_registration.restart_argv)
