@@ -689,6 +689,41 @@ Standard Python builtins and agent instance (`self`) are available."""
             )
         )
 
+    def _resolve_text_only_correction(self) -> str:
+        """Return the effective correction shape for a text-only turn.
+
+        ``text_only_correction`` (issue 264) wins when set and enables the
+        append-only path; otherwise fall back to the legacy shape implied by
+        ``text_only_stop_behavior`` (which still deletes-then-replaces).
+        """
+        explicit = getattr(self.config, "text_only_correction", None)
+        if explicit is not None:
+            return explicit
+        # Legacy mapping: return_result -> "return", synthetic_comment -> "comment".
+        return "return" if self.config.text_only_stop_behavior == "return_result" else "comment"
+
+    @property
+    def _append_only_text_only(self) -> bool:
+        """Append-only recovery is active once ``text_only_correction`` is set."""
+        return getattr(self.config, "text_only_correction", None) is not None
+
+    def _append_custom_text_only_correction(
+        self, runtime: RuntimeServices, call: "CurrentCall", text: str
+    ) -> None:
+        """Append a model-visible correction produced by a custom callable."""
+        fn = getattr(self.config, "text_only_correction_fn", None)
+        if fn is None:
+            # No callable supplied — fall back to the standard correction.
+            self._add_text_only_correction(runtime, call)
+            return
+        try:
+            message = fn(text)
+        except Exception as exc:  # noqa: BLE001 - never let a custom hook break recovery
+            logger.warning("[CODEACT] text_only_correction_fn raised: %s", exc)
+            self._add_text_only_correction(runtime, call)
+            return
+        runtime.event_manager.add(Error(content=str(message)))
+
     @staticmethod
     def _mark_text_only_recovered(runtime: RuntimeServices) -> None:
         """Flip the most recent unrecovered ``TextOnlyReply`` to recovered=True.
@@ -1030,7 +1065,13 @@ Standard Python builtins and agent instance (`self`) are available."""
                             consecutive_text_only=session.consecutive_text_only + 1,
                         )
                     )
-                    runtime.event_manager.remove(event_id)
+                    # Append-only (issue 264): keep the provider-authored
+                    # LLMOutput — for Responses reasoning models it carries the
+                    # opaque reasoning_items needed for stateless replay — so a
+                    # validation-failure retry replays the original items in
+                    # order. Legacy mode still deletes-then-replaces.
+                    if not self._append_only_text_only:
+                        runtime.event_manager.remove(event_id)
                     synthetic_id = f"synthetic_{uuid4().hex[:8]}"
                     result_value = _text if _has_text else None
                     synthetic_tool_call = ToolCall(
@@ -1044,6 +1085,11 @@ Standard Python builtins and agent instance (`self`) are available."""
                         f"({'content=' + str(len(_text)) + ' chars' if _has_text else 'no content'}) "
                         f"→ synthetic return_result(). Routing through validation."
                     )
+                    # In append-only mode the provider LLMOutput must survive, so
+                    # don't hand its event_id to _process_tool_calls (which would
+                    # remove it). The synthetic return_result still records its own
+                    # ToolCallEvent for the trace.
+                    _tool_event_id = "" if self._append_only_text_only else (event_id or "")
                     result = await self._process_tool_calls(
                         [synthetic_tool_call],
                         runtime,
@@ -1051,7 +1097,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                         session,
                         call,
                         return_type,
-                        event_id or "",
+                        _tool_event_id,
                     )
                     if result.completed:
                         # Recovered via the synthetic return_result — the drift was
@@ -1100,7 +1146,12 @@ Standard Python builtins and agent instance (`self`) are available."""
                             consecutive_text_only=session.consecutive_text_only + 1,
                         )
                     )
-                    runtime.event_manager.remove(event_id)
+                    # Append-only (issue 264): preserve the provider-authored
+                    # LLMOutput (and its reasoning_items) instead of deleting it;
+                    # the synthetic comment is appended after it and flagged
+                    # ``synthetic`` so it is never mistaken for provider output.
+                    if not self._append_only_text_only:
+                        runtime.event_manager.remove(event_id)
                     synthetic_id = f"synthetic_{uuid4().hex[:8]}"
                     runtime.event_manager.add(
                         ToolCallEvent(
@@ -1128,12 +1179,14 @@ Standard Python builtins and agent instance (`self`) are available."""
                         f"[CODEACT] Text-only response ({len(_text)} chars) "
                         f"converted to synthetic comment."
                     )
-                    # No extra Error correction here: Route B already injects a
-                    # synthetic execute_python comment whose ToolResult tells
-                    # the model the task isn't finished. Adding a "your reply had no
-                    # tool call" Error would contradict that synthetic tool call and
-                    # confuse the model. The backstop below still aborts on repeated
-                    # non-compliance.
+                    # Custom correction (issue 264): when the operator supplied a
+                    # ``text_only_correction="custom"`` hook, append its message so
+                    # the model sees a tailored nudge after the preserved provider
+                    # turn + synthetic comment. Otherwise Route B relies on the
+                    # synthetic comment's ToolResult alone (adding a generic "no
+                    # tool call" Error would contradict it).
+                    if self._resolve_text_only_correction() == "custom":
+                        self._append_custom_text_only_correction(runtime, call, _text)
                     session.record_text_only()
                     max_text_only = self.config.max_consecutive_text_only
                     if max_text_only > 0 and session.consecutive_text_only >= max_text_only:

@@ -3,6 +3,7 @@
 """Strategy configuration for CodeAct, Predict, and Reflexion strategies."""
 
 from collections.abc import Sequence
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -61,6 +62,28 @@ class CodeActConfig(BaseModel):
         if v == "synthetic_reasoning":
             return "synthetic_comment"
         return v
+
+    # Append-only text-only recovery (issue 264). When the model replies with
+    # plain text instead of a tool call, the provider-authored ``LLMOutput``
+    # (which for Responses reasoning models carries the opaque ``reasoning_items``
+    # continuation state) is PRESERVED rather than deleted, and a follow-up
+    # correction turn is appended after it. ``text_only_correction`` selects the
+    # correction that follows the preserved provider turn:
+    #   * "comment" — append a synthetic ``python_cell`` comment turn (the
+    #     historical ``synthetic_comment`` shape), keeping the text visible while
+    #     telling the model the task is not finished.
+    #   * "return"  — route the text through ``return_result(...)`` validation
+    #     (the historical ``return_result`` shape); on failure append a visible
+    #     correction and continue.
+    #   * "custom"  — call ``text_only_correction_fn(text)`` to produce the
+    #     model-visible correction string, appended as a normal correction.
+    # ``None`` (default) defers to ``text_only_stop_behavior`` for the shape and
+    # keeps the legacy delete-then-replace behavior, so existing configs are
+    # unchanged until they opt in.
+    text_only_correction: Literal["comment", "return", "custom"] | None = None
+    # Callable used when ``text_only_correction == "custom"``: takes the verbatim
+    # model text and returns the correction string shown to the model next turn.
+    text_only_correction_fn: Callable[[str], str] | None = None
 
     cell_timeout: float | None = None
     max_tokens: int | None = None
