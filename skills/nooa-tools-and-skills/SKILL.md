@@ -133,7 +133,7 @@ img = Image.from_file("photo.png")     # also .from_bytes(media_type=...), .from
 await MediaAgent().describe(img)
 ```
 
-Only works with multimodal-capable models — text-only models error when handed media. See `examples/quickstart/12_multimodal.py`.
+Only works with multimodal-capable models — text-only models error when handed media. See `examples/quickstart/13_multimodal.py`.
 
 ## Pitfalls
 
