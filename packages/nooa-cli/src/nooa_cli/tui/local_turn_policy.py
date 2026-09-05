@@ -109,6 +109,12 @@ class LocalTurnPolicy:
             tasks = tuple(self._tasks)
         self._runtime.cancel_tasks(list(tasks))
 
+    @property
+    def is_idle(self) -> bool:
+        """Return whether no keep-going decision can still enqueue work."""
+        with self._state_lock:
+            return not self._tasks
+
     async def shutdown(self) -> None:
         """Atomically close and quiesce policy producers before host teardown."""
         with self._state_lock:
