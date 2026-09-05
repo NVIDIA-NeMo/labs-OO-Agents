@@ -5,6 +5,7 @@
 import asyncio
 import os
 import platform
+import sys
 
 import pytest
 
@@ -130,3 +131,26 @@ class TestMonitorProcessIsolation:
 
         await asyncio.wait_for(survivor_task, timeout=5)
         assert "survived" in survivor_lines
+
+
+class TestMonitorOutputDecoding:
+    """Verify monitor() tolerates command output that is not valid UTF-8."""
+
+    async def test_undecodable_byte_does_not_end_the_stream(self, tmp_path):
+        """A non-UTF-8 byte must not kill the producer or drop later lines."""
+        emitter = tmp_path / "emit.py"
+        emitter.write_text(
+            "import sys\n"
+            "out = sys.stdout.buffer\n"
+            "out.write(b'first\\n')\n"
+            "out.write(b'caf\\xe9\\n')\n"  # latin-1 'e-acute': invalid UTF-8
+            "out.write(b'last\\n')\n"
+            "out.flush()\n",
+            encoding="utf-8",
+        )
+
+        lines = [line async for line in monitor(f'"{sys.executable}" "{emitter}"')]
+
+        # The undecodable byte becomes U+FFFD rather than being dropped, and
+        # "last" proves the stream continued past it.
+        assert lines == ["first", "caf\ufffd", "last"]
