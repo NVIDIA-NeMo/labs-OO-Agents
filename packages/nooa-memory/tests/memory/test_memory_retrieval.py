@@ -3,7 +3,7 @@
 """Tests for retrieval: scoring, recency/importance, multi-hop spread."""
 
 import pytest
-from nooa_memory.config import RetrievalConfig
+from nooa_memory.config import RetrievalConfig, ScoringWeights
 from nooa_memory.embeddings import HashingEmbedder
 from nooa_memory.retrieval import RetrievalEngine, base_level_activation
 from nooa_memory.schema import AccessRecord, EdgeType, Memory
@@ -99,3 +99,34 @@ def test_multi_hop_surfaces_linked_dissimilar_memory(store, emb):
     # A wins on relevance; B is pulled into the top-2 by associative spread
     # over the causal edge, beating the unlinked distractors.
     assert a.id in ids and b.id in ids
+
+
+@pytest.mark.parametrize("owner", [None, "alice"])
+def test_recall_does_not_resurface_archived_neighbor(store, emb, owner):
+    a = _add(store, emb, "deploy ship release production rollout", owner="alice", importance=10)
+    b = _add(store, emb, "obsolete instructions", owner="alice")
+    _add(store, emb, "deploy weather forecast", owner="alice", importance=0)
+    store.add_edge(a.id, b.id, EdgeType.CAUSES)
+    eng = RetrievalEngine(store, emb, RetrievalConfig(weights=ScoringWeights(recency=0)))
+    assert b.id in {m.id for m in eng.recall("deploy ship release", owner=owner, touch=False)}
+
+    store.archive(b.id)
+    res = eng.recall("deploy ship release", owner=owner)
+    assert a.id in {m.id for m in res}
+    assert b.id not in {m.id for m in res}
+    assert store.get(b.id).access_count == 0
+    assert b.id not in {row["id"] for row in eng.explain("deploy ship release", owner=owner)}
+
+
+@pytest.mark.parametrize("owner", [None, "alice"])
+def test_spread_does_not_relay_through_archived_memory(store, emb, owner):
+    a = _add(store, emb, "seed node", owner="alice")
+    b = _add(store, emb, "bridge node", owner="alice")
+    c = _add(store, emb, "downstream node", owner="alice")
+    store.add_edge(a.id, b.id, EdgeType.CAUSES)
+    store.add_edge(b.id, c.id, EdgeType.CAUSES)
+    eng = RetrievalEngine(store, emb, RetrievalConfig())
+    assert c.id in eng._spread({a.id: 1.0}, hops=2, owner=owner)
+
+    store.archive(b.id)
+    assert eng._spread({a.id: 1.0}, hops=2, owner=owner) == {}
