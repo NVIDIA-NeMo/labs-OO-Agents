@@ -141,6 +141,20 @@ def test_too_short_prefix_is_not_found(agent):
     assert agent.forget("abc") is False  # <6 chars never prefix-matches
 
 
+@pytest.mark.parametrize("prefix", ["%%%%%%", "______"])
+def test_wildcard_prefix_cannot_update_or_forget_memory(agent, prefix):
+    mgr = _install(agent)
+    try:
+        mid = agent.remember("original fact", type="info")
+        assert agent.update_memory(prefix, content="wrong replacement") is False
+        assert agent.forget(prefix) is False
+        stored = mgr.store.get(mid)
+        assert stored.content == "original fact"
+        assert stored.archived is False
+    finally:
+        mgr.uninstall()
+
+
 # --------------------------------------------------------------------------
 # raise-don't-recover at the tool boundary
 # --------------------------------------------------------------------------
