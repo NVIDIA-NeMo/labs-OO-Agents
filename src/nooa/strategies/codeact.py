@@ -1355,12 +1355,22 @@ Standard Python builtins and agent instance (`self`) are available."""
                 return _ToolCallsResult()
 
             # Add ToolCallEvent to record the tool call (result will be nested later)
+            _attached_reasoning = reasoning_items if tool_call_index == 0 else None
+            _reasoning_provenance = None
+            if _attached_reasoning:
+                from nooa.runtime.actor import _current_llm_var
+                from nooa.unifiedllm.unifiedllm import model_family
+
+                _llm = _current_llm_var.get()
+                _model = getattr(_llm, "model", None)
+                _reasoning_provenance = model_family(_model) if _model else None
             tool_call_event_id = runtime.event_manager.add(
                 ToolCallEvent(
                     tool_call_id=tool_call.id,
                     name=tool_call.name,
                     arguments=args,
-                    reasoning_items=(reasoning_items if tool_call_index == 0 else None),
+                    reasoning_items=_attached_reasoning,
+                    reasoning_provenance=_reasoning_provenance,
                     result=None,  # Will be updated after execution
                 )
             )

@@ -243,6 +243,14 @@ class ToolCallEvent(EventBase):
             "tool call when conversation history is replayed"
         ),
     )
+    reasoning_provenance: str | None = Field(
+        default=None,
+        repr=False,
+        description=(
+            "Coarse model-family tag (e.g. 'openai') for reasoning_items, so the "
+            "opaque state is only replayed to the same family that produced it."
+        ),
+    )
 
     # Nested result (filled after execution via EventManager.update())
     result: ToolResult | None = Field(

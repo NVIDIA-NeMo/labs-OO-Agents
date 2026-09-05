@@ -1265,7 +1265,20 @@ class ActorRuntime:
         )
         if not isinstance(reasoning_items, list):
             reasoning_items = None
-        event = LLMOutput(content=content, reasoning_items=reasoning_items)
+        # Tag the opaque reasoning state with its model family so replay can
+        # refuse to send it to a different provider (issue 264).
+        reasoning_provenance = None
+        if reasoning_items:
+            from nooa.unifiedllm.unifiedllm import model_family
+
+            _llm = _current_llm_var.get()
+            _model = getattr(_llm, "model", None)
+            reasoning_provenance = model_family(_model) if _model else None
+        event = LLMOutput(
+            content=content,
+            reasoning_items=reasoning_items,
+            reasoning_provenance=reasoning_provenance,
+        )
         event_id = self.event_manager.add(event)
 
         return response, event_id
@@ -3096,17 +3109,30 @@ class ActorRuntime:
             provider_formatter = _resolve_provider_formatter(
                 llm_client, self.agent.render_config.provider_formatter
             )
-            result = render_context(
-                blocks,
-                block_formatter=self.agent.render_config.block_formatter,
-                provider_formatter=provider_formatter,
-                context_limit=effective_context_limit,
-                count_tokens=count_tokens,
-                event_format=tc.event_format,
-                event_format_resolver=self._event_format_for_event,
-                model_context_window=getattr(llm_client, "context_window", None),
-                reserved_output_tokens=reserved_output,
+            # Tell the formatter which model family we're building for, so opaque
+            # reasoning state is only replayed to the family that produced it
+            # (issue 264). Scoped to this render call.
+            from nooa.context_blocks.formatter import _current_reasoning_family
+            from nooa.unifiedllm.unifiedllm import model_family
+
+            _fam_model = getattr(llm_client, "model", None)
+            _fam_token = _current_reasoning_family.set(
+                model_family(_fam_model) if _fam_model else None
             )
+            try:
+                result = render_context(
+                    blocks,
+                    block_formatter=self.agent.render_config.block_formatter,
+                    provider_formatter=provider_formatter,
+                    context_limit=effective_context_limit,
+                    count_tokens=count_tokens,
+                    event_format=tc.event_format,
+                    event_format_resolver=self._event_format_for_event,
+                    model_context_window=getattr(llm_client, "context_window", None),
+                    reserved_output_tokens=reserved_output,
+                )
+            finally:
+                _current_reasoning_family.reset(_fam_token)
 
         # ``render_context`` is a framework-agnostic leaf and does not touch the
         # runtime's metrics. The runtime owns ``HarnessMetrics``, so it

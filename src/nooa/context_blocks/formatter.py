@@ -18,6 +18,7 @@ This split keeps the "format" axis (XML / Markdown / Plain) orthogonal to the
 "provider" axis (OpenAI / Anthropic / ...). Neither knows about the other.
 """
 
+import contextvars
 import json
 import logging
 from abc import ABC, abstractmethod
@@ -38,6 +39,28 @@ from nooa.context_blocks.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# The model family currently being formatted for, set by the LLM client before
+# it formats history. Opaque reasoning state is only replayed when the stored
+# provenance matches this family (issue 264); ``None`` means "unknown", which is
+# treated as permissive so behavior is unchanged unless a family is set.
+_current_reasoning_family: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_reasoning_family", default=None
+)
+
+
+def _replay_reasoning_allowed(provenance: str | None) -> bool:
+    """Return True if opaque reasoning state with *provenance* may be replayed.
+
+    Replay is refused only when BOTH the stored provenance AND the current
+    family are known and differ — so an OpenAI-encrypted reasoning item is never
+    sent to a different provider that cannot decrypt it. Unknown values stay
+    permissive to preserve existing behavior.
+    """
+    current = _current_reasoning_family.get()
+    if provenance is None or current is None:
+        return True
+    return provenance == current
 
 
 class FormatType(StrEnum):
@@ -272,12 +295,16 @@ def _event_block_to_messages(
     reasoning_items = (
         getattr(block.event, "reasoning_items", None) if block.event is not None else None
     )
+    reasoning_provenance = (
+        getattr(block.event, "reasoning_provenance", None) if block.event is not None else None
+    )
     return [
         RenderedMessage(
             role=block.role,
             content=content,
             parts=[BlockPart(key=block.key, content=content)],
             reasoning_items=reasoning_items,
+            reasoning_provenance=reasoning_provenance,
             images=images,
         )
     ]
@@ -449,7 +476,7 @@ class OpenAIProviderFormatter(ProviderFormatter):
                         }
                     ],
                 }
-                if msg.reasoning_items:
+                if msg.reasoning_items and _replay_reasoning_allowed(msg.reasoning_provenance):
                     assistant_message["reasoning_items"] = msg.reasoning_items
                 out.append(assistant_message)
             elif msg.tool_call_id is not None:
@@ -546,7 +573,7 @@ class ResponsesProviderFormatter(ProviderFormatter):
                 # Preserve assistant text that precedes the tool call
                 if msg.content and msg.role == Role.ASSISTANT:
                     out.append({"role": "assistant", "content": msg.content})
-                if msg.reasoning_items:
+                if msg.reasoning_items and _replay_reasoning_allowed(msg.reasoning_provenance):
                     out.extend(msg.reasoning_items)
                 out.append(
                     {
@@ -604,7 +631,11 @@ class ResponsesProviderFormatter(ProviderFormatter):
                 # LLMOutput event (not the full native ``_batch``), so re-emit
                 # them before a reconstructed assistant message rather than
                 # replaying the original provider ``message`` output item.
-                if role == Role.ASSISTANT and msg.reasoning_items:
+                if (
+                    role == Role.ASSISTANT
+                    and msg.reasoning_items
+                    and _replay_reasoning_allowed(msg.reasoning_provenance)
+                ):
                     out.extend(msg.reasoning_items)
                 out.append({"role": role.value, "content": msg.content or ""})
         return out

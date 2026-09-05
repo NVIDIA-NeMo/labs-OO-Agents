@@ -512,3 +512,174 @@ def test_synthetic_inline_return_is_observable_but_not_replayed_to_provider():
     assert _event_block_to_messages(block, wrap_content=None) == []
     rendered = XMLBlockFormatter().format([block])
     assert all(message.tool_call is None for message in rendered)
+
+
+class TestReasoningProvenanceGate:
+    """Opaque reasoning state is only replayed to the family that produced it."""
+
+    @staticmethod
+    def _reasoning_item():
+        return {"id": "rs_p", "type": "reasoning", "encrypted_content": "enc", "summary": []}
+
+    def test_same_family_replays_reasoning(self):
+        from nooa.context_blocks.formatter import _current_reasoning_family
+
+        item = self._reasoning_item()
+        msgs = [
+            RenderedMessage(
+                role=Role.ASSISTANT,
+                content="done",
+                reasoning_items=[item],
+                reasoning_provenance="openai",
+            )
+        ]
+        token = _current_reasoning_family.set("openai")
+        try:
+            out = ResponsesProviderFormatter().format(msgs)
+        finally:
+            _current_reasoning_family.reset(token)
+        assert item in out
+
+    def test_different_family_drops_reasoning(self):
+        from nooa.context_blocks.formatter import _current_reasoning_family
+
+        item = self._reasoning_item()
+        msgs = [
+            RenderedMessage(
+                role=Role.ASSISTANT,
+                content="done",
+                reasoning_items=[item],
+                reasoning_provenance="openai",
+            )
+        ]
+        token = _current_reasoning_family.set("anthropic")
+        try:
+            out = ResponsesProviderFormatter().format(msgs)
+        finally:
+            _current_reasoning_family.reset(token)
+        # Opaque OpenAI state must NOT be replayed to a different family.
+        assert item not in out
+        # The assistant text still survives.
+        assert {"role": "assistant", "content": "done"} in out
+
+    def test_unknown_family_is_permissive(self):
+        item = self._reasoning_item()
+        msgs = [
+            RenderedMessage(
+                role=Role.ASSISTANT,
+                content="done",
+                reasoning_items=[item],
+                reasoning_provenance="openai",
+            )
+        ]
+        # No family set (contextvar default None) -> permissive, unchanged behavior.
+        out = ResponsesProviderFormatter().format(msgs)
+        assert item in out
+
+
+class TestAppendOnlyReasoningReplayIntegration:
+    """Actor -> event storage -> CodeAct recovery -> formatter -> second Responses request.
+
+    Exercises the full path: a text-only reply preserves the provider LLMOutput
+    (with reasoning_items + provenance), and rendering the stored history for a
+    same-family Responses request replays the reasoning items in order before a
+    reconstructed assistant message.
+    """
+
+    @pytest.mark.asyncio
+    async def test_appended_provider_reasoning_replays_in_order_same_family(self):
+        import json
+
+        from nooa import Agent, strategy
+        from nooa.config import CodeActConfig
+        from nooa.context_blocks.formatter import _current_reasoning_family
+        from nooa.events import LLMOutput
+        from nooa.strategies.codeact import CodeActStrategy
+        from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
+
+        reasoning_item = {
+            "id": "rs_int",
+            "type": "reasoning",
+            "encrypted_content": "enc",
+            "summary": [],
+        }
+
+        def _text_with_reasoning(content):
+            return LLMResponse(
+                raw_response=None,
+                content=content,
+                tool_calls=[],
+                finish_reason="stop",
+                assistant_message={
+                    "role": "assistant",
+                    "content": content,
+                    "reasoning_items": [reasoning_item],
+                },
+            )
+
+        def _ret(val):
+            return LLMResponse(
+                raw_response=None,
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="c_ret", name="return_result", arguments=json.dumps({"result": val})
+                    )
+                ],
+                finish_reason="tool_calls",
+                assistant_message={"role": "assistant", "content": ""},
+            )
+
+        class TestAgent(Agent, llm=FakeLLMClient()):
+            @strategy(
+                CodeActStrategy(
+                    config=CodeActConfig(
+                        max_retries=6,
+                        max_iterations=10,
+                        text_only_correction="return",
+                    )
+                )
+            )
+            async def my_task(self) -> dict:
+                """Return a dict — a bare string won't validate, forcing the retry."""
+                ...
+
+        fake_llm = FakeLLMClient(
+            scripted_responses=[_text_with_reasoning("I think I'm done."), _ret({"ok": True})]
+        )
+        # Tag the client so provenance is captured as "openai".
+        fake_llm.model = "openai/gpt-5.6"
+        agent = TestAgent(llm=fake_llm)
+        assert await agent.my_task() == {"ok": True}
+
+        # Provider output preserved with reasoning + provenance.
+        outputs = [e for e in agent.event_manager.values() if isinstance(e, LLMOutput)]
+        preserved = [o for o in outputs if o.reasoning_items == [reasoning_item]]
+        assert preserved, "append-only must preserve the provider LLMOutput with reasoning"
+        assert preserved[0].reasoning_provenance == "openai"
+
+        # Render the preserved reasoning turn for a same-family Responses request.
+        msgs = [
+            RenderedMessage(
+                role=Role.ASSISTANT,
+                content="I think I'm done.",
+                reasoning_items=[reasoning_item],
+                reasoning_provenance="openai",
+            )
+        ]
+        token = _current_reasoning_family.set("openai")
+        try:
+            out = ResponsesProviderFormatter().format(msgs)
+        finally:
+            _current_reasoning_family.reset(token)
+        # reasoning item replays immediately before the reconstructed assistant message.
+        idx = out.index(reasoning_item)
+        assert out[idx + 1] == {"role": "assistant", "content": "I think I'm done."}
+
+        # And a different-family request drops the opaque state.
+        token = _current_reasoning_family.set("anthropic")
+        try:
+            out2 = ResponsesProviderFormatter().format(msgs)
+        finally:
+            _current_reasoning_family.reset(token)
+        assert reasoning_item not in out2

@@ -749,6 +749,26 @@ def _is_anthropic_model(model: str) -> bool:
     return _is_bedrock_model(model) and "claude" in m
 
 
+def model_family(model: str) -> str:
+    """Return a coarse provider/model-family tag for opaque-state replay gating.
+
+    Opaque reasoning state (OpenAI Responses ``reasoning_items`` with encrypted
+    content) is only replayable to the *same* family that produced it. This
+    returns a stable, lowercase tag so callers can store provenance at capture
+    time and refuse to replay it to a different family (issue 264):
+
+    - ``"anthropic"`` for Claude (direct or Bedrock)
+    - ``"openai"`` for GPT / OpenAI-compatible OpenAI models
+    - ``"other"`` otherwise (NIM/Nemotron/etc.)
+    """
+    if _is_anthropic_model(model):
+        return "anthropic"
+    m = model.lower()
+    if "gpt" in m or "openai" in m or m.startswith(("o1", "o3", "o4")):
+        return "openai"
+    return "other"
+
+
 def _sanitize_schema_for_bedrock(schema: dict[str, Any]) -> dict[str, Any]:
     """Deep-copy *schema* and strip/fix keywords unsupported by Bedrock.
 
@@ -2695,7 +2715,10 @@ class ResponsesClient(UnifiedLLM):
             # Legacy OpenAI format: assistant messages with tool_calls
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 reasoning_items = msg.get("reasoning_items")
-                if isinstance(reasoning_items, list):
+                # Only replay opaque reasoning state to the family that produced
+                # it (issue 264): OpenAI-encrypted items are meaningless to a
+                # non-OpenAI Responses endpoint, so drop them there.
+                if isinstance(reasoning_items, list) and model_family(self.model) == "openai":
                     transformed.extend(
                         copy.deepcopy(item) for item in reasoning_items if isinstance(item, dict)
                     )
@@ -2717,7 +2740,11 @@ class ResponsesClient(UnifiedLLM):
             # User/Assistant text messages → passthrough with cache_control preservation
             if msg.get("role") in ["user", "assistant"]:
                 reasoning_items = msg.get("reasoning_items")
-                if msg.get("role") == "assistant" and isinstance(reasoning_items, list):
+                if (
+                    msg.get("role") == "assistant"
+                    and isinstance(reasoning_items, list)
+                    and model_family(self.model) == "openai"
+                ):
                     transformed.extend(
                         copy.deepcopy(item) for item in reasoning_items if isinstance(item, dict)
                     )

@@ -300,6 +300,10 @@ class RenderedMessage(BaseModel):
         default=None,
         description="Opaque provider reasoning state associated with an assistant output",
     )
+    reasoning_provenance: str | None = Field(
+        default=None,
+        description="Model-family tag for reasoning_items; replayed only to the same family",
+    )
     tool_call_id: str | None = Field(
         default=None, description="Tool-call id this message is a result for"
     )
