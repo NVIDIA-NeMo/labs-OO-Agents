@@ -49,6 +49,7 @@ def _source_root() -> Path:
 
 
 def _source_revision(root: Path) -> str | None:
+    """Return the Git revision for *root* when it can be resolved."""
     try:
         result = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"],
@@ -108,6 +109,8 @@ def explicit_resume_argv(argv: list[str], session_id: str) -> list[str]:
         if argument in {"-c", "--continue"}:
             index += 2
             continue
+        if argument == "--":
+            return [*result, "--continue", session_id, *argv[index:]]
         result.append(argument)
         index += 1
     return [*result, "--continue", session_id]
@@ -119,6 +122,7 @@ class TUIRuntimeRegistration:
     def __init__(
         self, *, session_id: str, working_dir: str, original_argv: list[str] | None = None
     ) -> None:
+        """Capture process, session, source, and restart invocation identity."""
         self.session_id = session_id
         self.working_dir = str(Path(working_dir).expanduser().resolve())
         self.pid = os.getpid()
@@ -134,6 +138,7 @@ class TUIRuntimeRegistration:
         self._previous_handler: Any = None
 
     def _payload(self) -> dict[str, Any]:
+        """Build the minimal public runtime-registration payload."""
         identity = process_identity(self.pid)
         if identity is None:
             raise OSError("cannot determine a stable process identity")

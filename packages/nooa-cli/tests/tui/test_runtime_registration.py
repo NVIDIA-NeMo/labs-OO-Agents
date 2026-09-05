@@ -21,8 +21,11 @@ from nooa_cli.tui.runtime_registration import (
     reexec_tui,
 )
 
+requires_fcntl = pytest.mark.skipif(fcntl is None, reason="requires POSIX file locking")
+
 
 def test_explicit_resume_argv_replaces_short_and_long_forms():
+    """Canonicalize existing short and long continue options."""
     assert explicit_resume_argv(
         ["/venv/bin/python", "/venv/bin/nooa", "tui", "-w", "/work", "-c", "old"], "new"
     ) == ["/venv/bin/python", "/venv/bin/nooa", "tui", "-w", "/work", "--continue", "new"]
@@ -31,7 +34,25 @@ def test_explicit_resume_argv_replaces_short_and_long_forms():
     ) == ["/venv/bin/python", "-m", "nooa_cli", "tui", "--python", "--continue", "new"]
 
 
+def test_explicit_resume_argv_inserts_continue_before_option_terminator():
+    """Keep the resume option parseable when argv contains an option terminator."""
+    argv = ["python", "-m", "nooa_cli", "tui", "--python", "--", "payload", "-c"]
+    assert explicit_resume_argv(argv, "new") == [
+        "python",
+        "-m",
+        "nooa_cli",
+        "tui",
+        "--python",
+        "--continue",
+        "new",
+        "--",
+        "payload",
+        "-c",
+    ]
+
+
 def test_explicit_resume_argv_preserves_interpreter_c_before_tui():
+    """Do not confuse Python interpreter flags with TUI options."""
     argv = ["python", "-c", "launch_tui()", "tui", "--continue", "old"]
     assert explicit_resume_argv(argv, "new") == [
         "python",
@@ -44,11 +65,14 @@ def test_explicit_resume_argv_preserves_interpreter_c_before_tui():
 
 
 def test_explicit_resume_argv_requires_tui_command():
+    """Reject invocations whose TUI command boundary cannot be identified."""
     with pytest.raises(ValueError, match="tui command"):
         explicit_resume_argv(["python", "-c", "launch_tui()"], "new")
 
 
+@requires_fcntl
 def test_publish_rejects_symlinked_lock_without_touching_target(tmp_path: Path):
+    """Reject a planted lock symlink without modifying its target."""
     target = tmp_path / "target"
     target.write_text("keep me")
     with (
@@ -69,6 +93,7 @@ def test_publish_rejects_symlinked_lock_without_touching_target(tmp_path: Path):
 
 
 def test_registration_disables_restart_without_fcntl(tmp_path: Path):
+    """Disable registration cleanly when POSIX file locking is unavailable."""
     loop = MagicMock()
     with (
         patch.dict("os.environ", {"NOOA_TUI_RUNTIME_DIR": str(tmp_path)}),
@@ -86,7 +111,9 @@ def test_registration_disables_restart_without_fcntl(tmp_path: Path):
             registration.publish()
 
 
+@requires_fcntl
 def test_registration_publishes_private_record_and_removes_only_its_own(tmp_path: Path):
+    """Publish private metadata and avoid deleting a successor record."""
     with (
         patch.dict("os.environ", {"NOOA_TUI_RUNTIME_DIR": str(tmp_path)}),
         patch("nooa_cli.tui.runtime_registration._source_root", return_value=Path("/source")),
@@ -119,7 +146,9 @@ def test_registration_publishes_private_record_and_removes_only_its_own(tmp_path
     assert not registration.path.exists()
 
 
+@requires_fcntl
 def test_install_restart_signal_routes_callback_and_restores_handler(tmp_path: Path):
+    """Install and restore the graceful-restart signal handler."""
     if not hasattr(signal, "SIGUSR1"):
         return
     loop = MagicMock()
@@ -143,7 +172,9 @@ def test_install_restart_signal_routes_callback_and_restores_handler(tmp_path: P
     set_signal.assert_called_once_with(signal.SIGUSR1, signal.SIG_DFL)
 
 
+@requires_fcntl
 def test_update_session_republishes_resume_target(tmp_path: Path):
+    """Track an in-process session change in metadata and restart argv."""
     with (
         patch.dict("os.environ", {"NOOA_TUI_RUNTIME_DIR": str(tmp_path)}),
         patch("nooa_cli.tui.runtime_registration._source_root", return_value=tmp_path),
@@ -162,12 +193,15 @@ def test_update_session_republishes_resume_target(tmp_path: Path):
 
 
 def test_reexec_uses_path_search():
+    """Re-execute through PATH so console-script launches remain valid."""
     with patch("nooa_cli.tui.runtime_registration.os.execvp") as execvp:
         reexec_tui(["python", "-m", "nooa_cli", "tui"])
     execvp.assert_called_once_with("python", ["python", "-m", "nooa_cli", "tui"])
 
 
+@requires_fcntl
 def test_publish_fails_closed_without_process_identity(tmp_path: Path):
+    """Do not advertise restart without a stable process identity."""
     with (
         patch.dict("os.environ", {"NOOA_TUI_RUNTIME_DIR": str(tmp_path)}),
         patch("nooa_cli.tui.runtime_registration._source_root", return_value=tmp_path),
@@ -183,7 +217,9 @@ def test_publish_fails_closed_without_process_identity(tmp_path: Path):
     assert not registration.path.exists()
 
 
+@requires_fcntl
 def test_close_releases_lock_when_record_disappeared(tmp_path: Path):
+    """Release ownership even when the runtime record was removed."""
     with (
         patch.dict("os.environ", {"NOOA_TUI_RUNTIME_DIR": str(tmp_path)}),
         patch("nooa_cli.tui.runtime_registration._source_root", return_value=tmp_path),
@@ -200,8 +236,9 @@ def test_close_releases_lock_when_record_disappeared(tmp_path: Path):
     assert not registration.lock_path.exists()
 
 
-@pytest.mark.skipif(fcntl is None, reason="requires POSIX file locking")
+@requires_fcntl
 def test_registration_holds_runtime_ownership_lock(tmp_path: Path):
+    """Hold the ownership lock until registration closes."""
     with (
         patch.dict("os.environ", {"NOOA_TUI_RUNTIME_DIR": str(tmp_path)}),
         patch("nooa_cli.tui.runtime_registration._source_root", return_value=tmp_path),

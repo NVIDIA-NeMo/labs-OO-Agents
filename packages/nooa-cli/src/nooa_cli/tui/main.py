@@ -134,6 +134,7 @@ async def main(
         restart_event = asyncio.Event()
 
         def _request_restart() -> None:
+            """Latch a signal request onto the running TUI lifecycle."""
             nonlocal restart_requested
             restart_requested = True
             restart_event.set()
@@ -149,6 +150,7 @@ async def main(
                 runtime_registration = candidate
 
                 def _update_runtime_session(session_id: str) -> None:
+                    """Keep restart metadata aligned with in-process session changes."""
                     try:
                         candidate.update_session(session_id)
                     except OSError:
@@ -158,6 +160,7 @@ async def main(
                 session._on_session_change = _update_runtime_session
 
                 async def _exit_when_restart_requested() -> None:
+                    """Exit the running app after a graceful restart is requested."""
                     await restart_event.wait()
                     while session._app is None or not session._app.is_running:
                         await asyncio.sleep(0.01)
