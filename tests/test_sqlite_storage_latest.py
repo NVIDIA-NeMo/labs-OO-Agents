@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from unittest.mock import patch
+
 from nooa import Agent
 from nooa.storage import SQLiteStorageManager
 from nooa.unifiedllm import CompletionClient
@@ -57,3 +60,28 @@ def test_restore_latest_returns_most_recent():
     agent2 = _SimpleAgent(storage=storage)
     storage.restore_latest_snapshot(agent2)
     assert agent2.value == 99
+
+
+def test_latest_snapshot_breaks_timestamp_ties_after_reopen(tmp_path):
+    path = tmp_path / "snapshots.sqlite"
+    storage = SQLiteStorageManager(path)
+    try:
+        agent = _SimpleAgent(storage=storage)
+        with patch("nooa.storage.sqlite.datetime") as clock:
+            clock.now.return_value = datetime(2026, 1, 1, tzinfo=UTC)
+            agent.value = 1
+            storage.save_snapshot(agent)
+            agent.value = 99
+            latest = storage.save_snapshot(agent)
+        assert storage.get_latest_snapshot_id() == latest
+    finally:
+        storage.close()
+
+    reopened = SQLiteStorageManager(path)
+    try:
+        restored = _SimpleAgent(storage=reopened)
+        assert reopened.get_latest_snapshot_id() == latest
+        assert reopened.restore_latest_snapshot(restored)
+        assert restored.value == 99
+    finally:
+        reopened.close()
