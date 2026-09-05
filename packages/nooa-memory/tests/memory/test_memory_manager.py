@@ -7,9 +7,12 @@ consolidation are exercised directly.
 """
 
 from pathlib import Path
+from unittest.mock import patch
 
+import numpy as np
 import pytest
 from nooa_memory import (
+    Memory,
     MemoryConfig,
     MemoryManager,
     MemoryToolsMixin,
@@ -152,6 +155,44 @@ def test_remember_dedups_on_write(agent):
     assert id1 == id2  # NOOP: reinforced the existing memory
     assert mgr.store.count() == 1
     assert mgr.store.get(id1).reinforcement_count >= 1
+
+
+@pytest.mark.parametrize("content", ["A longer sentence. Another sentence! A third?", "Hi.", ""])
+def test_update_refreshes_content_metadata(agent, content):
+    mgr = _install(agent)
+    try:
+        mid = mgr.remember("Original content to be revised.", tags=["original"])
+        before = mgr.store.get(mid)
+        assert mgr.update(mid, content=content)
+        after = mgr.store.get(mid)
+        expected = Memory(content=content)
+        assert after.content == content
+        for field in ("size_chars", "token_len", "sentence_count"):
+            assert getattr(after, field) == getattr(expected, field)
+        for field in ("id", "owner", "created_at", "tags"):
+            assert getattr(after, field) == getattr(before, field)
+        assert after.access_log[:-1] == before.access_log
+        assert after.reinforcement_count == before.reinforcement_count + 1
+    finally:
+        mgr.uninstall()
+
+
+@pytest.mark.parametrize("tags", [["aardvark", "zebra"], []])
+def test_update_reembeds_changed_tags_only_when_needed(agent, tags):
+    mgr = _install(agent)
+    try:
+        mid = mgr.remember("A stored fact.", tags=["original"])
+        original = mgr.store.get_embedding(mid)
+        assert mgr.update(mid, tags=tags)
+        current = mgr.store.get(mid)
+        expected = mgr.embedder.embed(current.embedding_text())
+        assert not np.allclose(original, expected)
+        np.testing.assert_allclose(mgr.store.get_embedding(mid), expected)
+        with patch.object(mgr.embedder, "embed", wraps=mgr.embedder.embed) as embed:
+            assert mgr.update(mid, tags=tags, importance=9)
+            embed.assert_not_called()
+    finally:
+        mgr.uninstall()
 
 
 # --------------------------------------------------------------------------
