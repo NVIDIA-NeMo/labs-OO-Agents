@@ -181,6 +181,8 @@ async def lifespan(app: FastAPI):
         worker.cancel()
         memory_routes.close_stores()
         _write_executor.shutdown(wait=True)
+        # After the writer thread is joined, so nothing is mid-write.
+        otlp_store.close_db()
         log.info("Shutdown complete")
 
 
