@@ -14,6 +14,7 @@ import time
 from collections.abc import Callable
 from typing import Any, TypeVar
 
+from nooa.unifiedllm.admission import AdmissionError
 from nooa.unifiedllm.errors import EmptyContentError
 from nooa.unifiedllm.retry_config import RetryConfig
 
@@ -145,6 +146,13 @@ def _is_retryable_error(error: Exception, config: RetryConfig) -> tuple[bool, bo
     Returns:
         Tuple of (is_retryable, is_rate_limit)
     """
+    # Admission failures happen before the provider. Retrying a timeout would
+    # immediately rejoin the same queue, a call-cap rejection cannot succeed,
+    # and a controller outage should not be mistaken for a provider outage.
+    # A higher-level workflow may still retry later if appropriate.
+    if isinstance(error, AdmissionError):
+        return False, False
+
     # Check for empty content error (if enabled)
     if isinstance(error, EmptyContentError) and config.retry_on_empty_content:
         return True, False

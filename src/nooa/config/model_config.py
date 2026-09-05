@@ -46,6 +46,9 @@ class ModelConfig(BaseModel):
     reasoning_levels: dict[str, dict[str, Any]] | None = None
     reasoning_default: str | None = None
     reasoning_level: str | None = None
+    concurrency_group: str | None = None
+    max_in_flight: int | None = None
+    queue_timeout: float | None = None
 
     @classmethod
     def from_registry(cls, name: str, raw: dict[str, Any]) -> ModelConfig:

@@ -14,7 +14,7 @@ import re as _re
 import tokenize
 import types
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast, get_type_hints
@@ -32,6 +32,7 @@ from nooa.context_blocks.scoped import _scoped_blocks_var, _scoped_events_var
 if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
     from nooa.context_blocks.models import ContextWindowStats
+    from nooa.llm_types import CacheBoundary, LLMResponse
     from nooa.runtime.event_query import EventQuery
     from nooa.runtime.restrictions import RestrictionsConfig
 
@@ -117,6 +118,7 @@ def _make_llm_metrics_bridge(hm: "HarnessMetrics") -> Callable[[str, Any], None]
         "json_double_decoded": lambda _: hm.record_json_double_decoded(),
         "reasoning_as_structured_output": lambda _: hm.record_reasoning_as_structured_output(),
         "token_usage": _handle_token_usage,
+        "llm_queue": lambda detail: hm.record_llm_queue(detail),
     }
 
     def bridge(event: str, detail: Any = None) -> None:
@@ -143,7 +145,9 @@ warnings.filterwarnings(
 _TRAILING_CONTEXT_RE = _re.compile(r"^(.*?)(<context>.*?</context>)\s*\Z", _re.DOTALL)
 
 
-def _extract_trailing_context_envelope(messages: list[dict[str, Any]]) -> str:
+def _extract_trailing_context_envelope(
+    messages: "Sequence[dict[str, Any] | LLMResponse | CacheBoundary]",
+) -> str:
     """Pull the trailing ``<context>…</context>`` envelope from messages.
 
     ``CachedBlockFormatter`` emits dynamic SYSTEM-role blocks as a
@@ -170,7 +174,9 @@ def _extract_trailing_context_envelope(messages: list[dict[str, Any]]) -> str:
 
 
 def _snapshot_llm_request(
-    event_manager: Any, messages: list[dict[str, Any]], generation_id: str
+    event_manager: Any,
+    messages: "Sequence[dict[str, Any] | LLMResponse | CacheBoundary]",
+    generation_id: str,
 ) -> str:
     """Snapshot the rendered request for observability consumers (e.g. ATIF).
 
@@ -951,7 +957,7 @@ class ActorRuntime:
                 if output_model is not None:
                     params["output_model"] = output_model
                 ctx = LLMCallContext(
-                    messages=messages,
+                    messages=cast("list[dict[str, Any] | LLMResponse | CacheBoundary]", messages),
                     params=params,
                     agent=self.agent,
                     runtime=self,
@@ -1023,12 +1029,15 @@ class ActorRuntime:
                         )
                         # Re-build messages after archival so the retry sees the
                         # reduced event store.
-                        ctx.messages = await self._build_messages(
-                            self._current_method,
-                            call_args=self._current_call.args if self._current_call else (),
-                            call_kwargs=self._current_call.kwargs if self._current_call else {},
-                            tools=ctx.params.get("tools"),
-                            max_output_tokens=_reduced,
+                        ctx.messages = cast(
+                            "list[dict[str, Any] | LLMResponse | CacheBoundary]",
+                            await self._build_messages(
+                                self._current_method,
+                                call_args=self._current_call.args if self._current_call else (),
+                                call_kwargs=self._current_call.kwargs if self._current_call else {},
+                                tools=ctx.params.get("tools"),
+                                max_output_tokens=_reduced,
+                            ),
                         )
                         _dynamic_context = _snapshot_llm_request(
                             self.event_manager, ctx.messages, current_generation_id or ""

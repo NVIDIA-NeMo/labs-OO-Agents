@@ -214,6 +214,60 @@ class TestGetLlmClient:
         assert llm.retry_config.rate_limit_extra_retries == 0
         assert "retry_config" not in llm.config
 
+    def test_registry_admission_config_reaches_client_without_litellm_leak(self, tmp_path):
+        path = _write_project_config(
+            _project_dir(tmp_path),
+            """\
+            models:
+              protected-alias:
+                model_name: openai/my-org/my-model
+                api_base: https://gateway.example/v1
+                concurrency_group: shared-gateway
+                max_in_flight: 5
+                queue_timeout: 30
+            """,
+        )
+        reload_registry(path)
+
+        llm = get_llm_client("protected-alias")
+
+        assert llm.concurrency_group == "shared-gateway"
+        assert llm.max_in_flight == 5
+        assert llm.queue_timeout == 30
+        assert "concurrency_group" not in llm.config
+        assert "max_in_flight" not in llm.config
+        assert "queue_timeout" not in llm.config
+
+    def test_injected_controller_overrides_registry_local_admission(self, tmp_path):
+        path = _write_project_config(
+            _project_dir(tmp_path),
+            """\
+            models:
+              protected-alias:
+                model_name: openai/my-org/my-model
+                api_base: https://gateway.example/v1
+                concurrency_group: shared-gateway
+                max_in_flight: 5
+                queue_timeout: 30
+            """,
+        )
+        reload_registry(path)
+
+        class Controller:
+            async def acquire(self, observer):
+                del observer
+                return None
+
+        controller = Controller()
+        llm = get_llm_client("protected-alias", admission_controller=controller)
+
+        assert llm.admission_controller is controller
+        assert llm.concurrency_group is None
+        assert llm.max_in_flight is None
+        assert llm.queue_timeout is None
+        assert "admission_controller" not in llm.config
+        llm.close()
+
     def test_retry_config_override_beats_registry(self, tmp_path):
         """Explicit call-site retry_config overrides YAML defaults."""
         path = _write_project_config(

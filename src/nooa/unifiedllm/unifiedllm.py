@@ -9,7 +9,7 @@ import math
 import re
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -34,6 +34,7 @@ from nooa.unifiedllm.cache_policy import (
 )
 
 from . import replay_state, response_parts
+from .admission import AdmissionController, AdmissionPolicy
 from .errors import EmptyContentError
 from .http_config import HttpConfig
 from .reasoning import ReasoningConfig, apply_reasoning_level
@@ -84,6 +85,19 @@ def _record_llm_metric(event: str, detail: Any = None) -> None:
             cb(event, detail)
         except Exception as e:  # noqa: BLE001
             logger.debug("Metric callback failed for event %r: %s", event, e)
+
+
+def _record_admission_observation(detail: dict[str, Any]) -> None:
+    """Record one admission outcome on the generation span and harness metrics."""
+    _record_llm_metric("llm_queue", detail)
+    try:
+        from opentelemetry import trace as otel_trace
+
+        span = otel_trace.get_current_span()
+        if span and span.is_recording():
+            span.add_event("llm.queue", attributes=detail)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Could not record LLM admission event: %s", e)
 
 
 @contextmanager
@@ -1005,7 +1019,9 @@ def _needs_dummy_tool(model: str) -> bool:
     return model_lower.startswith(("anthropic/", "anthropic."))
 
 
-def _messages_have_tool_calls(messages: list[dict[str, Any] | LLMResponse | CacheBoundary]) -> bool:
+def _messages_have_tool_calls(
+    messages: Sequence[dict[str, Any] | LLMResponse | CacheBoundary],
+) -> bool:
     """Return True if any message contains tool_call blocks."""
     for msg in messages:
         if msg.get("role") == "assistant":
@@ -1086,7 +1102,7 @@ _token_calibration = TokenCalibration()
 
 def _update_token_calibration(
     model: str,
-    messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
+    messages: Sequence[dict[str, Any] | LLMResponse | CacheBoundary],
     usage: LLMUsage,
     tools: list[dict[str, Any]] | None = None,
     *,
@@ -1113,27 +1129,28 @@ def _update_token_calibration(
         return
     # Responses lifts the leading system prompt out of input. It is still
     # billed input, so include it in the estimate without copying history.
+    message_list = list(messages)
     if instructions:
-        messages = [{"role": "system", "content": instructions}, *messages]
+        message_list = [{"role": "system", "content": instructions}, *message_list]
     # Calibration is best-effort: it must NEVER raise out of the (already paid)
     # response path. The whole estimate — primary AND fallback — is guarded.
     try:
         try:
-            estimated = litellm.token_counter(model=model, messages=messages)
+            estimated = litellm.token_counter(model=model, messages=message_list)
             if tools:
                 # Count the full messages+tools payload the way the API bills it,
                 # then take the larger of the bare and with-tools counts
                 # (with_tools is normally >= bare; max only guards a tokenizer
                 # that returns less with tools attached).
                 with_tools = litellm.token_counter(
-                    model=model, messages=messages, tools=cast(Any, tools)
+                    model=model, messages=message_list, tools=cast(Any, tools)
                 )
                 estimated = max(estimated, with_tools)
         except Exception:
             # token_counter can reject some message/tool shapes; fall back to the
             # per-message text sum rather than skip calibration entirely.
             estimated = 0
-            for msg in messages:
+            for msg in message_list:
                 content = msg.get("content")
                 if isinstance(content, str):
                     estimated += litellm.token_counter(model=model, text=content)
@@ -1159,9 +1176,34 @@ class UnifiedLLM(ABC):
         reasoning_levels: dict[str, dict[str, Any]] | None = None,
         reasoning_default: str | None = None,
         reasoning_level: str | None = None,
+        max_in_flight: int | None = None,
+        concurrency_group: str | None = None,
+        queue_timeout: float | None = None,
+        admission_controller: AdmissionController | None = None,
         **config,
     ):
         reject_legacy_cache_config(config)
+        if admission_controller is not None and any(
+            value is not None for value in (max_in_flight, concurrency_group, queue_timeout)
+        ):
+            raise ValueError(
+                "admission_controller cannot be combined with max_in_flight, "
+                "concurrency_group, or queue_timeout"
+            )
+        self.max_in_flight = max_in_flight
+        self.concurrency_group = concurrency_group
+        self.queue_timeout = queue_timeout
+        self.admission_controller = admission_controller
+        self._admission_policy: AdmissionController = (
+            admission_controller
+            if admission_controller is not None
+            else AdmissionPolicy(
+                max_in_flight=max_in_flight,
+                concurrency_group=concurrency_group,
+                queue_timeout=queue_timeout,
+                api_base=config.get("api_base") or config.get("base_url"),
+            )
+        )
         # Freeze prevents field assignment, not mutations inside nested Any
         # settings. Detach this small configuration once, never the history.
         self._reasoning_config = ReasoningConfig(
@@ -1421,7 +1463,48 @@ async def _collect_async(raw: Any) -> "litellm.ModelResponse":
     return raw
 
 
-async def _litellm_acompletion(api_params: dict[str, Any]) -> Any:
+async def _run_async_provider_call[T](
+    call: Callable[[], Awaitable[T]],
+    admission_policy: AdmissionController,
+    *,
+    unadmitted_call: Callable[[], Awaitable[T]] | None = None,
+) -> T:
+    """Run one provider attempt, holding admission through its actual exit.
+
+    Acquisition happens before the provider task is created, so cancelling a
+    queued caller cannot dispatch abandoned work.  Once dispatched, the
+    provider task owns the permit and releases it in ``finally``.  Shielding
+    keeps that accounting correct when the caller is cancelled while remote
+    work or a stream is still active.
+    """
+    permit = await admission_policy.acquire(_record_admission_observation)
+    if permit is None:
+        return await (unadmitted_call or call)()
+
+    async def run_and_release() -> T:
+        try:
+            return await call()
+        finally:
+            if permit is not None:
+                permit.release()
+
+    try:
+        task = asyncio.create_task(run_and_release())
+    except BaseException:
+        if permit is not None:
+            permit.release()
+        raise
+
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        task.add_done_callback(_consume_async_provider_result)
+        raise
+
+
+async def _litellm_acompletion(
+    api_params: dict[str, Any],
+) -> Any:
     """Await LiteLLM without cancelling its nested provider coroutine.
 
     LiteLLM runs sync ``completion()`` in an executor for async chat calls.
@@ -1435,15 +1518,16 @@ async def _litellm_acompletion(api_params: dict[str, Any]) -> Any:
     Shielding lets LiteLLM finish consuming that provider coroutine while the
     caller still receives ``CancelledError`` immediately.
     """
+
     task = asyncio.create_task(litellm.acompletion(**api_params))
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
-        task.add_done_callback(_consume_litellm_acompletion_result)
+        task.add_done_callback(_consume_async_provider_result)
         raise
 
 
-def _consume_litellm_acompletion_result(task: asyncio.Task[Any]) -> None:
+def _consume_async_provider_result(task: asyncio.Task[Any]) -> None:
     try:
         task.result()
     except BaseException:
@@ -1715,6 +1799,10 @@ class CompletionClient(UnifiedLLM):
         retry_config: RetryConfig | None = None,
         http_config: HttpConfig | None = None,
         cache_breakpoint: Literal["auto", "anthropic"] | None = "auto",
+        max_in_flight: int | None = None,
+        concurrency_group: str | None = None,
+        queue_timeout: float | None = None,
+        admission_controller: AdmissionController | None = None,
         **config,
     ):
         """
@@ -1741,13 +1829,28 @@ class CompletionClient(UnifiedLLM):
                 other routes use provider-default caching. ``None`` disables
                 NOOA markers. Without a boundary, only leading instructions
                 are marked.
+            max_in_flight: Optional maximum number of concurrent async provider
+                attempts in this process for the resolved concurrency group.
+            concurrency_group: Optional group shared across clients and aliases.
+                When omitted, ``api_base`` identifies an opaque endpoint group.
+            queue_timeout: Optional maximum seconds to wait for admission.
+            admission_controller: Optional application-supplied controller. Use
+                this for a shared process or distributed admission scope. It
+                cannot be combined with the process-local admission options.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
         if cache_breakpoint not in {None, "auto", "anthropic"}:
             raise ValueError(
                 "CompletionClient cache_breakpoint must be 'auto', 'anthropic', or None"
             )
-        super().__init__(model, **config)
+        super().__init__(
+            model,
+            max_in_flight=max_in_flight,
+            concurrency_group=concurrency_group,
+            queue_timeout=queue_timeout,
+            admission_controller=admission_controller,
+            **config,
+        )
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint
         self._http_config = http_config or HttpConfig()
@@ -1796,11 +1899,11 @@ class CompletionClient(UnifiedLLM):
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
-        messages = replay_state.prepare_chat_messages(messages, state_scope)
+        prepared_messages = replay_state.prepare_chat_messages(messages, state_scope)
 
         # Choose the stable-prefix breakpoint on projected provider messages.
         prepared_messages, _, _ = self._prepare_cache_boundary(
-            messages, responses=False, model=effective_model
+            prepared_messages, responses=False, model=effective_model
         )
 
         api_params = {
@@ -1888,11 +1991,11 @@ class CompletionClient(UnifiedLLM):
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
-        messages = replay_state.prepare_chat_messages(messages, state_scope)
+        prepared_messages = replay_state.prepare_chat_messages(messages, state_scope)
 
         # Choose the stable-prefix breakpoint on projected provider messages.
         prepared_messages, _, _ = self._prepare_cache_boundary(
-            messages, responses=False, model=effective_model
+            prepared_messages, responses=False, model=effective_model
         )
 
         api_params = {
@@ -1935,7 +2038,17 @@ class CompletionClient(UnifiedLLM):
             api_params.setdefault("client", http_client)
 
         async def _make_call():
-            raw_response = await _collect_async(await _litellm_acompletion(api_params))
+            async def admitted_call():
+                return await _collect_async(await litellm.acompletion(**api_params))
+
+            async def unadmitted_call():
+                return await _collect_async(await _litellm_acompletion(api_params))
+
+            raw_response = await _run_async_provider_call(
+                admitted_call,
+                self._admission_policy,
+                unadmitted_call=unadmitted_call,
+            )
             reasoning, _ = _extract_reasoning_and_usage(raw_response)
             text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
 
@@ -2069,6 +2182,10 @@ class ResponsesClient(UnifiedLLM):
         retry_config: RetryConfig | None = None,
         http_config: HttpConfig | None = None,
         cache_breakpoint: Literal["auto", "openai"] | None = "auto",
+        max_in_flight: int | None = None,
+        concurrency_group: str | None = None,
+        queue_timeout: float | None = None,
+        admission_controller: AdmissionController | None = None,
         **config,
     ):
         """
@@ -2098,11 +2215,26 @@ class ResponsesClient(UnifiedLLM):
                 Anthropic cache mapping is supported by CompletionClient only.
                 With ``"openai"`` and no eligible stable block, warns and keeps
                 explicit mode without a breakpoint, avoiding all cache writes.
+            max_in_flight: Optional maximum number of concurrent async provider
+                attempts in this process for the resolved concurrency group.
+            concurrency_group: Optional group shared across clients and aliases.
+                When omitted, ``api_base`` identifies an opaque endpoint group.
+            queue_timeout: Optional maximum seconds to wait for admission.
+            admission_controller: Optional application-supplied controller. Use
+                this for a shared process or distributed admission scope. It
+                cannot be combined with the process-local admission options.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
         if cache_breakpoint not in {None, "auto", "openai"}:
             raise ValueError("ResponsesClient cache_breakpoint must be 'auto', 'openai', or None")
-        super().__init__(model, **config)
+        super().__init__(
+            model,
+            max_in_flight=max_in_flight,
+            concurrency_group=concurrency_group,
+            queue_timeout=queue_timeout,
+            admission_controller=admission_controller,
+            **config,
+        )
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint
         self._http_config = http_config or HttpConfig()
@@ -2265,7 +2397,13 @@ class ResponsesClient(UnifiedLLM):
             api_params.setdefault("client", http_client.async_client)
 
         async def _make_call():
-            return cast("litellm.ResponsesAPIResponse", await litellm.aresponses(**api_params))
+            async def call_provider():
+                return cast("litellm.ResponsesAPIResponse", await litellm.aresponses(**api_params))
+
+            return await _run_async_provider_call(
+                call_provider,
+                self._admission_policy,
+            )
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
         with _track_llm_call(model=effective_model, endpoint=self.config.get("api_base")):
