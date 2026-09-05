@@ -3,6 +3,7 @@
 """Tests for RFC 9728 OAuth authorization-server discovery in mcp/oauth.py."""
 
 import asyncio
+import threading
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -560,6 +561,100 @@ def test_extract_authorization_code_accepts_curl_command_from_maas_page():
 
 def test_extract_authorization_code_preserves_raw_code():
     assert oauth._extract_authorization_code("abc123") == "abc123"
+
+
+def test_callback_url_state_must_match_authorization_request(monkeypatch):
+    monkeypatch.setattr(oauth.secrets, "token_urlsafe", lambda _size: "expected-state")
+    config = oauth.OAuthConfig(
+        authorization_endpoint="https://maas.example/authorize",
+        token_endpoint="https://maas.example/token",
+        client_id="client-id",
+        redirect_uri="http://localhost:8090/callback",
+    )
+    handler = oauth.OAuthHandler(config)
+    auth_url = handler._build_authorization_url()
+
+    assert parse_qs(urlparse(auth_url).query)["state"] == ["expected-state"]
+    handler._validate_callback_state("http://localhost:8090/callback?code=ok&state=expected-state")
+    with pytest.raises(RuntimeError, match="state did not match"):
+        handler._validate_callback_state(
+            "http://localhost:8090/callback?code=wrong&state=other-state"
+        )
+    with pytest.raises(RuntimeError, match="state did not match"):
+        handler._validate_callback_state("http://localhost:8090/callback?code=missing")
+
+
+def test_raw_authorization_code_remains_supported_with_state_validation(monkeypatch):
+    monkeypatch.setattr(oauth.secrets, "token_urlsafe", lambda _size: "expected-state")
+    config = oauth.OAuthConfig(
+        authorization_endpoint="https://maas.example/authorize",
+        token_endpoint="https://maas.example/token",
+        client_id="client-id",
+        redirect_uri="http://localhost:8090/callback",
+    )
+    handler = oauth.OAuthHandler(config)
+    handler._build_authorization_url()
+
+    handler._validate_callback_state("raw-code-with-no-query")
+
+
+@pytest.mark.asyncio
+async def test_loopback_timeout_closes_callback_thread(monkeypatch):
+    threads: list[threading.Thread] = []
+    real_thread = threading.Thread
+
+    def tracked_thread(*args, **kwargs):
+        thread = real_thread(*args, **kwargs)
+        threads.append(thread)
+        return thread
+
+    monkeypatch.setattr(oauth, "Thread", tracked_thread)
+    config = oauth.OAuthConfig(
+        authorization_endpoint="https://maas.example/authorize",
+        token_endpoint="https://maas.example/token",
+        client_id="client-id",
+        redirect_uri="http://localhost:0/callback",
+        timeout=0.01,
+    )
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        await oauth.OAuthHandler(config)._capture_code_via_local_server(open_browser=False)
+
+    assert len(threads) == 1
+    assert not threads[0].is_alive()
+
+
+@pytest.mark.asyncio
+async def test_loopback_cancellation_closes_callback_thread(monkeypatch):
+    threads: list[threading.Thread] = []
+    real_thread = threading.Thread
+
+    def tracked_thread(*args, **kwargs):
+        thread = real_thread(*args, **kwargs)
+        threads.append(thread)
+        return thread
+
+    monkeypatch.setattr(oauth, "Thread", tracked_thread)
+    config = oauth.OAuthConfig(
+        authorization_endpoint="https://maas.example/authorize",
+        token_endpoint="https://maas.example/token",
+        client_id="client-id",
+        redirect_uri="http://localhost:0/callback",
+        timeout=30,
+    )
+    handler = oauth.OAuthHandler(config)
+    task = asyncio.create_task(handler._capture_code_via_local_server(open_browser=False))
+    for _ in range(100):
+        if threads:
+            break
+        await asyncio.sleep(0.01)
+    assert threads
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not threads[0].is_alive()
 
 
 @pytest.mark.asyncio
