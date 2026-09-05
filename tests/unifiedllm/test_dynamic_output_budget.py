@@ -71,3 +71,23 @@ def test_budget_controls_are_not_forwarded_to_provider(tmp_path) -> None:
         assert "usage_log_path" not in kwargs
     finally:
         client.close()
+
+
+def test_usage_log_records_endpoint_and_reasoning_effort(tmp_path) -> None:
+    usage_log = tmp_path / "usage.jsonl"
+    client = CompletionClient(
+        model="test-model",
+        api_base="https://api.example.test/v1",
+        max_tokens=384_000,
+        reasoning_effort="max",
+        usage_log_path=str(usage_log),
+    )
+    try:
+        with patch("litellm.completion", return_value=_response(10)):
+            client.call([{"role": "user", "content": "hello"}])
+
+        record = json.loads(usage_log.read_text())
+        assert record["endpoint"] == "https://api.example.test/v1"
+        assert record["reasoning_effort"] == "max"
+    finally:
+        client.close()

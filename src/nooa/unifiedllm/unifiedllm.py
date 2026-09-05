@@ -1202,8 +1202,15 @@ class UnifiedLLM(ABC):
         if isinstance(prompt_tokens, int) and prompt_tokens >= 0:
             self._last_prompt_tokens_actual = prompt_tokens
         if self._usage_log_path:
+            reasoning_effort = self.config.get("reasoning_effort")
+            if reasoning_effort is None:
+                reasoning = self.config.get("reasoning")
+                if isinstance(reasoning, dict):
+                    reasoning_effort = reasoning.get("effort")
             record: dict[str, Any] = {
                 "model": self.model,
+                "endpoint": self.config.get("api_base"),
+                "reasoning_effort": reasoning_effort,
                 "requested_max_tokens": requested_max_tokens,
                 **usage,
             }
