@@ -710,3 +710,85 @@ async def test_require_true_raises_when_unavailable(monkeypatch):
             cell_timeout=5.0,
         )
     ex_mod._CAPS_CACHE = None
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: Windows signal guard in _classify_worker_death (issue #92)
+# ---------------------------------------------------------------------------
+
+
+def test_classify_worker_death_no_sigxcpu_no_sigkill(monkeypatch):
+    """Regression test for #92.
+
+    On platforms where signal.SIGXCPU and signal.SIGKILL don't exist (e.g.
+    Windows), _classify_worker_death() must not raise AttributeError.  It
+    should fall through and return the original WorkerDiedError unchanged.
+    """
+    import signal as signal_mod
+
+    from nooa.runtime.sandbox import executor as ex_mod
+    from nooa.runtime.sandbox.errors import WorkerDiedError
+    from nooa.runtime.sandbox.guards import Capabilities
+
+    # Inject a degraded-mode Windows-like Capabilities so __init__ doesn't crash
+    fake_caps = Capabilities(linux=False, landlock_abi=0, seccomp=False, rlimit=False)
+    monkeypatch.setattr(ex_mod, "_CAPS_CACHE", fake_caps)
+
+    # Mock get_context so instantiating SandboxedExecutor doesn't fail on Windows due to 'fork'
+    import multiprocessing
+
+    monkeypatch.setattr(multiprocessing, "get_context", lambda method: None)
+
+    # Simulate Windows: remove POSIX-only signal constants
+    monkeypatch.delattr(signal_mod, "SIGXCPU", raising=False)
+    monkeypatch.delattr(signal_mod, "SIGKILL", raising=False)
+
+    executor = SandboxedExecutor(
+        _ToolAgent(),
+        SandboxConfig(require=False),
+        cell_timeout=None,
+    )
+
+    # Simulate a dead worker with a generic exit code (e.g. 1)
+    class _FakeProc:
+        exitcode = 1
+
+    executor._proc = _FakeProc()
+    exc = WorkerDiedError("worker died unexpectedly")
+
+    # Before fix: raised AttributeError: module 'signal' has no attribute 'SIGXCPU'
+    # After fix:  falls through and returns the original exception unchanged
+    result = executor._classify_worker_death(exc)
+    assert result is exc
+
+    ex_mod._CAPS_CACHE = None
+
+
+def test_classify_worker_death_sigxcpu_present(monkeypatch):
+    """On Linux where signal.SIGXCPU exists, a SIGXCPU exit should map to CellTimeoutError."""
+    import signal as signal_mod
+
+    from nooa.runtime.sandbox import executor as ex_mod
+    from nooa.runtime.sandbox.errors import CellTimeoutError, WorkerDiedError
+    from nooa.runtime.sandbox.guards import Capabilities
+
+    if not hasattr(signal_mod, "SIGXCPU"):
+        pytest.skip("SIGXCPU not available on this platform")
+
+    fake_caps = Capabilities(linux=False, landlock_abi=0, seccomp=False, rlimit=False)
+    monkeypatch.setattr(ex_mod, "_CAPS_CACHE", fake_caps)
+
+    executor = SandboxedExecutor(
+        _ToolAgent(),
+        SandboxConfig(require=False),
+        cell_timeout=None,
+    )
+
+    class _FakeProc:
+        exitcode = -signal_mod.SIGXCPU
+
+    executor._proc = _FakeProc()
+    result = executor._classify_worker_death(WorkerDiedError("cpu killed"))
+    assert isinstance(result, CellTimeoutError)
+
+    ex_mod._CAPS_CACHE = None
