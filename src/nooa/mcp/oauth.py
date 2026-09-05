@@ -236,6 +236,7 @@ class OAuthHandler:
         self._browser_open = browser_open
         self._code_verifier: str | None = None
         self._code_challenge: str | None = None
+        self._authorization_state: str | None = None
         # Set by _capture_code_via_local_server after dynamic port assignment;
         # used by exchange_code_for_token to send the exact redirect_uri the
         # authorization server received (RFC 8252 §4.1 requirement).
@@ -272,6 +273,7 @@ class OAuthHandler:
             Authorization URL
         """
         self._code_verifier, self._code_challenge = self._generate_pkce_pair()
+        self._authorization_state = secrets.token_urlsafe(32)
         if not self.config.client_id:
             raise RuntimeError(
                 "OAuth client_id is missing and dynamic client registration did not complete"
@@ -283,6 +285,7 @@ class OAuthHandler:
             "redirect_uri": redirect_uri or self.config.redirect_uri,
             "code_challenge": self._code_challenge,
             "code_challenge_method": "S256",
+            "state": self._authorization_state,
         }
 
         if self.config.scope:
@@ -292,6 +295,23 @@ class OAuthHandler:
 
         query_string = urlencode(params)
         return f"{self.config.authorization_endpoint}?{query_string}"
+
+    def _validate_callback_state(self, callback: str) -> None:
+        """Reject callback URLs that do not match this authorization request."""
+        value = callback.strip()
+        curl_match = re.search(r"curl\s+['\"]([^'\"]+)['\"]", value)
+        if curl_match:
+            value = curl_match.group(1)
+        parsed = urlparse(value)
+        if not parsed.query:
+            return  # Raw authorization codes cannot carry state.
+        params = parse_qs(parsed.query)
+        if "code" not in params and "error" not in params:
+            return
+        received = (params.get("state") or [None])[0]
+        expected = self._authorization_state
+        if expected is None or received is None or not secrets.compare_digest(received, expected):
+            raise RuntimeError("OAuth callback state did not match the authorization request")
 
     async def _authorize_manual(self, open_browser: bool = True) -> str:
         """Out-of-band authorization: show the URL, collect a pasted code.
@@ -365,6 +385,7 @@ class OAuthHandler:
                 "OAuth authorization timed out while waiting for the code or callback URL "
                 f"({self.config.timeout:g} seconds). Retry the connection to start a fresh flow."
             ) from None
+        self._validate_callback_state(pasted)
         code = _extract_authorization_code(pasted)
         if not code:
             raise RuntimeError("Authorization code not provided")
@@ -473,6 +494,7 @@ class OAuthHandler:
         error_info: list[str] = []
         done = asyncio.Event()
         loop = asyncio.get_running_loop()
+        authorization_state: str | None = None
 
         class CallbackHandler(BaseHTTPRequestHandler):
             def log_message(self, format: str, *args: object) -> None:  # noqa: A002
@@ -486,7 +508,22 @@ class OAuthHandler:
                     return
 
                 params = parse_qs(req_parsed.query)
-                if "error" in params:
+                callback_state = (params.get("state") or [None])[0]
+                expected_state = authorization_state
+                if (
+                    expected_state is None
+                    or callback_state is None
+                    or not secrets.compare_digest(callback_state, expected_state)
+                ):
+                    error_info.append(
+                        "OAuth callback state did not match the authorization request"
+                    )
+                    body = _html_page(
+                        "Authorization Failed",
+                        "<p style='color:red'>Invalid authorization state.</p>"
+                        "<p>You can close this tab and retry.</p>",
+                    )
+                elif "error" in params:
                     error_info.append(params["error"][0])
                     body = _html_page(
                         "Authorization Failed",
@@ -511,8 +548,10 @@ class OAuthHandler:
                 self.send_header("Content-Length", str(len(encoded)))
                 self.end_headers()
                 self.wfile.write(encoded)
-                # Set the asyncio.Event from the thread using thread-safe call
-                loop.call_soon_threadsafe(done.set)
+                # The event loop may have been cancelled and closed while the
+                # callback thread was handling a late browser request.
+                if not loop.is_closed():
+                    loop.call_soon_threadsafe(done.set)
 
         # Bind to requested port (0 means OS picks a free port, RFC 8252 §7.3)
         server = HTTPServer((host, requested_port), CallbackHandler)
@@ -527,6 +566,7 @@ class OAuthHandler:
         try:
             await self._register_dynamic_client(actual_redirect_uri)
             auth_url = self._build_authorization_url(redirect_uri=actual_redirect_uri)
+            authorization_state = self._authorization_state
         except Exception:
             server.server_close()
             raise
@@ -540,7 +580,7 @@ class OAuthHandler:
 
         # Run the blocking server loop in a thread (asyncio.to_thread is for one-shot
         # functions, but this is a long-running loop that needs to run until done)
-        thread = Thread(target=serve, daemon=True)
+        thread = Thread(target=serve, daemon=True, name="nooa-oauth-callback")
         thread.start()
 
         if open_browser:
@@ -562,11 +602,16 @@ class OAuthHandler:
         else:
             logger.info(f"Please visit: {auth_url}")
 
-        with contextlib.suppress(asyncio.TimeoutError):
-            # Timeout is handled below by checking if received_code is empty
-            await asyncio.wait_for(done.wait(), timeout=self.config.timeout)
-
-        thread.join(timeout=2)
+        try:
+            with contextlib.suppress(TimeoutError):
+                # Timeout is handled below by checking if received_code is empty.
+                await asyncio.wait_for(done.wait(), timeout=self.config.timeout)
+        finally:
+            # Unblock handle_request and retire the callback server even when the
+            # OAuth task is cancelled or times out.
+            done.set()
+            server.server_close()
+            await asyncio.to_thread(thread.join, 2)
 
         if error_info:
             raise RuntimeError(f"OAuth authorization error: {error_info[0]}")
