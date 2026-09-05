@@ -50,38 +50,50 @@ def _make_headless_app():
     from nooa.viewer import otlp_store
     from nooa.viewer.trace_routes import router as trace_router
 
-    _ingest_queue: asyncio.Queue[bytes | asyncio.Event] = asyncio.Queue()
+    _ingest_queue: asyncio.Queue[bytes | asyncio.Future[bool]] = asyncio.Queue()
     _write_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="headless-writer")
 
     async def _ingest_worker() -> None:
         loop = asyncio.get_running_loop()
+        write_failed = False
+
+        def finish_barrier(barrier: asyncio.Future[bool]) -> None:
+            # Timed-out or disconnected callers may have cancelled their future.
+            if not barrier.done():
+                barrier.set_result(not write_failed)
+            _ingest_queue.task_done()
+
         while True:
             item = await _ingest_queue.get()
-            # Sentinel event from /v1/sync — everything before it is written.
-            if isinstance(item, asyncio.Event):
-                item.set()
-                _ingest_queue.task_done()
+            if isinstance(item, asyncio.Future):
+                finish_barrier(item)
                 continue
             batch: list[bytes] = [item]
+            barrier: asyncio.Future[bool] | None = None
             while len(batch) < _INGEST_MAX_BATCH:
                 try:
                     next_item = _ingest_queue.get_nowait()
-                    if isinstance(next_item, asyncio.Event):
-                        next_item.set()
-                        _ingest_queue.task_done()
-                        continue
+                    if isinstance(next_item, asyncio.Future):
+                        barrier = next_item
+                        break  # Flush the preceding batch before acknowledging sync.
                     batch.append(next_item)
                 except asyncio.QueueEmpty:
                     break
             try:
-                await loop.run_in_executor(
+                results = await loop.run_in_executor(
                     _write_executor, otlp_store.ingest_batch_write_bytes, batch
                 )
+                if len(results) != len(batch):
+                    write_failed = True
             except Exception:
+                # A dropped batch invalidates subsequent sync guarantees for this backend.
+                write_failed = True
                 log.exception("headless ingest_worker: failed to write batch of %d", len(batch))
             finally:
                 for _ in batch:
                     _ingest_queue.task_done()
+            if barrier is not None:
+                finish_barrier(barrier)
 
     @asynccontextmanager
     async def lifespan(app: fastapi.FastAPI):
@@ -90,8 +102,7 @@ def _make_headless_app():
         try:
             yield
         finally:
-            if not _ingest_queue.empty():
-                await _ingest_queue.join()
+            await _ingest_queue.join()
             worker.cancel()
             try:
                 await worker
@@ -176,15 +187,17 @@ def _make_headless_app():
     async def sync():
         """Wait until all spans queued before this call are written.
 
-        Inserts a sentinel Event into the queue.  The ingest worker
-        processes items in order; when it reaches the sentinel it sets
-        the event, guaranteeing everything enqueued before it has been
-        written to SQLite.  Unlike Queue.join(), this is not affected
-        by new items arriving from other concurrent tasks.
+        The worker resolves a queued future after writing the preceding batch.
+        Unlike Queue.join(), this does not wait for items arriving later.
+        A prior write failure returns an error because the missing spans cannot
+        be recovered by another sync request.
         """
-        event = asyncio.Event()
-        await _ingest_queue.put(event)
-        await asyncio.wait_for(event.wait(), timeout=30)
+        barrier: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        await _ingest_queue.put(barrier)
+        if not await asyncio.wait_for(barrier, timeout=30):
+            return _JSONResponse(
+                status_code=500, content={"error": "One or more trace batches failed to persist"}
+            )
         return _JSONResponse(content={"synced": True})
 
     @app.get("/health")
