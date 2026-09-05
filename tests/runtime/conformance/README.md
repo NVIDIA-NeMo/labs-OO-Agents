@@ -17,7 +17,7 @@ pytest node ID, e.g. `test_stdout_is_captured[sandbox]`.
 | Namespace persistence across cells | cell 2 reads cell 1's binding | |
 | Helper definitions across cells | `def` in cell 1, called in cell 2 | |
 | Restriction enforcement | `execution_status`, `.error` | `RestrictionsConfig` defaults apply to both backends |
-| Validation retry | session completes after a rejected cell | **Deferred** — not yet covered |
+| Validation retry | errored `PythonOutput`, session continues | Rejection is correctable, not fatal; namespace survives |
 | Nested agent/tool calls | value, stdout, `event_type` sequence | Brokered calls are observationally invisible on the sandbox path |
 | `PythonOutput` status and ordering | `event_type` sequence, `tool_call_id` | |
 | Runtime exception surfacing | `execution_status is ResultStatus.ERROR` | Status and exception type |
