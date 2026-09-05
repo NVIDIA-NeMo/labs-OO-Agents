@@ -403,14 +403,16 @@ class MemoryManager:
         status: str | None = None,
         references: list[str] | None = None,
     ) -> bool:
-        """Refine an existing memory in place (re-embeds if content changed)."""
+        """Refine a memory, refreshing derived metadata and changed embedding input."""
         m = self._find(memory_id)
         if m is None:
             return False
         self._assert_writable(m)
-        content_changed = content is not None and content != m.content
-        if content is not None:
-            m.content = content
+        embedding_before = m.embedding_text()
+        if content is not None and content != m.content:
+            # Reuse the schema's derivation rules without losing record history.
+            data = m.model_dump(exclude={"size_chars", "token_len", "sentence_count"})
+            m = Memory.model_validate({**data, "content": content})
         if importance is not None:
             m.importance = max(0.0, min(10.0, importance))
         if type is not None:
@@ -434,7 +436,7 @@ class MemoryManager:
             reinforce=False,
             cap=self.config.observability.access_log_cap,
         )
-        if content_changed:
+        if m.embedding_text() != embedding_before:
             self.store.add(m, self.embedder.embed(m.embedding_text()))  # re-embed + replace
         else:
             self.store.save(m)
