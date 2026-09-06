@@ -3229,3 +3229,16 @@ async def test_restart_drain_rejects_new_prompt_slash_and_bang_input():
         assert h.agent.messages_received == []
         assert h.app.commands_dispatched() == []
         assert h.app.last_bang_command() is None
+
+
+async def test_end_input_drain_accepts_new_prompt_input_again():
+    """end_input_drain() releases a drain so the user is not stuck."""
+    async with TUIHarness() as h:
+        assert h.app is not None
+        h.app.begin_input_drain("Restart pending; waiting for current work to finish.")
+        await h.submit_async("blocked prompt")
+        await h.wait_output_contains("Restart pending")
+
+        h.app.end_input_drain()
+        await h.submit_async("accepted prompt")
+        await h.wait_for(lambda: h.agent.messages_received == ["accepted prompt"])

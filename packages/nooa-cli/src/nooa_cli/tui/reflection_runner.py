@@ -125,7 +125,12 @@ class ReflectionRunner:
         qm = getattr(self._agent, "queue_manager", None)
         if qm is None:
             return True
-        if any(h.state == "running" for h in qm._handles):
+        running_work = getattr(qm, "running_work_handles", None)
+        if running_work is not None:
+            # Daemon producers are infrastructure, not turn-blocking work.
+            if running_work():
+                return False
+        elif any(h.state == "running" for h in qm._handles):
             return False
         for name, ch in qm._channels.items():
             if name == "user_messages":
