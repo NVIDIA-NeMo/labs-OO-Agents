@@ -5,11 +5,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -35,6 +37,118 @@ DEFAULT_PROMPT = (
 )
 DEFAULT_MODEL = "glm-5.2"
 DEFAULT_LLM_API_BASE = "https://inference-api.nvidia.com/v1"
+DEFAULT_SOFT_TIMEOUT_SEC = 13920
+DEFAULT_FINALIZATION_GRACE_SEC = 300.0
+DEFAULT_TRACING_SHUTDOWN_TIMEOUT_SEC = 30.0
+DEFAULT_OUTER_MARGIN_SEC = 60.0
+
+
+def validate_timeout_budget(
+    *,
+    hard_timeout: float,
+    soft_timeout: float,
+    finalization_grace: float,
+    tracing_shutdown_timeout: float,
+    outer_margin: float = DEFAULT_OUTER_MARGIN_SEC,
+) -> None:
+    """Reject a run whose cooperative phases can consume the outer timeout."""
+    required = (
+        soft_timeout + finalization_grace + tracing_shutdown_timeout + outer_margin
+    )
+    if required > hard_timeout:
+        raise ValueError(
+            "timeout budget is unsafe: "
+            f"hard={hard_timeout:g}s, required={required:g}s "
+            f"(soft={soft_timeout:g}s + finalization={finalization_grace:g}s + "
+            f"tracing={tracing_shutdown_timeout:g}s + margin={outer_margin:g}s)"
+        )
+
+
+def _existing_final(log_dir: Path) -> dict[str, object] | None:
+    final_dir = log_dir / "artifacts" / "final_submission"
+    poc_path = final_dir / "poc"
+    selection_path = final_dir / "selection.json"
+    if not poc_path.is_file() or not selection_path.is_file():
+        return None
+    try:
+        selection = json.loads(selection_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if selection.get("sha256") != hashlib.sha256(poc_path.read_bytes()).hexdigest():
+        return None
+    return selection
+
+
+def recover_timeout_final(log_dir: Path) -> dict[str, object] | None:
+    """Freeze a persisted verified crash when the outer watchdog killed the agent."""
+    existing = _existing_final(log_dir)
+    if existing is not None:
+        output_path = log_dir / "artifacts" / "output.txt"
+        output_path.touch(exist_ok=True)
+        return existing
+
+    artifacts_dir = log_dir / "artifacts"
+    log_path = artifacts_dir / "submissions.jsonl"
+    if not log_path.is_file():
+        return None
+
+    candidates: list[tuple[int, int, bytes, dict[str, object]]] = []
+    for line in log_path.read_text(errors="replace").splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("status") != "crashed" or record.get("kind") != "crash":
+            continue
+        try:
+            number = int(record["submission_number"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        candidate_path = artifacts_dir / "candidates" / f"submission_{number}.poc"
+        if not candidate_path.is_file():
+            continue
+        data = candidate_path.read_bytes()
+        candidates.append((len(data), number, data, record))
+
+    if not candidates:
+        return None
+
+    _, number, data, record = min(candidates, key=lambda item: (item[0], item[1]))
+    final_dir = artifacts_dir / "final_submission"
+    final_dir.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=".final_submission-", dir=final_dir.parent))
+    selection: dict[str, object] = {
+        "schema_version": 1,
+        "submission_number": number,
+        "poc_path": "/logs/artifacts/final_submission/poc",
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "byte_length": len(data),
+        "selection_reason": (
+            "Outer hard timeout recovery selected the smallest persisted verified "
+            "crash candidate."
+        ),
+        "source_agent": record.get("source_agent"),
+        "source_model": record.get("source_model"),
+        "hypothesis": record.get("hypothesis") or "Persisted verified crash candidate.",
+        "cluster_key": record.get("cluster_key") or "unknown-crash",
+    }
+    try:
+        (stage / "poc").write_bytes(data)
+        (stage / "selection.json").write_text(
+            json.dumps(selection, sort_keys=True, separators=(",", ":")) + "\n"
+        )
+        os.rename(stage, final_dir)
+        (final_dir / "poc").chmod(0o444)
+        (final_dir / "selection.json").chmod(0o444)
+        final_dir.chmod(0o555)
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)
+    (artifacts_dir / "output.txt").write_text(
+        "Agent reached the outer hard timeout; recovered persisted verified crash "
+        f"submission {number}.\n"
+    )
+    return selection
 
 
 def require_local_image(client, image: str, *, role: str) -> None:
@@ -302,6 +416,25 @@ def main(argv: list[str] | None = None) -> int:
     if args.reasoning_effort:
         env["NOOA_CYBERGYM_REASONING_EFFORT"] = args.reasoning_effort
 
+    effective_soft_timeout = float(
+        env.get("NOOA_CYBERGYM_SOFT_TIMEOUT_SEC", DEFAULT_SOFT_TIMEOUT_SEC)
+    )
+    finalization_grace = float(
+        env.get("NOOA_CYBERGYM_FINALIZATION_GRACE_SEC", DEFAULT_FINALIZATION_GRACE_SEC)
+    )
+    tracing_shutdown_timeout = float(
+        env.get(
+            "NOOA_CYBERGYM_TRACING_SHUTDOWN_TIMEOUT_SEC",
+            DEFAULT_TRACING_SHUTDOWN_TIMEOUT_SEC,
+        )
+    )
+    validate_timeout_budget(
+        hard_timeout=args.timeout,
+        soft_timeout=effective_soft_timeout,
+        finalization_grace=finalization_grace,
+        tracing_shutdown_timeout=tracing_shutdown_timeout,
+    )
+
     proxy = None
     if args.use_firewall or args.connect_firewall:
         from cybergym.firewall import FirewallProxyManager
@@ -366,7 +499,10 @@ def main(argv: list[str] | None = None) -> int:
         "timeout": args.timeout,
         "max_iter": args.max_iter,
         "max_output_tokens": args.max_output_tokens,
-        "soft_timeout": args.soft_timeout,
+        "soft_timeout": effective_soft_timeout,
+        "finalization_grace": finalization_grace,
+        "tracing_shutdown_timeout": tracing_shutdown_timeout,
+        "outer_margin": DEFAULT_OUTER_MARGIN_SEC,
         "min_exploration": args.min_exploration,
         "max_concurrent_expanders": args.max_concurrent_expanders,
         "reasoning_effort": args.reasoning_effort,
@@ -378,6 +514,16 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if not args.keep_tmp:
             shutil.rmtree(task_dir, ignore_errors=True)
+
+    if exit_code == 124:
+        recovered = recover_timeout_final(log_dir)
+        if recovered is not None:
+            print(
+                "agent reached the outer timeout; recovered persisted verified "
+                f"submission {recovered['submission_number']}",
+                file=sys.stderr,
+            )
+            exit_code = 0
 
     if exit_code != 0:
         print(f"nooa_cybergym container exited with {exit_code}; logs: {log_dir}", file=sys.stderr)
