@@ -733,8 +733,14 @@ class LocalAgentRunner:
 
     def has_pending_work(self) -> bool:
         # Daemon handles are long-lived infrastructure producers; only the
-        # output they have already queued counts as pending work.
-        if self._queue_manager.running_work_handles():
+        # output they have already queued counts as pending work. Custom
+        # queue-manager implementations predating running_work_handles()
+        # keep the previous all-running-handles predicate.
+        running_work = getattr(self._queue_manager, "running_work_handles", None)
+        if running_work is not None:
+            if running_work():
+                return True
+        elif self._queue_manager.running_handles():
             return True
         return any(
             name != "user_messages" and channel.mode == "queue" and not channel.is_empty()
