@@ -16,6 +16,7 @@ pytestmark = pytest.mark.asyncio
 
 @asynccontextmanager
 async def _client(monkeypatch, writer):
+    """Exercise the app lifecycle and HTTP routes using a controlled in-process writer."""
     monkeypatch.setattr("nooa.viewer.otlp_store.init_db", lambda: None)
     monkeypatch.setattr("nooa.viewer.otlp_store.ingest_batch_write_bytes", writer)
     app = _make_headless_app()
@@ -27,10 +28,12 @@ async def _client(monkeypatch, writer):
 
 
 def _observe_barrier(monkeypatch):
+    """Expose an event when a sync barrier enters the queue, without timing sleeps."""
     queued = asyncio.Event()
 
     class ObservedQueue(asyncio.Queue):
         def put_nowait(self, item):
+            """Signal only after the barrier has actually been enqueued."""
             super().put_nowait(item)
             if not isinstance(item, bytes):
                 queued.set()
@@ -41,6 +44,7 @@ def _observe_barrier(monkeypatch):
 
 @pytest.mark.parametrize("batch_limit", [1, 32])
 async def test_sync_waits_for_preceding_batch_but_not_later_arrivals(monkeypatch, batch_limit):
+    """Sync waits for earlier payloads but excludes writes enqueued after its barrier."""
     monkeypatch.setattr("eval_pipeline.headless_backend._INGEST_MAX_BATCH", batch_limit)
     started = {name: threading.Event() for name in (b"first", b"second", b"later")}
     release = {name: threading.Event() for name in started}
@@ -48,6 +52,7 @@ async def test_sync_waits_for_preceding_batch_but_not_later_arrivals(monkeypatch
     barrier_queued = _observe_barrier(monkeypatch)
 
     def writer(batch):
+        """Block each named batch until the test explicitly allows it to persist."""
         started[batch[0]].set()
         assert release[batch[0]].wait(10), "test did not release writer"
         persisted.extend(batch)
@@ -79,7 +84,10 @@ async def test_sync_waits_for_preceding_batch_but_not_later_arrivals(monkeypatch
 
 @pytest.mark.parametrize("failure", ["exception", "skipped_payload"])
 async def test_sync_reports_write_failure(monkeypatch, failure):
+    """Both raised and silently skipped writes invalidate subsequent sync acknowledgements."""
+
     def writer(batch):
+        """Emulate the store's two failure modes without a live database."""
         if failure == "exception":
             raise OSError("disk full")
         return []  # The store omits results for payloads that fail during ingestion.
@@ -93,11 +101,13 @@ async def test_sync_reports_write_failure(monkeypatch, failure):
 
 
 async def test_cancelled_sync_does_not_stop_worker(monkeypatch):
+    """Cancelling one caller leaves the worker able to persist data and handle later syncs."""
     started, release = threading.Event(), threading.Event()
     queued = _observe_barrier(monkeypatch)
     persisted = []
 
     def writer(batch):
+        """Hold persistence until the first sync caller has been cancelled."""
         started.set()
         assert release.wait(10), "test did not release writer"
         persisted.extend(batch)

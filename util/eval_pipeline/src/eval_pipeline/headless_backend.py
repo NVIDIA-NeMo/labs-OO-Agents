@@ -54,10 +54,12 @@ def _make_headless_app():
     _write_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="headless-writer")
 
     async def _ingest_worker() -> None:
+        """Write queued batches in order and resolve barriers after preceding writes finish."""
         loop = asyncio.get_running_loop()
         write_failed = False
 
         def finish_barrier(barrier: asyncio.Future[bool]) -> None:
+            """Acknowledge a consumed barrier without reviving a cancelled sync request."""
             # Timed-out or disconnected callers may have cancelled their future.
             if not barrier.done():
                 barrier.set_result(not write_failed)
@@ -97,6 +99,7 @@ def _make_headless_app():
 
     @asynccontextmanager
     async def lifespan(app: fastapi.FastAPI):
+        """Start the writer and drain queued or in-flight work before shutting it down."""
         otlp_store.init_db()
         worker = asyncio.create_task(_ingest_worker())
         try:
