@@ -48,6 +48,7 @@ def test_restore_latest_snapshot_returns_true_after_save():
 
 
 def test_restore_latest_returns_most_recent():
+    """Restoring without a snapshot ID loads the most recently saved agent state."""
     storage = _make_storage()
     agent = _SimpleAgent(storage=storage)
 
@@ -63,6 +64,7 @@ def test_restore_latest_returns_most_recent():
 
 
 def test_latest_snapshot_breaks_timestamp_ties_after_reopen(tmp_path):
+    """Save order breaks identical timestamps, including after reopening the database."""
     path = tmp_path / "snapshots.sqlite"
     storage = SQLiteStorageManager(path)
     try:
