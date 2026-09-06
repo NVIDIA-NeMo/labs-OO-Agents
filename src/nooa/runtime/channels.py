@@ -804,7 +804,9 @@ class QueueManager:
 
         Also shows active spawned jobs so the LLM knows background
         producers are still running even when queues are empty. Daemon
-        (long-lived infrastructure) jobs are marked ``running, daemon``.
+        (long-lived infrastructure) jobs are marked ``running, daemon``
+        with a one-line legend explaining the difference from finite
+        background work.
         """
         parts = [
             ch.status(max_items=max_items, max_chars=max_chars)
@@ -839,6 +841,12 @@ class QueueManager:
                     "self.queue_manager.running_handles() for their IDs."
                 )
             spawn_lines.append("  ↳ Output arrives through channels; do not poll job handles.")
+            if any(h.daemon for h in active_spawns):
+                spawn_lines.append(
+                    "  ↳ daemon = long-lived infrastructure producer (runs until "
+                    "teardown, never blocks idle/restart); other jobs are finite work "
+                    "in flight."
+                )
             spawn_status = "\n".join(spawn_lines)
             body = f"{body}\n{spawn_status}" if body else spawn_status
 
