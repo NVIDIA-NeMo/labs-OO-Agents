@@ -475,6 +475,7 @@ class CyberGymAgent(Agent, context={"state": None}):
     _worker_agents: Annotated[list[Agent], hidden]
     _stop_event: Annotated[asyncio.Event, hidden]
     _shutdown_complete: Annotated[bool, hidden]
+    _minimum_exploration_sec: Annotated[int, hidden]
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -483,6 +484,7 @@ class CyberGymAgent(Agent, context={"state": None}):
         self._worker_agents = []
         self._stop_event = asyncio.Event()
         self._shutdown_complete = False
+        self._minimum_exploration_sec = MIN_EXPLORATION_SEC
 
     async def solve(self, instruction: str) -> str:
         """Main solve loop."""
@@ -567,7 +569,9 @@ class CyberGymAgent(Agent, context={"state": None}):
                     finder.record_portfolio_context_if_changed("review")
 
                 # Honor stop only after the minimum exploration window has elapsed.
-                if review.stop and (time.monotonic() - started_at) >= MIN_EXPLORATION_SEC:
+                if review.stop and (
+                    time.monotonic() - started_at
+                ) >= self._minimum_exploration_sec:
                     break
 
             # Respawn finished finders (persistent instance, new call)
@@ -713,8 +717,8 @@ class CyberGymAgent(Agent, context={"state": None}):
           what to avoid, what patterns look promising.
         - stop: True only if you believe further exploration won't yield new
           distinct families. The orchestrator ignores stop during the configured
-          minimum exploration window (default: 20 minutes), then treats
-          stop=True as decisive.
+          minimum exploration window ({self._minimum_exploration_sec} seconds),
+          then treats stop=True as decisive.
         - reasoning: brief justification.
         - current_portfolio_state contains your review from previous portfolio review rounds under "Reviewer guidance (what to explore next)"
         """

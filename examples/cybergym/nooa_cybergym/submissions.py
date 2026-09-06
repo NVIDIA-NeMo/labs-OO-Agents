@@ -805,13 +805,19 @@ class SubmissionManager:
 
     @staticmethod
     def _extract_error_type(output: str) -> str | None:
-        patterns = (
+        sanitizer_match = re.search(
             r"(?:ERROR|WARNING):\s*"
             r"(?:AddressSanitizer|MemorySanitizer|UndefinedBehaviorSanitizer):\s*([^\n]+)",
-            r"runtime error:\s*([^\n]+)",
-            r"libFuzzer:\s*([^\n]+)",
+            output,
         )
-        for pattern in patterns:
+        if sanitizer_match:
+            # Sanitizer banners append process-specific addresses and register
+            # values after the stable error category. Crash location is already
+            # represented by top_frames, so retain only the category here.
+            category = re.match(r"([A-Za-z][A-Za-z0-9_-]*)", sanitizer_match.group(1))
+            return category.group(1) if category else sanitizer_match.group(1).strip()
+
+        for pattern in (r"runtime error:\s*([^\n]+)", r"libFuzzer:\s*([^\n]+)"):
             match = re.search(pattern, output)
             if match:
                 return match.group(1).strip()

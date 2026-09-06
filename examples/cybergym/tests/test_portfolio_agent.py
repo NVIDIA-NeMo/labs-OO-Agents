@@ -4,6 +4,7 @@
 
 import asyncio
 import hashlib
+import inspect
 import json
 import shlex
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ from opentelemetry import trace as otel_trace  # noqa: E402
 from examples.cybergym.nooa_cybergym import agent as nooa_cybergym_agent  # noqa: E402
 from examples.cybergym.nooa_cybergym import main as nooa_cybergym_main  # noqa: E402
 from examples.cybergym.nooa_cybergym import submissions as cybergym_submissions  # noqa: E402
+from nooa.prompts import build_prompt_data  # noqa: E402
 from nooa.tracing import flush_traces  # noqa: E402
 from nooa.unifiedllm.fake import FakeLLMClient  # noqa: E402
 
@@ -50,9 +52,55 @@ DEDUP_TOKEN: tt_face_palette_set--tt_face_load_cpal--sfnt_load_face
 
     assert fp.kind == "crash"
     assert fp.sanitizer == "AddressSanitizer"
-    assert fp.error_type == "heap-buffer-overflow on address 0x123"
+    assert fp.error_type == "heap-buffer-overflow"
     assert fp.dedup_token == "tt_face_palette_set--tt_face_load_cpal--sfnt_load_face"
     assert "tt_face_palette_set--tt_face_load_cpal" in fp.cluster_key
+
+
+def test_fingerprint_ignores_volatile_asan_addresses_for_same_crash_site():
+    first = """
+==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x512000000bd4 at pc 0x562ca6ebe9db bp 0x7fff2c54a6d0 sp 0x7fff2c549e98
+    #0 0x562ca6ebe9db in strlen /src/string.c:10:1
+    #1 0x562ca6e00111 in Set /src/string.h:20:1
+    #2 0x562ca6e00222 in Assimp::MD3Importer::InternReadFile /src/MD3Loader.cpp:30:1
+"""
+    second = """
+==2==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x513000000508 at pc 0x560a0fc9c9db bp 0x7ffee3c3db70 sp 0x7ffee3c3d338
+    #0 0x560a0fc9c9db in strlen /src/string.c:10:1
+    #1 0x560a0fc00111 in Set /src/string.h:20:1
+    #2 0x560a0fc00222 in Assimp::MD3Importer::InternReadFile /src/MD3Loader.cpp:30:1
+"""
+
+    first_fp = cybergym_submissions.SubmissionManager.fingerprint_output(
+        "crashed", 1, first
+    )
+    second_fp = cybergym_submissions.SubmissionManager.fingerprint_output(
+        "crashed", 1, second
+    )
+
+    assert first_fp.error_type == "heap-buffer-overflow"
+    assert second_fp.error_type == "heap-buffer-overflow"
+    assert first_fp.cluster_key == second_fp.cluster_key
+
+
+def test_fingerprint_keeps_distinct_asan_error_categories_separate():
+    heap_overflow = """
+==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x512000000bd4
+    #0 0xabc in parse_tag /src/parser.c:10:1
+"""
+    segv = """
+==2==ERROR: AddressSanitizer: SEGV on unknown address 0x512000000bd4
+    #0 0xdef in parse_tag /src/parser.c:10:1
+"""
+
+    heap_fp = cybergym_submissions.SubmissionManager.fingerprint_output(
+        "crashed", 1, heap_overflow
+    )
+    segv_fp = cybergym_submissions.SubmissionManager.fingerprint_output(
+        "crashed", 1, segv
+    )
+
+    assert heap_fp.cluster_key != segv_fp.cluster_key
 
 
 def test_fingerprint_classifies_msan_personality_as_infra():
@@ -388,6 +436,21 @@ def test_cybergym_agent_disables_default_state_context():
 
     assert "state" in agent.context_manager._blocks
     assert agent.context_manager.is_disabled("state")
+
+
+@pytest.mark.asyncio
+async def test_reviewer_prompt_uses_the_effective_minimum_exploration_window():
+    agent = nooa_cybergym_agent.CyberGymAgent(llm=FakeLLMClient())
+    prompt_template = inspect.getdoc(nooa_cybergym_agent.CyberGymAgent._review)
+    prompt = await build_prompt_data(agent._review, "empty portfolio")
+
+    assert agent._minimum_exploration_sec == nooa_cybergym_agent.MIN_EXPLORATION_SEC
+    assert "{self._minimum_exploration_sec} seconds" in prompt_template
+    assert "default: 20 minutes" not in prompt_template
+    assert (
+        f"minimum exploration window ({nooa_cybergym_agent.MIN_EXPLORATION_SEC} seconds)"
+        in prompt.task_prompt
+    )
 
 
 def test_cybergym_agents_have_isolated_shell_sessions():
