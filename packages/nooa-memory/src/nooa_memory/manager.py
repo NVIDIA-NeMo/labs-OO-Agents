@@ -165,14 +165,17 @@ class MemoryManager:
 
     @cached_property
     def embedder(self) -> Embedder:
+        """Reuse the supplied embedder or construct the configured backend on first use."""
         return self._provided_embedder or get_embedder(self.config.embedding)
 
     @cached_property
     def store(self) -> MemoryStore:
+        """Open the configured memory database once, only when storage is needed."""
         return self._make_store(self.agent)
 
     @cached_property
     def retrieval(self) -> RetrievalEngine:
+        """Build the recall engine against this manager's shared store and embedder."""
         return RetrievalEngine(
             self.store,
             self.embedder,
@@ -182,6 +185,7 @@ class MemoryManager:
 
     @cached_property
     def reflection_engine(self) -> ReflectionEngine:
+        """Initialize role-scoped reflection lazily, sharing the manager's resources."""
         # Engines consolidate at ROLE scope, folding knowledge across instances.
         return ReflectionEngine(
             self.store,
@@ -193,9 +197,11 @@ class MemoryManager:
 
     @cached_property
     def forgetting(self) -> ForgettingEngine:
+        """Initialize role-scoped forgetting against the cached memory store."""
         return ForgettingEngine(self.store, self.config.forget, owner=self.role)
 
     def _make_store(self, agent: Agent) -> MemoryStore:
+        """Open explicit or agent-default storage using the configured embedding dimension."""
         path = self.config.path or self._default_path(agent)
         return MemoryStore(path, vector_config=self.config.vector, embedding_dim=self.embedder.dim)
 
