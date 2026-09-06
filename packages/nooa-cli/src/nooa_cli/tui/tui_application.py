@@ -3040,6 +3040,14 @@ class TUIApplication:
         if self._app.is_running:
             self._app.invalidate()
 
+    def end_input_drain(self) -> None:
+        """Allow new user input again after a drain waiter stopped or failed."""
+        if self._submission_block_reason is None:
+            return
+        self._submission_block_reason = None
+        if self._app.is_running:
+            self._app.invalidate()
+
     @property
     def input_drain_idle(self) -> bool:
         """Return whether pre-drain callbacks and deferred prompts have settled."""

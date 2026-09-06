@@ -1305,6 +1305,80 @@ async def test_restart_waits_for_agent_command_policy_and_callback_work() -> Non
     await asyncio.wait_for(waiter, timeout=1)
 
 
+@pytest.mark.asyncio
+async def test_restart_request_cancels_daemon_producers_but_not_work() -> None:
+    """The drain stops long-lived daemon producers; finite jobs keep running."""
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from nooa_cli.tui.session import Session
+
+    from nooa.runtime.channels import QueueManager
+
+    session = Session.__new__(Session)
+    session._restart_pending = False
+    session._app = SimpleNamespace(begin_input_drain=Mock())
+    qm = QueueManager()
+    qm.queue("mesh")
+    qm.queue("jobs")
+
+    async def _forever() -> None:
+        await asyncio.Event().wait()
+
+    daemon = qm.spawn(_forever(), channel="mesh", daemon=True)
+    finite = qm.spawn(_forever(), channel="jobs")
+
+    class AgentRunner:
+        async def run_async(self, fn):
+            return await fn()
+
+    session._local_agent_runner = AgentRunner()
+    session.agent = SimpleNamespace(queue_manager=qm)
+
+    session.request_restart_when_idle()
+    for _ in range(100):
+        if daemon.state == "cancelled":
+            break
+        await asyncio.sleep(0.01)
+
+    assert daemon.state == "cancelled"
+    assert finite.state == "running"
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_restart_ready_waits_for_reflection_run_to_finish() -> None:
+    """An active reflection pass keeps the restart drain pending."""
+    from types import SimpleNamespace
+
+    from nooa_cli.tui.session import Session
+
+    session = Session.__new__(Session)
+    session._restart_pending = True
+    app = SimpleNamespace(is_running=True, input_drain_idle=True, begin_input_drain=lambda _r: None)
+    session._app = app
+    session._command_runner = None
+    session._local_turn_policy = SimpleNamespace(is_idle=True)
+    reflection = SimpleNamespace(state="running")
+    session.agent = SimpleNamespace(_tui_reflection_runner=reflection)
+
+    class AgentRunner:
+        async def wait_quiescent(self):
+            return None
+
+        async def run_async(self, fn):
+            return await fn()
+
+    session._local_agent_runner = AgentRunner()
+
+    waiter = asyncio.create_task(session.wait_restart_ready())
+    await asyncio.sleep(0.05)
+    assert not waiter.done()
+
+    reflection.state = "idle"
+    await asyncio.wait_for(waiter, timeout=1)
+
+
 def test_restart_request_is_idempotent_and_blocks_input_once() -> None:
     from types import SimpleNamespace
     from unittest.mock import Mock
@@ -1341,11 +1415,11 @@ async def test_restart_quiescence_is_sampled_on_agent_owner_loop() -> None:
 
     class AgentRunner:
         async def wait_quiescent(self):
+            nonlocal owner_samples
+            owner_samples += 1
             return None
 
         async def run_async(self, fn):
-            nonlocal owner_samples
-            owner_samples += 1
             return await fn()
 
     session._local_agent_runner = AgentRunner()

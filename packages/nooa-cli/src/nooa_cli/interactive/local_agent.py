@@ -732,7 +732,9 @@ class LocalAgentRunner:
         return self.swap_agent(agent, seed_prompt=prompt)
 
     def has_pending_work(self) -> bool:
-        if self._queue_manager.running_handles():
+        # Daemon handles are long-lived infrastructure producers; only the
+        # output they have already queued counts as pending work.
+        if self._queue_manager.running_work_handles():
             return True
         return any(
             name != "user_messages" and channel.mode == "queue" and not channel.is_empty()

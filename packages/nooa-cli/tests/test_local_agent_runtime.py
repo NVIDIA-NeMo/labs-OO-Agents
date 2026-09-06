@@ -796,3 +796,42 @@ async def test_wait_quiescent_does_not_return_during_active_turn() -> None:
     agent.release.set()
     await asyncio.wait_for(waiter, timeout=1)
     await runner.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_daemon_job_does_not_block_quiescence_but_queued_output_does() -> None:
+    agent = AgentStub()
+    runner = LocalAgentRunner(agent, emit_text=lambda _text: None, agent_id="local-1")
+    qm = agent.queue_manager
+    qm.queue("mesh")
+
+    async def _pump_forever():
+        # Silent producer: a live infrastructure loop that emits no items.
+        while True:
+            await asyncio.sleep(0.01)
+
+    async def _finite():
+        await asyncio.Event().wait()
+
+    daemon = qm.spawn(_pump_forever(), channel="mesh", daemon=True)
+    finite = qm.spawn(_finite(), channel="mesh")
+    await asyncio.sleep(0.02)
+
+    # A finite in-flight job blocks; a daemon producer alone does not.
+    assert not runner.is_quiescent
+    await finite.cancel()
+    for _ in range(100):
+        if runner.is_quiescent:
+            break
+        await asyncio.sleep(0.01)
+    assert runner.is_quiescent
+
+    # Output already queued by the daemon still counts as pending work.
+    mesh = qm.get_channel("mesh")
+    mesh.put("queued-msg")
+    assert not runner.is_quiescent
+    mesh.drain()
+    assert runner.is_quiescent
+
+    await runner.shutdown()
+    assert daemon.state == "cancelled"

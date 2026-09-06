@@ -11,12 +11,47 @@ The ``main()`` coroutine keeps its original signature so that callers like
     await main(config=config, agent=agent)
 """
 
-from typing import TYPE_CHECKING
+import asyncio
+import logging
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from nooa import Agent
 
     from .config import Config
+
+
+async def _exit_when_restart_requested(
+    session: Any,
+    restart_event: asyncio.Event,
+    *,
+    on_ready: Callable[[], None],
+) -> None:
+    """Exit only after pre-request work has settled naturally.
+
+    A drain failure must not leave input blocked forever: the waiter is
+    supervised, the drain is released, and the exception is logged instead
+    of dying unobserved.
+    """
+    await restart_event.wait()
+    try:
+        await session.wait_restart_ready()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("graceful-restart drain failed; resuming input")
+        app = getattr(session, "_app", None)
+        if app is not None:
+            try:
+                app.end_input_drain()
+            except Exception:
+                pass
+        return
+    on_ready()
+    session._app.exit()
 
 
 def _prepare_splash(config, frontend) -> list:
@@ -120,9 +155,8 @@ async def main(
     restart_requested = False
     restart_ready = False
     restart_task = None
-    if result.session_id is not None:
-        import asyncio
 
+    if result.session_id is not None:
         from .runtime_registration import TUIRuntimeRegistration
 
         try:
@@ -161,16 +195,15 @@ async def main(
 
                 session._on_session_change = _update_runtime_session
 
-                async def _exit_when_restart_requested() -> None:
-                    """Exit only after pre-request work has settled naturally."""
+                def _mark_restart_ready() -> None:
                     nonlocal restart_ready
-                    await restart_event.wait()
-                    await session.wait_restart_ready()
                     restart_ready = True
-                    session._app.exit()
 
                 restart_task = asyncio.create_task(
-                    _exit_when_restart_requested(), name="tui-graceful-restart"
+                    _exit_when_restart_requested(
+                        session, restart_event, on_ready=_mark_restart_ready
+                    ),
+                    name="tui-graceful-restart",
                 )
 
     try:

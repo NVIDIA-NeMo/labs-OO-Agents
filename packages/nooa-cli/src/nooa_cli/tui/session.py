@@ -367,13 +367,62 @@ class Session:
         # when the agent's shell was created on a different event loop.
         self._bang_shell: ShellTools | None = None
 
+    def _stop_infrastructure_producers(self) -> None:
+        """Cancel long-lived daemon producers so they stop refilling queues.
+
+        Daemon jobs (``spawn(..., daemon=True)``) are infrastructure whose
+        only natural end is teardown; leaving them running during a restart
+        drain would enqueue new work forever. Finite jobs already admitted
+        and output already queued are untouched and still settle naturally.
+        """
+        agent_runner = getattr(self, "_local_agent_runner", None)
+        if agent_runner is None:
+            return
+
+        async def _cancel_daemons() -> None:
+            qm = getattr(getattr(self, "agent", None), "queue_manager", None)
+            handles = getattr(qm, "running_handles", None)
+            if handles is None:
+                return
+            for handle in handles():
+                if handle.state == "running" and getattr(handle, "daemon", False):
+                    await handle.cancel()
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # Off-loop caller (defensive): hand the cancellation to the
+            # agent owner loop when it is available; teardown will cancel
+            # any daemon left behind otherwise.
+            runner_loop = getattr(agent_runner, "_loop", None)
+            if runner_loop is not None and runner_loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    agent_runner.run_async(_cancel_daemons), runner_loop
+                )
+            return
+        asyncio.create_task(
+            agent_runner.run_async(_cancel_daemons), name="restart-drain-stop-daemons"
+        )
+
     def request_restart_when_idle(self) -> None:
         """Latch a restart drain and stop accepting new user-initiated work."""
         if self._restart_pending:
             return
         self._restart_pending = True
+        self._stop_infrastructure_producers()
         if self._app is not None:
             self._app.begin_input_drain("Restart pending; waiting for current work to finish.")
+
+    def _reflection_idle(self) -> bool:
+        """Return whether no reflection run is pending or active.
+
+        A completed pass re-dirties the counter, and the drain blocks new
+        turns, so no follow-up run can be scheduled while restarting.
+        """
+        runner = getattr(getattr(self, "agent", None), "_tui_reflection_runner", None)
+        if runner is None:
+            return True
+        return runner.state not in ("debounce", "running")
 
     async def wait_restart_ready(self) -> None:
         """Wait until work admitted before the restart request settles naturally."""
@@ -382,12 +431,23 @@ class Session:
         while self._app is None or not self._app.is_running:
             await asyncio.sleep(0.01)
         self._app.begin_input_drain("Restart pending; waiting for current work to finish.")
+        self._stop_infrastructure_producers()
+        # Reflection is interruptible background maintenance; a restart must
+        # not wait out a full consolidation pass.
+        policy = getattr(self, "_local_turn_policy", None)
+        interrupt_reflection = getattr(policy, "interrupt_reflection", None)
+        if callable(interrupt_reflection):
+            try:
+                await interrupt_reflection()
+            except Exception:
+                logger.debug("reflection interrupt before restart failed", exc_info=True)
         while True:
             command_runner = self._command_runner
             policy = getattr(self, "_local_turn_policy", None)
             agent_runner = getattr(self, "_local_agent_runner", None)
             if (
                 self._app.input_drain_idle
+                and self._reflection_idle()
                 and (command_runner is None or command_runner.is_idle)
                 and (policy is None or policy.is_idle)
                 and agent_runner is not None

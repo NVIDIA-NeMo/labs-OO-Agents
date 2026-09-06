@@ -102,6 +102,42 @@ async def test_running_handles_filters_by_state():
     await qm.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_daemon_spawn_is_flagged_and_excluded_from_work_handles():
+    """Daemon spawns stay in running_handles() but not running_work_handles()."""
+    qm = QueueManager()
+    qm.queue("mesh")
+    qm.queue("jobs")
+
+    async def _forever() -> None:
+        await asyncio.Event().wait()
+
+    async def _quick() -> str:
+        return "done"
+
+    h_daemon = qm.spawn(_forever(), channel="mesh", daemon=True, label="inbox pump")
+    h_work = qm.spawn(_forever(), channel="jobs")
+    h_done = qm.spawn(_quick(), channel="jobs")
+    await asyncio.sleep(0.01)  # let _quick finish
+
+    assert h_daemon.daemon is True
+    assert h_work.daemon is False
+    assert h_done.daemon is False
+
+    assert h_daemon in qm.running_handles()
+    assert h_work in qm.running_handles()
+
+    work = qm.running_work_handles()
+    assert h_work in work
+    assert h_daemon not in work
+    assert h_done not in work
+
+    await qm.shutdown()
+
+    assert h_daemon.state == "cancelled"
+    assert h_work.state == "cancelled"
+
+
 # ---------------------------------------------------------------------------
 # QueueManager.set_notify_callback
 # ---------------------------------------------------------------------------
