@@ -318,6 +318,11 @@ class ShellTools(Skill):
         replace(match_or_path, ...)    — edit at a Match anchor, or by unique string
         write_file(path, content)      — create/overwrite a file
 
+    File reads, writes, and search anchors use UTF-8 by default. Set
+    ``encoding="cp1252"`` (or another codec) for legacy files, or
+    ``encoding=None`` to retain the platform's default file encoding.
+    This setting does not change the shell session's command-output encoding.
+
     Grep that you can edit from directly. When run() executes a plain search
     (grep/rg/egrep), the result still prints the EXACT bytes your command
     produced — and it also carries ``.matches``, a list of Match objects you can
@@ -347,9 +352,17 @@ class ShellTools(Skill):
 
     """
 
-    def __init__(self, cwd: str = ".", init_command: str | None = None, **kwargs: Any):
+    def __init__(
+        self,
+        cwd: str = ".",
+        init_command: str | None = None,
+        *,
+        encoding: str | None = "utf-8",
+        **kwargs: Any,
+    ):
         super().__init__(**kwargs)
         self.cwd = Path(cwd).resolve()
+        self.encoding = encoding
         # Construct the session eagerly (it starts lazily on first run) so a
         # consumer wired at construction time — e.g. RepoTools(session=shell.session)
         # in the TUI — shares this shell's bash session instead of capturing None.
@@ -585,7 +598,7 @@ class ShellTools(Skill):
             if mpath not in file_cache:
                 try:
                     resolved = self._resolve_path(mpath)
-                    lines = resolved.read_text().splitlines(keepends=True)
+                    lines = resolved.read_text(encoding=self.encoding).splitlines(keepends=True)
                     file_cache[mpath] = (resolved, lines)
                 except (OSError, ValueError):
                     return None
@@ -711,7 +724,7 @@ class ShellTools(Skill):
             Match with .text, .numbered, .path, .start, .end.
         """
         resolved = self._resolve_path(path)
-        content = resolved.read_text()
+        content = resolved.read_text(encoding=self.encoding)
         all_lines = content.splitlines(keepends=True)
         total = len(all_lines)
 
@@ -753,7 +766,7 @@ class ShellTools(Skill):
         if isinstance(target, Match):
             new_text = old_or_new
             resolved = Path(target.resolved_path)
-            content = resolved.read_text()
+            content = resolved.read_text(encoding=self.encoding)
             all_lines = content.splitlines(keepends=True)
 
             before = all_lines[: target.start - 1]
@@ -761,7 +774,7 @@ class ShellTools(Skill):
             if new_text and not new_text.endswith("\n") and after:
                 new_text += "\n"
             new_content = "".join(before) + new_text + "".join(after)
-            resolved.write_text(new_content)
+            resolved.write_text(new_content, encoding=self.encoding)
 
             diff = f"--- a/{target.path}\n+++ b/{target.path}\n"
             diff += f"@@ -{target.start},{target.end - target.start + 1} @@\n"
@@ -780,7 +793,7 @@ class ShellTools(Skill):
                 )
             old_text = old_or_new
             resolved = self._resolve_path(target)
-            content = resolved.read_text()
+            content = resolved.read_text(encoding=self.encoding)
 
             count = content.count(old_text)
             if count == 0:
@@ -795,7 +808,7 @@ class ShellTools(Skill):
                 )
 
             new_content = content.replace(old_text, new, 1)
-            resolved.write_text(new_content)
+            resolved.write_text(new_content, encoding=self.encoding)
 
             return FileWrite(
                 path=target,
@@ -820,7 +833,7 @@ class ShellTools(Skill):
         """
         resolved = self._resolve_path(path)
         resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_text(content)
+        resolved.write_text(content, encoding=self.encoding)
         line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
         return FileWrite(
             path=path,
