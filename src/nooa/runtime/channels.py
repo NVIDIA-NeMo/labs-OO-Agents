@@ -803,7 +803,8 @@ class QueueManager:
         they don't accumulate.
 
         Also shows active spawned jobs so the LLM knows background
-        producers are still running even when queues are empty.
+        producers are still running even when queues are empty. Daemon
+        (long-lived infrastructure) jobs are marked ``running, daemon``.
         """
         parts = [
             ch.status(max_items=max_items, max_chars=max_chars)
@@ -827,7 +828,8 @@ class QueueManager:
         if active_spawns:
             spawn_lines = [f"⚡ {len(active_spawns)} active background job(s):"]
             for h in visible_spawns:
-                spawn_lines.append(f"  • [{h.job_id}] {h.label} → {h.name} (running)")
+                state = "running, daemon" if h.daemon else "running"
+                spawn_lines.append(f"  • [{h.job_id}] {h.label} → {h.name} ({state})")
                 if h.description:
                     spawn_lines.append(f"    {h.description}")
             omitted = len(active_spawns) - len(visible_spawns)
