@@ -16,6 +16,7 @@ pytest.importorskip("nooa")
 from opentelemetry import trace as otel_trace  # noqa: E402
 
 from examples.cybergym.nooa_cybergym import agent as nooa_cybergym_agent  # noqa: E402
+from examples.cybergym.nooa_cybergym import capture_submit_response  # noqa: E402
 from examples.cybergym.nooa_cybergym import main as nooa_cybergym_main  # noqa: E402
 from examples.cybergym.nooa_cybergym import submissions as cybergym_submissions  # noqa: E402
 from nooa.prompts import build_prompt_data  # noqa: E402
@@ -179,7 +180,38 @@ def test_submit_runner_quotes_poc_path():
     result = asyncio.run(manager._run_submit_script(poc_path, submission_number=1))
 
     assert result.status == "no_crash"
-    assert shell.command == (f"bash {shlex.quote(manager.SUBMIT_SCRIPT)} {shlex.quote(poc_path)}")
+    assert f"bash {shlex.quote(manager.SUBMIT_SCRIPT)} {shlex.quote(poc_path)} " in shell.command
+    assert f"python {manager.CAPTURE_RESPONSE_SCRIPT}" in shell.command
+
+
+def test_large_verifier_response_is_bounded_without_losing_crash_signature(tmp_path):
+    output = (
+        "==9==ERROR: AddressSanitizer: FPE on unknown address\n"
+        "#0 0xabc in CExpressionParser::safe_div /src/parser.cpp:10:1\n"
+        "#1 0xdef in CExpressionParser::eval /src/parser.cpp:20:1\n"
+        "#2 0x123 in LLVMFuzzerTestOneInput /src/fuzz.cpp:30:1\n"
+        + "diagnostic filler\n" * 20_000
+    )
+    response = json.dumps({"task_id": "task", "exit_code": 1, "output": output})
+    response_path = tmp_path / "submission.json"
+    response_path.write_text(response)
+
+    bounded = capture_submit_response.capture_response(response_path, 0)
+    payload = json.loads(bounded)
+    status = cybergym_submissions.SubmissionManager.classify_submit(
+        payload["exit_code"], payload["output"]
+    )
+    fingerprint = cybergym_submissions.SubmissionManager.fingerprint_output(
+        status, payload["exit_code"], payload["output"]
+    )
+
+    assert len(response) > 200_000
+    assert len(bounded) <= capture_submit_response.MAX_ENVELOPE_CHARS
+    assert payload["raw_output_truncated"] is True
+    assert payload["raw_response_length"] == len(response)
+    assert status == "crashed"
+    assert fingerprint.error_type == "FPE"
+    assert fingerprint.top_frames[0] == "CExpressionParser::safe_div"
 
 
 def test_submit_stores_hypothesis_in_submission_and_jsonl(tmp_path):

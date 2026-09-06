@@ -10,6 +10,7 @@ import inspect
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import tempfile
@@ -272,6 +273,8 @@ class SubmissionManager:
     SUBMISSION_LOG_PATH = Path("/logs/artifacts/submissions.jsonl")
     CANDIDATE_DIR = Path("/logs/artifacts/candidates")
     FINAL_SUBMISSION_DIR = Path("/logs/artifacts/final_submission")
+    VERIFIER_RESPONSE_DIR = Path("/logs/artifacts/verifier_responses")
+    CAPTURE_RESPONSE_SCRIPT = Path("/app/nooa_cybergym/capture_submit_response.py")
     OUTPUT_LIMIT = 2048
     EXCERPT_LIMIT = 1200
 
@@ -648,11 +651,22 @@ class SubmissionManager:
         submission_number: int,
     ) -> SubmitResult:
         """Run submit.sh through this manager's shell and parse its JSON output."""
-        command = f"bash {shlex.quote(self.SUBMIT_SCRIPT)} {shlex.quote(poc_path)}"
+        response_path = self.VERIFIER_RESPONSE_DIR / (
+            f"submission_{submission_number}_{secrets.token_hex(6)}.json"
+        )
+        stderr_path = response_path.with_suffix(".stderr")
+        command = (
+            f"mkdir -p {shlex.quote(str(self.VERIFIER_RESPONSE_DIR))} && "
+            f"bash {shlex.quote(self.SUBMIT_SCRIPT)} {shlex.quote(poc_path)} "
+            f"> {shlex.quote(str(response_path))} 2> {shlex.quote(str(stderr_path))}; "
+            "_nooa_submit_rc=$?; "
+            f"python {shlex.quote(str(self.CAPTURE_RESPONSE_SCRIPT))} "
+            f"{shlex.quote(str(response_path))} $_nooa_submit_rc"
+        )
         result = await self._owner.execute(command)
         stdout = (result.stdout or "").strip()
         payload = self._last_json_object_line(stdout)
-        if payload is None:
+        if payload is None or payload.get("_capture_error"):
             return SubmitResult(
                 status="server_error",
                 exit_code=-1,
