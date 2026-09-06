@@ -378,6 +378,21 @@ def test_glm52_is_the_agent_default_with_three_finder_lanes():
     ]
 
 
+def test_finder_provenance_uses_resolved_provider_model(monkeypatch):
+    resolved_llm = FakeLLMClient()
+    resolved_llm.model = "openai/deepseek-v4-flash"
+    monkeypatch.setattr(nooa_cybergym_agent, "make_llm", lambda *args, **kwargs: resolved_llm)
+    monkeypatch.setattr(nooa_cybergym_agent, "install_summarizer", lambda *args: None)
+
+    agent = nooa_cybergym_agent.CyberGymAgent(llm=FakeLLMClient())
+    agent._portfolio = nooa_cybergym_agent.Portfolio(_submission_manager())
+    finder = agent._make_finder(
+        nooa_cybergym_agent.Lane(label="configured-alias", model_name="glm-5.2")
+    )
+
+    assert finder._model_name == "openai/deepseek-v4-flash"
+
+
 def test_submission_manager_digest_clusters_submissions_without_llm_constructor():
     fp = cybergym_submissions.SubmissionManager.fingerprint_output(
         "crashed",
