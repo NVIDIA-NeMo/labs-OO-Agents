@@ -29,12 +29,14 @@ def test_skill_path_loads_id(skill_dir):
 
 
 def test_skill_path_creates_dynamic_subclass(skill_dir):
+    """A path-loaded skill exposes its description through a generated skill subclass."""
     skill = TextSkill(path=skill_dir)
     assert type(skill).__name__ != "Skill"
     assert "Best practices for Git" in (type(skill).__doc__ or "")
 
 
 def test_skill_body_preserves_utf8_with_legacy_default(skill_dir, monkeypatch):
+    """UTF-8 instructions reach the skill docstring unchanged under a legacy locale."""
     body = "Budget: 50€ → café 中文 🚀"
     (skill_dir / "SKILL.md").write_text(
         f"---\nname: git-workflow\ndescription: Unicode instructions\n---\n{body}\n",
@@ -47,6 +49,7 @@ def test_skill_body_preserves_utf8_with_legacy_default(skill_dir, monkeypatch):
 
 
 def test_skill_content_constructor():
+    """Direct text construction exposes the provided instructions in the skill docstring."""
     skill = Skill(content="A helpful skill.")
     assert "A helpful skill." in (type(skill).__doc__ or "")
 
