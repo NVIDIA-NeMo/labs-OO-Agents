@@ -98,6 +98,8 @@ async def test_active_spawns_shown_when_queues_empty():
     assert "running" in status
     assert "Output arrives through channels" in status
     assert "do not poll job handles" in status
+    # No daemon jobs → no legend line.
+    assert "daemon = long-lived infrastructure producer" not in status
 
     # Cleanup
     await qm.shutdown()
@@ -124,6 +126,8 @@ async def test_daemon_spawn_is_marked_in_status_block():
     # Non-daemon jobs keep the plain rendering.
     assert "finite job → mesh (running)" in status
     assert "finite job → mesh (running, daemon)" not in status
+    # The legend explains what the daemon marker means.
+    assert "daemon = long-lived infrastructure producer" in status
 
     await qm.shutdown()
 
