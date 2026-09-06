@@ -395,6 +395,18 @@ def test_finder_provenance_uses_resolved_provider_model(monkeypatch):
     assert expander._model_name == "openai/deepseek-v4-flash"
 
 
+@pytest.mark.parametrize(
+    "method",
+    [nooa_cybergym_agent.Finder.find, nooa_cybergym_agent.Expander.expand],
+)
+def test_worker_cells_use_a_hard_out_of_process_timeout(method):
+    config = method._plan_strategy.config
+
+    assert config.execution_backend == "sandbox"
+    assert config.cell_timeout == 60
+    assert config.sandbox.broker_timeout_s == 360
+
+
 def test_submission_manager_digest_clusters_submissions_without_llm_constructor():
     fp = cybergym_submissions.SubmissionManager.fingerprint_output(
         "crashed",
