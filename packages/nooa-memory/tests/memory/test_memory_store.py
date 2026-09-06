@@ -34,6 +34,7 @@ def _add(store, emb, content, **kw):
 
 
 def test_add_get_roundtrip(store, emb):
+    """Reading a newly stored memory preserves its content and importance."""
     m = _add(store, emb, "deploy uses make ship", type=MemoryType.SKILL, importance=7.0)
     got = store.get(m.id)
     assert got is not None
@@ -44,12 +45,14 @@ def test_add_get_roundtrip(store, emb):
 
 @pytest.mark.parametrize("prefix", ["%%%%%%", "______", "abcde%", "abcde_"])
 def test_resolve_id_does_not_expand_sql_wildcards(store, prefix):
+    """SQL wildcard characters cannot broaden an otherwise nonmatching ID prefix."""
     store.add(Memory(id="abcdef123456", content="original"))
     assert store.resolve_id(prefix) is None
 
 
 @pytest.mark.parametrize("character", ["%", "_", "!"])
 def test_resolve_id_matches_literal_special_characters(store, character):
+    """Literal percent, underscore, and escape characters remain valid ID text."""
     mid = f"abcde{character}123456"
     store.add(Memory(id=mid, content="literal id"))
     store.add(Memory(id="abcdef123456", content="different id"))
@@ -58,6 +61,7 @@ def test_resolve_id_matches_literal_special_characters(store, character):
 
 
 def test_save_persists_mutation(store, emb):
+    """Saving an existing memory persists its updated access metadata."""
     m = _add(store, emb, "fact")
     m.touch()
     m.importance = 9.0

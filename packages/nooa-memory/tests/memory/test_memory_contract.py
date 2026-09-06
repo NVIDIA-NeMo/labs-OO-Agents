@@ -136,6 +136,7 @@ def test_ambiguous_prefix_raises(agent):
 
 
 def test_too_short_prefix_is_not_found(agent):
+    """A prefix shorter than the public minimum cannot select a stored memory."""
     _install(agent)
     agent.remember("something", type="info")
     assert agent.forget("abc") is False  # <6 chars never prefix-matches
@@ -143,6 +144,7 @@ def test_too_short_prefix_is_not_found(agent):
 
 @pytest.mark.parametrize("prefix", ["%%%%%%", "______"])
 def test_wildcard_prefix_cannot_update_or_forget_memory(agent, prefix):
+    """Wildcard-looking input leaves unrelated memory content and archive state intact."""
     mgr = _install(agent)
     try:
         mid = agent.remember("original fact", type="info")
