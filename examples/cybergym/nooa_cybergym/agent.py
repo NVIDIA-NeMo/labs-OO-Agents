@@ -35,11 +35,20 @@ with hidden:
     import time
 
     from nooa.errors import GenerationError
+    from nooa.runtime.sandbox.config import SandboxConfig
 
     try:
         from .util import install_summarizer, make_llm
     except ImportError:  # pragma: no cover
         from util import install_summarizer, make_llm  # type: ignore[no-redef]
+
+    WORKER_CELL_TIMEOUT_SEC = 60
+    WORKER_SANDBOX = SandboxConfig(
+        filesystem=False,
+        network=True,
+        broker_timeout_s=360,
+        require=False,
+    )
 
 try:
     from .submissions import FinalPocArtifact, PocSubmission, SubmissionManager, SubmitResult
@@ -310,7 +319,13 @@ class Finder(Agent, context={"state": None}):
     @hidden
     @strategy(
         CodeActStrategy(
-            config=CodeActConfig(max_iterations=MAX_ITERATIONS, max_tokens=MAX_OUTPUT_TOKENS)
+            config=CodeActConfig(
+                max_iterations=MAX_ITERATIONS,
+                max_tokens=MAX_OUTPUT_TOKENS,
+                cell_timeout=WORKER_CELL_TIMEOUT_SEC,
+                execution_backend="sandbox",
+                sandbox=WORKER_SANDBOX,
+            )
         )
     )
     async def find(
@@ -410,7 +425,13 @@ class Expander(Agent, context={"state": None}):
     @hidden
     @strategy(
         CodeActStrategy(
-            config=CodeActConfig(max_iterations=MAX_ITERATIONS // 2, max_tokens=MAX_OUTPUT_TOKENS)
+            config=CodeActConfig(
+                max_iterations=MAX_ITERATIONS // 2,
+                max_tokens=MAX_OUTPUT_TOKENS,
+                cell_timeout=WORKER_CELL_TIMEOUT_SEC,
+                execution_backend="sandbox",
+                sandbox=WORKER_SANDBOX,
+            )
         )
     )
     async def expand(
