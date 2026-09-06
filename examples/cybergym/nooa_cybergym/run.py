@@ -41,6 +41,7 @@ DEFAULT_SOFT_TIMEOUT_SEC = 13920
 DEFAULT_FINALIZATION_GRACE_SEC = 300.0
 DEFAULT_TRACING_SHUTDOWN_TIMEOUT_SEC = 30.0
 DEFAULT_OUTER_MARGIN_SEC = 60.0
+GIT_LFS_POINTER_HEADER = b"version https://git-lfs.github.com/spec/v1"
 
 
 def validate_timeout_budget(
@@ -61,6 +62,26 @@ def validate_timeout_budget(
             f"hard={hard_timeout:g}s, required={required:g}s "
             f"(soft={soft_timeout:g}s + finalization={finalization_grace:g}s + "
             f"tracing={tracing_shutdown_timeout:g}s + margin={outer_margin:g}s)"
+        )
+
+
+def require_resolved_task_files(task_dir: Path) -> None:
+    """Fail before inference if task generation copied Git LFS pointer stubs."""
+    unresolved = []
+    for path in task_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            with path.open("rb") as stream:
+                header = stream.read(len(GIT_LFS_POINTER_HEADER))
+            if header == GIT_LFS_POINTER_HEADER:
+                unresolved.append(str(path.relative_to(task_dir)))
+        except OSError as exc:
+            raise RuntimeError(f"cannot read generated task file {path}: {exc}") from exc
+    if unresolved:
+        raise RuntimeError(
+            "generated task contains unresolved Git LFS pointer files: "
+            + ", ".join(sorted(unresolved))
         )
 
 
@@ -488,6 +509,7 @@ def main(argv: list[str] | None = None) -> int:
             with_flag=args.with_flag,
         )
     )
+    require_resolved_task_files(task_dir)
 
     args_record = {
         "agent": f"nooa_cybergym:{args.model}",

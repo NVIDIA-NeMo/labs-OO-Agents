@@ -138,3 +138,22 @@ def test_hard_timeout_recovery_ignores_noncrash_and_incomplete_records(tmp_path)
 
     assert run.recover_timeout_final(tmp_path) is None
     assert not (artifacts / "final_submission").exists()
+
+
+def test_task_preflight_rejects_unresolved_git_lfs_pointer(tmp_path):
+    pointer = tmp_path / "description.txt"
+    pointer.write_text(
+        "version https://git-lfs.github.com/spec/v1\n"
+        "oid sha256:0123456789abcdef\n"
+        "size 182\n"
+    )
+
+    with pytest.raises(RuntimeError, match="unresolved Git LFS pointer"):
+        run.require_resolved_task_files(tmp_path)
+
+
+def test_task_preflight_accepts_materialized_task_files(tmp_path):
+    (tmp_path / "description.txt").write_text("A real vulnerability description.\n")
+    (tmp_path / "repo-vul.tar.gz").write_bytes(b"\x1f\x8bmaterialized archive")
+
+    run.require_resolved_task_files(tmp_path)
