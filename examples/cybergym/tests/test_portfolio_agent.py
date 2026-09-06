@@ -759,6 +759,103 @@ def test_submission_owner_serializes_callers_and_hides_shell():
     assert asyncio.run(scenario()) == 1
 
 
+def test_submission_owner_paces_all_callers_through_one_sliding_window():
+    class FakeClock:
+        def __init__(self):
+            self.now = 0.0
+            self.sleeps = []
+
+        def monotonic(self):
+            return self.now
+
+        async def sleep(self, seconds):
+            self.sleeps.append(seconds)
+            self.now += seconds
+
+    class FakeShell:
+        def __init__(self, clock):
+            self.clock = clock
+            self.started = []
+
+        async def run(self, command, timeout):
+            self.started.append(self.clock.now)
+            return SimpleNamespace(
+                stdout='{"exit_code": 0, "output": "Execution successful"}',
+                returncode=0,
+            )
+
+    async def scenario():
+        clock = FakeClock()
+        shell = FakeShell(clock)
+        owner = cybergym_submissions.SubmissionShellOwner(
+            shell,
+            rate_limit_max_requests=2,
+            rate_limit_window_seconds=10,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        )
+        await asyncio.gather(owner.execute("a"), owner.execute("b"), owner.execute("c"))
+        await owner.close()
+        return shell.started, clock.sleeps
+
+    started, sleeps = asyncio.run(scenario())
+    assert started == [0.0, 0.0, 10.0]
+    assert sleeps == [10.0]
+
+
+def test_verifier_rate_limit_cools_down_and_retries_without_false_crash():
+    class FakeClock:
+        def __init__(self):
+            self.now = 0.0
+
+        def monotonic(self):
+            return self.now
+
+        async def sleep(self, seconds):
+            self.now += seconds
+
+    class FakeShell:
+        def __init__(self):
+            self.calls = 0
+
+        async def run(self, command, timeout):
+            self.calls += 1
+            if self.calls == 1:
+                return SimpleNamespace(
+                    stdout='{"exit_code": 1, "output": "Rate limit exceeded: max 20 req/60s"}',
+                    returncode=1,
+                )
+            return SimpleNamespace(
+                stdout='{"exit_code": 0, "output": "Execution successful"}',
+                returncode=0,
+            )
+
+    async def scenario():
+        clock = FakeClock()
+        shell = FakeShell()
+        manager = cybergym_submissions.SubmissionManager(
+            shell,
+            owner_options={"monotonic": clock.monotonic, "sleep": clock.sleep},
+        )
+        result = await manager._run_submit_script("/tmp/a", submission_number=1)
+        await manager.close()
+        return result, shell.calls, clock.now
+
+    result, calls, elapsed = asyncio.run(scenario())
+    assert result.status == "no_crash"
+    assert calls == 2
+    assert elapsed == 60.0
+
+
+def test_persistent_verifier_rate_limit_is_server_error_not_crash_suspect():
+    assert (
+        cybergym_submissions.SubmissionManager.classify_submit(
+            1, "Rate limit exceeded for agent abc. Max 20 requests per 60s."
+        )
+        == "server_error"
+    )
+
+
 def test_submission_owner_isolates_caller_cancellation():
     class FakeShell:
         def __init__(self):

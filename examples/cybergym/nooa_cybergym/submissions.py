@@ -14,6 +14,8 @@ import secrets
 import shlex
 import shutil
 import tempfile
+import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -141,6 +143,10 @@ class SubmissionShellOwner:
         shell_factory: Callable[[], Any] | None = None,
         timeout: float | None = None,
         max_consecutive_respawns: int = 3,
+        rate_limit_max_requests: int | None = None,
+        rate_limit_window_seconds: float | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Any] = asyncio.sleep,
     ) -> None:
         self._shell = shell
         self._shell_factory = shell_factory or (lambda: ShellTools(cwd="/workspace"))
@@ -151,6 +157,24 @@ class SubmissionShellOwner:
         )
         self._max_consecutive_respawns = max_consecutive_respawns
         self._consecutive_respawns = 0
+        self._rate_limit_max_requests = int(
+            rate_limit_max_requests
+            if rate_limit_max_requests is not None
+            else os.environ.get("NOOA_CYBERGYM_SUBMISSION_RATE_LIMIT", "15")
+        )
+        self._rate_limit_window_seconds = float(
+            rate_limit_window_seconds
+            if rate_limit_window_seconds is not None
+            else os.environ.get("NOOA_CYBERGYM_SUBMISSION_RATE_WINDOW_SEC", "60")
+        )
+        if self._rate_limit_max_requests < 1:
+            raise ValueError("submission rate limit must be at least 1")
+        if self._rate_limit_window_seconds <= 0:
+            raise ValueError("submission rate window must be positive")
+        self._monotonic = monotonic
+        self._sleep = sleep
+        self._submission_times: deque[float] = deque()
+        self._blocked_until = 0.0
         self._queue: asyncio.Queue[_ShellRequest] | None = None
         self._worker: asyncio.Task[None] | None = None
 
@@ -187,6 +211,7 @@ class SubmissionShellOwner:
                 if request.future.cancelled():
                     continue
                 try:
+                    await self._wait_for_rate_slot()
                     result = await self._execute_with_recovery(request.command)
                 except Exception as exc:
                     if not request.future.cancelled():
@@ -196,6 +221,31 @@ class SubmissionShellOwner:
                         request.future.set_result(result)
             finally:
                 self._queue.task_done()
+
+    async def _wait_for_rate_slot(self) -> None:
+        """Reserve one verifier request inside the shared rolling window."""
+        while True:
+            now = self._monotonic()
+            cutoff = now - self._rate_limit_window_seconds
+            while self._submission_times and self._submission_times[0] <= cutoff:
+                self._submission_times.popleft()
+            wait_for = max(0.0, self._blocked_until - now)
+            if len(self._submission_times) >= self._rate_limit_max_requests:
+                wait_for = max(
+                    wait_for,
+                    self._submission_times[0] + self._rate_limit_window_seconds - now,
+                )
+            if wait_for <= 0:
+                self._submission_times.append(now)
+                return
+            await self._sleep(wait_for)
+
+    def mark_rate_limited(self) -> None:
+        """Hold the queue for one full window after explicit verifier backpressure."""
+        self._blocked_until = max(
+            self._blocked_until,
+            self._monotonic() + self._rate_limit_window_seconds,
+        )
 
     async def _execute_with_recovery(self, command: str) -> Any:
         if self._consecutive_respawns >= self._max_consecutive_respawns:
@@ -285,8 +335,13 @@ class SubmissionManager:
         submission_count: int = 0,
         submissions: list[PocSubmission] | None = None,
         shell_factory: Callable[[], Any] | None = None,
+        owner_options: dict[str, Any] | None = None,
     ) -> None:
-        self._owner = SubmissionShellOwner(shell, shell_factory=shell_factory)
+        self._owner = SubmissionShellOwner(
+            shell,
+            shell_factory=shell_factory,
+            **(owner_options or {}),
+        )
         self._submission_count = submission_count
         self._submissions = [self._clone_submission(item) for item in submissions or []]
         self._crashed_poc_paths: set[str] = set()
@@ -517,6 +572,8 @@ class SubmissionManager:
     @classmethod
     def classify_submit(cls, exit_code: int, output: str) -> SubmitStatus:
         """Map submit.sh's raw result to the status exposed to the model."""
+        if cls._is_rate_limited(output):
+            return "server_error"
         if exit_code == 124 or "Timeout waiting for the target binary" in output:
             return "timeout"
         if exit_code in cls.SAFE_EXITS:
@@ -526,6 +583,11 @@ class SubmissionManager:
         if exit_code in cls.CRASH_SIGNALS or exit_code in cls.SHELL_CRASH_EXIT_CODES:
             return "crashed"
         return "crashed_suspect"
+
+    @staticmethod
+    def _is_rate_limited(output: str) -> bool:
+        lowered = output.lower()
+        return "rate limit exceeded" in lowered or "too many requests" in lowered
 
     @classmethod
     def fingerprint_output(
@@ -663,9 +725,18 @@ class SubmissionManager:
             f"python {shlex.quote(str(self.CAPTURE_RESPONSE_SCRIPT))} "
             f"{shlex.quote(str(response_path))} $_nooa_submit_rc"
         )
-        result = await self._owner.execute(command)
-        stdout = (result.stdout or "").strip()
-        payload = self._last_json_object_line(stdout)
+        payload = None
+        stdout = ""
+        for attempt in range(2):
+            result = await self._owner.execute(command)
+            stdout = (result.stdout or "").strip()
+            payload = self._last_json_object_line(stdout)
+            if payload is None or payload.get("_capture_error"):
+                break
+            if not self._is_rate_limited(str(payload.get("output", ""))):
+                break
+            if attempt == 0:
+                self._owner.mark_rate_limited()
         if payload is None or payload.get("_capture_error"):
             return SubmitResult(
                 status="server_error",
