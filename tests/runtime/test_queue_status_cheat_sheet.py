@@ -104,6 +104,31 @@ async def test_active_spawns_shown_when_queues_empty():
 
 
 @pytest.mark.asyncio
+async def test_daemon_spawn_is_marked_in_status_block():
+    """Daemon (infrastructure) jobs render with an explicit daemon marker."""
+    qm = QueueManager()
+    qm.queue("mesh")
+
+    async def _pump():
+        while True:
+            await asyncio.sleep(9999)
+            yield "msg"
+
+    qm.spawn(_pump(), channel="mesh", daemon=True, label="inbox pump")
+    qm.spawn(_dummy_gen(), channel="mesh", label="finite job")
+    await asyncio.sleep(0.05)
+
+    status = qm.status()
+    assert "(running, daemon)" in status
+    assert "inbox pump → mesh (running, daemon)" in status
+    # Non-daemon jobs keep the plain rendering.
+    assert "finite job → mesh (running)" in status
+    assert "finite job → mesh (running, daemon)" not in status
+
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_active_spawn_description_is_normalized_and_bounded():
     """Model-facing descriptions are concise even when callers pass raw prose."""
     qm = QueueManager()
