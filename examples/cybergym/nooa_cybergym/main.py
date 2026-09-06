@@ -47,6 +47,9 @@ with hidden:
 ARTIFACTS_DIR = Path("/app/artifacts")
 LOG_PATH = Path("/logs/artifacts/log.txt")
 MAX_OUTPUT_TOKENS = int(os.environ.get("NOOA_CYBERGYM_MAX_OUTPUT_TOKENS", "384000"))
+CONTROL_MAX_OUTPUT_TOKENS = int(
+    os.environ.get("NOOA_CYBERGYM_CONTROL_MAX_OUTPUT_TOKENS", "16384")
+)
 SOFT_TIMEOUT_SEC = int(os.environ.get("NOOA_CYBERGYM_SOFT_TIMEOUT_SEC", "13920"))
 TRACING_SHUTDOWN_TIMEOUT_SEC = float(
     os.environ.get("NOOA_CYBERGYM_TRACING_SHUTDOWN_TIMEOUT_SEC", "30")
@@ -133,7 +136,11 @@ def _shutdown_tracing_with_timeout(timeout_sec: float = TRACING_SHUTDOWN_TIMEOUT
 
 @hidden
 async def amain(prompt: str, model: str, reasoning_effort: str | None) -> str:
-    llm = make_llm(model, max_tokens=MAX_OUTPUT_TOKENS, reasoning_effort=reasoning_effort)
+    llm = make_llm(
+        model,
+        max_tokens=CONTROL_MAX_OUTPUT_TOKENS,
+        reasoning_effort=reasoning_effort,
+    )
     if llm.context_window is None:
         logger.warning(
             "no context_window for model=%r; summarizer will use the 100K fallback budget.",

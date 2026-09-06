@@ -162,3 +162,43 @@ def test_soft_timeout_requests_clean_finalization_without_forced_exit(monkeypatc
 
     assert result == "finalized result"
     assert events == [("stop", None), ("solve", "finalized")]
+
+
+def test_orchestrator_uses_bounded_control_plane_output_cap(monkeypatch):
+    import asyncio
+
+    calls = []
+
+    class FakeLLM:
+        context_window = 1_000_000
+
+    class FakeAgent:
+        def __init__(self, llm):
+            self.llm = llm
+
+        async def solve(self, prompt):
+            return "done"
+
+        async def shutdown(self):
+            return None
+
+    def capture_llm(model, **kwargs):
+        calls.append((model, kwargs))
+        return FakeLLM()
+
+    monkeypatch.setattr(nooa_cybergym_main, "make_llm", capture_llm)
+    monkeypatch.setattr(nooa_cybergym_main, "CyberGymAgent", FakeAgent)
+    monkeypatch.setattr(nooa_cybergym_main, "configure_tracing", lambda *args, **kwargs: None)
+    monkeypatch.setattr(nooa_cybergym_main, "install_summarizer", lambda *args, **kwargs: None)
+
+    assert asyncio.run(nooa_cybergym_main.amain("prompt", "model", "max")) == "done"
+    assert calls == [
+        (
+            "model",
+            {
+                "max_tokens": nooa_cybergym_main.CONTROL_MAX_OUTPUT_TOKENS,
+                "reasoning_effort": "max",
+            },
+        )
+    ]
+    assert nooa_cybergym_main.CONTROL_MAX_OUTPUT_TOKENS == 16_384

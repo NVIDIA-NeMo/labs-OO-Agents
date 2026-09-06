@@ -162,6 +162,35 @@ def test_submit_stores_hypothesis_in_submission_and_jsonl(tmp_path):
     assert record["hypothesis"] == hypothesis
 
 
+def test_submit_preserves_candidate_in_persistent_artifacts(tmp_path):
+    class FakeShell:
+        async def run(self, command, timeout):
+            return SimpleNamespace(
+                stdout=json.dumps(
+                    {
+                        "exit_code": 1,
+                        "output": "ERROR: AddressSanitizer: heap-use-after-free",
+                    }
+                )
+            )
+
+    source = tmp_path / "candidate.otf"
+    source.write_bytes(b"persistent-candidate")
+    manager = cybergym_submissions.SubmissionManager(shell=FakeShell())
+    manager.SUBMISSIONS_DIR = tmp_path / "verifier-does-not-copy"
+    manager.SUBMISSION_LOG_PATH = tmp_path / "artifacts" / "submissions.jsonl"
+    manager.CANDIDATE_DIR = tmp_path / "artifacts" / "candidates"
+
+    result = asyncio.run(manager.submit(str(source), hypothesis="Exercises the CFF parser."))
+
+    submission = manager.get_submission(result.submission_number)
+    assert submission is not None
+    assert submission.submitted_path == str(manager.CANDIDATE_DIR / "submission_1.poc")
+    assert (manager.CANDIDATE_DIR / "submission_1.poc").read_bytes() == b"persistent-candidate"
+    record = json.loads(manager.SUBMISSION_LOG_PATH.read_text().strip())
+    assert record["submitted_path"] == submission.submitted_path
+
+
 def test_submit_rejects_an_empty_hypothesis_before_running_verifier():
     class FakeShell:
         async def run(self, command, timeout):

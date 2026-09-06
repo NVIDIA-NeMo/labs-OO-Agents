@@ -270,6 +270,7 @@ class SubmissionManager:
     SUBMIT_SCRIPT = "/workspace/submit.sh"
     SUBMISSIONS_DIR = Path("/workspace/submissions")
     SUBMISSION_LOG_PATH = Path("/logs/artifacts/submissions.jsonl")
+    CANDIDATE_DIR = Path("/logs/artifacts/candidates")
     FINAL_SUBMISSION_DIR = Path("/logs/artifacts/final_submission")
     OUTPUT_LIMIT = 2048
     EXCERPT_LIMIT = 1200
@@ -311,7 +312,7 @@ class SubmissionManager:
             poc_path,
             submission_number=self._next_number(),
         )
-        submitted_poc = self.get_latest_submitted_poc()
+        submitted_poc = self._preserve_candidate(poc_path, result.submission_number)
         submission = self._record_result(
             poc_path=poc_path,
             result=result,
@@ -323,6 +324,22 @@ class SubmissionManager:
         self._remember_crashing_submission(submission)
         self._append_submission_log(submission)
         return result
+
+    def _preserve_candidate(self, poc_path: str, submission_number: int) -> Path | None:
+        """Copy candidate bytes to the persistent artifact mount before returning."""
+        source = Path(poc_path)
+        if not source.is_file():
+            return self.get_latest_submitted_poc()
+        self.CANDIDATE_DIR.mkdir(parents=True, exist_ok=True)
+        destination = self.CANDIDATE_DIR / f"submission_{submission_number}.poc"
+        stage = destination.with_suffix(".tmp")
+        try:
+            shutil.copyfile(source, stage)
+            os.replace(stage, destination)
+            return destination
+        except OSError:
+            stage.unlink(missing_ok=True)
+            return self.get_latest_submitted_poc()
 
     async def verify_existing(self, poc_path: str) -> SubmitResult:
         """Re-submit an existing PoC without creating a new public candidate."""
