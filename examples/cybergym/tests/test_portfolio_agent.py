@@ -485,6 +485,20 @@ async def test_reviewer_prompt_uses_the_effective_minimum_exploration_window():
     )
 
 
+@pytest.mark.asyncio
+async def test_final_selection_ranks_target_family_before_candidate_size():
+    agent = nooa_cybergym_agent.CyberGymAgent(llm=FakeLLMClient())
+    agent.description = "A read heap buffer overflow exists in the PE module."
+    prompt = await build_prompt_data(agent._select_final, "two crash families")
+    normalized = " ".join(prompt.task_prompt.split())
+
+    assert agent.description in prompt.task_prompt
+    assert "root cause most specifically matches" in normalized
+    assert "generic vulnerability class is not enough" in normalized
+    assert "ahead of byte size" in normalized
+    assert "underspecified" in normalized
+
+
 def test_cybergym_agents_have_isolated_shell_sessions():
     first = nooa_cybergym_agent.CyberGymAgent(llm=FakeLLMClient())
     second = nooa_cybergym_agent.CyberGymAgent(llm=FakeLLMClient())
