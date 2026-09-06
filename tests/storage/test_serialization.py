@@ -172,6 +172,7 @@ class TestNoSnapshot:
 
 class TestPydantic:
     def test_model_config_preserves_provider_extras(self):
+        """Snapshot round trips retain provider options stored as allowed model extras."""
         model = ModelConfig(model_name="test", num_retries=7, custom={"stops": ("a", "b")})
         blob, allowlist = serialize(model)
         restored = deserialize(blob, allowlist)
@@ -179,6 +180,7 @@ class TestPydantic:
         assert restored.model_extra == model.model_extra
 
     def test_extra_values_use_recursive_serialization(self):
+        """Nested dataclasses and snapshotable values in extras retain their types."""
         model = ModelConfig(custom={"point": Point(1, 2), "config": Config("localhost")})
         blob, allowlist = serialize(model)
         restored = deserialize(blob, allowlist)
@@ -188,17 +190,20 @@ class TestPydantic:
         assert config.host == "localhost"
 
     def test_nested_extra_class_requires_allowlist(self):
+        """Allowing extra fields does not bypass the nested-class restoration allowlist."""
         model = ModelConfig(custom=Point(1, 2))
         blob, allowlist = serialize(model)
         with pytest.raises(DeserializationError, match="not in the allowlist"):
             deserialize(blob, allowlist - {f"{Point.__module__}.Point"})
 
     def test_nosnapshot_extra_is_skipped(self):
+        """Opted-out extra values are skipped without losing serializable sibling options."""
         model = ModelConfig(custom=_NoSnapshotThing(), num_retries=7)
         blob, allowlist = serialize(model)
         assert deserialize(blob, allowlist).model_extra == {"num_retries": 7}
 
     def test_simple_model_roundtrip(self):
+        """Ordinary declared Pydantic fields still survive a snapshot round trip."""
         m = MyModel(name="test", value=42)
         blob, al = serialize(m)
         assert blob["__type__"] == "pydantic"
