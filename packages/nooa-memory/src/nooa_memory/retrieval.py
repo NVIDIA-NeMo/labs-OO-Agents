@@ -257,6 +257,7 @@ class RetrievalEngine:
         visible_cache: dict[str, bool] = {}
 
         def _visible(mid: str) -> bool:
+            """Cache whether a non-archived record is visible to this recall's owner."""
             if mid not in visible_cache:
                 memory = self.store.get(mid)
                 visible_cache[mid] = (

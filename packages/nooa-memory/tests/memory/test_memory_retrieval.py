@@ -103,6 +103,7 @@ def test_multi_hop_surfaces_linked_dissimilar_memory(store, emb):
 
 @pytest.mark.parametrize("owner", [None, "alice"])
 def test_recall_does_not_resurface_archived_neighbor(store, emb, owner):
+    """Archiving a linked memory removes it from recall, explanations, and touches."""
     a = _add(store, emb, "deploy ship release production rollout", owner="alice", importance=10)
     b = _add(store, emb, "obsolete instructions", owner="alice")
     _add(store, emb, "deploy weather forecast", owner="alice", importance=0)
@@ -120,6 +121,7 @@ def test_recall_does_not_resurface_archived_neighbor(store, emb, owner):
 
 @pytest.mark.parametrize("owner", [None, "alice"])
 def test_spread_does_not_relay_through_archived_memory(store, emb, owner):
+    """An archived bridge cannot relay activation to otherwise reachable memories."""
     a = _add(store, emb, "seed node", owner="alice")
     b = _add(store, emb, "bridge node", owner="alice")
     c = _add(store, emb, "downstream node", owner="alice")
