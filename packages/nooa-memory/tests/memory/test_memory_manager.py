@@ -149,6 +149,7 @@ def test_remember_and_recall_via_tools(agent):
 
 
 def test_remember_dedups_on_write(agent):
+    """Remembering an existing fact reinforces its record instead of adding a duplicate."""
     mgr = _install(agent)
     id1 = agent.remember("identical fact about shipping releases", type="info")
     id2 = agent.remember("identical fact about shipping releases", type="info")
@@ -159,6 +160,7 @@ def test_remember_dedups_on_write(agent):
 
 @pytest.mark.parametrize("content", ["A longer sentence. Another sentence! A third?", "Hi.", ""])
 def test_update_refreshes_content_metadata(agent, content):
+    """Content edits recalculate size metadata while preserving identity and history."""
     mgr = _install(agent)
     try:
         mid = mgr.remember("Original content to be revised.", tags=["original"])
@@ -179,6 +181,7 @@ def test_update_refreshes_content_metadata(agent, content):
 
 @pytest.mark.parametrize("tags", [["aardvark", "zebra"], []])
 def test_update_reembeds_changed_tags_only_when_needed(agent, tags):
+    """Changed tags refresh the embedding, but unchanged embedding input is reused."""
     mgr = _install(agent)
     try:
         mid = mgr.remember("A stored fact.", tags=["original"])
