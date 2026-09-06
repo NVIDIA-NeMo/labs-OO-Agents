@@ -701,13 +701,13 @@ class CyberGymAgent(Agent, context={"state": None}):
 
     def _make_finder(self, lane: Lane) -> Finder:
         llm = make_llm(lane.model_name, max_tokens=MAX_OUTPUT_TOKENS)
-        finder = Finder(llm=llm, portfolio=self._portfolio, model_name=lane.model_name)
+        finder = Finder(llm=llm, portfolio=self._portfolio, model_name=llm.model)
         install_summarizer(finder, llm)
         return finder
 
     def _make_expander(self, seed: PocSubmission) -> tuple[Expander, PocSubmission]:
         llm = make_llm(DEFAULT_MODEL_NAME, max_tokens=MAX_OUTPUT_TOKENS)
-        expander = Expander(llm=llm, portfolio=self._portfolio, model_name=DEFAULT_MODEL_NAME)
+        expander = Expander(llm=llm, portfolio=self._portfolio, model_name=llm.model)
         install_summarizer(expander, llm)
         return expander, seed
 

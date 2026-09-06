@@ -389,8 +389,10 @@ def test_finder_provenance_uses_resolved_provider_model(monkeypatch):
     finder = agent._make_finder(
         nooa_cybergym_agent.Lane(label="configured-alias", model_name="glm-5.2")
     )
+    expander, _ = agent._make_expander(SimpleNamespace())
 
     assert finder._model_name == "openai/deepseek-v4-flash"
+    assert expander._model_name == "openai/deepseek-v4-flash"
 
 
 def test_submission_manager_digest_clusters_submissions_without_llm_constructor():
