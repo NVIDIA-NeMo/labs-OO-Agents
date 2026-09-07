@@ -2,7 +2,7 @@
 
 ## Goal
 
-Use one pattern for context produced by agents, skills, and future components. One agent view defines the complete model context. It may explicitly compose other views. Rendering adds no policy.
+Use one pattern for context produced by agents, skills, and future components. One agent view creates the complete ordered model context. It may explicitly compose other views. Rendering adds no content policy.
 
 ## Contract
 
@@ -14,18 +14,19 @@ class Block:
 
 
 ContextItem = Block | EventBase
-AssembledContext = tuple[ContextItem, ...]
 
 
 class ContextView[Owner](Protocol):
     def assemble(
         self,
         owner: Owner,
-        call: Call,
+        call: CurrentCall,
     ) -> AsyncIterator[ContextItem]: ...
 ```
 
-`Block.content` is materialized. Events remain typed. The runtime collects the selected agent view into an immutable tuple before rendering. `Call` is the immutable generation snapshot.
+`Block.content` is materialized. Events remain typed. The runtime collects the selected view into an immutable `tuple[Block | EventBase, ...]` before rendering. No additional assembled-context type is needed.
+
+`CurrentCall` is the immutable invocation snapshot. In addition to method inputs and the resolved strategy and event query, context views may read the resolved `model`, `provider`, `context_window`, and `context_budget`. It contains no LLM client or credentials.
 
 ## Resolution
 
@@ -48,77 +49,117 @@ skill = SearchSkill(context_view=OtherSearchView())
 
 `@strategy(..., context_view=view)` is the method override. Skills have no method or call override. Composition is ordinary Python; there is no merge protocol.
 
+## Sources and helpers
+
+The core contract does not require `ContextManager`, `EventManager`, string expressions, or a declarative block specification. A native view uses normal Python and yields materialized items directly:
+
+```python
+async def assemble(self, agent, call):
+    state = await agent.compute_state()
+    yield Block(key="state", content=context_text(state, call=call))
+```
+
+Small optional helpers provide reusable mechanisms:
+
+```python
+context_text(value, *, call) -> str
+collect_context(view, owner, call) -> tuple[ContextItem, ...]
+apply_context_budget(items, *, call, evictable) -> tuple[ContextItem, ...]
+evaluate_context_expression(expression, *, owner, call) -> object
+```
+
+Expression evaluation supports declarative APIs; it is not required by `ContextView`.
+
+The existing managers are concrete context sources. Source-specific helpers translate their state into the neutral contract:
+
+```python
+materialize_managed_context(agent, call) -> (prefix, trailing, evictable)
+events_from_manager(agent, call) -> tuple[EventBase, ...]
+```
+
+These helpers preserve current manager semantics: protected and disabled blocks, dynamic caching, strategy and scoped overrides, event queries, and prefix/trailing placement. They are not core context abstractions.
+
 ## Defaults
+
+`DefaultAgentView` owns the complete default policy. The runtime does not own its ordering or membership:
 
 ```python
 class DefaultAgentView(ContextView[Agent]):
     async def assemble(self, agent, call):
-        prefix, trailing = await agent.context_manager.materialize(call)
-        strategy = tuple(
-            [block async for block in call.strategy.context_blocks(agent, call)]
-        )
-
-        for block in default_prefix_order(prefix, strategy):
-            yield block
+        prefix, trailing, evictable = await materialize_managed_context(agent, call)
+        items: list[ContextItem] = [*prefix]
 
         for skill in agent.active_skills():
             view = resolve_context_view(skill, default=DefaultSkillView())
-            async for item in view.assemble(skill, call):
-                yield item
+            items.extend(await collect_context(view, skill, call))
 
-        for event in agent.event_manager.events_for_context(call.event_query):
-            yield event
+        items.extend(events_from_manager(agent, call))
+        items.extend(trailing)
+        items = apply_context_budget(items, call=call, evictable=evictable)
 
-        for block in trailing:
-            yield block
+        for item in items:
+            yield item
 
 
 class DefaultSkillView(ContextView[Skill]):
     async def assemble(self, skill, call):
         if skill.context_block is not None:
-            yield await materialize(skill.context_block, owner=skill, call=call)
+            key, expression = skill.context_block
+            value = await evaluate_context_expression(
+                expression,
+                owner=call.agent,  # preserves existing agent-scoped semantics
+                call=call,
+            )
+            yield Block(key=key, content=context_text(value, call=call))
 ```
 
-The agent view owns skill selection and placement. A skill view owns only its emitted items. Registry skills participate when active; directly attached public skills are active by default. Hidden and inactive skills contribute nothing.
+Registry skills participate when active; directly attached public skills are active by default. Hidden and inactive skills contribute nothing. `DefaultSkillView` emits only explicitly declared context; it never dumps skill documentation.
 
-`DefaultSkillView` emits only explicitly declared context. It does not dump skill documentation. A custom skill view may emit any ordered `Block | EventBase` sequence.
+## Model-specific content
+
+Model-specific prompt content remains view policy, not formatter policy. A custom view may collect items, run any application-defined adapter, apply its budget, then yield the final sequence. No framework-level prompt-adapter stage is required.
 
 ## Ownership
 
 ```text
-resolve agent view
-    -> assemble agent and selected component views
+resolve view
+    -> view assembles Block | EventBase items
     -> tuple[Block | EventBase, ...]
     -> ContextRenderer
     -> ProviderFormatter
 ```
 
-- The selected agent view owns membership, materialization, filtering, global order, and budget policy.
+- The selected agent view owns content, membership, materialization, filtering, global order, adaptation, and budget policy.
 - A nested view owns the content and local order of its contribution.
+- Source-specific helpers translate existing state APIs; they do not choose global placement.
 - The renderer expands each item in place and serializes it.
 - The provider formatter only adapts message shape and cache annotations.
-- Downstream stages preserve semantics or raise `UnsupportedContextLayout`; they never reorder, omit, resolve, evict, or repair context.
+- Downstream stages preserve semantics or raise `UnsupportedContextLayout`; they never reorder, omit, resolve, evict, repair, or add context.
 
 ## Migration
 
-Keep `agent.context`, context managers, event creation, and skill activation as state APIs. Stop giving them implicit prompt behavior.
+Keep `agent.context`, context managers, event creation, strategy/scoped overrides, skill activation, and `Skill.context_block` as public state APIs. Reimplement their internals as sources consumed by the default views; do not make them requirements for custom views.
 
-`Skill.context_block = (key, expression)` becomes shorthand consumed by `DefaultSkillView`; activation no longer writes it into `ContextManager`. Specialized skills replace this shorthand with a class- or instance-level view.
+Move default assembly policy out of `ActorRuntime` and into `DefaultAgentView`. `ActorRuntime` resolves `CurrentCall` and the selected view, collects its output into a tuple, renders it, and calls the LLM.
 
-Replace scoped context overrides and formatter-owned partitioning with views. A temporary adapter may feed assembled items to current formatters, but the final formatter boundary must preserve order.
+Do not introduce `BlockSpec`, a separate assembled-context object, or permanent runtime-owned compatibility assembly. Temporary bridges are acceptable only during migration.
 
 ## Required tests
 
 - immutable, stable assembly order;
 - agent and skill precedence;
+- resolved model and budget data on `CurrentCall`, including method and call overrides;
 - inactive and hidden skills contribute nothing;
-- legacy `Skill.context_block` materializes through `DefaultSkillView`;
-- the agent view controls exact skill placement;
-- custom agent views may omit all managers and skills;
+- existing manager, scoped override, event, and dynamic-cache behavior is preserved;
+- `Skill.context_block` preserves agent-scoped expression behavior;
+- the agent view controls exact skill and event placement;
+- custom views may omit all managers and skills;
+- custom views can adapt before applying their own budget;
+- `DefaultAgentView` uses public helpers, not private runtime assembly;
 - event expansion preserves position;
 - renderers preserve order or reject the layout;
-- existing Predict, CodeAct, tool, skill, context, and quickstart behavior remains covered.
+- existing Predict, CodeAct, tool, skill, context, capability, and quickstart behavior remains covered.
 
 ## Status
 
-Implemented. The compatibility defaults preserve current state APIs while agent and skill views own assembly. Renderers preserve order or reject unsupported layouts.
+Partially implemented. View resolution, typed assembly, order-preserving rendering, skill views, and compatibility behavior work. `DefaultAgentView` still delegates its policy to `ActorRuntime`; the remaining refactor is described in `docs/context-implementation-plan.md`.
