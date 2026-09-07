@@ -122,7 +122,15 @@ class JobHandle:
         self._task.cancel()
         try:
             await self._task
-        except (asyncio.CancelledError, Exception):
+        except asyncio.CancelledError:
+            # Task.cancel() delegates to the future being awaited, so the
+            # job's unwinding and our caller's own cancellation both surface
+            # here. cancelling() distinguishes them; the caller's is not ours
+            # to swallow.
+            current = asyncio.current_task()
+            if current is not None and current.cancelling() > 0:
+                raise
+        except Exception:
             pass
         if self.state == "running":
             self.state = "cancelled"
@@ -906,6 +914,13 @@ class QueueManager:
             for t in pending:
                 try:
                     await t
+                except asyncio.CancelledError:
+                    # Same delegation as JobHandle.cancel(): reaping a loser we
+                    # just cancelled and being cancelled ourselves both surface
+                    # here. Only the loser's unwinding is ours to absorb.
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling() > 0:
+                        raise
                 except BaseException:
                     pass
 
