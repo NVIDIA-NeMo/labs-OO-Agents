@@ -158,6 +158,41 @@ async def test_choice_prompt_filters_and_selects():
         assert await asyncio.wait_for(prompt, timeout=1) == "openai/gpt"
 
 
+def test_choice_overlay_clamps_cursor_when_filter_shrinks():
+    """Enter after a filter shrink must select in-range, never IndexError."""
+    from nooa_cli.tui.prompt_overlay import ChoiceOverlay
+
+    app = SimpleNamespace(output=MagicMock())
+    app.output.get_size.return_value = SimpleNamespace(rows=40, columns=80)
+    view = ChoiceOverlay(app, "Model", "Choose", [f"model-{i}" for i in range(10)])
+
+    for _ in range(6):
+        view.handle_key("down")
+    assert view.cursor == 6
+
+    # Filter shrinks the match set to one entry before any repaint.
+    view.handle_key("text", "9")
+    matches = view._clamped_matches()
+    assert len(matches) == 1
+    assert view.cursor == 0
+
+    assert view.handle_key("enter") == "close"
+    assert view.value == "model-9"
+
+
+def test_choice_overlay_enter_after_empty_filter_selects_valid_option():
+    """Keys queue before repaint; enter must not crash on a stale cursor."""
+    from nooa_cli.tui.prompt_overlay import ChoiceOverlay
+
+    app = SimpleNamespace(output=MagicMock())
+    app.output.get_size.return_value = SimpleNamespace(rows=40, columns=80)
+    view = ChoiceOverlay(app, "Model", "Choose", ["alpha", "beta", "gamma", "delta"])
+
+    view.handle_key("end")
+    assert view.handle_key("enter") == "close"
+    assert view.value == "delta"
+
+
 async def test_choice_prompt_supports_arrow_selection_and_escape():
     from .tui_app_harness import TUIHarness
 
