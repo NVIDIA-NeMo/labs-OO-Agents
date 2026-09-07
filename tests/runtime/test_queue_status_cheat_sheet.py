@@ -126,8 +126,10 @@ async def test_daemon_spawn_is_marked_in_status_block():
     # Non-daemon jobs keep the plain rendering.
     assert "finite job → mesh (running)" in status
     assert "finite job → mesh (running, daemon)" not in status
-    # The legend explains what the daemon marker means.
+    # The legend explains what the daemon marker means, including that
+    # already-queued output still counts as pending work.
     assert "daemon = long-lived infrastructure producer" in status
+    assert "queued output still counts as pending work" in status
 
     await qm.shutdown()
 
