@@ -50,7 +50,9 @@ def _safe_web_link(value: str | None) -> str | None:
     if target is None or strip_format_controls(target) != target:
         return None
     parsed = urlsplit(target)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    # ``netloc`` can be a bare port (``https://:443`` -> netloc=":443") while
+    # ``hostname`` is None; require an actual host before rendering a link.
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         return None
     return target
 

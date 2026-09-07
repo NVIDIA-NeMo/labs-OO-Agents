@@ -77,6 +77,8 @@ def test_link_fragments_require_strict_web_targets():
 
     assert "URL unavailable" in visible(_link_fragments("file:///etc/passwd"))
     assert "URL unavailable" in visible(_link_fragments("https://example.test/\u202eevil"))
+    # A bare port has netloc=":443" but no hostname — must never link.
+    assert "URL unavailable" in visible(_link_fragments("https://:443"))
     ok = _link_fragments("https://login.example.test/authorize?state=abc")
     assert "https://login.example.test/authorize?state=abc" in visible(ok)
 
