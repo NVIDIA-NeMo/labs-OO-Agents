@@ -584,6 +584,22 @@ def test_callback_url_state_must_match_authorization_request(monkeypatch):
         handler._validate_callback_state("http://localhost:8090/callback?code=missing")
 
 
+def test_callback_state_rejects_non_ascii_percent_decoded_state(monkeypatch):
+    """compare_digest must not raise TypeError on non-ASCII state values."""
+    monkeypatch.setattr(oauth.secrets, "token_urlsafe", lambda _size: "expected-state")
+    config = oauth.OAuthConfig(
+        authorization_endpoint="https://maas.example/authorize",
+        token_endpoint="https://maas.example/token",
+        client_id="client-id",
+        redirect_uri="http://localhost:8090/callback",
+    )
+    handler = oauth.OAuthHandler(config)
+    handler._build_authorization_url()
+
+    with pytest.raises(RuntimeError, match="state did not match"):
+        handler._validate_callback_state("http://localhost:8090/callback?code=ok&state=%C3%A9v")
+
+
 def test_raw_authorization_code_remains_supported_with_state_validation(monkeypatch):
     monkeypatch.setattr(oauth.secrets, "token_urlsafe", lambda _size: "expected-state")
     config = oauth.OAuthConfig(
@@ -596,6 +612,35 @@ def test_raw_authorization_code_remains_supported_with_state_validation(monkeypa
     handler._build_authorization_url()
 
     handler._validate_callback_state("raw-code-with-no-query")
+
+
+@pytest.mark.asyncio
+async def test_loopback_rejects_mismatched_state_without_hanging(monkeypatch):
+    """A real callback with a wrong/non-ASCII state reports failure, not a hang."""
+    monkeypatch.setattr(oauth.secrets, "token_urlsafe", lambda _size: "expected-state")
+    config = oauth.OAuthConfig(
+        authorization_endpoint="https://maas.example/authorize",
+        token_endpoint="https://maas.example/token",
+        client_id="client-id",
+        redirect_uri="http://localhost:0/callback",
+        timeout=30,
+    )
+    handler = oauth.OAuthHandler(config)
+    task = asyncio.create_task(handler._capture_code_via_local_server(open_browser=False))
+    # The capture waits for the callback; poll for the bound port from the handler.
+    for _ in range(200):
+        redirect = handler._actual_redirect_uri
+        if redirect and "localhost:0" not in redirect:
+            break
+        await asyncio.sleep(0.02)
+    import urllib.request
+
+    parsed = oauth.urlparse(handler._actual_redirect_uri)
+    base = f"http://{parsed.hostname}:{parsed.port}{parsed.path}"
+    for state in ("wrong-state", "%C3%A9v"):
+        urllib.request.urlopen(f"{base}?code=x&state={state}", timeout=5).read()
+    with pytest.raises(RuntimeError, match="state did not match"):
+        await asyncio.wait_for(task, timeout=5)
 
 
 @pytest.mark.asyncio

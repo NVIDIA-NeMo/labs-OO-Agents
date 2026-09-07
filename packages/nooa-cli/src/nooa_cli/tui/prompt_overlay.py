@@ -62,7 +62,7 @@ def _link_fragments(url: str | None) -> list[tuple[str, str]]:
     """Return visible, clickable OSC-8 fragments for a safe URL."""
     target = safe_hyperlink_target(url)
     if target is None:
-        return [("class:fullscreen-browser.muted", "(URL unavailable — see scrollback)")]
+        return [("class:fullscreen-browser.muted", "(URL unavailable — use Ctrl+Y to copy)")]
     return [
         _LINK_CLOSE,
         ("[ZeroWidthEscape]", f"\x1b]8;;{target}\x1b\\"),
@@ -193,7 +193,9 @@ class PromptOverlay:
             self._copy_status = "URL copied" if copied else "URL copy unavailable"
             return "handled"
         if action == "text":
-            buffer.insert_text(value)
+            # A bracketed paste may embed newlines; the single-line buffer
+            # cannot edit them, so collapse them to keep the callback usable.
+            buffer.insert_text(" ".join(value.split()))
             return "handled"
         if action == "backspace":
             buffer.delete_before_cursor(1)
@@ -322,9 +324,21 @@ class ChoiceOverlay:
     def render(self, width: int, height: int) -> str:  # pragma: no cover - container host
         return ""
 
+    def _clamped_matches(self) -> list[str]:
+        """Return current matches with the cursor clamped into range.
+
+        prompt_toolkit processes a burst of queued keys before the next
+        repaint, so ``enter`` can arrive before the render-time clamp in
+        ``_list_text`` ever runs. Filtering here keeps selection in range.
+        """
+        matches = self._matches()
+        if matches:
+            self.cursor = min(max(self.cursor, 0), len(matches) - 1)
+        return matches
+
     def handle_key(self, action: str, value: str = "") -> SubviewKeyResult:
         if action == "enter":
-            matches = self._matches()
+            matches = self._clamped_matches()
             if matches:
                 self.value = matches[self.cursor]
                 return "close"
@@ -334,12 +348,15 @@ class ChoiceOverlay:
             return "close"
         if action == "text":
             self.buffer.insert_text(value)
+            self._clamped_matches()
             return "handled"
         if action == "backspace":
             self.buffer.delete_before_cursor(1)
+            self._clamped_matches()
             return "handled"
         if action == "space":
             self.buffer.insert_text(" ")
+            self._clamped_matches()
             return "handled"
         if action in ("down", "scroll_down"):
             matches = self._matches()
@@ -358,5 +375,6 @@ class ChoiceOverlay:
         mapped = _TEXT_ACTIONS.get(action)
         if mapped is not None:
             self.buffer.insert_text(mapped)
+            self._clamped_matches()
             return "handled"
         return "handled"
