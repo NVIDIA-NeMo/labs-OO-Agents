@@ -39,6 +39,14 @@ class ModelConfig(BaseModel):
     # Name of the env var holding the API key (NOT the key itself).
     api_key_env: str | None = None
     client_type: str | None = None
+    # Canonical logical provider for ids whose routing string resolves to no
+    # provider (opaque enterprise/gateway ids). ``None`` means undeclared —
+    # identity then stays unset and consumption-time behavior is unchanged.
+    provider: str | None = None
+    # Name of the model compat group the declared model belongs to. Gives an
+    # otherwise-opaque id an opaque replay boundary derived from the declared
+    # group; requires ``provider`` (or a model string that resolves one).
+    compat_group: str | None = None
     context_window: int | None = None
     max_tokens: int | None = None
     temperature: float | None = None

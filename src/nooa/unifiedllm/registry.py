@@ -38,6 +38,10 @@ YAML schema::
         top_p: 1.0                           # optional
         max_tokens: 4096                     # optional
         drop_params: true                    # optional, defaults to true
+        provider: openai                     # optional: logical provider for ids
+                                             # the model string cannot resolve
+        compat_group: openai-gpt-5           # optional: declared compat group
+                                             # (opaque replay boundary)
 
 Set a model to ``null`` in a later layer to remove it.
 """
@@ -53,6 +57,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
+
+from nooa.unifiedllm.declaration import apply_alias_declaration
 
 if TYPE_CHECKING:
     from nooa.unifiedllm import UnifiedLLM
@@ -412,4 +418,14 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
     client_type = client_type or config.get("client_type", "completion")
     client = ResponsesClient(**params) if client_type == "responses" else CompletionClient(**params)
     client._registry_config = config  # For context_window lookup
+
+    # An alias may declare its logical provider and compat group — the two
+    # things an opaque enterprise/gateway model id cannot prove on its own.
+    # Applied lazily (first use of the alias) and attaches identity as
+    # metadata only: the request path is untouched. Aliases that declare
+    # nothing stay exactly as they were — no identity attached, and
+    # consumers keep failing closed at consumption time.
+    client.provider_identity = apply_alias_declaration(
+        name, config, api_style=client_type or "completion", transport="litellm"
+    )
     return client

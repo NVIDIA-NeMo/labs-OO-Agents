@@ -17,6 +17,7 @@ from typing import Any, Literal, cast
 import litellm
 from pydantic import BaseModel, RootModel
 
+from .contracts import ProviderIdentity
 from .http_config import HttpConfig
 from .retry import EmptyContentError, sync_retry, with_retry
 from .retry_config import RetryConfig
@@ -1152,11 +1153,16 @@ def _update_token_calibration(
 
 class UnifiedLLM(ABC):
     _registry_config: dict[str, Any] | None
+    #: Logical provider identity for models the registry declares one for.
+    #: Attached by get_llm_client() as metadata (never a request param);
+    #: None means undeclared, and consumers must fail closed on that.
+    provider_identity: ProviderIdentity | None
 
     def __init__(self, model: str, **config):
         self.model = model
         self.config = config
         self._registry_config = None
+        self.provider_identity = None
         # Cache control injection — shared by CompletionClient and ResponsesClient
         self.cache_control_injection_points: list[dict[str, Any]] = (
             DEFAULT_CACHE_CONTROL_INJECTION_POINTS

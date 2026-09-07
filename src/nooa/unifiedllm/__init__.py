@@ -17,6 +17,7 @@ from nooa.unifiedllm.contracts import (
     register_compat_group,
     register_reasoning_capabilities,
 )
+from nooa.unifiedllm.declaration import apply_alias_declaration
 from nooa.unifiedllm.fake import FakeLLMClient
 from nooa.unifiedllm.http_config import HttpConfig
 from nooa.unifiedllm.registry import (
@@ -63,6 +64,8 @@ __all__ = [
     "parse_model_string",
     "register_compat_group",
     "register_reasoning_capabilities",
+    # Config-driven declarations (registry edge)
+    "apply_alias_declaration",
     # Core classes
     "UnifiedLLM",
     "CompletionClient",
