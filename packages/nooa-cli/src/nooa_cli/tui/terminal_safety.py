@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import unicodedata
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from rich.cells import split_graphemes
@@ -343,6 +344,25 @@ def normalize_transcript_block(value: str, *, columns: int | None = None) -> str
     if columns is not None:
         normalized = _wrap_safe_ansi(normalized, columns)
     return normalized
+
+
+def strip_format_controls(value: str) -> str:
+    """Strip terminal controls and Unicode format (Cf) characters from text.
+
+    ANSI stripping is handled by the safe-ANSI scanners; this additionally
+    removes bidi overrides and joiners so untrusted text cannot reorder a
+    live region, and control characters outside newline/tab.
+    """
+    return "".join(
+        character
+        for character in value
+        if character in "\n\t"
+        or (
+            ord(character) >= 32
+            and not 127 <= ord(character) <= 159
+            and unicodedata.category(character) != "Cf"
+        )
+    )
 
 
 def sanitize_live_text(value: str) -> str:

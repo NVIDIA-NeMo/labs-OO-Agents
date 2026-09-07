@@ -49,29 +49,6 @@ def _mcp_auto_connect_names(value: object) -> list[str]:
     return []
 
 
-def _mcp_oauth_markdown_link(auth_url: str) -> str | None:
-    """Return a safe Markdown link whose visible label is the complete URL."""
-    safe_url = auth_url.strip()
-    try:
-        parsed = urllib.parse.urlsplit(safe_url)
-    except ValueError:
-        return None
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.netloc
-        or any(
-            character.isspace()
-            or character in "<>"
-            or ord(character) < 0x20
-            or 0x7F <= ord(character) <= 0x9F
-            for character in safe_url
-        )
-    ):
-        return None
-    label = re.sub(r"([\\`*_\[\]{}])", r"\\\1", safe_url)
-    return f"[{label}](<{safe_url}>)"
-
-
 def _batch_render_ctx(frontend: "Frontend"):
     """Return a context manager that batches a command's outputs into one block.
 

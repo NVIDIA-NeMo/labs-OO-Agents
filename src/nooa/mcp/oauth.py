@@ -148,6 +148,16 @@ def _system_browser_available() -> bool:
     return False
 
 
+def _normalize_pasted_callback(pasted: str) -> str:
+    """Return the URL from a pasted value, unwrapping ``curl '<url>'`` quoting."""
+    value = pasted.strip()
+    # The MaaS helper page also offers ``curl '<callback-url>'``; accept that too.
+    curl_match = re.search(r"curl\s+['\"]([^'\"]+)['\"]", value)
+    if curl_match:
+        return curl_match.group(1)
+    return value
+
+
 def _extract_authorization_code(pasted: str) -> str:
     """Extract an OAuth code from either a raw code or a pasted callback URL.
 
@@ -155,14 +165,9 @@ def _extract_authorization_code(pasted: str) -> str:
     ``urn:ietf:wg:oauth:2.0:oob?code=...&state=...``. Users naturally paste
     that whole URI, so accept it instead of sending the full URI as the code.
     """
-    value = pasted.strip()
+    value = _normalize_pasted_callback(pasted)
     if not value:
         return ""
-
-    # The MaaS helper page also offers ``curl '<callback-url>'``; accept that too.
-    curl_match = re.search(r"curl\s+['\"]([^'\"]+)['\"]", value)
-    if curl_match:
-        value = curl_match.group(1)
 
     parsed = urlparse(value)
     if parsed.query:
@@ -298,10 +303,7 @@ class OAuthHandler:
 
     def _validate_callback_state(self, callback: str) -> None:
         """Reject callback URLs that do not match this authorization request."""
-        value = callback.strip()
-        curl_match = re.search(r"curl\s+['\"]([^'\"]+)['\"]", value)
-        if curl_match:
-            value = curl_match.group(1)
+        value = _normalize_pasted_callback(callback)
         parsed = urlparse(value)
         if not parsed.query:
             return  # Raw authorization codes cannot carry state.
