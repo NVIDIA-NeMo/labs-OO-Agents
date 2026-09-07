@@ -14,7 +14,7 @@ must read the parent design and the named task packet before editing.
 | D-01 | Cross-model plain reasoning | Demote to labeled ordinary context in `AUTO` | R-03 |
 | D-02 | Plain-reasoning privacy | **DECIDED:** export ON by default (tracing retains everything sent to the model); `export_reasoning=false` opt-in suppression; event-store persistence confirmed | R-02, R-04 |
 | D-03 | Prototype #301 disposition | **DECIDED:** supersede | R-02 |
-| D-04 | Opaque compatibility scope | Provider + API + endpoint/account + model compatibility | C-01, R-03 |
+| D-04 | Opaque compatibility scope | **DECIDED (per Janson's five-harness survey):** keep exact-match fail-closed `opaque_replay_key` covering provider/api/endpoint/account + explicit model compat groups; normalize identity inputs inside key derivation; recovery ladder + broad classifier are non-optional companions. Evidence: tmp/reasoning-survey/reports/d04-*.md | C-01, R-03 |
 | D-05 | TUI compact metric | **DECIDED:** `↑in ↓out ↻cached% (n/m)`; cache segment hidden when endpoint lacks cache capability; `c` ASCII fallback | U-02 |
 | D-06 | AnyLLM branch treatment | **DECIDED:** include but strictly last — no adapter work until reasoning + telemetry tracks are working; branch stays reference-only | A-01 |
 

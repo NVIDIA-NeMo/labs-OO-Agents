@@ -189,6 +189,35 @@ Opaque compatibility is adapter-declared and may include:
 The compatibility key is a non-secret digest. It is not derived in runtime from
 model strings. If the adapter cannot prove compatibility, replay is refused.
 
+### 7.1 Key derivation rules (D-04 decided, cross-harness evidence)
+
+A five-harness survey (Pi/PA, OpenCode, Hermes, OpenClaw; evidence at
+`/localhome/local-pfurgale/dev/tmp/reasoning-survey/reports/d04-*.md`) found the
+only gates that never break sessions are strict ones **paired with recovery
+ladders** — strictness is affordable when being wrong costs one retry, not the
+session. The failure mode to avoid is *speculative* strictness (dropping state
+on unverified beliefs about provider behavior — Hermes' xAI reversal, PR #26644),
+which is different from provenance-gated fail-closed. Three rules follow:
+
+1. **Normalize identity inputs inside key derivation.** Tier suffixes
+   (`kimi-k3:free`, `deepseek-v4-flash:cloud`), provider aliases (OpenClaw
+   #103340), and namespace prefixes must be normalized by the adapter *before*
+   hashing, so normalization is versioned with the key itself. This is the
+   single highest-frequency over-strictness source in the survey (#87575,
+   #103340, tier-suffixed ids failing allowlists).
+2. **Model compatibility groups are explicit declarations with a verification
+   requirement.** Model-id equality is the highest-churn field in every codebase
+   surveyed; groups keep it out of the hot path. A group entry is added only
+   after live verification (OpenClaw's Fable 5.1 "verified live, then
+   hand-registered" pattern). Endpoint/account hashes are cheap-to-declare,
+   high-churn key parts — declaring them costs one line per adapter; NOT
+   declaring them costs what Hermes paid in #32716 (account/connection-bound
+   replay ids invalidated by credential-pool rotation or gateway restarts).
+3. **Pre-gate on stable identity; let rejection-recovery discover the rest.**
+   The division of labor: key covers issuer/provider/api/endpoint/account plus
+   compat-groups for models; the §9 ladder empirically discovers everything the
+   key cannot cheaply know.
+
 Plain-text native compatibility is a separate capability. A provider may accept
 `reasoning_content` but use a different field or reject it on tool calls; the
 capability profile declares the wire dialect.
@@ -261,8 +290,26 @@ When a provider rejects replay state with a classified compatibility error:
    - destination identity and error class;
    - action taken and bounded attempt number;
    - replacement/retirement state;
-4. future renders honor the repair and do not repeat the same invalid replay;
+4. future renders honor the repair and do not repeat the same invalid replay
+   (OpenClaw's suppression-tombstone lesson: rejected state must never retry);
 5. bounded exhaustion surfaces the provider error.
+
+**The recovery ladder and its classifier are non-optional companions to the
+compatibility key** (D-04 evidence: strictness is affordable only when being
+wrong costs one retry; the only gates that never break sessions are strict ones
+paired with recovery). Classifier requirements:
+
+- budget the classifier **broad**: error code + substrings + status + a prose
+  walk of the error graph. Narrow classifiers broke repeatedly in the survey
+  (OpenClaw #92916 genericized error text, #95429 stuck sessions; the classifier
+  was broadened twice after failing to fire);
+- **unknown errors never trigger destructive recovery** (Hermes' discipline):
+  speculative stripping is the other face of speculative gating — the same
+  anti-pattern as Hermes' xAI reversal, where unverified provider beliefs
+  dropped workable state;
+- repair demotes plain reasoning to labeled text rather than deleting it —
+  all five surveyed harnesses converge on lossless demotion as the default
+  mismatch recovery, which is what makes strict gating lossless.
 
 Repair is append-only where possible. If an active-view override is needed, it
 must be durable, inspectable, and reversible; the original event remains stored.
