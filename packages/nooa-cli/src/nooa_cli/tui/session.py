@@ -456,6 +456,17 @@ class Session:
                 # status surface must not silently swallow the notice.
                 logger.warning("update notice could not be displayed", exc_info=True)
                 return
+        # The status-bar notice is easy to miss mid-scroll; also put one
+        # durable block into the transcript so the update is unmissable.
+        emit_block = getattr(self._app, "emit_block", None)
+        if callable(emit_block):
+            try:
+                emit_block(
+                    "\x1b[33mUpdate available — call /restart to reload "
+                    "(the running code no longer matches this checkout).\x1b[0m\n"
+                )
+            except Exception:
+                logger.debug("update notice transcript block failed", exc_info=True)
         # Latch only after the notice is actually displayed.
         self._update_notice_shown = True
         logger.info(
