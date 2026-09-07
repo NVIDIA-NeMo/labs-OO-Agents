@@ -485,13 +485,13 @@ async def test_baseline_command_status_is_dynamic_not_scrollback():
 
 async def test_mouse_support_only_enabled_for_subviews():
     """Normal transcript mode must leave native terminal text selection/copy alone."""
-    from nooa_cli.tui.subapp import SensitiveTextPromptView
+    from nooa_cli.tui.prompt_overlay import PromptOverlay
 
     async with TUIHarness() as h:
         assert bool(h.app._app.mouse_support()) is False
         h.app._active_subview = object()
         assert bool(h.app._app.mouse_support()) is True
-        h.app._active_subview = SensitiveTextPromptView("OAuth", "Authorize")
+        h.app._active_subview = PromptOverlay(h.app._app, "OAuth", "Authorize")
         assert bool(h.app._app.mouse_support()) is False
         h.app._active_subview = None
         assert bool(h.app._app.mouse_support()) is False
@@ -520,7 +520,9 @@ async def test_explorer_f2_temporarily_restores_native_terminal_selection():
         await asyncio.wait_for(opened, timeout=1)
 
 
-async def test_oauth_modal_ctrl_y_copies_full_authorization_url(monkeypatch):
+async def test_oauth_prompt_ctrl_y_copies_full_authorization_url(monkeypatch):
+    from nooa_cli.tui.prompt_overlay import PromptOverlay
+
     url = "https://login.example.test/authorize?state=" + "a" * 500
     copied = []
 
@@ -534,13 +536,15 @@ async def test_oauth_modal_ctrl_y_copies_full_authorization_url(monkeypatch):
             h.app.prompt_sensitive("OAuth", "Authorize in your browser.", link_url=url)
         )
         await h.wait_for(lambda: h.app.active_subview is not None)
+        view = h.app.active_subview
+        assert isinstance(view, PromptOverlay)
 
         await h.press("c-y")
         await h.wait_for(lambda: copied == [url])
-        assert "URL copied" in h.app.active_subview.render(80, 10)
+        assert view._copy_status == "URL copied"
 
         await h.press("escape")
-        assert await prompt == ""
+        assert await asyncio.wait_for(prompt, timeout=1) == ""
 
 
 async def test_thinking_status_shows_live_human_readable_elapsed_time():

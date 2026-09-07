@@ -2019,12 +2019,19 @@ class TUIApplication:
     async def prompt_sensitive(
         self, title: str, message: str, *, link_url: str | None = None
     ) -> str:
-        """Collect masked text without launching a nested terminal application."""
-        from .subapp import SensitiveTextPromptView
+        """Collect masked input in a container-hosted overlay prompt.
 
-        view = SensitiveTextPromptView(
+        The overlay uses the same real ``BufferControl`` hosting as the
+        /resume and /todos browsers: prompt_toolkit owns the cursor and the
+        repaint, so typing never fights a hand-drawn input projection.
+        """
+        from .prompt_overlay import PromptOverlay
+
+        view = PromptOverlay(
+            self._app,
             title,
             message,
+            masked=True,
             link_url=link_url,
             copy_handler=self._copy_to_clipboard,
         )
@@ -2032,18 +2039,18 @@ class TUIApplication:
         return view.value or ""
 
     async def prompt_text(self, title: str, message: str, default: str = "") -> str:
-        """Collect ordinary text in a reusable in-app modal view."""
-        from .subapp import TextPromptView
+        """Collect one line of text in a container-hosted overlay prompt."""
+        from .prompt_overlay import PromptOverlay
 
-        view = TextPromptView(title, message, default=default)
+        view = PromptOverlay(self._app, title, message, default=default)
         await self.open_subview(view)
         return view.value or ""
 
     async def prompt_choice(self, title: str, message: str, options: list[str]) -> str:
-        """Collect one searchable choice in a reusable in-app modal view."""
-        from .subapp import ChoicePromptView
+        """Collect a filtered choice in a container-hosted overlay prompt."""
+        from .prompt_overlay import ChoiceOverlay
 
-        view = ChoicePromptView(title, message, options)
+        view = ChoiceOverlay(self._app, title, message, options)
         await self.open_subview(view)
         return view.value or ""
 
