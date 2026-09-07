@@ -29,29 +29,51 @@ async def _exit_when_restart_requested(
     restart_event: asyncio.Event,
     *,
     on_ready: Callable[[], None],
+    on_failed: Callable[[], None] | None = None,
 ) -> None:
     """Exit only after pre-request work has settled naturally.
 
-    A drain failure must not leave input blocked forever: the waiter is
-    supervised, the drain is released, and the exception is logged instead
-    of dying unobserved.
+    A drain failure must not leave input blocked forever or make the
+    restart signal permanently dead: the waiter is supervised, the
+    failure is surfaced in the transcript, the drain latch is released,
+    and the waiter re-arms so a later signal can latch a fresh drain.
     """
-    await restart_event.wait()
-    try:
-        await session.wait_restart_ready()
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        logger.exception("graceful-restart drain failed; resuming input")
-        app = getattr(session, "_app", None)
-        if app is not None:
-            try:
-                app.end_input_drain()
-            except Exception:
-                pass
+    while True:
+        await restart_event.wait()
+        try:
+            await session.wait_restart_ready()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("graceful-restart drain failed; resuming input")
+            app = getattr(session, "_app", None)
+            emit_block = getattr(app, "emit_block", None)
+            if callable(emit_block):
+                try:
+                    emit_block(
+                        "\x1b[33mRestart drain failed; input restored. "
+                        "Send the restart signal again to retry.\x1b[0m\n"
+                    )
+                except Exception:
+                    pass
+            release = getattr(session, "release_restart_request", None)
+            if callable(release):
+                try:
+                    release()
+                except Exception:
+                    pass
+            elif callable(getattr(app, "end_input_drain", None)):
+                try:
+                    app.end_input_drain()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            restart_event.clear()
+            if on_failed is not None:
+                on_failed()
+            continue
+        on_ready()
+        session._app.exit()
         return
-    on_ready()
-    session._app.exit()
 
 
 def _prepare_splash(config, frontend) -> list:

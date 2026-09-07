@@ -3067,7 +3067,10 @@ class TUIApplication:
         text = buffer.text
         if self._submission_block_reason is not None:
             self.emit_block(f"\x1b[33m{self._submission_block_reason}\x1b[0m\n")
-            return False
+            # Keep the typed draft: validate_and_handle() clears the buffer
+            # when the accept handler returns False, which would silently
+            # discard the user's in-progress text.
+            return True
         state = self._agent_controller.state
         mention_base = None if state is None else state.working_directory
         resolved = self._resolve_composer_submission(text, mention_base=mention_base)
