@@ -1,0 +1,500 @@
+{
+  "enums": {
+    "ReasoningKind": [
+      "opaque",
+      "text",
+      "checkpoint"
+    ],
+    "ReasoningReplayMode": [
+      "off",
+      "auto",
+      "native_only",
+      "text_context"
+    ]
+  },
+  "examples": {
+    "provider_identity": {
+      "provider": "openai",
+      "api_style": "responses",
+      "model": "gpt-5.6-sol",
+      "endpoint_id": "ep-123",
+      "account_scope": "acct-abc",
+      "transport": "litellm",
+      "opaque_replay_key": "sha256:0e57868347184b39df61aaf0dc917e5b3d7ad2deb231ad7a5456075393690934"
+    },
+    "reasoning_record": {
+      "version": 1,
+      "kind": "opaque",
+      "payload": {
+        "encrypted_content": "opaque-blob"
+      },
+      "provenance": {
+        "provider": "openai",
+        "api_style": "responses",
+        "model": "gpt-5.6-sol",
+        "endpoint_id": null,
+        "account_scope": null,
+        "transport": "litellm",
+        "opaque_replay_key": null
+      },
+      "provider_item_type": "reasoning",
+      "sequence": 0,
+      "provider_token_count": 128,
+      "replayable": true,
+      "redaction_class": "opaque"
+    },
+    "capabilities_openai": {
+      "capture_kinds": [
+        "text",
+        "opaque",
+        "checkpoint"
+      ],
+      "native_replay_kinds": [
+        "opaque",
+        "checkpoint"
+      ],
+      "effort_map": {
+        "minimal": "minimal",
+        "low": "low",
+        "medium": "medium",
+        "high": "high"
+      },
+      "supports_reasoning_when_disabled": true,
+      "requires_tool_turn_reasoning_replay": true,
+      "replay_field": null,
+      "signature_prefix_sensitive": false,
+      "terminal_backfill": true
+    }
+  },
+  "opaque_replay_key_version": "nooa.opaque-replay-key.v1",
+  "schema_version": 1,
+  "schemas": {
+    "ProviderIdentity": {
+      "description": "Versioned provider identity, independent of transport routing strings.\n\nendpoint_id and account_scope\nare non-secret fingerprints (never raw credentials).  transport is\n*not* part of replay compatibility, so it is excluded from\nderive_opaque_replay_key.",
+      "properties": {
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "api_style": {
+          "title": "Api Style",
+          "type": "string"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "endpoint_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Endpoint Id"
+        },
+        "account_scope": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Account Scope"
+        },
+        "transport": {
+          "title": "Transport",
+          "type": "string"
+        },
+        "opaque_replay_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Opaque Replay Key"
+        }
+      },
+      "required": [
+        "provider",
+        "api_style",
+        "model",
+        "transport"
+      ],
+      "title": "ProviderIdentity",
+      "type": "object"
+    },
+    "ReasoningRecord": {
+      "$defs": {
+        "JsonValue": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ProviderIdentity": {
+          "description": "Versioned provider identity, independent of transport routing strings.\n\nendpoint_id and account_scope\nare non-secret fingerprints (never raw credentials).  transport is\n*not* part of replay compatibility, so it is excluded from\nderive_opaque_replay_key.",
+          "properties": {
+            "provider": {
+              "title": "Provider",
+              "type": "string"
+            },
+            "api_style": {
+              "title": "Api Style",
+              "type": "string"
+            },
+            "model": {
+              "title": "Model",
+              "type": "string"
+            },
+            "endpoint_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Endpoint Id"
+            },
+            "account_scope": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Account Scope"
+            },
+            "transport": {
+              "title": "Transport",
+              "type": "string"
+            },
+            "opaque_replay_key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Opaque Replay Key"
+            }
+          },
+          "required": [
+            "provider",
+            "api_style",
+            "model",
+            "transport"
+          ],
+          "title": "ProviderIdentity",
+          "type": "object"
+        },
+        "ReasoningKind": {
+          "description": "Kind of retained reasoning artifact.",
+          "enum": [
+            "opaque",
+            "text",
+            "checkpoint"
+          ],
+          "title": "ReasoningKind",
+          "type": "string"
+        }
+      },
+      "description": "One retained reasoning artifact with provenance.\n\npayload is NOOA-owned JSON only; provider SDK objects are converted at\nthe adapter edge and never persist.",
+      "properties": {
+        "version": {
+          "default": 1,
+          "title": "Version",
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/ReasoningKind"
+        },
+        "payload": {
+          "$ref": "#/$defs/JsonValue"
+        },
+        "provenance": {
+          "$ref": "#/$defs/ProviderIdentity"
+        },
+        "provider_item_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider Item Type"
+        },
+        "sequence": {
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "provider_token_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider Token Count"
+        },
+        "replayable": {
+          "default": true,
+          "title": "Replayable",
+          "type": "boolean"
+        },
+        "redaction_class": {
+          "enum": [
+            "opaque",
+            "plain_reasoning"
+          ],
+          "title": "Redaction Class",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "payload",
+        "provenance",
+        "sequence",
+        "redaction_class"
+      ],
+      "title": "ReasoningRecord",
+      "type": "object"
+    },
+    "ReasoningCapabilities": {
+      "$defs": {
+        "ReasoningKind": {
+          "description": "Kind of retained reasoning artifact.",
+          "enum": [
+            "opaque",
+            "text",
+            "checkpoint"
+          ],
+          "title": "ReasoningKind",
+          "type": "string"
+        }
+      },
+      "description": "Reasoning capability profile for a provider.\n\nAll fields are explicit declarations \u2014 unknowns are never promoted to\nsupported.  effort_map maps neutral effort levels to the provider wire\nvalue, with None meaning \"unsupported\".",
+      "properties": {
+        "capture_kinds": {
+          "items": {
+            "$ref": "#/$defs/ReasoningKind"
+          },
+          "title": "Capture Kinds",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "native_replay_kinds": {
+          "items": {
+            "$ref": "#/$defs/ReasoningKind"
+          },
+          "title": "Native Replay Kinds",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "effort_map": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Effort Map",
+          "type": "object"
+        },
+        "supports_reasoning_when_disabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Supports Reasoning When Disabled"
+        },
+        "requires_tool_turn_reasoning_replay": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requires Tool Turn Reasoning Replay"
+        },
+        "replay_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Replay Field"
+        },
+        "signature_prefix_sensitive": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Signature Prefix Sensitive"
+        },
+        "terminal_backfill": {
+          "default": false,
+          "title": "Terminal Backfill",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "capture_kinds",
+        "native_replay_kinds",
+        "effort_map"
+      ],
+      "title": "ReasoningCapabilities",
+      "type": "object"
+    },
+    "ModelCompatGroup": {
+      "description": "Explicitly declared model compatibility group.\n\nGroup membership is hand-registered only after live verification; model-id\nequality stays out of the replay hot path.  A group is scoped to one\nlogical provider, so the same model string can never silently grant\ncompatibility across providers.",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "models": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Models",
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "name",
+        "provider",
+        "models"
+      ],
+      "title": "ModelCompatGroup",
+      "type": "object"
+    },
+    "NormalizedModel": {
+      "description": "Result of normalizing a routing-style model string.",
+      "properties": {
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Provider"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "namespace": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Namespace"
+        },
+        "tier": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tier"
+        }
+      },
+      "required": [
+        "provider",
+        "model"
+      ],
+      "title": "NormalizedModel",
+      "type": "object"
+    }
+  }
+}

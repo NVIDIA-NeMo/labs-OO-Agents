@@ -1467,7 +1467,7 @@ requires-dist = [
     { name = "opentelemetry-api", marker = "extra == 'tracing'", specifier = ">=1.20.0" },
     { name = "opentelemetry-sdk", marker = "extra == 'tracing'", specifier = ">=1.20.0" },
     { name = "pillow", marker = "extra == 'arc'", specifier = ">=10.0" },
-    { name = "pydantic", specifier = ">=2.5.0" },
+    { name = "pydantic", specifier = ">=2.11.0" },
     { name = "python-dotenv", marker = "extra == 'viewer'", specifier = ">=1.0.0" },
     { name = "python-multipart", marker = "extra == 'viewer'", specifier = ">=0.0.5" },
     { name = "rich", marker = "extra == 'arc'", specifier = ">=13.0" },
@@ -1605,7 +1605,7 @@ dependencies = [
 requires-dist = [
     { name = "nooa", editable = "." },
     { name = "numpy", specifier = ">=1.24.0" },
-    { name = "pydantic", specifier = ">=2.5.0" },
+    { name = "pydantic", specifier = ">=2.11.0" },
 ]
 
 [[package]]

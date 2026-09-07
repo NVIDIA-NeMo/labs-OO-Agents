@@ -1,5 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+from nooa.unifiedllm.contracts import (
+    OPAQUE_REPLAY_KEY_VERSION,
+    ModelCompatGroup,
+    NormalizedModel,
+    ProviderIdentity,
+    ReasoningCapabilities,
+    ReasoningKind,
+    ReasoningRecord,
+    ReasoningReplayMode,
+    UnknownProviderIdentityError,
+    compat_group_for,
+    derive_opaque_replay_key,
+    get_reasoning_capabilities,
+    parse_model_string,
+    register_compat_group,
+    register_reasoning_capabilities,
+)
 from nooa.unifiedllm.fake import FakeLLMClient
 from nooa.unifiedllm.http_config import HttpConfig
 from nooa.unifiedllm.registry import (
@@ -30,6 +47,22 @@ from nooa.unifiedllm.unifiedllm import (
 )
 
 __all__ = [
+    # Provider contracts (identity and capability types)
+    "ModelCompatGroup",
+    "NormalizedModel",
+    "OPAQUE_REPLAY_KEY_VERSION",
+    "ProviderIdentity",
+    "ReasoningCapabilities",
+    "ReasoningKind",
+    "ReasoningRecord",
+    "ReasoningReplayMode",
+    "UnknownProviderIdentityError",
+    "compat_group_for",
+    "derive_opaque_replay_key",
+    "get_reasoning_capabilities",
+    "parse_model_string",
+    "register_compat_group",
+    "register_reasoning_capabilities",
     # Core classes
     "UnifiedLLM",
     "CompletionClient",
