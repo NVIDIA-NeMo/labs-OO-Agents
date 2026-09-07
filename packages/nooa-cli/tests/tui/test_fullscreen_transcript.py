@@ -2870,7 +2870,7 @@ def test_fullscreen_entering_edge_row_does_not_scroll_immediately() -> None:
 
 @pytest.mark.asyncio
 async def test_fullscreen_opening_subview_cancels_drag_autoscroll() -> None:
-    from nooa_cli.tui.subapp import TextPromptView
+    from nooa_cli.tui.prompt_overlay import PromptOverlay
     from prompt_toolkit.mouse_events import MouseEventType
 
     app = _make_fullscreen_app()
@@ -2883,7 +2883,7 @@ async def test_fullscreen_opening_subview_cancels_drag_autoscroll() -> None:
     control.mouse_handler(_mouse_event(MouseEventType.MOUSE_MOVE, x=0, y=0))
     assert control._autoscroll_timer is not None
 
-    opening = asyncio.create_task(app.open_subview(TextPromptView("Title", "Prompt")))
+    opening = asyncio.create_task(app.open_subview(PromptOverlay(app._app, "Title", "Prompt")))
     await asyncio.sleep(0)
 
     assert control._dragging is False
@@ -4443,7 +4443,11 @@ def test_transcript_search_reveal_centers_match_vertically() -> None:
     from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
 
     model = FullscreenTranscriptModel(show_trailing_blank=False)
-    model.append("\n".join(f"line {i}" for i in range(12)) + "\nneedle\n" + "\n".join(f"tail {i}" for i in range(12)))
+    model.append(
+        "\n".join(f"line {i}" for i in range(12))
+        + "\nneedle\n"
+        + "\n".join(f"tail {i}" for i in range(12))
+    )
     model.set_search("needle", width=30, height=7)
 
     top = model.top_row(width=30, height=7)
@@ -4483,7 +4487,6 @@ def test_transcript_search_clear_returns_to_tail() -> None:
     assert not any(
         "transcript-search" in style for style, _text in model.formatted_text(width=10, height=2)
     )
-
 
 
 def test_prepend_preserves_visible_tail_and_record_anchor() -> None:

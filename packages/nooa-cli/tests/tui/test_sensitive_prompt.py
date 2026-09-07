@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the in-app masked prompt used by manual MCP OAuth."""
+"""Tests for the container-hosted overlay prompts used by manual MCP OAuth."""
 
+import asyncio
 import base64
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from nooa_cli.tui.commands import _mcp_oauth_markdown_link
-from nooa_cli.tui.subapp import ChoicePromptView, SensitiveTextPromptView, TextPromptView
+from nooa_cli.tui.prompt_overlay import ChoiceOverlay, PromptOverlay
 from nooa_cli.tui.tui_application import TUIApplication, _is_raw_mouse_report
 
 
@@ -39,98 +40,77 @@ def test_non_mouse_numeric_csi_sequence_is_not_filtered():
     assert _is_raw_mouse_report("\x1b[31m") is False
 
 
-def test_sensitive_prompt_masks_value_and_submits():
-    view = SensitiveTextPromptView("OAuth", "Paste the authorization code")
-    for character in "code-123":
-        view.handle_key("text", character)
+def _overlay(**kwargs):
+    return PromptOverlay(SimpleNamespace(render_counter=0), "OAuth", "Authorize.", **kwargs)
 
-    rendered = view.render(80, 10)
-    assert "code-123" not in rendered
-    assert "•" * len("code-123") in rendered
+
+def _join(fragments):
+    return "".join(fragment[1] for fragment in fragments)
+
+
+def test_prompt_overlay_masks_sensitive_buffer():
+    view = _overlay(masked=True)
+    view.handle_key("text", "secret")
+    assert view.buffer.text == "secret"
+    processors = list(view.input_control.input_processors)
+    assert any(type(processor).__name__ == "PasswordProcessor" for processor in processors)
     assert view.handle_key("enter") == "close"
-    assert view.value == "code-123"
+    assert view.value == "secret"
 
 
-def test_sensitive_prompt_accepts_keys_reserved_by_explorer_views():
-    view = SensitiveTextPromptView("OAuth", "Paste")
+def test_prompt_overlay_accepts_keys_reserved_by_explorer_views():
+    view = _overlay()
     for action in ("quit", "resume", "j", "k", "slash"):
         assert view.handle_key(action) == "handled"
-    assert view.handle_key("backspace") == "handled"
     assert view.handle_key("enter") == "close"
-    assert view.value == "qrjk"
+    assert view.buffer.text == "qrjk/"
+    assert view.value == "qrjk/"
 
 
-def test_sensitive_prompt_escape_cancels_without_value():
-    view = SensitiveTextPromptView("OAuth", "Paste")
+def test_prompt_overlay_escape_cancels_without_value():
+    view = _overlay()
     view.handle_key("text", "secret")
     assert view.handle_key("escape") == "close"
     assert view.value is None
 
 
-def test_sensitive_prompt_strips_terminal_controls_from_server_url():
-    view = SensitiveTextPromptView("OAuth", "https://example.test/\x1b[2J\u202eauthorize")
-    rendered = view.render(80, 10)
-    assert "\x1b" not in rendered
-    assert "\u202e" not in rendered
-
-
-def test_sensitive_prompt_stays_in_bounded_dynamic_area():
-    view = SensitiveTextPromptView("OAuth", "Authorize in your browser.")
-
-    rendered = view.render(120, 40)
-
-    assert len(rendered.splitlines()) == view.max_height
-    assert view.max_height < 40
-
-
-def test_sensitive_prompt_scrolls_long_authorization_url():
-    message = "Authorize: https://example.test/" + "a" * 500 + "\nTAIL_VISIBLE"
-    view = SensitiveTextPromptView("OAuth", message)
-
-    first = view.render(40, 8)
-    assert "TAIL_VISIBLE" not in first
-    view.handle_key("end")
-    last = view.render(40, 8)
-
-    assert "TAIL_VISIBLE" in last
-
-
-def test_sensitive_prompt_renders_safe_authorization_copy_hint():
-    url = "https://login.example.test/authorize?" + "state=" + "a" * 500
-    view = SensitiveTextPromptView("OAuth", "Authorize in your browser.", link_url=url)
-
-    rendered = view.render(60, 10)
-
-    assert "Authorization URL ready" in rendered
-    assert url not in rendered
-    assert "\x1b" not in rendered
-    assert "Ctrl+Y copy URL" in rendered
-
-
-def test_sensitive_prompt_copies_complete_authorization_url():
-    copied = []
-    url = "https://login.example.test/authorize?state=" + "a" * 500
-    view = SensitiveTextPromptView(
+def test_prompt_overlay_strips_terminal_controls_from_message():
+    view = PromptOverlay(
+        SimpleNamespace(render_counter=0),
         "OAuth",
-        "Authorize in your browser.",
+        "https://example.test/\x1b[2J\u202eauthorize",
+    )
+    assert "\x1b" not in view.message
+    assert "\u202e" not in view.message
+
+
+def test_prompt_overlay_shows_clickable_authorization_url():
+    url = "https://login.example.test/authorize?state=" + "a" * 300
+    view = _overlay(link_url=url)
+    body = view._body_text()
+    assert url in _join(body)
+    escapes = "".join(fragment[1] for fragment in body if "[ZeroWidthEscape]" in fragment[0])
+    assert f"\x1b]8;;{url}\x1b\\" in escapes
+
+
+def test_prompt_overlay_rejects_non_http_link_targets():
+    view = _overlay(link_url="javascript:alert(1)")
+    body = view._body_text()
+    visible = _join(fragment for fragment in body if "[ZeroWidthEscape]" not in fragment[0])
+    assert "javascript:" not in visible
+    assert "URL unavailable" in visible
+
+
+def test_prompt_overlay_copies_complete_authorization_url():
+    url = "https://login.example.test/authorize?state=" + "a" * 500
+    copied = []
+    view = _overlay(
         link_url=url,
         copy_handler=lambda value: copied.append(value) or True,
     )
-
     assert view.handle_key("copy") == "handled"
     assert copied == [url]
-    assert "URL copied" in view.render(80, 10)
-
-
-def test_sensitive_prompt_rejects_non_http_link_targets():
-    view = SensitiveTextPromptView(
-        "OAuth",
-        "Authorize in your browser.",
-        link_url="javascript:alert(1)",
-    )
-
-    assert "Open authorization URL" not in view.render(80, 10)
-    assert view.handle_key("copy") == "handled"
+    assert "URL copied" in _join(view._footer_text())
 
 
 def test_clipboard_falls_back_to_complete_osc52_payload(monkeypatch):
@@ -147,37 +127,51 @@ def test_clipboard_falls_back_to_complete_osc52_payload(monkeypatch):
     output.flush.assert_called_once_with()
 
 
-def test_text_prompt_shows_default_and_returns_edited_value():
-    view = TextPromptView("Alias", "Choose an alias", default="nemotron")
-    assert "nemotron" in view.render(80, 8)
-    view.handle_key("text", "-fast")
-    assert view.handle_key("enter") == "close"
-    assert view.value == "nemotron-fast"
+async def test_text_prompt_returns_edited_value():
+    from .tui_app_harness import TUIHarness
+
+    async with TUIHarness() as h:
+        prompt = asyncio.create_task(h.app.prompt_text("Alias", "Choose an alias", "nemotron"))
+        await h.wait_for(lambda: h.app.active_subview is not None)
+        view = h.app.active_subview
+        assert isinstance(view, PromptOverlay)
+        assert view.buffer.text == "nemotron"
+        await h.type_keys("-fast")
+        await h.press("enter")
+        assert await asyncio.wait_for(prompt, timeout=1) == "nemotron-fast"
 
 
-def test_choice_prompt_filters_and_selects():
-    view = ChoicePromptView(
-        "Model", "Choose a model", ["nvidia/nemotron", "openai/gpt", "meta/llama"]
-    )
-    for character in "gpt":
-        view.handle_key("text", character)
+async def test_choice_prompt_filters_and_selects():
+    from .tui_app_harness import TUIHarness
 
-    rendered = view.render(80, 10)
-    assert "openai/gpt" in rendered
-    assert "nemotron" not in rendered
-    assert view.handle_key("enter") == "close"
-    assert view.value == "openai/gpt"
+    async with TUIHarness() as h:
+        prompt = asyncio.create_task(
+            h.app.prompt_choice(
+                "Model", "Choose a model", ["nvidia/nemotron", "openai/gpt", "meta/llama"]
+            )
+        )
+        await h.wait_for(lambda: h.app.active_subview is not None)
+        view = h.app.active_subview
+        assert isinstance(view, ChoiceOverlay)
+        await h.type_keys("gpt")
+        await h.press("enter")
+        assert await asyncio.wait_for(prompt, timeout=1) == "openai/gpt"
 
 
-def test_choice_prompt_supports_arrow_selection_and_escape():
-    view = ChoicePromptView("Model", "Choose", ["one", "two"])
-    view.handle_key("down")
-    assert view.handle_key("enter") == "close"
-    assert view.value == "two"
+async def test_choice_prompt_supports_arrow_selection_and_escape():
+    from .tui_app_harness import TUIHarness
 
-    cancelled = ChoicePromptView("Model", "Choose", ["one"])
-    assert cancelled.handle_key("escape") == "close"
-    assert cancelled.value is None
+    async with TUIHarness() as h:
+        prompt = asyncio.create_task(h.app.prompt_choice("Model", "Choose", ["one", "two"]))
+        await h.wait_for(lambda: h.app.active_subview is not None)
+        await h.press("down")
+        await h.press("enter")
+        assert await asyncio.wait_for(prompt, timeout=1) == "two"
+
+        cancelled = asyncio.create_task(h.app.prompt_choice("Model", "Choose", ["one"]))
+        await h.wait_for(lambda: h.app.active_subview is not None)
+        await h.press("escape")
+        assert await asyncio.wait_for(cancelled, timeout=1) == ""
 
 
 def test_remote_clipboard_prefers_osc52_over_host_pbcopy(monkeypatch):
