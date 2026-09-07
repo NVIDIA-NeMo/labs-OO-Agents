@@ -2211,11 +2211,8 @@ class TUIApplication:
         if self._active_subview_done is done:
             self._active_subview_done = None
         self._resume_input_cursor_following()
-        focus_was_input = self._app.layout.current_window is self._input_window
-        focus_restored = False
         try:
             self._app.layout.focus(self._input_window)
-            focus_restored = True
         except Exception:
             logger.warning("failed to restore composer focus after closing subview", exc_info=True)
 
@@ -2223,7 +2220,12 @@ class TUIApplication:
             # Mutate the transcript projection now, but let the focus change
             # publish exactly one final frame.
             self._rebuild_fullscreen_transcript(redraw=False)
-        if invalidate and self._app.is_running and (focus_was_input or not focus_restored):
+        # ``Layout.focus`` changes focus state but does not invalidate, so a
+        # close that started with focus outside the composer must repaint
+        # here or the composer stays stale until some later event. Same-loop
+        # key closures pass ``invalidate=False`` and rely on prompt_toolkit's
+        # post-key paint, so this cannot double-paint on that path.
+        if invalidate and self._app.is_running:
             self._app.invalidate()
         if not self._is_fullscreen and self._resize_reflow.has_pending_replay:
             self._schedule_resize_replay()

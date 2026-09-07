@@ -53,6 +53,34 @@ def test_prompt_overlay_escape_cancels_without_value():
     assert view.value is None
 
 
+def test_prompt_overlay_preserves_spaces_and_collapses_only_linebreaks():
+    """Ordinary spaces must survive; only line breaks collapse."""
+    view = _overlay()
+    view.handle_key("space")
+    assert view.buffer.text == " "
+    view.handle_key("text", "word ")
+    assert view.buffer.text == " word "
+
+    pasted = _overlay()
+    pasted.handle_key("text", "line one\nline two\n")
+    # Interior line breaks become single spaces; a trailing break is dropped
+    # entirely so pasting a callback URL plus its newline adds no padding.
+    assert pasted.buffer.text == "line one line two"
+
+
+def test_link_fragments_require_strict_web_targets():
+    """file:// URLs and format characters must never become clickable links."""
+    from nooa_cli.tui.prompt_overlay import _link_fragments
+
+    def visible(fragments):
+        return "".join(f[1] for f in fragments if "[ZeroWidthEscape]" not in f[0])
+
+    assert "URL unavailable" in visible(_link_fragments("file:///etc/passwd"))
+    assert "URL unavailable" in visible(_link_fragments("https://example.test/\u202eevil"))
+    ok = _link_fragments("https://login.example.test/authorize?state=abc")
+    assert "https://login.example.test/authorize?state=abc" in visible(ok)
+
+
 def test_prompt_overlay_strips_terminal_controls_from_message():
     view = PromptOverlay(
         SimpleNamespace(render_counter=0),

@@ -120,9 +120,8 @@ def _system_browser_available() -> bool:
     # this process is listening on the remote host. Prefer the paste-back flow for
     # every SSH session; it works with or without display forwarding and needs no
     # tunnel. An explicit browser_open hook can still opt into loopback forwarding.
-    if os.name == "posix" and any(
-        os.environ.get(variable) for variable in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
-    ):
+    # Windows OpenSSH sets these variables too, so the check is OS-independent.
+    if any(os.environ.get(variable) for variable in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")):
         return False
 
     try:
@@ -506,6 +505,13 @@ class OAuthHandler:
         authorization_state: str | None = None
 
         class CallbackHandler(BaseHTTPRequestHandler):
+            # Bound the ACCEPTED connection, not just the listening socket: a
+            # client that never sends a request line must not block
+            # ``rfile.readline()`` forever — ``server_close()`` does not close
+            # accepted sockets, so an unbounded handler could outlive the
+            # join timeout and leak the callback worker thread.
+            timeout = 1.0
+
             def log_message(self, format: str, *args: object) -> None:  # noqa: A002
                 pass  # Silence request logs
 
