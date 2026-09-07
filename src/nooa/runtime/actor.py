@@ -1268,17 +1268,34 @@ class ActorRuntime:
         # Tag the opaque reasoning state with its model family so replay can
         # refuse to send it to a different provider (issue 264).
         reasoning_provenance = None
-        if reasoning_items:
+        reasoning_content = None
+        _llm = _current_llm_var.get()
+        _model = getattr(_llm, "model", None)
+        if reasoning_items or not response.tool_calls:
             from nooa.unifiedllm.unifiedllm import model_family
 
-            _llm = _current_llm_var.get()
-            _model = getattr(_llm, "model", None)
             reasoning_provenance = model_family(_model) if _model else None
+        # Plain-text reasoning retention (chat families: GLM/Kimi/DeepSeek/...).
+        # Only captured when the alias opted in via retain_reasoning, and only
+        # for terminal (non-tool) text — tool-call turns carry their reasoning
+        # on the ToolCallEvent instead (see CodeAct._process_tool_calls).
+        _retain = bool(
+            isinstance(_llm, object) and getattr(_llm, "config", {}).get("retain_reasoning")
+        )
+        if _retain and not response.tool_calls:
+            reasoning_content = getattr(response, "reasoning", None)
+            if not isinstance(reasoning_content, str) or not reasoning_content.strip():
+                reasoning_content = None
         event = LLMOutput(
             content=content,
             reasoning_items=reasoning_items,
-            reasoning_provenance=reasoning_provenance,
+            reasoning_provenance=reasoning_provenance if reasoning_items else None,
+            reasoning_content=reasoning_content,
+            # reasoning_content shares the same family gate as reasoning_items.
+            # Store provenance whenever any retained reasoning is present.
         )
+        if reasoning_content and not event.reasoning_provenance:
+            event = event.model_copy(update={"reasoning_provenance": reasoning_provenance})
         event_id = self.event_manager.add(event)
 
         return response, event_id

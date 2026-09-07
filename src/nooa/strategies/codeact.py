@@ -995,6 +995,18 @@ Standard Python builtins and agent instance (`self`) are available."""
                     )
                     if not isinstance(reasoning_items, list):
                         reasoning_items = None
+                    # Plain-text reasoning retention (chat families, GLM/Kimi/...):
+                    # same opt-in switch as the actor's terminal-text path.
+                    from nooa.runtime.actor import _current_llm_var
+
+                    _llm = _current_llm_var.get()
+                    _retain = bool(
+                        isinstance(_llm, object)
+                        and getattr(_llm, "config", {}).get("retain_reasoning")
+                    )
+                    _tool_reasoning = getattr(response, "reasoning", None) if _retain else None
+                    if not isinstance(_tool_reasoning, str) or not _tool_reasoning.strip():
+                        _tool_reasoning = None
                     # If the LLM also emitted message content alongside the tool
                     # call(s), preserve it by prepending it as a comment at the
                     # top of the first execute_python code block.
@@ -1024,6 +1036,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                         return_type,
                         event_id or "",
                         reasoning_items=reasoning_items,
+                        reasoning_content=_tool_reasoning,
                     )
                     if result.completed:
                         turn_state.success = True
@@ -1319,6 +1332,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         return_type: Any,
         event_id: str,
         reasoning_items: list[dict[str, Any]] | None = None,
+        reasoning_content: str | None = None,
     ) -> _ToolCallsResult:
         """Process tool calls from a single LLM turn.
 
@@ -1356,8 +1370,9 @@ Standard Python builtins and agent instance (`self`) are available."""
 
             # Add ToolCallEvent to record the tool call (result will be nested later)
             _attached_reasoning = reasoning_items if tool_call_index == 0 else None
+            _attached_reasoning_content = reasoning_content if tool_call_index == 0 else None
             _reasoning_provenance = None
-            if _attached_reasoning:
+            if _attached_reasoning or _attached_reasoning_content:
                 from nooa.runtime.actor import _current_llm_var
                 from nooa.unifiedllm.unifiedllm import model_family
 
@@ -1371,6 +1386,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     arguments=args,
                     reasoning_items=_attached_reasoning,
                     reasoning_provenance=_reasoning_provenance,
+                    reasoning_content=_attached_reasoning_content,
                     result=None,  # Will be updated after execution
                 )
             )

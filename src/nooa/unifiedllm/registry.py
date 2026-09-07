@@ -390,6 +390,7 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
         "extra_body",
         "store",
         "include",
+        "retain_reasoning",
     ):
         if key in config and key not in overrides:
             params[key] = config[key]

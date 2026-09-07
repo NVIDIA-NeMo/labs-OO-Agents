@@ -83,6 +83,22 @@ class ModelConfig(BaseModel):
             )
         ),
     ] = None
+    # Opt-in per alias (issue 264 generalization): retain the model's plain-text
+    # reasoning (chat-family ``reasoning_content`` — GLM/Kimi/DeepSeek/Qwen/...)
+    # on the stored assistant turn and replay it to later turns of the SAME
+    # model family. Costs context tokens on every subsequent turn, so it is a
+    # per-alias decision rather than always-on. OpenAI Responses models don't
+    # need this — their encrypted reasoning_items are retained automatically.
+    retain_reasoning: Annotated[
+        bool | None,
+        Field(
+            description=(
+                "Retain and replay plain-text reasoning_content for chat-family "
+                "models (GLM/Kimi/DeepSeek/Qwen/...). Provenance-gated: replayed "
+                "only to the same model family. Default off."
+            )
+        ),
+    ] = None
 
     @classmethod
     def from_registry(cls, name: str, raw: dict[str, Any]) -> ModelConfig:

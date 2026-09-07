@@ -749,6 +749,33 @@ def _is_anthropic_model(model: str) -> bool:
     return _is_bedrock_model(model) and "claude" in m
 
 
+def _strip_model_route_prefixes(model: str) -> str:
+    """Drop routing/prefix segments that say nothing about the model family.
+
+    LiteLLM and gateway model strings are prefix-stacked, e.g.
+    ``openai/azure/openai/gpt-5.6`` (litellm provider + azure route + gateway
+    id) or ``openai/nvidia/zai-org/glm-5.3`` (gateway id under an
+    OpenAI-compatible route). Those prefixes make substring matching tag GLM or
+    Kimi as ``openai``, which would leak encrypted reasoning state across
+    families. Stripping known route segments leaves the identifying part.
+    """
+    segments = [s for s in model.split("/") if s]
+    route_words = {
+        "openai",  # gateway route / litellm provider prefix
+        "azure",
+        "nvidia",
+        "bedrock",
+        "openrouter",
+        "api",
+        "v1",
+        "nim",
+        "proxy",
+    }
+    while segments and segments[0].lower() in route_words:
+        segments = segments[1:]
+    return "/".join(segments)
+
+
 def model_family(model: str) -> str:
     """Return a coarse provider/model-family tag for opaque-state replay gating.
 
@@ -758,14 +785,27 @@ def model_family(model: str) -> str:
     time and refuse to replay it to a different family (issue 264):
 
     - ``"anthropic"`` for Claude (direct or Bedrock)
-    - ``"openai"`` for GPT / OpenAI-compatible OpenAI models
-    - ``"other"`` otherwise (NIM/Nemotron/etc.)
+    - ``"openai"`` for GPT / OpenAI models (routing prefixes stripped first, so
+      gateway aliases like ``openai/nvidia/zai-org/glm-5.3`` are NOT openai)
+    - ``"glm"``, ``"kimi"``, ``"deepseek"``, ``"qwen"``, ``"nemotron"`` for the
+      common reasoning-capable chat families
+    - ``"other"`` otherwise
     """
     if _is_anthropic_model(model):
         return "anthropic"
-    m = model.lower()
+    m = _strip_model_route_prefixes(model).lower()
     if "gpt" in m or "openai" in m or m.startswith(("o1", "o3", "o4")):
         return "openai"
+    if "glm" in m:
+        return "glm"
+    if "kimi" in m or "moonshot" in m:
+        return "kimi"
+    if "deepseek" in m:
+        return "deepseek"
+    if "qwen" in m or "qwq" in m:
+        return "qwen"
+    if "nemotron" in m:
+        return "nemotron"
     return "other"
 
 

@@ -397,3 +397,107 @@ class TestAtifExporterContextVar:
             f"attach should fire once inside the scope, not after reset; got {len(attach_calls)}"
         )
         assert _atif_exporter_var.get() is None
+
+
+class TestReasoningContentCapture:
+    """retain_reasoning on the live client stores plain-text reasoning for replay."""
+
+    @pytest.mark.asyncio
+    async def test_capture_stores_reasoning_content_when_enabled(self) -> None:
+        """A terminal text turn stores reasoning_content + provenance when the
+        alias opted in via retain_reasoning."""
+
+        from nooa import strategy
+        from nooa.events import LLMOutput
+        from nooa.standalone import _atif_exporter_var
+        from nooa.strategies import PredictStrategy
+        from nooa.unifiedllm import FakeLLMClient, LLMResponse
+
+        event_managers: list = []
+
+        llm = FakeLLMClient(
+            scripted_responses=[
+                LLMResponse(
+                    raw_response=None,
+                    content='{"answer":"hi"}',
+                    tool_calls=[],
+                    finish_reason="stop",
+                    assistant_message={"role": "assistant", "content": '{"answer":"hi"}'},
+                    reasoning="17*23 = 391",
+                )
+            ]
+        )
+        llm.model = "openai/nvidia/zai-org/glm-5.3"
+        llm.config["retain_reasoning"] = True
+
+        @strategy(PredictStrategy(), llm=llm)
+        async def predict_fn(prompt: str) -> dict:
+            """{prompt}"""
+            ...
+
+        class _Capture:
+            def _attach_child(self, em, child_agent_name: str = "") -> None:
+                event_managers.append(em)
+
+            def _detach_child(self, em) -> None:
+                pass
+
+        token = _atif_exporter_var.set(_Capture())
+        try:
+            await predict_fn("hi")
+        finally:
+            _atif_exporter_var.reset(token)
+
+        outputs = [e for e in event_managers[0].values() if isinstance(e, LLMOutput)]
+        with_reasoning = [o for o in outputs if o.reasoning_content == "17*23 = 391"]
+        assert with_reasoning, "retain_reasoning must store reasoning_content on LLMOutput"
+        assert with_reasoning[0].reasoning_provenance == "glm"
+
+    @pytest.mark.asyncio
+    async def test_capture_off_by_default(self) -> None:
+        """Without retain_reasoning the reasoning text is not stored (behavior
+        unchanged for aliases that didn't opt in)."""
+        from nooa import strategy
+        from nooa.events import LLMOutput
+        from nooa.standalone import _atif_exporter_var
+        from nooa.strategies import PredictStrategy
+        from nooa.unifiedllm import FakeLLMClient, LLMResponse
+
+        event_managers: list = []
+
+        llm = FakeLLMClient(
+            scripted_responses=[
+                LLMResponse(
+                    raw_response=None,
+                    content='{"answer":"hi"}',
+                    tool_calls=[],
+                    finish_reason="stop",
+                    assistant_message={"role": "assistant", "content": '{"answer":"hi"}'},
+                    reasoning="17*23 = 391",
+                )
+            ]
+        )
+        llm.model = "openai/nvidia/zai-org/glm-5.3"
+
+        @strategy(PredictStrategy(), llm=llm)
+        async def predict_fn(prompt: str) -> dict:
+            """{prompt}"""
+            ...
+
+        class _Capture:
+            def _attach_child(self, em, child_agent_name: str = "") -> None:
+                event_managers.append(em)
+
+            def _detach_child(self, em) -> None:
+                pass
+
+        token = _atif_exporter_var.set(_Capture())
+        try:
+            await predict_fn("hi")
+        finally:
+            _atif_exporter_var.reset(token)
+
+        outputs = [e for e in event_managers[0].values() if isinstance(e, LLMOutput)]
+        assert all(o.reasoning_content is None for o in outputs), (
+            "retain_reasoning must default to off"
+        )

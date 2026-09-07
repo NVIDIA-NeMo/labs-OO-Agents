@@ -185,6 +185,16 @@ class LLMOutput(EventBase):  # type: ignore[misc]
             "cannot decrypt it."
         ),
     )
+    reasoning_content: str | None = Field(
+        default=None,
+        repr=False,
+        description=(
+            "Plain-text reasoning (e.g. DeepSeek/GLM/Kimi reasoning_content) that, "
+            "when retain_reasoning is enabled for the alias, is replayed on the "
+            "historical assistant turn so later turns retain the model's thinking. "
+            "Only replayed to the same model family (reasoning_provenance)."
+        ),
+    )
 
 
 class PythonOutput(EventBase):  # type: ignore[misc]

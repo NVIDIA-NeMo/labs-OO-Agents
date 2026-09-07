@@ -251,6 +251,15 @@ class ToolCallEvent(EventBase):
             "opaque state is only replayed to the same family that produced it."
         ),
     )
+    reasoning_content: str | None = Field(
+        default=None,
+        repr=False,
+        description=(
+            "Plain-text reasoning for chat-family models (GLM/Kimi/DeepSeek/...). "
+            "When retain_reasoning is enabled, replayed on the historical assistant "
+            "turn; provenance-gated like reasoning_items."
+        ),
+    )
 
     # Nested result (filled after execution via EventManager.update())
     result: ToolResult | None = Field(

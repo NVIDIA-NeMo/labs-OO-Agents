@@ -734,3 +734,43 @@ class TestReloadRegistry:
         assert not bad_observations, bad_observations
         # End state: registry holds the alias.
         assert "raceable" in MODELS
+
+
+def test_model_family_strips_gateway_route_prefixes():
+    """Gateway/litellm routing prefixes must not mask the model family."""
+    from nooa.unifiedllm.unifiedllm import model_family
+
+    cases = {
+        # Gateway aliases: the leading openai/ is a route, not a family.
+        "openai/nvidia/zai-org/glm-5.3": "glm",
+        "openai/nvidia/moonshotai/kimi-k2.6": "kimi",
+        "openai/nvidia/deepseek-v3": "deepseek",
+        "openai/nvidia/qwen3-235b": "qwen",
+        "openai/nvidia/nemotron-3-ultra": "nemotron",
+        # Azure route + gateway id still resolve to OpenAI.
+        "openai/azure/openai/gpt-5.6-sol": "openai",
+        "openai/openai/openai/gpt-5.5": "openai",
+        # Bare names.
+        "gpt-5.6": "openai",
+        "claude-opus-4-8": "anthropic",
+        "openai/aws/anthropic/claude-haiku-4-5": "anthropic",
+        # Unknown stays other.
+        "some/unknown/model": "other",
+    }
+    for model, expected in cases.items():
+        assert model_family(model) == expected, model
+
+
+def test_model_family_openai_prefix_not_overmatched():
+    """The openai route prefix alone must not tag a GLM/Kimi model as openai.
+
+    Regression: gateway ids like ``openai/nvidia/zai-org/glm-5.3`` previously
+    matched the ``"openai" in model`` substring and were tagged ``openai``,
+    which would have leaked OpenAI-encrypted reasoning state to GLM.
+    """
+    from nooa.unifiedllm.unifiedllm import _strip_model_route_prefixes, model_family
+
+    assert _strip_model_route_prefixes("openai/nvidia/zai-org/glm-5.3") == "zai-org/glm-5.3"
+    assert model_family("openai/nvidia/zai-org/glm-5.3") == "glm"
+    assert model_family("openai/nvidia/moonshotai/kimi-k2.6") == "kimi"
+    assert model_family("openai/nvidia/zai-org/glm-5.3") != "openai"

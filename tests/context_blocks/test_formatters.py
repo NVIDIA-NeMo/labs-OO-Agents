@@ -683,3 +683,75 @@ class TestAppendOnlyReasoningReplayIntegration:
         finally:
             _current_reasoning_family.reset(token)
         assert reasoning_item not in out2
+
+
+class TestReasoningContentReplayGate:
+    """Plain-text reasoning_content (chat families) replays only to its family."""
+
+    def test_same_family_replays_on_tool_call_and_text_turns(self):
+        from nooa.context_blocks.formatter import _current_reasoning_family
+
+        msgs = [
+            RenderedMessage(
+                role=Role.ASSISTANT,
+                tool_call=ToolCallInfo(id="c1", name="python_cell", arguments={"code": "1"}),
+                reasoning_content="17*23 = 391",
+                reasoning_provenance="glm",
+            ),
+            RenderedMessage(role=Role.ASSISTANT, content="", tool_call_id="c1"),
+            RenderedMessage(
+                role=Role.ASSISTANT,
+                content="391",
+                reasoning_content="17*23 = 391",
+                reasoning_provenance="glm",
+            ),
+        ]
+        token = _current_reasoning_family.set("glm")
+        try:
+            out = OpenAIProviderFormatter().format(msgs)
+        finally:
+            _current_reasoning_family.reset(token)
+        tool_msg = next(m for m in out if m.get("tool_calls"))
+        assert tool_msg["reasoning_content"] == "17*23 = 391"
+        text_msgs = [m for m in out if m.get("role") == "assistant" and not m.get("tool_calls")]
+        assert any(m.get("reasoning_content") == "17*23 = 391" for m in text_msgs)
+
+    def test_cross_family_drops_reasoning_but_keeps_content(self):
+        from nooa.context_blocks.formatter import _current_reasoning_family
+
+        msgs = [
+            RenderedMessage(
+                role=Role.ASSISTANT,
+                tool_call=ToolCallInfo(id="c1", name="python_cell", arguments={"code": "1"}),
+                reasoning_content="17*23 = 391",
+                reasoning_provenance="glm",
+            ),
+            RenderedMessage(
+                role=Role.ASSISTANT,
+                content="391",
+                reasoning_content="17*23 = 391",
+                reasoning_provenance="glm",
+            ),
+        ]
+        token = _current_reasoning_family.set("openai")
+        try:
+            out = OpenAIProviderFormatter().format(msgs)
+        finally:
+            _current_reasoning_family.reset(token)
+        tool_msg = next(m for m in out if m.get("tool_calls"))
+        assert "reasoning_content" not in tool_msg
+        text_msg = next(m for m in out if m.get("role") == "assistant" and not m.get("tool_calls"))
+        assert "reasoning_content" not in text_msg
+        assert text_msg["content"] == "391"
+
+    def test_no_reasoning_content_leaves_messages_unchanged(self):
+        """Without retained reasoning the emitted shapes are exactly as before."""
+        msgs = [
+            RenderedMessage(role=Role.ASSISTANT, content="hello"),
+            RenderedMessage(role=Role.USER, content="hi"),
+        ]
+        out = OpenAIProviderFormatter().format(msgs)
+        assert out == [
+            {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": "hi"},
+        ]

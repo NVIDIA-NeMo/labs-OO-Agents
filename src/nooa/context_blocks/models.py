@@ -304,6 +304,10 @@ class RenderedMessage(BaseModel):
         default=None,
         description="Model-family tag for reasoning_items; replayed only to the same family",
     )
+    reasoning_content: str | None = Field(
+        default=None,
+        description="Plain-text reasoning for chat families; replayed only to the same family",
+    )
     tool_call_id: str | None = Field(
         default=None, description="Tool-call id this message is a result for"
     )

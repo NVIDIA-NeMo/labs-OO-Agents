@@ -254,6 +254,8 @@ def _event_block_to_messages(
                     arguments=event.arguments,
                 ),
                 reasoning_items=event.reasoning_items,
+                reasoning_provenance=event.reasoning_provenance,
+                reasoning_content=event.reasoning_content,
             )
         ]
         if event.result is not None:
@@ -298,6 +300,9 @@ def _event_block_to_messages(
     reasoning_provenance = (
         getattr(block.event, "reasoning_provenance", None) if block.event is not None else None
     )
+    reasoning_content = (
+        getattr(block.event, "reasoning_content", None) if block.event is not None else None
+    )
     return [
         RenderedMessage(
             role=block.role,
@@ -305,6 +310,7 @@ def _event_block_to_messages(
             parts=[BlockPart(key=block.key, content=content)],
             reasoning_items=reasoning_items,
             reasoning_provenance=reasoning_provenance,
+            reasoning_content=reasoning_content,
             images=images,
         )
     ]
@@ -478,6 +484,12 @@ class OpenAIProviderFormatter(ProviderFormatter):
                 }
                 if msg.reasoning_items and _replay_reasoning_allowed(msg.reasoning_provenance):
                     assistant_message["reasoning_items"] = msg.reasoning_items
+                # Plain-text reasoning retention (chat families): replay the
+                # stored reasoning_content on the historical assistant turn so
+                # later turns retain the model's thinking. Provenance-gated like
+                # reasoning_items — never sent to a different family.
+                if msg.reasoning_content and _replay_reasoning_allowed(msg.reasoning_provenance):
+                    assistant_message["reasoning_content"] = msg.reasoning_content
                 out.append(assistant_message)
             elif msg.tool_call_id is not None:
                 out.append(
@@ -492,7 +504,20 @@ class OpenAIProviderFormatter(ProviderFormatter):
             else:
                 if msg.role in (Role.RUNTIME_EVENT, Role.METADATA):
                     continue
-                out.append({"role": msg.role.value, "content": msg.content or ""})
+                if (
+                    msg.role == Role.ASSISTANT
+                    and msg.reasoning_content
+                    and _replay_reasoning_allowed(msg.reasoning_provenance)
+                ):
+                    out.append(
+                        {
+                            "role": msg.role.value,
+                            "content": msg.content or "",
+                            "reasoning_content": msg.reasoning_content,
+                        }
+                    )
+                else:
+                    out.append({"role": msg.role.value, "content": msg.content or ""})
         return out
 
 
