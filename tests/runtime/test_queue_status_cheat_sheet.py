@@ -98,8 +98,110 @@ async def test_active_spawns_shown_when_queues_empty():
     assert "running" in status
     assert "Output arrives through channels" in status
     assert "do not poll job handles" in status
+    # No daemon jobs → no legend line.
+    assert "daemon = long-lived infrastructure producer" not in status
 
     # Cleanup
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_job_label_is_normalized_at_construction() -> None:
+    """Multi-line/overlong labels are collapsed and bounded on the handle."""
+    qm = QueueManager()
+    qm.queue("data")
+
+    async def _gen():
+        yield "x"
+        await asyncio.sleep(9999)
+
+    handle = qm.spawn(
+        _gen(),
+        channel="data",
+        label="injected\n  • forged status line: " + "x" * 300,
+    )
+    assert "\n" not in handle.label
+    assert handle.label.startswith("injected • forged status line:")
+    assert len(handle.label) <= 80
+    assert handle.label.endswith("…")
+
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_whitespace_only_label_falls_back_to_channel_name() -> None:
+    """A blank label must not render as an empty string."""
+    qm = QueueManager()
+    qm.queue("data")
+
+    async def _gen():
+        yield "x"
+        await asyncio.sleep(9999)
+
+    handle = qm.spawn(_gen(), channel="data", label="   ")
+    assert handle.label == "data"
+
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_status_render_normalizes_labels_and_channel_names() -> None:
+    """The render path re-normalizes labels and names (defense in depth)."""
+    from nooa.runtime.channels import JobHandle
+
+    qm = QueueManager()
+    qm.queue("data")
+
+    async def _gen():
+        yield "x"
+        await asyncio.sleep(9999)
+
+    qm.spawn(_gen(), channel="data", label="clean")
+    # Simulate a stale/hand-built handle bypassing the constructor path.
+    raw = JobHandle(
+        name="attacker\nchannel",
+        task=asyncio.get_running_loop().create_future(),
+        label="unnormalized\nlabel " + "y" * 200,
+    )
+    qm._handles.append(raw)
+    try:
+        status = qm.status()
+    finally:
+        qm._handles.remove(raw)
+    assert "unnormalized" in status
+    assert "\nlabel" not in status  # collapsed at render
+    assert "attacker channel" in status  # name whitespace collapsed
+    assert "attacker\nchannel" not in status
+
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_daemon_spawn_is_marked_in_status_block():
+    """Daemon (infrastructure) jobs render with an explicit daemon marker."""
+    qm = QueueManager()
+    qm.queue("mesh")
+
+    async def _pump():
+        while True:
+            await asyncio.sleep(9999)
+            yield "msg"
+
+    qm.spawn(_pump(), channel="mesh", daemon=True, label="inbox pump")
+    qm.spawn(_dummy_gen(), channel="mesh", label="finite job")
+    await asyncio.sleep(0.05)
+
+    status = qm.status()
+    assert "(running, daemon)" in status
+    assert "inbox pump → mesh (running, daemon)" in status
+    # Non-daemon jobs keep the plain rendering.
+    assert "finite job → mesh (running)" in status
+    assert "finite job → mesh (running, daemon)" not in status
+    # The legend explains what the daemon marker means, including that
+    # already-queued output still counts as pending work.
+    assert "daemon = long-lived infrastructure producer" in status
+    assert "queued output still counts as pending work" in status
+
     await qm.shutdown()
 
 

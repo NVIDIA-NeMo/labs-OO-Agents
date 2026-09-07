@@ -11,12 +11,69 @@ The ``main()`` coroutine keeps its original signature so that callers like
     await main(config=config, agent=agent)
 """
 
-from typing import TYPE_CHECKING
+import asyncio
+import logging
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from nooa import Agent
 
     from .config import Config
+
+
+async def _exit_when_restart_requested(
+    session: Any,
+    restart_event: asyncio.Event,
+    *,
+    on_ready: Callable[[], None],
+) -> None:
+    """Exit only after pre-request work has settled naturally.
+
+    A drain failure must not leave input blocked forever or make the
+    restart signal permanently dead: the waiter is supervised, the
+    failure is surfaced in the transcript, the drain latch is released,
+    and the waiter re-arms so a later signal can latch a fresh drain.
+    """
+    while True:
+        await restart_event.wait()
+        try:
+            await session.wait_restart_ready()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("graceful-restart drain failed; resuming input")
+            app = getattr(session, "_app", None)
+            emit_block = getattr(app, "emit_block", None)
+            if callable(emit_block):
+                try:
+                    emit_block(
+                        "\x1b[33mRestart drain failed; input restored. "
+                        "Send the restart signal again to retry.\x1b[0m\n"
+                    )
+                except Exception:
+                    pass
+            # Clear before releasing: a set-then-clear could drop a signal
+            # that latched a fresh drain between the two statements, while a
+            # clear-then-set can only ever produce one extra (harmless) retry.
+            restart_event.clear()
+            release = getattr(session, "release_restart_request", None)
+            if callable(release):
+                try:
+                    release()
+                except Exception:
+                    pass
+            elif callable(getattr(app, "end_input_drain", None)):
+                try:
+                    app.end_input_drain()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            continue
+        on_ready()
+        session._app.exit()
+        return
 
 
 def _prepare_splash(config, frontend) -> list:
@@ -118,10 +175,10 @@ async def main(
 
     runtime_registration = None
     restart_requested = False
+    restart_ready = False
     restart_task = None
-    if result.session_id is not None:
-        import asyncio
 
+    if result.session_id is not None:
         from .runtime_registration import TUIRuntimeRegistration
 
         try:
@@ -134,9 +191,10 @@ async def main(
         restart_event = asyncio.Event()
 
         def _request_restart() -> None:
-            """Latch a signal request onto the running TUI lifecycle."""
+            """Latch a restart request and stop admitting new user work."""
             nonlocal restart_requested
             restart_requested = True
+            session.request_restart_when_idle()
             restart_event.set()
 
         if candidate is not None and candidate.install_restart_signal(
@@ -149,6 +207,25 @@ async def main(
             else:
                 runtime_registration = candidate
 
+                def _restart_in_flight() -> bool:
+                    """Whether a graceful-restart drain is already latched."""
+                    return bool(getattr(session, "_restart_pending", False))
+
+                # The dev-time update UX (in-process /restart plus the
+                # observe-only update watch) is fully opt-in via
+                # tui.update_watch — default off, dev checkouts only.
+                if getattr(config.tui, "update_watch", False):
+                    registry.request_restart = _request_restart
+                    registry.restart_in_flight = _restart_in_flight
+                    # Baseline revision for the observe-only update notice.
+                    session._startup_source_revision = candidate.source_revision
+                else:
+                    registry.restart_unavailable_reason = (
+                        "tui.update_watch is off (enable with --update-watch "
+                        "or tui.update_watch in settings); the external "
+                        "SIGUSR1 restart path still works."
+                    )
+
                 def _update_runtime_session(session_id: str) -> None:
                     """Keep restart metadata aligned with in-process session changes."""
                     try:
@@ -159,15 +236,15 @@ async def main(
 
                 session._on_session_change = _update_runtime_session
 
-                async def _exit_when_restart_requested() -> None:
-                    """Exit the running app after a graceful restart is requested."""
-                    await restart_event.wait()
-                    while session._app is None or not session._app.is_running:
-                        await asyncio.sleep(0.01)
-                    session._app.exit()
+                def _mark_restart_ready() -> None:
+                    nonlocal restart_ready
+                    restart_ready = True
 
                 restart_task = asyncio.create_task(
-                    _exit_when_restart_requested(), name="tui-graceful-restart"
+                    _exit_when_restart_requested(
+                        session, restart_event, on_ready=_mark_restart_ready
+                    ),
+                    name="tui-graceful-restart",
                 )
 
     try:
@@ -182,7 +259,7 @@ async def main(
         if runtime_registration is not None:
             runtime_registration.close()
 
-    if restart_requested and runtime_registration is not None:
+    if restart_requested and restart_ready and runtime_registration is not None:
         from .runtime_registration import reexec_tui
 
         reexec_tui(runtime_registration.restart_argv)

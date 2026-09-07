@@ -90,6 +90,22 @@ def _normalize_job_description(description: str) -> str:
     return f"{compact[: _MAX_JOB_DESCRIPTION_LENGTH - 1].rstrip()}…"
 
 
+_MAX_JOB_LABEL_LENGTH = 80
+
+
+def _normalize_job_label(label: str) -> str:
+    """Collapse whitespace and bound model-facing job labels.
+
+    Labels are rendered raw into the queue status block; unnormalized
+    multi-line labels could forge status-block structure or inject
+    instructions into the model context.
+    """
+    compact = " ".join(label.split())
+    if len(compact) <= _MAX_JOB_LABEL_LENGTH:
+        return compact
+    return f"{compact[: _MAX_JOB_LABEL_LENGTH - 1].rstrip()}…"
+
+
 class JobHandle:
     """Handle returned by ``QueueManager.spawn()``.
 
@@ -101,7 +117,9 @@ class JobHandle:
 
     ``label`` is the compact job identity shown in status; ``description`` is
     optional, bounded model-facing context explaining the job's purpose and
-    expected lifetime.
+    expected lifetime. ``daemon`` marks a long-lived infrastructure producer;
+    quiescence checks ignore daemon handles (see
+    ``QueueManager.running_work_handles()``).
 
     If ``buffer`` was passed to ``spawn()``, yielded values accumulate
     in ``self.values``:
@@ -117,10 +135,12 @@ class JobHandle:
         buffer: bool | int = False,
         label: str = "",
         description: str = "",
+        daemon: bool = False,
     ) -> None:
         self.name = name
-        self.label = label or name
+        self.label = _normalize_job_label(label) if (label and label.strip()) else name
         self.description = _normalize_job_description(description)
+        self.daemon = daemon
         self.job_id = uuid.uuid4().hex
         self.state: JobState = "running"
         self._task = task
@@ -173,6 +193,26 @@ class JobHandle:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def has_running_work(queue_manager: Any) -> bool:
+    """Return whether *queue_manager* has finite, in-flight spawned work.
+
+    Uses ``running_work_handles()`` (daemon-aware) when the manager
+    provides it; hosts without that method fall back to the previous
+    all-running-handles predicate, and hosts exposing no handle API at
+    all read as idle (matching the pre-daemon behavior of callers that
+    only inspected channels). This is the single compatibility point for
+    idle/quiescence checks — do not hand-roll the ``getattr`` fallback at
+    call sites.
+    """
+    running_work = getattr(queue_manager, "running_work_handles", None)
+    if running_work is not None:
+        return bool(running_work())
+    running = getattr(queue_manager, "running_handles", None)
+    if running is not None:
+        return bool(running())
+    return False
 
 
 ChannelMode = Literal["queue", "event"]
@@ -758,6 +798,18 @@ class QueueManager:
         """
         return [h for h in self._handles if h.state == "running"]
 
+    def running_work_handles(self) -> list[JobHandle]:
+        """Return running handles that represent finite, in-flight work.
+
+        ``spawn(..., daemon=True)`` marks long-lived infrastructure
+        producers (inbox pumps, reconnect loops, tickers) that are
+        expected to run until the host tears them down; they are
+        excluded here so idle and quiescence checks do not treat a live
+        infrastructure connection as pending work. Output a daemon has
+        already queued still counts as pending through its channel.
+        """
+        return [h for h in self._handles if h.state == "running" and not h.daemon]
+
     def remove_channel(self, name: str) -> None:
         """Remove a channel by name.
 
@@ -787,7 +839,10 @@ class QueueManager:
         they don't accumulate.
 
         Also shows active spawned jobs so the LLM knows background
-        producers are still running even when queues are empty.
+        producers are still running even when queues are empty. Daemon
+        (long-lived infrastructure) jobs are marked ``running, daemon``
+        with a one-line legend explaining the difference from finite
+        background work.
         """
         parts = [
             ch.status(max_items=max_items, max_chars=max_chars)
@@ -811,7 +866,10 @@ class QueueManager:
         if active_spawns:
             spawn_lines = [f"⚡ {len(active_spawns)} active background job(s):"]
             for h in visible_spawns:
-                spawn_lines.append(f"  • [{h.job_id}] {h.label} → {h.name} (running)")
+                state = "running, daemon" if h.daemon else "running"
+                label = _normalize_job_label(h.label) if h.label else h.name
+                name = _normalize_job_label(h.name) if h.name else h.name
+                spawn_lines.append(f"  • [{h.job_id}] {label} → {name} ({state})")
                 if h.description:
                     spawn_lines.append(f"    {h.description}")
             omitted = len(active_spawns) - len(visible_spawns)
@@ -821,6 +879,13 @@ class QueueManager:
                     "self.queue_manager.running_handles() for their IDs."
                 )
             spawn_lines.append("  ↳ Output arrives through channels; do not poll job handles.")
+            if any(h.daemon for h in active_spawns):
+                spawn_lines.append(
+                    "  ↳ daemon = long-lived infrastructure producer (runs until "
+                    "teardown; its handle does not block idle/restart, but queued "
+                    "output still counts as pending work). Other jobs are finite "
+                    "work in flight."
+                )
             spawn_status = "\n".join(spawn_lines)
             body = f"{body}\n{spawn_status}" if body else spawn_status
 
@@ -995,6 +1060,7 @@ class QueueManager:
         buffer: bool | int = False,
         label: str = "",
         description: str = "",
+        daemon: bool = False,
     ) -> JobHandle:
         """Run *job* in the background, routing output to *channel*.
 
@@ -1028,6 +1094,13 @@ class QueueManager:
         - ``False`` (default): no buffering.
         - ``True``: unbounded list of all yielded values.
         - ``int > 0``: ring buffer keeping the last N values.
+
+        ``daemon`` marks a long-lived infrastructure producer (inbox pump,
+        reconnect loop, ticker) that is expected to run until the host tears
+        it down. Idle/quiescence checks ignore daemon handles — only output
+        they have already queued counts as pending work — while finite jobs
+        keep blocking. Cancel daemon handles via ``cancel_job()`` or
+        ``shutdown()`` when their input must stop.
         """
         if channel not in self._channels:
             raise ValueError(
@@ -1139,6 +1212,7 @@ class QueueManager:
             buffer=buffer,
             label=label,
             description=description,
+            daemon=daemon,
         )
         _handles_by_task[task] = handle
         self._handles.append(handle)

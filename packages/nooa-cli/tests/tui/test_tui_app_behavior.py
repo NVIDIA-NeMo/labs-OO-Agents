@@ -3215,3 +3215,33 @@ async def test_shutdown_agent_queue_manager_runs_spawn_cleanup_on_agent_loop() -
         await asyncio.wait_for(cleanup_started.wait(), timeout=1.0)
         await asyncio.wait_for(cleanup_done.wait(), timeout=1.0)
         assert agent.queue_manager._handles == []
+
+
+async def test_restart_drain_rejects_new_prompt_slash_and_bang_input():
+    async with TUIHarness() as h:
+        assert h.app is not None
+        h.app.begin_input_drain("Restart pending; waiting for current work to finish.")
+
+        for text in ("new prompt", "/help", "!echo nope"):
+            await h.submit_async(text)
+            await h.wait_output_contains("Restart pending")
+
+        assert h.agent.messages_received == []
+        assert h.app.commands_dispatched() == []
+        assert h.app.last_bang_command() is None
+
+
+async def test_end_input_drain_accepts_new_prompt_input_again():
+    """end_input_drain() releases a drain so the user is not stuck."""
+    async with TUIHarness() as h:
+        assert h.app is not None
+        h.app.begin_input_drain("Restart pending; waiting for current work to finish.")
+        await h.submit_async("blocked prompt")
+        await h.wait_output_contains("Restart pending")
+        # The typed draft is preserved rather than silently discarded.
+        assert h.app.input_buffer.text == "blocked prompt"
+
+        h.app.end_input_drain()
+        h.app.input_buffer.reset()
+        await h.submit_async("accepted prompt")
+        await h.wait_for(lambda: h.agent.messages_received == ["accepted prompt"])

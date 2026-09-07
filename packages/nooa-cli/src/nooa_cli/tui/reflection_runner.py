@@ -125,7 +125,10 @@ class ReflectionRunner:
         qm = getattr(self._agent, "queue_manager", None)
         if qm is None:
             return True
-        if any(h.state == "running" for h in qm._handles):
+        from nooa.runtime.channels import has_running_work
+
+        # Daemon producers are infrastructure, not turn-blocking work.
+        if has_running_work(qm):
             return False
         for name, ch in qm._channels.items():
             if name == "user_messages":

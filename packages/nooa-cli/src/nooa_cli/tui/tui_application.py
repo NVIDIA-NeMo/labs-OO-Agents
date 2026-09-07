@@ -1205,6 +1205,9 @@ class TUIApplication:
         self._config = config
         self._submission_guard = submission_guard
         self._defer_submission = defer_submission
+        self._submission_block_reason: str | None = None
+        self._persistent_notice: str | None = None
+        self._callback_tasks: set[asyncio.Task[Any]] = set()
         self._ctrl_c_exit_armed = False
         self._ctrl_c_exit_timer: asyncio.TimerHandle | None = None
         self._exit_hint_text = ""
@@ -3032,6 +3035,25 @@ class TUIApplication:
 
     # ── submission pipeline -------------------------------------------
 
+    def begin_input_drain(self, reason: str) -> None:
+        """Reject new user input while allowing already-admitted work to finish."""
+        self._submission_block_reason = reason
+        if self._app.is_running:
+            self._app.invalidate()
+
+    def end_input_drain(self) -> None:
+        """Allow new user input again after a drain waiter stopped or failed."""
+        if self._submission_block_reason is None:
+            return
+        self._submission_block_reason = None
+        if self._app.is_running:
+            self._app.invalidate()
+
+    @property
+    def input_drain_idle(self) -> bool:
+        """Return whether pre-drain callbacks and deferred prompts have settled."""
+        return not self._callback_tasks and not self._deferred_input_handoffs
+
     def _accept_handler(self, buffer: Buffer) -> bool:
         """prompt_toolkit accept_handler — invoked by ``validate_and_handle()``.
 
@@ -3044,6 +3066,12 @@ class TUIApplication:
         the text, don't keep it as the working-lines tip).
         """
         text = buffer.text
+        if self._submission_block_reason is not None:
+            self.emit_block(f"\x1b[33m{self._submission_block_reason}\x1b[0m\n")
+            # Keep the typed draft: validate_and_handle() clears the buffer
+            # when the accept handler returns False, which would silently
+            # discard the user's in-progress text.
+            return True
         state = self._agent_controller.state
         mention_base = None if state is None else state.working_directory
         resolved = self._resolve_composer_submission(text, mention_base=mention_base)
@@ -3109,8 +3137,10 @@ class TUIApplication:
         if not asyncio.iscoroutine(result):
             return None
         task = asyncio.ensure_future(result)
+        self._callback_tasks.add(task)
 
         def _report(t: asyncio.Task) -> None:
+            self._callback_tasks.discard(t)
             if t.cancelled():
                 return
             exc = t.exception()
@@ -5086,6 +5116,8 @@ class TUIApplication:
                 logger.debug("auxiliary status callback failed", exc_info=True)
         if auxiliary_status:
             rows.append([("class:status", auxiliary_status)])
+        if self._persistent_notice:
+            rows.append([("class:status", self._persistent_notice)])
         if include_transient and self._transient_status_text:
             rows.append([(self._transient_status_style, self._transient_status_text)])
         if self._command_status_text:
@@ -5099,6 +5131,17 @@ class TUIApplication:
             else:
                 rows.append([("class:status", label)])
         return rows
+
+    def set_status_notice(self, text: str | None) -> None:
+        """Show (or clear) a persistent status-row notice.
+
+        Used for durable, non-urgent information such as an available code
+        update; unlike transient status text it survives repaints until
+        explicitly cleared.
+        """
+        self._persistent_notice = text if text else None
+        if self._app.is_running:
+            self._app.invalidate()
 
     def status_text(self) -> str:
         """Plain-text projection of the dynamic status rows."""
