@@ -24,7 +24,6 @@ from typing import TYPE_CHECKING, Any, ClassVar
 logger = logging.getLogger(__name__)
 
 from .output import (  # noqa: E402
-    AgentMessage,
     ClearScreen,
     CodeExecution,
     DiffOutput,
@@ -2727,27 +2726,17 @@ class CommandRegistry:
             if not callable(prompt_sensitive):
                 raise RuntimeError("This frontend cannot collect MCP OAuth codes securely")
 
-            # Put a full, clickable Markdown link in terminal scrollback before
-            # opening the bounded modal. This survives tmux redraws and remains
-            # selectable when OSC 52 clipboard forwarding is unavailable.
-            markdown_link = _mcp_oauth_markdown_link(auth_url)
-            if markdown_link is not None:
-                await self.frontend.render(
-                    AgentMessage(
-                        "Open the MCP OAuth authorization URL in a browser:\n\n"
-                        f"{markdown_link}\n\n"
-                        "If the link is not clickable (for example through tmux), "
-                        "copy and paste the displayed URL.",
-                        show_rule=False,
-                        soft_wrap=True,
-                    )
-                )
-
+            # The overlay prompt is the single URL surface: it renders the
+            # authorization link itself, keeps it clickable while input is
+            # active, and offers Ctrl+Y copy. Printing the same block to
+            # scrollback as well erased and rewrote the live region a second
+            # time while ownership was changing hands — the pattern users
+            # observed as the cursor breaking.
             return await prompt_sensitive(
                 "MCP OAuth authorization",
-                "Open the authorization URL shown in scrollback and authorize the server. "
-                "If the browser then says it cannot reach localhost (common when NOOA runs "
-                "over SSH or in tmux), copy the complete localhost callback URL from the "
+                "Open the authorization URL shown above and authorize the server. If the "
+                "browser then says it cannot reach localhost (common when NOOA runs over "
+                "SSH or in tmux), copy the complete localhost callback URL from the "
                 "browser address bar and paste it here. You may also paste a raw code.",
                 link_url=auth_url,
             )
