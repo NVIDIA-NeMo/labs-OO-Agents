@@ -211,14 +211,15 @@ async def main(
                     """Whether a graceful-restart drain is already latched."""
                     return bool(getattr(session, "_restart_pending", False))
 
-                # The in-process /restart command reuses the exact
-                # signal-path latch; it is only advertised when the
-                # re-exec contract (runtime registration) is live.
-                session.set_restart_request_hook(_request_restart)
-                registry.request_restart = _request_restart
-                registry.restart_in_flight = _restart_in_flight
-                # Baseline revision for the observe-only update notice.
-                session._startup_source_revision = candidate.source_revision
+                # The dev-time update UX (in-process /restart plus the
+                # observe-only update watch) is fully opt-in via
+                # tui.update_watch — default off, dev checkouts only.
+                if getattr(config.tui, "update_watch", False):
+                    session.set_restart_request_hook(_request_restart)
+                    registry.request_restart = _request_restart
+                    registry.restart_in_flight = _restart_in_flight
+                    # Baseline revision for the observe-only update notice.
+                    session._startup_source_revision = candidate.source_revision
 
                 def _update_runtime_session(session_id: str) -> None:
                     """Keep restart metadata aligned with in-process session changes."""

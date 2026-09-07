@@ -187,3 +187,29 @@ async def test_restart_command_reports_unavailable_without_registration() -> Non
 
 def test_restart_command_appears_in_help() -> None:
     assert "/restart" in CommandRegistry.get_help()
+
+
+# ---------------------------------------------------------------------------
+# Opt-in configuration (default off)
+# ---------------------------------------------------------------------------
+
+
+def test_update_watch_defaults_off() -> None:
+    """The dev-time update watcher is completely opt-in."""
+    from nooa_cli.tui.config import TUIConfig
+
+    cfg = TUIConfig()
+    assert cfg.update_watch is False
+    assert cfg.update_watch_interval_s == 30.0
+
+
+def test_update_watch_cli_flag_maps_to_tui_setting(tmp_path) -> None:
+    """--update-watch maps to tui.update_watch; absent means not provided."""
+    from nooa_cli.tui.config import Config
+
+    cfg = Config.load(update_watch=True)
+    assert cfg.tui.update_watch is True
+
+    # Absent flag must not overwrite layered settings (False = not provided).
+    cfg2 = Config.load()
+    assert cfg2.tui.update_watch is False

@@ -875,8 +875,12 @@ class Session:
         app_ref.append(self._app)
         if getattr(self, "_restart_pending", False):
             self._app.begin_input_drain("Restart pending; waiting for current work to finish.")
-        # Observe-only update watch: notice only, never an automatic restart.
-        self._fire_and_forget(self._watch_source_updates())
+        # Observe-only update watch, fully opt-in via tui.update_watch
+        # (default off): notice only, never an automatic restart.
+        if getattr(self.config.tui, "update_watch", False):
+            self._fire_and_forget(
+                self._watch_source_updates(interval_s=self.config.tui.update_watch_interval_s)
+            )
 
         from .local_turn_policy import LocalTurnPolicy
 

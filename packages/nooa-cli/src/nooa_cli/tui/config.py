@@ -169,6 +169,14 @@ class TUIConfig(BaseModel):
         default_factory=lambda: ["time", "model", "context", "session"]
     )
 
+    # Dev-time update watcher: periodically compare the checked-out revision
+    # of the running code to the revision this process started from and show
+    # an "update available — call /restart" status notice when they differ.
+    # Completely opt-in (observe-only, never restarts); intended for
+    # development checkouts that move underneath long-lived TUIs.
+    update_watch: bool = False
+    update_watch_interval_s: float = 30.0
+
 
 def resolve_display_mode(config: TUIConfig) -> DisplayMode:
     """Resolve one restart-only display mode while preserving old settings.
@@ -261,6 +269,8 @@ class Config(BaseModel):
         "reflection_generative": "tui.reflection_generative",
         "reflection_debounce_s": "tui.reflection_debounce_s",
         "reflection_grace_s": "tui.reflection_grace_s",
+        "update_watch": "tui.update_watch",
+        "update_watch_interval_s": "tui.update_watch_interval_s",
     }
 
     # Boolean CLI flags: False means absent and must not overwrite settings.
@@ -271,6 +281,7 @@ class Config(BaseModel):
         "vi",
         "python",
         "full_screen",
+        "update_watch",
     }
 
     @classmethod
