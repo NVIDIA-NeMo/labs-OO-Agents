@@ -354,14 +354,9 @@ class Session:
         self._command_runner = None
         self._on_session_change: Callable[[str], None] | None = None
         self._restart_pending = False
-        # In-process graceful-restart latch callable (wired by main(); also
-        # used by the /restart command). None in embedders that did not
-        # install runtime registration.
-        self._request_restart: Callable[[], None] | None = None
         # Update notice: set when the running code's source revision no
         # longer matches the checked-out tree (git HEAD moved under us).
         self._update_notice_shown = False
-        self._update_watch_task: asyncio.Task | None = None
         # The revision this process started from (wired by main() from the
         # runtime registration; None disables the update watch).
         self._startup_source_revision: str | None = None
@@ -385,9 +380,16 @@ class Session:
         only natural end is teardown; leaving them running during a restart
         drain would enqueue new work forever. Finite jobs already admitted
         and output already queued are untouched and still settle naturally.
+
+        The drain loop may re-issue this on every poll while a daemon keeps
+        respawning; a pass is skipped while the previous one is still
+        in flight so a slow owner loop cannot pile up cancel tasks.
         """
         agent_runner = getattr(self, "_local_agent_runner", None)
         if agent_runner is None:
+            return
+        previous = getattr(self, "_daemon_cancel_in_flight", None)
+        if previous is not None and not previous.done():
             return
 
         async def _cancel_daemons() -> None:
@@ -418,6 +420,7 @@ class Session:
         task = asyncio.create_task(
             agent_runner.run_async(_cancel_daemons), name="restart-drain-stop-daemons"
         )
+        self._daemon_cancel_in_flight = task
         tasks = getattr(self, "_background_tasks", None)
         if tasks is not None:
             tasks.add(task)
@@ -434,15 +437,6 @@ class Session:
         if exc is not None:
             logger.error("restart drain: daemon cancellation failed", exc_info=exc)
 
-    def set_restart_request_hook(self, hook: Callable[[], None] | None) -> None:
-        """Wire the in-process restart latch used by ``/restart``.
-
-        *hook* performs the full graceful-restart latch (drain + waiter
-        wake-up + re-exec gate) exactly like the SIGUSR1 signal path; the
-        slash command must never implement its own restart mechanism.
-        """
-        self._request_restart = hook
-
     def _current_source_revision(self) -> str | None:
         """Return the checked-out revision of the running code's root."""
         from .runtime_registration import _source_revision, _source_root
@@ -453,15 +447,36 @@ class Session:
         """Show the persistent update notice once; never auto-restart."""
         if self._update_notice_shown or self._app is None:
             return
-        self._update_notice_shown = True
         set_notice = getattr(self._app, "set_status_notice", None)
         if callable(set_notice):
-            set_notice("Update available — call /restart to reload")
+            try:
+                set_notice("Update available — call /restart to reload")
+            except Exception:
+                # Leave the latch unset so the next check retries; a dead
+                # status surface must not silently swallow the notice.
+                logger.warning("update notice could not be displayed", exc_info=True)
+                return
+        # Latch only after the notice is actually displayed.
+        self._update_notice_shown = True
         logger.info(
             "TUI source revision changed under the running process "
             "(started at %s, checkout now %s); showing /restart notice",
             expected[:12],
             current[:12],
+        )
+
+    def _start_update_watch_if_enabled(self) -> None:
+        """Start the observe-only update watch when the opt-in flag is on.
+
+        Completely dormant by default: with ``tui.update_watch`` off no
+        watcher task is created at all — nothing polls git and no notice
+        can appear. When on, it is tracked as a background task so
+        teardown cancels it.
+        """
+        if not getattr(self.config.tui, "update_watch", False):
+            return
+        self._fire_and_forget(
+            self._watch_source_updates(interval_s=self.config.tui.update_watch_interval_s)
         )
 
     async def _watch_source_updates(self, *, interval_s: float = 30.0) -> None:
@@ -475,11 +490,16 @@ class Session:
         if expected is None:
             return  # not a source checkout / git unavailable — nothing to compare
         while True:
-            await asyncio.sleep(interval_s)
-            current = await asyncio.to_thread(self._current_source_revision)
-            if current is not None and current != expected:
-                self._notice_update_available(current, expected)
-                return  # the notice stays until restart; no need to re-check
+            try:
+                await asyncio.sleep(interval_s)
+                current = await asyncio.to_thread(self._current_source_revision)
+                if current is not None and current != expected:
+                    self._notice_update_available(current, expected)
+                    return  # the notice stays until restart; no need to re-check
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("update watch check failed; retrying", exc_info=True)
 
     def request_restart_when_idle(self) -> None:
         """Latch a restart drain and stop accepting new user-initiated work."""
@@ -877,10 +897,7 @@ class Session:
             self._app.begin_input_drain("Restart pending; waiting for current work to finish.")
         # Observe-only update watch, fully opt-in via tui.update_watch
         # (default off): notice only, never an automatic restart.
-        if getattr(self.config.tui, "update_watch", False):
-            self._fire_and_forget(
-                self._watch_source_updates(interval_s=self.config.tui.update_watch_interval_s)
-            )
+        self._start_update_watch_if_enabled()
 
         from .local_turn_policy import LocalTurnPolicy
 
