@@ -9,7 +9,6 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-
 from nooa_cli.tui.main import _exit_when_restart_requested
 
 
