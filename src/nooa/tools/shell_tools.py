@@ -758,7 +758,16 @@ class ShellTools(Skill):
 
             before = all_lines[: target.start - 1]
             after = all_lines[target.end :]
-            if new_text and not new_text.endswith("\n") and after:
+            # Keep the file newline-terminated when the replaced region
+            # reaches end-of-file and the original content ended with a
+            # newline — otherwise the edit silently strips the final byte.
+            reaches_end = target.end >= len(all_lines)
+            ended_with_newline = content.endswith("\n")
+            if (
+                new_text
+                and not new_text.endswith("\n")
+                and (after or (reaches_end and ended_with_newline))
+            ):
                 new_text += "\n"
             new_content = "".join(before) + new_text + "".join(after)
             resolved.write_text(new_content)
