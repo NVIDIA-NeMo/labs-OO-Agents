@@ -18,7 +18,7 @@ import litellm
 from pydantic import BaseModel, RootModel
 
 from .http_config import HttpConfig
-from .retry import EmptyContentError, sync_retry, with_retry
+from .retry import EmptyContentError, InsufficientSystemResourceError, sync_retry, with_retry
 from .retry_config import RetryConfig
 
 logger = logging.getLogger(__name__)
@@ -677,7 +677,15 @@ class LLMResponse:
     raw_response: Any
     content: str | BaseModel
     tool_calls: list[ToolCall]
-    finish_reason: Literal["stop", "tool_calls", "length", "error"]
+    finish_reason: Literal[
+        "stop",
+        "tool_calls",
+        "length",
+        "content_filter",
+        "insufficient_system_resource",
+        "error",
+        "unknown",
+    ]
     assistant_message: dict[str, Any]
     reasoning: str | None = None  # o1-style or DeepSeek/QwQ reasoning
     usage: dict[str, int] | None = None  # Token usage stats
@@ -1155,6 +1163,13 @@ class UnifiedLLM(ABC):
 
     def __init__(self, model: str, **config):
         self.model = model
+        output_margin = config.pop("output_token_margin", None)
+        reasoning_floor = config.pop("reasoning_output_floor", None)
+        self._usage_log_path = config.pop("usage_log_path", None)
+        self._dynamic_output_budget = output_margin is not None or reasoning_floor is not None
+        self._output_token_margin = int(output_margin or 0)
+        self._reasoning_output_floor = int(reasoning_floor or 0)
+        self._last_prompt_tokens_actual: int | None = None
         self.config = config
         self._registry_config = None
         # Cache control injection — shared by CompletionClient and ResponsesClient
@@ -1164,6 +1179,46 @@ class UnifiedLLM(ABC):
         # Per-client HTTP transport (httpx clients + litellm wrappers). Set by
         # concrete subclasses; guarded here so base helpers stay safe.
         self._http: _ClientHttp | None = None
+
+    def _apply_dynamic_output_budget(
+        self, api_params: dict[str, Any], *, parameter: str = "max_tokens"
+    ) -> None:
+        """Reserve output room using the previous provider-reported prompt size."""
+        if not self._dynamic_output_budget or self._last_prompt_tokens_actual is None:
+            return
+        configured = api_params.get(parameter)
+        context_window = self.context_window
+        if not isinstance(configured, int) or not isinstance(context_window, int):
+            return
+        available = context_window - self._last_prompt_tokens_actual - self._output_token_margin
+        api_params[parameter] = max(1, min(configured, available))
+
+    def _record_prompt_usage(
+        self, usage: dict[str, int] | None, *, requested_max_tokens: int | None = None
+    ) -> None:
+        if not usage:
+            return
+        prompt_tokens = usage.get("prompt_tokens")
+        if isinstance(prompt_tokens, int) and prompt_tokens >= 0:
+            self._last_prompt_tokens_actual = prompt_tokens
+        if self._usage_log_path:
+            reasoning_effort = self.config.get("reasoning_effort")
+            if reasoning_effort is None:
+                reasoning = self.config.get("reasoning")
+                if isinstance(reasoning, dict):
+                    reasoning_effort = reasoning.get("effort")
+            record: dict[str, Any] = {
+                "model": self.model,
+                "endpoint": self.config.get("api_base"),
+                "reasoning_effort": reasoning_effort,
+                "requested_max_tokens": requested_max_tokens,
+                **usage,
+            }
+            try:
+                with open(self._usage_log_path, "a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+            except OSError:
+                logger.warning("failed to append LLM usage log", exc_info=True)
 
     def close(self) -> None:
         """Release this client's sync HTTP resources (its own httpx clients)."""
@@ -1483,7 +1538,15 @@ def _consume_litellm_acompletion_result(task: asyncio.Task[Any]) -> None:
 
 def _map_completion_finish_reason(
     raw_response: Any,
-) -> Literal["stop", "tool_calls", "length", "error"]:
+) -> Literal[
+    "stop",
+    "tool_calls",
+    "length",
+    "content_filter",
+    "insufficient_system_resource",
+    "error",
+    "unknown",
+]:
     """Map a Chat-Completions provider finish_reason onto LLMResponse.finish_reason.
 
     litellm/OpenAI report the provider's stop condition on
@@ -1495,7 +1558,12 @@ def _map_completion_finish_reason(
     """
     raw = None
     try:
-        raw = raw_response.choices[0].finish_reason
+        choice = raw_response.choices[0]
+        provider_fields = getattr(choice, "provider_specific_fields", None)
+        if isinstance(provider_fields, dict):
+            raw = provider_fields.get("native_finish_reason")
+        if raw is None:
+            raw = choice.finish_reason
     except (AttributeError, IndexError, TypeError):
         raw = None
 
@@ -1503,14 +1571,28 @@ def _map_completion_finish_reason(
         return "length"
     if raw == "tool_calls":
         return "tool_calls"
-    if raw in ("content_filter", "error"):
+    if raw == "content_filter":
+        return "content_filter"
+    if raw == "insufficient_system_resource":
+        return "insufficient_system_resource"
+    if raw == "error":
         return "error"
-    return "stop"
+    if raw == "stop":
+        return "stop"
+    return "unknown"
 
 
 def _map_responses_finish_reason(
     raw_response: Any,
-) -> Literal["stop", "tool_calls", "length", "error"]:
+) -> Literal[
+    "stop",
+    "tool_calls",
+    "length",
+    "content_filter",
+    "insufficient_system_resource",
+    "error",
+    "unknown",
+]:
     """Map a Responses-API response onto LLMResponse.finish_reason.
 
     The Responses API reports truncation via ``status == "incomplete"`` with
@@ -1528,10 +1610,16 @@ def _map_responses_finish_reason(
             reason = details.get("reason")
         if reason == "max_output_tokens":
             return "length"
+        if reason == "content_filter":
+            return "content_filter"
+        if reason == "insufficient_system_resource":
+            return "insufficient_system_resource"
         return "error"
     if status == "failed":
         return "error"
-    return "stop"
+    if status == "completed":
+        return "stop"
+    return "unknown"
 
 
 def _extract_reasoning_and_usage(raw_response: Any) -> tuple[str | None, dict[str, int] | None]:
@@ -1603,6 +1691,12 @@ def _completion_assistant_message(
             else copy.deepcopy(item)
             for item in reasoning_items
         ]
+
+    reasoning_content = getattr(message, "reasoning_content", None) or getattr(
+        message, "reasoning", None
+    )
+    if reasoning_content:
+        assistant_message["reasoning_content"] = reasoning_content
 
     return assistant_message
 
@@ -1820,6 +1914,7 @@ class CompletionClient(UnifiedLLM):
             **self.config,
             **kwargs,
         }
+        self._apply_dynamic_output_budget(api_params)
 
         if tools:
             api_params["tools"] = [self._convert_tool_to_schema(tool) for tool in tools]
@@ -1853,6 +1948,10 @@ class CompletionClient(UnifiedLLM):
 
         def _make_call():
             raw_response = _collect_sync(litellm.completion(**api_params))
+            if _map_completion_finish_reason(raw_response) == "insufficient_system_resource":
+                raise InsufficientSystemResourceError(
+                    "provider interrupted inference: insufficient_system_resource"
+                )
             reasoning, _ = _extract_reasoning_and_usage(raw_response)
             text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
 
@@ -1871,6 +1970,7 @@ class CompletionClient(UnifiedLLM):
             )
 
         reasoning, usage = _extract_reasoning_and_usage(raw_response)
+        self._record_prompt_usage(usage, requested_max_tokens=api_params.get("max_tokens"))
         if usage:
             _record_llm_metric("token_usage", usage)
             _update_token_calibration(
@@ -1988,6 +2088,7 @@ class CompletionClient(UnifiedLLM):
             **self.config,
             **kwargs,
         }
+        self._apply_dynamic_output_budget(api_params)
 
         if tools:
             api_params["tools"] = [self._convert_tool_to_schema(tool) for tool in tools]
@@ -2021,6 +2122,10 @@ class CompletionClient(UnifiedLLM):
 
         async def _make_call():
             raw_response = await _collect_async(await _litellm_acompletion(api_params))
+            if _map_completion_finish_reason(raw_response) == "insufficient_system_resource":
+                raise InsufficientSystemResourceError(
+                    "provider interrupted inference: insufficient_system_resource"
+                )
             reasoning, _ = _extract_reasoning_and_usage(raw_response)
             text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
 
@@ -2039,6 +2144,7 @@ class CompletionClient(UnifiedLLM):
             )
 
         reasoning, usage = _extract_reasoning_and_usage(raw_response)
+        self._record_prompt_usage(usage, requested_max_tokens=api_params.get("max_tokens"))
         if usage:
             _record_llm_metric("token_usage", usage)
             _update_token_calibration(

@@ -5,11 +5,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -17,6 +19,7 @@ from uuid import uuid4
 import docker
 from cybergym.task.gen_task import generate_task
 from cybergym.task.types import TaskConfig, TaskDifficulty
+from docker.errors import ImageNotFound
 
 ENV_PREFIXES = (
     "NOOA_CYBERGYM_",
@@ -34,6 +37,172 @@ DEFAULT_PROMPT = (
 )
 DEFAULT_MODEL = "glm-5.2"
 DEFAULT_LLM_API_BASE = "https://inference-api.nvidia.com/v1"
+DEFAULT_SOFT_TIMEOUT_SEC = 13920
+DEFAULT_FINALIZATION_GRACE_SEC = 300.0
+DEFAULT_TRACING_SHUTDOWN_TIMEOUT_SEC = 30.0
+DEFAULT_OUTER_MARGIN_SEC = 60.0
+GIT_LFS_POINTER_HEADER = b"version https://git-lfs.github.com/spec/v1"
+
+
+def validate_timeout_budget(
+    *,
+    hard_timeout: float,
+    soft_timeout: float,
+    finalization_grace: float,
+    tracing_shutdown_timeout: float,
+    outer_margin: float = DEFAULT_OUTER_MARGIN_SEC,
+) -> None:
+    """Reject a run whose cooperative phases can consume the outer timeout."""
+    required = (
+        soft_timeout + finalization_grace + tracing_shutdown_timeout + outer_margin
+    )
+    if required > hard_timeout:
+        raise ValueError(
+            "timeout budget is unsafe: "
+            f"hard={hard_timeout:g}s, required={required:g}s "
+            f"(soft={soft_timeout:g}s + finalization={finalization_grace:g}s + "
+            f"tracing={tracing_shutdown_timeout:g}s + margin={outer_margin:g}s)"
+        )
+
+
+def require_resolved_task_files(task_dir: Path) -> None:
+    """Fail before inference if task generation copied Git LFS pointer stubs."""
+    unresolved = []
+    for path in task_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            with path.open("rb") as stream:
+                header = stream.read(len(GIT_LFS_POINTER_HEADER))
+            if header == GIT_LFS_POINTER_HEADER:
+                unresolved.append(str(path.relative_to(task_dir)))
+        except OSError as exc:
+            raise RuntimeError(f"cannot read generated task file {path}: {exc}") from exc
+    if unresolved:
+        raise RuntimeError(
+            "generated task contains unresolved Git LFS pointer files: "
+            + ", ".join(sorted(unresolved))
+        )
+
+
+def _existing_final(log_dir: Path) -> dict[str, object] | None:
+    final_dir = log_dir / "artifacts" / "final_submission"
+    poc_path = final_dir / "poc"
+    selection_path = final_dir / "selection.json"
+    if not poc_path.is_file() or not selection_path.is_file():
+        return None
+    try:
+        selection = json.loads(selection_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if selection.get("sha256") != hashlib.sha256(poc_path.read_bytes()).hexdigest():
+        return None
+    return selection
+
+
+def recover_timeout_final(log_dir: Path) -> dict[str, object] | None:
+    """Freeze a persisted verified crash when the outer watchdog killed the agent."""
+    existing = _existing_final(log_dir)
+    if existing is not None:
+        output_path = log_dir / "artifacts" / "output.txt"
+        output_path.touch(exist_ok=True)
+        return existing
+
+    artifacts_dir = log_dir / "artifacts"
+    log_path = artifacts_dir / "submissions.jsonl"
+    if not log_path.is_file():
+        return None
+
+    candidates: list[tuple[int, int, bytes, dict[str, object]]] = []
+    for line in log_path.read_text(errors="replace").splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("status") != "crashed" or record.get("kind") != "crash":
+            continue
+        try:
+            number = int(record["submission_number"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        candidate_path = artifacts_dir / "candidates" / f"submission_{number}.poc"
+        if not candidate_path.is_file():
+            continue
+        data = candidate_path.read_bytes()
+        candidates.append((len(data), number, data, record))
+
+    if not candidates:
+        return None
+
+    _, number, data, record = min(candidates, key=lambda item: (item[0], item[1]))
+    final_dir = artifacts_dir / "final_submission"
+    final_dir.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=".final_submission-", dir=final_dir.parent))
+    selection: dict[str, object] = {
+        "schema_version": 1,
+        "submission_number": number,
+        "poc_path": "/logs/artifacts/final_submission/poc",
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "byte_length": len(data),
+        "selection_reason": (
+            "Outer hard timeout recovery selected the smallest persisted verified "
+            "crash candidate."
+        ),
+        "source_agent": record.get("source_agent"),
+        "source_model": record.get("source_model"),
+        "hypothesis": record.get("hypothesis") or "Persisted verified crash candidate.",
+        "cluster_key": record.get("cluster_key") or "unknown-crash",
+    }
+    try:
+        (stage / "poc").write_bytes(data)
+        (stage / "selection.json").write_text(
+            json.dumps(selection, sort_keys=True, separators=(",", ":")) + "\n"
+        )
+        os.rename(stage, final_dir)
+        (final_dir / "poc").chmod(0o444)
+        (final_dir / "selection.json").chmod(0o444)
+        final_dir.chmod(0o555)
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)
+    (artifacts_dir / "output.txt").write_text(
+        "Agent reached the outer hard timeout; recovered persisted verified crash "
+        f"submission {number}.\n"
+    )
+    return selection
+
+
+def require_local_image(client, image: str, *, role: str) -> None:
+    """Fail before task generation when a required image is unavailable."""
+    try:
+        client.images.get(image)
+    except ImageNotFound as exc:
+        raise RuntimeError(f"required {role} image is not local: {image}") from exc
+
+
+def preflight_internal_route(
+    client,
+    *,
+    image: str,
+    network: str,
+    env: dict[str, str],
+    server: str,
+) -> None:
+    """Verify the runner image can reach the task server through the real network."""
+    url = server.rstrip("/") + "/docs"
+    code = (
+        "import urllib.request; "
+        f"r=urllib.request.urlopen({url!r}, timeout=20); "
+        "assert 200 <= r.status < 400, r.status"
+    )
+    client.containers.run(
+        image,
+        command=["python", "-c", code],
+        environment=env,
+        network=network,
+        extra_hosts={"host.docker.internal": "host-gateway"},
+        remove=True,
+    )
 
 
 def load_dotenv(path: Path) -> None:
@@ -236,6 +405,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     load_dotenv(args.dotenv)
+    docker_client = docker.from_env()
+    require_local_image(docker_client, args.image, role="runner")
 
     args.tmp_dir.mkdir(parents=True, exist_ok=True)
     args.log_dir.mkdir(parents=True, exist_ok=True)
@@ -266,9 +437,31 @@ def main(argv: list[str] | None = None) -> int:
     if args.reasoning_effort:
         env["NOOA_CYBERGYM_REASONING_EFFORT"] = args.reasoning_effort
 
+    effective_soft_timeout = float(
+        env.get("NOOA_CYBERGYM_SOFT_TIMEOUT_SEC", DEFAULT_SOFT_TIMEOUT_SEC)
+    )
+    finalization_grace = float(
+        env.get("NOOA_CYBERGYM_FINALIZATION_GRACE_SEC", DEFAULT_FINALIZATION_GRACE_SEC)
+    )
+    tracing_shutdown_timeout = float(
+        env.get(
+            "NOOA_CYBERGYM_TRACING_SHUTDOWN_TIMEOUT_SEC",
+            DEFAULT_TRACING_SHUTDOWN_TIMEOUT_SEC,
+        )
+    )
+    validate_timeout_budget(
+        hard_timeout=args.timeout,
+        soft_timeout=effective_soft_timeout,
+        finalization_grace=finalization_grace,
+        tracing_shutdown_timeout=tracing_shutdown_timeout,
+    )
+
     proxy = None
     if args.use_firewall or args.connect_firewall:
         from cybergym.firewall import FirewallProxyManager
+        from cybergym.firewall.proxy import PROXY_IMAGE
+
+        require_local_image(docker_client, PROXY_IMAGE, role="firewall proxy")
 
         extra_domains = [
             d for d in os.environ.get("CYBERGYM_FIREWALL_EXTRA_DOMAINS", "").split(",") if d
@@ -296,6 +489,13 @@ def main(argv: list[str] | None = None) -> int:
             if server_no_proxy not in no_proxy:
                 no_proxy.append(server_no_proxy)
             env["NO_PROXY"] = env["no_proxy"] = ",".join(no_proxy)
+        preflight_internal_route(
+            docker_client,
+            image=args.image,
+            network=network,
+            env=env,
+            server=server,
+        )
 
     task = generate_task(
         TaskConfig(
@@ -309,6 +509,7 @@ def main(argv: list[str] | None = None) -> int:
             with_flag=args.with_flag,
         )
     )
+    require_resolved_task_files(task_dir)
 
     args_record = {
         "agent": f"nooa_cybergym:{args.model}",
@@ -320,7 +521,10 @@ def main(argv: list[str] | None = None) -> int:
         "timeout": args.timeout,
         "max_iter": args.max_iter,
         "max_output_tokens": args.max_output_tokens,
-        "soft_timeout": args.soft_timeout,
+        "soft_timeout": effective_soft_timeout,
+        "finalization_grace": finalization_grace,
+        "tracing_shutdown_timeout": tracing_shutdown_timeout,
+        "outer_margin": DEFAULT_OUTER_MARGIN_SEC,
         "min_exploration": args.min_exploration,
         "max_concurrent_expanders": args.max_concurrent_expanders,
         "reasoning_effort": args.reasoning_effort,
@@ -333,11 +537,26 @@ def main(argv: list[str] | None = None) -> int:
         if not args.keep_tmp:
             shutil.rmtree(task_dir, ignore_errors=True)
 
+    if exit_code == 124:
+        recovered = recover_timeout_final(log_dir)
+        if recovered is not None:
+            print(
+                "agent reached the outer timeout; recovered persisted verified "
+                f"submission {recovered['submission_number']}",
+                file=sys.stderr,
+            )
+            exit_code = 0
+
     if exit_code != 0:
         print(f"nooa_cybergym container exited with {exit_code}; logs: {log_dir}", file=sys.stderr)
         return exit_code
+    final_dir = log_dir / "artifacts" / "final_submission"
+    if not (final_dir / "poc").is_file() or not (final_dir / "selection.json").is_file():
+        print(f"final PoC artifact not found under {final_dir}", file=sys.stderr)
+        return 4
     if not (log_dir / "artifacts" / "output.txt").exists():
-        print(f"warning: output.txt not found under {log_dir / 'artifacts'}", file=sys.stderr)
+        print(f"output.txt not found under {log_dir / 'artifacts'}", file=sys.stderr)
+        return 5
     print(f"agent_id={agent_id}")
     print(f"logs={log_dir}")
     return 0

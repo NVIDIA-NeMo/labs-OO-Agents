@@ -46,11 +46,15 @@ with hidden:
 
 ARTIFACTS_DIR = Path("/app/artifacts")
 LOG_PATH = Path("/logs/artifacts/log.txt")
-MAX_OUTPUT_TOKENS = int(os.environ.get("NOOA_CYBERGYM_MAX_OUTPUT_TOKENS", "32768"))
+MAX_OUTPUT_TOKENS = int(os.environ.get("NOOA_CYBERGYM_MAX_OUTPUT_TOKENS", "384000"))
+CONTROL_MAX_OUTPUT_TOKENS = int(
+    os.environ.get("NOOA_CYBERGYM_CONTROL_MAX_OUTPUT_TOKENS", "16384")
+)
 SOFT_TIMEOUT_SEC = int(os.environ.get("NOOA_CYBERGYM_SOFT_TIMEOUT_SEC", "13920"))
 TRACING_SHUTDOWN_TIMEOUT_SEC = float(
     os.environ.get("NOOA_CYBERGYM_TRACING_SHUTDOWN_TIMEOUT_SEC", "30")
 )
+FINALIZATION_GRACE_SEC = float(os.environ.get("NOOA_CYBERGYM_FINALIZATION_GRACE_SEC", "300"))
 
 logger = logging.getLogger("nooa_cybergym")
 
@@ -132,7 +136,11 @@ def _shutdown_tracing_with_timeout(timeout_sec: float = TRACING_SHUTDOWN_TIMEOUT
 
 @hidden
 async def amain(prompt: str, model: str, reasoning_effort: str | None) -> str:
-    llm = make_llm(model, max_tokens=MAX_OUTPUT_TOKENS, reasoning_effort=reasoning_effort)
+    llm = make_llm(
+        model,
+        max_tokens=CONTROL_MAX_OUTPUT_TOKENS,
+        reasoning_effort=reasoning_effort,
+    )
     if llm.context_window is None:
         logger.warning(
             "no context_window for model=%r; summarizer will use the 100K fallback budget.",
@@ -145,19 +153,26 @@ async def amain(prompt: str, model: str, reasoning_effort: str | None) -> str:
     solve_task = asyncio.create_task(agent.solve(prompt))
     done, _ = await asyncio.wait({solve_task}, timeout=SOFT_TIMEOUT_SEC)
     if done:
-        return solve_task.result()
+        try:
+            return solve_task.result()
+        except BaseException:
+            await agent.shutdown()
+            raise
 
     # Soft timeout reached
     logger.warning("soft timeout reached after %ds", SOFT_TIMEOUT_SEC)
     summary = agent.timeout_summary()
     logger.info("%s", summary)
-    solve_task.cancel()
-    # Write artifacts before tracing shutdown; shutdown may block on exporter threads.
-    _write_output(summary)
-    logger.info("solve() returned: %r", summary)
-    _shutdown_tracing_with_timeout()
-    # Force-exit before asyncio.run() tries to await pending tasks.
-    os._exit(0)
+    agent.request_stop()
+    try:
+        return await asyncio.wait_for(asyncio.shield(solve_task), timeout=FINALIZATION_GRACE_SEC)
+    except TimeoutError as exc:
+        solve_task.cancel()
+        await asyncio.gather(solve_task, return_exceptions=True)
+        await agent.shutdown()
+        raise RuntimeError(
+            "Agent did not finalize and close within the post-timeout grace period"
+        ) from exc
 
 
 def main() -> None:

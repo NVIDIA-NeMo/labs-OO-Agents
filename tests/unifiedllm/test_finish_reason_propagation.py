@@ -19,7 +19,7 @@ from nooa import Agent, strategy
 from nooa.config import CodeActConfig
 from nooa.errors import GenerationError
 from nooa.strategies.codeact import CodeActStrategy
-from nooa.unifiedllm import CompletionClient, ResponsesClient
+from nooa.unifiedllm import CompletionClient, ResponsesClient, RetryConfig
 from nooa.unifiedllm.unifiedllm import (
     _map_completion_finish_reason,
     _map_responses_finish_reason,
@@ -60,19 +60,33 @@ class TestMapCompletionFinishReason:
             ("stop", "stop"),
             ("length", "length"),
             ("tool_calls", "tool_calls"),
-            ("content_filter", "error"),
+            ("content_filter", "content_filter"),
+            ("insufficient_system_resource", "insufficient_system_resource"),
             ("error", "error"),
-            (None, "stop"),
-            ("something_new", "stop"),
+            (None, "unknown"),
+            ("something_new", "unknown"),
         ],
     )
     def test_mapping(self, raw, expected):
         resp = SimpleNamespace(choices=[SimpleNamespace(finish_reason=raw)])
         assert _map_completion_finish_reason(resp) == expected
 
-    def test_malformed_response_defaults_to_stop(self):
-        assert _map_completion_finish_reason(SimpleNamespace()) == "stop"
-        assert _map_completion_finish_reason(None) == "stop"
+    def test_malformed_response_fails_closed(self):
+        assert _map_completion_finish_reason(SimpleNamespace()) == "unknown"
+        assert _map_completion_finish_reason(None) == "unknown"
+
+    def test_native_finish_reason_wins_over_litellm_normalization(self):
+        choice = litellm.Choices(
+            message=litellm.Message(content="partial", role="assistant"),
+            index=0,
+            finish_reason="insufficient_system_resource",
+        )
+        assert choice.finish_reason == "stop"
+        assert choice.provider_specific_fields == {
+            "native_finish_reason": "insufficient_system_resource"
+        }
+        response = litellm.ModelResponse(choices=[choice], model="test-model")
+        assert _map_completion_finish_reason(response) == "insufficient_system_resource"
 
 
 class TestMapResponsesFinishReason:
@@ -95,19 +109,19 @@ class TestMapResponsesFinishReason:
         )
         assert _map_responses_finish_reason(resp) == "length"
 
-    def test_incomplete_other_reason_maps_to_error(self):
+    def test_incomplete_content_filter_is_explicit(self):
         resp = SimpleNamespace(
             status="incomplete",
             incomplete_details=SimpleNamespace(reason="content_filter"),
         )
-        assert _map_responses_finish_reason(resp) == "error"
+        assert _map_responses_finish_reason(resp) == "content_filter"
 
     def test_failed_maps_to_error(self):
         resp = SimpleNamespace(status="failed", incomplete_details=None)
         assert _map_responses_finish_reason(resp) == "error"
 
-    def test_missing_status_defaults_to_stop(self):
-        assert _map_responses_finish_reason(SimpleNamespace()) == "stop"
+    def test_missing_status_fails_closed(self):
+        assert _map_responses_finish_reason(SimpleNamespace()) == "unknown"
 
 
 class TestCompletionClientPropagation:
@@ -130,17 +144,49 @@ class TestCompletionClientPropagation:
             out = await client.acall([{"role": "user", "content": "Hi"}])
         assert out.finish_reason == "length"
 
+    @pytest.mark.asyncio
+    async def test_insufficient_resource_retries_identical_request_without_leaking_partial(self):
+        interrupted = make_mock_response(
+            content="partial",
+            reasoning="discard me",
+            tool_calls=[make_tool_call("partial_call", "do_thing", '{"unsafe":true}')],
+        )
+        interrupted.choices[0].finish_reason = "insufficient_system_resource"
+        completed = make_mock_response(content="done", finish_reason="stop")
+        client = CompletionClient(
+            model="test-model",
+            retry_config=RetryConfig(max_retries=1, base_delay=0, jitter_factor=0),
+        )
+        with patch(
+            "litellm.acompletion",
+            new_callable=AsyncMock,
+            side_effect=[interrupted, completed],
+        ) as mock_acompletion:
+            out = await client.acall(
+                [{"role": "user", "content": "Hi"}],
+                tools=[],
+            )
+
+        assert out.finish_reason == "stop"
+        assert out.content == "done"
+        assert out.reasoning is None
+        assert out.tool_calls == []
+        assert mock_acompletion.call_count == 2
+        assert (
+            mock_acompletion.call_args_list[0].kwargs == mock_acompletion.call_args_list[1].kwargs
+        )
+
     def test_sync_stop_stays_stop(self, client):
         resp = make_mock_response(content="done", finish_reason="stop")
         with patch("litellm.completion", return_value=resp):
             out = client.call([{"role": "user", "content": "Hi"}])
         assert out.finish_reason == "stop"
 
-    def test_content_filter_maps_to_error(self, client):
+    def test_content_filter_is_preserved(self, client):
         resp = make_mock_response(content="", finish_reason="content_filter")
         with patch("litellm.completion", return_value=resp):
             out = client.call([{"role": "user", "content": "Hi"}])
-        assert out.finish_reason == "error"
+        assert out.finish_reason == "content_filter"
 
     def test_tool_calls_preserved_even_if_provider_reports_length(self, client):
         # When tool calls are present the client keeps "tool_calls" regardless of

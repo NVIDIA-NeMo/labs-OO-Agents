@@ -14,6 +14,9 @@ class TokenBudgetConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     max_tokens: int = 100_000
+    context_window: int | None = None
+    output_margin: int = 0
+    reasoning_output_floor: int | None = None
     preserve_recent: int = 10
     target_chars: int = 1000
 

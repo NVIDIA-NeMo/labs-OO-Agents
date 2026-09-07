@@ -240,6 +240,14 @@ class ToolCallEvent(EventBase):
             "tool call when conversation history is replayed"
         ),
     )
+    reasoning_content: str | None = Field(
+        default=None,
+        repr=False,
+        description=(
+            "Provider reasoning content that must accompany this assistant "
+            "tool call when hosted Chat Completions history is replayed"
+        ),
+    )
 
     # Nested result (filled after execution via EventManager.update())
     result: ToolResult | None = Field(

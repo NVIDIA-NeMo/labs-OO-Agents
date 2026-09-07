@@ -3,6 +3,8 @@
 """Regression tests for the portfolio-based CyberGym agent."""
 
 import asyncio
+import hashlib
+import inspect
 import json
 import shlex
 from types import SimpleNamespace
@@ -14,8 +16,10 @@ pytest.importorskip("nooa")
 from opentelemetry import trace as otel_trace  # noqa: E402
 
 from examples.cybergym.nooa_cybergym import agent as nooa_cybergym_agent  # noqa: E402
+from examples.cybergym.nooa_cybergym import capture_submit_response  # noqa: E402
 from examples.cybergym.nooa_cybergym import main as nooa_cybergym_main  # noqa: E402
 from examples.cybergym.nooa_cybergym import submissions as cybergym_submissions  # noqa: E402
+from nooa.prompts import build_prompt_data  # noqa: E402
 from nooa.tracing import flush_traces  # noqa: E402
 from nooa.unifiedllm.fake import FakeLLMClient  # noqa: E402
 
@@ -49,9 +53,55 @@ DEDUP_TOKEN: tt_face_palette_set--tt_face_load_cpal--sfnt_load_face
 
     assert fp.kind == "crash"
     assert fp.sanitizer == "AddressSanitizer"
-    assert fp.error_type == "heap-buffer-overflow on address 0x123"
+    assert fp.error_type == "heap-buffer-overflow"
     assert fp.dedup_token == "tt_face_palette_set--tt_face_load_cpal--sfnt_load_face"
     assert "tt_face_palette_set--tt_face_load_cpal" in fp.cluster_key
+
+
+def test_fingerprint_ignores_volatile_asan_addresses_for_same_crash_site():
+    first = """
+==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x512000000bd4 at pc 0x562ca6ebe9db bp 0x7fff2c54a6d0 sp 0x7fff2c549e98
+    #0 0x562ca6ebe9db in strlen /src/string.c:10:1
+    #1 0x562ca6e00111 in Set /src/string.h:20:1
+    #2 0x562ca6e00222 in Assimp::MD3Importer::InternReadFile /src/MD3Loader.cpp:30:1
+"""
+    second = """
+==2==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x513000000508 at pc 0x560a0fc9c9db bp 0x7ffee3c3db70 sp 0x7ffee3c3d338
+    #0 0x560a0fc9c9db in strlen /src/string.c:10:1
+    #1 0x560a0fc00111 in Set /src/string.h:20:1
+    #2 0x560a0fc00222 in Assimp::MD3Importer::InternReadFile /src/MD3Loader.cpp:30:1
+"""
+
+    first_fp = cybergym_submissions.SubmissionManager.fingerprint_output(
+        "crashed", 1, first
+    )
+    second_fp = cybergym_submissions.SubmissionManager.fingerprint_output(
+        "crashed", 1, second
+    )
+
+    assert first_fp.error_type == "heap-buffer-overflow"
+    assert second_fp.error_type == "heap-buffer-overflow"
+    assert first_fp.cluster_key == second_fp.cluster_key
+
+
+def test_fingerprint_keeps_distinct_asan_error_categories_separate():
+    heap_overflow = """
+==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x512000000bd4
+    #0 0xabc in parse_tag /src/parser.c:10:1
+"""
+    segv = """
+==2==ERROR: AddressSanitizer: SEGV on unknown address 0x512000000bd4
+    #0 0xdef in parse_tag /src/parser.c:10:1
+"""
+
+    heap_fp = cybergym_submissions.SubmissionManager.fingerprint_output(
+        "crashed", 1, heap_overflow
+    )
+    segv_fp = cybergym_submissions.SubmissionManager.fingerprint_output(
+        "crashed", 1, segv
+    )
+
+    assert heap_fp.cluster_key != segv_fp.cluster_key
 
 
 def test_fingerprint_classifies_msan_personality_as_infra():
@@ -120,7 +170,7 @@ def test_submit_runner_quotes_poc_path():
 
         async def run(self, command, timeout):
             self.command = command
-            assert timeout == 60
+            assert timeout == 300.0
             return SimpleNamespace(stdout='{"exit_code": 0, "output": "Execution successful"}')
 
     shell = FakeShell()
@@ -130,7 +180,38 @@ def test_submit_runner_quotes_poc_path():
     result = asyncio.run(manager._run_submit_script(poc_path, submission_number=1))
 
     assert result.status == "no_crash"
-    assert shell.command == (f"bash {shlex.quote(manager.SUBMIT_SCRIPT)} {shlex.quote(poc_path)}")
+    assert f"bash {shlex.quote(manager.SUBMIT_SCRIPT)} {shlex.quote(poc_path)} " in shell.command
+    assert f"python {manager.CAPTURE_RESPONSE_SCRIPT}" in shell.command
+
+
+def test_large_verifier_response_is_bounded_without_losing_crash_signature(tmp_path):
+    output = (
+        "==9==ERROR: AddressSanitizer: FPE on unknown address\n"
+        "#0 0xabc in CExpressionParser::safe_div /src/parser.cpp:10:1\n"
+        "#1 0xdef in CExpressionParser::eval /src/parser.cpp:20:1\n"
+        "#2 0x123 in LLVMFuzzerTestOneInput /src/fuzz.cpp:30:1\n"
+        + "diagnostic filler\n" * 20_000
+    )
+    response = json.dumps({"task_id": "task", "exit_code": 1, "output": output})
+    response_path = tmp_path / "submission.json"
+    response_path.write_text(response)
+
+    bounded = capture_submit_response.capture_response(response_path, 0)
+    payload = json.loads(bounded)
+    status = cybergym_submissions.SubmissionManager.classify_submit(
+        payload["exit_code"], payload["output"]
+    )
+    fingerprint = cybergym_submissions.SubmissionManager.fingerprint_output(
+        status, payload["exit_code"], payload["output"]
+    )
+
+    assert len(response) > 200_000
+    assert len(bounded) <= capture_submit_response.MAX_ENVELOPE_CHARS
+    assert payload["raw_output_truncated"] is True
+    assert payload["raw_response_length"] == len(response)
+    assert status == "crashed"
+    assert fingerprint.error_type == "FPE"
+    assert fingerprint.top_frames[0] == "CExpressionParser::safe_div"
 
 
 def test_submit_stores_hypothesis_in_submission_and_jsonl(tmp_path):
@@ -161,6 +242,35 @@ def test_submit_stores_hypothesis_in_submission_and_jsonl(tmp_path):
     assert record["hypothesis"] == hypothesis
 
 
+def test_submit_preserves_candidate_in_persistent_artifacts(tmp_path):
+    class FakeShell:
+        async def run(self, command, timeout):
+            return SimpleNamespace(
+                stdout=json.dumps(
+                    {
+                        "exit_code": 1,
+                        "output": "ERROR: AddressSanitizer: heap-use-after-free",
+                    }
+                )
+            )
+
+    source = tmp_path / "candidate.otf"
+    source.write_bytes(b"persistent-candidate")
+    manager = cybergym_submissions.SubmissionManager(shell=FakeShell())
+    manager.SUBMISSIONS_DIR = tmp_path / "verifier-does-not-copy"
+    manager.SUBMISSION_LOG_PATH = tmp_path / "artifacts" / "submissions.jsonl"
+    manager.CANDIDATE_DIR = tmp_path / "artifacts" / "candidates"
+
+    result = asyncio.run(manager.submit(str(source), hypothesis="Exercises the CFF parser."))
+
+    submission = manager.get_submission(result.submission_number)
+    assert submission is not None
+    assert submission.submitted_path == str(manager.CANDIDATE_DIR / "submission_1.poc")
+    assert (manager.CANDIDATE_DIR / "submission_1.poc").read_bytes() == b"persistent-candidate"
+    record = json.loads(manager.SUBMISSION_LOG_PATH.read_text().strip())
+    assert record["submitted_path"] == submission.submitted_path
+
+
 def test_submit_rejects_an_empty_hypothesis_before_running_verifier():
     class FakeShell:
         async def run(self, command, timeout):
@@ -170,6 +280,126 @@ def test_submit_rejects_an_empty_hypothesis_before_running_verifier():
 
     with pytest.raises(ValueError, match="hypothesis must briefly explain"):
         asyncio.run(manager.submit("/tmp/poc", hypothesis="  \n  "))
+
+
+def test_finalize_writes_one_immutable_model_selected_poc(tmp_path):
+    source = tmp_path / "candidate.bin"
+    source.write_bytes(b"chosen-poc")
+    fingerprint = cybergym_submissions.SubmissionManager.fingerprint_output(
+        "crashed", 139, "SIGSEGV"
+    )
+    submission = cybergym_submissions.PocSubmission(
+        submission_number=7,
+        original_path=str(source),
+        submitted_path=str(source),
+        status="crashed",
+        exit_code=139,
+        fingerprint=fingerprint,
+        hypothesis="The length field reaches the vulnerable copy.",
+    )
+    manager = _submission_manager(submission_count=7, submissions=[submission])
+    manager.FINAL_SUBMISSION_DIR = tmp_path / "final_submission"
+
+    artifact = manager.finalize(7, selection_reason="Strongest patch-relevant crash.")
+
+    final_poc = manager.FINAL_SUBMISSION_DIR / "poc"
+    manifest_path = manager.FINAL_SUBMISSION_DIR / "selection.json"
+    assert final_poc.read_bytes() == b"chosen-poc"
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["submission_number"] == 7
+    assert manifest["selection_reason"] == "Strongest patch-relevant crash."
+    assert manifest["sha256"] == hashlib.sha256(b"chosen-poc").hexdigest()
+    assert artifact.sha256 == manifest["sha256"]
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        manager.finalize(7, selection_reason="A second choice must never replace it.")
+    assert final_poc.read_bytes() == b"chosen-poc"
+
+
+def test_finalize_rejects_a_non_crashing_candidate(tmp_path):
+    source = tmp_path / "safe.bin"
+    source.write_bytes(b"safe")
+    submission = cybergym_submissions.PocSubmission(
+        submission_number=2,
+        original_path=str(source),
+        submitted_path=str(source),
+        status="no_crash",
+        exit_code=0,
+        fingerprint=cybergym_submissions.SubmissionManager.fingerprint_output(
+            "no_crash", 0, "Execution successful"
+        ),
+        hypothesis="Does not crash.",
+    )
+    manager = _submission_manager(submission_count=2, submissions=[submission])
+    manager.FINAL_SUBMISSION_DIR = tmp_path / "final_submission"
+
+    with pytest.raises(ValueError, match="verified crash"):
+        manager.finalize(2, selection_reason="Invalid selection")
+
+    assert not manager.FINAL_SUBMISSION_DIR.exists()
+
+
+@pytest.mark.asyncio
+async def test_agent_uses_model_selection_to_finalize_portfolio(tmp_path, monkeypatch):
+    source = tmp_path / "candidate.bin"
+    source.write_bytes(b"agent-choice")
+    submission = cybergym_submissions.PocSubmission(
+        submission_number=4,
+        original_path=str(source),
+        submitted_path=str(source),
+        status="crashed",
+        exit_code=139,
+        fingerprint=cybergym_submissions.SubmissionManager.fingerprint_output(
+            "crashed", 139, "SIGSEGV"
+        ),
+        hypothesis="Triggers the vulnerable parser branch.",
+    )
+    manager = _submission_manager(submission_count=4, submissions=[submission])
+    manager.FINAL_SUBMISSION_DIR = tmp_path / "final_submission"
+    portfolio = nooa_cybergym_agent.Portfolio(manager)
+    portfolio.submissions = [submission]
+    agent = nooa_cybergym_agent.CyberGymAgent(llm=FakeLLMClient())
+    agent._portfolio = portfolio
+
+    async def choose(self, current_portfolio_state):
+        assert "crash_families=1" in current_portfolio_state
+        return nooa_cybergym_agent.FinalSelection(
+            submission_number=4,
+            reasoning="Most direct and reproducible trigger.",
+        )
+
+    monkeypatch.setattr(nooa_cybergym_agent.CyberGymAgent, "_select_final", choose)
+
+    artifact = await agent._finalize_portfolio()
+
+    assert artifact.submission_number == 4
+    assert (manager.FINAL_SUBMISSION_DIR / "poc").read_bytes() == b"agent-choice"
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_workers_and_closes_every_shell():
+    class CloseableShell:
+        def __init__(self):
+            self.closed = 0
+
+        async def close(self):
+            self.closed += 1
+
+    root_shell = CloseableShell()
+    worker_shell = CloseableShell()
+    manager = _submission_manager()
+    manager._owner._shell = root_shell
+    agent = nooa_cybergym_agent.CyberGymAgent(llm=FakeLLMClient())
+    agent._portfolio = nooa_cybergym_agent.Portfolio(manager)
+    agent._worker_agents = [SimpleNamespace(shell=worker_shell, llm=FakeLLMClient())]
+    sleeper = asyncio.create_task(asyncio.sleep(30))
+    agent._active_tasks = {sleeper}
+
+    await agent.shutdown()
+
+    assert sleeper.cancelled()
+    assert root_shell.closed == 1
+    assert worker_shell.closed == 1
 
 
 def test_finder_uses_feedback_history_for_portfolio_context():
@@ -240,6 +470,35 @@ def test_cybergym_agent_disables_default_state_context():
     assert agent.context_manager.is_disabled("state")
 
 
+@pytest.mark.asyncio
+async def test_reviewer_prompt_uses_the_effective_minimum_exploration_window():
+    agent = nooa_cybergym_agent.CyberGymAgent(llm=FakeLLMClient())
+    prompt_template = inspect.getdoc(nooa_cybergym_agent.CyberGymAgent._review)
+    prompt = await build_prompt_data(agent._review, "empty portfolio")
+
+    assert agent._minimum_exploration_sec == nooa_cybergym_agent.MIN_EXPLORATION_SEC
+    assert "{self._minimum_exploration_sec} seconds" in prompt_template
+    assert "default: 20 minutes" not in prompt_template
+    assert (
+        f"minimum exploration window ({nooa_cybergym_agent.MIN_EXPLORATION_SEC} seconds)"
+        in prompt.task_prompt
+    )
+
+
+@pytest.mark.asyncio
+async def test_final_selection_ranks_target_family_before_candidate_size():
+    agent = nooa_cybergym_agent.CyberGymAgent(llm=FakeLLMClient())
+    agent.description = "A read heap buffer overflow exists in the PE module."
+    prompt = await build_prompt_data(agent._select_final, "two crash families")
+    normalized = " ".join(prompt.task_prompt.split())
+
+    assert agent.description in prompt.task_prompt
+    assert "root cause most specifically matches" in normalized
+    assert "generic vulnerability class is not enough" in normalized
+    assert "ahead of byte size" in normalized
+    assert "underspecified" in normalized
+
+
 def test_cybergym_agents_have_isolated_shell_sessions():
     first = nooa_cybergym_agent.CyberGymAgent(llm=FakeLLMClient())
     second = nooa_cybergym_agent.CyberGymAgent(llm=FakeLLMClient())
@@ -255,6 +514,35 @@ def test_glm52_is_the_agent_default_with_three_finder_lanes():
         nooa_cybergym_agent.Lane(label="nemotron-3-ultra", model_name="nvidia/nemotron-3-ultra"),
         nooa_cybergym_agent.Lane(label="deepseek-v4-flash", model_name="deepseek-v4-flash"),
     ]
+
+
+def test_finder_provenance_uses_resolved_provider_model(monkeypatch):
+    resolved_llm = FakeLLMClient()
+    resolved_llm.model = "openai/deepseek-v4-flash"
+    monkeypatch.setattr(nooa_cybergym_agent, "make_llm", lambda *args, **kwargs: resolved_llm)
+    monkeypatch.setattr(nooa_cybergym_agent, "install_summarizer", lambda *args: None)
+
+    agent = nooa_cybergym_agent.CyberGymAgent(llm=FakeLLMClient())
+    agent._portfolio = nooa_cybergym_agent.Portfolio(_submission_manager())
+    finder = agent._make_finder(
+        nooa_cybergym_agent.Lane(label="configured-alias", model_name="glm-5.2")
+    )
+    expander, _ = agent._make_expander(SimpleNamespace())
+
+    assert finder._model_name == "openai/deepseek-v4-flash"
+    assert expander._model_name == "openai/deepseek-v4-flash"
+
+
+@pytest.mark.parametrize(
+    "method",
+    [nooa_cybergym_agent.Finder.find, nooa_cybergym_agent.Expander.expand],
+)
+def test_worker_cells_use_a_hard_out_of_process_timeout(method):
+    config = method._plan_strategy.config
+
+    assert config.execution_backend == "sandbox"
+    assert config.cell_timeout == 60
+    assert config.sandbox.broker_timeout_s == 360
 
 
 def test_submission_manager_digest_clusters_submissions_without_llm_constructor():
@@ -452,3 +740,305 @@ def test_finder_and_expander_are_distinct_worker_agent_types():
     assert not isinstance(expander, nooa_cybergym_agent.Finder)
     assert finder is not expander
     assert finder.shell is not expander.shell
+
+
+def test_submission_owner_serializes_callers_and_hides_shell():
+    class FakeShell:
+        def __init__(self):
+            self.active = 0
+            self.max_active = 0
+
+        async def run(self, command, timeout):
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            await asyncio.sleep(0.01)
+            self.active -= 1
+            return SimpleNamespace(
+                stdout='{"exit_code": 0, "output": "Execution successful"}',
+                returncode=0,
+            )
+
+    async def scenario():
+        shell = FakeShell()
+        manager = cybergym_submissions.SubmissionManager(shell=shell)
+        assert not hasattr(manager, "shell")
+        await asyncio.gather(
+            manager._run_submit_script("/tmp/a", submission_number=1),
+            manager._run_submit_script("/tmp/b", submission_number=2),
+            manager._run_submit_script("/tmp/c", submission_number=3),
+        )
+        await manager.close()
+        return shell.max_active
+
+    assert asyncio.run(scenario()) == 1
+
+
+def test_submission_owner_paces_all_callers_through_one_sliding_window():
+    class FakeClock:
+        def __init__(self):
+            self.now = 0.0
+            self.sleeps = []
+
+        def monotonic(self):
+            return self.now
+
+        async def sleep(self, seconds):
+            self.sleeps.append(seconds)
+            self.now += seconds
+
+    class FakeShell:
+        def __init__(self, clock):
+            self.clock = clock
+            self.started = []
+
+        async def run(self, command, timeout):
+            self.started.append(self.clock.now)
+            return SimpleNamespace(
+                stdout='{"exit_code": 0, "output": "Execution successful"}',
+                returncode=0,
+            )
+
+    async def scenario():
+        clock = FakeClock()
+        shell = FakeShell(clock)
+        owner = cybergym_submissions.SubmissionShellOwner(
+            shell,
+            rate_limit_max_requests=2,
+            rate_limit_window_seconds=10,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        )
+        await asyncio.gather(owner.execute("a"), owner.execute("b"), owner.execute("c"))
+        await owner.close()
+        return shell.started, clock.sleeps
+
+    started, sleeps = asyncio.run(scenario())
+    assert started == [0.0, 0.0, 10.0]
+    assert sleeps == [10.0]
+
+
+def test_verifier_rate_limit_cools_down_and_retries_without_false_crash():
+    class FakeClock:
+        def __init__(self):
+            self.now = 0.0
+
+        def monotonic(self):
+            return self.now
+
+        async def sleep(self, seconds):
+            self.now += seconds
+
+    class FakeShell:
+        def __init__(self):
+            self.calls = 0
+
+        async def run(self, command, timeout):
+            self.calls += 1
+            if self.calls == 1:
+                return SimpleNamespace(
+                    stdout='{"exit_code": 1, "output": "Rate limit exceeded: max 20 req/60s"}',
+                    returncode=1,
+                )
+            return SimpleNamespace(
+                stdout='{"exit_code": 0, "output": "Execution successful"}',
+                returncode=0,
+            )
+
+    async def scenario():
+        clock = FakeClock()
+        shell = FakeShell()
+        manager = cybergym_submissions.SubmissionManager(
+            shell,
+            owner_options={"monotonic": clock.monotonic, "sleep": clock.sleep},
+        )
+        result = await manager._run_submit_script("/tmp/a", submission_number=1)
+        await manager.close()
+        return result, shell.calls, clock.now
+
+    result, calls, elapsed = asyncio.run(scenario())
+    assert result.status == "no_crash"
+    assert calls == 2
+    assert elapsed == 60.0
+
+
+def test_persistent_verifier_rate_limit_is_server_error_not_crash_suspect():
+    assert (
+        cybergym_submissions.SubmissionManager.classify_submit(
+            1, "Rate limit exceeded for agent abc. Max 20 requests per 60s."
+        )
+        == "server_error"
+    )
+
+
+def test_submission_owner_isolates_caller_cancellation():
+    class FakeShell:
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.completed = False
+
+        async def run(self, command, timeout):
+            self.started.set()
+            await self.release.wait()
+            self.completed = True
+            return SimpleNamespace(
+                stdout='{"exit_code": 0, "output": "Execution successful"}',
+                returncode=0,
+            )
+
+    async def scenario():
+        shell = FakeShell()
+        manager = cybergym_submissions.SubmissionManager(shell=shell)
+        caller = asyncio.create_task(manager._run_submit_script("/tmp/a", submission_number=1))
+        await shell.started.wait()
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        shell.release.set()
+        for _ in range(20):
+            if shell.completed:
+                break
+            await asyncio.sleep(0)
+        assert shell.completed
+        await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_submission_owner_poison_respawns_and_retries_once():
+    class PoisonedShell:
+        def __init__(self):
+            self.closed = False
+
+        async def run(self, command, timeout):
+            return SimpleNamespace(stdout="", returncode=124, timed_out=True)
+
+        async def close(self):
+            self.closed = True
+
+    class HealthyShell:
+        async def run(self, command, timeout):
+            return SimpleNamespace(
+                stdout='{"exit_code": 0, "output": "Execution successful"}',
+                returncode=0,
+                timed_out=False,
+            )
+
+    async def scenario():
+        poisoned = PoisonedShell()
+        manager = cybergym_submissions.SubmissionManager(
+            shell=poisoned,
+            shell_factory=HealthyShell,
+        )
+        result = await manager._run_submit_script("/tmp/a", submission_number=1)
+        assert result.status == "no_crash"
+        assert poisoned.closed
+        await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_submission_owner_preserves_verifier_timeout_exit_124():
+    factory_calls = 0
+
+    class VerifierTimeoutShell:
+        async def run(self, command, timeout):
+            return SimpleNamespace(
+                stdout='{"exit_code": 124, "output": "candidate timed out"}\n',
+                returncode=124,
+                timed_out=False,
+            )
+
+        async def close(self):
+            pass
+
+    def shell_factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        return VerifierTimeoutShell()
+
+    async def scenario():
+        manager = cybergym_submissions.SubmissionManager(
+            VerifierTimeoutShell(),
+            shell_factory=shell_factory,
+        )
+        result = await manager._run_submit_script("/tmp/a", submission_number=1)
+        assert result.status == "timeout"
+        assert result.exit_code == 124
+        assert factory_calls == 0
+        assert manager._owner._consecutive_respawns == 0
+        await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_submission_owner_routes_at_production_process_boundary(tmp_path):
+    factory_calls = 0
+    submit_script = tmp_path / "submit.sh"
+    submit_script.write_text("#!/usr/bin/env bash\nexit 124\n")
+    submit_script.chmod(0o755)
+
+    def shell_factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        return cybergym_submissions.ShellTools(cwd=tmp_path)
+
+    async def scenario():
+        owner = cybergym_submissions.SubmissionShellOwner(
+            cybergym_submissions.ShellTools(cwd=tmp_path),
+            shell_factory=shell_factory,
+            timeout=0.25,
+            max_consecutive_respawns=3,
+        )
+
+        child_exit = await owner.execute(f"bash {submit_script}")
+        assert child_exit.returncode == 124
+        assert child_exit.timed_out is False
+        assert factory_calls == 0
+        assert owner._consecutive_respawns == 0
+
+        shell_survives = await owner.execute("printf shell-survived")
+        assert shell_survives.stdout == "shell-survived"
+        assert shell_survives.returncode == 0
+        assert shell_survives.timed_out is False
+        assert factory_calls == 0
+
+        with pytest.raises(
+            cybergym_submissions.SubmissionShellCircuitOpen,
+            match="failed after one clean-session retry",
+        ):
+            await owner.execute("exit 23")
+        assert factory_calls == 2
+        assert owner._consecutive_respawns == 2
+        await owner.close()
+
+    asyncio.run(scenario())
+
+
+def test_submission_owner_circuit_breaks_after_bounded_respawns():
+    class PoisonedShell:
+        async def run(self, command, timeout):
+            return SimpleNamespace(stdout="", returncode=-1)
+
+        async def close(self):
+            pass
+
+    async def scenario():
+        owner = cybergym_submissions.SubmissionShellOwner(
+            PoisonedShell(),
+            shell_factory=PoisonedShell,
+            max_consecutive_respawns=2,
+        )
+        with pytest.raises(
+            cybergym_submissions.SubmissionShellCircuitOpen,
+            match="failed after one clean-session retry",
+        ):
+            await owner.execute("first")
+        with pytest.raises(
+            cybergym_submissions.SubmissionShellCircuitOpen,
+            match="circuit open after 2 respawns",
+        ):
+            await owner.execute("second")
+        await owner.close()
+
+    asyncio.run(scenario())

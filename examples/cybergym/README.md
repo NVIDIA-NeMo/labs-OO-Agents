@@ -107,8 +107,7 @@ scripts/run_subset.sh
 Pass task IDs to run a subset of the subset, e.g. `scripts/run_subset.sh arvo:10400`.
 
 Each task gets up to 4h of wall-clock (`TIMEOUT` in `scripts/config.sh`), so the
-full subset runs serially for a while. Lower it for a quick smoke test, e.g.
-`TIMEOUT=1800 scripts/run_subset.sh`.
+full subset runs serially for a while.
 
 Results land in a timestamped run directory:
 

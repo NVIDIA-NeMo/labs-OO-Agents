@@ -16,6 +16,12 @@ TMP_DIR="${TMP_DIR:-$RUN_ROOT/tmp}"
 # TIMEOUT comes from config.sh (default 4h). DIFFICULTY stays run-local.
 DIFFICULTY="${DIFFICULTY:-level1}"
 CLEAN_TASK_IMAGES="${CLEAN_TASK_IMAGES:-0}"
+CONTAINER_NAME_ARGS=()
+overall_rc=0
+PROXY_IMAGE="${CYBERGYM_PROXY_IMAGE:-ubuntu/squid:latest}"
+if [ -n "${CONTAINER_NAME:-}" ]; then
+  CONTAINER_NAME_ARGS=(--container-name "$CONTAINER_NAME")
+fi
 
 if [ "$#" -gt 0 ]; then
   TASKS=("$@")
@@ -77,7 +83,11 @@ EOF
 fi
 
 echo "===== BUILD RUNNER IMAGE $(date -Is) ====="
-docker build -f "$AGENT_REPO/Dockerfile" -t "$RUNNER_IMAGE" "$AGENT_REPO"
+docker build -f "$AGENT_REPO/Dockerfile" -t "$RUNNER_IMAGE" "$NOOA_REPO_ROOT"
+docker image inspect "$RUNNER_IMAGE" >/dev/null
+echo "===== PREFLIGHT PROXY IMAGE $PROXY_IMAGE $(date -Is) ====="
+docker pull "$PROXY_IMAGE"
+docker image inspect "$PROXY_IMAGE" >/dev/null
 
 echo "===== RUN ${#TASKS[@]} TASKS $(date -Is) ====="
 for TASK_ID in "${TASKS[@]}"; do
@@ -98,15 +108,20 @@ for TASK_ID in "${TASKS[@]}"; do
     --tmp-dir "$TMP_DIR" \
     --image "$RUNNER_IMAGE" \
     --timeout "$TIMEOUT" \
-    --difficulty "$DIFFICULTY"
+    --difficulty "$DIFFICULTY" \
+    "${CONTAINER_NAME_ARGS[@]}"
   rc=$?
   set -e
 
   echo "===== END $TASK_ID rc=$rc $(date -Is) ====="
   echo "$TASK_ID $rc" >> "$RUN_ROOT/task_exit_codes.txt"
+  if [ "$rc" -ne 0 ]; then
+    overall_rc=1
+  fi
   cleanup_task_images "$TASK_ID"
 done
 
 echo "===== DONE $(date -Is) ====="
 echo "run_root=$RUN_ROOT"
 echo "task_exit_codes=$RUN_ROOT/task_exit_codes.txt"
+exit "$overall_rc"

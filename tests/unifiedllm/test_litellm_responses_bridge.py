@@ -181,3 +181,58 @@ def test_reasoning_items_round_trip_into_next_responses_request() -> None:
         assert reasoning_index < function_call_index < output_index
     finally:
         client.close()
+
+
+def test_deepseek_reasoning_content_round_trips_into_next_chat_request() -> None:
+    client = CompletionClient(
+        model="deepseek/deepseek-chat",
+        api_base="https://api.deepseek.com/v1",
+        api_key="test",
+    )
+    tool_call = {
+        "id": "call_deepseek",
+        "type": "function",
+        "function": {"name": "execute_python", "arguments": '{"code":"print(1)"}'},
+    }
+    first_response = ModelResponse(
+        model="deepseek-chat",
+        choices=[
+            Choices(
+                finish_reason="tool_calls",
+                message=Message(
+                    content=None,
+                    role="assistant",
+                    tool_calls=[tool_call],
+                    reasoning_content="private chain state",
+                ),
+            )
+        ],
+    )
+    second_response = _chat_response()
+
+    try:
+        with patch(
+            "litellm.completion", side_effect=[first_response, second_response]
+        ) as completion:
+            first = client.call(
+                messages=[{"role": "user", "content": "Run Python."}],
+                tools=[TOOL],
+            )
+            client.call(
+                messages=[
+                    {"role": "user", "content": "Run Python."},
+                    first.assistant_message,
+                    {
+                        "role": "tool",
+                        "tool_call_id": first.tool_calls[0].id,
+                        "content": "1",
+                    },
+                ],
+                tools=[TOOL],
+            )
+
+        replayed = completion.call_args_list[1].kwargs["messages"][1]
+        assert replayed["reasoning_content"] == "private chain state"
+        assert replayed["tool_calls"][0]["id"] == "call_deepseek"
+    finally:
+        client.close()

@@ -98,3 +98,24 @@ class TestMaxTokensExhaustedError:
         agent_instance = TestAgent(llm=fake_llm)
         result = await agent_instance.my_task()
         assert result == "hello"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("finish_reason", ["content_filter", "error", "unknown"])
+    async def test_terminal_faults_fail_closed_even_when_text_is_present(self, finish_reason):
+        class TestAgent(Agent, llm=_TEST_LLM):
+            @strategy(CodeActStrategy(config=CodeActConfig(max_retries=3, max_iterations=10)))
+            async def my_task(self) -> str:
+                """A task."""
+                ...
+
+        fake_llm = FakeLLMClient(
+            scripted_responses=[
+                _resp("partial text must not be accepted", finish_reason=finish_reason)
+            ]
+        )
+        agent_instance = TestAgent(llm=fake_llm)
+
+        with pytest.raises(GenerationError, match=finish_reason):
+            await agent_instance.my_task()
+
+        assert fake_llm.call_count == 1

@@ -4,11 +4,22 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import inspect
 import json
+import os
 import re
+import secrets
 import shlex
+import shutil
+import tempfile
+import time
+from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -72,6 +83,21 @@ class PocSubmission(BaseModel):
     hypothesis: str
 
 
+class FinalPocArtifact(BaseModel):
+    """Immutable final PoC designation consumed by the official scorer."""
+
+    schema_version: int = 1
+    submission_number: int
+    poc_path: str
+    sha256: str
+    byte_length: int
+    selection_reason: str
+    source_agent: str | None = None
+    source_model: str | None = None
+    hypothesis: str
+    cluster_key: str
+
+
 class KnownFamily(BaseModel):
     """Reviewer-maintained family summary to steer independent attempts."""
 
@@ -88,6 +114,189 @@ class KnownFamily(BaseModel):
 
 def _model_data(model: BaseModel) -> dict:
     return model.model_dump() if hasattr(model, "model_dump") else model.dict()
+
+
+class SubmissionShellCircuitOpen(RuntimeError):
+    """The verifier shell repeatedly lost framing and is no longer trusted."""
+
+
+@dataclass
+class _ShellRequest:
+    command: str
+    future: asyncio.Future[Any]
+
+
+class SubmissionShellOwner:
+    """Single owner for the persistent verifier shell.
+
+    Callers enqueue commands and await futures. Only the worker task can touch
+    the shell, so caller cancellation cannot interrupt or desynchronize an
+    in-flight command. The underlying BashSession supplies a unique per-command
+    control-channel sentinel; timeout or framing loss poisons and replaces the
+    entire ShellTools instance before one retry.
+    """
+
+    def __init__(
+        self,
+        shell: Any,
+        *,
+        shell_factory: Callable[[], Any] | None = None,
+        timeout: float | None = None,
+        max_consecutive_respawns: int = 3,
+        rate_limit_max_requests: int | None = None,
+        rate_limit_window_seconds: float | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Any] = asyncio.sleep,
+    ) -> None:
+        self._shell = shell
+        self._shell_factory = shell_factory or (lambda: ShellTools(cwd="/workspace"))
+        self._timeout = float(
+            timeout
+            if timeout is not None
+            else os.environ.get("NOOA_CYBERGYM_SUBMISSION_TIMEOUT_SEC", "300")
+        )
+        self._max_consecutive_respawns = max_consecutive_respawns
+        self._consecutive_respawns = 0
+        self._rate_limit_max_requests = int(
+            rate_limit_max_requests
+            if rate_limit_max_requests is not None
+            else os.environ.get("NOOA_CYBERGYM_SUBMISSION_RATE_LIMIT", "15")
+        )
+        self._rate_limit_window_seconds = float(
+            rate_limit_window_seconds
+            if rate_limit_window_seconds is not None
+            else os.environ.get("NOOA_CYBERGYM_SUBMISSION_RATE_WINDOW_SEC", "60")
+        )
+        if self._rate_limit_max_requests < 1:
+            raise ValueError("submission rate limit must be at least 1")
+        if self._rate_limit_window_seconds <= 0:
+            raise ValueError("submission rate window must be positive")
+        self._monotonic = monotonic
+        self._sleep = sleep
+        self._submission_times: deque[float] = deque()
+        self._blocked_until = 0.0
+        self._queue: asyncio.Queue[_ShellRequest] | None = None
+        self._worker: asyncio.Task[None] | None = None
+
+    async def execute(self, command: str) -> Any:
+        self._ensure_worker()
+        assert self._queue is not None
+        future = asyncio.get_running_loop().create_future()
+        self._queue.put_nowait(_ShellRequest(command=command, future=future))
+        return await future
+
+    async def close(self) -> None:
+        worker = self._worker
+        if worker is not None and not worker.done():
+            worker.cancel()
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
+        await self._close_shell(self._shell)
+        self._worker = None
+        self._queue = None
+
+    def _ensure_worker(self) -> None:
+        if self._worker is not None and not self._worker.done():
+            return
+        self._queue = asyncio.Queue()
+        self._worker = asyncio.create_task(self._run())
+
+    async def _run(self) -> None:
+        assert self._queue is not None
+        while True:
+            request = await self._queue.get()
+            try:
+                if request.future.cancelled():
+                    continue
+                try:
+                    await self._wait_for_rate_slot()
+                    result = await self._execute_with_recovery(request.command)
+                except Exception as exc:
+                    if not request.future.cancelled():
+                        request.future.set_exception(exc)
+                else:
+                    if not request.future.cancelled():
+                        request.future.set_result(result)
+            finally:
+                self._queue.task_done()
+
+    async def _wait_for_rate_slot(self) -> None:
+        """Reserve one verifier request inside the shared rolling window."""
+        while True:
+            now = self._monotonic()
+            cutoff = now - self._rate_limit_window_seconds
+            while self._submission_times and self._submission_times[0] <= cutoff:
+                self._submission_times.popleft()
+            wait_for = max(0.0, self._blocked_until - now)
+            if len(self._submission_times) >= self._rate_limit_max_requests:
+                wait_for = max(
+                    wait_for,
+                    self._submission_times[0] + self._rate_limit_window_seconds - now,
+                )
+            if wait_for <= 0:
+                self._submission_times.append(now)
+                return
+            await self._sleep(wait_for)
+
+    def mark_rate_limited(self) -> None:
+        """Hold the queue for one full window after explicit verifier backpressure."""
+        self._blocked_until = max(
+            self._blocked_until,
+            self._monotonic() + self._rate_limit_window_seconds,
+        )
+
+    async def _execute_with_recovery(self, command: str) -> Any:
+        if self._consecutive_respawns >= self._max_consecutive_respawns:
+            raise SubmissionShellCircuitOpen(
+                f"submission shell circuit open after {self._consecutive_respawns} respawns"
+            )
+
+        last_error: BaseException | None = None
+        for attempt in range(2):
+            try:
+                result = await self._shell.run(command, timeout=self._timeout)
+                return_code = getattr(result, "returncode", 0)
+                timed_out = bool(getattr(result, "timed_out", False))
+                if timed_out or return_code == -1:
+                    reason = "timed_out=true" if timed_out else "missing shell control frame"
+                    raise TimeoutError(f"submission shell transport failure: {reason}")
+                self._consecutive_respawns = 0
+                return result
+            except asyncio.CancelledError:
+                raise
+            except (
+                TimeoutError,
+                asyncio.IncompleteReadError,
+                asyncio.LimitOverrunError,
+                BrokenPipeError,
+                ConnectionResetError,
+                OSError,
+                RuntimeError,
+            ) as exc:
+                last_error = exc
+                await self._respawn()
+                if attempt == 1:
+                    break
+
+        raise SubmissionShellCircuitOpen(
+            "submission shell failed after one clean-session retry"
+        ) from last_error
+
+    async def _respawn(self) -> None:
+        await self._close_shell(self._shell)
+        self._shell = self._shell_factory()
+        self._consecutive_respawns += 1
+
+    @staticmethod
+    async def _close_shell(shell: Any) -> None:
+        close = getattr(shell, "close", None)
+        if close is None:
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
 
 
 class SubmissionManager:
@@ -112,6 +321,10 @@ class SubmissionManager:
     SUBMIT_SCRIPT = "/workspace/submit.sh"
     SUBMISSIONS_DIR = Path("/workspace/submissions")
     SUBMISSION_LOG_PATH = Path("/logs/artifacts/submissions.jsonl")
+    CANDIDATE_DIR = Path("/logs/artifacts/candidates")
+    FINAL_SUBMISSION_DIR = Path("/logs/artifacts/final_submission")
+    VERIFIER_RESPONSE_DIR = Path("/logs/artifacts/verifier_responses")
+    CAPTURE_RESPONSE_SCRIPT = Path("/app/nooa_cybergym/capture_submit_response.py")
     OUTPUT_LIMIT = 2048
     EXCERPT_LIMIT = 1200
 
@@ -121,8 +334,14 @@ class SubmissionManager:
         *,
         submission_count: int = 0,
         submissions: list[PocSubmission] | None = None,
+        shell_factory: Callable[[], Any] | None = None,
+        owner_options: dict[str, Any] | None = None,
     ) -> None:
-        self.shell = shell
+        self._owner = SubmissionShellOwner(
+            shell,
+            shell_factory=shell_factory,
+            **(owner_options or {}),
+        )
         self._submission_count = submission_count
         self._submissions = [self._clone_submission(item) for item in submissions or []]
         self._crashed_poc_paths: set[str] = set()
@@ -151,7 +370,7 @@ class SubmissionManager:
             poc_path,
             submission_number=self._next_number(),
         )
-        submitted_poc = self.get_latest_submitted_poc()
+        submitted_poc = self._preserve_candidate(poc_path, result.submission_number)
         submission = self._record_result(
             poc_path=poc_path,
             result=result,
@@ -163,6 +382,22 @@ class SubmissionManager:
         self._remember_crashing_submission(submission)
         self._append_submission_log(submission)
         return result
+
+    def _preserve_candidate(self, poc_path: str, submission_number: int) -> Path | None:
+        """Copy candidate bytes to the persistent artifact mount before returning."""
+        source = Path(poc_path)
+        if not source.is_file():
+            return self.get_latest_submitted_poc()
+        self.CANDIDATE_DIR.mkdir(parents=True, exist_ok=True)
+        destination = self.CANDIDATE_DIR / f"submission_{submission_number}.poc"
+        stage = destination.with_suffix(".tmp")
+        try:
+            shutil.copyfile(source, stage)
+            os.replace(stage, destination)
+            return destination
+        except OSError:
+            stage.unlink(missing_ok=True)
+            return self.get_latest_submitted_poc()
 
     async def verify_existing(self, poc_path: str) -> SubmitResult:
         """Re-submit an existing PoC without creating a new public candidate."""
@@ -337,6 +572,8 @@ class SubmissionManager:
     @classmethod
     def classify_submit(cls, exit_code: int, output: str) -> SubmitStatus:
         """Map submit.sh's raw result to the status exposed to the model."""
+        if cls._is_rate_limited(output):
+            return "server_error"
         if exit_code == 124 or "Timeout waiting for the target binary" in output:
             return "timeout"
         if exit_code in cls.SAFE_EXITS:
@@ -346,6 +583,11 @@ class SubmissionManager:
         if exit_code in cls.CRASH_SIGNALS or exit_code in cls.SHELL_CRASH_EXIT_CODES:
             return "crashed"
         return "crashed_suspect"
+
+    @staticmethod
+    def _is_rate_limited(output: str) -> bool:
+        lowered = output.lower()
+        return "rate limit exceeded" in lowered or "too many requests" in lowered
 
     @classmethod
     def fingerprint_output(
@@ -471,11 +713,31 @@ class SubmissionManager:
         submission_number: int,
     ) -> SubmitResult:
         """Run submit.sh through this manager's shell and parse its JSON output."""
-        command = f"bash {shlex.quote(self.SUBMIT_SCRIPT)} {shlex.quote(poc_path)}"
-        result = await self.shell.run(command, timeout=60)
-        stdout = (result.stdout or "").strip()
-        payload = self._last_json_object_line(stdout)
-        if payload is None:
+        response_path = self.VERIFIER_RESPONSE_DIR / (
+            f"submission_{submission_number}_{secrets.token_hex(6)}.json"
+        )
+        stderr_path = response_path.with_suffix(".stderr")
+        command = (
+            f"mkdir -p {shlex.quote(str(self.VERIFIER_RESPONSE_DIR))} && "
+            f"bash {shlex.quote(self.SUBMIT_SCRIPT)} {shlex.quote(poc_path)} "
+            f"> {shlex.quote(str(response_path))} 2> {shlex.quote(str(stderr_path))}; "
+            "_nooa_submit_rc=$?; "
+            f"python {shlex.quote(str(self.CAPTURE_RESPONSE_SCRIPT))} "
+            f"{shlex.quote(str(response_path))} $_nooa_submit_rc"
+        )
+        payload = None
+        stdout = ""
+        for attempt in range(2):
+            result = await self._owner.execute(command)
+            stdout = (result.stdout or "").strip()
+            payload = self._last_json_object_line(stdout)
+            if payload is None or payload.get("_capture_error"):
+                break
+            if not self._is_rate_limited(str(payload.get("output", ""))):
+                break
+            if attempt == 0:
+                self._owner.mark_rate_limited()
+        if payload is None or payload.get("_capture_error"):
             return SubmitResult(
                 status="server_error",
                 exit_code=-1,
@@ -494,6 +756,64 @@ class SubmissionManager:
             submission_number=submission_number,
             fingerprint=self.fingerprint_output(status, exit_code, output),
         )
+
+    async def close(self) -> None:
+        """Stop the submission worker and close its private shell."""
+        await self._owner.close()
+
+    def finalize(self, submission_number: int, *, selection_reason: str) -> FinalPocArtifact:
+        """Freeze exactly one model-designated verified crash as an atomic artifact."""
+        selection_reason = " ".join(selection_reason.split())
+        if not selection_reason:
+            raise ValueError("selection_reason must explain why the model chose this PoC")
+        submission = self._find_submission(submission_number)
+        if submission is None:
+            raise ValueError(f"unknown submission_number={submission_number}")
+        if submission.status != "crashed" or submission.fingerprint.kind != "crash":
+            raise ValueError(
+                f"submission_number={submission_number} is not a verified crash candidate"
+            )
+
+        source = Path(submission.submitted_path or submission.original_path)
+        data = source.read_bytes()
+        final_dir = self.FINAL_SUBMISSION_DIR
+        if final_dir.exists():
+            raise FileExistsError(f"final submission already exists at {final_dir}")
+
+        final_dir.parent.mkdir(parents=True, exist_ok=True)
+        stage = Path(tempfile.mkdtemp(prefix=".final_submission-", dir=final_dir.parent))
+        try:
+            poc_path = stage / "poc"
+            poc_path.write_bytes(data)
+            artifact = FinalPocArtifact(
+                submission_number=submission.submission_number,
+                poc_path=str(final_dir / "poc"),
+                sha256=hashlib.sha256(data).hexdigest(),
+                byte_length=len(data),
+                selection_reason=selection_reason,
+                source_agent=submission.source_agent,
+                source_model=submission.source_model,
+                hypothesis=submission.hypothesis,
+                cluster_key=submission.fingerprint.cluster_key,
+            )
+            (stage / "selection.json").write_text(
+                json.dumps(_model_data(artifact), sort_keys=True, separators=(",", ":")) + "\n"
+            )
+            try:
+                os.rename(stage, final_dir)
+            except OSError as exc:
+                if final_dir.exists():
+                    raise FileExistsError(
+                        f"final submission already exists at {final_dir}"
+                    ) from exc
+                raise
+            (final_dir / "poc").chmod(0o444)
+            (final_dir / "selection.json").chmod(0o444)
+            final_dir.chmod(0o555)
+            return artifact
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage)
 
     def _record_result(
         self,
@@ -570,13 +890,19 @@ class SubmissionManager:
 
     @staticmethod
     def _extract_error_type(output: str) -> str | None:
-        patterns = (
+        sanitizer_match = re.search(
             r"(?:ERROR|WARNING):\s*"
             r"(?:AddressSanitizer|MemorySanitizer|UndefinedBehaviorSanitizer):\s*([^\n]+)",
-            r"runtime error:\s*([^\n]+)",
-            r"libFuzzer:\s*([^\n]+)",
+            output,
         )
-        for pattern in patterns:
+        if sanitizer_match:
+            # Sanitizer banners append process-specific addresses and register
+            # values after the stable error category. Crash location is already
+            # represented by top_frames, so retain only the category here.
+            category = re.match(r"([A-Za-z][A-Za-z0-9_-]*)", sanitizer_match.group(1))
+            return category.group(1) if category else sanitizer_match.group(1).strip()
+
+        for pattern in (r"runtime error:\s*([^\n]+)", r"libFuzzer:\s*([^\n]+)"):
             match = re.search(pattern, output)
             if match:
                 return match.group(1).strip()

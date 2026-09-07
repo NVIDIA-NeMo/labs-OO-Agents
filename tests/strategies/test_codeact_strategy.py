@@ -259,6 +259,43 @@ class TestCodeActStrategySimpleExecution:
         assert replayed_tool_call["reasoning_items"] == [reasoning_item]
 
     @pytest.mark.asyncio
+    async def test_reasoning_content_replayed_with_tool_call_history(self):
+        """Hosted Chat Completions reasoning state survives the CodeAct event pipeline."""
+
+        class TestAgent(Agent, llm=_TEST_LLM):
+            async def compute(self) -> int:
+                """Compute a value."""
+                ...
+
+        first_response = _resp(
+            "", tool_calls=[_tool_call("value = 42\nprint(value)", call_id="call_deepseek")]
+        )
+        first_response.assistant_message["reasoning_content"] = "private chain state"
+        fake_llm = FakeLLMClient(
+            scripted_responses=[
+                first_response,
+                _resp("", tool_calls=[_return_result(result=42)]),
+            ]
+        )
+
+        agent_instance = TestAgent(llm=fake_llm)
+        result = await agent_instance.compute()
+
+        assert result == 42
+        tool_call_event = next(
+            event
+            for event in agent_instance.event_manager.values()
+            if event.event_type == "ToolCallEvent" and event.tool_call_id == "call_deepseek"
+        )
+        assert tool_call_event.reasoning_content == "private chain state"
+        replayed_tool_call = next(
+            message
+            for message in fake_llm.last_messages
+            if message.get("role") == "assistant" and message.get("tool_calls")
+        )
+        assert replayed_tool_call["reasoning_content"] == "private chain state"
+
+    @pytest.mark.asyncio
     async def test_multiple_tool_calls_then_result(self):
         """LLM calling execute_python multiple times before return_result."""
 

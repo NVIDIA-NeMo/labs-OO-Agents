@@ -126,6 +126,10 @@ class EmptyContentError(Exception):
         )
 
 
+class InsufficientSystemResourceError(Exception):
+    """Provider interrupted inference before producing a complete response."""
+
+
 def _calculate_delay(
     attempt: int,
     config: RetryConfig,
@@ -161,6 +165,9 @@ def _is_retryable_error(error: Exception, config: RetryConfig) -> tuple[bool, bo
     """
     # Check for empty content error (if enabled)
     if isinstance(error, EmptyContentError) and config.retry_on_empty_content:
+        return True, False
+
+    if isinstance(error, InsufficientSystemResourceError):
         return True, False
 
     # Prefer the structured status code when the exception exposes one (LiteLLM /

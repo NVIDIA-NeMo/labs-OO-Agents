@@ -300,6 +300,10 @@ class RenderedMessage(BaseModel):
         default=None,
         description="Opaque provider reasoning state associated with an assistant tool call",
     )
+    reasoning_content: str | None = Field(
+        default=None,
+        description="Provider reasoning content associated with an assistant tool call",
+    )
     tool_call_id: str | None = Field(
         default=None, description="Tool-call id this message is a result for"
     )
