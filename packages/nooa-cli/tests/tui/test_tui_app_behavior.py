@@ -640,6 +640,31 @@ async def test_thinking_duration_resets_for_next_turn():
         agent.block.set()
 
 
+async def test_prompt_cancellation_explicitly_repaints_the_composer() -> None:
+    """A cancelled prompt must repaint even when focus was on the overlay."""
+    async with TUIHarness() as h:
+        prompt = asyncio.create_task(h.app.prompt_sensitive("OAuth", "Authorize."))
+        await h.wait_for(lambda: h.app.active_subview is not None)
+
+        invalidated = 0
+        original_invalidate = h.app._app.invalidate
+
+        def count_invalidate() -> None:
+            nonlocal invalidated
+            invalidated += 1
+            original_invalidate()
+
+        h.app._app.invalidate = count_invalidate
+        prompt.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await prompt
+        h.app._app.invalidate = original_invalidate
+
+        assert invalidated >= 1
+        assert h.app.active_subview is None
+        assert h.app._app.layout.current_window is h.app._input_window
+
+
 async def test_fullscreen_oauth_modal_close_restores_one_stable_composer_frame(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.formatted_text import AnyFormattedText
@@ -38,9 +39,25 @@ _TEXT_ACTIONS = {
 _LINK_CLOSE = ("[ZeroWidthEscape]", "\x1b]8;;\x1b\\")
 
 
+def _safe_web_link(value: str | None) -> str | None:
+    """Return a strict HTTP(S) target for a link rendered as clickable.
+
+    ``safe_hyperlink_target`` also accepts ``file://`` URLs, but the only
+    callers here render MCP-provided authorization URLs: require HTTP(S)
+    with a host, and reject Unicode format (Cf) characters outright.
+    """
+    target = safe_hyperlink_target(value)
+    if target is None or strip_format_controls(target) != target:
+        return None
+    parsed = urlsplit(target)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return target
+
+
 def _link_fragments(url: str | None) -> list[tuple[str, str]]:
     """Return visible, clickable OSC-8 fragments for a safe URL."""
-    target = safe_hyperlink_target(url)
+    target = _safe_web_link(url)
     if target is None:
         return [("class:fullscreen-browser.muted", "(URL unavailable — use Ctrl+Y to copy)")]
     return [
@@ -137,9 +154,10 @@ class _InputOverlayBase:
         return ""
 
     def _insert_text(self, value: str) -> None:
-        # A bracketed paste may embed newlines; the single-line buffer cannot
-        # edit them, so collapse whitespace to keep the value usable.
-        self.buffer.insert_text(" ".join(value.split()))
+        # A bracketed paste may embed line breaks the single-line buffer
+        # cannot edit; collapse each line boundary to one space while
+        # preserving ordinary spaces (including a bare space keypress).
+        self.buffer.insert_text(" ".join(value.splitlines()))
 
     def _handle_edit_action(self, action: str, value: str = "") -> bool:
         """Apply shared editing actions; return True when ``action`` matched."""
