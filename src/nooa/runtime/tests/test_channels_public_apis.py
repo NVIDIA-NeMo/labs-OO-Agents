@@ -118,7 +118,13 @@ async def test_daemon_spawn_is_flagged_and_excluded_from_work_handles():
     h_daemon = qm.spawn(_forever(), channel="mesh", daemon=True, label="inbox pump")
     h_work = qm.spawn(_forever(), channel="jobs")
     h_done = qm.spawn(_quick(), channel="jobs")
-    await asyncio.sleep(0.01)  # let _quick finish
+    # Wait for _quick's terminal state instead of a fixed sleep: the quick
+    # job must actually finish before "not in work" can be asserted.
+    for _ in range(1000):
+        if h_done.state != "running":
+            break
+        await asyncio.sleep(0.001)
+    assert h_done.state != "running"
 
     assert h_daemon.daemon is True
     assert h_work.daemon is False

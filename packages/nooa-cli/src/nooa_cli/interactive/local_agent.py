@@ -585,7 +585,8 @@ class LocalAgentRunner:
                 value = self._on_stop_reason(result.kind, explanation)
                 if value is not None:
                     await value
-            running = qm.running_handles()
+            running_work = getattr(qm, "running_work_handles", None)
+            running = running_work() if running_work is not None else qm.running_handles()
             if running:
                 now = datetime.datetime.now().strftime("%H:%M:%S")
                 lines = "".join(f"  ⠿ {h.label}\n" for h in running)
@@ -733,14 +734,10 @@ class LocalAgentRunner:
 
     def has_pending_work(self) -> bool:
         # Daemon handles are long-lived infrastructure producers; only the
-        # output they have already queued counts as pending work. Custom
-        # queue-manager implementations predating running_work_handles()
-        # keep the previous all-running-handles predicate.
-        running_work = getattr(self._queue_manager, "running_work_handles", None)
-        if running_work is not None:
-            if running_work():
-                return True
-        elif self._queue_manager.running_handles():
+        # output they have already queued counts as pending work.
+        from nooa.runtime.channels import has_running_work
+
+        if has_running_work(self._queue_manager):
             return True
         return any(
             name != "user_messages" and channel.mode == "queue" and not channel.is_empty()
