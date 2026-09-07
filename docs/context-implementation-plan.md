@@ -27,3 +27,7 @@ Make `DefaultAgentView` the visible owner of default context assembly while pres
 - Custom views can reuse generic helpers or ignore manager-based sources entirely.
 - Existing behavior and prompt order remain unchanged under the default view.
 - The full verification matrix passes without framework or API errors.
+
+## Status
+
+Steps 1–5 are implemented. Focused tests, repository lint, and type checks pass. Five representative quickstarts pass, the one-sample Claude Haiku capability matrix passes 37/40 with no framework errors, and both custom and default view paths pass live on Nemotron Super v3.

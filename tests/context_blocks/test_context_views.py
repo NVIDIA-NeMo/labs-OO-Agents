@@ -12,11 +12,18 @@ from nooa import (
     ContextView,
     DefaultAgentView,
     DefaultSkillView,
+    DynamicContext,
     Skill,
+    apply_context_budget,
+    collect_context,
+    context_text,
+    evaluate_context_expression,
+    materialize_managed_context,
     resolve_context_view,
     spec,
     strategy,
 )
+from nooa.config.truncation_config import FormatConfig
 from nooa.context_blocks import (
     OpenAIProviderFormatter,
     Role,
@@ -25,7 +32,6 @@ from nooa.context_blocks import (
     render_context,
 )
 from nooa.context_blocks.events import UserEvent
-from nooa.context_view import assemble_context
 from nooa.strategies.current_call import CurrentCall
 
 
@@ -40,11 +46,33 @@ class NamedView:
 
 async def test_assembly_is_stable_and_immutable():
     call = CurrentCall(id="1", method_name="run", decorator="plan")
-    result = await assemble_context(NamedView("one"), object(), call)
+    result = await collect_context(NamedView("one"), object(), call)
     assert isinstance(result, tuple)
     assert [item.key for item in result] == ["one"]
     with pytest.raises(ValidationError):
         result[0].content = "changed"
+
+
+def test_context_text_uses_call_format():
+    call = CurrentCall(
+        id="1",
+        method_name="run",
+        decorator="plan",
+        _context_format=FormatConfig(max_string=5, max_length=5, max_depth=2),
+    )
+    assert "str(len=10" in context_text({"value": "abcdefghij"}, call=call)
+
+
+async def test_expression_helper_binds_the_requested_owner():
+    class Example(Agent, llm=object()):
+        pass
+
+    class Owner:
+        value = "owner"
+
+    agent = Example()
+    call = CurrentCall(id="1", method_name="run", decorator="plan", agent=agent)
+    assert await evaluate_context_expression("self.value", owner=Owner(), call=call) == "owner"
 
 
 def test_agent_resolution_call_method_instance_class():
@@ -170,6 +198,44 @@ async def test_legacy_skill_block_is_materialized_by_default_skill_view():
     assert block.content == "ready"
 
 
+async def test_managed_source_separates_prefix_trailing_and_eviction_order():
+    class Example(Agent, llm=object(), context={"tail": DynamicContext("'tail'")}):
+        async def run(self): ...
+
+    agent = Example()
+    call = CurrentCall(
+        id="1",
+        method_name="run",
+        decorator="plan",
+        agent=agent,
+        _method=Example.run,
+        _context_format=agent._truncation.context_block_format,
+    )
+    prefix, trailing, evictable = await materialize_managed_context(agent, call)
+    assert all(block.metadata.static for block in prefix)
+    assert [block.key for block in trailing][-1] == "tail"
+    assert [block.key for block in evictable][0] == "tail"
+
+
+async def test_default_order_is_prefix_skills_events_trailing():
+    class DeclaredSkill(Skill):
+        context_block = ("skill", "'skill'")
+
+    class Example(Agent, llm=object(), context={"tail": DynamicContext("'tail'")}):
+        skill = DeclaredSkill()
+
+        async def run(self): ...
+
+    agent = Example()
+    event = UserEvent(content="event")
+    agent.event_manager.add(event)
+    items = await agent.runtime._prepare_context(Example.run)
+    skill_index = next(i for i, item in enumerate(items) if getattr(item, "key", None) == "skill")
+    event_index = items.index(event)
+    tail_index = next(i for i, item in enumerate(items) if getattr(item, "key", None) == "tail")
+    assert skill_index < event_index < tail_index
+
+
 async def test_agent_view_controls_exact_skill_placement():
     class DeclaredSkill(Skill):
         context_block = ("skill", "'skill'")
@@ -233,3 +299,79 @@ def test_provider_preserves_or_rejects_layout():
 
 def test_default_agent_view_satisfies_protocol():
     assert isinstance(DefaultAgentView(), ContextView)
+
+
+def test_budget_helper_allows_adaptation_before_budgeting():
+    call = CurrentCall(
+        id="1",
+        method_name="run",
+        decorator="plan",
+        model="special/model",
+        context_budget=3,
+        _context_token_counter=len,
+    )
+    original = Block(key="prompt", content="too long")
+    adapted = original.model_copy(update={"content": "ok"})
+    assert apply_context_budget((adapted,), call=call, evictable=(adapted,)) == (adapted,)
+
+
+async def test_current_call_exposes_call_overridden_model_and_budget():
+    from nooa.runtime.actor import (
+        _current_call_var,
+        _current_context_view_var,
+        _current_llm_var,
+    )
+
+    captured: list[CurrentCall] = []
+
+    class CaptureView:
+        async def assemble(self, owner, call):
+            captured.append(call)
+            yield Block(key="capture", content="capture")
+
+    class LLM:
+        def __init__(self, model, window):
+            self.model = model
+            self.context_window = window
+
+    class Example(Agent, llm=LLM("agent/model", 100)):
+        async def run(self) -> str: ...
+
+    agent = Example()
+    resolved_call = CurrentCall(
+        id="1",
+        method_name="run",
+        decorator="plan",
+        agent=agent,
+        model="call/model",
+        provider="call",
+        context_window=300,
+    )
+    tokens = (
+        (_current_call_var, _current_call_var.set(resolved_call)),
+        (_current_context_view_var, _current_context_view_var.set(CaptureView())),
+        (_current_llm_var, _current_llm_var.set(LLM("call/model", 300))),
+    )
+    try:
+        await agent.runtime._prepare_context(Example.run, context_limit=17, count_tokens=len)
+    finally:
+        for variable, token in reversed(tokens):
+            variable.reset(token)
+
+    call = captured[-1]
+    assert (call.model, call.provider, call.context_window, call.context_budget) == (
+        "call/model",
+        "call",
+        300,
+        17,
+    )
+
+
+def test_default_view_has_no_runtime_assembly_dependency():
+    import inspect
+
+    from nooa.runtime.actor import ActorRuntime
+
+    source = inspect.getsource(DefaultAgentView)
+    assert "owner.runtime" not in source
+    assert "_assemble_default_context" not in vars(ActorRuntime)

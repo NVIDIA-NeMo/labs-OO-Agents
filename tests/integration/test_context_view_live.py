@@ -11,7 +11,7 @@ import pytest
 from dotenv import find_dotenv, load_dotenv
 from pydantic import BaseModel
 
-from nooa import Agent, Block, DefaultSkillView, Skill, resolve_context_view, strategy
+from nooa import Agent, Block, Context, DefaultSkillView, Skill, resolve_context_view, strategy
 from nooa.context_blocks.events import UserEvent
 from nooa.strategies import PredictStrategy
 from nooa.unifiedllm import get_llm_client
@@ -68,6 +68,32 @@ class InventoryAgent(Agent, context_view=InventoryView()):
         ...
 
 
+class DefaultInventoryPolicy(Skill):
+    context_block = ("inventory_policy", "self.inventory_policy_text()")
+
+
+class DefaultInventoryAgent(Agent):
+    policy = DefaultInventoryPolicy()
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.context["inventory_state"] = Context(expr="self.inventory_state()")
+
+    def inventory_policy_text(self) -> str:
+        return (
+            "Policy SKILL_DENY_MISSING: can_fulfill is false when any requested "
+            "item has quantity zero; include each such item in missing."
+        )
+
+    def inventory_state(self) -> dict[str, int]:
+        return {"apple": 3, "orange": 0}
+
+    @strategy(PredictStrategy())
+    async def decide(self, inventory: dict[str, int]) -> Decision:
+        """Apply the inventory policy and return the decision."""
+        ...
+
+
 @pytest.mark.asyncio
 async def test_context_view_end_to_end_on_nemotron_super_v3(monkeypatch):
     monkeypatch.setenv("OTLP_ENDPOINT", "http://127.0.0.1:1/v1/traces")
@@ -89,6 +115,37 @@ async def test_context_view_end_to_end_on_nemotron_super_v3(monkeypatch):
         "event",
         "request",
     ]
+
+    result = await agent.decide(inventory)
+    assert result == Decision(
+        can_fulfill=False,
+        missing=["orange"],
+        policy="SKILL_DENY_MISSING",
+    )
+
+
+@pytest.mark.asyncio
+async def test_default_views_end_to_end_on_nemotron_super_v3(monkeypatch):
+    monkeypatch.setenv("OTLP_ENDPOINT", "http://127.0.0.1:1/v1/traces")
+    key = os.getenv("NVIDIA_INFERENCE_API_KEY") or os.environ["NVIDIA_INTERNAL_API_KEY"]
+    llm = get_llm_client(
+        "openai/nvidia/nvidia/nemotron-3-super-v3",
+        api_base="https://inference-api.nvidia.com/v1",
+        api_key=key,
+        max_tokens=512,
+        temperature=0,
+    )
+    agent = DefaultInventoryAgent(llm=llm)
+    inventory = {"apple": 3, "orange": 0}
+
+    assembled = await agent.runtime._prepare_context(
+        DefaultInventoryAgent.decide, call_args=(inventory,)
+    )
+    keys = [getattr(item, "key", "event") for item in assembled]
+    assert keys.index("inventory_policy") < keys.index("inventory_state")
+    assert next(
+        item for item in assembled if getattr(item, "key", None) == "inventory_state"
+    ).content == ("{'apple': 3, 'orange': 0}")
 
     result = await agent.decide(inventory)
     assert result == Decision(

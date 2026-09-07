@@ -26,7 +26,7 @@ class ContextView[Owner](Protocol):
 
 `Block.content` is materialized. Events remain typed. The runtime collects the selected view into an immutable `tuple[Block | EventBase, ...]` before rendering. No additional assembled-context type is needed.
 
-`CurrentCall` is the immutable invocation snapshot. In addition to method inputs and the resolved strategy and event query, context views may read the resolved `model`, `provider`, `context_window`, and `context_budget`. It contains no LLM client or credentials.
+`CurrentCall` is the immutable invocation snapshot. In addition to method inputs and the resolved strategy and event query, context views may read the resolved `model`, `provider`, `context_window`, and `context_budget`. Internal formatting and token-counting data support the helpers. It contains no LLM client or credentials.
 
 ## Resolution
 
@@ -162,4 +162,4 @@ Do not introduce `BlockSpec`, a separate assembled-context object, or permanent 
 
 ## Status
 
-Partially implemented. View resolution, typed assembly, order-preserving rendering, skill views, and compatibility behavior work. `DefaultAgentView` still delegates its policy to `ActorRuntime`; the remaining refactor is described in `docs/context-implementation-plan.md`.
+Implemented on this branch as a proof of concept. `DefaultAgentView` owns assembly policy; `ActorRuntime` only resolves the call and view, collects the tuple, renders it, and invokes the model.

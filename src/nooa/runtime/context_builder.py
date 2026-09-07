@@ -197,6 +197,27 @@ class BuildResult(NamedTuple):
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
+async def build_managed_context(
+    *,
+    context_manager: "ContextManager",
+    strategy: "GenerationStrategy | None",
+    resolve_fn: ResolveFunc,
+    decorator_context: dict[str, Any] | None = None,
+    scoped_context: dict[str, Any] | None = None,
+    context_block_format: "FormatConfig | None" = None,
+) -> BuildResult:
+    """Materialize manager-backed blocks without choosing event placement."""
+    blocks, resolved_cache = await _phase_persistent_blocks(
+        [], context_manager, resolve_fn, context_block_format=context_block_format
+    )
+    disabled_keys = context_manager.disabled()
+    blocks = await _phase_strategy_overrides(blocks, strategy, resolve_fn, disabled_keys)
+    blocks = await _phase_decorator_context(blocks, decorator_context, resolve_fn, disabled_keys)
+    blocks = await _phase_scoped_blocks(blocks, scoped_context, resolve_fn, disabled_keys)
+    blocks = _reorder_blocks(blocks, strategy)
+    return BuildResult(blocks=blocks, resolved_cache=resolved_cache)
+
+
 async def build_context(
     *,
     context_manager: "ContextManager",
@@ -242,30 +263,18 @@ async def build_context(
     Returns:
         BuildResult with blocks and resolved_cache.
     """
-    blocks: list[ResolvedBlock] = []
-
-    # --- All persistent blocks (protected framework blocks + user blocks) ---
-    blocks, resolved_cache = await _phase_persistent_blocks(
-        blocks, context_manager, resolve_fn, context_block_format=context_block_format
+    managed = await build_managed_context(
+        context_manager=context_manager,
+        strategy=strategy,
+        resolve_fn=resolve_fn,
+        decorator_context=decorator_context,
+        scoped_context=scoped_context,
+        context_block_format=context_block_format,
     )
-
-    disabled_keys = context_manager.disabled()
-
-    # --- Strategy block overrides ---
-    blocks = await _phase_strategy_overrides(blocks, strategy, resolve_fn, disabled_keys)
-
-    # --- @strategy(context=...) decorator overrides ---
-    blocks = await _phase_decorator_context(blocks, decorator_context, resolve_fn, disabled_keys)
-
-    # --- Scoped context blocks ---
-    blocks = await _phase_scoped_blocks(blocks, scoped_context, resolve_fn, disabled_keys)
-
-    # --- Strategy block reordering (between content phases and events) ---
-    blocks = _reorder_blocks(blocks, strategy)
 
     # --- Events (with optional filtering via EventQuery) ---
     blocks = _phase_events(
-        blocks,
+        managed.blocks,
         event_manager,
         runtime_event_query=runtime_event_query,
         scoped_event_query=scoped_event_query,
@@ -274,7 +283,7 @@ async def build_context(
         current_call_id=current_call_id,
     )
 
-    return BuildResult(blocks=blocks, resolved_cache=resolved_cache)
+    return BuildResult(blocks=blocks, resolved_cache=managed.resolved_cache)
 
 
 async def _phase_persistent_blocks(

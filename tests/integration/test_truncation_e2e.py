@@ -30,9 +30,10 @@ from nooa.context_blocks import BlockMetadata, ResolvedBlock, Role
 from nooa.context_blocks.events import ResultStatus
 from nooa.context_blocks.formatter import XMLBlockFormatter
 from nooa.context_blocks.renderer import render_context
-from nooa.context_view import _apply_default_budget
+from nooa.context_view import _MaterializedBlock, apply_context_budget
 from nooa.events import PythonOutput
 from nooa.runtime.actor import _current_llm_var
+from nooa.strategies.current_call import CurrentCall
 from nooa.unifiedllm import FakeLLMClient
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -109,7 +110,30 @@ def _count_tokens(text: str) -> int:
 
 
 def _render_default_budget(blocks, limit):
-    budgeted, dropped = _apply_default_budget(blocks, limit, _count_tokens)
+    items = tuple(
+        _MaterializedBlock(
+            key=block.key,
+            content=block.content,
+            role=block.role,
+            metadata=block.metadata,
+        )
+        for block in blocks
+    )
+    evictable = tuple(
+        block
+        for user_only in (True, False)
+        for block in reversed(items)
+        if not block.metadata.static and block.metadata.user_block is user_only
+    )
+    call = CurrentCall(
+        id="test",
+        method_name="test",
+        decorator="plan",
+        context_budget=limit,
+        _context_token_counter=_count_tokens,
+    )
+    budgeted = apply_context_budget(items, call=call, evictable=evictable)
+    dropped = sum(block.metadata.truncated for block in budgeted)
     return render_context(
         budgeted,
         block_formatter=XMLBlockFormatter(),

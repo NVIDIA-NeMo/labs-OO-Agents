@@ -16,18 +16,12 @@ import types
 import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
-from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast, get_type_hints
 from uuid import uuid4
 
 from nooa.agentdoc import FileBackedTruncatingStringIO, TruncatingStringIO
 from nooa.agentdoc.introspect import methods, variables
-from nooa.context_blocks import (
-    DynamicContext,
-    ResolvedBlock,
-    Role,
-    render_context,
-)
+from nooa.context_blocks import render_context
 from nooa.context_blocks.scoped import _scoped_blocks_var, _scoped_events_var
 
 if TYPE_CHECKING:
@@ -61,6 +55,22 @@ from nooa.runtime.hooks import call_after_hook, call_before_hook
 logger = logging.getLogger(__name__)
 
 _MISSING = object()
+
+
+def _provider_for_llm(llm_client: Any) -> str | None:
+    """Resolve provider metadata without exposing client configuration."""
+    provider = getattr(llm_client, "provider", None)
+    if provider:
+        return str(provider)
+    config = getattr(llm_client, "config", None)
+    if isinstance(config, dict):
+        configured = config.get("custom_llm_provider") or config.get("provider")
+        if configured:
+            return str(configured)
+    model = getattr(llm_client, "model", None)
+    if not model:
+        return None
+    return model.split("/", 1)[0] if "/" in model else None
 
 
 @contextmanager
@@ -421,15 +431,6 @@ _current_strategy_var: contextvars.ContextVar[Any] = contextvars.ContextVar(
 # Complete context view selected for the current generation call.
 _current_context_view_var: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "current_context_view", default=None
-)
-_current_context_limit_var: contextvars.ContextVar[int | None] = contextvars.ContextVar(
-    "current_context_limit", default=None
-)
-_current_context_count_var: contextvars.ContextVar[Any] = contextvars.ContextVar(
-    "current_context_count", default=None
-)
-_prepared_context_dropped_var: contextvars.ContextVar[int] = contextvars.ContextVar(
-    "prepared_context_dropped", default=0
 )
 
 # Context variable for inherited decorator context.
@@ -2686,6 +2687,21 @@ class ActorRuntime:
                 # _prepare_context uses _agent_call_id (the stack value) for
                 # EventQuery.current_call() filtering, not current_call.id.
                 call_id = self._agent_call_id or str(uuid4())
+
+                # Snapshot inherited + local context before CurrentCall is built.
+                parent_ctx = _decorator_context_var.get()
+                own_ctx = getattr(getattr(method, "__func__", method), "_strategy_context", None)
+                merged_ctx: dict[str, Any] | None = None
+                if parent_ctx or own_ctx:
+                    merged_ctx = {**(parent_ctx or {}), **(own_ctx or {})}
+
+                event_query = (
+                    self.agent.event_manager.get_event_query()
+                    or _scoped_events_var.get()
+                    or getattr(base_method, "_strategy_events", None)
+                    or _decorator_events_var.get()
+                    or getattr(self.agent, "event_query", None)
+                )
                 call = CurrentCall(
                     id=call_id,
                     method_name=method_name,
@@ -2706,13 +2722,15 @@ class ActorRuntime:
                     param_names=[p for p in sig.parameters if p != "self"],
                     agent=self.agent,
                     strategy=strategy,
-                    event_query=(
-                        self.agent.event_manager.get_event_query()
-                        or _scoped_events_var.get()
-                        or getattr(base_method, "_strategy_events", None)
-                        or _decorator_events_var.get()
-                        or getattr(self.agent, "event_query", None)
-                    ),
+                    event_query=event_query,
+                    model=llm_model_name or None,
+                    provider=_provider_for_llm(llm_client),
+                    context_window=getattr(llm_client, "context_window", None),
+                    _context_format=resolved_truncation.context_block_format,
+                    _method=method,
+                    _decorator_context=merged_ctx,
+                    _scoped_context=_scoped_blocks_var.get(),
+                    _context_call_id=call_id,
                 )
 
                 # Store current call context in context vars for RuntimeServices.generate()
@@ -2730,17 +2748,6 @@ class ActorRuntime:
                 )
                 context_view_token = _current_context_view_var.set(selected_context_view)
 
-                # Propagate decorator context to nested calls:
-                # merge parent's inherited context with this method's @strategy(context={...})
-                parent_ctx = _decorator_context_var.get()
-                own_ctx = getattr(getattr(method, "__func__", method), "_strategy_context", None)
-                merged_ctx: dict[str, Any] | None = None
-                if parent_ctx or own_ctx:
-                    merged_ctx = {}
-                    if parent_ctx:
-                        merged_ctx.update(parent_ctx)
-                    if own_ctx:
-                        merged_ctx.update(own_ctx)
                 decorator_ctx_token = _decorator_context_var.set(merged_ctx)
 
                 # Propagate decorator events to nested calls:
@@ -2856,192 +2863,6 @@ class ActorRuntime:
             # Fallback to simple indentation if tokenization fails
             return "\n".join(indent + line for line in lines)
 
-    async def _prepare_legacy_context(
-        self,
-        method: Any,
-        call_args: tuple[Any, ...] = (),
-        call_kwargs: dict[str, Any] | None = None,
-    ) -> list[ResolvedBlock]:
-        """Gather all blocks, resolve DynamicContext values, return list[ResolvedBlock].
-
-        Thin wrapper around context_builder.build_context() that constructs
-        the resolve function and strategy from the current runtime state.
-
-        DynamicContext expression errors are displayed inline in the block content
-        (not raised), so a single broken expression doesn't crash the whole
-        context build.
-
-        Args:
-            method: Method being generated
-            call_args: Current call positional arguments
-            call_kwargs: Current call keyword arguments
-
-        Returns:
-            Ordered list of ResolvedBlock ready for render_context()
-        """
-        from nooa.runtime.context_builder import build_context
-
-        tc = self.agent._truncation
-        call_kwargs = call_kwargs or {}
-
-        # Get current strategy
-        strategy = getattr(method, "_plan_strategy", None)
-        if strategy is None:
-            strategy = _current_strategy_var.get()
-
-        # Build evaluation context for DynamicContext expressions
-        extra_context = {
-            "method": method,
-            "call_args": call_args,
-            "call_kwargs": call_kwargs,
-            "strategy": strategy,
-            "datetime": datetime,
-            "runtime": self,
-        }
-
-        # Hoist the format kwargs out of the resolve loop — same FormatConfig for
-        # every block this turn, no need to re-dump per resolve.
-        ctx_block_kwargs = tc.context_block_format.model_dump()
-
-        async def _resolve_value(key: str, value: str | DynamicContext) -> str:
-            """Resolve a value (static str or DynamicContext) to a string.
-
-            Errors are displayed inline as "ExceptionType: message" so the
-            LLM can see and fix the problem. Unlike codeact errors (which
-            include full tracebacks), context block errors omit tracebacks
-            because the source is a short expression, not user-written code.
-            """
-            if isinstance(value, DynamicContext):
-                try:
-                    result = await self.evaluate_expression(
-                        value.expr, extra_context=extra_context, error_mode="raise"
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "DynamicContext block %r failed to resolve: %s: %s (expr: %s)",
-                        key,
-                        type(e).__name__,
-                        e,
-                        value.expr,
-                    )
-                    return f"{type(e).__name__}: {e}"
-                if result is None:
-                    return "None"
-                if isinstance(result, str):
-                    return result
-                from nooa.agentdoc import pformat as _pformat_value
-
-                return _pformat_value(result, unquote_strings=True, **ctx_block_kwargs)
-            return value
-
-        build_result = await build_context(
-            context_manager=self.agent.context_manager,
-            event_manager=self.agent.event_manager,
-            strategy=strategy,
-            resolve_fn=_resolve_value,
-            decorator_context=_decorator_context_var.get(),
-            scoped_context=_scoped_blocks_var.get(),
-            runtime_event_query=self.agent.event_manager.get_event_query(),
-            decorator_event_query=_decorator_events_var.get(),
-            scoped_event_query=_scoped_events_var.get(),
-            agent_event_query=getattr(self.agent, "event_query", None),
-            current_call_id=self._agent_call_id,
-            context_block_format=tc.context_block_format,
-        )
-
-        # Apply the resolved cache (the only side effect)
-        self.agent.context_manager._update_resolved(build_result.resolved_cache)
-
-        return build_result.blocks
-
-    async def _materialize_skill_context_block(
-        self,
-        key: str,
-        expression: str,
-        call: Any,
-    ) -> Any:
-        """Materialize one legacy skill declaration without manager mutation."""
-        from nooa.agentdoc import pformat as _pformat_value
-        from nooa.context_view import _MaterializedBlock
-
-        try:
-            value = await self.evaluate_expression(
-                expression,
-                extra_context={"call": call, "strategy": call.strategy, "runtime": self},
-                error_mode="raise",
-            )
-        except Exception as exc:
-            logger.warning(
-                "Skill context block %r failed to resolve: %s: %s",
-                key,
-                type(exc).__name__,
-                exc,
-            )
-            content = f"{type(exc).__name__}: {exc}"
-        else:
-            if isinstance(value, str):
-                content = value
-            else:
-                kwargs = self.truncation_config.context_block_format.model_dump()
-                content = _pformat_value(value, unquote_strings=True, **kwargs)
-
-        return _MaterializedBlock(key=key, content=content)
-
-    async def _assemble_default_context(self, call: Any):
-        """Assemble legacy state through the explicit default view policy."""
-        from nooa.context_view import (
-            DefaultSkillView,
-            _apply_default_budget,
-            _MaterializedBlock,
-            resolve_context_view,
-        )
-
-        method = _current_method_var.get()
-        blocks = await self._prepare_legacy_context(method, call.args, call.kwargs)
-
-        context_blocks = [block for block in blocks if block.event is None]
-        context_limit = _current_context_limit_var.get()
-        count_tokens = _current_context_count_var.get()
-        if context_limit is not None and count_tokens is not None:
-            context_blocks, dropped = _apply_default_budget(
-                context_blocks, context_limit, count_tokens
-            )
-            _prepared_context_dropped_var.set(dropped)
-        else:
-            _prepared_context_dropped_var.set(0)
-
-        prefix = [block for block in context_blocks if block.metadata.static]
-        trailing = [block for block in context_blocks if not block.metadata.static]
-
-        for block in prefix:
-            yield _MaterializedBlock(
-                key=block.key,
-                content=block.content,
-                role=block.role,
-                metadata=block.metadata,
-            )
-
-        active_skills = getattr(self.agent, "active_skills", lambda: ())
-        for skill in active_skills():
-            view = resolve_context_view(skill, default=DefaultSkillView())
-            async for item in view.assemble(skill, call):
-                yield item
-
-        for block in blocks:
-            if block.event is not None and block.role not in (
-                Role.RUNTIME_EVENT,
-                Role.METADATA,
-            ):
-                yield block.event
-
-        for block in trailing:
-            yield _MaterializedBlock(
-                key=block.key,
-                content=block.content,
-                role=Role.USER,
-                metadata=block.metadata,
-            )
-
     async def _prepare_context(
         self,
         method: Any,
@@ -3052,13 +2873,13 @@ class ActorRuntime:
         count_tokens: Callable[[str], int] | None = None,
     ) -> Any:
         """Collect the selected view into one immutable context tuple."""
-        from nooa.context_view import DefaultAgentView, assemble_context, resolve_context_view
+        from dataclasses import replace
+
+        from nooa.context_view import DefaultAgentView, collect_context, resolve_context_view
         from nooa.strategies.current_call import CurrentCall
 
         call = _current_call_var.get()
         if call is None:
-            from dataclasses import replace
-
             try:
                 base_call = CurrentCall.from_method(method, call_args, call_kwargs or {})
             except (OSError, TypeError):
@@ -3069,24 +2890,62 @@ class ActorRuntime:
                     args=call_args,
                     kwargs=call_kwargs or {},
                 )
-            call = replace(
-                base_call,
-                agent=self.agent,
-                strategy=_current_strategy_var.get(),
+        else:
+            base_call = call
+
+        base_method = getattr(method, "__func__", method)
+        parent_context = _decorator_context_var.get()
+        own_context = getattr(base_method, "_strategy_context", None)
+        decorator_context = base_call._decorator_context
+        if decorator_context is None and (parent_context or own_context):
+            decorator_context = {**(parent_context or {}), **(own_context or {})}
+
+        strategy = base_call.strategy or getattr(base_method, "_plan_strategy", None)
+        strategy = strategy or _current_strategy_var.get()
+        llm_client = _current_llm_var.get() or getattr(self.agent, "_llm", None)
+        model = base_call.model or getattr(llm_client, "model", None)
+        context_window = base_call.context_window
+        if context_window is None:
+            context_window = getattr(llm_client, "context_window", None)
+        context_format = base_call._context_format
+        if context_format is None:
+            current_truncation = _current_truncation_config_var.get()
+            context_format = (
+                current_truncation.context_block_format
+                if current_truncation is not None
+                else self.agent._truncation.context_block_format
             )
+
+        event_query = base_call.event_query or (
+            self.agent.event_manager.get_event_query()
+            or _scoped_events_var.get()
+            or getattr(base_method, "_strategy_events", None)
+            or _decorator_events_var.get()
+            or getattr(self.agent, "event_query", None)
+        )
+        call = replace(
+            base_call,
+            agent=self.agent,
+            strategy=strategy,
+            event_query=event_query,
+            model=model,
+            provider=base_call.provider or _provider_for_llm(llm_client),
+            context_window=context_window,
+            context_budget=(
+                context_limit if context_limit is not None else base_call.context_budget
+            ),
+            _context_format=context_format,
+            _context_token_counter=count_tokens or base_call._context_token_counter,
+            _method=method,
+            _decorator_context=decorator_context,
+            _scoped_context=base_call._scoped_context or _scoped_blocks_var.get(),
+            _context_call_id=base_call._context_call_id or self._agent_call_id or base_call.id,
+        )
 
         view = _current_context_view_var.get()
         if view is None:
             view = resolve_context_view(self.agent, default=DefaultAgentView())
-
-        limit_token = _current_context_limit_var.set(context_limit)
-        count_token = _current_context_count_var.set(count_tokens)
-        _prepared_context_dropped_var.set(0)
-        try:
-            return await assemble_context(view, self.agent, call)
-        finally:
-            _current_context_limit_var.reset(limit_token)
-            _current_context_count_var.reset(count_token)
+        return await collect_context(view, self.agent, call)
 
     async def _build_messages(
         self,
@@ -3164,7 +3023,11 @@ class ActorRuntime:
                 context_limit=effective_context_limit,
                 count_tokens=count_tokens,
             )
-        context_blocks_dropped = _prepared_context_dropped_var.get()
+        from nooa.context_view import _MaterializedBlock
+
+        context_blocks_dropped = sum(
+            isinstance(block, _MaterializedBlock) and block.metadata.truncated for block in blocks
+        )
 
         with hm.timer("time_render_context"):
             provider_formatter = _resolve_provider_formatter(
