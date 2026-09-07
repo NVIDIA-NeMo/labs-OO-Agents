@@ -271,7 +271,21 @@ class TUIRuntimeRegistration:
 
 
 def reexec_tui(argv: list[str]) -> None:
-    """Replace the current process with its recorded Python invocation."""
+    """Replace the current process with its recorded Python invocation.
+
+    The restart signal is set to SIG_IGN before exec: an *ignored*
+    disposition survives ``exec``, so a racing or duplicate SIGUSR1 can
+    neither kill the process in the window after the handler is removed
+    (the default action for SIGUSR1 is terminate) nor hit the freshly
+    exec'd boot before it installs its real handler — that second signal
+    is exactly what produced restart chains that drained twice and then
+    died. The new boot re-arms the real handler during startup.
+    """
     if not argv:
         raise ValueError("restart argv must not be empty")
+    try:
+        if hasattr(signal, "SIGUSR1"):
+            signal.signal(signal.SIGUSR1, signal.SIG_IGN)
+    except (OSError, ValueError):
+        pass  # best-effort; the fresh boot re-arms its own handler anyway
     os.execvp(argv[0], argv)
