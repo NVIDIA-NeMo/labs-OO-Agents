@@ -1315,11 +1315,10 @@ async def test_restart_drain_re_cancels_daemons_spawned_during_turn() -> None:
     output forever.
     """
     from types import SimpleNamespace
-    from unittest.mock import Mock
-
-    from nooa.runtime.channels import QueueManager
 
     from nooa_cli.tui.session import Session
+
+    from nooa.runtime.channels import QueueManager
 
     session = Session.__new__(Session)
     session._restart_pending = True
@@ -1363,11 +1362,7 @@ async def test_restart_drain_re_cancels_daemons_spawned_during_turn() -> None:
                 AgentRunner.is_quiescent = False  # queued output = busy
                 return await fn()
             late = spawned_during_drain["handle"]
-            if (
-                late is not None
-                and late.state == "cancelled"
-                and AgentRunner.is_quiescent is False
-            ):
+            if late is not None and late.state == "cancelled" and AgentRunner.is_quiescent is False:
                 # The dispatcher consumes the orphaned output once the
                 # producer is gone; only then is the runner quiescent.
                 qm.get_channel("mesh").drain()
