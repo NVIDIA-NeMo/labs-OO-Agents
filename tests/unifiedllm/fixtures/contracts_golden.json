@@ -45,9 +45,9 @@
     },
     "capabilities_openai": {
       "capture_kinds": [
-        "text",
         "opaque",
-        "checkpoint"
+        "checkpoint",
+        "text"
       ],
       "native_replay_kinds": [
         "opaque",
@@ -70,7 +70,7 @@
   "schema_version": 1,
   "schemas": {
     "ProviderIdentity": {
-      "description": "Versioned provider identity, independent of transport routing strings.\n\nendpoint_id and account_scope\nare non-secret fingerprints (never raw credentials).  transport is\n*not* part of replay compatibility, so it is excluded from\nderive_opaque_replay_key.",
+      "description": "Logical provider identity, independent of transport routing strings.\n\nOwned by NOOA rather than borrowed from a transport library (litellm or a\nsuccessor) because the two answer different questions. litellm parses a\nrouting string to pick *where to send the request*; that parsing is\ntransport-specific, mutable across library versions, and confuses gateway\nroutes with providers \u2014 an ``openai/`` prefix in a routed id is not\nevidence the model is served by OpenAI. This identity answers *who\nproduced a stored artifact and who may receive it back*: it is stamped\nonce at the adapter edge, persisted alongside captured reasoning, and\ncompared long after the original request. Making that durable,\nprovider-independent, and testable in isolation is why it lives here.\n\nendpoint_id and account_scope are non-secret fingerprints (never raw\ncredentials).  transport is *not* part of replay compatibility, so it is\nexcluded from derive_opaque_replay_key.",
       "properties": {
         "provider": {
           "title": "Provider",
@@ -168,7 +168,7 @@
           ]
         },
         "ProviderIdentity": {
-          "description": "Versioned provider identity, independent of transport routing strings.\n\nendpoint_id and account_scope\nare non-secret fingerprints (never raw credentials).  transport is\n*not* part of replay compatibility, so it is excluded from\nderive_opaque_replay_key.",
+          "description": "Logical provider identity, independent of transport routing strings.\n\nOwned by NOOA rather than borrowed from a transport library (litellm or a\nsuccessor) because the two answer different questions. litellm parses a\nrouting string to pick *where to send the request*; that parsing is\ntransport-specific, mutable across library versions, and confuses gateway\nroutes with providers \u2014 an ``openai/`` prefix in a routed id is not\nevidence the model is served by OpenAI. This identity answers *who\nproduced a stored artifact and who may receive it back*: it is stamped\nonce at the adapter edge, persisted alongside captured reasoning, and\ncompared long after the original request. Making that durable,\nprovider-independent, and testable in isolation is why it lives here.\n\nendpoint_id and account_scope are non-secret fingerprints (never raw\ncredentials).  transport is *not* part of replay compatibility, so it is\nexcluded from derive_opaque_replay_key.",
           "properties": {
             "provider": {
               "title": "Provider",

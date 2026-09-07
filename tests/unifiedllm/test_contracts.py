@@ -292,6 +292,29 @@ def test_compat_group_requires_declared_membership() -> None:
     assert compat_group_for("openai", "claude-sonnet-4-5") is None
 
 
+def test_injected_compat_groups_are_case_normalized() -> None:
+    """Callers passing their own groups mapping get the same case handling
+    as register_compat_group: mixed-case members must still match."""
+    injected = {
+        "custom-openai": ModelCompatGroup(
+            name="custom-openai",
+            provider="OpenAI",
+            models=frozenset({"GPT-5.6-SOL"}),
+        )
+    }
+    # Mixed-case provider and model both resolve through the injected mapping.
+    group = compat_group_for("openai", "gpt-5.6-sol", groups=injected)
+    assert group is not None and group.name == "custom-openai"
+    # And key derivation honors the injected (mixed-case) declaration.
+    key = derive_opaque_replay_key(
+        provider="openai",
+        api_style="responses",
+        model="gpt-5.6-sol",
+        compat_groups=injected,
+    )
+    assert key is not None
+
+
 def test_register_compat_group_overrides_default() -> None:
     group = ModelCompatGroup(
         name="openai-gpt-5",

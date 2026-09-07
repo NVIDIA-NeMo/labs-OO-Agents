@@ -61,11 +61,15 @@ __all__ = [
     "register_reasoning_capabilities",
 ]
 
-#: NOOA-owned recursive JSON value type.  Provider objects are converted to
-#: this shape at the adapter edge; no SDK object ever persists.
-#: PEP 695 recursive alias: the old-style ``JsonValue = list["JsonValue"]``
-#: assignment form recurses infinitely under Pydantic 2.x schema generation,
-#: so this requires pydantic>=2.11.
+#: Recursive JSON value.  Provider objects are converted to this shape at
+#: the adapter edge so no SDK object ever persists or crosses the boundary.
+#:
+#: Defined here because neither Python nor Pydantic ships one: ``json`` is a
+#: (de)serializer, not a type; ``typing.Any`` validates nothing; and the
+#: old-style recursive alias (``JsonValue = list["JsonValue"]``) recurses
+#: infinitely under Pydantic 2.x schema generation.  The PEP 695 ``type``
+#: statement is the one recursive form Pydantic supports as a field
+#: annotation, which is why this module requires pydantic>=2.11.
 type JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 
 #: Version tag mixed into every opaque replay key: when the normalization
@@ -95,12 +99,22 @@ RedactionClass = Literal["opaque", "plain_reasoning"]
 
 
 class ProviderIdentity(BaseModel):
-    """Versioned provider identity, independent of transport routing strings.
+    """Logical provider identity, independent of transport routing strings.
 
-    endpoint_id and account_scope
-    are non-secret fingerprints (never raw credentials).  transport is
-    *not* part of replay compatibility, so it is excluded from
-    derive_opaque_replay_key.
+    Owned by NOOA rather than borrowed from a transport library (litellm or a
+    successor) because the two answer different questions. litellm parses a
+    routing string to pick *where to send the request*; that parsing is
+    transport-specific, mutable across library versions, and confuses gateway
+    routes with providers — an ``openai/`` prefix in a routed id is not
+    evidence the model is served by OpenAI. This identity answers *who
+    produced a stored artifact and who may receive it back*: it is stamped
+    once at the adapter edge, persisted alongside captured reasoning, and
+    compared long after the original request. Making that durable,
+    provider-independent, and testable in isolation is why it lives here.
+
+    endpoint_id and account_scope are non-secret fingerprints (never raw
+    credentials).  transport is *not* part of replay compatibility, so it is
+    excluded from derive_opaque_replay_key.
     """
 
     provider: str  # openai, anthropic, moonshot, zai, ...
@@ -387,11 +401,15 @@ def compat_group_for(
     registry = _COMPAT_GROUPS if groups is None else groups
     provider_key = provider.lower()
     model_key = model.lower()
+    # Members are lowercased at comparison time so injected mappings match
+    # regardless of how they were constructed (register_compat_group also
+    # normalizes on write; this covers callers passing their own mapping).
     matches = sorted(
         (
             group
             for group in registry.values()
-            if group.provider.lower() == provider_key and model_key in group.models
+            if group.provider.lower() == provider_key
+            and model_key in {m.lower() for m in group.models}
         ),
         key=lambda group: group.name,
     )
