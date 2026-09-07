@@ -310,7 +310,14 @@ class OAuthHandler:
             return
         received = (params.get("state") or [None])[0]
         expected = self._authorization_state
-        if expected is None or received is None or not secrets.compare_digest(received, expected):
+        # compare_digest rejects non-ASCII str (a callback URL can percent-
+        # decode to anything), so compare bytes: mismatch stays a clean
+        # RuntimeError instead of an unhandled TypeError.
+        if (
+            expected is None
+            or received is None
+            or not secrets.compare_digest(received.encode("utf-8"), expected.encode("utf-8"))
+        ):
             raise RuntimeError("OAuth callback state did not match the authorization request")
 
     async def _authorize_manual(self, open_browser: bool = True) -> str:
@@ -513,7 +520,12 @@ class OAuthHandler:
                 if (
                     expected_state is None
                     or callback_state is None
-                    or not secrets.compare_digest(callback_state, expected_state)
+                    # Byte-compare: non-ASCII states (possible after percent
+                    # decoding) must report invalid state, not raise TypeError
+                    # out of do_GET and leave the flow hanging.
+                    or not secrets.compare_digest(
+                        callback_state.encode("utf-8"), expected_state.encode("utf-8")
+                    )
                 ):
                     error_info.append(
                         "OAuth callback state did not match the authorization request"

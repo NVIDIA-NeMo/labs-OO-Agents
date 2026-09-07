@@ -1,9 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 from io import StringIO
+from types import SimpleNamespace
 
-from nooa_cli.tui.commands import _mcp_oauth_markdown_link
+import pytest
+from nooa_cli.tui.commands import CommandRegistry, _mcp_oauth_markdown_link
 from nooa_cli.tui.console import TUIConsole
 from nooa_cli.tui.output import AgentMessage
 from nooa_cli.tui.terminal_safety import strip_safe_ansi
@@ -67,3 +70,39 @@ def test_oauth_link_rejects_terminal_controls():
     assert _mcp_oauth_markdown_link("https://example.test/a\x00b") is None
     assert _mcp_oauth_markdown_link("https://example.test/a\x1bb") is None
     assert _mcp_oauth_markdown_link("https://example.test/a\x85b") is None
+
+
+@pytest.mark.asyncio
+async def test_oauth_bridge_emits_no_scrollback_url_render():
+    """The overlay is the single URL surface: no scrollback render before it.
+
+    The duplicate scrollback write was the cursor-corruption root cause; this
+    pins that the bridge does not reintroduce it.
+    """
+    rendered: list[object] = []
+
+    class FakeMCP:
+        def _bind_oauth_code_prompt(self, callback):
+            rendered.append(callback)
+
+    class RecordingFrontend:
+        async def render(self, output):
+            rendered.append(output)
+            raise AssertionError("bridge must not render to scrollback before the overlay")
+
+        async def prompt_sensitive(self, title, message, *, link_url=None):
+            return "http://localhost:8090/callback?code=ok&state=expected"
+
+    registry = CommandRegistry.__new__(CommandRegistry)
+    registry.agent = SimpleNamespace(mcp=FakeMCP())
+    registry.frontend = RecordingFrontend()
+    registry._bind_mcp_oauth_prompt()
+    callback = rendered[0]
+
+    result = await asyncio.to_thread(
+        lambda: asyncio.run(callback("https://login.example.test/authorize?state=expected"))
+    )
+
+    assert result == "http://localhost:8090/callback?code=ok&state=expected"
+    # Only the bound callback remains; no AgentMessage render ever happened.
+    assert len(rendered) == 1
