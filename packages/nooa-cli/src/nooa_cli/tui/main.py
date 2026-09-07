@@ -13,6 +13,7 @@ The ``main()`` coroutine keeps its original signature so that callers like
 
 import asyncio
 import logging
+import sys
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -262,4 +263,10 @@ async def main(
     if restart_requested and restart_ready and runtime_registration is not None:
         from .runtime_registration import reexec_tui
 
+        # Say so before the exec: the ordinary session teardown prints its
+        # goodbye + resume hint above, which alone reads like a plain quit.
+        sys.stderr.write(
+            "\x1b[2mRestarting: reloading this session on the current code "
+            "(pid stays with the process)...\x1b[0m\n"
+        )
         reexec_tui(runtime_registration.restart_argv)

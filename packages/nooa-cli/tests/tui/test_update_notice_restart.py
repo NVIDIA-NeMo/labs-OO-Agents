@@ -67,7 +67,8 @@ async def test_update_watch_shows_notice_once_and_never_restarts() -> None:
     session._startup_source_revision = "aaa"
     session._update_notice_shown = False
     set_notice = Mock()
-    session._app = SimpleNamespace(set_status_notice=set_notice)
+    emit_block = Mock()
+    session._app = SimpleNamespace(set_status_notice=set_notice, emit_block=emit_block)
     calls = {"n": 0}
 
     def fake_current():
@@ -83,6 +84,9 @@ async def test_update_watch_shows_notice_once_and_never_restarts() -> None:
 
     assert calls["n"] == 1  # one comparison was enough
     set_notice.assert_called_once_with("Update available — call /restart to reload")
+    # The notice is also written into the transcript so it cannot be missed.
+    emit_block.assert_called_once()
+    assert "/restart" in emit_block.call_args.args[0]
     assert session._update_notice_shown
 
 

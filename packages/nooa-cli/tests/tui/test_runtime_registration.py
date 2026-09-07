@@ -199,6 +199,27 @@ def test_reexec_uses_path_search():
     execvp.assert_called_once_with("python", ["python", "-m", "nooa_cli", "tui"])
 
 
+def test_reexec_ignores_restart_signal_before_execvp():
+    """A racing/duplicate SIGUSR1 must not kill or re-drain across the exec.
+
+    SIGUSR1's default action is terminate: a signal landing in the window
+    between handler removal and exec kills the process, and one reaching the
+    freshly exec'd boot (before it installs its handler) makes that boot drain
+    and re-exec again — the observed restart chain. An *ignored* disposition
+    survives exec, so the new boot starts with the signal inert until it
+    arms its real handler.
+    """
+    if not hasattr(signal, "SIGUSR1"):  # pragma: no cover - platform dependent
+        pytest.skip("SIGUSR1 not available")
+    with (
+        patch("nooa_cli.tui.runtime_registration.signal.signal") as sig,
+        patch("nooa_cli.tui.runtime_registration.os.execvp") as execvp,
+    ):
+        reexec_tui(["python", "-m", "nooa_cli", "tui"])
+    sig.assert_called_once_with(signal.SIGUSR1, signal.SIG_IGN)
+    execvp.assert_called_once()
+
+
 @requires_fcntl
 def test_publish_fails_closed_without_process_identity(tmp_path: Path):
     """Do not advertise restart without a stable process identity."""
