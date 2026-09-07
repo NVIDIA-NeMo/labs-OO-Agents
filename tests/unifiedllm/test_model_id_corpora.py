@@ -65,7 +65,7 @@ def _corpus_ids(name: str) -> list[tuple[str, str | None]]:
     return [(e["id"], _canon(e.get("vendor"))) for e in entries if e.get("id")]
 
 
-@pytest.mark.parametrize("name", ["openrouter", "nvidia_gateway"])
+@pytest.mark.parametrize("name", ["openrouter", "nvidia_gateway", "azure", "vertex_ai", "bedrock"])
 def test_no_misattribution_in_corpora(name: str) -> None:
     """Every id the parser resolves must match the catalog's own vendor.
 
@@ -83,7 +83,7 @@ def test_no_misattribution_in_corpora(name: str) -> None:
     assert not misattributed, misattributed[:20]
 
 
-@pytest.mark.parametrize("name", ["openrouter", "nvidia_gateway"])
+@pytest.mark.parametrize("name", ["openrouter", "nvidia_gateway", "azure", "vertex_ai", "bedrock"])
 def test_corpora_resolution_rate(name: str) -> None:
     """Guard the measured resolution rate against regressions.
 
@@ -95,8 +95,16 @@ def test_corpora_resolution_rate(name: str) -> None:
     ids_with_truth = [x for x in _corpus_ids(name) if x[1] is not None]
     resolved = [x for x in ids_with_truth if parse_model_string(x[0]).provider is not None]
     rate = len(resolved) / len(ids_with_truth)
-    # OpenRouter ~= 0.74, NVIDIA gateway ~= 0.91 at the time of writing.
-    assert rate >= 0.70, f"{name}: resolution rate {rate:.3f} dropped"
+    # Measured at the time of writing: OpenRouter 0.74, NVIDIA gateway 0.91,
+    # azure 0.97, vertex_ai 0.94, bedrock 0.98 (of verifiable ids).
+    floors = {
+        "openrouter": 0.70,
+        "nvidia_gateway": 0.85,
+        "azure": 0.90,
+        "vertex_ai": 0.90,
+        "bedrock": 0.95,
+    }
+    assert rate >= floors[name], f"{name}: resolution rate {rate:.3f} dropped"
 
 
 def test_deployment_spellings_resolve() -> None:
@@ -132,6 +140,29 @@ def test_deployment_spellings_resolve() -> None:
         ("nvidia/google/gemma-4-31b-it", "google", "gemma-4-31b-it"),
         # o-series with effort suffix.
         ("o4-mini-high", "openai", "o4-mini-high"),
+        # Vertex @version suffixes; Bedrock region+commitment paths with
+        # vendor.model ids and deployment segments in the middle.
+        ("vertex_ai/claude-3-5-sonnet@20240620", "anthropic", "claude-3-5-sonnet"),
+        ("vertex_ai/codestral@latest", "mistral", "codestral"),
+        ("bedrock/ap-northeast-1/moonshotai.kimi-k2-thinking", "kimi", "kimi-k2-thinking"),
+        ("bedrock/eu-central-1/qwen.qwen3-coder-next", "qwen", "qwen3-coder-next"),
+        (
+            "bedrock/*/1-month-commitment/cohere.command-light-text-v14",
+            "cohere",
+            "command-light-text-v14",
+        ),
+        ("bedrock/us-east-1/amazon.nova-pro-v1", "amazon", "nova-pro-v1"),
+        # Azure media/aux model families.
+        ("azure/gpt-image-1", "openai", "gpt-image-1"),
+        ("azure/eu/gpt-realtime-mini-2025-10-06", "openai", "gpt-realtime-mini-2025-10-06"),
+        ("azure/text-embedding-3-large", "openai", "text-embedding-3-large"),
+        ("azure/tts-1-hd", "openai", "tts-1-hd"),
+        ("azure/command-r-plus", "cohere", "command-r-plus"),
+        ("azure/eu/gpt-5.6", "openai", "gpt-5.6"),
+        # Vertex media families.
+        ("vertex_ai/gemini-embedding-2", "google", "gemini-embedding-2"),
+        ("vertex_ai/imagen-3.0-generate-001", "google", "imagen-3.0-generate-001"),
+        ("vertex_ai/jamba-1.5-mini@001", "ai21", "jamba-1.5-mini"),
     ]
     for model_string, provider, model in cases:
         parsed = parse_model_string(model_string)
@@ -143,7 +174,6 @@ def test_unknown_boutique_vendors_fail_closed() -> None:
     """Undeclared model families resolve to None — never a guess."""
     for model_id in (
         "aion-labs/aion-3.0",
-        "amazon/nova-pro-v1",
         "baidu/ernie-4.5-vl-424b-a47b",
         "thinkingmachines/inkling",
         "some-unknown-vendor/model-x",

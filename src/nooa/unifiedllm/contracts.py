@@ -264,7 +264,12 @@ _PROVIDER_ALIASES: dict[str, str] = {
     "deepseek-ai": "deepseek",
     "google": "google",
     "minimaxai": "minimax",
+    "minimax": "minimax",
     "microsoft": "microsoft",
+    "cohere": "cohere",
+    "amazon": "amazon",
+    "ai21": "ai21",
+    "qwen": "qwen",
 }
 
 #: Model-family prefixes -> logical provider.  Matched on the final path
@@ -276,6 +281,8 @@ _MODEL_FAMILIES: tuple[tuple[str, str], ...] = (
     ("gpt-oss", "openai"),
     ("gpt-audio", "openai"),
     ("gpt-chat", "openai"),
+    ("gpt-image", "openai"),
+    ("gpt-realtime", "openai"),
     ("gpt-", "openai"),
     ("o1", "openai"),
     ("o3", "openai"),
@@ -301,6 +308,18 @@ _MODEL_FAMILIES: tuple[tuple[str, str], ...] = (
     ("grok", "xai"),
     ("phi-", "microsoft"),
     ("phi4", "microsoft"),
+    ("command", "cohere"),
+    ("jamba", "ai21"),
+    ("codex", "openai"),
+    ("dall-e", "openai"),
+    ("sora", "openai"),
+    ("text-embedding", "openai"),
+    ("tts-", "openai"),
+    ("whisper", "openai"),
+    ("imagen", "google"),
+    ("chirp", "google"),
+    ("imagegeneration", "google"),
+    ("veo", "google"),
 )
 _FAMILY_BOUNDARY = "-_.0123456789"
 
@@ -375,6 +394,10 @@ def parse_model_string(model: str) -> NormalizedModel:
             tier = suffix.lower()
             last = stem
             segments[-1] = last
+    # Vertex-style version suffixes: "codestral@latest", "claude-3-5-sonnet@20240620".
+    if "@" in last:
+        last = last.split("@", 1)[0]
+        segments[-1] = last
 
     namespace = "/".join(segments[:-1]) or None
 
@@ -386,6 +409,9 @@ def parse_model_string(model: str) -> NormalizedModel:
         # and never diverge in key derivation.
         if "." in last:
             head, _, rest = last.partition(".")
+            # Strip the vendor head only when it is a declared vendor name
+            # ("moonshotai.kimi-k2-thinking", "qwen.qwen3-coder-next"), not a
+            # model family — "jamba-1.5-mini" must not lose its "jamba-1" head.
             if rest and _PROVIDER_ALIASES.get(head.lower()) is not None:
                 last = rest
         return NormalizedModel(provider=provider, model=last, namespace=namespace, tier=tier)
