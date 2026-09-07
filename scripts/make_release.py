@@ -1369,59 +1369,14 @@ def local_change_notes(sha: str, prev_tag: str) -> str:
 
 def build_public_notes(
     *,
-    tag: str,
-    sha: str,
-    prev_tag: str,
     diff: Diff,
     change_notes: str,
-    pipeline_url: str,
-    distributions: list[dict[str, str]],
-    capability_gate_ran: bool,
 ) -> str:
-    advisory_count = (
-        len(diff.regressions) + len(diff.new_errors) + len(diff.beyond_noise) + len(diff.removed)
-    )
-    if not capability_gate_ran:
-        verdict = "NOT RUN — the capability gate was skipped for this candidate"
-    elif diff.hard_gate_passed:
-        verdict = "PASS — all automated hard gates passed"
-    else:
-        verdict = f"FAIL — {diff.floor_breach}"
-    checksum_lines = [
-        f"- `{Path(item['path']).name}` — `{item['sha256']}`" for item in distributions
-    ]
-    sections = [
-        "# Unpublished NOOA release candidate",
-        "",
-        "> **This draft is not published. Publishing it is the sole human release approval and immediately starts automatic PyPI publication.**",
-        "",
-        f"- Version: `{tag}`",
-        f"- Immutable candidate: `{sha}`",
-        f"- Previous release: `{prev_tag}`",
-        f"- Automated hard-gate verdict: **{verdict}**",
-        f"- Advisory findings: **{advisory_count}** (review the open sections below)",
-        f"- Private pipeline evidence: {pipeline_url}",
-        "",
-        sanitize_public_text(diff.markdown),
-        "",
-        "## Changes",
-        "",
-        sanitize_public_text(change_notes) or "No generated change notes were returned.",
-        "",
-        "## Candidate build provenance",
-        "",
-        *checksum_lines,
-        "",
-        "The candidate pipeline built and smoke-tested these artifacts. The current publication workflow rebuilds from this exact tag; artifact promotion remains a follow-up.",
-        "",
-        "## Reviewer checklist",
-        "",
-        f"- Confirm the candidate SHA is exactly `{sha}`.",
-        "- Review advisory findings and the private GitLab evidence/traces.",
-        "- **Accept:** click GitHub’s **Publish release** button. This immediately triggers `publish.yml` and automatic PyPI publication.",
-        "- **Reject:** delete this draft (including its tag) or leave it for the documented cleanup procedure.",
-    ]
-    return sanitize_public_text("\n".join(sections).rstrip() + "\n")
+    changes = sanitize_public_text(change_notes).strip()
+    if not changes:
+        changes = "No generated change notes were returned."
+    capability = sanitize_public_text(diff.markdown).strip()
+    return f"{changes}\n\n---\n\n{capability}\n"
 
 
 def create_or_update_draft(
@@ -1720,14 +1675,8 @@ def ci_main(args: argparse.Namespace) -> int:
             else generated_change_notes(args.tag, head_sha, prev_tag)
         )
         notes = build_public_notes(
-            tag=args.tag,
-            sha=head_sha,
-            prev_tag=prev_tag,
             diff=diff,
             change_notes=change_notes,
-            pipeline_url=args.pipeline_url,
-            distributions=distributions,
-            capability_gate_ran=True,
         )
         notes_path = artifact_dir / "public-release-notes.md"
         notes_path.write_text(notes)
@@ -1806,18 +1755,8 @@ def local_main(args: argparse.Namespace) -> int:
     change_notes = generated_change_notes(args.tag, head_sha, prev_tag)
     diff = diff if report else Diff(markdown="Capability comparison skipped.")
     notes = build_public_notes(
-        tag=args.tag,
-        sha=head_sha,
-        prev_tag=prev_tag,
         diff=diff,
         change_notes=change_notes,
-        pipeline_url="Local emergency fallback; no private CI evidence URL.",
-        distributions=[
-            {"path": str(path), "sha256": sha256(path)}
-            for path in sorted((REPO / "dist").iterdir())
-            if path.is_file()
-        ],
-        capability_gate_ran=not args.skip_capability,
     )
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
         fh.write(notes)
