@@ -212,6 +212,7 @@ def has_running_work(queue_manager: Any) -> bool:
         return bool(running())
     return False
 
+
 ChannelMode = Literal["queue", "event"]
 
 
@@ -878,8 +879,9 @@ class QueueManager:
             if any(h.daemon for h in active_spawns):
                 spawn_lines.append(
                     "  ↳ daemon = long-lived infrastructure producer (runs until "
-                    "teardown, never blocks idle/restart); other jobs are finite work "
-                    "in flight."
+                    "teardown; its handle does not block idle/restart, but queued "
+                    "output still counts as pending work). Other jobs are finite "
+                    "work in flight."
                 )
             spawn_status = "\n".join(spawn_lines)
             body = f"{body}\n{spawn_status}" if body else spawn_status
