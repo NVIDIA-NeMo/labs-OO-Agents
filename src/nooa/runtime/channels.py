@@ -90,6 +90,22 @@ def _normalize_job_description(description: str) -> str:
     return f"{compact[: _MAX_JOB_DESCRIPTION_LENGTH - 1].rstrip()}…"
 
 
+_MAX_JOB_LABEL_LENGTH = 80
+
+
+def _normalize_job_label(label: str) -> str:
+    """Collapse whitespace and bound model-facing job labels.
+
+    Labels are rendered raw into the queue status block; unnormalized
+    multi-line labels could forge status-block structure or inject
+    instructions into the model context.
+    """
+    compact = " ".join(label.split())
+    if len(compact) <= _MAX_JOB_LABEL_LENGTH:
+        return compact
+    return f"{compact[: _MAX_JOB_LABEL_LENGTH - 1].rstrip()}…"
+
+
 class JobHandle:
     """Handle returned by ``QueueManager.spawn()``.
 
@@ -122,7 +138,7 @@ class JobHandle:
         daemon: bool = False,
     ) -> None:
         self.name = name
-        self.label = label or name
+        self.label = _normalize_job_label(label) if label else (label or name)
         self.description = _normalize_job_description(description)
         self.daemon = daemon
         self.job_id = uuid.uuid4().hex
@@ -178,6 +194,23 @@ class JobHandle:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
+def has_running_work(queue_manager: Any) -> bool:
+    """Return whether *queue_manager* has finite, in-flight spawned work.
+
+    Uses ``running_work_handles()`` (daemon-aware) when the manager
+    provides it; older custom QueueManager-like hosts fall back to the
+    previous all-running-handles predicate. This is the single
+    compatibility point for idle/quiescence checks — do not hand-roll
+    the ``getattr`` fallback at call sites.
+    """
+    running_work = getattr(queue_manager, "running_work_handles", None)
+    if running_work is not None:
+        return bool(running_work())
+    running = getattr(queue_manager, "running_handles", None)
+    if running is not None:
+        return bool(running())
+    return False
 
 ChannelMode = Literal["queue", "event"]
 
@@ -831,7 +864,8 @@ class QueueManager:
             spawn_lines = [f"⚡ {len(active_spawns)} active background job(s):"]
             for h in visible_spawns:
                 state = "running, daemon" if h.daemon else "running"
-                spawn_lines.append(f"  • [{h.job_id}] {h.label} → {h.name} ({state})")
+                label = _normalize_job_label(h.label) if h.label else h.label
+                spawn_lines.append(f"  • [{h.job_id}] {label} → {h.name} ({state})")
                 if h.description:
                     spawn_lines.append(f"    {h.description}")
             omitted = len(active_spawns) - len(visible_spawns)

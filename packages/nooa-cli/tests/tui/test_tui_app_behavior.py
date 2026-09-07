@@ -3238,7 +3238,10 @@ async def test_end_input_drain_accepts_new_prompt_input_again():
         h.app.begin_input_drain("Restart pending; waiting for current work to finish.")
         await h.submit_async("blocked prompt")
         await h.wait_output_contains("Restart pending")
+        # The typed draft is preserved rather than silently discarded.
+        assert h.app.input_buffer.text == "blocked prompt"
 
         h.app.end_input_drain()
+        h.app.input_buffer.reset()
         await h.submit_async("accepted prompt")
         await h.wait_for(lambda: h.agent.messages_received == ["accepted prompt"])

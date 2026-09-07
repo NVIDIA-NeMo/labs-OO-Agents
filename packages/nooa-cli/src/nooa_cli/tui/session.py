@@ -380,7 +380,10 @@ class Session:
             return
 
         async def _cancel_daemons() -> None:
-            qm = getattr(getattr(self, "agent", None), "queue_manager", None)
+            # Read the agent through the runner first: a session swap rebinds
+            # the runner's agent without updating Session.agent.
+            agent = getattr(agent_runner, "_agent", None) or getattr(self, "agent", None)
+            qm = getattr(agent, "queue_manager", None)
             handles = getattr(qm, "running_handles", None)
             if handles is None:
                 return
@@ -396,13 +399,29 @@ class Session:
             # any daemon left behind otherwise.
             runner_loop = getattr(agent_runner, "_loop", None)
             if runner_loop is not None and runner_loop.is_running():
-                asyncio.run_coroutine_threadsafe(
+                future = asyncio.run_coroutine_threadsafe(
                     agent_runner.run_async(_cancel_daemons), runner_loop
                 )
+                future.add_done_callback(self._log_daemon_cancel_failure)
             return
-        asyncio.create_task(
+        task = asyncio.create_task(
             agent_runner.run_async(_cancel_daemons), name="restart-drain-stop-daemons"
         )
+        tasks = getattr(self, "_background_tasks", None)
+        if tasks is not None:
+            tasks.add(task)
+            task.add_done_callback(tasks.discard)
+        task.add_done_callback(self._log_daemon_cancel_failure)
+
+    @staticmethod
+    def _log_daemon_cancel_failure(future: Any) -> None:
+        """Log a failed daemon-cancellation pass instead of dropping it."""
+        try:
+            exc = future.exception()
+        except BaseException:  # cancelled caller or cancelled future
+            return
+        if exc is not None:
+            logger.error("restart drain: daemon cancellation failed", exc_info=exc)
 
     def request_restart_when_idle(self) -> None:
         """Latch a restart drain and stop accepting new user-initiated work."""
@@ -413,55 +432,127 @@ class Session:
         if self._app is not None:
             self._app.begin_input_drain("Restart pending; waiting for current work to finish.")
 
+    def release_restart_request(self) -> None:
+        """Unlatch a failed restart drain and re-open user input.
+
+        Called by the supervised drain waiter after a failure so a later
+        restart signal can latch a fresh drain instead of being a no-op
+        for the rest of the process lifetime.
+        """
+        self._restart_pending = False
+        app = self._app
+        end_drain = getattr(app, "end_input_drain", None)
+        if callable(end_drain):
+            try:
+                end_drain()
+            except Exception:
+                pass
+
     def _reflection_idle(self) -> bool:
         """Return whether no reflection run is pending or active.
 
         A completed pass re-dirties the counter, and the drain blocks new
-        turns, so no follow-up run can be scheduled while restarting.
+        turns, so no follow-up run can be scheduled while restarting. The
+        agent is read through the runner first because a session swap
+        rebinds the runner's agent without updating ``Session.agent``.
         """
-        runner = getattr(getattr(self, "agent", None), "_tui_reflection_runner", None)
+        agent_runner = getattr(self, "_local_agent_runner", None)
+        agent = getattr(agent_runner, "_agent", None)
+        if agent is None:
+            agent = getattr(self, "agent", None)
+        runner = getattr(agent, "_tui_reflection_runner", None)
         if runner is None:
             return True
         return runner.state not in ("debounce", "running")
 
+    async def _interrupt_reflection_for_restart(self) -> None:
+        """Interrupt any pending or active reflection run (safe no-op)."""
+        policy = getattr(self, "_local_turn_policy", None)
+        interrupt = getattr(policy, "interrupt_reflection", None)
+        if not callable(interrupt):
+            return
+        try:
+            await interrupt()
+        except Exception:
+            logger.debug("reflection interrupt during restart drain failed", exc_info=True)
+
+    def _restart_idle(self) -> bool:
+        """Shared readiness predicate for both drain observations.
+
+        Written once so the pre-probe check and the post-probe recheck
+        cannot diverge (the recheck previously dropped the reflection
+        gate, letting a turn's epilogue-scheduled pass slip through).
+        """
+        command_runner = self._command_runner
+        policy = getattr(self, "_local_turn_policy", None)
+        return (
+            self._app.input_drain_idle
+            and self._reflection_idle()
+            and (command_runner is None or command_runner.is_idle)
+            and (policy is None or policy.is_idle)
+        )
+
+    def _has_daemon_producers(self) -> bool:
+        """Return whether any long-lived daemon producer is still running."""
+        agent_runner = getattr(self, "_local_agent_runner", None)
+        agent = getattr(agent_runner, "_agent", None) or getattr(self, "agent", None)
+        qm = getattr(agent, "queue_manager", None)
+        handles = getattr(qm, "running_handles", None)
+        if handles is None:
+            return False
+        return any(
+            handle.state == "running" and getattr(handle, "daemon", False)
+            for handle in handles()
+        )
+
     async def wait_restart_ready(self) -> None:
-        """Wait until work admitted before the restart request settles naturally."""
+        """Wait until work admitted before the restart request settles naturally.
+
+        Quiescence is probed on the agent owner loop with a short bounded
+        call — a quick ``is_quiescent`` double observation — so the wait
+        can never hit ``run_async``'s 30 s cap the way an unbounded
+        ``wait_quiescent`` wait could, no matter how long the admitted
+        work runs. While work remains, the loop keeps cancelling daemon
+        producers and interrupting reflection: a turn admitted before the
+        request can still spawn fresh infrastructure or schedule a
+        reflection pass after the early cancellation passes have run.
+        """
         if not self._restart_pending:
             raise RuntimeError("restart was not requested")
         while self._app is None or not self._app.is_running:
             await asyncio.sleep(0.01)
         self._app.begin_input_drain("Restart pending; waiting for current work to finish.")
-        self._stop_infrastructure_producers()
-        # Reflection is interruptible background maintenance; a restart must
-        # not wait out a full consolidation pass.
-        policy = getattr(self, "_local_turn_policy", None)
-        interrupt_reflection = getattr(policy, "interrupt_reflection", None)
-        if callable(interrupt_reflection):
-            try:
-                await interrupt_reflection()
-            except Exception:
-                logger.debug("reflection interrupt before restart failed", exc_info=True)
-        while True:
-            command_runner = self._command_runner
-            policy = getattr(self, "_local_turn_policy", None)
+        agent_runner = getattr(self, "_local_agent_runner", None)
+        while agent_runner is None:
+            await asyncio.sleep(0.01)
             agent_runner = getattr(self, "_local_agent_runner", None)
-            if (
-                self._app.input_drain_idle
-                and self._reflection_idle()
-                and (command_runner is None or command_runner.is_idle)
-                and (policy is None or policy.is_idle)
-                and agent_runner is not None
-            ):
-                await agent_runner.run_async(agent_runner.wait_quiescent)
-                # The owner-loop wait establishes a barrier past queue gets.
-                # Recheck UI-side producers in case they admitted work meanwhile.
-                command_runner = self._command_runner
-                if (
-                    self._app.input_drain_idle
-                    and (command_runner is None or command_runner.is_idle)
-                    and (policy is None or policy.is_idle)
-                ):
-                    return
+
+        async def _quiescence_probe() -> bool:
+            # Double idle observation on the owner loop: a queue getter can
+            # consume an item before its dispatcher continuation runs, so a
+            # single check could observe a false idle window.
+            if agent_runner.is_quiescent:
+                await asyncio.sleep(0)
+                return agent_runner.is_quiescent
+            return False
+
+        while True:
+            if self._restart_idle():
+                if await agent_runner.run_async(_quiescence_probe):
+                    # Recheck UI-side producers in case they admitted work
+                    # while the owner-loop probe was in flight.
+                    if self._restart_idle():
+                        return
+                # The owner loop still sees work. A turn finishing during
+                # the drain may have spawned a fresh daemon producer; stop
+                # ingress again so it cannot keep the queues busy forever.
+                if self._has_daemon_producers():
+                    self._stop_infrastructure_producers()
+            else:
+                if self._has_daemon_producers():
+                    self._stop_infrastructure_producers()
+                if not self._reflection_idle():
+                    await self._interrupt_reflection_for_restart()
             await asyncio.sleep(0.01)
 
     @property

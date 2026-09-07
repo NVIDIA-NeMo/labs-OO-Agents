@@ -1306,6 +1306,91 @@ async def test_restart_waits_for_agent_command_policy_and_callback_work() -> Non
 
 
 @pytest.mark.asyncio
+async def test_restart_drain_re_cancels_daemons_spawned_during_turn() -> None:
+    """A turn completing during the drain cannot revive daemon producers.
+
+    Regression test for the one-shot-cancellation livelock: the turn spawns
+    a fresh daemon AFTER the drain's early cancellation passes ran; the
+    drain loop must cancel it again instead of waiting on its queued
+    output forever.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from nooa.runtime.channels import QueueManager
+
+    from nooa_cli.tui.session import Session
+
+    session = Session.__new__(Session)
+    session._restart_pending = True
+    session._app = SimpleNamespace(
+        is_running=True,
+        input_drain_idle=True,
+        begin_input_drain=lambda _reason: None,
+    )
+    session._command_runner = None
+    session._local_turn_policy = SimpleNamespace(is_idle=True)
+    qm = QueueManager()
+    qm.queue("mesh")
+    spawned_during_drain = {"handle": None}
+
+    async def _pump():
+        while True:
+            await asyncio.sleep(9999)
+            yield "msg"
+
+    agent = SimpleNamespace(
+        queue_manager=qm,
+        _tui_reflection_runner=None,
+    )
+
+    class AgentRunner:
+        """Faithful-enough runner: quiescence includes queued output."""
+
+        _agent = agent
+        is_quiescent = True
+        spawned = False
+
+        async def run_async(self, fn):
+            if not AgentRunner.spawned:
+                # A turn epilogue finishes during the drain and spawns a
+                # fresh daemon producer plus one queued output item.
+                AgentRunner.spawned = True
+                spawned_during_drain["handle"] = qm.spawn(
+                    _pump(), channel="mesh", daemon=True, label="late pump"
+                )
+                qm.get_channel("mesh").put("late output")
+                AgentRunner.is_quiescent = False  # queued output = busy
+                return await fn()
+            late = spawned_during_drain["handle"]
+            if (
+                late is not None
+                and late.state == "cancelled"
+                and AgentRunner.is_quiescent is False
+            ):
+                # The dispatcher consumes the orphaned output once the
+                # producer is gone; only then is the runner quiescent.
+                qm.get_channel("mesh").drain()
+                AgentRunner.is_quiescent = True
+            return await fn()
+
+    session._local_agent_runner = AgentRunner()
+    session.agent = agent
+    session._background_tasks = set()
+
+    session._stop_infrastructure_producers()
+    waiter = asyncio.create_task(session.wait_restart_ready())
+    await asyncio.wait_for(waiter, timeout=2)
+
+    late = spawned_during_drain["handle"]
+    assert late is not None
+    # The drain loop re-cancelled the late daemon instead of waiting on it.
+    assert late.state == "cancelled"
+    assert waiter.done() and waiter.exception() is None
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_restart_request_cancels_daemon_producers_but_not_work() -> None:
     """The drain stops long-lived daemon producers; finite jobs keep running."""
     from types import SimpleNamespace
@@ -1363,8 +1448,7 @@ async def test_restart_ready_waits_for_reflection_run_to_finish() -> None:
     session.agent = SimpleNamespace(_tui_reflection_runner=reflection)
 
     class AgentRunner:
-        async def wait_quiescent(self):
-            return None
+        is_quiescent = True
 
         async def run_async(self, fn):
             return await fn()
@@ -1414,16 +1498,16 @@ async def test_restart_quiescence_is_sampled_on_agent_owner_loop() -> None:
     owner_samples = 0
 
     class AgentRunner:
-        async def wait_quiescent(self):
-            nonlocal owner_samples
-            owner_samples += 1
-            return None
+        is_quiescent = True
 
         async def run_async(self, fn):
+            nonlocal owner_samples
+            owner_samples += 1
             return await fn()
 
     session._local_agent_runner = AgentRunner()
 
     await asyncio.wait_for(session.wait_restart_ready(), timeout=1)
 
+    # The bounded quiescence probe ran exactly once, on the agent owner loop.
     assert owner_samples == 1
