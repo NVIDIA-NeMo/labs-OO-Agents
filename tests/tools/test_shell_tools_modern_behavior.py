@@ -99,7 +99,9 @@ async def test_file_operations_allow_paths_outside_cwd(sh, tmp_path):
     await sh.replace(
         Match(relative, 2, 2, "two\n", resolved_path=sibling / "relative.txt"), "replaced"
     )
-    assert (sibling / "relative.txt").read_text() == "changed\nreplaced"
+    # The region reaches EOF in a file that ended with a newline, so the
+    # replacement is re-terminated rather than stripping the final byte.
+    assert (sibling / "relative.txt").read_text() == "changed\nreplaced\n"
 
     await sh.write_file(str(absolute), "absolute")
     assert (await sh.read(str(absolute))).text == "absolute"
@@ -118,7 +120,9 @@ async def test_match_from_read_stays_bound_after_cwd_change(sh, tmp_path):
     await sh.run("cd other")
     await sh.replace(sliced, "after")
 
-    assert original.read_text() == "after"
+    # Whole-file region at EOF in a newline-terminated file keeps its final
+    # newline instead of silently stripping it.
+    assert original.read_text() == "after\n"
     assert (other / "original.txt").read_text() == "wrong file\n"
 
 
@@ -160,3 +164,21 @@ def test_match_keeps_an_absolute_resolved_path(tmp_path):
     target.write_text("hello\n")
     match = Match("f.txt", 1, 1, "hello\n", resolved_path=target)
     assert match.resolved_path == str(target.resolve())
+
+
+@pytest.mark.asyncio
+async def test_replace_match_at_eof_keeps_trailing_newline(sh, tmp_path):
+    """A replacement reaching end-of-file must not strip the file's final newline."""
+    await sh.write_file("f.py", "a = 1\nb = 2\n")
+    match = await sh.read("f.py", (2, 2))
+    await sh.replace(match, "b = 20")  # no trailing newline in the replacement
+    assert (tmp_path / "f.py").read_text() == "a = 1\nb = 20\n"
+
+
+@pytest.mark.asyncio
+async def test_replace_match_at_eof_preserves_missing_newline(sh, tmp_path):
+    """A file that genuinely lacks a final newline must not gain one."""
+    await sh.write_file("f.py", "a = 1\nb = 2")  # no trailing newline
+    match = await sh.read("f.py", (2, 2))
+    await sh.replace(match, "b = 20")
+    assert (tmp_path / "f.py").read_text() == "a = 1\nb = 20"

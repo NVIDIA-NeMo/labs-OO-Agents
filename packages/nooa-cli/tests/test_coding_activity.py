@@ -80,7 +80,7 @@ async def test_match_replace_emits_actual_before_and_after_text(tmp_path):
     assert "@@ -2 +2 @@" in edit.diff
 
 
-async def test_match_replace_at_end_of_file_reports_the_unterminated_text(tmp_path):
+async def test_match_replace_at_end_of_file_keeps_the_file_terminated(tmp_path):
     shell, events = _observed_shell(tmp_path)
     (tmp_path / "example.txt").write_text("one\ntwo\nthree\n")
     try:
@@ -90,9 +90,10 @@ async def test_match_replace_at_end_of_file_reports_the_unterminated_text(tmp_pa
         await shell.close()
 
     edit = next(event for event in events if isinstance(event, FileEdit))
-    # Nothing follows the region, so no newline is added and none is reported.
-    assert edit.new_text == "changed"
-    assert (tmp_path / "example.txt").read_text() == "one\ntwo\nchanged"
+    # The region reaches EOF in a file that ended with a newline, so the
+    # replacement is re-terminated — and reported as what was actually written.
+    assert edit.new_text == "changed\n"
+    assert (tmp_path / "example.txt").read_text() == "one\ntwo\nchanged\n"
 
 
 async def test_match_replace_after_cwd_change_emits_original_path(tmp_path):
@@ -111,7 +112,8 @@ async def test_match_replace_after_cwd_change_emits_original_path(tmp_path):
 
     edit = next(event for event in events if isinstance(event, FileEdit))
     assert edit.path == str(original)
-    assert original.read_text() == "after"
+    # Whole-file region at EOF keeps the file newline-terminated.
+    assert original.read_text() == "after\n"
     assert (other / "example.txt").read_text() == "wrong file\n"
 
 
@@ -315,12 +317,28 @@ def test_every_hunk_is_offset_not_just_the_first():
     assert complete is True
 
 
-def test_a_missing_final_newline_is_marked():
-    """Unterminated content needs the marker, or the diff is not applicable."""
-    diff, _ = activity._edit_diff("f.py", "a", "b", start_line=None)
+def test_a_missing_final_newline_is_marked_for_whole_file_diffs():
+    """Unterminated file content needs the marker, or the diff is not applicable."""
+    diff, _ = activity._edit_diff("f.py", "a", "b", start_line=None, whole_file=True)
 
     assert "-a" in diff and "+b" in diff
     assert "\\ No newline at end of file" in diff, diff
+
+
+def test_fragment_diffs_do_not_claim_a_missing_final_newline():
+    """replace() diffs fragments, not files — an unterminated fragment is
+    not a file state, so the EOF marker there was noise.
+
+    A snippet that simply stops before the file's last newline used to make
+    every edit report "\\ No newline at end of file" even though the file
+    on disk was newline-terminated.
+    """
+    diff, _ = activity._edit_diff("f.py", "a", "b", start_line=None)
+
+    assert "-a" in diff and "+b" in diff
+    assert "\\ No newline at end of file" not in diff, diff
+    # The line still ends newline-terminated so it cannot glue to a marker.
+    assert diff.endswith("+b\n"), diff
 
 
 async def test_overwriting_an_empty_file_reports_no_original_lines(tmp_path):

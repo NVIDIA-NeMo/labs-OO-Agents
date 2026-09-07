@@ -69,8 +69,15 @@ def _edit_diff(
     old_text: str,
     new_text: str,
     start_line: int | None,
+    *,
+    whole_file: bool = False,
 ) -> tuple[str, bool]:
-    """Return a bounded, line-oriented unified diff and its completeness."""
+    """Return a bounded, line-oriented unified diff and its completeness.
+
+    ``whole_file`` marks both texts as complete file contents, where a missing
+    final newline is a real file state worth reporting. Fragment diffs stop
+    mid-file, so the EOF marker there was noise.
+    """
     if _diff_input_is_too_large(old_text) or _diff_input_is_too_large(new_text):
         return _omitted_diff(path, "file content exceeds the safe diff preview limit")
 
@@ -91,7 +98,13 @@ def _edit_diff(
         if not line.endswith("\n"):
             # difflib emits the source line verbatim, so unterminated content
             # would run the next marker onto the same line ("-a+b").
-            line = f"{line}\n\\ No newline at end of file\n"
+            if whole_file:
+                line = f"{line}\n\\ No newline at end of file\n"
+            else:
+                # A fragment routinely stops before the file's final
+                # newline; marking that as "no newline at end of file"
+                # reported a file state that does not exist.
+                line = f"{line}\n"
         output.write(line)
     return output.getvalue(), not output.was_truncated
 
@@ -504,6 +517,7 @@ class ActivityShellTools(Skill):
                 old_diff_text or "",
                 content,
                 None,
+                whole_file=True,
             )
         self._emit(
             FileEdit(
