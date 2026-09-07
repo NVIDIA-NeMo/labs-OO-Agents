@@ -17,6 +17,7 @@ must read the parent design and the named task packet before editing.
 | D-04 | Opaque compatibility scope | **DECIDED (per Janson's five-harness survey):** keep exact-match fail-closed `opaque_replay_key` covering provider/api/endpoint/account + explicit model compat groups; normalize identity inputs inside key derivation; recovery ladder + broad classifier are non-optional companions. Evidence: tmp/reasoning-survey/reports/d04-*.md | C-01, R-03 |
 | D-05 | TUI compact metric | **DECIDED:** `↑in ↓out ↻cached% (n/m)`; cache segment hidden when endpoint lacks cache capability; `c` ASCII fallback | U-02 |
 | D-06 | AnyLLM branch treatment | **DECIDED:** include but strictly last — no adapter work until reasoning + telemetry tracks are working; branch stays reference-only | A-01 |
+| D-07 | Reasoning-effort setting | **DECIDED:** unsupported-level UX per evidence (dig pending); mid-conversation changes allowed (generation-only); default = model catalog default else `medium`; Anthropic reconciliation per evidence; effort stamped per turn; metadata in PR 1, UX folds in | C-02 |
 
 ## Contract foundation
 

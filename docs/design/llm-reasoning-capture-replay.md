@@ -373,6 +373,29 @@ class ReasoningCapabilities(BaseModel):
 Profiles may come from generated catalogs, provider metadata, or explicit
 registry overrides. Unknowns are not silently promoted to supported.
 
+### 12.1 Effort-level setting (D-07 decided)
+
+Product decisions on reasoning-effort setting:
+
+- **Unsupported levels**: choose the nicer UX per cross-harness evidence
+  (Janson's effort-setting dig, pending); the working assumption is
+  clamp-then-inform rather than hard rejection, but the dig decides.
+- **Mid-conversation changes**: allowed. Changing effort only affects new
+  generation; prior-turn replay is unaffected (per-message provenance
+  invariant above).
+- **Default per model**: the model's declared default from the catalog when
+  present, otherwise `medium`.
+- **Anthropic budget-vs-effort reconciliation**: follow what the harnesses
+  actually do (dig pending) rather than inventing a mapping.
+- **Effort is stamped per turn** when a mid-conversation change occurs, so
+  replay provenance can detect effort-level mismatch (Pi's persistent-400
+  incident is the failure this prevents).
+
+The capability metadata (`effort_map`) lands in PR 1 (packet C-02); the
+setting UX (clamping behavior, per-turn stamping, defaults) is sized after the
+dig returns and folds into the PR 1/PR 3 tracks rather than opening a separate
+PR unless the evidence shows a larger surface.
+
 ## 13. Tests
 
 Required cross-provider fixtures:
