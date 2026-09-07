@@ -4509,3 +4509,105 @@ def test_prepend_preserves_visible_tail_and_record_anchor() -> None:
     model.prepend("oldest\n", record_id=5)
     assert model.viewport.anchor == anchor
     assert model.formatted_text(width=20, height=2) == anchored_before
+
+
+def test_grapheme_paint_plan_replays_identical_screen() -> None:
+    """The fast-path paint plan must reproduce the derive path exactly.
+
+    The fullscreen transcript window's ``_copy_body`` fast path derives each
+    row's cell writes once per ``(content, geometry)`` and replays them into
+    the fresh per-frame screen. That replay is only safe if it paints
+    byte-identical screens to the original derive-every-frame projection, and
+    if repeated frames replay the memoized plan instead of rebuilding it.
+    """
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+    from nooa_cli.tui.tui_application import _FullscreenTranscriptControl, _GraphemeWindow
+    from prompt_toolkit.formatted_text.utils import split_lines
+    from prompt_toolkit.layout.controls import UIContent
+    from prompt_toolkit.layout.screen import Screen, WritePosition
+
+    model = FullscreenTranscriptModel(show_trailing_blank=False)
+    for start in range(0, 60, 10):
+        model.append(
+            "\n".join(
+                f"\x1b[36mrow {i}: the quick brown fox\x1b[0m"
+                if i % 3
+                else f"see \x1b]8;;https://example.invalid/{i}\x1b\\link {i}\x1b]8;;\x1b\\ tail"
+                for i in range(start, min(start + 10, 60))
+            )
+            + "\n"
+        )
+    width, height = 40, 6
+    formatted = model.formatted_text(width=width, height=height, render_counter=0)
+    control = _FullscreenTranscriptControl(
+        lambda: formatted,
+        focusable=False,
+        show_cursor=False,
+        scroll_callback=lambda delta: None,
+        mouse_navigation_enabled=lambda: False,
+        selection_callback=lambda *args: None,
+        link_callback=lambda x, y: False,
+        code_action_at=lambda x, y: None,
+        copy_code_callback=lambda text: None,
+    )
+    window = _GraphemeWindow(
+        control,
+        wrap_lines=False,
+        get_vertical_scroll=lambda _window: 0,
+        always_hide_cursor=True,
+    )
+    fragment_lines = list(split_lines(formatted))
+    content = UIContent(
+        get_line=lambda i: fragment_lines[i],
+        line_count=len(fragment_lines),
+        show_cursor=False,
+        cursor_position=None,
+        menu_position=None,
+    )
+    write_position = WritePosition(xpos=0, ypos=0, width=width, height=height)
+
+    def paint_derive() -> tuple[Screen, object, object]:
+        screen = Screen()
+        visible, coordinates = window._copy_body_derive(content, screen, write_position, 0, width)
+        return screen, visible, coordinates
+
+    screen_a, visible_a, coordinates_a = paint_derive()
+    screen_b = Screen()
+    visible_b, coordinates_b = window._copy_body_from_plan(
+        content, screen_b, write_position, 0, width
+    )
+    screen_c = Screen()
+    visible_c, coordinates_c = window._copy_body_from_plan(
+        content, screen_c, write_position, 0, width
+    )
+
+    def dump(screen: Screen) -> tuple[list[str], list[list[tuple[int, str, str, int]]]]:
+        rows = []
+        cells = []
+        for y in range(write_position.height):
+            row = screen.data_buffer[y]
+            rows.append("".join(row[x].char if x in row else " " for x in range(width)))
+            cells.append([(x, row[x].char, row[x].style, row[x].width) for x in sorted(row)])
+        escapes = [dict(screen.zero_width_escapes[y].items()) for y in range(write_position.height)]
+        return rows + [repr(escapes)], cells
+
+    rows_a, cells_a = dump(screen_a)
+    rows_b, cells_b = dump(screen_b)
+    rows_c, cells_c = dump(screen_c)
+
+    assert rows_a == rows_b, "plan path must paint the same text as the derive path"
+    assert rows_a == rows_c, "plan replay must stay identical across frames"
+    assert cells_a == cells_b and cells_a == cells_c
+    assert visible_a == visible_b and visible_b == visible_c
+    assert coordinates_a == coordinates_b and coordinates_b == coordinates_c
+    # Replay proof: the second fast-path call serves the memoized mappings.
+    assert visible_b is visible_c
+    assert coordinates_b is coordinates_c
+    # One plan for this (content, geometry) pair, built once.
+    assert len(window._grapheme_plans) == 1
+
+    # A different geometry derives a fresh plan rather than replaying stale writes.
+    narrow = WritePosition(xpos=0, ypos=0, width=20, height=height)
+    screen_d = Screen()
+    window._copy_body_from_plan(content, screen_d, narrow, 0, 20)
+    assert len(window._grapheme_plans) == 2
