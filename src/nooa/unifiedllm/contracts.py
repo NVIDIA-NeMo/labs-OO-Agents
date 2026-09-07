@@ -242,43 +242,90 @@ _ROUTING_PREFIXES: frozenset[str] = frozenset(
     {"openai", "nvidia", "azure", "aws", "bedrock", "vertex_ai", "nvidia_nim", "huggingface"}
 )
 
-#: Free-tier / capacity tier suffixes stripped before any comparison or hash
-#: (e.g. "kimi-k3:free", "deepseek-v4-flash:cloud").
-_TIER_SUFFIXES: frozenset[str] = frozenset({"free", "cloud"})
+#: Free-tier / capacity / routing tier suffixes stripped before any comparison
+#: or hash (e.g. "kimi-k3:free", "deepseek-v4-flash:cloud", "o3:batch").
+_TIER_SUFFIXES: frozenset[str] = frozenset({"free", "cloud", "batch"})
 
 #: Provider aliases: a leading segment that names a vendor but is not the
 #: canonical logical provider.  Canonical names map to themselves.
 _PROVIDER_ALIASES: dict[str, str] = {
     "claude": "anthropic",
     "anthropic": "anthropic",
+    "z-ai": "glm",
     "zai": "glm",
     "zai-org": "glm",
     "moonshot": "kimi",
     "moonshotai": "kimi",
+    "meta-llama": "meta",
+    "meta": "meta",
+    "mistralai": "mistral",
+    "mistral": "mistral",
+    "x-ai": "xai",
+    "deepseek-ai": "deepseek",
+    "google": "google",
+    "minimaxai": "minimax",
+    "microsoft": "microsoft",
 }
 
 #: Model-family prefixes -> logical provider.  Matched on the final path
 #: segment, at token boundaries only (so "glm" never matches "glmx").
+#: Prefixes are checked in order; the first boundary-respecting match wins,
+#: so "llama" is checked after "nemotron" to keep NVIDIA's llama-based
+#: nemotron models attributed to nvidia.
 _MODEL_FAMILIES: tuple[tuple[str, str], ...] = (
+    ("gpt-oss", "openai"),
+    ("gpt-audio", "openai"),
+    ("gpt-chat", "openai"),
     ("gpt-", "openai"),
+    ("o1", "openai"),
+    ("o3", "openai"),
+    ("o4", "openai"),
     ("chatgpt-", "openai"),
     ("glm", "glm"),
     ("kimi", "kimi"),
     ("deepseek", "deepseek"),
     ("qwen", "qwen"),
-    ("nemotron", "nvidia"),
     ("claude", "anthropic"),
     ("llama", "meta"),
+    ("muse-spark", "meta"),
+    ("muse-glimmer", "meta"),
     ("mistral", "mistral"),
+    ("ministral", "mistral"),
+    ("mixtral", "mistral"),
+    ("codestral", "mistral"),
+    ("devstral", "mistral"),
+    ("voxtral", "mistral"),
     ("gemini", "google"),
+    ("gemma", "google"),
+    ("lyria", "google"),
     ("grok", "xai"),
+    ("phi-", "microsoft"),
+    ("phi4", "microsoft"),
 )
 _FAMILY_BOUNDARY = "-_.0123456789"
+
+#: Distinctive mid-id markers -> logical provider, checked before prefix
+#: matching.  Vendors derive model lines from other families' bases
+#: ("llama-3.1-nemotron-ultra-..." is NVIDIA's post-trained Llama), so no
+#: prefix rule can attribute them; the marker is unambiguous in practice.
+_FAMILY_MARKERS: tuple[tuple[str, str], ...] = (
+    ("nemotron", "nvidia"),
+    ("nemoguard", "nvidia"),
+    ("nemoretriever", "nvidia"),
+    ("nemosmith", "nvidia"),
+    ("nv-embedqa", "nvidia"),
+    ("nv-rerankqa", "nvidia"),
+    ("nv-embed", "nvidia"),
+    ("nv-rerank", "nvidia"),
+)
 
 
 def _resolve_family(segment: str) -> str | None:
     """Return the logical provider for a final model-id segment, if known."""
     lowered = segment.lower()
+    for marker, provider in _FAMILY_MARKERS:
+        if marker in lowered:
+            return provider
     # Bedrock-style ids embed the vendor: "anthropic.claude-3-5-sonnet".
     if "." in lowered:
         head = lowered.split(".", 1)[0]
@@ -303,6 +350,9 @@ def parse_model_string(model: str) -> NormalizedModel:
     callers must fail closed on that.
     """
     raw = model.strip()
+    # Variant markers like OpenRouter's "~anthropic/claude-..." prefix.
+    raw = raw.lstrip("~")
+    raw = raw.strip()
     if not raw:
         return NormalizedModel(provider=None, model="", namespace=None, tier=None)
 

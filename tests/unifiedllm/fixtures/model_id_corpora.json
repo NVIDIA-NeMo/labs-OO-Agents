@@ -1,0 +1,2691 @@
+{
+ "_comment": "Model-id corpora for parse_model_string conformance. openrouter: 430 ids from the public OpenRouter catalog (fetched 2026-09-07); ground truth = leading id segment. nvidia_gateway: 241 ids from the NVIDIA inference gateway /v1/models; ground truth = middle vendor segment for nvidia/<vendor>/<model> spellings.",
+ "openrouter": [
+  {
+   "id": "openai/gpt-6-astra",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-6-astra:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-6-astra-pro",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-6-astra-pro:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "inclusionai/ling-3.0-flash-sante:free",
+   "vendor": "inclusionai"
+  },
+  {
+   "id": "qwen/qwen3.8-max-0902",
+   "vendor": "qwen"
+  },
+  {
+   "id": "meta/muse-spark-1.3-contributor",
+   "vendor": "meta"
+  },
+  {
+   "id": "meta/muse-spark-1.3",
+   "vendor": "meta"
+  },
+  {
+   "id": "google/gemini-3.8-flash",
+   "vendor": "google"
+  },
+  {
+   "id": "google/gemini-3.8-flash:batch",
+   "vendor": "google"
+  },
+  {
+   "id": "anthropic/claude-fable-5.1",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "anthropic/claude-fable-5.1:batch",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "inception/mercury-2.5-preview",
+   "vendor": "inception"
+  },
+  {
+   "id": "ibm-granite/granite-4.2-8b",
+   "vendor": "ibm-granite"
+  },
+  {
+   "id": "tencent/hy4-preview",
+   "vendor": "tencent"
+  },
+  {
+   "id": "inclusionai/ling-3.0-flash-fin",
+   "vendor": "inclusionai"
+  },
+  {
+   "id": "inclusionai/ling-3.0-flash-fin:free",
+   "vendor": "inclusionai"
+  },
+  {
+   "id": "~z-ai/glm-flash-latest",
+   "vendor": "z-ai"
+  },
+  {
+   "id": "qwen/qwen3.8-flash",
+   "vendor": "qwen"
+  },
+  {
+   "id": "z-ai/glm-5.3-flash",
+   "vendor": "z-ai"
+  },
+  {
+   "id": "z-ai/glm-5.3-flash:batch",
+   "vendor": "z-ai"
+  },
+  {
+   "id": "meta/muse-spark-1.2-contributor",
+   "vendor": "meta"
+  },
+  {
+   "id": "deepseek/deepseek-v4-flash-vision-exp",
+   "vendor": "deepseek"
+  },
+  {
+   "id": "tencent/hy-mt2-1.8b",
+   "vendor": "tencent"
+  },
+  {
+   "id": "tencent/hy-mt2-30b-a3b",
+   "vendor": "tencent"
+  },
+  {
+   "id": "~z-ai/glm-latest",
+   "vendor": "z-ai"
+  },
+  {
+   "id": "tencent/hy-mt2-7b",
+   "vendor": "tencent"
+  },
+  {
+   "id": "z-ai/glm-5.3",
+   "vendor": "z-ai"
+  },
+  {
+   "id": "qwen/qwen3.8-27b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "dots-studio/dots-3-note-preview:free",
+   "vendor": "dots-studio"
+  },
+  {
+   "id": "google/gemini-3.7-flash",
+   "vendor": "google"
+  },
+  {
+   "id": "google/gemini-3.7-flash:batch",
+   "vendor": "google"
+  },
+  {
+   "id": "bytedance-seed/seed-2-1-turbo",
+   "vendor": "bytedance-seed"
+  },
+  {
+   "id": "qwen/qwen3.8-2.4t-a95b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3.8-2.4t-a95b:batch",
+   "vendor": "qwen"
+  },
+  {
+   "id": "bytedance-seed/seed-2.0-code",
+   "vendor": "bytedance-seed"
+  },
+  {
+   "id": "deepseek/deepseek-v4-pro-0813",
+   "vendor": "deepseek"
+  },
+  {
+   "id": "deepseek/deepseek-v4-pro-0813:batch",
+   "vendor": "deepseek"
+  },
+  {
+   "id": "x-ai/grok-4.6",
+   "vendor": "x-ai"
+  },
+  {
+   "id": "liquid/lfm-2.5-2.6b:free",
+   "vendor": "liquid"
+  },
+  {
+   "id": "nvidia/nemotron-3.5-lightning",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nemotron-3.5-lightning:free",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "sakana/sakana-namazu",
+   "vendor": "sakana"
+  },
+  {
+   "id": "upstage/solar-pro4",
+   "vendor": "upstage"
+  },
+  {
+   "id": "meta/muse-glimmer-30b",
+   "vendor": "meta"
+  },
+  {
+   "id": "meta/muse-glimmer-30b:batch",
+   "vendor": "meta"
+  },
+  {
+   "id": "meta/muse-spark-1.2",
+   "vendor": "meta"
+  },
+  {
+   "id": "~deepseek/deepseek-v4-flash-latest",
+   "vendor": "deepseek"
+  },
+  {
+   "id": "deepseek/deepseek-v4-flash-0731",
+   "vendor": "deepseek"
+  },
+  {
+   "id": "deepseek/deepseek-v4-flash-0731:batch",
+   "vendor": "deepseek"
+  },
+  {
+   "id": "thinkingmachines/inkling-small",
+   "vendor": "thinkingmachines"
+  },
+  {
+   "id": "thinkingmachines/inkling-small:batch",
+   "vendor": "thinkingmachines"
+  },
+  {
+   "id": "thinkingmachines/inkling-small:free",
+   "vendor": "thinkingmachines"
+  },
+  {
+   "id": "qwen/qwen3.7-flash",
+   "vendor": "qwen"
+  },
+  {
+   "id": "anthropic/claude-opus-5",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "anthropic/claude-opus-5:batch",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "inclusionai/ling-3.0-flash",
+   "vendor": "inclusionai"
+  },
+  {
+   "id": "poolside/laguna-s-2.1",
+   "vendor": "poolside"
+  },
+  {
+   "id": "poolside/laguna-s-2.1:free",
+   "vendor": "poolside"
+  },
+  {
+   "id": "google/gemini-3.6-flash",
+   "vendor": "google"
+  },
+  {
+   "id": "google/gemini-3.6-flash:batch",
+   "vendor": "google"
+  },
+  {
+   "id": "google/gemini-3.5-flash-lite",
+   "vendor": "google"
+  },
+  {
+   "id": "google/gemini-3.5-flash-lite:batch",
+   "vendor": "google"
+  },
+  {
+   "id": "meituan/longcat-2.0",
+   "vendor": "meituan"
+  },
+  {
+   "id": "thinkingmachines/inkling",
+   "vendor": "thinkingmachines"
+  },
+  {
+   "id": "thinkingmachines/inkling:batch",
+   "vendor": "thinkingmachines"
+  },
+  {
+   "id": "thinkingmachines/inkling:free",
+   "vendor": "thinkingmachines"
+  },
+  {
+   "id": "openrouter/auto-beta",
+   "vendor": "openrouter"
+  },
+  {
+   "id": "moonshotai/kimi-k3",
+   "vendor": "moonshotai"
+  },
+  {
+   "id": "moonshotai/kimi-k3:batch",
+   "vendor": "moonshotai"
+  },
+  {
+   "id": "meta/muse-spark-1.1",
+   "vendor": "meta"
+  },
+  {
+   "id": "kwaipilot/kat-coder-pro-v2.5",
+   "vendor": "kwaipilot"
+  },
+  {
+   "id": "openai/gpt-5.6-luna-pro",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.6-luna-pro:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.6-luna",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.6-luna:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.6-terra-pro",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.6-terra-pro:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.6-terra",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.6-terra:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.6-sol-pro",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.6-sol-pro:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.6-sol",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.6-sol:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "x-ai/grok-4.5",
+   "vendor": "x-ai"
+  },
+  {
+   "id": "~x-ai/grok-latest",
+   "vendor": "x-ai"
+  },
+  {
+   "id": "aion-labs/aion-3.0-mini",
+   "vendor": "aion-labs"
+  },
+  {
+   "id": "aion-labs/aion-3.0",
+   "vendor": "aion-labs"
+  },
+  {
+   "id": "tencent/hy3",
+   "vendor": "tencent"
+  },
+  {
+   "id": "poolside/laguna-xs-2.1",
+   "vendor": "poolside"
+  },
+  {
+   "id": "poolside/laguna-xs-2.1:free",
+   "vendor": "poolside"
+  },
+  {
+   "id": "anthropic/claude-sonnet-5",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "anthropic/claude-sonnet-5:batch",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "google/gemini-3.1-flash-lite-image",
+   "vendor": "google"
+  },
+  {
+   "id": "nex-agi/nex-n2-mini",
+   "vendor": "nex-agi"
+  },
+  {
+   "id": "sakana/fugu-ultra",
+   "vendor": "sakana"
+  },
+  {
+   "id": "google/gemini-3.1-flash-image",
+   "vendor": "google"
+  },
+  {
+   "id": "google/gemini-3-pro-image",
+   "vendor": "google"
+  },
+  {
+   "id": "cohere/north-mini-code:free",
+   "vendor": "cohere"
+  },
+  {
+   "id": "z-ai/glm-5.2",
+   "vendor": "z-ai"
+  },
+  {
+   "id": "openrouter/fusion",
+   "vendor": "openrouter"
+  },
+  {
+   "id": "moonshotai/kimi-k2.7-code",
+   "vendor": "moonshotai"
+  },
+  {
+   "id": "~anthropic/claude-fable-latest",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "anthropic/claude-fable-5",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "anthropic/claude-fable-5:batch",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "nex-agi/nex-n2-pro",
+   "vendor": "nex-agi"
+  },
+  {
+   "id": "nvidia/nemotron-3.5-content-safety",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nemotron-3.5-content-safety:free",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nemotron-3-ultra-550b-a55b",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nemotron-3-ultra-550b-a55b:free",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "qwen/qwen3.7-plus",
+   "vendor": "qwen"
+  },
+  {
+   "id": "minimax/minimax-m3",
+   "vendor": "minimax"
+  },
+  {
+   "id": "minimax/minimax-m3:batch",
+   "vendor": "minimax"
+  },
+  {
+   "id": "minimax/minimax-m3:free",
+   "vendor": "minimax"
+  },
+  {
+   "id": "stepfun/step-3.7-flash",
+   "vendor": "stepfun"
+  },
+  {
+   "id": "anthropic/claude-opus-4.8",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "anthropic/claude-opus-4.8:batch",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "qwen/qwen3.7-max",
+   "vendor": "qwen"
+  },
+  {
+   "id": "x-ai/grok-build-0.1",
+   "vendor": "x-ai"
+  },
+  {
+   "id": "google/gemini-3.5-flash",
+   "vendor": "google"
+  },
+  {
+   "id": "google/gemini-3.5-flash:batch",
+   "vendor": "google"
+  },
+  {
+   "id": "perceptron/perceptron-mk1",
+   "vendor": "perceptron"
+  },
+  {
+   "id": "google/gemini-3.1-flash-lite",
+   "vendor": "google"
+  },
+  {
+   "id": "google/gemini-3.1-flash-lite:batch",
+   "vendor": "google"
+  },
+  {
+   "id": "openai/gpt-chat-latest",
+   "vendor": "openai"
+  },
+  {
+   "id": "x-ai/grok-4.3",
+   "vendor": "x-ai"
+  },
+  {
+   "id": "x-ai/grok-4.3:batch",
+   "vendor": "x-ai"
+  },
+  {
+   "id": "mistralai/mistral-medium-3-5",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "mistralai/mistral-medium-3-5:batch",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "~anthropic/claude-haiku-latest",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "~openai/gpt-mini-latest",
+   "vendor": "openai"
+  },
+  {
+   "id": "~google/gemini-pro-latest",
+   "vendor": "google"
+  },
+  {
+   "id": "~moonshotai/kimi-latest",
+   "vendor": "moonshotai"
+  },
+  {
+   "id": "~google/gemini-flash-latest",
+   "vendor": "google"
+  },
+  {
+   "id": "~anthropic/claude-sonnet-latest",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "~openai/gpt-latest",
+   "vendor": "openai"
+  },
+  {
+   "id": "qwen/qwen3.5-plus-20260420",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3.6-flash",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3.6-35b-a3b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3.6-max-preview",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3.6-27b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "openai/gpt-5.5-pro",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.5-pro:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.5",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.5:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "deepseek/deepseek-v4-pro",
+   "vendor": "deepseek"
+  },
+  {
+   "id": "deepseek/deepseek-v4-flash",
+   "vendor": "deepseek"
+  },
+  {
+   "id": "tencent/hy3-preview",
+   "vendor": "tencent"
+  },
+  {
+   "id": "xiaomi/mimo-v2.5-pro",
+   "vendor": "xiaomi"
+  },
+  {
+   "id": "xiaomi/mimo-v2.5",
+   "vendor": "xiaomi"
+  },
+  {
+   "id": "openai/gpt-5.4-image-2",
+   "vendor": "openai"
+  },
+  {
+   "id": "~anthropic/claude-opus-latest",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "openrouter/pareto-code",
+   "vendor": "openrouter"
+  },
+  {
+   "id": "moonshotai/kimi-k2.6",
+   "vendor": "moonshotai"
+  },
+  {
+   "id": "anthropic/claude-opus-4.7",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "anthropic/claude-opus-4.7:batch",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "z-ai/glm-5.1",
+   "vendor": "z-ai"
+  },
+  {
+   "id": "google/gemma-4-26b-a4b-it",
+   "vendor": "google"
+  },
+  {
+   "id": "google/gemma-4-26b-a4b-it:free",
+   "vendor": "google"
+  },
+  {
+   "id": "google/gemma-4-31b-it",
+   "vendor": "google"
+  },
+  {
+   "id": "google/gemma-4-31b-it:batch",
+   "vendor": "google"
+  },
+  {
+   "id": "google/gemma-4-31b-it:free",
+   "vendor": "google"
+  },
+  {
+   "id": "qwen/qwen3.6-plus",
+   "vendor": "qwen"
+  },
+  {
+   "id": "z-ai/glm-5v-turbo",
+   "vendor": "z-ai"
+  },
+  {
+   "id": "arcee-ai/trinity-large-thinking",
+   "vendor": "arcee-ai"
+  },
+  {
+   "id": "x-ai/grok-4.20-multi-agent",
+   "vendor": "x-ai"
+  },
+  {
+   "id": "x-ai/grok-4.20",
+   "vendor": "x-ai"
+  },
+  {
+   "id": "google/lyria-3-pro-preview",
+   "vendor": "google"
+  },
+  {
+   "id": "google/lyria-3-clip-preview",
+   "vendor": "google"
+  },
+  {
+   "id": "kwaipilot/kat-coder-pro-v2",
+   "vendor": "kwaipilot"
+  },
+  {
+   "id": "rekaai/reka-edge",
+   "vendor": "rekaai"
+  },
+  {
+   "id": "minimax/minimax-m2.7",
+   "vendor": "minimax"
+  },
+  {
+   "id": "minimax/minimax-m2.7:free",
+   "vendor": "minimax"
+  },
+  {
+   "id": "openai/gpt-5.4-nano",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.4-nano:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.4-mini",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.4-mini:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "mistralai/mistral-small-2603",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "z-ai/glm-5-turbo",
+   "vendor": "z-ai"
+  },
+  {
+   "id": "nvidia/nemotron-3-super-120b-a12b",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nemotron-3-super-120b-a12b:free",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "bytedance-seed/seed-2.0-lite",
+   "vendor": "bytedance-seed"
+  },
+  {
+   "id": "qwen/qwen3.5-9b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3.5-9b:batch",
+   "vendor": "qwen"
+  },
+  {
+   "id": "openai/gpt-5.4-pro",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.4-pro:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.4",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.4:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "inception/mercury-2",
+   "vendor": "inception"
+  },
+  {
+   "id": "google/gemini-3.1-flash-lite-preview",
+   "vendor": "google"
+  },
+  {
+   "id": "bytedance-seed/seed-2.0-mini",
+   "vendor": "bytedance-seed"
+  },
+  {
+   "id": "google/gemini-3.1-flash-image-preview",
+   "vendor": "google"
+  },
+  {
+   "id": "qwen/qwen3.5-35b-a3b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3.5-27b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3.5-122b-a10b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3.5-flash-02-23",
+   "vendor": "qwen"
+  },
+  {
+   "id": "google/gemini-3.1-pro-preview-customtools",
+   "vendor": "google"
+  },
+  {
+   "id": "openai/gpt-5.3-codex",
+   "vendor": "openai"
+  },
+  {
+   "id": "aion-labs/aion-2.0",
+   "vendor": "aion-labs"
+  },
+  {
+   "id": "google/gemini-3.1-pro-preview",
+   "vendor": "google"
+  },
+  {
+   "id": "google/gemini-3.1-pro-preview:batch",
+   "vendor": "google"
+  },
+  {
+   "id": "anthropic/claude-sonnet-4.6",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "anthropic/claude-sonnet-4.6:batch",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "qwen/qwen3.5-plus-02-15",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3.5-397b-a17b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "minimax/minimax-m2.5",
+   "vendor": "minimax"
+  },
+  {
+   "id": "z-ai/glm-5",
+   "vendor": "z-ai"
+  },
+  {
+   "id": "qwen/qwen3-max-thinking",
+   "vendor": "qwen"
+  },
+  {
+   "id": "anthropic/claude-opus-4.6",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "anthropic/claude-opus-4.6:batch",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "qwen/qwen3-coder-next",
+   "vendor": "qwen"
+  },
+  {
+   "id": "openrouter/free",
+   "vendor": "openrouter"
+  },
+  {
+   "id": "stepfun/step-3.5-flash",
+   "vendor": "stepfun"
+  },
+  {
+   "id": "moonshotai/kimi-k2.5",
+   "vendor": "moonshotai"
+  },
+  {
+   "id": "upstage/solar-pro-3",
+   "vendor": "upstage"
+  },
+  {
+   "id": "minimax/minimax-m2-her",
+   "vendor": "minimax"
+  },
+  {
+   "id": "writer/palmyra-x5",
+   "vendor": "writer"
+  },
+  {
+   "id": "openai/gpt-audio",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-audio-mini",
+   "vendor": "openai"
+  },
+  {
+   "id": "z-ai/glm-4.7-flash",
+   "vendor": "z-ai"
+  },
+  {
+   "id": "openai/gpt-5.2-codex",
+   "vendor": "openai"
+  },
+  {
+   "id": "bytedance-seed/seed-1.6-flash",
+   "vendor": "bytedance-seed"
+  },
+  {
+   "id": "bytedance-seed/seed-1.6",
+   "vendor": "bytedance-seed"
+  },
+  {
+   "id": "minimax/minimax-m2.1",
+   "vendor": "minimax"
+  },
+  {
+   "id": "z-ai/glm-4.7",
+   "vendor": "z-ai"
+  },
+  {
+   "id": "google/gemini-3-flash-preview",
+   "vendor": "google"
+  },
+  {
+   "id": "google/gemini-3-flash-preview:batch",
+   "vendor": "google"
+  },
+  {
+   "id": "nvidia/nemotron-3-nano-30b-a3b",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "openai/gpt-5.2-chat",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.2-pro",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.2-pro:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.2",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.2:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "mistralai/devstral-2512",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "relace/relace-search",
+   "vendor": "relace"
+  },
+  {
+   "id": "z-ai/glm-4.6v",
+   "vendor": "z-ai"
+  },
+  {
+   "id": "openrouter/bodybuilder",
+   "vendor": "openrouter"
+  },
+  {
+   "id": "openai/gpt-5.1-codex-max",
+   "vendor": "openai"
+  },
+  {
+   "id": "amazon/nova-2-lite-v1",
+   "vendor": "amazon"
+  },
+  {
+   "id": "mistralai/ministral-14b-2512",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "mistralai/ministral-8b-2512",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "mistralai/ministral-3b-2512",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "mistralai/mistral-large-2512",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "deepseek/deepseek-v3.2",
+   "vendor": "deepseek"
+  },
+  {
+   "id": "anthropic/claude-opus-4.5",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "anthropic/claude-opus-4.5:batch",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "google/gemini-3-pro-image-preview",
+   "vendor": "google"
+  },
+  {
+   "id": "openai/gpt-5.1",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.1:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.1-codex",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5.1-codex-mini",
+   "vendor": "openai"
+  },
+  {
+   "id": "moonshotai/kimi-k2-thinking",
+   "vendor": "moonshotai"
+  },
+  {
+   "id": "amazon/nova-premier-v1",
+   "vendor": "amazon"
+  },
+  {
+   "id": "perplexity/sonar-pro-search",
+   "vendor": "perplexity"
+  },
+  {
+   "id": "mistralai/voxtral-small-24b-2507",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "openai/gpt-oss-safeguard-20b",
+   "vendor": "openai"
+  },
+  {
+   "id": "minimax/minimax-m2",
+   "vendor": "minimax"
+  },
+  {
+   "id": "qwen/qwen3-vl-32b-instruct",
+   "vendor": "qwen"
+  },
+  {
+   "id": "ibm-granite/granite-4.0-h-micro",
+   "vendor": "ibm-granite"
+  },
+  {
+   "id": "openai/gpt-5-image-mini",
+   "vendor": "openai"
+  },
+  {
+   "id": "anthropic/claude-haiku-4.5",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "anthropic/claude-haiku-4.5:batch",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "qwen/qwen3-vl-8b-thinking",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3-vl-8b-instruct",
+   "vendor": "qwen"
+  },
+  {
+   "id": "openai/gpt-5-image",
+   "vendor": "openai"
+  },
+  {
+   "id": "google/gemini-2.5-flash-image",
+   "vendor": "google"
+  },
+  {
+   "id": "qwen/qwen3-vl-30b-a3b-thinking",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3-vl-30b-a3b-instruct",
+   "vendor": "qwen"
+  },
+  {
+   "id": "openai/gpt-5-pro",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5-pro:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "z-ai/glm-4.6",
+   "vendor": "z-ai"
+  },
+  {
+   "id": "anthropic/claude-sonnet-4.5",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "anthropic/claude-sonnet-4.5:batch",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "deepseek/deepseek-v3.2-exp",
+   "vendor": "deepseek"
+  },
+  {
+   "id": "thedrummer/cydonia-24b-v4.1",
+   "vendor": "thedrummer"
+  },
+  {
+   "id": "relace/relace-apply-3",
+   "vendor": "relace"
+  },
+  {
+   "id": "qwen/qwen3-vl-235b-a22b-thinking",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3-vl-235b-a22b-instruct",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3-max",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3-coder-plus",
+   "vendor": "qwen"
+  },
+  {
+   "id": "deepseek/deepseek-v3.1-terminus",
+   "vendor": "deepseek"
+  },
+  {
+   "id": "qwen/qwen3-coder-flash",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3-next-80b-a3b-thinking",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3-next-80b-a3b-instruct",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen-plus-2025-07-28",
+   "vendor": "qwen"
+  },
+  {
+   "id": "moonshotai/kimi-k2-0905",
+   "vendor": "moonshotai"
+  },
+  {
+   "id": "qwen/qwen3-30b-a3b-thinking-2507",
+   "vendor": "qwen"
+  },
+  {
+   "id": "nousresearch/hermes-4-70b",
+   "vendor": "nousresearch"
+  },
+  {
+   "id": "nousresearch/hermes-4-405b",
+   "vendor": "nousresearch"
+  },
+  {
+   "id": "deepseek/deepseek-chat-v3.1",
+   "vendor": "deepseek"
+  },
+  {
+   "id": "mistralai/mistral-medium-3.1",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "z-ai/glm-4.5v",
+   "vendor": "z-ai"
+  },
+  {
+   "id": "openai/gpt-5",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5-mini",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5-mini:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5-nano",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-5-nano:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-oss-120b",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-oss-120b:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-oss-20b",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-oss-20b:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "anthropic/claude-opus-4.1",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "anthropic/claude-opus-4.1:batch",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "mistralai/codestral-2508",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "qwen/qwen3-coder-30b-a3b-instruct",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3-30b-a3b-instruct-2507",
+   "vendor": "qwen"
+  },
+  {
+   "id": "z-ai/glm-4.5",
+   "vendor": "z-ai"
+  },
+  {
+   "id": "z-ai/glm-4.5-air",
+   "vendor": "z-ai"
+  },
+  {
+   "id": "qwen/qwen3-235b-a22b-thinking-2507",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3-coder",
+   "vendor": "qwen"
+  },
+  {
+   "id": "bytedance/ui-tars-1.5-7b",
+   "vendor": "bytedance"
+  },
+  {
+   "id": "google/gemini-2.5-flash-lite",
+   "vendor": "google"
+  },
+  {
+   "id": "google/gemini-2.5-flash-lite:batch",
+   "vendor": "google"
+  },
+  {
+   "id": "qwen/qwen3-235b-a22b-2507",
+   "vendor": "qwen"
+  },
+  {
+   "id": "moonshotai/kimi-k2",
+   "vendor": "moonshotai"
+  },
+  {
+   "id": "cognitivecomputations/dolphin-mistral-24b-venice-edition",
+   "vendor": "cognitivecomputations"
+  },
+  {
+   "id": "tencent/hunyuan-a13b-instruct",
+   "vendor": "tencent"
+  },
+  {
+   "id": "morph/morph-v3-large",
+   "vendor": "morph"
+  },
+  {
+   "id": "morph/morph-v3-fast",
+   "vendor": "morph"
+  },
+  {
+   "id": "baidu/ernie-4.5-vl-424b-a47b",
+   "vendor": "baidu"
+  },
+  {
+   "id": "mistralai/mistral-small-3.2-24b-instruct",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "minimax/minimax-m1",
+   "vendor": "minimax"
+  },
+  {
+   "id": "google/gemini-2.5-flash",
+   "vendor": "google"
+  },
+  {
+   "id": "google/gemini-2.5-flash:batch",
+   "vendor": "google"
+  },
+  {
+   "id": "google/gemini-2.5-pro",
+   "vendor": "google"
+  },
+  {
+   "id": "google/gemini-2.5-pro:batch",
+   "vendor": "google"
+  },
+  {
+   "id": "openai/o3-pro",
+   "vendor": "openai"
+  },
+  {
+   "id": "google/gemini-2.5-pro-preview",
+   "vendor": "google"
+  },
+  {
+   "id": "deepseek/deepseek-r1-0528",
+   "vendor": "deepseek"
+  },
+  {
+   "id": "anthropic/claude-opus-4",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "anthropic/claude-sonnet-4",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "mistralai/mistral-medium-3",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "google/gemini-2.5-pro-preview-05-06",
+   "vendor": "google"
+  },
+  {
+   "id": "meta-llama/llama-guard-4-12b",
+   "vendor": "meta-llama"
+  },
+  {
+   "id": "qwen/qwen3-30b-a3b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3-8b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3-14b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3-32b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen3-235b-a22b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "openai/o4-mini-high",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/o3",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/o3:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/o4-mini",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/o4-mini:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-4.1",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-4.1:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-4.1-mini",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-4.1-mini:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-4.1-nano",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-4.1-nano:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "meta-llama/llama-4-maverick",
+   "vendor": "meta-llama"
+  },
+  {
+   "id": "meta-llama/llama-4-scout",
+   "vendor": "meta-llama"
+  },
+  {
+   "id": "deepseek/deepseek-chat-v3-0324",
+   "vendor": "deepseek"
+  },
+  {
+   "id": "openai/o1-pro",
+   "vendor": "openai"
+  },
+  {
+   "id": "mistralai/mistral-small-3.1-24b-instruct",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "google/gemma-3-4b-it",
+   "vendor": "google"
+  },
+  {
+   "id": "google/gemma-3-12b-it",
+   "vendor": "google"
+  },
+  {
+   "id": "cohere/command-a",
+   "vendor": "cohere"
+  },
+  {
+   "id": "rekaai/reka-flash-3",
+   "vendor": "rekaai"
+  },
+  {
+   "id": "google/gemma-3-27b-it",
+   "vendor": "google"
+  },
+  {
+   "id": "thedrummer/skyfall-36b-v2",
+   "vendor": "thedrummer"
+  },
+  {
+   "id": "perplexity/sonar-reasoning-pro",
+   "vendor": "perplexity"
+  },
+  {
+   "id": "perplexity/sonar-pro",
+   "vendor": "perplexity"
+  },
+  {
+   "id": "perplexity/sonar-deep-research",
+   "vendor": "perplexity"
+  },
+  {
+   "id": "mistralai/mistral-saba",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "openai/o3-mini-high",
+   "vendor": "openai"
+  },
+  {
+   "id": "aion-labs/aion-rp-llama-3.1-8b",
+   "vendor": "aion-labs"
+  },
+  {
+   "id": "qwen/qwen2.5-vl-72b-instruct",
+   "vendor": "qwen"
+  },
+  {
+   "id": "qwen/qwen-plus",
+   "vendor": "qwen"
+  },
+  {
+   "id": "openai/o3-mini",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/o3-mini:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "mistralai/mistral-small-24b-instruct-2501",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "perplexity/sonar",
+   "vendor": "perplexity"
+  },
+  {
+   "id": "deepseek/deepseek-r1-distill-llama-70b",
+   "vendor": "deepseek"
+  },
+  {
+   "id": "deepseek/deepseek-r1",
+   "vendor": "deepseek"
+  },
+  {
+   "id": "minimax/minimax-01",
+   "vendor": "minimax"
+  },
+  {
+   "id": "microsoft/phi-4",
+   "vendor": "microsoft"
+  },
+  {
+   "id": "deepseek/deepseek-chat",
+   "vendor": "deepseek"
+  },
+  {
+   "id": "sao10k/l3.3-euryale-70b",
+   "vendor": "sao10k"
+  },
+  {
+   "id": "openai/o1",
+   "vendor": "openai"
+  },
+  {
+   "id": "cohere/command-r7b-12-2024",
+   "vendor": "cohere"
+  },
+  {
+   "id": "meta-llama/llama-3.3-70b-instruct",
+   "vendor": "meta-llama"
+  },
+  {
+   "id": "amazon/nova-lite-v1",
+   "vendor": "amazon"
+  },
+  {
+   "id": "amazon/nova-micro-v1",
+   "vendor": "amazon"
+  },
+  {
+   "id": "amazon/nova-pro-v1",
+   "vendor": "amazon"
+  },
+  {
+   "id": "openai/gpt-4o-2024-11-20",
+   "vendor": "openai"
+  },
+  {
+   "id": "mistralai/mistral-large-2407",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "qwen/qwen-2.5-coder-32b-instruct",
+   "vendor": "qwen"
+  },
+  {
+   "id": "thedrummer/unslopnemo-12b",
+   "vendor": "thedrummer"
+  },
+  {
+   "id": "anthracite-org/magnum-v4-72b",
+   "vendor": "anthracite-org"
+  },
+  {
+   "id": "qwen/qwen-2.5-7b-instruct",
+   "vendor": "qwen"
+  },
+  {
+   "id": "meta-llama/llama-3.2-1b-instruct",
+   "vendor": "meta-llama"
+  },
+  {
+   "id": "meta-llama/llama-3.2-3b-instruct",
+   "vendor": "meta-llama"
+  },
+  {
+   "id": "qwen/qwen-2.5-72b-instruct",
+   "vendor": "qwen"
+  },
+  {
+   "id": "cohere/command-r-08-2024",
+   "vendor": "cohere"
+  },
+  {
+   "id": "cohere/command-r-plus-08-2024",
+   "vendor": "cohere"
+  },
+  {
+   "id": "sao10k/l3.1-euryale-70b",
+   "vendor": "sao10k"
+  },
+  {
+   "id": "nousresearch/hermes-3-llama-3.1-70b",
+   "vendor": "nousresearch"
+  },
+  {
+   "id": "nousresearch/hermes-3-llama-3.1-405b",
+   "vendor": "nousresearch"
+  },
+  {
+   "id": "sao10k/l3-lunaris-8b",
+   "vendor": "sao10k"
+  },
+  {
+   "id": "openai/gpt-4o-2024-08-06",
+   "vendor": "openai"
+  },
+  {
+   "id": "meta-llama/llama-3.1-70b-instruct",
+   "vendor": "meta-llama"
+  },
+  {
+   "id": "meta-llama/llama-3.1-8b-instruct",
+   "vendor": "meta-llama"
+  },
+  {
+   "id": "mistralai/mistral-nemo",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "openai/gpt-4o-mini",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-4o-mini-2024-07-18",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-4o-mini:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "google/gemma-2-27b-it",
+   "vendor": "google"
+  },
+  {
+   "id": "openai/gpt-4o",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-4o-2024-05-13",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-4o:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "mistralai/mixtral-8x22b-instruct",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "microsoft/wizardlm-2-8x22b",
+   "vendor": "microsoft"
+  },
+  {
+   "id": "openai/gpt-4-turbo",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-4-turbo:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "anthropic/claude-3-haiku",
+   "vendor": "anthropic"
+  },
+  {
+   "id": "mistralai/mistral-large",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "openai/gpt-3.5-turbo-0613",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-4-turbo-preview",
+   "vendor": "openai"
+  },
+  {
+   "id": "openrouter/auto",
+   "vendor": "openrouter"
+  },
+  {
+   "id": "openai/gpt-3.5-turbo-instruct",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-3.5-turbo-16k",
+   "vendor": "openai"
+  },
+  {
+   "id": "mancer/weaver",
+   "vendor": "mancer"
+  },
+  {
+   "id": "undi95/remm-slerp-l2-13b",
+   "vendor": "undi95"
+  },
+  {
+   "id": "gryphe/mythomax-l2-13b",
+   "vendor": "gryphe"
+  },
+  {
+   "id": "openai/gpt-3.5-turbo",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-3.5-turbo:batch",
+   "vendor": "openai"
+  },
+  {
+   "id": "openai/gpt-4",
+   "vendor": "openai"
+  }
+ ],
+ "nvidia_gateway": [
+  {
+   "id": "gcp/google/gemini-omni-flash-preview",
+   "vendor": null
+  },
+  {
+   "id": "test/nvidia/load-test",
+   "vendor": null
+  },
+  {
+   "id": "nvidia/nvidia/cosmos3-nano-reasoner",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/dfw-llama-3.2-nv-embedqa-1b",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/google/gemma-2-9b-it",
+   "vendor": "google"
+  },
+  {
+   "id": "nvidia/google/gemma-4-31b-it",
+   "vendor": "google"
+  },
+  {
+   "id": "nvidia/openai/gpt-oss-20b",
+   "vendor": "openai"
+  },
+  {
+   "id": "nvidia/meta/llama-3.1-8b-instruct",
+   "vendor": "meta"
+  },
+  {
+   "id": "nvidia/nvidia/llama-3.1-nemoguard-8b-content-safety",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/llama-3.1-nemotron-ultra-253b-v1",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/meta/llama-3.2-11b-vision-instruct",
+   "vendor": "meta"
+  },
+  {
+   "id": "nvidia/meta/llama-3.2-1b-instruct",
+   "vendor": "meta"
+  },
+  {
+   "id": "nvcf/meta/llama-3.2-1b-instruct",
+   "vendor": null
+  },
+  {
+   "id": "nvidia/meta/llama-3.2-90b-vision-instruct",
+   "vendor": "meta"
+  },
+  {
+   "id": "nvidia/nvidia/llama-3.2-nemoretriever-300m-embed-v2",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/llama-3.2-nemoretriever-500m-rerank-v2",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/llama-3.2-nv-embedqa-1b-v2",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvcf/nvidia/llama-3.2-nv-embedqa-1b-v2",
+   "vendor": null
+  },
+  {
+   "id": "nvidia/nvidia/llama-3.2-nv-rerankqa-1b-v2",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvcf/nvidia/llama-3.2-nv-rerankqa-1b-v2",
+   "vendor": null
+  },
+  {
+   "id": "nvidia/meta/llama-3.3-70b-instruct",
+   "vendor": "meta"
+  },
+  {
+   "id": "nvcf/meta/llama-3.3-70b-instruct",
+   "vendor": null
+  },
+  {
+   "id": "nvcf/meta/llama-3.1-70b-instruct",
+   "vendor": null
+  },
+  {
+   "id": "nvidia/meta/llama-3.1-70b-instruct",
+   "vendor": "meta"
+  },
+  {
+   "id": "nvidia/nvidia/llama-3.3-nemotron-super-49b-v1",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvcf/nvidia/llama-3.3-nemotron-super-49b-v1",
+   "vendor": null
+  },
+  {
+   "id": "nvidia/nvidia/llama-embed-nemotron-8b",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/llama-nemotron-embed-vl-1b-v2",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvcf/nvidia/llama-nemotron-embed-vl-1b-v2",
+   "vendor": null
+  },
+  {
+   "id": "nvidia/nvidia/llama-nemotron-rerank-vl-1b-v2",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/magpie-tts-multilingual-357m",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/mistralai/mistral-7b-instruct-v0.3",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "nvidia/mistralai/mixtral-8x22b-instruct-v01",
+   "vendor": "mistralai"
+  },
+  {
+   "id": "nvidia/nvidia/nemosmith-4b-instruct",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/nemotron-3-embed-1b",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/nemotron-3.5-lightning",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/nemotron-nano-3.5-preview",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/nemotron-nano-12b-v2-vl",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/nemotron-nano-9b-v2",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/Nemotron-3-Nano-30B-A3B",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/nemotron-3-nano-30b-a3b",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/nemotron-nano-31b-v3",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvcf/nvidia/nemotron-nano-31b-v3",
+   "vendor": null
+  },
+  {
+   "id": "nvidia/nvidia/nemotron-ocr-v2-english",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/nemotron-ocr-v2-multilingual",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/nemotron-page-elements-v3",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/nemotron-table-structure-v1",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/nv-embed-qa-v4",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/nv-embedqa-e5-v5",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/nv-rerankqa-mistral-4b-v3",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/baidu/paddleocr-vl",
+   "vendor": "baidu"
+  },
+  {
+   "id": "nvidia/microsoft/phi-4-mini-instruct",
+   "vendor": "microsoft"
+  },
+  {
+   "id": "nvidia/qwen/qwen3-32b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "nvidia/qwen/qwen3-embedding-0.6b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "nvidia/qwen/qwen3-next-80b-a3b-instruct",
+   "vendor": "qwen"
+  },
+  {
+   "id": "nvidia/qwen/qwen3-reranker-0.6b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "nvidia/qwen/qwen3-reranker-8b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "nvidia/qwen/qwen3.5-0.8b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "nvidia/qwen/qwen3.5-122b-a10b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "nvidia/qwen/qwen3.5-9b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "nvidia/qwen/qwen3.6-27b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "nvidia/qwen/qwen3.6-35b-a3b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "nvidia/qwen/qwen3.5-35b-a3b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "nvidia/qwen/qwen3.8-27b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "nvidia/nvidia/riva-translate-4b-instruct-v1.1",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "gcp/google/gemini-3.1-flash-lite",
+   "vendor": null
+  },
+  {
+   "id": "gcp/google/gemini-3.1-flash-lite-image",
+   "vendor": null
+  },
+  {
+   "id": "gcp/google/gemini-3.1-pro-preview",
+   "vendor": null
+  },
+  {
+   "id": "gcp/google/gemini-3.5-flash",
+   "vendor": null
+  },
+  {
+   "id": "gcp/google/gemini-3.5-flash-lite",
+   "vendor": null
+  },
+  {
+   "id": "gcp/google/gemini-3.6-flash",
+   "vendor": null
+  },
+  {
+   "id": "gcp/google/gemini-3.7-flash",
+   "vendor": null
+  },
+  {
+   "id": "gcp/google/gemini-3.8-flash",
+   "vendor": null
+  },
+  {
+   "id": "gcp/google/gemini-2.5-pro",
+   "vendor": null
+  },
+  {
+   "id": "gcp/google/gemini-2.5-flash",
+   "vendor": null
+  },
+  {
+   "id": "gcp/google/gemini-2.5-flash-lite",
+   "vendor": null
+  },
+  {
+   "id": "gcp/google/multimodalembedding",
+   "vendor": null
+  },
+  {
+   "id": "gcp/google/gemini-embedding-001",
+   "vendor": null
+  },
+  {
+   "id": "gcp/google/gemini-embedding-2",
+   "vendor": null
+  },
+  {
+   "id": "gcp/google/veo-3.1-generate-001",
+   "vendor": null
+  },
+  {
+   "id": "gcp/google/veo-3.0-generate-001",
+   "vendor": null
+  },
+  {
+   "id": "gcp/google/gemini-3-flash-preview",
+   "vendor": null
+  },
+  {
+   "id": "gcp/google/gemini-3-pro-image",
+   "vendor": null
+  },
+  {
+   "id": "gcp/google/gemini-3.1-flash-image",
+   "vendor": null
+  },
+  {
+   "id": "gemini-omni-flash-preview",
+   "vendor": null
+  },
+  {
+   "id": "fake-openai-endpoint",
+   "vendor": null
+  },
+  {
+   "id": "fusion-fake-llm",
+   "vendor": null
+  },
+  {
+   "id": "azure/anthropic/claude-sonnet-4-5",
+   "vendor": null
+  },
+  {
+   "id": "azure/anthropic/claude-haiku-4-5",
+   "vendor": null
+  },
+  {
+   "id": "azure/anthropic/claude-opus-4-5",
+   "vendor": null
+  },
+  {
+   "id": "azure/anthropic/claude-opus-4-6",
+   "vendor": null
+  },
+  {
+   "id": "azure/anthropic/claude-opus-4-7",
+   "vendor": null
+  },
+  {
+   "id": "azure/anthropic/claude-opus-4-8",
+   "vendor": null
+  },
+  {
+   "id": "azure/anthropic/claude-opus-5",
+   "vendor": null
+  },
+  {
+   "id": "azure/anthropic/claude-sonnet-4-6",
+   "vendor": null
+  },
+  {
+   "id": "azure/anthropic/claude-sonnet-5",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-5.4-nano",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-5.4-mini",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-5.6-terra",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-5.6-luna",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-5.6-sol",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-5.3-chat",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-5.3-codex",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-5.2-codex",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-5.2",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-5.2-chat",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-5-chat",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-5-mini",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-5",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-5-nano",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-5.1",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-5.1-chat",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-5.1-codex",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-5.1-codex-mini",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-4.1",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-4o",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/o1",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/o3-mini",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/o4-mini",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/text-embedding-3-small",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/text-embedding-3-large",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/o3",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-4.1-mini",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-4o-mini",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-5.1-codex-max",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/text-embedding-ada-002",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-5.4",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-5.5",
+   "vendor": null
+  },
+  {
+   "id": "azure/openai/gpt-image-2",
+   "vendor": null
+  },
+  {
+   "id": "us/azure/openai/gpt-5.3-codex",
+   "vendor": null
+  },
+  {
+   "id": "us/azure/openai/gpt-5.4",
+   "vendor": null
+  },
+  {
+   "id": "us/azure/openai/gpt-5.2",
+   "vendor": null
+  },
+  {
+   "id": "us/azure/openai/gpt-5.1",
+   "vendor": null
+  },
+  {
+   "id": "us/azure/openai/gpt-5-mini",
+   "vendor": null
+  },
+  {
+   "id": "us/azure/openai/gpt-5",
+   "vendor": null
+  },
+  {
+   "id": "us/azure/openai/o3-mini",
+   "vendor": null
+  },
+  {
+   "id": "us/azure/openai/o1",
+   "vendor": null
+  },
+  {
+   "id": "us/azure/openai/gpt-4.1",
+   "vendor": null
+  },
+  {
+   "id": "us/azure/openai/text-embedding-ada-002",
+   "vendor": null
+  },
+  {
+   "id": "us/azure/openai/text-embedding-3-small",
+   "vendor": null
+  },
+  {
+   "id": "us/azure/openai/text-embedding-3-large",
+   "vendor": null
+  },
+  {
+   "id": "us/azure/openai/gpt-5-nano",
+   "vendor": null
+  },
+  {
+   "id": "us/azure/openai/gpt-4o-mini",
+   "vendor": null
+  },
+  {
+   "id": "us/azure/openai/gpt-4.1-mini",
+   "vendor": null
+  },
+  {
+   "id": "us/azure/openai/o4-mini",
+   "vendor": null
+  },
+  {
+   "id": "us/azure/openai/gpt-4.1-nano",
+   "vendor": null
+  },
+  {
+   "id": "aws/anthropic/bedrock-claude-opus-4-7",
+   "vendor": null
+  },
+  {
+   "id": "aws/anthropic/bedrock-claude-opus-4-8",
+   "vendor": null
+  },
+  {
+   "id": "aws/anthropic/bedrock-claude-opus-5",
+   "vendor": null
+  },
+  {
+   "id": "aws/anthropic/bedrock-claude-sonnet-4-6",
+   "vendor": null
+  },
+  {
+   "id": "aws/anthropic/bedrock-claude-opus-4-6",
+   "vendor": null
+  },
+  {
+   "id": "aws/anthropic/claude-opus-4-5",
+   "vendor": null
+  },
+  {
+   "id": "aws/anthropic/bedrock-claude-sonnet-4-5-v1",
+   "vendor": null
+  },
+  {
+   "id": "aws/anthropic/bedrock-claude-sonnet-5",
+   "vendor": null
+  },
+  {
+   "id": "aws/anthropic/claude-haiku-4-5-v1",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-5.5",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-5.5-batch",
+   "vendor": null
+  },
+  {
+   "id": "openai/gpt-realtime-2.1",
+   "vendor": null
+  },
+  {
+   "id": "openai/gpt-realtime-2.1-mini",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-5.6-luna",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-5.6-sol",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-5.6-sol-batch",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-5.6-terra",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-5.4-mini",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-5.4-nano",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-5.4-pro",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-5.4",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-5.4-batch",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-5.3-codex",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-5.2",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-5-mini",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-5-nano",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-5.1",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-3.5-turbo",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-image-2",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/sora-2",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/sora-2-pro",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-4o-mini",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-4o-mini-tts",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-4o-mini-transcribe",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/gpt-transcribe",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/text-embedding-3-large",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/text-embedding-3-small",
+   "vendor": null
+  },
+  {
+   "id": "openai/openai/text-embedding-ada-002",
+   "vendor": null
+  },
+  {
+   "id": "cognition/nvidia/nemotron-3-ultra-evals",
+   "vendor": null
+  },
+  {
+   "id": "nvidia/nvidia/nemotron-3-ultra",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/deepseek-ai/deepseek-v4-flash",
+   "vendor": "deepseek-ai"
+  },
+  {
+   "id": "nvidia/deepseek-ai/deepseek-v4-pro",
+   "vendor": "deepseek-ai"
+  },
+  {
+   "id": "nvidia/moonshotai/kimi-k2.7",
+   "vendor": "moonshotai"
+  },
+  {
+   "id": "nvidia/moonshotai/kimi-k2.6",
+   "vendor": "moonshotai"
+  },
+  {
+   "id": "nvidia/moonshotai/kimi-k2.5",
+   "vendor": "moonshotai"
+  },
+  {
+   "id": "cognition/zai-org/glm-5.3-flash",
+   "vendor": null
+  },
+  {
+   "id": "nvidia/zai-org/glm-5.3-flash",
+   "vendor": "zai-org"
+  },
+  {
+   "id": "nvidia/zai-org/glm-5.2",
+   "vendor": "zai-org"
+  },
+  {
+   "id": "nvidia/zai-org/glm-5.1",
+   "vendor": "zai-org"
+  },
+  {
+   "id": "nvidia/moonshotai/kimi-k3",
+   "vendor": "moonshotai"
+  },
+  {
+   "id": "xai/xai/grok-4.6",
+   "vendor": null
+  },
+  {
+   "id": "xai/grok-voice-latest",
+   "vendor": null
+  },
+  {
+   "id": "perplexity/perplexity/sonar",
+   "vendor": null
+  },
+  {
+   "id": "perplexity/perplexity/sonar-pro",
+   "vendor": null
+  },
+  {
+   "id": "perplexity/perplexity/sonar-reasoning-pro",
+   "vendor": null
+  },
+  {
+   "id": "perplexity/perplexity/sonar-deep-research",
+   "vendor": null
+  },
+  {
+   "id": "nvidia/openai/gpt-oss-120b",
+   "vendor": "openai"
+  },
+  {
+   "id": "nvcf/openai/gpt-oss-120b",
+   "vendor": null
+  },
+  {
+   "id": "nvidia/nvidia/nemotron-3.5-super-text-preview",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/qwen/qwen-235b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "nvidia/qwen/qwen3.8-flash-next",
+   "vendor": "qwen"
+  },
+  {
+   "id": "nvidia/nvidia/nemotron-3.5-super-vl-preview",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/super-sft-charxiv-babyvision-blend",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/nemotron-3-super-v3",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/nemotron-3-super-preview",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/nemotron-3-super-rc-nim",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/cosmos3-super-reasoner",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/nemotron-3-ultra-nvfp4",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/evals-nemotron-3-nano",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/evals-nemotron-3-30b-a3b",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/nvidia/nemotron-3-super-120b-long-ctx",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia_dynamo/deepseek-ai/deepseek-v4-flash-nvfp4-elb",
+   "vendor": null
+  },
+  {
+   "id": "nvidia_dynamo/moonshotai/kimi-k2.6-nvfp4-elb",
+   "vendor": null
+  },
+  {
+   "id": "nvidia/nvidia/llama-3.3-nemotron-super-49b-v1.5",
+   "vendor": "nvidia"
+  },
+  {
+   "id": "nvidia/qwen/qwen3-5-397b-a17b",
+   "vendor": "qwen"
+  },
+  {
+   "id": "nvidia/minimaxai/minimax-m2.7",
+   "vendor": "minimaxai"
+  },
+  {
+   "id": "nvidia/minimaxai/minimax-m3",
+   "vendor": "minimaxai"
+  },
+  {
+   "id": "nvidia/meta/evals-muse-glimmer-30b",
+   "vendor": "meta"
+  },
+  {
+   "id": "nvidia/google/evals-gemma-4-31b",
+   "vendor": "google"
+  },
+  {
+   "id": "nvidia/google/evals-gemma-4-26b-a4b",
+   "vendor": "google"
+  },
+  {
+   "id": "nvidia/zai-org/glm-5.3",
+   "vendor": "zai-org"
+  },
+  {
+   "id": "nvidia/thinkingmachines/inkling",
+   "vendor": "thinkingmachines"
+  },
+  {
+   "id": "nvidia/thinkingmachines/inkling-small",
+   "vendor": "thinkingmachines"
+  },
+  {
+   "id": "switchyard/openai/gpt-5.6-luna",
+   "vendor": null
+  },
+  {
+   "id": "switchyard/openai/gpt-5.6-sol",
+   "vendor": null
+  },
+  {
+   "id": "switchyard/openai/gpt-5.6-terra",
+   "vendor": null
+  },
+  {
+   "id": "switchyard/openai/gpt-5.5",
+   "vendor": null
+  },
+  {
+   "id": "switchyard/openai/gpt-5.4",
+   "vendor": null
+  },
+  {
+   "id": "switchyard/openai/gpt-5.2",
+   "vendor": null
+  },
+  {
+   "id": "switchyard/openai/gpt-5.1",
+   "vendor": null
+  },
+  {
+   "id": "switchyard/openai/gpt-5.3-codex",
+   "vendor": null
+  },
+  {
+   "id": "switchyard/openai/gpt-5-mini",
+   "vendor": null
+  },
+  {
+   "id": "switchyard/openai/gpt-5-nano",
+   "vendor": null
+  },
+  {
+   "id": "switchyard/openai/gpt-4o-mini",
+   "vendor": null
+  }
+ ]
+}
