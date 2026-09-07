@@ -138,7 +138,7 @@ class JobHandle:
         daemon: bool = False,
     ) -> None:
         self.name = name
-        self.label = _normalize_job_label(label) if label else (label or name)
+        self.label = _normalize_job_label(label) if (label and label.strip()) else name
         self.description = _normalize_job_description(description)
         self.daemon = daemon
         self.job_id = uuid.uuid4().hex
@@ -199,10 +199,12 @@ def has_running_work(queue_manager: Any) -> bool:
     """Return whether *queue_manager* has finite, in-flight spawned work.
 
     Uses ``running_work_handles()`` (daemon-aware) when the manager
-    provides it; older custom QueueManager-like hosts fall back to the
-    previous all-running-handles predicate. This is the single
-    compatibility point for idle/quiescence checks — do not hand-roll
-    the ``getattr`` fallback at call sites.
+    provides it; hosts without that method fall back to the previous
+    all-running-handles predicate, and hosts exposing no handle API at
+    all read as idle (matching the pre-daemon behavior of callers that
+    only inspected channels). This is the single compatibility point for
+    idle/quiescence checks — do not hand-roll the ``getattr`` fallback at
+    call sites.
     """
     running_work = getattr(queue_manager, "running_work_handles", None)
     if running_work is not None:
@@ -865,8 +867,9 @@ class QueueManager:
             spawn_lines = [f"⚡ {len(active_spawns)} active background job(s):"]
             for h in visible_spawns:
                 state = "running, daemon" if h.daemon else "running"
-                label = _normalize_job_label(h.label) if h.label else h.label
-                spawn_lines.append(f"  • [{h.job_id}] {label} → {h.name} ({state})")
+                label = _normalize_job_label(h.label) if h.label else h.name
+                name = _normalize_job_label(h.name) if h.name else h.name
+                spawn_lines.append(f"  • [{h.job_id}] {label} → {name} ({state})")
                 if h.description:
                     spawn_lines.append(f"    {h.description}")
             omitted = len(active_spawns) - len(visible_spawns)

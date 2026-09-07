@@ -98,13 +98,13 @@ async def test_restart_waiter_drain_failure_releases_input_and_retries() -> None
 
 
 @pytest.mark.asyncio
-async def test_real_sigusr1_routes_restart_request_and_re_exec_gate() -> None:
-    """End-to-end signal wiring: SIGUSR1 latches the drain via the real handler.
+async def test_real_sigusr1_routes_restart_request_through_handler() -> None:
+    """Signal wiring: a real SIGUSR1 latches the drain via the real handler.
 
     Covers the wiring the unit-tested waiter depends on: a real
     ``install_restart_signal`` handler on the running loop must invoke the
-    session latch (and would arm the waiter), while the re-exec gate stays
-    closed until the drain reports ready.
+    session latch. (The re-exec gate itself is asserted separately by the
+    waiter tests' on_ready contract.)
     """
     import os
     import signal as _signal
@@ -133,14 +133,14 @@ async def test_real_sigusr1_routes_restart_request_and_re_exec_gate() -> None:
         asyncio.get_running_loop(),
         lambda: (session.request_restart_when_idle(), restart_event.set()),
     )
-
-    # Send the real signal from this process; the loop-routed handler must
-    # run on the loop thread (same thread here) and latch the drain.
-    os.kill(os.getpid(), _signal.SIGUSR1)
-    await asyncio.wait_for(restart_event.wait(), timeout=2)
-    assert latched == [True]
-
-    registration.close()
+    try:
+        # Send the real signal from this process; the loop-routed handler
+        # must run on the loop thread (same thread here) and latch the drain.
+        os.kill(os.getpid(), _signal.SIGUSR1)
+        await asyncio.wait_for(restart_event.wait(), timeout=2)
+        assert latched == [True]
+    finally:
+        registration.close()
 
 
 def test_legacy_queue_manager_host_keeps_all_running_handles_predicate() -> None:

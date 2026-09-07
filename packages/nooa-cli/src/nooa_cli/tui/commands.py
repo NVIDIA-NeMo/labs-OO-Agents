@@ -343,16 +343,24 @@ class RestartCommand(Command):
         return {"/restart": "Gracefully drain active work and reload the TUI in place"}
 
     async def execute(self, args: list[str]) -> "CommandResult":
-        # The session hook (wired by main()) performs the exact same latch as
+        # The registry hook (wired by main()) performs the exact same latch as
         # the SIGUSR1 signal path: block new input, drain admitted work, then
         # same-session re-exec. The command never implements its own restart.
-        hook = getattr(self._registry, "request_restart", None)
+        registry = self._registry
+        hook = getattr(registry, "request_restart", None)
         if not callable(hook):
+            # main() records why the in-process restart is not wired —
+            # the opt-in update watch being off, or no runtime
+            # registration at all. Never guess: report the actual reason.
+            reason = getattr(registry, "restart_unavailable_reason", None)
+            if reason:
+                return CommandResult.err(f"Restart is unavailable: {reason}")
             return CommandResult.err(
                 "Restart is unavailable: this process has no runtime registration "
                 "(restart requires a source checkout with the graceful-restart contract)."
             )
-        if getattr(self._registry, "restart_in_flight", lambda: False)():
+        in_flight = getattr(registry, "restart_in_flight", None)
+        if callable(in_flight) and in_flight():
             return CommandResult.ok(
                 TextOutput("Restart already pending; waiting for current work to finish.", "status")
             )
@@ -2727,9 +2735,11 @@ class CommandRegistry:
         # Graceful-restart wiring, set by the composition root (main) when
         # runtime registration is active. ``/restart`` latches the exact same
         # drain as the SIGUSR1 signal path; it must never implement its own
-        # restart mechanism.
+        # restart mechanism. ``restart_unavailable_reason`` explains (for the
+        # command's error message) why the hook is not wired when it is not.
         self.request_restart: Any = None
         self.restart_in_flight: Any = None
+        self.restart_unavailable_reason: str | None = None
         self.startup_info: Output | None = None  # set by main after bootstrap
         self.blocking_llm_health: Any | None = None
         self.llm_health_generation = 0
