@@ -29,7 +29,6 @@ async def _exit_when_restart_requested(
     restart_event: asyncio.Event,
     *,
     on_ready: Callable[[], None],
-    on_failed: Callable[[], None] | None = None,
 ) -> None:
     """Exit only after pre-request work has settled naturally.
 
@@ -56,6 +55,10 @@ async def _exit_when_restart_requested(
                     )
                 except Exception:
                     pass
+            # Clear before releasing: a set-then-clear could drop a signal
+            # that latched a fresh drain between the two statements, while a
+            # clear-then-set can only ever produce one extra (harmless) retry.
+            restart_event.clear()
             release = getattr(session, "release_restart_request", None)
             if callable(release):
                 try:
@@ -67,9 +70,6 @@ async def _exit_when_restart_requested(
                     app.end_input_drain()  # type: ignore[attr-defined]
                 except Exception:
                     pass
-            restart_event.clear()
-            if on_failed is not None:
-                on_failed()
             continue
         on_ready()
         session._app.exit()
@@ -215,11 +215,16 @@ async def main(
                 # observe-only update watch) is fully opt-in via
                 # tui.update_watch — default off, dev checkouts only.
                 if getattr(config.tui, "update_watch", False):
-                    session.set_restart_request_hook(_request_restart)
                     registry.request_restart = _request_restart
                     registry.restart_in_flight = _restart_in_flight
                     # Baseline revision for the observe-only update notice.
                     session._startup_source_revision = candidate.source_revision
+                else:
+                    registry.restart_unavailable_reason = (
+                        "tui.update_watch is off (enable with --update-watch "
+                        "or tui.update_watch in settings); the external "
+                        "SIGUSR1 restart path still works."
+                    )
 
                 def _update_runtime_session(session_id: str) -> None:
                     """Keep restart metadata aligned with in-process session changes."""

@@ -175,7 +175,7 @@ class TUIConfig(BaseModel):
     # Completely opt-in (observe-only, never restarts); intended for
     # development checkouts that move underneath long-lived TUIs.
     update_watch: bool = False
-    update_watch_interval_s: float = 30.0
+    update_watch_interval_s: float = Field(default=30.0, ge=1.0)
 
 
 def resolve_display_mode(config: TUIConfig) -> DisplayMode:
