@@ -128,6 +128,10 @@ class TUIRuntimeRegistration:
         self.pid = os.getpid()
         self.token = secrets.token_hex(16)
         self.source_root = _source_root()
+        # Snapshot once: the revision this process started from is the
+        # baseline for "update available" detection, and publishing must
+        # not re-run git (the checkout may change under the process later).
+        self.source_revision = _source_revision(self.source_root)
         self.started_at = time.time()
         invocation = original_argv or list(getattr(sys, "orig_argv", [sys.executable, *sys.argv]))
         self.restart_argv = explicit_resume_argv(invocation, session_id)
@@ -151,7 +155,7 @@ class TUIRuntimeRegistration:
             "session_id": self.session_id,
             "working_dir": self.working_dir,
             "source_root": str(self.source_root),
-            "source_revision": _source_revision(self.source_root),
+            "source_revision": self.source_revision,
             "started_at": self.started_at,
         }
 

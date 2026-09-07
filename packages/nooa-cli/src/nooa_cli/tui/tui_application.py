@@ -1206,6 +1206,7 @@ class TUIApplication:
         self._submission_guard = submission_guard
         self._defer_submission = defer_submission
         self._submission_block_reason: str | None = None
+        self._persistent_notice: str | None = None
         self._callback_tasks: set[asyncio.Task[Any]] = set()
         self._ctrl_c_exit_armed = False
         self._ctrl_c_exit_timer: asyncio.TimerHandle | None = None
@@ -5115,6 +5116,8 @@ class TUIApplication:
                 logger.debug("auxiliary status callback failed", exc_info=True)
         if auxiliary_status:
             rows.append([("class:status", auxiliary_status)])
+        if self._persistent_notice:
+            rows.append([("class:status", self._persistent_notice)])
         if include_transient and self._transient_status_text:
             rows.append([(self._transient_status_style, self._transient_status_text)])
         if self._command_status_text:
@@ -5128,6 +5131,17 @@ class TUIApplication:
             else:
                 rows.append([("class:status", label)])
         return rows
+
+    def set_status_notice(self, text: str | None) -> None:
+        """Show (or clear) a persistent status-row notice.
+
+        Used for durable, non-urgent information such as an available code
+        update; unlike transient status text it survives repaints until
+        explicitly cleared.
+        """
+        self._persistent_notice = text if text else None
+        if self._app.is_running:
+            self._app.invalidate()
 
     def status_text(self) -> str:
         """Plain-text projection of the dynamic status rows."""

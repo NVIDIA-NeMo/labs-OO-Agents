@@ -354,6 +354,17 @@ class Session:
         self._command_runner = None
         self._on_session_change: Callable[[str], None] | None = None
         self._restart_pending = False
+        # In-process graceful-restart latch callable (wired by main(); also
+        # used by the /restart command). None in embedders that did not
+        # install runtime registration.
+        self._request_restart: Callable[[], None] | None = None
+        # Update notice: set when the running code's source revision no
+        # longer matches the checked-out tree (git HEAD moved under us).
+        self._update_notice_shown = False
+        self._update_watch_task: asyncio.Task | None = None
+        # The revision this process started from (wired by main() from the
+        # runtime registration; None disables the update watch).
+        self._startup_source_revision: str | None = None
 
         # Populated at the start of ``run()``; referenced by the handler
         # methods (``_on_command``, ``_on_user_message_ui``, ``_loud_handler``,
@@ -422,6 +433,53 @@ class Session:
             return
         if exc is not None:
             logger.error("restart drain: daemon cancellation failed", exc_info=exc)
+
+    def set_restart_request_hook(self, hook: Callable[[], None] | None) -> None:
+        """Wire the in-process restart latch used by ``/restart``.
+
+        *hook* performs the full graceful-restart latch (drain + waiter
+        wake-up + re-exec gate) exactly like the SIGUSR1 signal path; the
+        slash command must never implement its own restart mechanism.
+        """
+        self._request_restart = hook
+
+    def _current_source_revision(self) -> str | None:
+        """Return the checked-out revision of the running code's root."""
+        from .runtime_registration import _source_revision, _source_root
+
+        return _source_revision(_source_root())
+
+    def _notice_update_available(self, current: str, expected: str) -> None:
+        """Show the persistent update notice once; never auto-restart."""
+        if self._update_notice_shown or self._app is None:
+            return
+        self._update_notice_shown = True
+        set_notice = getattr(self._app, "set_status_notice", None)
+        if callable(set_notice):
+            set_notice("Update available — call /restart to reload")
+        logger.info(
+            "TUI source revision changed under the running process "
+            "(started at %s, checkout now %s); showing /restart notice",
+            expected[:12],
+            current[:12],
+        )
+
+    async def _watch_source_updates(self, *, interval_s: float = 30.0) -> None:
+        """Periodically compare the checkout's HEAD to the startup revision.
+
+        Observe only: when they differ, surface the persistent
+        "update available — call /restart" status notice. Never restarts
+        anything by itself.
+        """
+        expected = self._startup_source_revision
+        if expected is None:
+            return  # not a source checkout / git unavailable — nothing to compare
+        while True:
+            await asyncio.sleep(interval_s)
+            current = await asyncio.to_thread(self._current_source_revision)
+            if current is not None and current != expected:
+                self._notice_update_available(current, expected)
+                return  # the notice stays until restart; no need to re-check
 
     def request_restart_when_idle(self) -> None:
         """Latch a restart drain and stop accepting new user-initiated work."""
@@ -501,8 +559,7 @@ class Session:
         if handles is None:
             return False
         return any(
-            handle.state == "running" and getattr(handle, "daemon", False)
-            for handle in handles()
+            handle.state == "running" and getattr(handle, "daemon", False) for handle in handles()
         )
 
     async def wait_restart_ready(self) -> None:
@@ -818,6 +875,8 @@ class Session:
         app_ref.append(self._app)
         if getattr(self, "_restart_pending", False):
             self._app.begin_input_drain("Restart pending; waiting for current work to finish.")
+        # Observe-only update watch: notice only, never an automatic restart.
+        self._fire_and_forget(self._watch_source_updates())
 
         from .local_turn_policy import LocalTurnPolicy
 
