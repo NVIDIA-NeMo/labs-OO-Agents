@@ -331,6 +331,41 @@ class ExitCommand(Command):
         return CommandResult.bye()
 
 
+class RestartCommand(Command):
+    """Reload the TUI in place via the graceful drain (never automatic)."""
+
+    @property
+    def name(self) -> str:
+        return "restart"
+
+    @classmethod
+    def help_text(cls) -> dict[str, str]:
+        return {"/restart": "Gracefully drain active work and reload the TUI in place"}
+
+    async def execute(self, args: list[str]) -> "CommandResult":
+        # The session hook (wired by main()) performs the exact same latch as
+        # the SIGUSR1 signal path: block new input, drain admitted work, then
+        # same-session re-exec. The command never implements its own restart.
+        hook = getattr(self._registry, "request_restart", None)
+        if not callable(hook):
+            return CommandResult.err(
+                "Restart is unavailable: this process has no runtime registration "
+                "(restart requires a source checkout with the graceful-restart contract)."
+            )
+        if getattr(self._registry, "restart_in_flight", lambda: False)():
+            return CommandResult.ok(
+                TextOutput("Restart already pending; waiting for current work to finish.", "status")
+            )
+        hook()
+        return CommandResult.ok(
+            TextOutput(
+                "Restart requested: waiting for current work to finish, "
+                "then reloading this session in place.",
+                "status",
+            )
+        )
+
+
 async def _reset_agent_working_state(agent: "Agent") -> None:
     """Reset the agent's in-memory working state for a fresh ``/clear``.
 
@@ -2661,6 +2696,7 @@ class CommandRegistry:
         "reflection": ReflectionCommand,
         "session": SessionCommand,
         "resume": ResumeCommand,
+        "restart": RestartCommand,
         "jobs": JobsCommand,
         "events": EventsCommand,
         "todos": TodosCommand,
@@ -2688,6 +2724,12 @@ class CommandRegistry:
         self.mcp_file = mcp_file
         self.session_manager = session_manager
         self._root_config = root_config
+        # Graceful-restart wiring, set by the composition root (main) when
+        # runtime registration is active. ``/restart`` latches the exact same
+        # drain as the SIGUSR1 signal path; it must never implement its own
+        # restart mechanism.
+        self.request_restart: Any = None
+        self.restart_in_flight: Any = None
         self.startup_info: Output | None = None  # set by main after bootstrap
         self.blocking_llm_health: Any | None = None
         self.llm_health_generation = 0
