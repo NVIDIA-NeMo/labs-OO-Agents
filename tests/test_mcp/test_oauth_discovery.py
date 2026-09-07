@@ -644,6 +644,56 @@ async def test_loopback_rejects_mismatched_state_without_hanging(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_loopback_silent_client_does_not_wedge_callback_thread(monkeypatch):
+    """An accepted client that sends nothing must not outlive the join."""
+    import socket
+
+    threads: list[threading.Thread] = []
+    real_thread = threading.Thread
+
+    def tracked_thread(*args, **kwargs):
+        thread = real_thread(*args, **kwargs)
+        threads.append(thread)
+        return thread
+
+    monkeypatch.setattr(oauth, "Thread", tracked_thread)
+    config = oauth.OAuthConfig(
+        authorization_endpoint="https://maas.example/authorize",
+        token_endpoint="https://maas.example/token",
+        client_id="client-id",
+        redirect_uri="http://localhost:0/callback",
+        timeout=5,
+    )
+    handler = oauth.OAuthHandler(config)
+    task = asyncio.create_task(handler._capture_code_via_local_server(open_browser=False))
+    for _ in range(200):
+        redirect = handler._actual_redirect_uri
+        if redirect and "localhost:0" not in redirect:
+            break
+        await asyncio.sleep(0.02)
+    assert threads
+
+    parsed = oauth.urlparse(handler._actual_redirect_uri)
+    silent = socket.create_connection((parsed.hostname, parsed.port), timeout=5)
+    try:
+        await asyncio.sleep(0.2)
+        assert threads[0].is_alive()
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        silent.close()
+
+    # The bounded handler timeout lets the serve loop retire the worker.
+    for _ in range(100):
+        if not threads[0].is_alive():
+            break
+        await asyncio.sleep(0.05)
+    assert not threads[0].is_alive()
+
+
+@pytest.mark.asyncio
 async def test_loopback_timeout_closes_callback_thread(monkeypatch):
     threads: list[threading.Thread] = []
     real_thread = threading.Thread
@@ -812,6 +862,15 @@ def test_system_browser_available_true_when_browser_present(monkeypatch):
     monkeypatch.delenv("SBX_NO_DISPLAY", raising=False)
     monkeypatch.setattr(oauth.webbrowser, "get", lambda *a, **k: object())
     assert oauth._system_browser_available() is True
+
+
+def test_system_browser_unavailable_over_windows_openssh(monkeypatch):
+    """Windows OpenSSH sets the SSH variables too; the check must not be POSIX-only."""
+    monkeypatch.setattr(oauth.os, "name", "nt")
+    monkeypatch.setenv("SSH_CONNECTION", "laptop 123 remote 22")
+    monkeypatch.setattr(oauth.webbrowser, "get", lambda *a, **k: object())
+
+    assert oauth._system_browser_available() is False
 
 
 def test_system_browser_available_false_over_ssh_even_with_forwarded_display(monkeypatch):
