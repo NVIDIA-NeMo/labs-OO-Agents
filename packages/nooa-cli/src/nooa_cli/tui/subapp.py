@@ -46,10 +46,14 @@ class InAppSubview(Protocol):
         """Called just before the view is removed."""
 
 
-def normalize_key_result(result: SubviewKeyResult | bool | None) -> SubviewKeyResult:
-    """Accept legacy bool-ish handlers while new views return explicit results."""
+def normalize_key_result(result: SubviewKeyResult) -> SubviewKeyResult:
+    """Normalize a subview key result to its canonical literal.
+
+    Every host-routed view returns an explicit :data:`SubviewKeyResult`
+    literal; the legacy boolean forms are no longer accepted.
+    """
     if result == "close":
         return "close"
-    if result == "ignored" or result is False:
+    if result == "ignored":
         return "ignored"
     return "handled"

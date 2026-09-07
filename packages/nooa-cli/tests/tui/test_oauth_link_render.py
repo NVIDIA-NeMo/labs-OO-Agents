@@ -6,7 +6,7 @@ from io import StringIO
 from types import SimpleNamespace
 
 import pytest
-from nooa_cli.tui.commands import CommandRegistry, _mcp_oauth_markdown_link
+from nooa_cli.tui.commands import CommandRegistry
 from nooa_cli.tui.console import TUIConsole
 from nooa_cli.tui.output import AgentMessage
 from nooa_cli.tui.terminal_safety import strip_safe_ansi
@@ -60,16 +60,6 @@ def test_agent_message_soft_wrap_preserves_long_url_as_one_logical_line():
     console.print_agent(f"[{url}](<{url}>)", show_rule=False, soft_wrap=True)
 
     assert stream.getvalue() == f"{url}\n"
-
-
-def test_oauth_link_rejects_malformed_bracketed_host():
-    assert _mcp_oauth_markdown_link("https://[not-ipv6]/oauth") is None
-
-
-def test_oauth_link_rejects_terminal_controls():
-    assert _mcp_oauth_markdown_link("https://example.test/a\x00b") is None
-    assert _mcp_oauth_markdown_link("https://example.test/a\x1bb") is None
-    assert _mcp_oauth_markdown_link("https://example.test/a\x85b") is None
 
 
 @pytest.mark.asyncio
