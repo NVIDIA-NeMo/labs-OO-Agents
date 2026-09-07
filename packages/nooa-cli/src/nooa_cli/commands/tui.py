@@ -117,6 +117,15 @@ def _working_directory_project_scope(working_dir: str):
     help="Show agent Python code execution panels",
 )
 @click.option(
+    "--update-watch",
+    is_flag=True,
+    help=(
+        "Dev-time: watch the source checkout for revision changes and show "
+        "an 'update available — call /restart' status notice (never restarts "
+        "automatically). Default off."
+    ),
+)
+@click.option(
     "--display-mode",
     type=click.Choice(["native-replay", "native", "fullscreen"]),
     default=None,
@@ -147,6 +156,7 @@ def command(
     no_trace: bool,
     vi: bool,
     python: bool,
+    update_watch: bool,
     display_mode: str | None,
     continue_session: str | None,
 ):
@@ -188,6 +198,7 @@ def command(
             no_trace=no_trace,
             vi=vi,
             python=python,
+            update_watch=update_watch,
             display_mode=display_mode,
         )
 
