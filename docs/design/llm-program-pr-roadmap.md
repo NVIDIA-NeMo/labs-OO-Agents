@@ -35,15 +35,15 @@ claim or add a follow-up that replaces coarse model-family matching with typed
 
 ### #301 — opt-in plain-text reasoning capture
 
-Treat as a prototype. The target policy is **always capture, replay by policy**.
-Preferred choices:
+**DECIDED (D-03): supersede.** Do not merge #301 as-is; its `retain_reasoning`
+capture gate is inverted by the target policy (**always capture, replay by
+policy**). Close/supersede it with PRs 2–4 below. Carry over its useful pieces —
+the gateway-prefix `model_family()` fix and the provenance plumbing — into PR 1/PR 2
+(the provenance gate itself is replaced by typed `ProviderIdentity`).
 
-- amend #301 before merge to remove the capture gate and introduce the first
-  replay policy; or
-- if reviewability suffers, close/supersede #301 with PRs 2–4 below.
-
-Do not merge `retain_reasoning` as a long-lived capture control and then invert
-it immediately unless release timing requires a compatibility bridge.
+Keep #261 and #268 as in-flight foundations: #261 lands after review (its cache
+read fix stands), #268's append-only recovery stands while its coarse provenance
+matching is superseded by PR 1's typed identity.
 
 ## 3. PR series
 
@@ -99,11 +99,14 @@ Deliverables:
 - ordering/sequence retained;
 - provider metadata converted to NOOA-owned JSON;
 - event JSON backward reader for #261/#268/#301 fields;
-- reasoning-aware repr/redaction classification;
-- default-deny external export of reasoning bodies across logs, bug reports,
-  clipboard, journal, OTLP, trace download, and normal event-explorer views;
-- documented at-rest posture and erase/retention operation (these block
-  always-capture acceptance, not deferred hardening);
+- reasoning-aware repr classification (keep opaque blobs out of traceback/
+  debug-log/repr noise channels, which are not tracing surfaces);
+- **reasoning included by default in journal, OTLP, trace download, bug
+  reports, and normal Event Explorer previews** — tracing must retain
+  everything sent to the model (product decision D-02 override);
+- opt-in `export_reasoning=false` suppression for compliance-sensitive
+  deployments, with tests for both paths;
+- erase/retention operation for reasoning bodies;
 - terminal-stream backfill for providers that emit encrypted content only at
   completion.
 
@@ -117,8 +120,9 @@ Tests:
   chat reasoning text, tool and text turns, save/resume round-trip;
 - capture occurs even when replay is disabled;
 - no SDK class crosses the event boundary;
-- non-leak tests cover repr/log, bug report, clipboard, journal, OTLP, trace
-  download, and default event explorer;
+- export tests prove reasoning appears in journal/OTLP/trace-download/bug
+  reports/Event Explorer by default and is suppressed under
+  `export_reasoning=false`; opaque blobs stay out of traceback/repr channels;
 - stateless save/resume reconstructs the next request from local history with
   `store=false` and no continuation ID.
 
@@ -158,13 +162,15 @@ Deliverables:
   necessary, record a repair event with original IDs/digest and reason;
 - compaction boundaries retire stale opaque state explicitly and retain only
   provider-compatible checkpoint/newest required signed turn;
-- reasoning-aware external-export redaction default;
-- erase/retention API for locally persisted plain reasoning.
+- opt-in export suppression (`export_reasoning=false`) honored across all
+  sinks;
+- erase/retention API for locally persisted reasoning bodies.
 
 Tests:
 - recovery survives session resume and does not retry forever;
 - prefix/signature mismatch, invalid encrypted content, compaction boundary;
-- no opaque blob in logs/repr/bug reports/OTLP by default;
+- opaque blobs absent from traceback/repr channels; reasoning present in
+  journal/OTLP by default and absent when `export_reasoning=false`;
 - completion and provider-switch behavior unchanged.
 
 ### PR 5 — Canonical usage and logical-call lifecycle
@@ -242,8 +248,10 @@ Deliverables:
 
 ### PR 9 — AnyLLM adapter on frozen contracts
 
-**Base:** after PRs 1, 3, and 5; may be developed in parallel after contracts
-freeze.
+**DECIDED (D-06): start only after the other tracks are demonstrably working.**
+Contracts (PRs 1/3/5) must be frozen AND the reasoning replay + telemetry
+pipelines (PRs 2–4, 6–8) must be working end to end on the LiteLLM line before
+adapter implementation begins. No parallel AnyLLM work until then.
 **Scope:** rebase/reimplement the private adapter, not a semantic redesign.
 
 Deliverables:
@@ -293,7 +301,7 @@ PR 3 replay policy
   v
 PR 4 repair/compaction/privacy
 
-PR 1 + PR 3 + PR 5 --> PR 9 AnyLLM adapter
+PR 1 + PR 3 + PR 5 --> contracts frozen --> PRs 2-8 working --> PR 9 AnyLLM adapter
 PR 4 + PR 6 + PR 9 --> PR 10 cutover
 ```
 

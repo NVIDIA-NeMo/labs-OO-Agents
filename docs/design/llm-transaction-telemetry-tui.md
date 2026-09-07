@@ -287,17 +287,42 @@ Coverage    usage 17/17 · cache 14/17 · attempt cost 12/19
 
 ### 9.2 Toolbar
 
-Add a `usage` provider to the existing toolbar registry. Proposed compact
-session label:
+Add a `usage` provider to the existing toolbar registry. Compact session label
+using monochrome arrows (DECIDED, D-05):
 
 ```text
-tok 411k/22k · cache 62% (14/17)
+↑411k ↓22k ↻62% (14/17)
 ```
 
-It must fit gracefully and display `cache —` when coverage is zero. The toolbar shows session successful-response aggregate; `/usage last` gives
+- `↑` input tokens (provider-reported, session total)
+- `↓` output tokens (provider-reported, session total)
+- `↻` cached-input share (62% of observed input served from cache), with
+  coverage `(14/17)` = calls with a cache observation / successful calls
+
+**Cache symbol (D-05).** `↻` (U+21BB, clockwise open-circle arrow) is the
+recommended glyph: it reads as "served again / reused" — exactly what a cache
+hit is — is monochrome, renders in essentially every terminal font, and is
+visually distinct from `↑`/`↓`. ASCII fallback when the terminal/locale profile
+rejects non-ASCII: `c` (label reads `↑411k ↓22k c62% (14/17)`). Alternatives
+considered: `◆` (ubiquitous but semantically blank), `⟳` (same meaning, slightly
+weaker font coverage), `@`/`#` (safe but unreadable as cache).
+
+**Cache-segment hiding.** The cache segment is emitted only when (a) the
+current endpoint's capability profile reports cache support and (b) at least
+one session call produced a cache observation. Endpoints without caching (some
+inference-API models) show simply:
+
+```text
+↑411k ↓22k
+```
+
+— the segment is absent, not `↻—` or `↻0%`. Capability is decided once per
+model switch, not per call.
+
+The toolbar shows session successful-response aggregate; `/usage last` gives
 transaction detail and `/usage session` distinguishes successful response usage
-from observed billed-attempt usage. Context window
-usage (`ctx 42%`) remains a separate concept and toolbar item.
+from observed billed-attempt usage. Context window usage (`ctx 42%`) remains a
+separate concept and toolbar item.
 
 ### 9.3 Event explorer and viewer
 
@@ -311,11 +336,13 @@ usage (`ctx 42%`) remains a separate concept and toolbar item.
 
 - Token counts and aggregate timings are safe observability metadata.
 - Raw usage may contain provider-defined extras; scrub and size-cap it.
-- Plain reasoning text is sensitive. Persist locally as requested by the parent
-  design, but exclude it from external OTLP/journal exports by default unless
-  `export_reasoning=true` is explicitly configured.
-- Encrypted/signed blobs must be treated as opaque secrets in logs, reprs,
-  exceptions, event explorer previews, clipboard exports, and bug reports.
+- **Product decision (overrides the earlier draft): reasoning is exported by
+  default.** OTLP spans, the journal, trace downloads, bug reports, and normal
+  Event Explorer previews include reasoning content because tracing must
+  retain everything that was sent to the model. `export_reasoning=false`
+  suppresses reasoning bodies for compliance-sensitive deployments.
+- Even with export on, keep reasoning out of *accidental* channels: exception
+  tracebacks, debug logs, and `repr()` output. Those are not tracing surfaces.
 - Report whether metrics cover calls whose reasoning body was redacted; never
   require reasoning content to compute usage.
 
@@ -337,4 +364,5 @@ usage (`ctx 42%`) remains a separate concept and toolbar item.
    and zero coverage.
 9. Old events/traces/journal rows continue to render.
 10. No usage field is read by context control/summarization code.
-11. Export redaction tests prove reasoning bodies and opaque blobs do not leak.
+11. Export tests prove reasoning bodies appear in journal/OTLP/trace-download/
+    Event Explorer by default, and are suppressed when `export_reasoning=false`.

@@ -12,11 +12,11 @@ must read the parent design and the named task packet before editing.
 | ID | Decision | Proposed default | Blocks |
 |---|---|---|---|
 | D-01 | Cross-model plain reasoning | Demote to labeled ordinary context in `AUTO` | R-03 |
-| D-02 | Plain-reasoning privacy | Store locally; external export off by default | R-02, R-04 |
-| D-03 | Prototype #301 disposition | Supersede/amend capture gate before merge | R-02 |
+| D-02 | Plain-reasoning privacy | **DECIDED:** export ON by default (tracing retains everything sent to the model); `export_reasoning=false` opt-in suppression; event-store persistence confirmed | R-02, R-04 |
+| D-03 | Prototype #301 disposition | **DECIDED:** supersede | R-02 |
 | D-04 | Opaque compatibility scope | Provider + API + endpoint/account + model compatibility | C-01, R-03 |
-| D-05 | TUI compact metric | Session token totals + cached-input share/coverage | U-02 |
-| D-06 | AnyLLM branch treatment | Reference/reimplementation, not direct merge | A-01 |
+| D-05 | TUI compact metric | **DECIDED:** `↑in ↓out ↻cached% (n/m)`; cache segment hidden when endpoint lacks cache capability; `c` ASCII fallback | U-02 |
+| D-06 | AnyLLM branch treatment | **DECIDED:** include but strictly last — no adapter work until reasoning + telemetry tracks are working; branch stays reference-only | A-01 |
 
 ## Contract foundation
 
@@ -76,13 +76,17 @@ order survives save/resume.
 - [ ] Chat-family reasoning content for GLM/Kimi/DeepSeek/Qwen/Nemotron.
 - [ ] Tool and terminal-text turns.
 - [ ] Capture with replay disabled.
-- [ ] Reasoning-aware default export redaction across logs, repr, bug reports,
-  clipboard, journal, OTLP, trace download, and normal event explorer.
-- [ ] Documented at-rest posture plus reasoning erase/retention operation.
+- [ ] Reasoning exported by default to journal, OTLP, trace download, bug
+  reports, and normal Event Explorer previews (D-02 override: tracing retains
+  everything sent to the model).
+- [ ] Opt-in `export_reasoning=false` suppression honored across all sinks,
+  with tests for both default and suppressed paths.
+- [ ] Opaque blobs kept out of traceback/repr/debug-log noise channels.
+- [ ] Reasoning erase/retention operation.
 - [ ] Stateless save/resume reconstructs the next request from local history
   with `store=false` and no continuation ID.
 
-**Acceptance:** capture fixtures pass for every family; all non-leak and
+**Acceptance:** capture fixtures pass for every family; export-both-paths and
 stateless-resume tests pass; #301 capture switch no longer controls storage.
 
 ### R-03 — ReplayPlanner
@@ -210,7 +214,8 @@ close exactly once.
 
 ### A-01 — Rebase/reimplement AnyLLM adapter
 
-**Depends:** C-01, C-02, R-03, M-02
+**DECIDED (D-06): do not start until R-02, R-04, M-04, U-02, and U-03 are
+complete and working. Depends:** C-01, C-02, R-03, M-02
 **Objective:** port the private adapter to current mainline contracts.
 
 - [ ] Pin AnyLLM version.

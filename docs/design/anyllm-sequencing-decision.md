@@ -22,6 +22,15 @@ merge would turn conflict resolution into an accidental specification.
 
 ## Decision
 
+**DECIDED (D-06): include AnyLLM, but leave it strictly for last.** No AnyLLM
+adapter work begins until the reasoning and telemetry tracks are actually
+working end to end on the LiteLLM line. The prior recommendation (parallel
+adapter work after contract freeze) is superseded: contracts may still be
+written transport-neutral so AnyLLM can slot in cleanly later, but implementation
+of the adapter is deferred until the other program tracks are demonstrably
+working. The existing `feat/anyllm-unified-boundary` branch remains reference
+material and is not merged.
+
 **Do not migrate first and do not merge the existing AnyLLM branch unchanged.**
 
 Land provider-neutral contracts and behavior on the current mainline first:
