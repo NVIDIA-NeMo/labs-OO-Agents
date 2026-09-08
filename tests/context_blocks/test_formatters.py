@@ -176,7 +176,9 @@ class TestXMLBlockFormatter:
 
         messages = XMLBlockFormatter().format(
             [
-                ResolvedBlock(key="turn", content=turn.content, role=Role.ASSISTANT, event=turn),
+                # Runtime event projection carries the object on an otherwise
+                # contentless block; assistant text comes from the canonical turn.
+                ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=turn),
                 call_1,
                 ResolvedBlock(key="output_1", content="first output", role=Role.USER),
                 call_2,

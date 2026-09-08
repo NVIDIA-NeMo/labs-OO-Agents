@@ -339,7 +339,9 @@ def _event_blocks_to_messages(
             messages.append(
                 RenderedMessage(
                     role=Role.ASSISTANT,
-                    content=block.content or None,
+                    # Event projection stores the raw object on a contentless
+                    # block; the canonical provider text lives on LLMOutput.
+                    content=event.content or None,
                     tool_calls=tuple(
                         ToolCallInfo(
                             id=call.id,
