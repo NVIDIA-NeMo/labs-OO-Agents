@@ -108,6 +108,36 @@ class CurrentCall:
             return NotImplemented
         return self.id == other.id
 
+    @property
+    def context_format(self) -> "FormatConfig | None":
+        """Structural formatting limits for materialized context values."""
+        return self._context_format
+
+    @property
+    def context_token_counter(self) -> Callable[[str], int] | None:
+        """Token counter selected for this invocation, when available."""
+        return self._context_token_counter
+
+    @property
+    def method(self) -> Any | None:
+        """Method being generated."""
+        return self._method
+
+    @property
+    def decorator_context(self) -> dict[str, Any] | None:
+        """Merged inherited and method-level context overrides."""
+        return self._decorator_context
+
+    @property
+    def scoped_context(self) -> dict[str, Any] | None:
+        """Overrides active through ``ScopedContext`` for this invocation."""
+        return self._scoped_context
+
+    @property
+    def invocation_id(self) -> str:
+        """Stable call ID used for event selection even if a strategy changes ``id``."""
+        return self._context_call_id or self.id
+
     def bound_parameters(self) -> dict[str, Any]:
         """Return effective parameter name → value, each input represented exactly once.
 

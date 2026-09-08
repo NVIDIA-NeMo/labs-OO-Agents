@@ -100,19 +100,18 @@ def render_context(
     which lets method-level ``@strategy(truncation=...)`` affect events from
     that method without re-rendering the rest of the context under that config.
     """
-    from nooa.context_view import Block, _MaterializedBlock
+    from nooa.context_view import Block
 
     resolved: list[ResolvedBlock] = []
     for item in blocks:
         if isinstance(item, ResolvedBlock):
             block = item
         elif isinstance(item, Block):
-            metadata = item.metadata if isinstance(item, _MaterializedBlock) else None
             block = ResolvedBlock(
                 key=item.key,
                 content=item.content,
                 role=item.role,
-                metadata=metadata or BlockMetadata(),
+                metadata=item.metadata or BlockMetadata(),
             )
         elif isinstance(item, EventBase):
             tag = item.tag if item.tag is not None else item.id

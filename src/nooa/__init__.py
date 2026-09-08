@@ -30,17 +30,14 @@ from nooa.context_view import (  # noqa: E402
     Block,
     ContextItem,
     ContextView,
-    DefaultAgentView,
-    DefaultSkillView,
     apply_context_budget,
     collect_context,
     context_text,
     evaluate_context_expression,
-    events_from_manager,
-    materialize_managed_context,
     resolve_context_view,
 )
 from nooa.decorators import strategy  # noqa: E402
+from nooa.default_context_view import DefaultAgentView, DefaultSkillView  # noqa: E402
 
 # Export errors
 from nooa.errors import (  # noqa: E402
@@ -136,8 +133,6 @@ __all__ = [
     "collect_context",
     "context_text",
     "evaluate_context_expression",
-    "events_from_manager",
-    "materialize_managed_context",
     "resolve_context_view",
     "EventQuery",  # Event filtering configuration
     "ContextApi",  # LLM-facing context API wrapper (Skill)

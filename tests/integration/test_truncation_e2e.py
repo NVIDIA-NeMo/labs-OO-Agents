@@ -30,7 +30,7 @@ from nooa.context_blocks import BlockMetadata, ResolvedBlock, Role
 from nooa.context_blocks.events import ResultStatus
 from nooa.context_blocks.formatter import XMLBlockFormatter
 from nooa.context_blocks.renderer import render_context
-from nooa.context_view import _MaterializedBlock, apply_context_budget
+from nooa.context_view import Block, apply_context_budget
 from nooa.events import PythonOutput
 from nooa.runtime.actor import _current_llm_var
 from nooa.strategies.current_call import CurrentCall
@@ -111,7 +111,7 @@ def _count_tokens(text: str) -> int:
 
 def _render_default_budget(blocks, limit):
     items = tuple(
-        _MaterializedBlock(
+        Block(
             key=block.key,
             content=block.content,
             role=block.role,

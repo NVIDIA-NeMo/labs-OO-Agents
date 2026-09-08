@@ -5,16 +5,19 @@
 When EventManager.collapse() archives a range of events, those events must
 not show up in the context blocks passed to the LLM.
 
-_phase_events uses event_manager.values() (active_tags only) for all paths —
+The default view uses event_manager.values() (active_tags only) for all paths —
 archived events are represented by the Summary that replaced them in active_tags.
 """
+
+from types import SimpleNamespace
 
 import pytest
 
 from nooa.context_blocks.events import AssistantEvent, ToolCallEvent, UserEvent
-from nooa.runtime.context_builder import _phase_events
+from nooa.default_context_view import visible_events
 from nooa.runtime.event_manager import EventManager
 from nooa.storage.sqlite import SQLiteEventBackend
+from nooa.strategies.current_call import CurrentCall
 
 # ---------------------------------------------------------------------------
 # Parametrized EventManager fixture
@@ -32,9 +35,24 @@ def event_manager(request, sqlite_conn):
         raise ValueError(f"Unknown backend param: {request.param!r}")
 
 
+def _visible(em, query=None):
+    agent = SimpleNamespace(event_manager=em)
+    call = CurrentCall(
+        id="call",
+        method_name="run",
+        decorator="plan",
+        event_query=query,
+    )
+    return visible_events(agent, call)
+
+
+def _event_key(event) -> str:
+    return f"event_{event.tag if event.tag is not None else event.id}"
+
+
 def _phase_event_keys(em) -> set[str]:
-    """Return the set of block keys produced by _phase_events (no active query)."""
-    return {b.key for b in _phase_events([], em)}
+    """Return the keys the renderer will assign to visible events."""
+    return {_event_key(event) for event in _visible(em)}
 
 
 # ---------------------------------------------------------------------------
@@ -143,10 +161,8 @@ def test_phase_events_display_order_after_collapse(event_manager):
 
     assert em.keys() == ["1..2", "3"]
 
-    blocks = _phase_events([], em)
-    assert len(blocks) == 2
-    assert blocks[0].key == "event_1..2", f"Summary must be first, got {blocks[0].key}"
-    assert blocks[1].key == "event_3", f"Active event must be second, got {blocks[1].key}"
+    events = _visible(em)
+    assert [_event_key(event) for event in events] == ["event_1..2", "event_3"]
 
 
 # ---------------------------------------------------------------------------
@@ -164,10 +180,10 @@ def test_phase_events_with_type_query_on_real_event_manager(event_manager):
     em.add(Error(content="oops"))  # "2"
     em.add(Task(prompt="retry"))  # "3"
 
-    blocks = _phase_events([], em, agent_event_query=EventQuery(type="Task"))
+    blocks = _visible(em, EventQuery(type="Task"))
 
     assert len(blocks) == 2
-    assert all(b.event.event_type == "Task" for b in blocks)
+    assert all(event.event_type == "Task" for event in blocks)
 
 
 def test_phase_events_query_does_not_include_archived_events(event_manager):
@@ -190,12 +206,12 @@ def test_phase_events_query_does_not_include_archived_events(event_manager):
     # active_tags: ["1..2" (Summary), "3" (Task)]; "1" and "2" are archived
     assert em.keys() == ["1..2", "3"]
 
-    blocks = _phase_events([], em, agent_event_query=EventQuery(type="Task"))
+    blocks = _visible(em, EventQuery(type="Task"))
 
     # Only the active Task (tag "3") should match — archived tags "1" and "2" must not
     assert len(blocks) == 1, (
         f"Expected 1 active Task, got {len(blocks)}. "
         "Archived events must not appear even when a query is active."
     )
-    assert blocks[0].key == "event_3"
-    assert blocks[0].event.prompt == "third"
+    assert _event_key(blocks[0]) == "event_3"
+    assert blocks[0].prompt == "third"

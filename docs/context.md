@@ -11,6 +11,7 @@ class Block:
     key: str
     content: str
     role: Role = Role.SYSTEM
+    metadata: BlockMetadata | None = None
 
 
 ContextItem = Block | EventBase
@@ -24,7 +25,7 @@ class ContextView[Owner](Protocol):
     ) -> AsyncIterator[ContextItem]: ...
 ```
 
-`Block.content` is materialized. Events remain typed. The runtime collects the selected view into an immutable `tuple[Block | EventBase, ...]` before rendering. No additional assembled-context type is needed.
+`Block.content` is materialized; `metadata` carries optional rendering and budget hints. Events remain typed. The runtime collects the selected view into an immutable `tuple[Block | EventBase, ...]` before rendering. No additional assembled-context type is needed.
 
 `CurrentCall` is the immutable invocation snapshot. In addition to method inputs and the resolved strategy and event query, context views may read the resolved `model`, `provider`, `context_window`, and `context_budget`. Internal formatting and token-counting data support the helpers. It contains no LLM client or credentials.
 
@@ -87,7 +88,9 @@ class DefaultAgentView(ContextView[Agent]):
 
         # Later sources replace earlier blocks with the same key.
         for source in (
-            await stored_context_blocks(agent.context_manager, agent, call),
+            await stored_context_blocks(
+                agent.context_manager, agent, call, exclude={"system_prompt", "self", "state"}
+            ),
             await strategy_context_blocks(call.strategy, agent, call),
             await decorator_context_blocks(call),
             await scoped_context_blocks(call),

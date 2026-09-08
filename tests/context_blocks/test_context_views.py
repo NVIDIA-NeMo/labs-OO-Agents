@@ -18,7 +18,6 @@ from nooa import (
     collect_context,
     context_text,
     evaluate_context_expression,
-    materialize_managed_context,
     resolve_context_view,
     spec,
     strategy,
@@ -198,7 +197,7 @@ async def test_legacy_skill_block_is_materialized_by_default_skill_view():
     assert block.content == "ready"
 
 
-async def test_managed_source_separates_prefix_trailing_and_eviction_order():
+async def test_default_view_partitions_and_evicts_manager_blocks():
     class Example(Agent, llm=object(), context={"tail": DynamicContext("'tail'")}):
         async def run(self): ...
 
@@ -210,11 +209,15 @@ async def test_managed_source_separates_prefix_trailing_and_eviction_order():
         agent=agent,
         _method=Example.run,
         _context_format=agent._truncation.context_block_format,
+        context_budget=0,
+        _context_token_counter=len,
     )
-    prefix, trailing, evictable = await materialize_managed_context(agent, call)
-    assert all(block.metadata.static for block in prefix)
-    assert [block.key for block in trailing][-1] == "tail"
-    assert [block.key for block in evictable][0] == "tail"
+    items = await collect_context(DefaultAgentView(), agent, call)
+    tail = next(block for block in items if getattr(block, "key", None) == "tail")
+    assert tail.role == Role.USER
+    assert tail.metadata is not None
+    assert tail.metadata.static is False
+    assert tail.metadata.truncated is True
 
 
 async def test_default_order_is_prefix_skills_events_trailing():

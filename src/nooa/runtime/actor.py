@@ -436,7 +436,7 @@ _current_context_view_var: contextvars.ContextVar[Any] = contextvars.ContextVar(
 # Context variable for inherited decorator context.
 # Set by _execute_with_generation() so that @strategy(context={...})
 # blocks propagate to nested method calls on the same agent.
-# Read by _prepare_context() and passed explicitly to build_context().
+# Read by _prepare_context() and captured on CurrentCall for the selected view.
 _decorator_context_var: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
     "decorator_context", default=None
 )
@@ -444,7 +444,7 @@ _decorator_context_var: contextvars.ContextVar[dict[str, Any] | None] = contextv
 # Context variable for inherited decorator event query.
 # Set by _execute_with_generation() so that @strategy(ScopedContext(events=...))
 # event filtering propagates to nested method calls on the same agent.
-# Read by _prepare_context() and passed explicitly to build_context().
+# Read by _prepare_context() and captured on CurrentCall for the selected view.
 _decorator_events_var: contextvars.ContextVar["EventQuery | None"] = contextvars.ContextVar(
     "decorator_events", default=None
 )
@@ -647,7 +647,8 @@ class ActorRuntime:
 
     def _select_context_view(self, method: Any, call_context_view: Any = _MISSING) -> Any:
         """Resolve call, method, agent, and default view precedence."""
-        from nooa.context_view import DefaultAgentView, resolve_context_view
+        from nooa.context_view import resolve_context_view
+        from nooa.default_context_view import DefaultAgentView
 
         base_method = getattr(method, "__func__", method)
         method_context_view = getattr(base_method, "_strategy_context_view", None)
@@ -2875,7 +2876,8 @@ class ActorRuntime:
         """Collect the selected view into one immutable context tuple."""
         from dataclasses import replace
 
-        from nooa.context_view import DefaultAgentView, collect_context, resolve_context_view
+        from nooa.context_view import collect_context, resolve_context_view
+        from nooa.default_context_view import DefaultAgentView
         from nooa.strategies.current_call import CurrentCall
 
         call = _current_call_var.get()
@@ -2896,7 +2898,7 @@ class ActorRuntime:
         base_method = getattr(method, "__func__", method)
         parent_context = _decorator_context_var.get()
         own_context = getattr(base_method, "_strategy_context", None)
-        decorator_context = base_call._decorator_context
+        decorator_context = base_call.decorator_context
         if decorator_context is None and (parent_context or own_context):
             decorator_context = {**(parent_context or {}), **(own_context or {})}
 
@@ -2907,7 +2909,7 @@ class ActorRuntime:
         context_window = base_call.context_window
         if context_window is None:
             context_window = getattr(llm_client, "context_window", None)
-        context_format = base_call._context_format
+        context_format = base_call.context_format
         if context_format is None:
             current_truncation = _current_truncation_config_var.get()
             context_format = (
@@ -2935,10 +2937,10 @@ class ActorRuntime:
                 context_limit if context_limit is not None else base_call.context_budget
             ),
             _context_format=context_format,
-            _context_token_counter=count_tokens or base_call._context_token_counter,
+            _context_token_counter=count_tokens or base_call.context_token_counter,
             _method=method,
             _decorator_context=decorator_context,
-            _scoped_context=base_call._scoped_context or _scoped_blocks_var.get(),
+            _scoped_context=base_call.scoped_context or _scoped_blocks_var.get(),
             _context_call_id=base_call._context_call_id or self._agent_call_id or base_call.id,
         )
 
@@ -3023,10 +3025,11 @@ class ActorRuntime:
                 context_limit=effective_context_limit,
                 count_tokens=count_tokens,
             )
-        from nooa.context_view import _MaterializedBlock
+        from nooa.context_view import Block
 
         context_blocks_dropped = sum(
-            isinstance(block, _MaterializedBlock) and block.metadata.truncated for block in blocks
+            isinstance(block, Block) and block.metadata is not None and block.metadata.truncated
+            for block in blocks
         )
 
         with hm.timer("time_render_context"):

@@ -96,7 +96,7 @@ class NoteTakingTestWrapper(Agent):
         context_keys = list(self._inner_agent.context.keys())
         dynamic_blocks = {
             k: v.expr
-            for k, v in self._inner_agent.context_manager._raw_items()
+            for k, v in self._inner_agent.context_manager.declarations()
             if isinstance(v, DynamicContext)
         }
 
