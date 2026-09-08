@@ -1437,10 +1437,98 @@ def _collect_sync(raw: Any) -> "litellm.ModelResponse":
     return raw
 
 
-async def _collect_async(raw: Any) -> "litellm.ModelResponse":
+_chunk_sink: ContextVar[Callable[[str], None] | None] = ContextVar("nooa_chunk_sink", default=None)
+# Whether the current call has already handed the caller any text. Tracked per
+# call, because a retry after that would replay the prefix.
+_chunk_emitted: ContextVar[bool] = ContextVar("nooa_chunk_emitted", default=False)
+
+
+class StreamedBeforeFailing(Exception):
+    """A call failed after its sink had already received part of the answer.
+
+    Carries no ``status_code``, so the retry policy treats it as terminal — which
+    is the point: what has been shown cannot be unshown, and a second attempt
+    would repeat that prefix on screen and corrupt an incremental reader. The
+    original failure is the cause.
+    """
+
+
+@contextmanager
+def stream_to(sink: Callable[[str], None]):
+    """Deliver text deltas to ``sink`` for async LLM calls made inside this block.
+
+    A generation method returns its whole answer, which is the right contract —
+    but a caller that wants to *show* the answer arriving (a chat UI, a task
+    stream over a protocol) needs the pieces on the way. Entering this context
+    asks the provider to stream and hands every delta to ``sink`` as it lands;
+    the method still returns the complete text, so nothing downstream changes.
+
+        with stream_to(lambda delta: queue.put_nowait(delta)):
+            answer = await agent.reply(message=...)
+
+    Scope is the context, so concurrent tasks each get their own sink and calls
+    outside the block are untouched (no streaming requested, same as before).
+
+    The deltas are raw provider output, not the method's return value: a method
+    with a structured return type is filled by a JSON-schema call, so the stream
+    carries that JSON as it is written. Read it incrementally rather than
+    concatenating blindly.
+
+    Chat completions only. ``ResponsesClient`` does not stream through this, so a
+    call on that path returns its answer whole and the sink stays silent — the
+    contract is "you may receive deltas", never "you will".
+
+    A call that fails after its sink has already received part of the answer is
+    not retried: replaying that prefix would duplicate it on screen and corrupt
+    an incremental reader. It raises ``StreamedBeforeFailing`` from the original
+    error. Failures before the first delta retry as they always did.
+
+    The sink is a plain callable and runs on the event loop between chunks, so
+    keep it cheap — enqueue, do not await.
+    """
+    token = _chunk_sink.set(sink)
+    try:
+        yield
+    finally:
+        _chunk_sink.reset(token)
+
+
+def _emit_chunk(chunk: Any, structured: bool = False) -> None:
+    """Push one delta's text to the active sink, if any. Never raises into the stream.
+
+    For a structured call, ``reasoning_content`` counts as text: some reasoning
+    models put the JSON there and leave ``content`` empty, and the parser already
+    falls back to it, so a sink reading only ``content`` would watch a call
+    succeed with nothing on screen. On a plain call that field is the model
+    thinking aloud, not the answer, and is left alone.
+    """
+    sink = _chunk_sink.get()
+    if sink is None:
+        return
+    try:
+        choices = getattr(chunk, "choices", None) or []
+        delta = getattr(choices[0], "delta", None) if choices else None
+        if delta is None:
+            return
+        text = getattr(delta, "content", None)
+        if not text and structured:
+            text = getattr(delta, "reasoning_content", None)
+        if text:
+            # Recorded *before* the sink runs: a sink that appends the delta and
+            # then raises has already shown it, and a retry would repeat it.
+            _chunk_emitted.set(True)
+            sink(text)
+    except Exception:  # a display sink must never break the call it is watching
+        logger.debug("chunk sink raised; dropping the delta", exc_info=True)
+
+
+async def _collect_async(raw: Any, structured: bool = False) -> "litellm.ModelResponse":
     """Consume an async streaming or non-streaming litellm response, returning ModelResponse."""
     if isinstance(raw, litellm.CustomStreamWrapper):
-        chunks = [chunk async for chunk in raw]  # type: ignore[attr-defined]
+        chunks = []
+        async for chunk in raw:  # type: ignore[attr-defined]
+            chunks.append(chunk)
+            _emit_chunk(chunk, structured)
         result = litellm.stream_chunk_builder(chunks)
         if result is None:
             raise ValueError("stream_chunk_builder returned None for empty stream")
@@ -2019,8 +2107,15 @@ class CompletionClient(UnifiedLLM):
         if http_client.async_client is not None:
             api_params.setdefault("client", http_client.async_client)
 
+        # Streaming is requested only when someone is listening (see stream_to);
+        # otherwise the request is byte-for-byte what it was before.
+        if _chunk_sink.get() is not None:
+            api_params.setdefault("stream", True)
+
         async def _make_call():
-            raw_response = await _collect_async(await _litellm_acompletion(api_params))
+            raw_response = await _collect_async(
+                await _litellm_acompletion(api_params), output_model is not None
+            )
             reasoning, _ = _extract_reasoning_and_usage(raw_response)
             text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
 
@@ -2030,13 +2125,38 @@ class CompletionClient(UnifiedLLM):
 
             return raw_response
 
+        async def _attempt():
+            """One attempt, refusing to retry once the caller has seen output.
+
+            A retry re-runs the call, so the sink would receive the prefix it
+            already got: duplicated text on screen, and a corrupted read for
+            anything parsing the stream incrementally. Failures before the first
+            delta retry exactly as they did.
+            """
+            try:
+                return await _make_call()
+            except StreamedBeforeFailing:
+                raise
+            except Exception as failure:
+                if _chunk_emitted.get():
+                    raise StreamedBeforeFailing(
+                        "the sink already received part of this answer"
+                    ) from failure
+                raise
+
+        # Each call starts having shown nothing, so one call's deltas cannot make
+        # the next one non-retryable.
+        emitted_token = _chunk_emitted.set(False)
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
-        with _track_llm_call(model=self.model, endpoint=self.config.get("api_base")):
-            raw_response = (
-                await with_retry(_make_call, config=self.retry_config)
-                if self.retry_config
-                else await _make_call()
-            )
+        try:
+            with _track_llm_call(model=self.model, endpoint=self.config.get("api_base")):
+                raw_response = (
+                    await with_retry(_attempt, config=self.retry_config)
+                    if self.retry_config
+                    else await _make_call()
+                )
+        finally:
+            _chunk_emitted.reset(emitted_token)
 
         reasoning, usage = _extract_reasoning_and_usage(raw_response)
         if usage:
