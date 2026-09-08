@@ -177,17 +177,42 @@ def _extract_trailing_context_envelope(messages: list[dict[str, Any]]) -> str:
     return m.group(2) if m is not None else ""
 
 
+def _legacy_dynamic_context_snapshot(items: tuple[Any, ...], messages: list[Any]) -> str:
+    """Reconstruct the legacy trace envelope from a trailing USER block run.
+
+    The envelope is observability metadata only; provider messages stay exactly
+    as rendered by the selected view and formatters. Block-aware formatters give
+    us the already-rendered block bodies, including expression metadata.
+    """
+    if not items or not messages:
+        return ""
+
+    from nooa.context_blocks.models import BlockPart
+    from nooa.context_blocks.roles import Role
+    from nooa.context_view import Block
+
+    if not isinstance(items[-1], Block) or items[-1].role != Role.USER:
+        return ""
+    message = messages[-1]
+    if message.role != Role.USER or not message.parts:
+        return ""
+    blocks = [part.content for part in message.parts if isinstance(part, BlockPart)]
+    return f"<context>\n{'\n'.join(blocks)}\n</context>" if blocks else ""
+
+
 def _snapshot_llm_request(
-    event_manager: Any, messages: list[dict[str, Any]], generation_id: str
+    event_manager: Any,
+    messages: list[dict[str, Any]],
+    generation_id: str,
+    dynamic_context_snapshot: str = "",
 ) -> str:
     """Snapshot the rendered request for observability consumers (e.g. ATIF).
 
-    Emits a :class:`SystemPrompt` event carrying ``messages[0].content``
-    and returns the trailing ``<context>…</context>`` envelope from the
-    same list. Called right after ``_build_messages`` so both reflect the
-    exact bytes about to be sent to the LLM; the returned envelope is
-    stamped onto the matching :class:`LLMResponse`. ``record=False`` keeps
-    the snapshot out of the LLM-visible event timeline.
+    Emits a :class:`SystemPrompt` event carrying ``messages[0].content`` and
+    returns either an explicit trailing ``<context>…</context>`` envelope or
+    the compatibility snapshot reconstructed during rendering. The returned
+    envelope is stamped onto the matching :class:`LLMResponse`. ``record=False``
+    keeps the snapshot out of the LLM-visible event timeline.
     """
     if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
         content = messages[0].get("content", "")
@@ -197,7 +222,7 @@ def _snapshot_llm_request(
             SystemPrompt(content=content, generation_id=generation_id),
             record=False,
         )
-    return _extract_trailing_context_envelope(messages)
+    return _extract_trailing_context_envelope(messages) or dynamic_context_snapshot
 
 
 def _resolve_provider_formatter(llm_client: Any, default_formatter: Any) -> Any:
@@ -637,6 +662,7 @@ class ActorRuntime:
         # isolation, read stats from the on_messages_built hook's context_stats kwarg.
         self._last_context_stats: ContextWindowStats | None = None
         self._last_prompt_tokens_actual: int | None = None
+        self._last_dynamic_context_snapshot = ""
         self._event_format_cache: dict[tuple[tuple[str, Any], ...], Any] = {}
         self._event_format_cache_max_entries = 32
         # Chars→tokens ratio, calibrated from the last provider response
@@ -940,7 +966,10 @@ class ActorRuntime:
         # Snapshot system prompt + dynamic context from the rendered messages
         # (consumed by the ATIF exporter). Captured here, at render time.
         _dynamic_context = _snapshot_llm_request(
-            self.event_manager, messages, current_generation_id or ""
+            self.event_manager,
+            messages,
+            current_generation_id or "",
+            self._last_dynamic_context_snapshot,
         )
 
         # --- Middleware: llm_call -------------------------------------------
@@ -1048,7 +1077,10 @@ class ActorRuntime:
                             max_output_tokens=_reduced,
                         )
                         _dynamic_context = _snapshot_llm_request(
-                            self.event_manager, ctx.messages, current_generation_id or ""
+                            self.event_manager,
+                            ctx.messages,
+                            current_generation_id or "",
+                            self._last_dynamic_context_snapshot,
                         )
                         ctx.params["max_tokens"] = _reduced
                         ctx = await em.run_middleware("llm_call", ctx, _core_llm)
@@ -1136,7 +1168,10 @@ class ActorRuntime:
                             max_output_tokens=_reduced,
                         )
                         _dynamic_context = _snapshot_llm_request(
-                            self.event_manager, messages, current_generation_id or ""
+                            self.event_manager,
+                            messages,
+                            current_generation_id or "",
+                            self._last_dynamic_context_snapshot,
                         )
                         # Reuse _kwargs (already has the per-(agent, strategy) key set)
                         # so recovery lands on the same shard as the original attempt.
@@ -3073,6 +3108,9 @@ class ActorRuntime:
         # generate() writes that actual value back into _last_context_stats after
         # the call. Until then, keep render_context's local estimate as a fallback
         # for diagnostics and context-window error recovery.
+        self._last_dynamic_context_snapshot = _legacy_dynamic_context_snapshot(
+            tuple(blocks), result.messages
+        )
         messages = result.output
         self._last_context_stats = result.stats
         self._last_prompt_tokens_actual = None

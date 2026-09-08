@@ -97,6 +97,10 @@ def _get_agent_cls(module_name: str) -> type:
             # decorated function's identity so repeated calls share a shard.
             self._agent_id = agent_id
 
+        def active_skills(self) -> tuple[Any, ...]:
+            """Match the Agent context-view interface; standalone calls have no skills."""
+            return ()
+
     cls = type("_StandaloneAgent", (_StandaloneAgent,), {})
     # Setting __module__ makes inspect.getmodule(cls) return the function's module,
     # so execute_code's filter_module_globals exposes the caller's types.
