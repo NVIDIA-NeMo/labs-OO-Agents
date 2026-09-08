@@ -23,7 +23,7 @@ import logging
 import types
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -219,36 +219,6 @@ class _ReturnResultSignal(ExecutionSignal):
     def __init__(self, result: dict[str, Any]):
         self.result = result
         super().__init__("return_result() called")
-
-
-def _as_comment(text: str) -> str:
-    """Render *text* as Python comment lines (one ``#`` prefix per line)."""
-    return "\n".join(f"# {line}" if line else "#" for line in text.splitlines())
-
-
-def _prepend_comment(tool_calls: list[ToolCall], text: str) -> list[ToolCall]:
-    """Return a copy of *tool_calls* with *text* prepended as a comment to the
-    first execute_python code block.  Other tool calls are left unchanged.
-    """
-    result: list[ToolCall] = []
-    prepended = False
-    preview = _as_comment(text)
-    for tc in tool_calls:
-        if not prepended and tc.name == "execute_python":
-            try:
-                args = json.loads(tc.arguments)
-                original_code = args.get("code", "")
-                args["code"] = f"{preview}\n{original_code}"
-                tc = replace(tc, arguments=json.dumps(args))
-                prepended = True
-                get_harness_metrics().content_prepended_as_comment()
-            except json.JSONDecodeError:
-                logger.debug(
-                    "[CODEACT] _prepend_comment: skipping execute_python with unparseable arguments (tool_call_id=%s)",
-                    tc.id,
-                )
-        result.append(tc)
-    return result
 
 
 @dataclass
@@ -1026,8 +996,8 @@ Standard Python builtins and agent instance (`self`) are available."""
 
                 # ── Post-response cleanup (CodeAct) ──────────────────────
                 # Intercept point: strategy-specific response transforms.
-                # Handles text-only→synthetic, comment prepend, tool call
-                # translation. Consider making extensible in the future.
+                # Handles text-only recovery and tool-call translation.
+                # Consider making extensible in the future.
                 if response.finish_reason == "tool_calls" and response.tool_calls:
                     tool_calls = response.tool_calls
                     assistant_message = getattr(response, "assistant_message", None)
@@ -1038,18 +1008,6 @@ Standard Python builtins and agent instance (`self`) are available."""
                     )
                     if not isinstance(reasoning_items, list):
                         reasoning_items = None
-                    # If the LLM also emitted message content alongside the tool
-                    # call(s), preserve it by prepending it as a comment at the
-                    # top of the first execute_python code block.
-                    if response.content:
-                        content = response.content
-                        text = (
-                            content.model_dump_json()
-                            if isinstance(content, BaseModel)
-                            else str(content)
-                        )
-                        if text.strip():
-                            tool_calls = _prepend_comment(tool_calls, text)
                     # A real tool call counts as progress: reset the consecutive
                     # text-only guard (issue 185) before executing, so a single
                     # exec mid-stream rescues the run from accidental drift.

@@ -1383,11 +1383,8 @@ class TestCodeActStrategyEventSequence:
         )
 
     @pytest.mark.asyncio
-    async def test_text_only_basemodel_response_with_tool_calls_prepends_comment(self):
-        """BaseModel content alongside execute_python tool calls is prepended as a comment.
-
-        Exercises the model_dump_json() branch in the content+tool_calls path.
-        """
+    async def test_basemodel_content_with_tool_calls_preserves_turn_and_arguments(self):
+        """BaseModel prose is serialized on the turn without mutating execution."""
         from pydantic import BaseModel as PydanticBaseModel
 
         class ThoughtModel(PydanticBaseModel):
@@ -1422,10 +1419,10 @@ class TestCodeActStrategyEventSequence:
             e for e in events if e.event_type == "ToolCallEvent" and e.name == "execute_python"
         ]
         assert len(exec_calls) == 1
-        code = exec_calls[0].arguments["code"]
-        assert code.startswith("# "), f"Expected comment prepended, got: {code!r}"
-        assert "I should calculate this." in code, f"BaseModel JSON should appear in code: {code!r}"
-        assert "x = 6 * 7" in code, f"Original code should follow: {code!r}"
+        assert exec_calls[0].arguments["code"] == "x = 6 * 7"
+        output = next(e for e in events if e.event_type == "LLMOutput" and e.content)
+        assert output.content == '{"thought":"I should calculate this."}'
+        assert output.tool_calls[0].arguments == json.dumps({"code": "x = 6 * 7"})
 
     @pytest.mark.asyncio
     async def test_empty_stop_response_routes_through_return_result(self):
@@ -1514,13 +1511,8 @@ class TestCodeActStrategyEventSequence:
             )
 
     @pytest.mark.asyncio
-    async def test_content_plus_tool_calls_prepends_comment(self):
-        """When LLM returns both content and execute_python tool calls, the content
-        is prepended as a comment at the top of the first execute_python code.
-
-        This preserves any explanatory text the LLM produced alongside its tool
-        call without creating a separate synthetic event.
-        """
+    async def test_content_plus_tool_calls_preserves_turn_and_arguments(self):
+        """Assistant prose remains on LLMOutput and execution stays exact."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
             @strategy(CodeActStrategy(config=CodeActConfig()))
@@ -1545,20 +1537,15 @@ class TestCodeActStrategyEventSequence:
         assert result == "done"
 
         events = agent_instance.event_manager.values()
-        tool_calls = [e for e in events if e.event_type == "ToolCallEvent"]
-
-        # First tool call should have the content prepended as a comment
-        first_tc = tool_calls[0]
-        code = first_tc.arguments["code"]
-        assert code.startswith("# "), f"Expected comment prepended, got: {code!r}"
-        assert "Let me work through this step by step." in code, (
-            f"Original content should appear in the comment, got: {code!r}"
-        )
-        assert "x = 42" in code, f"Original code should follow the comment, got: {code!r}"
+        tool_call = next(e for e in events if e.event_type == "ToolCallEvent")
+        assert tool_call.arguments["code"] == "x = 42"
+        output = next(e for e in events if e.event_type == "LLMOutput" and e.content)
+        assert output.content == "Let me work through this step by step."
+        assert output.tool_calls[0].arguments == json.dumps({"code": "x = 42"})
 
     @pytest.mark.asyncio
-    async def test_content_plus_tool_calls_empty_content_not_prepended(self):
-        """Whitespace-only content alongside tool calls is ignored (not prepended)."""
+    async def test_content_plus_tool_calls_empty_content_does_not_mutate_call(self):
+        """Whitespace-only assistant content does not mutate execution arguments."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
             @strategy(CodeActStrategy(config=CodeActConfig()))
@@ -1577,14 +1564,11 @@ class TestCodeActStrategyEventSequence:
 
         assert result == 7
 
-        # The return_result tool call should have no comment prepended
         events = agent_instance.event_manager.values()
         tool_calls = [e for e in events if e.event_type == "ToolCallEvent"]
         final_tc = tool_calls[0]
         code = final_tc.arguments.get("code", "")
-        assert not code.startswith("# "), (
-            f"Whitespace-only content should not be prepended, got: {code!r}"
-        )
+        assert code == ""
 
     @pytest.mark.asyncio
     async def test_text_only_loop_aborts_after_threshold(self):
@@ -1735,8 +1719,8 @@ class TestCodeActStrategyEventSequence:
         assert last.exception_type == "GenerationError"
 
     @pytest.mark.asyncio
-    async def test_content_plus_tool_calls_prepends_first_execute_python_only(self):
-        """The comment is prepended to the first execute_python; later ones are untouched."""
+    async def test_content_plus_tool_calls_preserves_turn_and_execution_arguments(self):
+        """Assistant prose and raw tool calls are retained without mutating execution."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
             @strategy(CodeActStrategy(config=CodeActConfig()))
@@ -1765,43 +1749,13 @@ class TestCodeActStrategyEventSequence:
         exec_calls = [
             e for e in events if e.event_type == "ToolCallEvent" and e.name == "execute_python"
         ]
-        # First execute_python should have the comment prepended
-        assert exec_calls[0].arguments["code"].startswith("# "), (
-            f"First execute_python should have the comment prepended, got: {exec_calls[0].arguments['code']!r}"
-        )
-        # Second execute_python should be unchanged
-        assert exec_calls[1].arguments["code"] == "y = 2", (
-            f"Second execute_python should be unchanged, got: {exec_calls[1].arguments['code']!r}"
-        )
-
-    def test_prepend_comment_skips_to_next_on_invalid_json(self):
-        """If the first execute_python has invalid JSON arguments, skip it and prepend to next."""
-        from nooa.strategies.codeact import _prepend_comment
-        from nooa.unifiedllm import ToolCall
-
-        bad_tc = ToolCall(id="bad", name="execute_python", arguments="NOT VALID JSON")
-        good_tc = ToolCall(id="c2", name="execute_python", arguments=json.dumps({"code": "x = 42"}))
-        result = _prepend_comment([bad_tc, good_tc], "Thinking aloud.")
-
-        # First tool call unchanged (bad JSON)
-        assert result[0].arguments == "NOT VALID JSON"
-        # Second tool call should have the comment prepended
-        args = json.loads(result[1].arguments)
-        assert args["code"].startswith("# "), (
-            f"Second execute_python should have the comment prepended, got: {args['code']!r}"
-        )
-        assert "x = 42" in args["code"]
-
-    def test_prepend_comment_no_execute_python_unchanged(self):
-        """If there's no execute_python in the list, all tool calls are returned unchanged."""
-        from nooa.strategies.codeact import _prepend_comment
-        from nooa.unifiedllm import ToolCall
-
-        rr = ToolCall(id="ret", name="return_result", arguments=json.dumps({"result": 7}))
-        result = _prepend_comment([rr], "some content")
-
-        assert len(result) == 1
-        assert result[0].arguments == rr.arguments
+        assert [call.arguments["code"] for call in exec_calls] == ["x = 1", "y = 2"]
+        output = next(event for event in events if event.event_type == "LLMOutput")
+        assert output.content == "Thinking aloud."
+        assert [call.arguments for call in output.tool_calls] == [
+            json.dumps({"code": "x = 1"}),
+            json.dumps({"code": "y = 2"}),
+        ]
 
 
 class TestCodeActStrategyPersistentState:

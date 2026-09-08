@@ -122,7 +122,6 @@ class HarnessMetrics(BaseModel):
     stop_to_return_result_count: int = 0
     stop_to_return_result_previews: list[str] = Field(default_factory=list)
     text_only_loop_aborts_count: int = 0
-    content_prepended_as_comment_count: int = 0
     empty_response_count: int = 0
     gpt4o_double_quote_fix_count: int = 0
     gpt4o_double_quote_fix_previews: list[str] = Field(default_factory=list)
@@ -239,9 +238,6 @@ class HarnessMetrics(BaseModel):
 
     def text_only_loop_abort(self) -> None:
         self.text_only_loop_aborts_count += 1
-
-    def content_prepended_as_comment(self) -> None:
-        self.content_prepended_as_comment_count += 1
 
     def empty_response(self) -> None:
         self.empty_response_count += 1
@@ -593,12 +589,6 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Text-only loop aborts",
         "Response Format Fixups",
         lambda m: m.text_only_loop_aborts_count,
-    ),
-    SchemaEntry(
-        "harness.content_prepended_as_comment.count",
-        "Content prepended as comment",
-        "Response Format Fixups",
-        lambda m: m.content_prepended_as_comment_count,
     ),
     SchemaEntry(
         "harness.empty_response.count",

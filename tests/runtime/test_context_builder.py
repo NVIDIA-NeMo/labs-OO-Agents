@@ -585,6 +585,7 @@ class TestPhaseEvents:
                     arguments='{"code":"print(1)"}',
                 ),
             ),
+            finish_reason="tool_calls",
         )
         call = ToolCallEvent(
             tool_call_id="call-1",

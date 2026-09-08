@@ -281,7 +281,7 @@ class RenderedMessage(BaseModel):
     formatters continue to read ``content`` and are unaware of parts.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     role: Role = Field(description="Message role (SYSTEM / USER / ASSISTANT / TOOL)")
     content: str | None = Field(

@@ -25,7 +25,8 @@ import pytest
 
 from nooa.context_blocks import ResultStatus, ToolCallEvent, ToolResult
 from nooa.context_blocks.events import AssistantEvent, UserEvent
-from nooa.context_blocks.models import Role
+from nooa.context_blocks.formatter import XMLBlockFormatter
+from nooa.context_blocks.models import ResolvedBlock, Role
 from nooa.events import (
     AfterTurn,
     BeforeTurn,
@@ -266,6 +267,55 @@ def test_assistant_turn_ir_survives_backend_roundtrip(backend, event):
     else:
         assert restored.llm_output_id == event.llm_output_id
         assert restored.reasoning_items == event.reasoning_items
+
+
+def test_linked_assistant_turn_renders_after_backend_roundtrip(backend):
+    """A persisted canonical turn and its execution retain their relationship."""
+    turn = LLMOutput(
+        content="I will run it.",
+        tool_calls=(
+            LLMToolCall(
+                id="call-roundtrip",
+                name="execute_python",
+                arguments='{"code":"print(1)"}',
+            ),
+        ),
+        finish_reason="tool_calls",
+    )
+    execution = ToolCallEvent(
+        tool_call_id="call-roundtrip",
+        name="execute_python",
+        arguments={"code": "print(1)"},
+        llm_output_id=turn.id,
+        result=ToolResult(tool_call_id="call-roundtrip", content="status: complete"),
+    )
+    backend.store("turn", turn)
+    backend.store("execution", execution)
+
+    restored_turn, restored_execution = backend.all_events()
+    messages = XMLBlockFormatter().format(
+        [
+            ResolvedBlock(
+                key="turn",
+                content=restored_turn.content,
+                role=Role.ASSISTANT,
+                event=restored_turn,
+            ),
+            ResolvedBlock(
+                key="execution",
+                content="",
+                role=Role.ASSISTANT,
+                event=restored_execution,
+            ),
+        ]
+    )
+
+    assistant = next(message for message in messages if message.role == Role.ASSISTANT)
+    assert assistant.content == "I will run it."
+    assert [call.id for call in assistant.tool_calls] == ["call-roundtrip"]
+    result = next(message for message in messages if message.role == Role.TOOL)
+    assert result.tool_call_id == "call-roundtrip"
+    assert result.content == "status: complete"
 
 
 def test_tool_call_event_result_preserved_after_update(backend):

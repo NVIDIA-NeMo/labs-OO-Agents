@@ -8,6 +8,7 @@ blocks) and returns ``list[RenderedMessage]``. ProviderFormatter.format() takes
 """
 
 import pytest
+from pydantic import ValidationError
 
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
 from nooa.context_blocks.formatter import (
@@ -154,6 +155,7 @@ class TestXMLBlockFormatter:
                     arguments='{"code":"second()"}',
                 ),
             ),
+            finish_reason="tool_calls",
         )
         call_1 = _tool_call_block(
             key="call_1",
@@ -205,6 +207,7 @@ class TestXMLBlockFormatter:
                 LLMToolCall(id="call_1", name="one", arguments="{}"),
                 LLMToolCall(id="call_2", name="two", arguments="{}"),
             ),
+            finish_reason="tool_calls",
         )
         call_1 = _tool_call_block(
             tool_call_id="call_1",
@@ -224,6 +227,80 @@ class TestXMLBlockFormatter:
         assert [call.id for call in messages[1].tool_calls] == ["call_1", "call_2"]
         assert [message.tool_call_id for message in messages[2:]] == ["call_1", "call_2"]
         assert messages[3].content == "(tool call was not executed)"
+
+    @pytest.mark.parametrize(
+        ("finish_reason", "arguments", "content"),
+        [
+            ("length", '{"code":"partial()"}', ""),
+            ("tool_calls", '{"code":', "partial response"),
+            ("tool_calls", "[]", "non-object arguments"),
+        ],
+    )
+    def test_incomplete_or_malformed_tool_batch_is_not_replayed(
+        self, finish_reason, arguments, content
+    ):
+        turn = LLMOutput(
+            content=content,
+            tool_calls=(
+                LLMToolCall(
+                    id="partial",
+                    name="execute_python",
+                    arguments=arguments,
+                ),
+            ),
+            finish_reason=finish_reason,
+        )
+
+        messages = XMLBlockFormatter().format(
+            [
+                ResolvedBlock(
+                    key="turn",
+                    content=content,
+                    role=Role.ASSISTANT,
+                    event=turn,
+                )
+            ]
+        )
+
+        assert all(not message.tool_calls for message in messages)
+        assert AnthropicProviderFormatter().format(messages) == {
+            "system": "",
+            "messages": ([{"role": "assistant", "content": content}] if content else []),
+        }
+
+    def test_linked_execution_falls_back_to_standalone_when_carrier_is_rejected(self):
+        turn = LLMOutput(
+            content="",
+            tool_calls=(
+                LLMToolCall(
+                    id="partial",
+                    name="execute_python",
+                    arguments='{"code":"partial()"}',
+                ),
+            ),
+            finish_reason="length",
+        )
+        execution = _tool_call_block(
+            tool_call_id="partial",
+            name="execute_python",
+            arguments={"code": "completed()"},
+            result_content="status: complete",
+            llm_output_id=turn.id,
+        )
+
+        messages = XMLBlockFormatter().format(
+            [
+                ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=turn),
+                execution,
+            ]
+        )
+
+        assistant = next(message for message in messages if message.role == Role.ASSISTANT)
+        assert [call.id for call in assistant.tool_calls] == ["partial"]
+        assert assistant.tool_calls[0].arguments == {"code": "completed()"}
+        result = next(message for message in messages if message.role == Role.TOOL)
+        assert result.tool_call_id == "partial"
+        assert result.content == "status: complete"
 
 
 class TestMarkdownBlockFormatter:
@@ -368,6 +445,13 @@ class TestOpenAIProviderFormatter:
         assert result[0]["content"] == "Calling both"
         assert [call["id"] for call in result[0]["tool_calls"]] == ["a", "b"]
         assert result[0]["tool_calls"][0]["function"]["arguments"] == '{"x":1}'
+
+    def test_removed_singular_tool_call_fails_loudly(self):
+        with pytest.raises(ValidationError, match="tool_call"):
+            RenderedMessage(
+                role=Role.ASSISTANT,
+                tool_call=ToolCallInfo(id="old", name="old", arguments={}),
+            )
 
     def test_runtime_event_skipped(self):
         messages = [

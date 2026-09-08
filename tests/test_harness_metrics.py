@@ -82,11 +82,6 @@ class TestRecording:
         m.text_to_synthetic()
         assert m.text_to_synthetic_count == 2
 
-    def test_content_prepended_as_comment(self):
-        m = HarnessMetrics()
-        m.content_prepended_as_comment()
-        assert m.content_prepended_as_comment_count == 1
-
     def test_empty_response(self):
         m = HarnessMetrics()
         m.empty_response()
@@ -373,7 +368,6 @@ def _populate_all_fields(m: HarnessMetrics) -> None:
     m.import_stripped("import x")
     m.blocked_module_removed("os")
     m.text_to_synthetic()
-    m.content_prepended_as_comment()
     m.empty_response()
     m.gpt4o_double_quote_fix('"x\\n"')
     m.variable_ref_resolved("x")

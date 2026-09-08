@@ -1896,7 +1896,7 @@ class CompletionClient(UnifiedLLM):
 
             return LLMResponse(
                 raw_response=raw_response,
-                content="",
+                content=response_message.content or "",
                 tool_calls=tool_calls,
                 finish_reason=_finish_reason_for_tool_calls(
                     _map_completion_finish_reason(raw_response)
@@ -2070,7 +2070,7 @@ class CompletionClient(UnifiedLLM):
 
             return LLMResponse(
                 raw_response=raw_response,
-                content="",
+                content=response_message.content or "",
                 tool_calls=tool_calls,
                 finish_reason=_finish_reason_for_tool_calls(
                     _map_completion_finish_reason(raw_response)
@@ -2427,7 +2427,7 @@ class ResponsesClient(UnifiedLLM):
 
             return LLMResponse(
                 raw_response=raw_response,
-                content="",
+                content=self._extract_text_from_output(raw_response),
                 tool_calls=tool_calls,
                 finish_reason=_finish_reason_for_tool_calls(
                     _map_responses_finish_reason(raw_response)
@@ -2560,7 +2560,7 @@ class ResponsesClient(UnifiedLLM):
 
             return LLMResponse(
                 raw_response=raw_response,
-                content="",
+                content=self._extract_text_from_output(raw_response),
                 tool_calls=tool_calls,
                 finish_reason=_finish_reason_for_tool_calls(
                     _map_responses_finish_reason(raw_response)

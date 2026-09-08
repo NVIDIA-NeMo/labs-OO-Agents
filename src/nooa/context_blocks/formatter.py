@@ -217,6 +217,20 @@ def _tool_result_message(event: ToolCallEvent) -> RenderedMessage:
     )
 
 
+def _is_replayable_tool_call_turn(event: LLMOutput) -> bool:
+    """Return whether a captured turn is safe to project as provider tool calls."""
+    if event.finish_reason != "tool_calls" or not event.tool_calls:
+        return False
+    for call in event.tool_calls:
+        try:
+            arguments = json.loads(call.arguments)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(arguments, dict):
+            return False
+    return True
+
+
 def _event_block_to_messages(
     block: ResolvedBlock,
     *,
@@ -233,6 +247,16 @@ def _event_block_to_messages(
     repeated events across turns hash identically and don't retransmit.
     """
     from nooa.context_blocks.models import BlockPart
+
+    if (
+        isinstance(block.event, LLMOutput)
+        and block.event.tool_calls
+        and not _is_replayable_tool_call_turn(block.event)
+        and not block.content
+    ):
+        # Keep incomplete/malformed provider turns in the public event IR,
+        # but do not synthesize an empty assistant message for them.
+        return []
 
     if isinstance(block.event, ToolCallEvent):
         event = block.event
@@ -286,7 +310,7 @@ def _event_blocks_to_messages(
     visible_turn_ids = {
         block.event.id
         for block in blocks
-        if isinstance(block.event, LLMOutput) and block.event.tool_calls
+        if isinstance(block.event, LLMOutput) and _is_replayable_tool_call_turn(block.event)
     }
     executions: dict[str, dict[str, ToolCallEvent]] = {}
     for block in blocks:
@@ -301,7 +325,7 @@ def _event_blocks_to_messages(
     messages: list[RenderedMessage] = []
     for block in blocks:
         event = block.event
-        if isinstance(event, LLMOutput) and event.tool_calls:
+        if isinstance(event, LLMOutput) and _is_replayable_tool_call_turn(event):
             by_call_id = executions.get(event.id, {})
             reasoning_items = next(
                 (
