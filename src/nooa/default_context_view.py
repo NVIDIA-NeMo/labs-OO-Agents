@@ -269,7 +269,9 @@ class DefaultAgentView(ContextView["Agent"]):
                 default_blocks = tuple(
                     item
                     for item in contribution
-                    if isinstance(item, Block) and not manager.is_protected(item.key)
+                    if isinstance(item, Block)
+                    and item.key not in disabled
+                    and not manager.is_protected(item.key)
                 )
                 blocks = replace_blocks_by_key(blocks, default_blocks)
             else:

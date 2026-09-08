@@ -204,6 +204,21 @@ async def test_legacy_skill_block_is_materialized_by_default_skill_view():
     assert block.metadata.source_dynamic is True
 
 
+async def test_disabled_key_suppresses_default_skill_shorthand():
+    class DeclaredSkill(Skill):
+        context_block = ("skill_state", "'visible'")
+
+    class Example(Agent, llm=object()):
+        skill = DeclaredSkill()
+
+        async def run(self): ...
+
+    agent = Example()
+    agent.context["skill_state"] = None
+    items = await agent.runtime._prepare_context(Example.run)
+    assert "skill_state" not in [getattr(item, "key", None) for item in items]
+
+
 async def test_default_view_partitions_and_evicts_manager_blocks():
     class Example(Agent, llm=object(), context={"tail": DynamicContext("'tail'")}):
         async def run(self): ...
