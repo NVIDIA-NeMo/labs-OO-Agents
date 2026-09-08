@@ -96,7 +96,7 @@ async def stored_context_blocks(
             expr=value.expr if is_dynamic else f'self.context["{key}"]',
             user_block=not protected,
             static=manager.is_static(key),
-            source_dynamic=is_dynamic and not protected,
+            source_dynamic=is_dynamic,
         )
         blocks.append(_block(key, content, metadata))
 

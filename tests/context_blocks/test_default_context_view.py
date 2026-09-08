@@ -71,7 +71,7 @@ async def test_named_helpers_make_framework_sources_explicit():
     )
 
     assert [system.key, interface.key, state.key] == ["system_prompt", "self", "state"]
-    assert not any(block.metadata.source_dynamic for block in (system, interface, state))
+    assert all(block.metadata.source_dynamic for block in (system, interface, state))
     assert stored == ()
 
 
