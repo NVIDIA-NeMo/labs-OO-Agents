@@ -127,10 +127,6 @@ class TextOnlyReply(EventBase):  # type: ignore[misc]
     text-only reply does not change generation. This is the durable, structured record that
     powers ``/bug`` capture and time-travel replay; the model-visible
     recovery action is recorded separately and may be supplied by the host.
-
-    Replaces the lossy ``DebugTrace`` previously written on the CodeAct
-    text-only path, which truncated the content and could not be relied on by
-    downstream consumers.
     """
 
     _role: ClassVar[Role] = Role.METADATA
