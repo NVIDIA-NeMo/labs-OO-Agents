@@ -172,10 +172,10 @@ RULE3_FOREIGN = {
 }
 
 # Escape-surface *use* regardless of target — flags any direct call to a host
-# shell/repo/pyp/web/mcp tool from inside agent code (the surfaces the lockdown
+# shell/repo/web/mcp tool from inside agent code (the surfaces the lockdown
 # was meant to remove). Used as an umbrella signal.
 ESCAPE_TOOL_CALL = re.compile(
-    r"\bself\.(shell\.(run|cwd|popen|exec)|repo\.\w+|pyp\.\w+|web\.\w+|mcp\.\w+"
+    r"\bself\.(shell\.(run|cwd|popen|exec)|repo\.\w+|web\.\w+|mcp\.\w+"
     r"|tui_config\.\w+|libwriting\.\w+)"
 )
 

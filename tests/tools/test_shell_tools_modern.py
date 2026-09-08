@@ -14,6 +14,7 @@ Strategy:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 import shutil
@@ -89,6 +90,82 @@ def _grep_anchor_lines(repo: Path, cmd: str) -> set[tuple[str, int]]:
                 p = p[2:]
             out.add((p, int(parts[1])))
     return out
+
+
+# --------------------------------------------------------------------------
+# Read-only sed ranges
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "cmd,start,end,expected",
+    [
+        ("sed -n '2,3p' a.py", 2, 3, '    return "bar"\n# foo again\n'),
+        ('sed -n "2p" a.py', 2, 2, '    return "bar"\n'),
+        ("sed -n -e '3,99p' a.py", 3, 4, "# foo again\nfooo = 1\n"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_sed_numeric_range_attaches_editable_match(
+    repo: Path, cmd: str, start: int, end: int, expected: str
+):
+    sh = ShellTools(cwd=str(repo))
+    result = await sh.run(cmd)
+
+    assert result.matches is not None and len(result.matches) == 1
+    match = result.matches[0]
+    assert (match.path, match.start, match.end, match.text) == ("a.py", start, end, expected)
+    assert match.text.strip() == result.stdout
+
+
+@pytest.mark.asyncio
+async def test_sed_range_after_cd_prefix_attaches_match(repo: Path):
+    sh = ShellTools(cwd=str(repo))
+    result = await sh.run("cd sub && sed -n '1,2p' c.py")
+
+    assert result.matches is not None and len(result.matches) == 1
+    match = result.matches[0]
+    assert (match.path, match.start, match.end, match.text) == ("c.py", 1, 2, "x = 1\nfoo = 2\n")
+
+
+@pytest.mark.asyncio
+async def test_sed_range_match_is_editable(repo: Path):
+    sh = ShellTools(cwd=str(repo))
+    result = await sh.run("sed -n '2,3p' a.py")
+    assert result.matches
+
+    await sh.replace(result.matches[0], "    return 42\n")
+
+    assert (repo / "a.py").read_text() == "def foo():\n    return 42\nfooo = 1\n"
+
+
+@pytest.mark.asyncio
+async def test_sed_range_past_eof_attaches_empty_match_list(repo: Path):
+    sh = ShellTools(cwd=str(repo))
+    result = await sh.run("sed -n '99,100p' a.py")
+
+    assert result.stdout == ""
+    assert result.matches == []
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "sed -n 's/foo/bar/p' a.py",  # transformation
+        "sed -n '/foo/p' a.py",  # regex address
+        "sed -n '1p;2p' a.py",  # multiple expressions
+        "sed -n -e '1p' -e '2p' a.py",  # multiple -e expressions
+        "sed -n '1,2p' a.py b.txt",  # multiple files
+        "sed -n '1,2p'",  # stdin
+        "sed -n '1,2p' a.py | cat",  # pipe
+        "sed -i -n '1,2p' a.py",  # mutation
+        "sed -n '3,2p' a.py",  # reversed range
+    ],
+)
+@pytest.mark.asyncio
+async def test_nontrivial_sed_does_not_attach_matches(repo: Path, cmd: str):
+    sh = ShellTools(cwd=str(repo))
+    result = await sh.run(cmd)
+
+    assert result.matches is None
 
 
 # --------------------------------------------------------------------------
@@ -505,3 +582,113 @@ class TestIsPureSearchCommand:
         from nooa.tools.shell_tools import is_pure_search_command
 
         assert is_pure_search_command('echo "hello" | grep "h"') is False
+
+
+@pytest.mark.asyncio
+async def test_sed_range_in_a_symlinked_cwd_still_attaches_a_match(repo: Path, tmp_path: Path):
+    """A symlinked cwd must not make a read-only sed raise out of run().
+
+    ``self.cwd`` comes from bash's *logical* pwd, so after ``cd`` through a
+    symlink it reads ``/tmp/x`` while the file resolves to ``/private/tmp/x``.
+    Relating the two without a guard raises ValueError from inside run().
+    """
+    link = tmp_path / "link"
+    link.symlink_to(repo, target_is_directory=True)
+
+    sh = ShellTools(cwd=str(repo))
+    await sh.run(f"cd {link}")
+    result = await sh.run("sed -n '2,3p' a.py")
+
+    assert result.matches is not None
+    assert result.matches[0].text == '    return "bar"\n# foo again\n'
+    # Relative to the resolved cwd. Relating an unresolved logical cwd to the
+    # resolved file either raises or degrades this to an absolute path.
+    assert result.matches[0].path == "a.py"
+    await sh.close()
+
+
+@pytest.mark.asyncio
+async def test_sed_range_cwd_is_captured_with_the_command(repo: Path):
+    """A concurrent ``cd`` must not be misattributed to the sed command.
+
+    Ordering between two gathered run() calls is genuinely undefined -- sed may
+    legitimately run before or after ``cd sub``. What must hold either way is
+    that the harvest uses the cwd *that sed ran in*, so the anchor describes the
+    file sed actually read.
+
+    run() gets that by reading the cwd under the same session lock as the
+    command. A separate ``pwd`` round-trip can instead observe the other task's
+    ``cd``, harvest against the wrong directory, and lose the anchor entirely.
+    """
+    sh = ShellTools(cwd=str(repo))
+    (repo / "sub" / "a.py").write_text("DECOY\nDECOY2\n")
+    # Start the session first: otherwise lazy startup yields and `cd sub` wins
+    # the lock every time, so sed and the cwd never disagree and the race the
+    # test is about never happens.
+    await sh.run("true")
+
+    sed_result, _ = await asyncio.gather(
+        sh.run("sed -n '1,1p' a.py"),
+        sh.run("cd sub"),
+    )
+
+    # Whichever a.py sed reached, an anchor must be attached and must agree
+    # with what sed printed.
+    assert sed_result.stdout.strip() in ("def foo():", "DECOY")
+    assert sed_result.matches is not None and len(sed_result.matches) == 1
+    assert sed_result.matches[0].text.strip() == sed_result.stdout.strip()
+    await sh.close()
+
+
+@pytest.mark.asyncio
+async def test_sed_range_match_stays_bound_to_its_file_after_a_cd(repo: Path):
+    """A sed Match must keep pointing at the file sed read, even after a cd."""
+    (repo / "sub" / "a.py").write_text("DECOY\nDECOY2\n")
+
+    sh = ShellTools(cwd=str(repo))
+    result = await sh.run("sed -n '1,1p' a.py")
+    assert result.matches
+    await sh.run("cd sub")
+    await sh.replace(result.matches[0], "PATCHED\n")
+
+    assert (repo / "a.py").read_text().startswith("PATCHED\n")
+    assert (repo / "sub" / "a.py").read_text() == "DECOY\nDECOY2\n"
+    await sh.close()
+
+
+@pytest.mark.asyncio
+async def test_sed_range_anchor_excludes_blank_lines_it_never_showed(repo: Path):
+    """The anchor must cover what was displayed, not the whole requested range.
+
+    Command output is stripped, so blank lines at either edge of the range never
+    reach the screen. Anchoring the full range would let replace() delete lines
+    the agent never saw.
+    """
+    target = repo / "x.py"
+    target.write_text("import os\n\n\ndef go():\n    pass\n\n\n")
+
+    sh = ShellTools(cwd=str(repo))
+    result = await sh.run("sed -n '2,7p' x.py")
+
+    assert result.matches is not None and len(result.matches) == 1
+    match = result.matches[0]
+    # Requested 2-7; lines 2, 3, 6 and 7 are blank and were never shown.
+    assert (match.start, match.end) == (4, 5)
+    assert match.text == "def go():\n    pass\n"
+
+    await sh.replace(match, "def go():\n    return 1\n")
+    assert target.read_text() == "import os\n\n\ndef go():\n    return 1\n\n\n"
+    await sh.close()
+
+
+@pytest.mark.asyncio
+async def test_sed_range_of_only_blank_lines_anchors_nothing(repo: Path):
+    """A range that printed nothing visible has nothing to anchor."""
+    (repo / "y.py").write_text("a = 1\n\n\n\nb = 2\n")
+
+    sh = ShellTools(cwd=str(repo))
+    result = await sh.run("sed -n '2,4p' y.py")
+
+    assert result.stdout.strip() == ""
+    assert result.matches == []
+    await sh.close()

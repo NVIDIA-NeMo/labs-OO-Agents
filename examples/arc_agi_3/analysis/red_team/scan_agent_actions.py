@@ -9,7 +9,7 @@ For each game:
                    source, foreign-file contents, or network responses, that is
                    proof an attempt returned data.
 
-Also flags escape-tool usage (self.shell/repo/pyp/web/mcp) regardless of target.
+Also flags escape-tool usage (self.shell/repo/web/mcp) regardless of target.
 
 De-dup: the same code cell / output is echoed across many message files (the
 conversation history repeats). We dedup by (where, code/stdout hash) so each
