@@ -27,7 +27,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
@@ -232,12 +232,21 @@ class _GraphemePaintPlan:
         row_writes: list[tuple[int, dict[int, Char], dict[int, str]]],
         escape_clear_range: range,
     ) -> None:
+        """Store the derived projection; all arguments are treated read-only."""
         self.ui_content = ui_content
         self.visible_lines = visible_lines
         self.grapheme_coordinates = grapheme_coordinates
         self.blank_map = blank_map
         self.row_writes = row_writes
         self.escape_clear_range = escape_clear_range
+
+
+class _WrappedContentEntry(NamedTuple):
+    """One memoized ``UIContent`` wrapper for a (text identity, width)."""
+
+    text: AnyFormattedText
+    width: int
+    content: UIContent
 
 
 # Shared blank/continuation cells: the renderer compares painted cells with
@@ -270,10 +279,12 @@ class _GraphemeWindow(Window):
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize the window and its empty paint-plan cache."""
         super().__init__(*args, **kwargs)
-        self._grapheme_plans: OrderedDict[tuple[int, int, int, int, int], _GraphemePaintPlan] = (
-            OrderedDict()
-        )
+        # Keyed by (content identity, geometry); see ``_copy_body_from_plan``.
+        self._grapheme_plans: OrderedDict[
+            tuple[int, int, int, int, int, int], _GraphemePaintPlan
+        ] = OrderedDict()
 
     def _copy_body(
         self,
@@ -292,9 +303,17 @@ class _GraphemeWindow(Window):
         align: WindowAlign = WindowAlign.LEFT,
         get_line_prefix: Callable[[int, int], AnyFormattedText] | None = None,
     ) -> tuple[dict[int, tuple[int, int]], dict[tuple[int, int], tuple[int, int]]]:
-        # The base implementation's cursor/menu handling is a no-op without
-        # focus (this window is never focusable) and without a menu position;
-        # its cursor_position is Point(0, 0) even for cursor-free content.
+        """Copy the body via a cached paint plan when this window's shape allows.
+
+        The base implementation's cursor/menu handling is a no-op without
+        focus (this window is never focusable) and without a menu position;
+        its ``cursor_position`` is ``Point(0, 0)`` even for cursor-free
+        content. ``_highlight_cursorlines`` is the one focus-independent
+        cursor side effect, so ``cursorline``/``cursorcolumn`` (and
+        ``colorcolumns``) must be off for the plan path; anything else —
+        wrapping, scrolling, a line prefix, another alignment, or live
+        highlight options — falls back to ``_copy_body_derive``.
+        """
         if (
             not wrap_lines
             and vertical_scroll == 0
@@ -303,6 +322,9 @@ class _GraphemeWindow(Window):
             and get_line_prefix is None
             and align == WindowAlign.LEFT
             and not has_focus
+            and not self.cursorline()
+            and not self.cursorcolumn()
+            and not self.colorcolumns
             and ui_content.menu_position is None
         ):
             return self._copy_body_from_plan(ui_content, new_screen, write_position, move_x, width)
@@ -443,6 +465,10 @@ class _GraphemeWindow(Window):
         plan = plans.get(key)
         if plan is None or plan.ui_content is not ui_content:
             plan = self._build_grapheme_paint_plan(ui_content, write_position, move_x, width)
+            # An id() collision with a dead UIContent can hit a stale key;
+            # replacing the value alone would keep the key's old LRU slot, so
+            # remove it first and let the insert re-order the fresh plan last.
+            plans.pop(key, None)
             plans[key] = plan
             while len(plans) > _MAX_GRAPHEME_PLANS:
                 plans.popitem(last=False)
@@ -478,6 +504,13 @@ class _GraphemeWindow(Window):
         same erase-then-atom ordering, same escape clearing and coordinates —
         but into plan structures instead of a live screen. The regression test
         asserts both paths paint byte-identical screens.
+
+        One deliberate divergence from the base path: when a multi-width
+        grapheme starts at the final column, the base writes its continuation
+        cells one column past the window edge. The plan (like the derive
+        override) does not reproduce that stray write; it is out of the
+        window's region and clipped by the renderer, and reproducing it would
+        require invoking the base projection the plan exists to skip.
         """
         xpos = write_position.xpos + move_x
         ypos = write_position.ypos
@@ -517,7 +550,12 @@ class _GraphemeWindow(Window):
                 atom.width = cells
                 if x < xpos + width:
                     if sequence := raw_at_offset.get(start):
-                        escapes[x] = sequence
+                        # Zero-cell clusters (lone combining marks, orphan
+                        # ZWJ/keycap fragments) do not advance x, so several
+                        # clusters' escapes can land on one column. The
+                        # derive path concatenates at the same coordinate;
+                        # match it so replay stays byte-identical.
+                        escapes[x] = escapes.get(x, "") + sequence
                     writes[x] = atom
                     for continuation in range(cells):
                         grapheme_coordinates[line_number, logical_cell + continuation] = (
@@ -553,6 +591,7 @@ class _FullscreenTranscriptControl(FormattedTextControl):
         copy_code_callback: Callable[[str], None],
         **kwargs: Any,
     ) -> None:
+        """Capture the transcript interaction callbacks and cache state."""
         super().__init__(*args, **kwargs)
         self._scroll_callback = scroll_callback
         self._mouse_navigation_enabled = mouse_navigation_enabled
@@ -571,7 +610,7 @@ class _FullscreenTranscriptControl(FormattedTextControl):
         # rebuilt per call, which also defeated the grapheme paint-plan cache
         # (a fresh UIContent identity every frame). Two slots cover the
         # model's two alternating hyperlink-marker variants per geometry.
-        self._wrapped_by_text: OrderedDict[int, tuple[Any, int, UIContent]] = OrderedDict()
+        self._wrapped_by_text: OrderedDict[int, _WrappedContentEntry] = OrderedDict()
         self._dragging = False
         self._drag_moved = False
         self._drag_position = (0, 0)
@@ -585,10 +624,17 @@ class _FullscreenTranscriptControl(FormattedTextControl):
         return self._render_width, self._render_height
 
     def create_content(self, width: int, height: int | None):
-        # ``preferred_height`` asks for content with ``height=None`` before the
-        # concrete window height is allocated. Keep that measurement useful,
-        # but do not let its render-counter cache poison the paint that follows
-        # when bottom chrome changed this frame.
+        """Return the viewport content, memoized per (text identity, width).
+
+        ``preferred_height`` asks for content with ``height=None`` before the
+        concrete window height is allocated. Keep that measurement useful,
+        but do not let its render-counter cache poison the paint that follows
+        when bottom chrome changed this frame. A memo hit skips the base
+        implementation entirely: a hit proves the same ``FormattedText``
+        object is served, so the base's ``_fragments`` (only read by its
+        ``mouse_handler`` fallback, and never carrying per-fragment handlers
+        in the transcript) cannot be stale.
+        """
         self._render_width = max(1, width)
         if height is not None:
             self._render_height = max(1, height)
@@ -627,7 +673,7 @@ class _FullscreenTranscriptControl(FormattedTextControl):
             show_cursor=content.show_cursor,
         )
         if text is not None:
-            self._wrapped_by_text[id(text)] = (text, width, wrapped)
+            self._wrapped_by_text[id(text)] = _WrappedContentEntry(text, width, wrapped)
             while len(self._wrapped_by_text) > 2:
                 self._wrapped_by_text.popitem(last=False)
         return wrapped

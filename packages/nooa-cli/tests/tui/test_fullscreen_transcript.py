@@ -4528,15 +4528,24 @@ def test_grapheme_paint_plan_replays_identical_screen() -> None:
 
     model = FullscreenTranscriptModel(show_trailing_blank=False)
     for start in range(0, 60, 10):
-        model.append(
-            "\n".join(
-                f"\x1b[36mrow {i}: the quick brown fox\x1b[0m"
-                if i % 3
-                else f"see \x1b]8;;https://example.invalid/{i}\x1b\\link {i}\x1b]8;;\x1b\\ tail"
-                for i in range(start, min(start + 10, 60))
-            )
-            + "\n"
-        )
+        rows = []
+        for i in range(start, min(start + 10, 60)):
+            if i % 3:
+                rows.append(f"\x1b[36mrow {i}: the quick brown fox\x1b[0m")
+            else:
+                rows.append(
+                    f"see \x1b]8;;https://example.invalid/{i}\x1b\\link {i}\x1b]8;;\x1b\\ tail"
+                )
+            if i % 5 == 0:
+                # Multi-width graphemes (emoji/flags/ZWJ sequences) pin the
+                # plan's continuation cells and width clipping, and a lone
+                # combining mark after a hyperlink close pins co-located
+                # zero-width escapes (two clusters painting at one column).
+                rows.append(
+                    "\x1b]8;;https://example.invalid/wide\x1b\\e\u0301"
+                    "\U0001f1e8\U0001f1ed\U0001f469\u200d\U0001f4bb\x1b]8;;\x1b\\"
+                )
+        model.append("\n".join(rows) + "\n")
     width, height = 40, 6
     formatted = model.formatted_text(width=width, height=height, render_counter=0)
     control = _FullscreenTranscriptControl(
@@ -4606,8 +4615,194 @@ def test_grapheme_paint_plan_replays_identical_screen() -> None:
     # One plan for this (content, geometry) pair, built once.
     assert len(window._grapheme_plans) == 1
 
+    # The fast path owns the whole body write, so it must replicate the
+    # base's screen-height bookkeeping.
+    assert screen_b.height == write_position.height
+    assert screen_c.height == write_position.height
+
     # A different geometry derives a fresh plan rather than replaying stale writes.
     narrow = WritePosition(xpos=0, ypos=0, width=20, height=height)
     screen_d = Screen()
     window._copy_body_from_plan(content, screen_d, narrow, 0, 20)
     assert len(window._grapheme_plans) == 2
+
+
+def _make_paint_plan_window(width: int = 40, height: int = 6):
+    """Shared fixture: a transcript control + grapheme window over a small model."""
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+    from nooa_cli.tui.tui_application import _FullscreenTranscriptControl, _GraphemeWindow
+
+    model = FullscreenTranscriptModel(show_trailing_blank=False)
+    for start in range(0, 30, 10):
+        model.append(
+            "\n".join(
+                f"\x1b[36mrow {i}: the quick brown fox\x1b[0m"
+                if i % 3
+                else f"see \x1b]8;;https://example.invalid/{i}\x1b\\link {i}\x1b]8;;\x1b\\ tail"
+                for i in range(start, min(start + 10, 30))
+            )
+            + "\n"
+        )
+    formatted_holder = [model.formatted_text(width=width, height=height, render_counter=0)]
+    control = _FullscreenTranscriptControl(
+        lambda: formatted_holder[0],
+        focusable=False,
+        show_cursor=False,
+        scroll_callback=lambda delta: None,
+        mouse_navigation_enabled=lambda: False,
+        selection_callback=lambda *args: None,
+        link_callback=lambda x, y: False,
+        code_action_at=lambda x, y: None,
+        copy_code_callback=lambda text: None,
+    )
+    window = _GraphemeWindow(
+        control,
+        wrap_lines=False,
+        get_vertical_scroll=lambda _window: 0,
+        always_hide_cursor=True,
+    )
+    return model, formatted_holder, control, window
+
+
+def test_transcript_control_create_content_memoizes_wrapper_identity() -> None:
+    """The create_content memo must serve the same wrapper for the same text+width.
+
+    A regression that rebuilds the wrapper per call would silently defeat both
+    the base fragment cache and the grapheme paint-plan cache — the entire
+    point of the fast path — with every existing test still green.
+    """
+    model, formatted_holder, control, _window = _make_paint_plan_window(width=40, height=6)
+    with create_app_session(input=DummyInput(), output=DummyOutput()):
+        # Same FormattedText object at the same width: one memoized wrapper.
+        first = control.create_content(40, 6)
+        second = control.create_content(40, 6)
+        assert first is second
+        # The alternating hyperlink-marker variant is a different text object:
+        # each variant gets its own wrapper, served stably across calls.
+        formatted_holder[0] = model.formatted_text(width=40, height=6, render_counter=1)
+        variant_b = control.create_content(40, 6)
+        assert variant_b is not first
+        formatted_holder[0] = model.formatted_text(width=40, height=6, render_counter=0)
+        variant_a_again = control.create_content(40, 6)
+        assert variant_a_again is first
+        # A different width rebuilds rather than serving the other width's wrapper.
+        narrower = control.create_content(20, 6)
+        assert narrower is not first and narrower is not variant_b
+        # The memo stays bounded regardless of how many widths cycle through.
+        for width in (10, 15, 20, 25, 30, 35):
+            control.create_content(width, 6)
+        assert len(control._wrapped_by_text) <= 2
+
+
+def test_grapheme_plan_id_reuse_cannot_replay_stale_writes() -> None:
+    """A recycled id() must not alias a stale plan onto new content."""
+    from nooa_cli.tui.tui_application import _GraphemePaintPlan
+    from prompt_toolkit.formatted_text.utils import split_lines
+    from prompt_toolkit.layout.controls import UIContent
+    from prompt_toolkit.layout.screen import Screen, WritePosition
+
+    _model, _holder, _control, window = _make_paint_plan_window(width=40, height=6)
+    fragments = [("", "ZZZZ"), ("", "\n"), ("", "ZZZZ"), ("", "\n")]
+    lines = list(split_lines(fragments))
+    content = UIContent(
+        get_line=lambda i: lines[i],
+        line_count=len(lines),
+        show_cursor=False,
+        cursor_position=None,
+        menu_position=None,
+    )
+    write_position = WritePosition(xpos=0, ypos=0, width=40, height=6)
+    # A DIFFERENT (simulated dead) UIContent whose id collided with the new
+    # content's — exactly the recycle the identity guard exists to catch.
+    stale_content = UIContent(
+        get_line=lambda i: [("class:stale", "stale")],
+        line_count=1,
+        show_cursor=False,
+        cursor_position=None,
+        menu_position=None,
+    )
+    key = (id(content), 0, 0, 0, 40, 6)
+    # Plant a STALE plan under the exact key the new content will produce.
+    window._grapheme_plans[key] = _GraphemePaintPlan(
+        stale_content,
+        {0: (999, 0)},
+        {},
+        {},
+        [],
+        range(0, 41),
+    )
+    screen = Screen()
+    visible, _coordinates = window._copy_body_from_plan(content, screen, write_position, 0, 40)
+    # The identity re-validation must have rebuilt instead of replaying the
+    # stale plan: visible rows come from the NEW content ("ZZZZ\nZZZZ\n"
+    # splits into two text rows plus the trailing empty line), not (999, 0).
+    assert visible == {0: (0, 0), 1: (1, 0), 2: (2, 0)}
+    rebuilt = window._grapheme_plans[key]
+    assert rebuilt is not None and rebuilt.ui_content is content
+
+
+def test_grapheme_plan_lru_is_bounded() -> None:
+    """Distinct geometries evict oldest plans; the cache stays at its cap."""
+    from prompt_toolkit.layout.screen import Screen, WritePosition
+
+    _model, _holder, _control, window = _make_paint_plan_window(width=40, height=6)
+    from nooa_cli.tui.tui_application import _MAX_GRAPHEME_PLANS
+
+    for index in range(_MAX_GRAPHEME_PLANS + 3):
+        write_position = WritePosition(xpos=0, ypos=0, width=10 + index, height=6)
+        screen = Screen()
+        content = window.content.create_content(10 + index, 6)
+        window._copy_body_from_plan(content, screen, write_position, 0, 10 + index)
+    assert len(window._grapheme_plans) <= _MAX_GRAPHEME_PLANS
+
+
+def test_grapheme_window_copy_body_guard_falls_back_to_derive() -> None:
+    """Configurations the plan does not model must route to the derive path."""
+    import inspect
+
+    from prompt_toolkit.layout.screen import Screen, WritePosition
+
+    _model, _holder, _control, window = _make_paint_plan_window(width=40, height=6)
+    content = window.content.create_content(40, 6)
+    write_position = WritePosition(xpos=0, ypos=0, width=40, height=6)
+    plans_before = len(window._grapheme_plans)
+
+    # wrap_lines=True is not modeled by the plan path: it must fall back.
+    screen = Screen()
+    window._copy_body(content, screen, write_position, 0, 40, wrap_lines=True)
+    assert len(window._grapheme_plans) == plans_before, "wrapped config must not create plans"
+    # The fallback is the derive implementation, with its full mapping contract.
+    assert screen.height >= write_position.height
+
+    # The structural guard keeps matching the derive path's signature.
+    derive_signature = inspect.signature(window._copy_body_derive)
+    copy_signature = inspect.signature(window._copy_body)
+    assert tuple(copy_signature.parameters) == tuple(derive_signature.parameters)
+
+
+def test_grapheme_plan_returned_mappings_are_not_mutated_by_replay() -> None:
+    """The shared plan mappings must remain unchanged across replays (contract)."""
+    from prompt_toolkit.layout.screen import Screen, WritePosition
+
+    _model, _holder, _control, window = _make_paint_plan_window(width=40, height=6)
+    content = window.content.create_content(40, 6)
+    write_position = WritePosition(xpos=0, ypos=0, width=40, height=6)
+
+    screen_one = Screen()
+    visible_one, coordinates_one = window._copy_body_from_plan(
+        content, screen_one, write_position, 0, 40
+    )
+    snapshot_visible = dict(visible_one)
+    snapshot_coordinates = dict(coordinates_one)
+    snapshot_ids = (id(visible_one), id(coordinates_one))
+
+    # A second replay with a DIFFERENT screen must not touch the plan maps.
+    screen_two = Screen()
+    visible_two, coordinates_two = window._copy_body_from_plan(
+        content, screen_two, write_position, 0, 40
+    )
+    assert (id(visible_two), id(coordinates_two)) == snapshot_ids
+    assert visible_two == snapshot_visible
+    assert coordinates_two == snapshot_coordinates
+    assert dict(visible_one) == snapshot_visible
+    assert dict(coordinates_one) == snapshot_coordinates
