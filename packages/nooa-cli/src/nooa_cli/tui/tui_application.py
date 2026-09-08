@@ -657,6 +657,7 @@ class _FullscreenTranscriptControl(FormattedTextControl):
         content = super().create_content(width, height)
 
         def get_line(index: int):
+            """Return one content row, substituting a blank space for empty rows."""
             line = content.get_line(index)
             if any(fragment_text for _style, fragment_text, *_rest in line):
                 return line
