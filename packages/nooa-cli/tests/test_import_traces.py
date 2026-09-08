@@ -214,6 +214,15 @@ def test_resource_attribute_injection_skips_malformed_entries():
     ]
 
 
+def test_resource_attribute_injection_encodes_ints_as_otlp_decimal_strings():
+    body = _otlp_body(1)
+
+    _otlp_helpers.inject_resource_attrs(body, {"large.counter": 2**60})
+
+    attrs = body["resourceSpans"][0]["resource"]["attributes"]
+    assert attrs == [{"key": "large.counter", "value": {"intValue": str(2**60)}}]
+
+
 def test_harbor_live_session_lookup_uses_configured_viewer_auth(
     monkeypatch: pytest.MonkeyPatch,
 ):
