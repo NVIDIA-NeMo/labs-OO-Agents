@@ -1010,6 +1010,20 @@ Standard Python builtins and agent instance (`self`) are available."""
                         "needed for reasoning models such as GPT-5.5 and o-series)."
                     )
 
+                # A provider-declared error is incomplete even if it includes
+                # partial text. Preserve that output for diagnostics, but do
+                # not let a text-only handler turn it into a successful result.
+                if response.finish_reason == "error":
+                    session.record_error()
+                    if not response.content and not response.tool_calls:
+                        get_harness_metrics().empty_response()
+                        runtime.event_manager.remove(event_id)
+                    runtime.event_manager.add(
+                        DebugTrace(content=f"Failed response: {_response_debug_details(response)}")
+                    )
+                    turn_state.is_final = True
+                    raise GenerationError("The model returned an incomplete response.")
+
                 # ── Post-response cleanup (CodeAct) ──────────────────────
                 # Intercept point: strategy-specific response transforms.
                 # Handles text-only→synthetic, comment prepend, tool call

@@ -114,6 +114,32 @@ async def test_return_text_as_result_is_opt_in():
 
 
 @pytest.mark.asyncio
+async def test_error_finish_reason_never_calls_text_only_handler():
+    calls = []
+
+    def accept_text(context):
+        calls.append(context)
+        return TextOnlyResponseAction.return_result(context.content)
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        @strategy(CodeActStrategy(on_text_only=accept_text))
+        async def my_task(self) -> str:
+            """Return a string."""
+            ...
+
+    agent = TestAgent(
+        llm=FakeLLMClient(scripted_responses=[_resp("partial", finish_reason="error")])
+    )
+
+    with pytest.raises(GenerationError, match="incomplete response"):
+        await agent.my_task()
+
+    assert calls == []
+    assert [event.content for event in _events(agent, LLMOutput)] == ["partial"]
+    assert _events(agent, TextOnlyReply) == []
+
+
+@pytest.mark.asyncio
 async def test_default_does_not_treat_valid_string_as_result():
     class TestAgent(Agent, llm=_TEST_LLM):
         @strategy(CodeActStrategy())
