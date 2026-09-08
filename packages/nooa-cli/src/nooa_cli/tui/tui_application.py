@@ -383,6 +383,7 @@ class _GraphemeWindow(Window):
         grapheme_coordinates: dict[tuple[int, int], tuple[int, int]] = {}
         xpos = write_position.xpos + move_x
         ypos = write_position.ypos
+        pending_tail_escape: list[str] = []
         for screen_y, (line_number, _column) in visible_lines.items():
             if screen_y < 0 or screen_y >= write_position.height:
                 continue
@@ -408,6 +409,7 @@ class _GraphemeWindow(Window):
                 escape_row.pop(screen_x, None)
             x = xpos
             logical_cell = 0
+            row_wrote = False
             for start, stop, cells in FullscreenTranscriptModel._grapheme_spans(styled_chars):
                 cluster = "".join(char for _style, char in styled_chars[start:stop])
                 if cluster == "\n":
@@ -425,9 +427,18 @@ class _GraphemeWindow(Window):
                 atom = Char(cluster, styled_chars[start][0] if start < stop else "")
                 atom.width = cells
                 if x < xpos + width:
-                    if sequence := raw_at_offset.get(start):
+                    sequence = raw_at_offset.get(start, "")
+                    if not row_wrote and pending_tail_escape:
+                        # A previous row ended with a trailing zero-width
+                        # escape (no cluster of its own to attach to). Emit
+                        # it before this row's first glyph so the terminal
+                        # sees e.g. an OSC-8 close before later content.
+                        sequence = "".join(pending_tail_escape) + sequence
+                        pending_tail_escape.clear()
+                    if sequence:
                         escape_row[x] += sequence
                     row[x] = atom
+                    row_wrote = True
                     for continuation in range(cells):
                         grapheme_coordinates[line_number, logical_cell + continuation] = (
                             ypos + screen_y,
@@ -437,6 +448,12 @@ class _GraphemeWindow(Window):
                         row[x + continuation] = Char("")
                 x += cells
                 logical_cell += cells
+            # Trailing zero-width escapes sit at an offset no cluster starts
+            # at, so the loop above never emits them. The renderer only emits
+            # escapes on changed cells, so dropping them could leave a later
+            # row inheriting an open hyperlink; carry them to the next row.
+            if tail := raw_at_offset.get(len(styled_chars)):
+                pending_tail_escape.append(tail)
 
         return visible_lines, grapheme_coordinates
 
@@ -519,6 +536,7 @@ class _GraphemeWindow(Window):
         grapheme_coordinates: dict[tuple[int, int], tuple[int, int]] = {}
         blank_map: dict[int, Char] = dict.fromkeys(range(xpos, xpos + width), _GRAPH_BLANK)
         row_writes: list[tuple[int, dict[int, Char], dict[int, str]]] = []
+        pending_tail_escape: list[str] = []
         for screen_y in range(min(height, ui_content.line_count)):
             line_number = screen_y
             visible_lines[screen_y] = (line_number, 0)
@@ -536,6 +554,7 @@ class _GraphemeWindow(Window):
             escapes: dict[int, str] = {}
             x = xpos
             logical_cell = 0
+            row_wrote = False
             for start, stop, cells in FullscreenTranscriptModel._grapheme_spans(styled_chars):
                 cluster = "".join(char for _style, char in styled_chars[start:stop])
                 if cluster == "\n":
@@ -549,7 +568,15 @@ class _GraphemeWindow(Window):
                 atom = Char(cluster, styled_chars[start][0] if start < stop else "")
                 atom.width = cells
                 if x < xpos + width:
-                    if sequence := raw_at_offset.get(start):
+                    sequence = raw_at_offset.get(start, "")
+                    if not row_wrote and pending_tail_escape:
+                        # Mirror the derive path: a previous row's trailing
+                        # zero-width escape (no cluster of its own to attach
+                        # to) is emitted before this row's first glyph so an
+                        # OSC-8 close cannot leak onto later content.
+                        sequence = "".join(pending_tail_escape) + sequence
+                        pending_tail_escape.clear()
+                    if sequence:
                         # Zero-cell clusters (lone combining marks, orphan
                         # ZWJ/keycap fragments) do not advance x, so several
                         # clusters' escapes can land on one column. The
@@ -557,6 +584,7 @@ class _GraphemeWindow(Window):
                         # match it so replay stays byte-identical.
                         escapes[x] = escapes.get(x, "") + sequence
                     writes[x] = atom
+                    row_wrote = True
                     for continuation in range(cells):
                         grapheme_coordinates[line_number, logical_cell + continuation] = (
                             ypos + screen_y,
@@ -566,6 +594,11 @@ class _GraphemeWindow(Window):
                         writes[x + continuation] = _GRAPH_CONTINUATION
                 x += cells
                 logical_cell += cells
+            # Trailing zero-width escapes sit at an offset no cluster starts
+            # at, so the loop above never emits them; carry to the next row
+            # exactly like the derive path does.
+            if tail := raw_at_offset.get(len(styled_chars)):
+                pending_tail_escape.append(tail)
             row_writes.append((screen_y, writes, escapes))
         return _GraphemePaintPlan(
             ui_content,
