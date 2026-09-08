@@ -30,6 +30,7 @@ from nooa.context_blocks import (
     ResolvedBlock,
     Role,
 )
+from nooa.events import LLMOutput
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import FormatConfig
@@ -454,6 +455,19 @@ def _phase_events(
     new_blocks: list[ResolvedBlock] = []
 
     for event in events:
+        # Keep empty provider turns in the event log for persistence and
+        # diagnostics, but do not send an empty assistant message back to an
+        # API. CodeAct's text-only recovery appends its feedback after this
+        # event, so removing only the provider-visible block preserves the
+        # append-only history without producing an invalid message.
+        if (
+            isinstance(event, LLMOutput)
+            and not event.content
+            and not getattr(event, "llm_state", None)
+            and not getattr(event, "reasoning", None)
+        ):
+            continue
+
         tag = event.tag if event.tag is not None else event.id
         event_role = getattr(event, "_role", Role.USER)
         meta = BlockMetadata(expr=f'self.events["{tag}"]', tag=tag)

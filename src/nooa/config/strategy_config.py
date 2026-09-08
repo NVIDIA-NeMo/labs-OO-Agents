@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Strategy configuration for CodeAct, Predict, and Reflexion strategies."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from nooa.runtime.restrictions import RestrictionsConfig
 from nooa.runtime.sandbox.config import SandboxConfig
@@ -43,6 +43,29 @@ class CodeActConfig(BaseModel):
     # tool call before the run is aborted. A real tool call resets the counter.
     # Set to 0 to disable the guard.
     max_consecutive_text_only: int = 3
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_text_only_options(cls, value: Any) -> Any:
+        """Fail loudly when configuration uses the superseded recovery API."""
+        if not isinstance(value, Mapping):
+            return value
+
+        removed = sorted(
+            {
+                "text_only_stop_behavior",
+                "text_only_correction",
+                "text_only_correction_fn",
+            }.intersection(value)
+        )
+        if removed:
+            fields = ", ".join(repr(field) for field in removed)
+            raise ValueError(
+                f"CodeActConfig field(s) {fields} were removed. Pass recovery behavior "
+                "to CodeActStrategy(on_text_only=...) instead; use the default retry, "
+                "return_text_as_result, or a callback returning TextOnlyResponseAction."
+            )
+        return value
 
     cell_timeout: float | None = None
     max_tokens: int | None = None

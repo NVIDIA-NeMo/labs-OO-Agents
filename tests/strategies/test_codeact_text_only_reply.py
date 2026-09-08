@@ -129,6 +129,26 @@ async def test_default_does_not_treat_valid_string_as_result():
 
 
 @pytest.mark.asyncio
+async def test_default_preserves_empty_stop_without_replaying_empty_assistant_message():
+    class TestAgent(Agent, llm=_TEST_LLM):
+        @strategy(CodeActStrategy())
+        async def my_task(self) -> dict:
+            """Return a dict."""
+            ...
+
+    fake_llm = FakeLLMClient(scripted_responses=[_resp(""), _resp(tool_calls=[_ret({"ok": True})])])
+    agent = TestAgent(llm=fake_llm)
+
+    assert await agent.my_task() == {"ok": True}
+    assert [event.content for event in _events(agent, LLMOutput)] == [""]
+    assert [event.content for event in _events(agent, TextOnlyReply)] == [""]
+    assert not any(
+        message.get("role") == "assistant" and not message.get("content")
+        for message in fake_llm.last_messages
+    )
+
+
+@pytest.mark.asyncio
 async def test_callback_can_synthesize_execute_python_without_replacing_output():
     def execute_text(context):
         return TextOnlyResponseAction.tool_calls(
