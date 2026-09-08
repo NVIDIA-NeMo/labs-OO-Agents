@@ -10,6 +10,7 @@ import json
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, TypedDict
+from unittest.mock import patch
 
 from pydantic import BaseModel
 
@@ -19,6 +20,7 @@ from nooa import Agent, Context, EventQuery, strategy
 from nooa.config.truncation_config import TruncationConfig
 from nooa.context_blocks import ScopedContext
 from nooa.context_blocks.events import AssistantEvent, UserEvent
+from nooa.skill_registry import SkillRegistry
 from nooa.strategies import PredictStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
@@ -207,6 +209,29 @@ async def dynamic_failure() -> dict[str, Any]:
     return {"result": _jsonable(result), "requests": client.requests}
 
 
+async def skill_registry_context() -> dict[str, Any]:
+    client = CapturingFakeLLMClient([_predict_response({"value": "skills-ok"})])
+
+    class SkillAgent(Agent, llm=client):
+        def __init__(self):
+            super().__init__()
+            with patch("nooa.skill_registry.entry_points", return_value=[]):
+                self.skills = SkillRegistry(self)
+
+        @strategy(PredictStrategy())
+        async def run(self) -> Answer:
+            """Observe the skill registry and return the marker."""
+            ...
+
+    agent = SkillAgent()
+    agent.event_manager.add(UserEvent(id="skill-prior", content="SKILL_PRIOR_EVENT_V1"))
+    result = await agent.run()
+    rendered = _request_text(client)
+    assert "SKILL_PRIOR_EVENT_V1" in rendered
+    assert "<skills" in rendered
+    return {"result": _jsonable(result), "requests": client.requests}
+
+
 async def codeact_multiturn() -> dict[str, Any]:
     client = CapturingFakeLLMClient(
         [
@@ -276,6 +301,7 @@ async def capture() -> dict[str, Any]:
         "predict_context": predict_context,
         "filtered_events": filtered_events,
         "dynamic_failure": dynamic_failure,
+        "skill_registry_context": skill_registry_context,
         "codeact_multiturn": codeact_multiturn,
         "budget_eviction": budget_eviction,
     }
