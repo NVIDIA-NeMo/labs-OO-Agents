@@ -1,11 +1,11 @@
 # Context parity result
 
 Tested 2026-09-08 against `fbbbfb16d68d66dc1ff029a9c06844d3b900e29d`
-(`main`). Implementation commit: `5af7a04c2867aadbfd63890c05bdc6810e20ee72`.
+(`main`). Implementation commit: `85924da313709991819dfa395c7bc695ebab7f27`.
 
 ## Result
 
-**PASS.** Five deterministic scenarios produced six LLM requests and 29 messages
+**PASS.** Six deterministic scenarios produced seven LLM requests and 33 messages
 in each arm. After documented normalization, there was no content, role, order,
 tool-contract, or output-schema difference.
 
@@ -35,11 +35,16 @@ NVIDIA internal inference was tested with
 - Quickstart 02: structured Predict output passed.
 - Quickstart 03: two-turn CodeAct tool execution passed with valid assistant/tool
   pairing and stable system context.
-- All OTel traces completed with zero error spans.
+- Quickstart 10: direct and registry-managed skills passed; the registry block was
+  trailing USER context after events with its expression metadata intact.
+- The five final OTel sessions contain 48 spans and zero error spans.
 
 Local raw traces are grouped by session under `tmp/terra-context-e2e/{journal,otlp}`.
-Final sessions are `terra-{default,custom}-context-v7` and
-`terra-parity-final-v7-quickstart-{02,03}`.
+Final sessions are `terra-{default,custom}-context-v8`,
+`terra-parity-final-v8-quickstart-{02,03}`, and
+`terra-parity-final-v8-quickstart-10-retry`. The first quickstart-10 run is also
+retained: its 1,024-token output cap truncated generated HTML; the 4,096-token
+retry passed.
 
 ## Regressions found and fixed
 
@@ -50,6 +55,9 @@ Final sessions are `terra-{default,custom}-context-v7` and
    provider messages are unchanged.
 3. Standalone generation functions lacked the new public `active_skills()` seam.
    Their adapter now returns an empty skill tuple.
+4. Legacy `Skill.context_block` moved before events into SYSTEM context and lost
+   expression metadata. Default shorthand now joins the normal block source before
+   strategy/decorator/scoped overrides; custom skill views keep their explicit seam.
 
-No design change was required. Verification: 509 focused tests passed, plus both
-live quickstarts and the default/custom live audit.
+No design change was required. Verification: 574 focused tests passed, six-scenario
+parity passed, and three live quickstarts plus the default/custom audit passed.
