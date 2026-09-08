@@ -24,9 +24,10 @@ import re
 import shutil
 import subprocess
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
@@ -202,6 +203,62 @@ class DispatcherExit(Exception):
     """
 
 
+class _GraphemePaintPlan:
+    """Derived cell writes for one (content, geometry), replayed across frames.
+
+    The renderer builds a fresh ``Screen`` every frame on purpose — its
+    old-vs-new diff is what emits minimal terminal output — so "reuse one
+    buffer" is only possible above it: derive each row's writes once and
+    rewrite the fresh screen rows in place. Holds a reference to the
+    ``UIContent`` it was derived from so the identity-based cache key stays
+    valid for as long as the plan is cached.
+    """
+
+    __slots__ = (
+        "ui_content",
+        "visible_lines",
+        "grapheme_coordinates",
+        "blank_map",
+        "row_writes",
+        "escape_clear_range",
+    )
+
+    def __init__(
+        self,
+        ui_content: UIContent,
+        visible_lines: dict[int, tuple[int, int]],
+        grapheme_coordinates: dict[tuple[int, int], tuple[int, int]],
+        blank_map: dict[int, Char],
+        row_writes: list[tuple[int, dict[int, Char], dict[int, str]]],
+        escape_clear_range: range,
+    ) -> None:
+        """Store the derived projection; all arguments are treated read-only."""
+        self.ui_content = ui_content
+        self.visible_lines = visible_lines
+        self.grapheme_coordinates = grapheme_coordinates
+        self.blank_map = blank_map
+        self.row_writes = row_writes
+        self.escape_clear_range = escape_clear_range
+
+
+class _WrappedContentEntry(NamedTuple):
+    """One memoized ``UIContent`` wrapper for a (text identity, width)."""
+
+    text: AnyFormattedText
+    width: int
+    content: UIContent
+
+
+# Shared blank/continuation cells: the renderer compares painted cells with
+# ``Char._equal``, so a shared instance is equivalent to a fresh ``Char()``
+# while allocating nothing per frame.
+_GRAPH_BLANK = Char(" ", "")
+_GRAPH_CONTINUATION = Char("", "")
+# Geometry changes rarely; two hyperlink-marker variants of one viewport plus
+# slack for a resize in flight is plenty.
+_MAX_GRAPHEME_PLANS = 4
+
+
 class _GraphemeWindow(Window):
     """Window that installs extended graphemes as atomic terminal cells.
 
@@ -210,7 +267,24 @@ class _GraphemeWindow(Window):
     a valid grapheme at the viewport edge. The transcript model already wraps
     on extended-grapheme boundaries; this final screen projection preserves
     those boundaries and supplies the terminal cluster width to the renderer.
+
+    During animation the transcript's ``UIContent`` is identical frame after
+    frame (its fragment and content caches hit), yet the base ``_copy_body``
+    re-derives every cell write — and this window used to call it first and
+    then overwrite its work. The fast path below derives each row's writes once
+    per ``(content, geometry)`` into a ``_GraphemePaintPlan`` and replays the
+    plan into each fresh screen, so steady-state frames allocate almost
+    nothing. Any configuration the plan does not model falls back to the
+    original derive-every-frame path.
     """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize the window and its empty paint-plan cache."""
+        super().__init__(*args, **kwargs)
+        # Keyed by (content identity, geometry); see ``_copy_body_from_plan``.
+        self._grapheme_plans: OrderedDict[
+            tuple[int, int, int, int, int, int], _GraphemePaintPlan
+        ] = OrderedDict()
 
     def _copy_body(
         self,
@@ -229,6 +303,66 @@ class _GraphemeWindow(Window):
         align: WindowAlign = WindowAlign.LEFT,
         get_line_prefix: Callable[[int, int], AnyFormattedText] | None = None,
     ) -> tuple[dict[int, tuple[int, int]], dict[tuple[int, int], tuple[int, int]]]:
+        """Copy the body via a cached paint plan when this window's shape allows.
+
+        The base implementation's cursor/menu handling is a no-op without
+        focus (this window is never focusable) and without a menu position;
+        its ``cursor_position`` is ``Point(0, 0)`` even for cursor-free
+        content. ``_highlight_cursorlines`` is the one focus-independent
+        cursor side effect, so ``cursorline``/``cursorcolumn`` (and
+        ``colorcolumns``) must be off for the plan path; anything else —
+        wrapping, scrolling, a line prefix, another alignment, or live
+        highlight options — falls back to ``_copy_body_derive``.
+        """
+        if (
+            not wrap_lines
+            and vertical_scroll == 0
+            and vertical_scroll_2 == 0
+            and horizontal_scroll == 0
+            and get_line_prefix is None
+            and align == WindowAlign.LEFT
+            and not has_focus
+            and not self.cursorline()
+            and not self.cursorcolumn()
+            and not self.colorcolumns
+            and ui_content.menu_position is None
+        ):
+            return self._copy_body_from_plan(ui_content, new_screen, write_position, move_x, width)
+        return self._copy_body_derive(
+            ui_content,
+            new_screen,
+            write_position,
+            move_x,
+            width,
+            vertical_scroll,
+            horizontal_scroll,
+            wrap_lines,
+            highlight_lines,
+            vertical_scroll_2,
+            always_hide_cursor,
+            has_focus,
+            align,
+            get_line_prefix,
+        )
+
+    def _copy_body_derive(
+        self,
+        ui_content: UIContent,
+        new_screen: Screen,
+        write_position: WritePosition,
+        move_x: int,
+        width: int,
+        vertical_scroll: int = 0,
+        horizontal_scroll: int = 0,
+        wrap_lines: bool = False,
+        highlight_lines: bool = False,
+        vertical_scroll_2: int = 0,
+        always_hide_cursor: bool = False,
+        has_focus: bool = False,
+        align: WindowAlign = WindowAlign.LEFT,
+        get_line_prefix: Callable[[int, int], AnyFormattedText] | None = None,
+    ) -> tuple[dict[int, tuple[int, int]], dict[tuple[int, int], tuple[int, int]]]:
+        """Derive every cell write from scratch (the original projection)."""
         mappings = super()._copy_body(
             ui_content,
             new_screen,
@@ -249,6 +383,7 @@ class _GraphemeWindow(Window):
         grapheme_coordinates: dict[tuple[int, int], tuple[int, int]] = {}
         xpos = write_position.xpos + move_x
         ypos = write_position.ypos
+        pending_tail_escape: list[str] = []
         for screen_y, (line_number, _column) in visible_lines.items():
             if screen_y < 0 or screen_y >= write_position.height:
                 continue
@@ -274,6 +409,7 @@ class _GraphemeWindow(Window):
                 escape_row.pop(screen_x, None)
             x = xpos
             logical_cell = 0
+            row_wrote = False
             for start, stop, cells in FullscreenTranscriptModel._grapheme_spans(styled_chars):
                 cluster = "".join(char for _style, char in styled_chars[start:stop])
                 if cluster == "\n":
@@ -291,9 +427,18 @@ class _GraphemeWindow(Window):
                 atom = Char(cluster, styled_chars[start][0] if start < stop else "")
                 atom.width = cells
                 if x < xpos + width:
-                    if sequence := raw_at_offset.get(start):
+                    sequence = raw_at_offset.get(start, "")
+                    if not row_wrote and pending_tail_escape:
+                        # A previous row ended with a trailing zero-width
+                        # escape (no cluster of its own to attach to). Emit
+                        # it before this row's first glyph so the terminal
+                        # sees e.g. an OSC-8 close before later content.
+                        sequence = "".join(pending_tail_escape) + sequence
+                        pending_tail_escape.clear()
+                    if sequence:
                         escape_row[x] += sequence
                     row[x] = atom
+                    row_wrote = True
                     for continuation in range(cells):
                         grapheme_coordinates[line_number, logical_cell + continuation] = (
                             ypos + screen_y,
@@ -303,8 +448,166 @@ class _GraphemeWindow(Window):
                         row[x + continuation] = Char("")
                 x += cells
                 logical_cell += cells
+            # Trailing zero-width escapes sit at an offset no cluster starts
+            # at, so the loop above never emits them. The renderer only emits
+            # escapes on changed cells, so dropping them could leave a later
+            # row inheriting an open hyperlink; carry them to the next row.
+            if tail := raw_at_offset.get(len(styled_chars)):
+                pending_tail_escape.append(tail)
 
         return visible_lines, grapheme_coordinates
+
+    def _copy_body_from_plan(
+        self,
+        ui_content: UIContent,
+        new_screen: Screen,
+        write_position: WritePosition,
+        move_x: int,
+        width: int,
+    ) -> tuple[dict[int, tuple[int, int]], dict[tuple[int, int], tuple[int, int]]]:
+        """Replay a derived paint plan into the fresh per-frame screen.
+
+        With the base ``Window`` shape this transcript window always renders
+        (no wrap, no scroll, no prefix, LEFT, no cursor/menu), the plan's
+        ``visible_lines`` and per-row writes are fully determined by the
+        ``(content, geometry)`` pair — so identical frames derive once and then
+        replay with plain ``dict.update`` stores, allocating nothing. The
+        returned mappings are the plan's own read-only projections, matching
+        the derive path's contract (consumers treat them as immutable).
+        """
+        ypos = write_position.ypos
+        height = write_position.height
+        key = (id(ui_content), move_x, write_position.xpos, ypos, width, height)
+        plans = self._grapheme_plans
+        plan = plans.get(key)
+        if plan is None or plan.ui_content is not ui_content:
+            plan = self._build_grapheme_paint_plan(ui_content, write_position, move_x, width)
+            # An id() collision with a dead UIContent can hit a stale key;
+            # replacing the value alone would keep the key's old LRU slot, so
+            # remove it first and let the insert re-order the fresh plan last.
+            plans.pop(key, None)
+            plans[key] = plan
+            while len(plans) > _MAX_GRAPHEME_PLANS:
+                plans.popitem(last=False)
+        else:
+            plans.move_to_end(key)
+        blank_map = plan.blank_map
+        escape_clear_range = plan.escape_clear_range
+        for screen_y, writes, escapes in plan.row_writes:
+            row = new_screen.data_buffer[ypos + screen_y]
+            row.update(blank_map)
+            row.update(writes)
+            escape_row = new_screen.zero_width_escapes[ypos + screen_y]
+            for screen_x in escape_clear_range:
+                escape_row.pop(screen_x, None)
+            for x, sequence in escapes.items():
+                escape_row[x] = sequence
+        # The base implementation keeps the screen height in sync for the
+        # renderer; the fast path owns the whole body write so it must too.
+        new_screen.height = max(new_screen.height, ypos + height)
+        return plan.visible_lines, plan.grapheme_coordinates
+
+    def _build_grapheme_paint_plan(
+        self,
+        ui_content: UIContent,
+        write_position: WritePosition,
+        move_x: int,
+        width: int,
+    ) -> _GraphemePaintPlan:
+        """Derive the replayable cell writes for one ``(content, geometry)``.
+
+        Mirrors ``_copy_body_derive`` exactly — same visible-line enumeration
+        (``vertical_scroll == 0`` means screen row ``y`` paints line ``y``),
+        same erase-then-atom ordering, same escape clearing and coordinates —
+        but into plan structures instead of a live screen. The regression test
+        asserts both paths paint byte-identical screens.
+
+        One deliberate divergence from the base path: when a multi-width
+        grapheme starts at the final column, the base writes its continuation
+        cells one column past the window edge. The plan (like the derive
+        override) does not reproduce that stray write; it is out of the
+        window's region and clipped by the renderer, and reproducing it would
+        require invoking the base projection the plan exists to skip.
+        """
+        xpos = write_position.xpos + move_x
+        ypos = write_position.ypos
+        height = write_position.height
+        visible_lines: dict[int, tuple[int, int]] = {}
+        grapheme_coordinates: dict[tuple[int, int], tuple[int, int]] = {}
+        blank_map: dict[int, Char] = dict.fromkeys(range(xpos, xpos + width), _GRAPH_BLANK)
+        row_writes: list[tuple[int, dict[int, Char], dict[int, str]]] = []
+        pending_tail_escape: list[str] = []
+        for screen_y in range(min(height, ui_content.line_count)):
+            line_number = screen_y
+            visible_lines[screen_y] = (line_number, 0)
+            fragments = ui_content.get_line(line_number)
+            styled_chars: list[tuple[str, str]] = []
+            raw_at_offset: dict[int, str] = {}
+            for style, text, *_rest in fragments:
+                if "[ZeroWidthEscape]" in style:
+                    raw_at_offset[len(styled_chars)] = raw_at_offset.get(
+                        len(styled_chars), ""
+                    ) + str(text)
+                else:
+                    styled_chars.extend((style, char) for char in text)
+            writes: dict[int, Char] = {}
+            escapes: dict[int, str] = {}
+            x = xpos
+            logical_cell = 0
+            row_wrote = False
+            for start, stop, cells in FullscreenTranscriptModel._grapheme_spans(styled_chars):
+                cluster = "".join(char for _style, char in styled_chars[start:stop])
+                if cluster == "\n":
+                    break
+                cells = max(0, cells)
+                if cells > width:
+                    cluster = "…"
+                    cells = 1
+                elif x + cells > xpos + width:
+                    break
+                atom = Char(cluster, styled_chars[start][0] if start < stop else "")
+                atom.width = cells
+                if x < xpos + width:
+                    sequence = raw_at_offset.get(start, "")
+                    if not row_wrote and pending_tail_escape:
+                        # Mirror the derive path: a previous row's trailing
+                        # zero-width escape (no cluster of its own to attach
+                        # to) is emitted before this row's first glyph so an
+                        # OSC-8 close cannot leak onto later content.
+                        sequence = "".join(pending_tail_escape) + sequence
+                        pending_tail_escape.clear()
+                    if sequence:
+                        # Zero-cell clusters (lone combining marks, orphan
+                        # ZWJ/keycap fragments) do not advance x, so several
+                        # clusters' escapes can land on one column. The
+                        # derive path concatenates at the same coordinate;
+                        # match it so replay stays byte-identical.
+                        escapes[x] = escapes.get(x, "") + sequence
+                    writes[x] = atom
+                    row_wrote = True
+                    for continuation in range(cells):
+                        grapheme_coordinates[line_number, logical_cell + continuation] = (
+                            ypos + screen_y,
+                            x + continuation,
+                        )
+                    for continuation in range(1, cells):
+                        writes[x + continuation] = _GRAPH_CONTINUATION
+                x += cells
+                logical_cell += cells
+            # Trailing zero-width escapes sit at an offset no cluster starts
+            # at, so the loop above never emits them; carry to the next row
+            # exactly like the derive path does.
+            if tail := raw_at_offset.get(len(styled_chars)):
+                pending_tail_escape.append(tail)
+            row_writes.append((screen_y, writes, escapes))
+        return _GraphemePaintPlan(
+            ui_content,
+            visible_lines,
+            grapheme_coordinates,
+            blank_map,
+            row_writes,
+            range(xpos, xpos + width + 1),
+        )
 
 
 class _FullscreenTranscriptControl(FormattedTextControl):
@@ -321,6 +624,7 @@ class _FullscreenTranscriptControl(FormattedTextControl):
         copy_code_callback: Callable[[str], None],
         **kwargs: Any,
     ) -> None:
+        """Capture the transcript interaction callbacks and cache state."""
         super().__init__(*args, **kwargs)
         self._scroll_callback = scroll_callback
         self._mouse_navigation_enabled = mouse_navigation_enabled
@@ -332,6 +636,14 @@ class _FullscreenTranscriptControl(FormattedTextControl):
         self._render_width: int | None = None
         self._render_height: int | None = None
         self._formatted_geometry: tuple[int, int | None] | None = None
+        # Memoized blank-row-preserving wrappers around the base control's
+        # content, keyed by the identity of the model's ``FormattedText``
+        # object (it is a list subclass and not directly hashable). The base
+        # content is cached per (fragments, width) key; the wrapper used to be
+        # rebuilt per call, which also defeated the grapheme paint-plan cache
+        # (a fresh UIContent identity every frame). Two slots cover the
+        # model's two alternating hyperlink-marker variants per geometry.
+        self._wrapped_by_text: OrderedDict[int, _WrappedContentEntry] = OrderedDict()
         self._dragging = False
         self._drag_moved = False
         self._drag_position = (0, 0)
@@ -345,10 +657,17 @@ class _FullscreenTranscriptControl(FormattedTextControl):
         return self._render_width, self._render_height
 
     def create_content(self, width: int, height: int | None):
-        # ``preferred_height`` asks for content with ``height=None`` before the
-        # concrete window height is allocated. Keep that measurement useful,
-        # but do not let its render-counter cache poison the paint that follows
-        # when bottom chrome changed this frame.
+        """Return the viewport content, memoized per (text identity, width).
+
+        ``preferred_height`` asks for content with ``height=None`` before the
+        concrete window height is allocated. Keep that measurement useful,
+        but do not let its render-counter cache poison the paint that follows
+        when bottom chrome changed this frame. A memo hit skips the base
+        implementation entirely: a hit proves the same ``FormattedText``
+        object is served, so the base's ``_fragments`` (only read by its
+        ``mouse_handler`` fallback, and never carrying per-fragment handlers
+        in the transcript) cannot be stale.
+        """
         self._render_width = max(1, width)
         if height is not None:
             self._render_height = max(1, height)
@@ -356,24 +675,42 @@ class _FullscreenTranscriptControl(FormattedTextControl):
         if geometry != self._formatted_geometry:
             self._fragment_cache.clear()
             self._formatted_geometry = geometry
+        # The base implementation re-splits the fragment list and rebuilds its
+        # whole-list cache key on every call, even when the model returned an
+        # already-cached ``FormattedText`` (steady-state animation frames).
+        # Return the memoized wrapper directly when the same text object is
+        # served at the same width; the wrapper carries the identity the
+        # grapheme paint plan caches on.
+        text = self.text() if callable(self.text) else None
+        if text is not None:
+            cached = self._wrapped_by_text.get(id(text))
+            if cached is not None and cached[0] is text and cached[1] == width:
+                self._wrapped_by_text.move_to_end(id(text))
+                return cached[2]
         content = super().create_content(width, height)
 
         def get_line(index: int):
+            """Return one content row, substituting a blank space for empty rows."""
             line = content.get_line(index)
-            if any(text for _style, text, *_rest in line):
+            if any(fragment_text for _style, fragment_text, *_rest in line):
                 return line
             # prompt_toolkit only installs coordinate mappings for painted
             # cells. A visually blank space keeps logical blank transcript
             # rows mouse-addressable without changing model/exported text.
             return [("", " ")]
 
-        return UIContent(
+        wrapped = UIContent(
             get_line=get_line,
             line_count=content.line_count,
             cursor_position=content.cursor_position,
             menu_position=content.menu_position,
             show_cursor=content.show_cursor,
         )
+        if text is not None:
+            self._wrapped_by_text[id(text)] = _WrappedContentEntry(text, width, wrapped)
+            while len(self._wrapped_by_text) > 2:
+                self._wrapped_by_text.popitem(last=False)
+        return wrapped
 
     def mouse_handler(self, mouse_event: MouseEvent):
         # Terminals commonly reserve Option/Alt (or Shift in tmux) to bypass
