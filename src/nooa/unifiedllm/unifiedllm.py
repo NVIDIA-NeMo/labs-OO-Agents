@@ -1489,9 +1489,7 @@ def _map_completion_finish_reason(
     litellm/OpenAI report the provider's stop condition on
     ``raw_response.choices[0].finish_reason``. We surface ``"length"`` (output
     tokens exhausted) and ``"error"`` (e.g. ``content_filter``) so downstream
-    logic (e.g. CodeAct's max-tokens abort) can react. Callers that have already
-    detected tool calls should keep ``finish_reason="tool_calls"`` rather than
-    calling this.
+    logic (e.g. CodeAct's max-tokens abort) can react.
     """
     raw = None
     try:
@@ -1516,8 +1514,7 @@ def _map_responses_finish_reason(
     The Responses API reports truncation via ``status == "incomplete"`` with
     ``incomplete_details.reason == "max_output_tokens"`` (rather than a
     per-choice finish_reason). A ``status == "failed"`` response is surfaced as
-    ``"error"``. Callers that have already detected tool calls should keep
-    ``finish_reason="tool_calls"`` rather than calling this.
+    ``"error"``.
     """
     status = getattr(raw_response, "status", None)
 
@@ -1532,6 +1529,15 @@ def _map_responses_finish_reason(
     if status == "failed":
         return "error"
     return "stop"
+
+
+def _finish_reason_for_tool_calls(
+    provider_finish_reason: Literal["stop", "tool_calls", "length", "error"],
+) -> Literal["tool_calls", "length", "error"]:
+    """Keep provider failure/truncation authoritative over parsed tool calls."""
+    if provider_finish_reason in ("length", "error"):
+        return provider_finish_reason
+    return "tool_calls"
 
 
 def _extract_reasoning_and_usage(raw_response: Any) -> tuple[str | None, dict[str, int] | None]:
@@ -1892,7 +1898,9 @@ class CompletionClient(UnifiedLLM):
                 raw_response=raw_response,
                 content="",
                 tool_calls=tool_calls,
-                finish_reason="tool_calls",
+                finish_reason=_finish_reason_for_tool_calls(
+                    _map_completion_finish_reason(raw_response)
+                ),
                 assistant_message=_completion_assistant_message(
                     response_message, tool_calls=raw_tool_calls
                 ),
@@ -2062,7 +2070,9 @@ class CompletionClient(UnifiedLLM):
                 raw_response=raw_response,
                 content="",
                 tool_calls=tool_calls,
-                finish_reason="tool_calls",
+                finish_reason=_finish_reason_for_tool_calls(
+                    _map_completion_finish_reason(raw_response)
+                ),
                 assistant_message=_completion_assistant_message(
                     response_message, tool_calls=raw_tool_calls
                 ),
@@ -2415,7 +2425,9 @@ class ResponsesClient(UnifiedLLM):
                 raw_response=raw_response,
                 content="",
                 tool_calls=tool_calls,
-                finish_reason="tool_calls",
+                finish_reason=_finish_reason_for_tool_calls(
+                    _map_responses_finish_reason(raw_response)
+                ),
                 assistant_message={"_batch": assistant_messages},
                 reasoning=None,  # Responses API doesn't have reasoning
                 usage=usage,
@@ -2546,7 +2558,9 @@ class ResponsesClient(UnifiedLLM):
                 raw_response=raw_response,
                 content="",
                 tool_calls=tool_calls,
-                finish_reason="tool_calls",
+                finish_reason=_finish_reason_for_tool_calls(
+                    _map_responses_finish_reason(raw_response)
+                ),
                 assistant_message={"_batch": assistant_messages},
                 reasoning=None,
                 usage=usage,
