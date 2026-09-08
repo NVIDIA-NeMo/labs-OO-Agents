@@ -1,7 +1,7 @@
 # Context parity result
 
 Tested 2026-09-08 against `fbbbfb16d68d66dc1ff029a9c06844d3b900e29d`
-(`main`). Implementation commit: `85924da313709991819dfa395c7bc695ebab7f27`.
+(`main`). Implementation commit: `a64aa5223743a876e102b931f056d3da73625ec0`.
 
 ## Result
 
@@ -56,8 +56,9 @@ retry passed.
 3. Standalone generation functions lacked the new public `active_skills()` seam.
    Their adapter now returns an empty skill tuple.
 4. Legacy `Skill.context_block` moved before events into SYSTEM context and lost
-   expression metadata. Default shorthand now joins the normal block source before
-   strategy/decorator/scoped overrides; custom skill views keep their explicit seam.
+   expression metadata; disabled keys also stopped suppressing it. Default shorthand
+   now joins the normal block source before strategy/decorator/scoped overrides and
+   honors disabled keys; custom skill views keep their explicit seam.
 
-No design change was required. Verification: 574 focused tests passed, six-scenario
+No design change was required. Verification: 575 focused tests passed, six-scenario
 parity passed, and three live quickstarts plus the default/custom audit passed.
