@@ -4808,3 +4808,71 @@ def test_grapheme_plan_returned_mappings_are_not_mutated_by_replay() -> None:
     assert coordinates_two == snapshot_coordinates
     assert dict(visible_one) == snapshot_visible
     assert dict(coordinates_one) == snapshot_coordinates
+
+
+def test_trailing_zero_width_escape_carries_to_next_row_glyph() -> None:
+    """A row-final zero-width escape must be emitted before the next row's glyph.
+
+    A trailing OSC-8 close has no grapheme cluster of its own (its offset is
+    ``len(styled_chars)``), so neither path emits it in-row. The renderer only
+    writes escapes on changed cells, so dropping it would let the following
+    transcript row inherit the open hyperlink. Both paths carry it forward.
+    """
+    from nooa_cli.tui.tui_application import _FullscreenTranscriptControl, _GraphemeWindow
+    from prompt_toolkit.formatted_text.utils import split_lines
+    from prompt_toolkit.layout.controls import UIContent
+    from prompt_toolkit.layout.screen import Screen, WritePosition
+
+    osc8_close = chr(27) + "]8;;" + chr(27) + chr(92)
+    fragments = [
+        ("", "A"),
+        ("", "B"),
+        ("[ZeroWidthEscape]", osc8_close),
+        ("", "\n"),
+        ("", "C"),
+        ("", "D"),
+        ("", "\n"),
+    ]
+    lines = list(split_lines(fragments))
+    content = UIContent(
+        get_line=lambda i: lines[i],
+        line_count=len(lines),
+        show_cursor=False,
+        cursor_position=None,
+        menu_position=None,
+    )
+    control = _FullscreenTranscriptControl(
+        lambda: fragments,
+        focusable=False,
+        show_cursor=False,
+        scroll_callback=lambda delta: None,
+        mouse_navigation_enabled=lambda: False,
+        selection_callback=lambda *args: None,
+        link_callback=lambda x, y: False,
+        code_action_at=lambda x, y: None,
+        copy_code_callback=lambda text: None,
+    )
+    window = _GraphemeWindow(
+        control,
+        wrap_lines=False,
+        get_vertical_scroll=lambda _window: 0,
+        always_hide_cursor=True,
+    )
+    write_position = WritePosition(xpos=0, ypos=0, width=20, height=4)
+
+    screen_a = Screen()
+    window._copy_body_derive(content, screen_a, write_position, 0, 20)
+    screen_b = Screen()
+    window._copy_body_from_plan(content, screen_b, write_position, 0, 20)
+
+    for name, screen in (("derive", screen_a), ("plan", screen_b)):
+        first_row_escapes = dict(screen.zero_width_escapes[0])
+        next_row_escapes = dict(screen.zero_width_escapes[1])
+        # The trailing close never lands on its own row...
+        assert "\x1b]8;;\x1b\\" not in "".join(first_row_escapes.values())
+        # ...and does appear before the next row's first glyph (x=0).
+        assert next_row_escapes.get(0) == "\x1b]8;;\x1b\\", name
+    # Both paths agree byte-for-byte.
+    assert {y: dict(screen_a.zero_width_escapes[y]) for y in range(4)} == {
+        y: dict(screen_b.zero_width_escapes[y]) for y in range(4)
+    }
