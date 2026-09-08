@@ -125,6 +125,10 @@ class CodeResult(TypedDict):
     phase: str
 
 
+def _request_text(client: CapturingFakeLLMClient, call: int = -1) -> str:
+    return json.dumps(client.requests[call]["messages"], sort_keys=True)
+
+
 async def predict_context() -> dict[str, Any]:
     client = CapturingFakeLLMClient([_predict_response({"value": "predict-ok"})])
 
@@ -151,6 +155,19 @@ async def predict_context() -> dict[str, Any]:
     agent.event_manager.add(AssistantEvent(id="prior-assistant", content="PRIOR_ASSISTANT_V1"))
     with ScopedContext(context={"scoped_block": "SCOPED_V1", "remove_me": None}):
         result = await agent.run("TASK_INPUT_V1")
+    rendered = _request_text(client)
+    markers = [
+        "STATIC_POLICY_V1",
+        "DECORATOR_V1",
+        "SCOPED_V1",
+        "PRIOR_USER_V1",
+        "PRIOR_ASSISTANT_V1",
+        "dynamic-v2",
+        "TASK_INPUT_V1",
+    ]
+    assert all(marker in rendered for marker in markers)
+    assert "REMOVE_ME" not in rendered
+    assert client.requests[0]["output_schema"]
     return {"result": _jsonable(result), "requests": client.requests}
 
 
@@ -166,6 +183,9 @@ async def filtered_events() -> dict[str, Any]:
     agent = FilteredEventsAgent()
     agent.event_manager.add(UserEvent(id="excluded-user", content="MUST_BE_FILTERED"))
     result = await agent.run("FILTERED_TASK_V1")
+    rendered = _request_text(client)
+    assert "FILTERED_TASK_V1" in rendered
+    assert "MUST_BE_FILTERED" not in rendered
     return {"result": _jsonable(result), "requests": client.requests}
 
 
@@ -183,6 +203,7 @@ async def dynamic_failure() -> dict[str, Any]:
             ...
 
     result = await DynamicFailureAgent().run()
+    assert "ZeroDivisionError: division by zero" in _request_text(client)
     return {"result": _jsonable(result), "requests": client.requests}
 
 
@@ -220,6 +241,10 @@ async def codeact_multiturn() -> dict[str, Any]:
             ...
 
     result = await CodeActAgent().run([2, 3, 5])
+    assert len(client.requests) == 2
+    assert '<live_phase expr=\\"self.phase\\">\\nbefore\\n</live_phase>' in _request_text(client, 0)
+    assert '<live_phase expr=\\"self.phase\\">\\nafter\\n</live_phase>' in _request_text(client, 1)
+    assert client.requests[0]["tools"]
     return {"result": _jsonable(result), "requests": client.requests}
 
 
@@ -240,6 +265,9 @@ async def budget_eviction() -> dict[str, Any]:
             ...
 
     result = await BudgetAgent().run()
+    rendered = _request_text(client)
+    assert rendered.count("EVICTED: over context budget") == 3
+    assert "A" * 2_000 not in rendered
     return {"result": _jsonable(result), "requests": client.requests}
 
 
