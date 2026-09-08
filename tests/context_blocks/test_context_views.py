@@ -127,9 +127,12 @@ async def test_skill_class_and_instance_view_resolution():
 
         async def run(self): ...
 
-    items = await Example().runtime._prepare_context(Example.run)
-    keys = [item.key for item in items]
-    assert keys.index("skill_class") < keys.index("skill_instance")
+    agent = Example()
+    event = UserEvent(content="event")
+    agent.event_manager.add(event)
+    items = await agent.runtime._prepare_context(Example.run)
+    keys = [getattr(item, "key", None) for item in items]
+    assert keys.index("skill_class") < keys.index("skill_instance") < items.index(event)
 
 
 async def test_hidden_skill_contributes_nothing():
@@ -195,6 +198,10 @@ async def test_legacy_skill_block_is_materialized_by_default_skill_view():
     items = await agent.runtime._prepare_context(Example.run)
     block = next(item for item in items if getattr(item, "key", None) == "skill_state")
     assert block.content == "ready"
+    assert block.role == Role.USER
+    assert block.metadata is not None
+    assert block.metadata.expr == "self.value"
+    assert block.metadata.source_dynamic is True
 
 
 async def test_default_view_partitions_and_evicts_manager_blocks():
@@ -220,7 +227,7 @@ async def test_default_view_partitions_and_evicts_manager_blocks():
     assert tail.metadata.truncated is True
 
 
-async def test_default_order_is_prefix_skills_events_trailing():
+async def test_default_skill_shorthand_keeps_legacy_trailing_order():
     class DeclaredSkill(Skill):
         context_block = ("skill", "'skill'")
 
@@ -236,7 +243,7 @@ async def test_default_order_is_prefix_skills_events_trailing():
     skill_index = next(i for i, item in enumerate(items) if getattr(item, "key", None) == "skill")
     event_index = items.index(event)
     tail_index = next(i for i, item in enumerate(items) if getattr(item, "key", None) == "tail")
-    assert skill_index < event_index < tail_index
+    assert event_index < tail_index < skill_index
 
 
 async def test_agent_view_controls_exact_skill_placement():

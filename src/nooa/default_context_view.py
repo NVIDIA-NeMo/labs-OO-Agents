@@ -201,6 +201,22 @@ def order_blocks(blocks: Sequence[Block], preferred: Sequence[str] | None) -> tu
     return tuple(block for _, block in ordered)
 
 
+def replace_blocks_by_key(
+    blocks: Sequence[Block], replacements: Sequence[Block]
+) -> tuple[Block, ...]:
+    """Replace matching blocks in place and append new keys in source order."""
+    result = list(blocks)
+    index = {block.key: position for position, block in enumerate(result)}
+    for replacement in replacements:
+        position = index.get(replacement.key)
+        if position is None:
+            index[replacement.key] = len(result)
+            result.append(replacement)
+        else:
+            result[position] = replacement
+    return tuple(result)
+
+
 def partition_blocks(blocks: Sequence[Block]) -> tuple[tuple[Block, ...], tuple[Block, ...]]:
     """Partition cacheable prefix blocks from volatile trailing blocks."""
     prefix = tuple(block for block in blocks if block.metadata and block.metadata.static)
@@ -244,6 +260,21 @@ class DefaultAgentView(ContextView["Agent"]):
         )
         blocks += await stored_context_blocks(manager, owner, call, exclude=_FRAMEWORK_KEYS)
 
+        custom_skill_items: list[ContextItem] = []
+        for skill in owner.active_skills():
+            default_skill_view = DefaultSkillView()
+            view = resolve_context_view(skill, default=default_skill_view)
+            contribution = await collect_context(view, skill, call)
+            if view is default_skill_view:
+                default_blocks = tuple(
+                    item
+                    for item in contribution
+                    if isinstance(item, Block) and not manager.is_protected(item.key)
+                )
+                blocks = replace_blocks_by_key(blocks, default_blocks)
+            else:
+                custom_skill_items.extend(contribution)
+
         strategy = call.strategy
         if strategy is not None:
             get_overrides = getattr(strategy, "get_block_overrides", None)
@@ -277,10 +308,7 @@ class DefaultAgentView(ContextView["Agent"]):
         blocks = order_blocks(blocks, get_order() if get_order is not None else None)
         prefix, trailing = partition_blocks(blocks)
 
-        items: list[ContextItem] = [*prefix]
-        for skill in owner.active_skills():
-            view = resolve_context_view(skill, default=DefaultSkillView())
-            items.extend(await collect_context(view, skill, call))
+        items: list[ContextItem] = [*prefix, *custom_skill_items]
         items.extend(visible_events(owner, call))
         items.extend(trailing)
 
@@ -306,7 +334,11 @@ class DefaultSkillView(ContextView["Skill"]):
             raise RuntimeError("DefaultSkillView requires an agent-bound CurrentCall")
         key, expression = declaration
         value = await _resolve_value(key, DynamicContext(expression), agent=agent, call=call)
-        yield Block(key=key, content=value, metadata=BlockMetadata())
+        yield _block(
+            key,
+            value,
+            BlockMetadata(expr=expression, user_block=True, source_dynamic=True),
+        )
 
 
 __all__ = [
@@ -317,6 +349,7 @@ __all__ = [
     "apply_context_overrides",
     "order_blocks",
     "partition_blocks",
+    "replace_blocks_by_key",
     "stored_context_blocks",
     "system_prompt_block",
     "visible_events",

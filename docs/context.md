@@ -86,11 +86,22 @@ class DefaultAgentView(ContextView[Agent]):
             await agent_state_block(agent, call),
         ]
 
+        blocks += await stored_context_blocks(
+            agent.context_manager, agent, call, exclude={"system_prompt", "self", "state"}
+        )
+
+        custom_skills = []
+        for skill in agent.active_skills():
+            default = DefaultSkillView()
+            view = resolve_context_view(skill, default=default)
+            contribution = await collect_context(view, skill, call)
+            if view is default:
+                blocks = replace_by_key(blocks, contribution)
+            else:
+                custom_skills.extend(contribution)
+
         # Later sources replace earlier blocks with the same key.
         for source in (
-            await stored_context_blocks(
-                agent.context_manager, agent, call, exclude={"system_prompt", "self", "state"}
-            ),
             await strategy_context_blocks(call.strategy, agent, call),
             await decorator_context_blocks(call),
             await scoped_context_blocks(call),
@@ -101,12 +112,7 @@ class DefaultAgentView(ContextView[Agent]):
         blocks = order_blocks(blocks, call.strategy.get_block_order())
         prefix, trailing = partition_blocks(blocks)
 
-        skills = []
-        for skill in agent.active_skills():
-            view = resolve_context_view(skill, default=DefaultSkillView())
-            skills.extend(await collect_context(view, skill, call))
-
-        items = [*prefix, *skills, *visible_events(agent, call), *trailing]
+        items = [*prefix, *custom_skills, *visible_events(agent, call), *trailing]
         evictable = [*reversed(user_blocks(trailing)), *reversed(framework_blocks(trailing))]
         for item in apply_context_budget(items, call=call, evictable=evictable):
             yield item
@@ -124,7 +130,12 @@ class DefaultSkillView(ContextView[Skill]):
                 owner=call.agent,  # preserves existing agent-scoped semantics
                 call=call,
             )
-            yield Block(key=key, content=context_text(value, call=call))
+            yield Block(
+                key=key,
+                content=context_text(value, call=call),
+                role=USER,
+                metadata={"expr": expression, "source_dynamic": True},
+            )
 ```
 
 Registry skills participate when active; directly attached public skills are active by default. Hidden and inactive skills contribute nothing. `DefaultSkillView` emits only explicitly declared context; it never dumps skill documentation.
