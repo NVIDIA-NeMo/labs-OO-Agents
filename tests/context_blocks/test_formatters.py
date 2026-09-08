@@ -24,6 +24,7 @@ from nooa.context_blocks.models import (
     Role,
     ToolCallInfo,
 )
+from nooa.events import LLMOutput, LLMToolCall
 
 
 def _tool_call_block(
@@ -34,6 +35,7 @@ def _tool_call_block(
     arguments: dict,
     result_content: str | None = None,
     reasoning_items: list[dict] | None = None,
+    llm_output_id: str | None = None,
 ) -> ResolvedBlock:
     """Helper: ResolvedBlock carrying a ToolCallEvent."""
     result = (
@@ -46,6 +48,7 @@ def _tool_call_block(
         name=name,
         arguments=arguments,
         reasoning_items=reasoning_items,
+        llm_output_id=llm_output_id,
         result=result,
     )
     return ResolvedBlock(key=key, content="", role=Role.ASSISTANT, event=event)
@@ -135,6 +138,92 @@ class TestXMLBlockFormatter:
 
     def test_format_type(self):
         assert XMLBlockFormatter().format_type == "xml"
+
+    def test_groups_linked_executions_under_original_assistant_turn(self):
+        turn = LLMOutput(
+            content="I will run both.",
+            tool_calls=(
+                LLMToolCall(
+                    id="call_1",
+                    name="execute_python",
+                    arguments='{"code":"first()"}',
+                ),
+                LLMToolCall(
+                    id="call_2",
+                    name="execute_python",
+                    arguments='{"code":"second()"}',
+                ),
+            ),
+        )
+        call_1 = _tool_call_block(
+            key="call_1",
+            tool_call_id="call_1",
+            name="execute_python",
+            arguments={"code": "first()"},
+            result_content="status: complete",
+            llm_output_id=turn.id,
+        )
+        call_2 = _tool_call_block(
+            key="call_2",
+            tool_call_id="call_2",
+            name="execute_python",
+            arguments={"code": "second()"},
+            result_content="status: complete",
+            llm_output_id=turn.id,
+        )
+
+        messages = XMLBlockFormatter().format(
+            [
+                ResolvedBlock(key="turn", content=turn.content, role=Role.ASSISTANT, event=turn),
+                call_1,
+                ResolvedBlock(key="output_1", content="first output", role=Role.USER),
+                call_2,
+                ResolvedBlock(key="output_2", content="second output", role=Role.USER),
+            ]
+        )
+
+        assert [message.role for message in messages] == [
+            Role.SYSTEM,
+            Role.ASSISTANT,
+            Role.TOOL,
+            Role.TOOL,
+            Role.USER,
+            Role.USER,
+        ]
+        assert [call.id for call in messages[1].tool_calls] == ["call_1", "call_2"]
+        assert [call.arguments for call in messages[1].tool_calls] == [
+            '{"code":"first()"}',
+            '{"code":"second()"}',
+        ]
+        assert messages[1].content == "I will run both."
+        assert [message.tool_call_id for message in messages[2:4]] == ["call_1", "call_2"]
+
+    def test_unexecuted_call_gets_a_matching_result(self):
+        turn = LLMOutput(
+            content="",
+            tool_calls=(
+                LLMToolCall(id="call_1", name="one", arguments="{}"),
+                LLMToolCall(id="call_2", name="two", arguments="{}"),
+            ),
+        )
+        call_1 = _tool_call_block(
+            tool_call_id="call_1",
+            name="one",
+            arguments={},
+            result_content="failed",
+            llm_output_id=turn.id,
+        )
+
+        messages = XMLBlockFormatter().format(
+            [
+                ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=turn),
+                call_1,
+            ]
+        )
+
+        assert [call.id for call in messages[1].tool_calls] == ["call_1", "call_2"]
+        assert [message.tool_call_id for message in messages[2:]] == ["call_1", "call_2"]
+        assert messages[3].content == "(tool call was not executed)"
 
 
 class TestMarkdownBlockFormatter:
@@ -234,8 +323,8 @@ class TestOpenAIProviderFormatter:
             RenderedMessage(role=Role.SYSTEM, content="System"),
             RenderedMessage(
                 role=Role.ASSISTANT,
-                tool_call=ToolCallInfo(
-                    id="call_abc", name="get_weather", arguments={"location": "SF"}
+                tool_calls=(
+                    ToolCallInfo(id="call_abc", name="get_weather", arguments={"location": "SF"}),
                 ),
             ),
         ]
@@ -251,8 +340,8 @@ class TestOpenAIProviderFormatter:
             RenderedMessage(role=Role.SYSTEM, content="System"),
             RenderedMessage(
                 role=Role.ASSISTANT,
-                tool_call=ToolCallInfo(
-                    id="call_abc", name="get_weather", arguments={"location": "SF"}
+                tool_calls=(
+                    ToolCallInfo(id="call_abc", name="get_weather", arguments={"location": "SF"}),
                 ),
             ),
             RenderedMessage(role=Role.TOOL, content="Sunny", tool_call_id="call_abc"),
@@ -261,6 +350,24 @@ class TestOpenAIProviderFormatter:
         assert len(result) == 3
         assert result[1]["role"] == "assistant" and "tool_calls" in result[1]
         assert result[2] == {"role": "tool", "tool_call_id": "call_abc", "content": "Sunny"}
+
+    def test_tool_call_batch_preserves_order_and_raw_arguments(self):
+        messages = [
+            RenderedMessage(
+                role=Role.ASSISTANT,
+                content="Calling both",
+                tool_calls=(
+                    ToolCallInfo(id="a", name="one", arguments='{"x":1}'),
+                    ToolCallInfo(id="b", name="two", arguments='{"y":2}'),
+                ),
+            )
+        ]
+
+        result = OpenAIProviderFormatter().format(messages)
+
+        assert result[0]["content"] == "Calling both"
+        assert [call["id"] for call in result[0]["tool_calls"]] == ["a", "b"]
+        assert result[0]["tool_calls"][0]["function"]["arguments"] == '{"x":1}'
 
     def test_runtime_event_skipped(self):
         messages = [
@@ -308,7 +415,7 @@ class TestAnthropicProviderFormatter:
             RenderedMessage(role=Role.SYSTEM, content="System"),
             RenderedMessage(
                 role=Role.ASSISTANT,
-                tool_call=ToolCallInfo(id="tc_1", name="search", arguments={"q": "test"}),
+                tool_calls=(ToolCallInfo(id="tc_1", name="search", arguments={"q": "test"}),),
             ),
         ]
         result = AnthropicProviderFormatter().format(messages)
@@ -321,7 +428,7 @@ class TestAnthropicProviderFormatter:
             RenderedMessage(role=Role.SYSTEM, content="System"),
             RenderedMessage(
                 role=Role.ASSISTANT,
-                tool_call=ToolCallInfo(id="tc_1", name="search", arguments={"q": "test"}),
+                tool_calls=(ToolCallInfo(id="tc_1", name="search", arguments={"q": "test"}),),
             ),
             RenderedMessage(role=Role.TOOL, content="Result", tool_call_id="tc_1"),
         ]

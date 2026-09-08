@@ -32,6 +32,7 @@ from nooa.events import (
     Error,
     Feedback,
     LLMOutput,
+    LLMToolCall,
     Message,
     PythonOutput,
     Reasoning,
@@ -226,6 +227,45 @@ def test_event_roundtrip_via_all_events(backend, tag, event, expected_type, expe
         f"all_events() returned {type(retrieved).__name__}, expected {expected_type.__name__}. "
         f"event_type={event.event_type!r}"
     )
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        LLMOutput(
+            content="done",
+            tool_calls=(
+                LLMToolCall(
+                    id="call-state",
+                    name="execute_python",
+                    arguments='{"code":"print(1)"}',
+                ),
+            ),
+            finish_reason="tool_calls",
+        ),
+        ToolCallEvent(
+            tool_call_id="tc-state",
+            name="execute_python",
+            arguments={"code": "print(1)"},
+            llm_output_id="assistant-turn-id",
+            reasoning_items=[{"type": "reasoning", "encrypted_content": "opaque"}],
+        ),
+    ],
+    ids=["llm-output", "tool-call"],
+)
+def test_assistant_turn_ir_survives_backend_roundtrip(backend, event):
+    """Canonical turns and execution links survive session persistence."""
+    backend.store("state", event)
+
+    restored = backend.get("state")
+
+    assert restored is not None
+    if isinstance(event, LLMOutput):
+        assert restored.tool_calls == event.tool_calls
+        assert restored.finish_reason == event.finish_reason
+    else:
+        assert restored.llm_output_id == event.llm_output_id
+        assert restored.reasoning_items == event.reasoning_items
 
 
 def test_tool_call_event_result_preserved_after_update(backend):

@@ -44,6 +44,7 @@ from nooa.events import (
     LLMCallStart,
     LLMComplete,
     LLMOutput,
+    LLMToolCall,
     SystemPrompt,
 )
 from nooa.runtime.context_vars import (
@@ -1242,7 +1243,18 @@ class ActorRuntime:
         elif not isinstance(content, str):
             # Other non-string types - convert to string representation
             content = str(content)
-        event = LLMOutput(content=content)
+        event = LLMOutput(
+            content=content,
+            tool_calls=tuple(
+                LLMToolCall(
+                    id=tool_call.id,
+                    name=tool_call.name,
+                    arguments=tool_call.arguments,
+                )
+                for tool_call in (getattr(response, "tool_calls", None) or [])
+            ),
+            finish_reason=getattr(response, "finish_reason", "") or "",
+        )
         event_id = self.event_manager.add(event)
 
         return response, event_id

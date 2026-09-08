@@ -463,6 +463,7 @@ def _phase_events(
         if (
             isinstance(event, LLMOutput)
             and not event.content
+            and not event.tool_calls
             and not getattr(event, "llm_state", None)
             and not getattr(event, "reasoning", None)
         ):

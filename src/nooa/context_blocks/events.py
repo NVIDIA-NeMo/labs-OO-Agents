@@ -240,6 +240,11 @@ class ToolCallEvent(EventBase):
             "tool call when conversation history is replayed"
         ),
     )
+    llm_output_id: str | None = Field(
+        default=None,
+        repr=False,
+        description="Canonical LLMOutput event that emitted this tool call",
+    )
 
     # Nested result (filled after execution via EventManager.update())
     result: ToolResult | None = Field(

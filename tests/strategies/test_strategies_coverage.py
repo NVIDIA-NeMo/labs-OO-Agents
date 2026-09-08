@@ -1714,7 +1714,7 @@ class TestPlainProviderFormatterFormat:
         messages = formatter.format([block])
         tool_msgs = [m for m in messages if m.role == Role.TOOL]
         assert len(tool_msgs) == 1
-        assert tool_msgs[0].content == ""
+        assert tool_msgs[0].content == "(no result recorded)"
 
     def test_block_with_no_event_uses_content(self):
         from nooa.context_blocks import ResolvedBlock

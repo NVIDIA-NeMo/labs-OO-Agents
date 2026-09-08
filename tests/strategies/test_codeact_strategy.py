@@ -245,12 +245,20 @@ class TestCodeActStrategySimpleExecution:
         result = await agent_instance.compute()
 
         assert result == 42
+        output_event = next(
+            event
+            for event in agent_instance.event_manager.values()
+            if event.event_type == "LLMOutput"
+            and event.tool_calls
+            and event.tool_calls[0].id == "call_reasoning"
+        )
         tool_call_event = next(
             event
             for event in agent_instance.event_manager.values()
             if event.event_type == "ToolCallEvent" and event.tool_call_id == "call_reasoning"
         )
         assert tool_call_event.reasoning_items == [reasoning_item]
+        assert tool_call_event.llm_output_id == output_event.id
         replayed_tool_call = next(
             message
             for message in fake_llm.last_messages
@@ -1052,7 +1060,7 @@ class TestCodeActStrategyEventSequence:
         The architecture nests ToolResult inside ToolCallEvent.result,
         so there are no separate tool_result events.
 
-        Sequence: task -> tool_call (with nested result) -> execute_python -> tool_call (with nested result)
+        Each provider turn remains as LLMOutput before its execution events.
         """
 
         class TestAgent(Agent, llm=_TEST_LLM):
@@ -1082,18 +1090,23 @@ class TestCodeActStrategyEventSequence:
         events = agent_instance.event_manager.values()
         event_types = [e.event_type for e in events]
 
-        # Architecture: ToolResult is nested in ToolCallEvent.result (no separate tool_result events)
-        # Sequence: Task -> ToolCallEvent -> PythonOutput -> ToolCallEvent
+        # LLMOutput is the canonical provider turn. ToolResult remains nested
+        # in ToolCallEvent, with no separate tool-result event.
         assert event_types == [
             "Task",
+            "LLMOutput",
             "ToolCallEvent",
             "PythonOutput",
+            "LLMOutput",
             "ToolCallEvent",
-        ], f"Expected ['Task', 'ToolCallEvent', 'PythonOutput', 'ToolCallEvent'], got {event_types}"
+        ]
 
         # Verify first ToolCallEvent has correct data (execute_python)
-        tool_call_event = events[1]
+        first_output = events[1]
+        tool_call_event = events[2]
+        assert first_output.tool_calls[0].id == "call_abc123"
         assert tool_call_event.event_type == "ToolCallEvent"
+        assert tool_call_event.llm_output_id == first_output.id
         assert tool_call_event.tool_call_id == "call_abc123"
         assert tool_call_event.name == "execute_python"
         assert "code" in tool_call_event.arguments
@@ -1103,23 +1116,21 @@ class TestCodeActStrategyEventSequence:
         assert tool_call_event.result.tool_call_id == "call_abc123"
 
         # Verify execute_python event contains the deferred output
-        exec_output_event = events[2]
+        exec_output_event = events[3]
         assert exec_output_event.event_type == "PythonOutput"
         assert exec_output_event.tool_call_id == "call_abc123"
 
         # Verify second ToolCallEvent is return_result
-        return_call_event = events[3]
+        return_output = events[4]
+        return_call_event = events[5]
         assert return_call_event.event_type == "ToolCallEvent"
+        assert return_call_event.llm_output_id == return_output.id
         assert return_call_event.name == "return_result"
         assert return_call_event.result is not None
 
     @pytest.mark.asyncio
-    async def test_no_empty_assistant_event_before_tool_call(self):
-        """Empty LLMOutputs should be removed before ToolCallEvents.
-
-        When the LLM returns a tool call with no content, the CodeAct strategy
-        removes the empty LLMOutput to keep history clean.
-        """
+    async def test_tool_turn_is_retained_but_not_rendered_twice(self):
+        """The canonical LLMOutput persists while ToolCallEvent drives replay."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
             @strategy(CodeActStrategy(config=CodeActConfig()))
@@ -1139,19 +1150,20 @@ class TestCodeActStrategyEventSequence:
 
         assert result == "done"
 
-        # Check that we don't have empty LLMOutputs before ToolCallEvents
         events = agent_instance.event_manager.values()
-        event_types = [e.event_type for e in events]
-
-        # Verify no empty LLMOutput events remain (they should be removed when tool calls are made)
-        for i in range(len(event_types) - 1):
-            if event_types[i] == "LLMOutput" and event_types[i + 1] == "ToolCallEvent":
-                # Check if it's an empty assistant event
-                if not events[i].content:
-                    pytest.fail(
-                        f"Found empty LLMOutput before ToolCallEvent at index {i}. "
-                        f"Event sequence: {event_types}"
-                    )
+        outputs = [event for event in events if event.event_type == "LLMOutput"]
+        calls = [event for event in events if event.event_type == "ToolCallEvent"]
+        assert len(outputs) == len(calls) == 2
+        assert [output.tool_calls[0].id for output in outputs] == [
+            call.tool_call_id for call in calls
+        ]
+        assert [call.llm_output_id for call in calls] == [output.id for output in outputs]
+        assert not any(
+            message.get("role") == "assistant"
+            and not message.get("tool_calls")
+            and not message.get("content")
+            for message in fake_llm.last_messages
+        )
 
     @pytest.mark.asyncio
     async def test_text_only_stop_response_routes_through_return_result(self):
@@ -1192,7 +1204,7 @@ class TestCodeActStrategyEventSequence:
 
         # The original assistant turn is preserved; no synthetic provider tool
         # exchange is added to history.
-        llm_outputs = [e for e in events if e.event_type == "LLMOutput"]
+        llm_outputs = [e for e in events if e.event_type == "LLMOutput" and not e.tool_calls]
         assert [event.content for event in llm_outputs] == ["The answer is 42."]
         tool_call_events = [e for e in events if e.event_type == "ToolCallEvent"]
         assert tool_call_events == []
@@ -1244,7 +1256,7 @@ class TestCodeActStrategyEventSequence:
         assert "I need to reason carefully here." in result
 
         events = agent_instance.event_manager.values()
-        llm_outputs = [e for e in events if e.event_type == "LLMOutput"]
+        llm_outputs = [e for e in events if e.event_type == "LLMOutput" and not e.tool_calls]
         assert len(llm_outputs) == 1
         assert "I need to reason carefully here." in llm_outputs[0].content
         tool_call_events = [e for e in events if e.event_type == "ToolCallEvent"]
@@ -1289,7 +1301,7 @@ class TestCodeActStrategyEventSequence:
         events = agent_instance.event_manager.values()
         # The text-only assistant turn is retained, followed by a user correction
         # and the model's real return_result call.
-        llm_outputs = [e for e in events if e.event_type == "LLMOutput"]
+        llm_outputs = [e for e in events if e.event_type == "LLMOutput" and not e.tool_calls]
         assert [event.content for event in llm_outputs] == [
             "I have successfully completed the computation!"
         ]
@@ -1445,7 +1457,7 @@ class TestCodeActStrategyEventSequence:
         # The empty assistant turn is retained and the only tool event is the
         # model's successful self-correction.
         all_events = agent_instance.event_manager.values()
-        llm_outputs = [e for e in all_events if e.event_type == "LLMOutput"]
+        llm_outputs = [e for e in all_events if e.event_type == "LLMOutput" and not e.tool_calls]
         assert [event.content for event in llm_outputs] == [""]
         tool_call_events = [e for e in all_events if e.event_type == "ToolCallEvent"]
         assert len(tool_call_events) == 1
@@ -1481,14 +1493,16 @@ class TestCodeActStrategyEventSequence:
         events = agent_instance.event_manager.values()
         event_types = [e.event_type for e in events]
 
-        # Architecture: ToolResult is nested in ToolCallEvent.result (no separate tool_result events)
-        # Sequence: Task -> (ToolCallEvent -> PythonOutput) x2 -> ToolCallEvent
+        # Each provider response is retained immediately before its execution projection.
         assert event_types == [
             "Task",
+            "LLMOutput",
             "ToolCallEvent",
             "PythonOutput",
+            "LLMOutput",
             "ToolCallEvent",
             "PythonOutput",
+            "LLMOutput",
             "ToolCallEvent",
         ], f"Expected correct sequence with nested results, got {event_types}"
 
@@ -2896,6 +2910,23 @@ class TestCodeActMultiToolCallsPerResponse:
             if isinstance(event, PythonOutput)
         ]
         assert [event.execution_count for event in outputs] == [1, 2, 3]
+        events = agent_instance.event_manager.values()
+        multi_turn = next(
+            event
+            for event in events
+            if event.event_type == "LLMOutput" and len(event.tool_calls) == 3
+        )
+        projected_calls = [
+            event
+            for event in events
+            if event.event_type == "ToolCallEvent" and event.name == "execute_python"
+        ]
+        assert [call.id for call in multi_turn.tool_calls] == [
+            "call_1",
+            "call_2",
+            "call_3",
+        ]
+        assert {call.llm_output_id for call in projected_calls} == {multi_turn.id}
 
     @pytest.mark.asyncio
     async def test_multi_tool_calls_stop_on_first_error(self):

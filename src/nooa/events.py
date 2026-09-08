@@ -150,14 +150,32 @@ class TextOnlyReply(EventBase):  # type: ignore[misc]
     ] = 0
 
 
+class LLMToolCall(BaseModel):
+    """Provider-neutral tool call exactly as emitted on an assistant turn."""
+
+    id: Annotated[str, Field(description="Provider tool-call identifier")]
+    name: Annotated[str, Field(description="Tool name")]
+    arguments: Annotated[str, Field(description="Raw tool arguments from the provider")]
+
+
 class LLMOutput(EventBase):  # type: ignore[misc]
-    """Raw LLM output - code (PURE_PYTHON), JSON (STRUCTURED_OUTPUT), or tool calls (CODEACT)."""
+    """Canonical, append-only record of one provider assistant turn."""
 
     _role: ClassVar[Role] = Role.ASSISTANT
 
     content: Annotated[
         str, spec(max_string=None), Field(description="LLM response content (code or JSON)")
     ]
+    tool_calls: tuple[LLMToolCall, ...] = Field(
+        default_factory=tuple,
+        repr=False,
+        description="Ordered public tool calls emitted on this assistant turn",
+    )
+    finish_reason: str = Field(
+        default="",
+        repr=False,
+        description="Normalized finish reason returned by UnifiedLLM",
+    )
 
 
 class PythonOutput(EventBase):  # type: ignore[misc]

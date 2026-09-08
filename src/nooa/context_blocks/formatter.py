@@ -36,6 +36,7 @@ from nooa.context_blocks.models import (
     Role,
     ToolCallInfo,
 )
+from nooa.events import LLMOutput
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +199,24 @@ def _markdown_message_content(block: ResolvedBlock) -> str:
     return f"### {role_label}{inline_meta}\n\n{block.content}"
 
 
+def _tool_result_message(event: ToolCallEvent) -> RenderedMessage:
+    """Project one execution event into a provider-neutral tool result."""
+    if event.result is not None:
+        content = event.result.content
+    else:
+        logger.warning(
+            "ToolCallEvent %s has result=None — emitting placeholder tool_result "
+            "to prevent context corruption.",
+            event.tool_call_id,
+        )
+        content = "(no result recorded)"
+    return RenderedMessage(
+        role=Role.TOOL,
+        content=content,
+        tool_call_id=event.tool_call_id,
+    )
+
+
 def _event_block_to_messages(
     block: ResolvedBlock,
     *,
@@ -217,45 +236,20 @@ def _event_block_to_messages(
 
     if isinstance(block.event, ToolCallEvent):
         event = block.event
-        messages: list[RenderedMessage] = [
+        return [
             RenderedMessage(
                 role=Role.ASSISTANT,
-                tool_call=ToolCallInfo(
-                    id=event.tool_call_id,
-                    name=event.name,
-                    arguments=event.arguments,
+                tool_calls=(
+                    ToolCallInfo(
+                        id=event.tool_call_id,
+                        name=event.name,
+                        arguments=event.arguments,
+                    ),
                 ),
                 reasoning_items=event.reasoning_items,
-            )
+            ),
+            _tool_result_message(event),
         ]
-        if event.result is not None:
-            messages.append(
-                RenderedMessage(
-                    role=Role.TOOL,
-                    content=event.result.content,
-                    tool_call_id=event.tool_call_id,
-                )
-            )
-        else:
-            # Defensive: ToolCallEvent with result=None should not happen in
-            # normal flow, but if it does (e.g. a GenerationError was raised
-            # before the caller could update the event), emit a minimal
-            # tool_result to avoid producing tool_use without a matching
-            # tool_result — which corrupts the conversation for the next
-            # session.
-            logger.warning(
-                "ToolCallEvent %s has result=None — emitting placeholder tool_result "
-                "to prevent context corruption.",
-                event.tool_call_id,
-            )
-            messages.append(
-                RenderedMessage(
-                    role=Role.TOOL,
-                    content="(no result recorded)",
-                    tool_call_id=event.tool_call_id,
-                )
-            )
-        return messages
 
     # Non-tool event
     content = (
@@ -272,6 +266,96 @@ def _event_block_to_messages(
             images=images,
         )
     ]
+
+
+def _event_blocks_to_messages(
+    blocks: list[ResolvedBlock],
+    *,
+    wrap_content: "Callable[[ResolvedBlock], str] | None",
+) -> list[RenderedMessage]:
+    """Project the public event-list IR into neutral conversation turns.
+
+    ``LLMOutput`` is the canonical assistant turn. Linked ``ToolCallEvent``
+    objects describe executions of calls from that turn; they are not separate
+    assistant turns. Grouping here preserves the provider's call batch and
+    prevents call/result interleaving from changing its meaning.
+
+    Legacy and synthetic ``ToolCallEvent`` objects without a visible linked
+    ``LLMOutput`` remain independently renderable.
+    """
+    visible_turn_ids = {
+        block.event.id
+        for block in blocks
+        if isinstance(block.event, LLMOutput) and block.event.tool_calls
+    }
+    executions: dict[str, dict[str, ToolCallEvent]] = {}
+    for block in blocks:
+        event = block.event
+        if (
+            isinstance(event, ToolCallEvent)
+            and event.llm_output_id is not None
+            and event.llm_output_id in visible_turn_ids
+        ):
+            executions.setdefault(event.llm_output_id, {})[event.tool_call_id] = event
+
+    messages: list[RenderedMessage] = []
+    for block in blocks:
+        event = block.event
+        if isinstance(event, LLMOutput) and event.tool_calls:
+            by_call_id = executions.get(event.id, {})
+            reasoning_items = next(
+                (
+                    execution.reasoning_items
+                    for call in event.tool_calls
+                    if (execution := by_call_id.get(call.id)) is not None
+                    and execution.reasoning_items
+                ),
+                None,
+            )
+            messages.append(
+                RenderedMessage(
+                    role=Role.ASSISTANT,
+                    content=block.content or None,
+                    tool_calls=tuple(
+                        ToolCallInfo(
+                            id=call.id,
+                            name=call.name,
+                            arguments=call.arguments,
+                        )
+                        for call in event.tool_calls
+                    ),
+                    reasoning_items=reasoning_items,
+                )
+            )
+            for call in event.tool_calls:
+                execution = by_call_id.get(call.id)
+                if execution is not None:
+                    messages.append(_tool_result_message(execution))
+                    continue
+                logger.warning(
+                    "LLMOutput %s tool call %s has no execution event — emitting "
+                    "placeholder tool_result to preserve protocol ordering.",
+                    event.id,
+                    call.id,
+                )
+                messages.append(
+                    RenderedMessage(
+                        role=Role.TOOL,
+                        content="(tool call was not executed)",
+                        tool_call_id=call.id,
+                    )
+                )
+            continue
+
+        if (
+            isinstance(event, ToolCallEvent)
+            and event.llm_output_id is not None
+            and event.llm_output_id in visible_turn_ids
+        ):
+            continue
+
+        messages.extend(_event_block_to_messages(block, wrap_content=wrap_content))
+    return messages
 
 
 def _build_messages(
@@ -314,8 +398,7 @@ def _build_messages(
             parts=system_parts if system_parts else None,
         )
     ]
-    for block in event_blocks:
-        messages.extend(_event_block_to_messages(block, wrap_content=wrap_message))
+    messages.extend(_event_blocks_to_messages(event_blocks, wrap_content=wrap_message))
     return messages
 
 
@@ -419,25 +502,44 @@ def _append_openai_image_message(out: list[dict], msg: RenderedMessage) -> None:
     out.append({"role": msg.role.value, "content": content_parts})
 
 
+def _arguments_json(arguments: dict[str, Any] | str) -> str:
+    """Return provider-standard JSON text without rewriting captured arguments."""
+    return json.dumps(arguments) if isinstance(arguments, dict) else arguments
+
+
+def _arguments_object(arguments: dict[str, Any] | str) -> dict[str, Any]:
+    """Return Anthropic's object-shaped tool input with a useful failure."""
+    if isinstance(arguments, dict):
+        return arguments
+    try:
+        parsed = json.loads(arguments)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Anthropic tool arguments must be a JSON object") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("Anthropic tool arguments must decode to a JSON object")
+    return parsed
+
+
 class OpenAIProviderFormatter(ProviderFormatter):
     """Emit OpenAI-compatible messages (``list[dict]``)."""
 
     def format(self, messages: list[RenderedMessage]) -> list[dict]:
         out: list[dict] = []
         for msg in messages:
-            if msg.tool_call is not None:
+            if msg.tool_calls:
                 assistant_message = {
                     "role": "assistant",
-                    "content": None,
+                    "content": msg.content,
                     "tool_calls": [
                         {
-                            "id": msg.tool_call.id,
+                            "id": call.id,
                             "type": "function",
                             "function": {
-                                "name": msg.tool_call.name,
-                                "arguments": json.dumps(msg.tool_call.arguments),
+                                "name": call.name,
+                                "arguments": _arguments_json(call.arguments),
                             },
                         }
+                        for call in msg.tool_calls
                     ],
                 }
                 if msg.reasoning_items:
@@ -472,18 +574,23 @@ class AnthropicProviderFormatter(ProviderFormatter):
                     system_parts.append(msg.content)
                 continue
 
-            if msg.tool_call is not None:
+            if msg.tool_calls:
+                content: list[dict[str, Any]] = []
+                if msg.content:
+                    content.append({"type": "text", "text": msg.content})
+                content.extend(
+                    {
+                        "type": "tool_use",
+                        "id": call.id,
+                        "name": call.name,
+                        "input": _arguments_object(call.arguments),
+                    }
+                    for call in msg.tool_calls
+                )
                 out.append(
                     {
                         "role": "assistant",
-                        "content": [
-                            {
-                                "type": "tool_use",
-                                "id": msg.tool_call.id,
-                                "name": msg.tool_call.name,
-                                "input": msg.tool_call.arguments,
-                            }
-                        ],
+                        "content": content,
                     }
                 )
             elif msg.tool_call_id is not None:
@@ -533,22 +640,21 @@ class ResponsesProviderFormatter(ProviderFormatter):
                 out.append({"role": "system", "content": msg.content or ""})
                 continue
 
-            if msg.tool_call is not None:
+            if msg.tool_calls:
                 # Preserve assistant text that precedes the tool call
                 if msg.content and msg.role == Role.ASSISTANT:
                     out.append({"role": "assistant", "content": msg.content})
                 if msg.reasoning_items:
                     out.extend(msg.reasoning_items)
-                out.append(
-                    {
-                        "type": "function_call",
-                        "call_id": msg.tool_call.id,
-                        "name": msg.tool_call.name,
-                        "arguments": json.dumps(msg.tool_call.arguments)
-                        if isinstance(msg.tool_call.arguments, dict)
-                        else msg.tool_call.arguments,
-                    }
-                )
+                for call in msg.tool_calls:
+                    out.append(
+                        {
+                            "type": "function_call",
+                            "call_id": call.id,
+                            "name": call.name,
+                            "arguments": _arguments_json(call.arguments),
+                        }
+                    )
             elif msg.tool_call_id is not None:
                 out.append(
                     {

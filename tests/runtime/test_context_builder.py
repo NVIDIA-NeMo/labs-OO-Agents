@@ -571,6 +571,36 @@ class TestPhaseEvents:
         assert [block.event for block in result] == [visible]
         assert em.values() == events
 
+    def test_tool_turn_and_linked_executions_are_public_context_ir(self):
+        from nooa.events import LLMOutput, LLMToolCall
+        from nooa.runtime.context_builder import _phase_events
+
+        turn = LLMOutput(
+            content="",
+            tag="1",
+            tool_calls=(
+                LLMToolCall(
+                    id="call-1",
+                    name="execute_python",
+                    arguments='{"code":"print(1)"}',
+                ),
+            ),
+        )
+        call = ToolCallEvent(
+            tool_call_id="call-1",
+            name="execute_python",
+            arguments={"code": "print(1)"},
+            llm_output_id=turn.id,
+            result=ToolResult(tool_call_id="call-1", content="status: complete"),
+            tag="2",
+        )
+        em = _make_event_manager([turn, call])
+
+        result = _phase_events([], em)
+
+        assert [block.event for block in result] == [turn, call]
+        assert em.values() == [turn, call]
+
     def test_current_call_query_keeps_task_event(self):
         """EventQuery.current_call() must keep the task so LLM gets system + task.
 

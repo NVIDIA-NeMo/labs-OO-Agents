@@ -22,10 +22,8 @@ from typing import TYPE_CHECKING, Any
 from nooa.context_blocks import (
     RenderedMessage,
     ResolvedBlock,
-    ToolCallEvent,
-    ToolCallInfo,
 )
-from nooa.context_blocks.formatter import XMLBlockFormatter
+from nooa.context_blocks.formatter import XMLBlockFormatter, _event_blocks_to_messages
 from nooa.context_blocks.models import Role
 from nooa.context_blocks.scoped import ScopedContext
 from nooa.context_blocks.utils import truncating_pformat
@@ -169,48 +167,23 @@ class PlainCodeActBlockFormatter(XMLBlockFormatter):  # type: ignore[misc]  # un
             if isinstance(block.event, PythonOutput):
                 python_outputs[block.event.tool_call_id] = block
 
-        for block in message_blocks:
-            if block.role == Role.RUNTIME_EVENT:
-                continue
-
-            if isinstance(block.event, ToolCallEvent):
-                event = block.event
-                messages.append(
-                    RenderedMessage(
-                        role=Role.ASSISTANT,
-                        tool_call=ToolCallInfo(
-                            id=event.tool_call_id,
-                            name=event.name,
-                            arguments=event.arguments,
-                        ),
-                    )
+        event_messages = _event_blocks_to_messages(
+            [
+                block
+                for block in message_blocks
+                if block.role != Role.RUNTIME_EVENT and not isinstance(block.event, PythonOutput)
+            ],
+            wrap_content=self._content_for_block,
+        )
+        for message in event_messages:
+            py_out_block = (
+                python_outputs.get(message.tool_call_id) if message.tool_call_id else None
+            )
+            if py_out_block is not None:
+                message = message.model_copy(
+                    update={"content": self._content_for_block(py_out_block)}
                 )
-                # Tool result: merge PythonOutput content if available.
-                py_out_block = python_outputs.get(event.tool_call_id)
-                if py_out_block and py_out_block.event:
-                    content = self._content_for_block(py_out_block)
-                elif event.result is not None:
-                    content = event.result.content
-                else:
-                    content = ""
-                messages.append(
-                    RenderedMessage(
-                        role=Role.TOOL,
-                        content=content,
-                        tool_call_id=event.tool_call_id,
-                    )
-                )
-
-            elif isinstance(block.event, PythonOutput):
-                # Already merged into tool result above.
-                assert block.event.tool_call_id in python_outputs, (
-                    "PythonOutput not in python_outputs index — indexing loop above should capture all"
-                )
-                continue
-
-            else:
-                content = self._content_for_block(block)
-                messages.append(RenderedMessage(role=block.role, content=content))
+            messages.append(message)
 
         return messages
 

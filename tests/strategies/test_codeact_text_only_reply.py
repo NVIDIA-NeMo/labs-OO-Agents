@@ -49,6 +49,10 @@ def _events(agent, event_type):
     return [event for event in agent.event_manager.values() if isinstance(event, event_type)]
 
 
+def _text_outputs(agent):
+    return [event for event in _events(agent, LLMOutput) if not event.tool_calls]
+
+
 @pytest.mark.asyncio
 async def test_default_preserves_text_adds_error_and_retries():
     class TestAgent(Agent, llm=_TEST_LLM):
@@ -67,7 +71,7 @@ async def test_default_preserves_text_adds_error_and_retries():
 
     assert await agent.my_task() == {"ok": True}
 
-    outputs = _events(agent, LLMOutput)
+    outputs = _text_outputs(agent)
     assert [event.content for event in outputs] == ["I think the answer is ready."]
 
     diagnostics = _events(agent, TextOnlyReply)
@@ -151,7 +155,7 @@ async def test_default_does_not_treat_valid_string_as_result():
     agent = TestAgent(llm=fake_llm)
 
     assert await agent.my_task() == "done"
-    assert [event.content for event in _events(agent, LLMOutput)] == ["prose"]
+    assert [event.content for event in _text_outputs(agent)] == ["prose"]
     assert any(event.event_type == "Error" for event in agent.event_manager.values())
 
 
@@ -167,7 +171,7 @@ async def test_default_preserves_empty_stop_without_replaying_empty_assistant_me
     agent = TestAgent(llm=fake_llm)
 
     assert await agent.my_task() == {"ok": True}
-    assert [event.content for event in _events(agent, LLMOutput)] == [""]
+    assert [event.content for event in _text_outputs(agent)] == [""]
     assert [event.content for event in _events(agent, TextOnlyReply)] == [""]
     assert not any(
         message.get("role") == "assistant" and not message.get("content")
@@ -196,7 +200,7 @@ async def test_callback_can_synthesize_execute_python_without_replacing_output()
     agent = TestAgent(llm=fake_llm)
 
     assert await agent.my_task() == "done"
-    assert [event.content for event in _events(agent, LLMOutput)] == ["hello"]
+    assert [event.content for event in _text_outputs(agent)] == ["hello"]
     assert [event.tool_call_id for event in _events(agent, ToolCallEvent)] == [
         "synthetic_cell",
         "c_ret",
@@ -301,7 +305,11 @@ async def test_text_only_output_survives_sqlite_resume(tmp_path):
     reopened = SQLiteStorageManager(db_path)
     try:
         resumed = EventManager(backend=reopened.event_backend).values()
-        assert [event.content for event in resumed if isinstance(event, LLMOutput)] == [
+        assert [
+            event.content
+            for event in resumed
+            if isinstance(event, LLMOutput) and not event.tool_calls
+        ] == [
             "I should have used a tool."
         ]
         diagnostics = [event for event in resumed if isinstance(event, TextOnlyReply)]

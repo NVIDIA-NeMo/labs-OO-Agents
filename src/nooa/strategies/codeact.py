@@ -1273,9 +1273,9 @@ Standard Python builtins and agent instance (`self`) are available."""
         Executes tool calls sequentially, stopping at the first error.
         Returns a _ToolCallsResult indicating whether the task completed.
 
-        ``preserve_llm_output`` is used only for tool calls synthesized by a
-        text-only response handler. Real provider tool calls replace the empty
-        LLMOutput with their ToolCallEvent representation as before.
+        ``preserve_llm_output`` distinguishes calls synthesized by a text-only
+        response handler from calls already recorded on the provider's
+        canonical LLMOutput event.
         """
         # Handle tool calls - process ALL tool calls sequentially
         # Some LLMs return multiple tool calls in one response even when
@@ -1283,14 +1283,12 @@ Standard Python builtins and agent instance (`self`) are available."""
         # cell's output available to subsequent cells via session_locals.
         session.record_iteration()
 
-        if not preserve_llm_output:
-            # Replace the empty LLMOutput created by runtime.generate() with the
-            # provider's actual ToolCallEvent representation.
-            runtime.event_manager.remove(event_id)
-
         num_tool_calls = len(tool_calls)
         if num_tool_calls > 1:
             logger.debug(f"[CODEACT] Processing {num_tool_calls} tool calls sequentially")
+
+        llm_output = runtime.event_manager.get(event_id) if not preserve_llm_output else None
+        llm_output_id = getattr(llm_output, "id", None)
 
         # Process each tool call in order, stopping at the first error.
         # If one cell fails, subsequent cells likely depend on its output
@@ -1313,6 +1311,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     tool_call_id=tool_call.id,
                     name=tool_call.name,
                     arguments=args,
+                    llm_output_id=llm_output_id,
                     reasoning_items=(reasoning_items if tool_call_index == 0 else None),
                     result=None,  # Will be updated after execution
                 )
