@@ -166,6 +166,19 @@ def _handler_name(handler: TextOnlyResponseHandler) -> str:
     return getattr(handler, "__qualname__", type(handler).__qualname__)
 
 
+def _response_debug_details(response: LLMResponse) -> str:
+    """Summarize an incomplete provider response for internal diagnostics."""
+    parts = [
+        f"finish_reason={response.finish_reason!r}",
+        f"content={response.content!r}",
+        f"tool_calls={response.tool_calls!r}",
+    ]
+    raw = getattr(response, "raw_response", None)
+    if raw is not None and (output := getattr(raw, "output", None)) is not None:
+        parts.append(f"raw_response.output={output!r}")
+    return "; ".join(parts)
+
+
 # Small, deterministic expression subset accepted inside constructor-string
 # arguments.  The values supplied to these callables have already been reduced
 # to plain data by ``_safe_constructor_arg``; callbacks and object attributes
@@ -969,6 +982,27 @@ Standard Python builtins and agent instance (`self`) are available."""
                 if response is None:
                     continue
 
+                # Output-limit responses are incomplete even when they carry
+                # partial text. Preserve non-empty text in its LLMOutput for
+                # diagnostics, but never let a text-only handler accept it as
+                # a successful result.
+                if response.finish_reason == "length":
+                    session.record_error()
+                    if not response.content and not response.tool_calls:
+                        get_harness_metrics().empty_response()
+                        runtime.event_manager.remove(event_id)
+                    runtime.event_manager.add(
+                        DebugTrace(
+                            content=f"Truncated response: {_response_debug_details(response)}"
+                        )
+                    )
+                    turn_state.is_final = True
+                    raise GenerationError(
+                        "The model used all available output tokens before completing "
+                        "a tool call. Increase `max_tokens` (16384 or more is often "
+                        "needed for reasoning models such as GPT-5.5 and o-series)."
+                    )
+
                 # ── Post-response cleanup (CodeAct) ──────────────────────
                 # Intercept point: strategy-specific response transforms.
                 # Handles text-only→synthetic, comment prepend, tool call
@@ -1058,7 +1092,12 @@ Standard Python builtins and agent instance (`self`) are available."""
 
                     if action.kind == "return_result":
                         session.record_iteration()
-                        get_harness_metrics().stop_to_return_result(action.value)
+                        # This metric stores a bounded text preview. Arbitrary
+                        # callback result values still take the normal
+                        # validation path without being stringified by
+                        # telemetry or passed to its string-only API.
+                        result_preview = action.value if isinstance(action.value, str) else None
+                        get_harness_metrics().stop_to_return_result(result_preview)
                         validated, validation_error = self._handle_return_result(
                             runtime,
                             {"result": action.value},
@@ -1116,33 +1155,11 @@ Standard Python builtins and agent instance (`self`) are available."""
                 get_harness_metrics().empty_response()
                 session.record_error()
                 # Capture raw LLM response for debugging before removing the event
-                _debug_parts = [
-                    f"finish_reason={response.finish_reason!r}",
-                    f"content={response.content!r}",
-                    f"tool_calls={response.tool_calls!r}",
-                ]
-                raw = getattr(response, "raw_response", None)
-                if raw is not None:
-                    output = getattr(raw, "output", None)
-                    if output is not None:
-                        _debug_parts.append(f"raw_response.output={output!r}")
                 runtime.event_manager.add(
-                    DebugTrace(content=f"Empty response: {'; '.join(_debug_parts)}")
+                    DebugTrace(content=f"Empty response: {_response_debug_details(response)}")
                 )
                 # Remove the empty assistant event - APIs reject empty content
                 runtime.event_manager.remove(event_id)
-                # Reasoning models that exhaust max_tokens produce empty output.
-                # Retrying won't help — abort immediately with an actionable message.
-                if response.finish_reason == "length":
-                    turn_state.is_final = True
-                    raise GenerationError(
-                        "Empty response: the model used all available output tokens "
-                        "on reasoning and had none left for a tool call. "
-                        "This typically means `max_tokens` is too low for a "
-                        "reasoning model (e.g. GPT-5.5, o-series). "
-                        "Increase `max_tokens` in the model config "
-                        "(16384+ recommended for reasoning models)."
-                    )
                 feedback = await self._tool_use_reminder(runtime, reason="Empty response received.")
                 runtime.event_manager.add(Error(content=feedback))
 

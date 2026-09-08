@@ -1338,12 +1338,8 @@ class TestCodeActStrategyEventSequence:
         assert tool_call_events == []
 
     @pytest.mark.asyncio
-    async def test_text_only_whitespace_response_treated_as_empty(self):
-        """Whitespace-only text response (no tool calls) is treated as empty, not synthetic.
-
-        "   " is truthy but str.strip() is falsy, so it should fall through to the
-        empty-response error handler rather than creating a synthetic comment.
-        """
+    async def test_text_only_whitespace_response_uses_default_retry(self):
+        """Whitespace-only stop output uses text-only recovery without synthetic calls."""
         from nooa.errors import GenerationError
 
         class TestAgent(Agent, llm=_TEST_LLM):

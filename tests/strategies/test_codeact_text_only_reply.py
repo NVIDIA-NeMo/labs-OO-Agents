@@ -18,6 +18,7 @@ from nooa.context_blocks import ToolCallEvent
 from nooa.errors import GenerationError
 from nooa.events import LLMOutput, PythonOutput, TextOnlyReply
 from nooa.runtime.event_manager import EventManager
+from nooa.runtime.harness_metrics import HarnessMetrics
 from nooa.storage import SQLiteStorageManager
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
@@ -195,6 +196,26 @@ async def test_async_callback_is_supported():
 
     agent = TestAgent(llm=FakeLLMClient(scripted_responses=[_resp("done")]))
     assert await agent.my_task() == "DONE"
+
+
+@pytest.mark.asyncio
+async def test_callback_can_return_non_string_result(monkeypatch):
+    def return_integer(context):
+        return TextOnlyResponseAction.return_result(42)
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        @strategy(CodeActStrategy(on_text_only=return_integer))
+        async def my_task(self) -> int:
+            """Return an integer."""
+            ...
+
+    metrics = HarnessMetrics()
+    monkeypatch.setattr("nooa.strategies.codeact.get_harness_metrics", lambda: metrics)
+    agent = TestAgent(llm=FakeLLMClient(scripted_responses=[_resp("forty-two")]))
+
+    assert await agent.my_task() == 42
+    assert metrics.stop_to_return_result_count == 1
+    assert metrics.stop_to_return_result_previews == []
 
 
 @pytest.mark.asyncio

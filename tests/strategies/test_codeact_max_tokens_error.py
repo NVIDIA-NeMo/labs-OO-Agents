@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from nooa import Agent, strategy
+from nooa import Agent, return_text_as_result, strategy
 from nooa.config import CodeActConfig
 from nooa.errors import GenerationError
 from nooa.strategies.codeact import CodeActStrategy
@@ -67,6 +67,33 @@ class TestMaxTokensExhaustedError:
         assert len(max_tokens_errors) == 0, (
             f"max_tokens error should not be an Error event (LLM-visible), got: {max_tokens_errors}"
         )
+
+    @pytest.mark.asyncio
+    async def test_finish_reason_length_does_not_return_partial_text(self):
+        """A text-only handler cannot accept output truncated at max_tokens."""
+
+        class TestAgent(Agent, llm=_TEST_LLM):
+            @strategy(CodeActStrategy(on_text_only=return_text_as_result))
+            async def my_task(self) -> str:
+                """A task."""
+                ...
+
+        agent_instance = TestAgent(
+            llm=FakeLLMClient(
+                scripted_responses=[
+                    _resp("truncated partial", finish_reason="length"),
+                ]
+            )
+        )
+
+        with pytest.raises(GenerationError, match="max_tokens"):
+            await agent_instance.my_task()
+
+        events = agent_instance.event_manager.values()
+        assert [event.content for event in events if event.event_type == "LLMOutput"] == [
+            "truncated partial"
+        ]
+        assert not any(event.event_type == "TextOnlyReply" for event in events)
 
     @pytest.mark.asyncio
     async def test_empty_response_without_length_retries_normally(self):
