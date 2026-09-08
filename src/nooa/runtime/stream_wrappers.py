@@ -4,8 +4,40 @@
 
 import contextvars
 import io
+import sys
+import warnings
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, TextIO
+
+# Captured before pytest's warning-capture plugin can replace it; used as the
+# fallback when a caller passes an explicit `file=`.
+_default_showwarning = warnings.showwarning
+
+
+def _capturing_showwarning(
+    message: Warning | str,
+    category: type[Warning],
+    filename: str,
+    lineno: int,
+    file: TextIO | None = None,
+    line: str | None = None,
+) -> None:
+    """Route warnings.warn() through sys.stderr so ContextVarStream captures it."""
+    if file is not None:
+        _default_showwarning(message, category, filename, lineno, file, line)
+        return
+    text = warnings.formatwarning(message, category, filename, lineno, line)
+    sys.stderr.write(text)
+
+
+def install_warnings_capture() -> None:
+    """(Re-)install the warnings.warn() -> sys.stderr redirect.
+
+    pytest resets warnings.showwarning around every test, so this must be
+    called before each code execution rather than once at import time.
+    """
+    warnings.showwarning = _capturing_showwarning
+
 
 # Task-local flag to block stdin reads (prevents hangs from input(), sys.stdin.read(), etc.)
 # When True for the current async task, any stdin read raises RuntimeError

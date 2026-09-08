@@ -1496,6 +1496,19 @@ TestAgent.process = _make_method()
             with pytest.raises(ValidationError, match="[Cc]annot assign to class"):
                 validator.validate(code, context)
 
+        def test_reject_class_assignment_after_conditional_shadow(
+            self, validator: UnifiedCodeValidator, agent_context
+        ):
+            """A reassignment inside a branch that may not run must not bypass detection."""
+            context, _ = agent_context
+            code = """
+if False:
+    TestAgent = {}
+TestAgent.process = lambda self: None
+"""
+            with pytest.raises(ValidationError, match="[Cc]annot assign to class"):
+                validator.validate(code, context)
+
         def test_reject_annotated_class_assignment(
             self, validator: UnifiedCodeValidator, agent_context
         ):
@@ -1577,11 +1590,20 @@ TestAgent.process = _make_method()
             """Local variable shadowing class name is allowed if assigned first."""
             context, _ = agent_context
             # This creates a local variable, then assigns to it
-            # The validator should ideally track this, but for now
-            # we test that simple local var assignment works
             code = """
 result = {}
 result.value = 42
+"""
+            validator.validate(code, context)  # Should NOT raise
+
+        def test_allow_attribute_assign_after_shadowing_class_name(
+            self, validator: UnifiedCodeValidator, agent_context
+        ):
+            """A top-level reassignment of a class name shadows it for later code."""
+            context, _ = agent_context
+            code = """
+TestAgent = {}
+TestAgent.value = 42
 """
             validator.validate(code, context)  # Should NOT raise
 
@@ -1763,30 +1785,14 @@ setattr(type(agent), 'process', lambda self: None)
         def test_no_false_positive_local_var_same_name_as_class(
             self, validator: UnifiedCodeValidator, agent_context
         ):
-            """Local variable with same name as class should be allowed AFTER reassignment.
-
-            Edge case: If LLM creates a local variable that shadows a class name,
-            subsequent assignments to that variable should be allowed.
-
-            Note: This is tricky - we can't do full data flow analysis in AST validation.
-            Current behavior: We reject this as a false positive because we can't
-            distinguish between the class and a local variable with the same name.
-            """
+            """Local variable with same name as class is allowed AFTER reassignment."""
             context, TestAgent = agent_context
 
-            # This creates a local variable shadowing the class name
-            # Ideally this should be allowed, but we can't distinguish it from class
             code = """
 TestAgent = {"mock": True}  # Local var shadows class
-TestAgent.method = lambda: None  # Assignment to local... but looks like class
+TestAgent.method = lambda: None  # Assignment to the local dict, not the class
 """
-            # Current behavior: This IS rejected (false positive)
-            # This is acceptable because:
-            # 1. Shadowing class names is bad practice
-            # 2. LLM shouldn't be doing this anyway
-            # 3. Better to be safe than sorry
-            with pytest.raises(ValidationError, match="[Cc]annot assign to class"):
-                validator.validate(code, context)
+            validator.validate(code, context)  # Should NOT raise
 
         def test_allow_method_call_that_looks_like_assignment(
             self, validator: UnifiedCodeValidator, agent_context

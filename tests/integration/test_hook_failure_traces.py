@@ -13,10 +13,12 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from opentelemetry.trace import StatusCode
 
 from nooa import Agent
 from nooa.runtime.hooks import call_before_hook, set_hooks
 from nooa.tracing._hooks_impl import OpenInferenceHooks
+from nooa.unifiedllm import FakeLLMClient
 
 
 class SimpleAgent(Agent):
@@ -159,8 +161,57 @@ async def test_concurrent_hook_failures_cause_missing_traces(temp_trace_dir):
 async def test_with_fix_all_samples_traced(temp_trace_dir):
     """After the fix, even failed hooks should result in some trace record.
 
-    This test will FAIL until the fix is applied.
+    Drives real SimpleAgent.process() calls with a hooks implementation whose
+    before_agent_call raises for half the calls. Every call - failed or not -
+    must still produce a "method.process" span.
     """
-    # TODO: This test should pass after the fix is applied
-    # For now, it demonstrates what we want to achieve
-    pass
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    from nooa.tracing._hooks_impl import OpenInferenceHooks
+
+    exporter = InMemorySpanExporter()
+    provider = trace.get_tracer_provider()
+    if not hasattr(provider, "add_span_processor"):
+        provider = TracerProvider()
+        trace.set_tracer_provider(provider)
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+    class FlakyHooks(OpenInferenceHooks):
+        """Real OpenInferenceHooks, but before_agent_call raises on some calls."""
+
+        def __init__(self, tracer, fail_indices: set[int]):
+            super().__init__(tracer)
+            self.fail_indices = fail_indices
+            self.call_count = 0
+
+        def before_agent_call(self, **kwargs):
+            self.call_count += 1
+            if self.call_count in self.fail_indices:
+                raise ValueError(f"Simulated hook failure for call {self.call_count}")
+            return super().before_agent_call(**kwargs)
+
+    tracer = provider.get_tracer("test-hook-failure-traces")
+    set_hooks(FlakyHooks(tracer, fail_indices={6, 7, 8, 9, 10}))
+
+    try:
+        agent = SimpleAgent(llm=FakeLLMClient())
+        results = await asyncio.gather(*[agent.process(i) for i in range(1, 11)])
+        assert len(results) == 10
+
+        method_spans = [s for s in exporter.get_finished_spans() if s.name == "method.process"]
+        assert len(method_spans) == 10, (
+            f"Expected 10 traced calls (5 successful + 5 hook-failure fallback "
+            f"spans), got {len(method_spans)}"
+        )
+
+        ok_spans = [s for s in method_spans if s.status.status_code == StatusCode.OK]
+        error_spans = [s for s in method_spans if s.status.status_code == StatusCode.ERROR]
+        assert len(ok_spans) == 5
+        assert len(error_spans) == 5
+    finally:
+        set_hooks(None)
