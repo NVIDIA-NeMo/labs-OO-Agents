@@ -4576,6 +4576,7 @@ def test_grapheme_paint_plan_replays_identical_screen() -> None:
     write_position = WritePosition(xpos=0, ypos=0, width=width, height=height)
 
     def paint_derive() -> tuple[Screen, object, object]:
+        """Paint via the derive path and return (screen, visible, coordinates)."""
         screen = Screen()
         visible, coordinates = window._copy_body_derive(content, screen, write_position, 0, width)
         return screen, visible, coordinates
@@ -4591,6 +4592,7 @@ def test_grapheme_paint_plan_replays_identical_screen() -> None:
     )
 
     def dump(screen: Screen) -> tuple[list[str], list[list[tuple[int, str, str, int]]]]:
+        """Serialize rows, per-cell tuples, and zero-width escapes for equality checks."""
         rows = []
         cells = []
         for y in range(write_position.height):
