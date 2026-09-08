@@ -29,4 +29,4 @@ Results are written to `results/<baseline>_vs_<candidate>/` with a manifest, rep
 
 ## Results
 
-Pending the committed experiment run.
+The final implementation passed against upstream `main`; see [REPORT.md](REPORT.md).
