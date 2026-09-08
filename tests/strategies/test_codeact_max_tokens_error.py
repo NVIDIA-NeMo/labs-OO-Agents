@@ -3,12 +3,14 @@
 """Test that empty response with finish_reason='length' raises immediately with an actionable message."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from nooa import Agent, return_text_as_result, strategy
 from nooa.config import CodeActConfig
 from nooa.errors import GenerationError
+from nooa.events import DebugTrace
 from nooa.strategies.codeact import CodeActStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
@@ -94,6 +96,39 @@ class TestMaxTokensExhaustedError:
             "truncated partial"
         ]
         assert not any(event.event_type == "TextOnlyReply" for event in events)
+
+    @pytest.mark.asyncio
+    async def test_truncation_diagnostics_do_not_persist_provider_output(self):
+        """Debug metadata records output shape without opaque provider payloads."""
+
+        class TestAgent(Agent, llm=_TEST_LLM):
+            @strategy(CodeActStrategy())
+            async def my_task(self) -> str:
+                """A task."""
+                ...
+
+        response = _resp("partial", finish_reason="length")
+        response.raw_response = SimpleNamespace(
+            output=[
+                {
+                    "type": "reasoning",
+                    "encrypted_content": "must-never-enter-debug-events",
+                },
+                {"type": "message", "content": []},
+            ]
+        )
+        agent_instance = TestAgent(llm=FakeLLMClient(scripted_responses=[response]))
+
+        with pytest.raises(GenerationError, match="max_tokens"):
+            await agent_instance.my_task()
+
+        debug = next(
+            event.content
+            for event in agent_instance.event_manager.values()
+            if isinstance(event, DebugTrace)
+        )
+        assert "must-never-enter-debug-events" not in debug
+        assert "raw_response.output_count=2; output_types=['reasoning', 'message']" in debug
 
     @pytest.mark.asyncio
     async def test_empty_response_without_length_retries_normally(self):

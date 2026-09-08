@@ -175,7 +175,14 @@ def _response_debug_details(response: LLMResponse) -> str:
     ]
     raw = getattr(response, "raw_response", None)
     if raw is not None and (output := getattr(raw, "output", None)) is not None:
-        parts.append(f"raw_response.output={output!r}")
+        if isinstance(output, (list, tuple)):
+            item_types = [
+                item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+                for item in output
+            ]
+            parts.append(f"raw_response.output_count={len(output)}; output_types={item_types!r}")
+        else:
+            parts.append(f"raw_response.output_type={type(output).__name__!r}")
     return "; ".join(parts)
 
 
