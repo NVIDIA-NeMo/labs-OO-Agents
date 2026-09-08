@@ -41,26 +41,8 @@ class CodeActConfig(BaseModel):
     max_retries: int = 3
     # Maximum consecutive turns where the LLM returns plain text instead of a
     # tool call before the run is aborted. A real tool call resets the counter.
-    # Set to 0 to disable the guard (legacy behavior). See also
-    # text_only_stop_behavior for how each text-only response is handled.
+    # Set to 0 to disable the guard.
     max_consecutive_text_only: int = 3
-    # How to handle finish_reason="stop" (text-only, no tool call) responses:
-    # - "return_result": Route through return_result(content) validation. If the
-    #   return type matches, the session terminates cleanly. If not, the LLM gets
-    #   an actionable validation error to self-correct. (Recommended — breaks
-    #   loops faster and often terminates successfully.)
-    # - "synthetic_comment": Convert to an execute_python call whose code is the
-    #   text as a `#` comment — a no-op synthetic call that preserves the text
-    #   in traces. The LLM sees "status: complete" and must still call
-    #   return_result() explicitly.
-    text_only_stop_behavior: Literal["return_result", "synthetic_comment"] = "return_result"
-
-    @field_validator("text_only_stop_behavior", mode="before")
-    @classmethod
-    def _migrate_synthetic_reasoning(cls, v: str) -> str:
-        if v == "synthetic_reasoning":
-            return "synthetic_comment"
-        return v
 
     cell_timeout: float | None = None
     max_tokens: int | None = None

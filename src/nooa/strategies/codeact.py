@@ -21,13 +21,14 @@ import inspect
 import json
 import logging
 import types
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import (
     TYPE_CHECKING,
     Annotated,
     Any,
+    Literal,
     get_args,
     get_origin,
 )
@@ -37,7 +38,7 @@ from pydantic import BaseModel, create_model
 from pydantic import ValidationError as PydanticValidationError
 
 from nooa.agentdoc._structured import format_type as _format_type
-from nooa.context_blocks import DynamicContext, ResultStatus, ToolCallEvent, ToolResult
+from nooa.context_blocks import DynamicContext, EventBase, ResultStatus, ToolCallEvent, ToolResult
 from nooa.context_blocks.exceptions import BlockSyntaxError
 from nooa.decorators import strategy
 from nooa.errors import GenerationError
@@ -68,7 +69,7 @@ from nooa.strategy_validation import (
     run_postconditions,
     run_preconditions,
 )
-from nooa.unifiedllm import Tool, ToolCall
+from nooa.unifiedllm import LLMResponse, Tool, ToolCall
 
 if TYPE_CHECKING:
     from nooa.config.strategy_config import CodeActConfig
@@ -79,11 +80,88 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class TextOnlyResponseContext:
+    """The untouched model turn passed to a CodeAct text-only handler."""
+
+    response: LLMResponse
+    content: str
+    call: "CurrentCall"
+    return_type: Any
+
+
+@dataclass(frozen=True)
+class TextOnlyResponseAction:
+    """What CodeAct should do after preserving a text-only model turn."""
+
+    kind: Literal["return_result", "retry", "tool_calls"]
+    value: Any = None
+    events: tuple[EventBase, ...] = ()
+    calls: tuple[ToolCall, ...] = ()
+
+    @classmethod
+    def return_result(cls, value: Any) -> "TextOnlyResponseAction":
+        """Validate *value* using CodeAct's normal return-result path."""
+        return cls(kind="return_result", value=value)
+
+    @classmethod
+    def retry(cls, *events: EventBase) -> "TextOnlyResponseAction":
+        """Append model-visible feedback events, then ask the model again."""
+        return cls(kind="retry", events=events)
+
+    @classmethod
+    def tool_calls(cls, *calls: ToolCall) -> "TextOnlyResponseAction":
+        """Process synthetic tool calls while retaining the original model turn."""
+        if not calls:
+            raise ValueError("TextOnlyResponseAction.tool_calls() needs at least one call")
+        return cls(kind="tool_calls", calls=calls)
+
+
+type TextOnlyResponseHandler = Callable[
+    [TextOnlyResponseContext],
+    TextOnlyResponseAction | Awaitable[TextOnlyResponseAction],
+]
+
+
+def return_text_as_result(context: TextOnlyResponseContext) -> TextOnlyResponseAction:
+    """Opt-in handler: submit non-empty text (or ``None``) as the result."""
+    value = context.content if context.content.strip() else None
+    return TextOnlyResponseAction.return_result(value)
+
+
+def retry_text_only_response(context: TextOnlyResponseContext) -> TextOnlyResponseAction:
+    """Built-in handler that tells the model to use a CodeAct tool."""
+    return TextOnlyResponseAction.retry(_text_only_correction(context))
+
+
+def _text_only_correction(
+    context: TextOnlyResponseContext,
+    validation_error: str | None = None,
+) -> Error:
+    validation_feedback = (
+        f"\n\nThe attempted result was invalid:\n{validation_error}" if validation_error else ""
+    )
+    return Error(
+        content=(
+            "Your last reply was plain text with no tool call. It was preserved, "
+            "but a bare message cannot end the turn or run code. "
+            f"To finish `{context.call.method_name}`, call `return_result(value)`. "
+            "To do more work, call `execute_python(code)`. "
+            "Re-issue your response now as one of those tool calls."
+            f"{validation_feedback}"
+        )
+    )
+
+
+def _handler_name(handler: TextOnlyResponseHandler) -> str:
+    return getattr(handler, "__qualname__", type(handler).__qualname__)
+
+
 # Small, deterministic expression subset accepted inside constructor-string
 # arguments.  The values supplied to these callables have already been reduced
 # to plain data by ``_safe_constructor_arg``; callbacks and object attributes
 # therefore cannot cross into this compatibility path.
-_SAFE_CONSTRUCTOR_CALLS = {
+_SAFE_CONSTRUCTOR_CALLS: dict[str, Callable[..., Any]] = {
     "abs": abs,
     "all": all,
     "any": any,
@@ -325,6 +403,7 @@ class CodeActStrategy(CompositeStrategy):
         config: "CodeActConfig | None" = None,
         *,
         error_formatter: "ErrorFormatter | None" = None,
+        on_text_only: TextOnlyResponseHandler = retry_text_only_response,
     ):
         """Initialize CodeAct strategy.
 
@@ -334,6 +413,9 @@ class CodeActStrategy(CompositeStrategy):
             error_formatter: Custom error formatter for LLM feedback. It must implement
                 ``format(error, code=None, *, line_offset=0, max_error=None,
                 tail_chars=None)``.
+            on_text_only: Callback that chooses how to recover when the model
+                returns text without a tool call. The default appends an Error
+                asking the model to use ``execute_python`` or ``return_result``.
 
         Note:
             Prefill is always enabled and uses InspectInputsPrefill internally.
@@ -342,6 +424,7 @@ class CodeActStrategy(CompositeStrategy):
 
         self.config = config or _CC()
         self.error_formatter = error_formatter
+        self.on_text_only = on_text_only
 
     def _build_sampling_kwargs(self) -> dict[str, Any]:
         """Build sampling kwargs for llm calls, excluding None values."""
@@ -629,47 +712,6 @@ Standard Python builtins and agent instance (`self`) are available."""
         """{reason} Use `execute_python(code)` to run code, or `return_result(...)` to submit your answer."""
         ...
 
-    @staticmethod
-    def _add_text_only_correction(runtime: RuntimeServices, call: "CurrentCall") -> None:
-        """Add a model-visible correction after a text-only turn.
-
-        Mirrors PredictStrategy's validation-retry feedback (``Error``,
-        ``Role.USER``): instead of silently dropping the turn, tell the model
-        what it did and what to do, so it self-corrects on the next turn. The
-        consecutive-text-only backstop still aborts after repeated text-only replies.
-        """
-        runtime.event_manager.add(
-            Error(
-                content=(
-                    f"Your last reply was plain text with no tool call, so it was "
-                    f"dropped — a bare message cannot end the turn or run code. "
-                    f"To finish `{call.method_name}`, call `return_result(value)`. "
-                    f"To do more work, call `execute_python(code)`. "
-                    f"Re-issue your response now as one of those tool calls."
-                )
-            )
-        )
-
-    @staticmethod
-    def _mark_text_only_recovered(runtime: RuntimeServices) -> None:
-        """Flip the most recent unrecovered ``TextOnlyReply`` to recovered=True.
-
-        Called when a real tool call lands after one or more text-only replies —
-        the correction worked. Lets capture/replay distinguish benign,
-        self-corrected replies from ones that needed an abort.
-        """
-        # Flip every unrecovered text-only reply since the last real progress,
-        # not just the most recent — multiple consecutive ones can precede a
-        # single tool call, and all were rescued by it. Stop at the first
-        # already-recovered one (older runs are already resolved).
-        for tag in reversed(runtime.event_manager.keys()):
-            event = runtime.event_manager.get(tag)
-            if not isinstance(event, TextOnlyReply):
-                continue
-            if event.recovered:
-                break
-            runtime.event_manager.update(tag, recovered=True)
-
     @strategy(TemplateStrategy())
     async def _build_task_message(
         self, runtime: RuntimeServices, original_call: "CurrentCall"
@@ -936,8 +978,6 @@ Standard Python builtins and agent instance (`self`) are available."""
                     # A real tool call counts as progress: reset the consecutive
                     # text-only guard (issue 185) before executing, so a single
                     # exec mid-stream rescues the run from accidental drift.
-                    if session.consecutive_text_only > 0:
-                        self._mark_text_only_recovered(runtime)
                     session.reset_text_only()
                     result = await self._process_tool_calls(
                         tool_calls,
@@ -957,7 +997,6 @@ Standard Python builtins and agent instance (`self`) are available."""
                     continue
 
                 # ── Text-only response (no tool call) ──────────────────────
-                # Normalize content for both branches below.
                 _raw_content = response.content
                 _text = (
                     _raw_content.model_dump_json()
@@ -968,136 +1007,80 @@ Standard Python builtins and agent instance (`self`) are available."""
                 )
                 _has_text = bool(_text.strip())
 
-                # Route A: "return_result" mode — treat stop as a done signal
-                # and route through return_result() validation. Handles both
-                # stop+content and stop+no-content in one branch.
-                if (
-                    response.finish_reason == "stop"
-                    and self.config.text_only_stop_behavior == "return_result"
-                    and (_has_text or not _raw_content)
-                ):
-                    session.record_iteration()
-                    # Capture the drift faithfully for /bug + replay (recorded but
-                    # Role.METADATA, so it never reaches the model). Replaces the
-                    # old lossy DebugTrace; preserves the verbatim content (even
-                    # when empty) before the offending event is removed.
-                    drift_tag = runtime.event_manager.add(
+                if _has_text or response.finish_reason == "stop":
+                    context = TextOnlyResponseContext(
+                        response=response,
+                        content=_text,
+                        call=call,
+                        return_type=return_type,
+                    )
+                    action = self.on_text_only(context)
+                    if inspect.isawaitable(action):
+                        action = await action
+                    if not isinstance(action, TextOnlyResponseAction):
+                        raise TypeError(
+                            "CodeAct on_text_only must return TextOnlyResponseAction, "
+                            f"got {type(action).__name__}"
+                        )
+
+                    # Capture the drift faithfully for /bug reports. The original
+                    # LLMOutput remains the assistant turn; the handler may only
+                    # append recovery events after it.
+                    runtime.event_manager.add(
                         TextOnlyReply(
                             content=_text,
                             finish_reason=str(response.finish_reason),
-                            route="return_result",
+                            handler=_handler_name(self.on_text_only),
+                            action=action.kind,
                             consecutive_text_only=session.consecutive_text_only + 1,
                         )
                     )
-                    runtime.event_manager.remove(event_id)
-                    synthetic_id = f"synthetic_{uuid4().hex[:8]}"
-                    result_value = _text if _has_text else None
-                    synthetic_tool_call = ToolCall(
-                        id=synthetic_id,
-                        name="return_result",
-                        arguments=json.dumps({"result": result_value}),
-                    )
-                    get_harness_metrics().stop_to_return_result(result_value)
-                    logger.info(
-                        f"[CODEACT] finish_reason='stop' "
-                        f"({'content=' + str(len(_text)) + ' chars' if _has_text else 'no content'}) "
-                        f"→ synthetic return_result(). Routing through validation."
-                    )
-                    result = await self._process_tool_calls(
-                        [synthetic_tool_call],
-                        runtime,
-                        builtins,
-                        session,
-                        call,
-                        return_type,
-                        event_id or "",
-                    )
-                    if result.completed:
-                        # Recovered via the synthetic return_result — the drift was
-                        # benign. Mark it so capture/replay can distinguish recovered
-                        # drifts from ones that needed a correction.
-                        runtime.event_manager.update(drift_tag, recovered=True)
-                        turn_state.success = True
-                        turn_state.is_final = True
-                        self._sync_session_locals(call, session)
-                        return result.final_value
-                    # Validation failed — give the model a visible correction (the
-                    # PredictStrategy pattern: a Role.USER event it sees on the next
-                    # turn) instead of silently dropping the turn, then continue.
-                    # The abort below is only a backstop for repeated non-compliance.
+
+                    if action.kind == "return_result":
+                        session.record_iteration()
+                        get_harness_metrics().stop_to_return_result(action.value)
+                        validated, validation_error = self._handle_return_result(
+                            runtime,
+                            {"result": action.value},
+                            return_type,
+                            session,
+                            call,
+                        )
+                        if validation_error is None:
+                            turn_state.success = True
+                            turn_state.is_final = True
+                            self._sync_session_locals(call, session)
+                            return validated
+                        runtime.event_manager.add(_text_only_correction(context, validation_error))
+                    elif action.kind == "retry":
+                        session.record_iteration()
+                        for feedback_event in action.events:
+                            runtime.event_manager.add(feedback_event)
+                    elif action.kind == "tool_calls":
+                        get_harness_metrics().text_to_synthetic()
+                        result = await self._process_tool_calls(
+                            list(action.calls),
+                            runtime,
+                            builtins,
+                            session,
+                            call,
+                            return_type,
+                            event_id or "",
+                            preserve_llm_output=True,
+                        )
+                        if result.completed:
+                            turn_state.success = True
+                            turn_state.is_final = True
+                            self._sync_session_locals(call, session)
+                            return result.final_value
+                    else:
+                        raise ValueError(f"Unknown text-only action: {action.kind!r}")
+
                     session.record_text_only()
-                    self._add_text_only_correction(runtime, call)
                     max_text_only = self.config.max_consecutive_text_only
                     if max_text_only > 0 and session.consecutive_text_only >= max_text_only:
                         get_harness_metrics().text_only_loop_abort()
                         preview = _text if _has_text else "(empty)"
-                        turn_state.is_final = True
-                        raise GenerationError(
-                            f"CodeAct aborted: LLM returned plain text without a tool call "
-                            f"{session.consecutive_text_only} times in a row "
-                            f"(max_consecutive_text_only={max_text_only}) for "
-                            f"`{call.method_name}`. The agent likely thinks it is done — "
-                            f"it must call `return_result(...)` to finish. "
-                            f"Last text: {preview!r}"
-                        )
-
-                    continue
-
-                # Route B: "synthetic_comment" mode — convert text to a no-op
-                # execute_python comment that preserves content in traces.
-                elif _has_text:
-                    session.record_iteration()
-                    execution_count = session.record_execution()
-                    # Capture the drift faithfully for /bug + replay (recorded but
-                    # Role.METADATA, never shown to the model). Replaces the old
-                    # lossy DebugTrace.
-                    runtime.event_manager.add(
-                        TextOnlyReply(
-                            content=_text,
-                            finish_reason=str(response.finish_reason),
-                            route="synthetic_comment",
-                            consecutive_text_only=session.consecutive_text_only + 1,
-                        )
-                    )
-                    runtime.event_manager.remove(event_id)
-                    synthetic_id = f"synthetic_{uuid4().hex[:8]}"
-                    runtime.event_manager.add(
-                        ToolCallEvent(
-                            tool_call_id=synthetic_id,
-                            name="execute_python",
-                            arguments={"code": _as_comment(_text)},
-                            result=ToolResult(
-                                tool_call_id=synthetic_id,
-                                content="status: commentary only — task is NOT finished. You must call return_result() to complete.",
-                                result_status=ResultStatus.COMPLETE,
-                            ),
-                            metadata={"synthetic": True, "synthetic_type": "text_response"},
-                        )
-                    )
-                    runtime.event_manager.add(
-                        PythonOutput(
-                            tool_call_id=synthetic_id,
-                            execution_count=execution_count,
-                            execution_status=ResultStatus.COMPLETE,
-                            metadata={"synthetic": True, "synthetic_type": "text_response"},
-                        )
-                    )
-                    get_harness_metrics().text_to_synthetic()
-                    logger.debug(
-                        f"[CODEACT] Text-only response ({len(_text)} chars) "
-                        f"converted to synthetic comment."
-                    )
-                    # No extra Error correction here: Route B already injects a
-                    # synthetic execute_python comment whose ToolResult tells
-                    # the model the task isn't finished. Adding a "your reply had no
-                    # tool call" Error would contradict that synthetic tool call and
-                    # confuse the model. The backstop below still aborts on repeated
-                    # non-compliance.
-                    session.record_text_only()
-                    max_text_only = self.config.max_consecutive_text_only
-                    if max_text_only > 0 and session.consecutive_text_only >= max_text_only:
-                        get_harness_metrics().text_only_loop_abort()
-                        preview = _text
                         turn_state.is_final = True
                         raise GenerationError(
                             f"CodeAct aborted: LLM returned plain text without a tool call "
@@ -1225,11 +1208,16 @@ Standard Python builtins and agent instance (`self`) are available."""
         return_type: Any,
         event_id: str,
         reasoning_items: list[dict[str, Any]] | None = None,
+        preserve_llm_output: bool = False,
     ) -> _ToolCallsResult:
         """Process tool calls from a single LLM turn.
 
         Executes tool calls sequentially, stopping at the first error.
         Returns a _ToolCallsResult indicating whether the task completed.
+
+        ``preserve_llm_output`` is used only for tool calls synthesized by a
+        text-only response handler. Real provider tool calls replace the empty
+        LLMOutput with their ToolCallEvent representation as before.
         """
         # Handle tool calls - process ALL tool calls sequentially
         # Some LLMs return multiple tool calls in one response even when
@@ -1237,9 +1225,10 @@ Standard Python builtins and agent instance (`self`) are available."""
         # cell's output available to subsequent cells via session_locals.
         session.record_iteration()
 
-        # Remove the empty LLMOutput that runtime.generate() created
-        # and replace it with a proper ToolCallEvent that includes tool_calls
-        runtime.event_manager.remove(event_id)
+        if not preserve_llm_output:
+            # Replace the empty LLMOutput created by runtime.generate() with the
+            # provider's actual ToolCallEvent representation.
+            runtime.event_manager.remove(event_id)
 
         num_tool_calls = len(tool_calls)
         if num_tool_calls > 1:
@@ -1298,7 +1287,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # Return the final result
                 try:
                     validated, error_msg = self._handle_return_result(
-                        runtime, tool_call, args, return_type, session, call
+                        runtime, args, return_type, session, call
                     )
                 except GenerationError:
                     # _handle_return_result raises GenerationError when validation
@@ -1573,7 +1562,6 @@ Standard Python builtins and agent instance (`self`) are available."""
             try:
                 validated, validation_error = self._handle_return_result(
                     runtime,
-                    tool_call,
                     result.signal.result,  # Extract the result dict from the signal
                     return_type,
                     session,
@@ -1720,7 +1708,6 @@ Standard Python builtins and agent instance (`self`) are available."""
     def _handle_return_result(
         self,
         runtime: RuntimeServices,
-        tool_call: Any,
         args: dict[str, Any],
         return_type: Any,
         session: CodeActSession,
@@ -1787,7 +1774,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # LLM passed direct fields (e.g., sum=100, mean=20)
                 # Wrap them as the result value
                 get_harness_metrics().args_normalized()
-                normalized_args: dict[str, Any] = {"result": args}
+                normalized_args = {"result": args}
             else:
                 # Already has "result" key, use as-is
                 normalized_args = args
@@ -2023,7 +2010,9 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         return value
 
-    def _corrected_return_args(self, validated: Any, original_args: dict) -> dict:
+    def _corrected_return_args(
+        self, validated: Any, original_args: dict[str, Any]
+    ) -> dict[str, Any]:
         """Return corrected tool_call arguments showing correct JSON syntax.
 
         When coercion transformed the result (e.g. from a constructor-call
@@ -2422,7 +2411,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             # Activate doc() adapters for installed libs (pandas, plotly, …) so the
             # rendering is concise rather than the library's full constructor docstring.
             # Idempotent and installed-gated; only runs on this (opaque-type) path.
-            register_all()
+            register_all()  # type: ignore[no-untyped-call]
             rendered = _doc(return_type)
         except Exception:  # noqa: BLE001 — doc() is advisory; never break tool build
             return None

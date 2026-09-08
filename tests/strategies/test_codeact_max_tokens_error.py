@@ -73,14 +73,7 @@ class TestMaxTokensExhaustedError:
         """When empty response has finish_reason != 'length', normal retry logic applies."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(
-                CodeActStrategy(
-                    config=CodeActConfig(
-                        max_retries=2,
-                        text_only_stop_behavior="synthetic_comment",
-                    )
-                )
-            )
+            @strategy(CodeActStrategy(config=CodeActConfig(max_retries=2)))
             async def my_task(self) -> str:
                 """A task."""
                 ...

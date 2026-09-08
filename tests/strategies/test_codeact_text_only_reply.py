@@ -1,23 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for CodeAct text-only-reply capture + PredictStrategy-style recovery.
-
-Covers the fix for the "model returns text instead of a tool call" failure mode:
-- a TextOnlyReply event is recorded (but never shown to the model),
-- a model-visible Error correction is added so the model self-corrects,
-- recovered=True is set when a real tool call follows,
-- the consecutive-text-only backstop still aborts on repeated non-compliance.
-"""
+"""Tests for append-only, extensible CodeAct text-only recovery."""
 
 import json
 
 import pytest
 
-from nooa import Agent, strategy
+from nooa import (
+    Agent,
+    CodeActStrategy,
+    TextOnlyResponseAction,
+    return_text_as_result,
+    strategy,
+)
 from nooa.config import CodeActConfig
+from nooa.context_blocks import ToolCallEvent
 from nooa.errors import GenerationError
-from nooa.events import PythonOutput
-from nooa.strategies.codeact import CodeActStrategy
+from nooa.events import LLMOutput, PythonOutput, TextOnlyReply
+from nooa.runtime.event_manager import EventManager
+from nooa.storage import SQLiteStorageManager
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
 _TEST_LLM = FakeLLMClient()
@@ -35,65 +36,149 @@ def _resp(content="", tool_calls=None, finish_reason=None):
     )
 
 
-def _ret(val, cid="c_ret"):
-    return ToolCall(id=cid, name="return_result", arguments=json.dumps({"result": val}))
+def _ret(value, call_id="c_ret"):
+    return ToolCall(
+        id=call_id,
+        name="return_result",
+        arguments=json.dumps({"result": value}),
+    )
 
 
-def _drifts(agent):
-    return [e for e in agent.event_manager.values() if e.event_type == "TextOnlyReply"]
-
-
-def _errors(agent):
-    return [e for e in agent.event_manager.values() if e.event_type == "Error"]
+def _events(agent, event_type):
+    return [event for event in agent.event_manager.values() if isinstance(event, event_type)]
 
 
 @pytest.mark.asyncio
-async def test_text_only_drift_recorded_and_recovers():
-    """A text-only stop (Route A, non-str return) records a TextOnlyReply, adds a
-    model-visible Error correction, and recovers when a real tool call follows."""
-
+async def test_default_preserves_text_adds_error_and_retries():
     class TestAgent(Agent, llm=_TEST_LLM):
         @strategy(CodeActStrategy(config=CodeActConfig(max_retries=5, max_iterations=10)))
         async def my_task(self) -> dict:
-            """Return a dict — a bare string won't validate, forcing the correction path."""
+            """Return a dict."""
             ...
 
     fake_llm = FakeLLMClient(
         scripted_responses=[
-            _resp("I think the answer is ready."),  # text-only drift (won't validate as dict)
-            _resp(tool_calls=[_ret({"ok": True})]),  # real tool call → recovery
+            _resp("I think the answer is ready."),
+            _resp(tool_calls=[_ret({"ok": True})]),
         ]
     )
     agent = TestAgent(llm=fake_llm)
-    result = await agent.my_task()
-    assert result == {"ok": True}
 
-    drifts = _drifts(agent)
-    assert len(drifts) == 1, f"expected one TextOnlyReply, got {len(drifts)}"
-    d = drifts[0]
-    assert d.route == "return_result"
-    assert d.finish_reason == "stop"
-    assert d.content == "I think the answer is ready."
-    assert d.recovered is True, "drift should be marked recovered after the real tool call"
+    assert await agent.my_task() == {"ok": True}
 
-    # The correction is a model-visible Error event.
-    errs = [e for e in _errors(agent) if "no tool call" in e.content]
-    assert errs, "expected a model-visible Error correction after the drift"
+    outputs = _events(agent, LLMOutput)
+    assert [event.content for event in outputs] == ["I think the answer is ready."]
+
+    diagnostics = _events(agent, TextOnlyReply)
+    assert len(diagnostics) == 1
+    assert diagnostics[0].content == "I think the answer is ready."
+    assert diagnostics[0].finish_reason == "stop"
+    assert diagnostics[0].handler == "retry_text_only_response"
+    assert diagnostics[0].action == "retry"
+
+    corrections = [
+        event
+        for event in agent.event_manager.values()
+        if event.event_type == "Error" and "no tool call" in event.content
+    ]
+    assert len(corrections) == 1
+    events = agent.event_manager.values()
+    assert events.index(outputs[0]) < events.index(corrections[0])
+
+    # The provider sees the exact assistant text followed by user feedback.
+    assert any(
+        message.get("role") == "assistant"
+        and message.get("content") == "I think the answer is ready."
+        for message in fake_llm.last_messages
+    )
+    assert not any(message.get("tool_calls") for message in fake_llm.last_messages)
 
 
 @pytest.mark.asyncio
-async def test_text_only_drift_not_shown_to_model():
-    """TextOnlyReply is Role.METADATA — recorded but never rendered into the prompt."""
-    from nooa.context_blocks.roles import Role
-    from nooa.events import TextOnlyReply
+async def test_return_text_as_result_is_opt_in():
+    class TestAgent(Agent, llm=_TEST_LLM):
+        @strategy(CodeActStrategy(on_text_only=return_text_as_result))
+        async def my_task(self) -> str:
+            """Return a string."""
+            ...
 
-    assert TextOnlyReply._role == Role.METADATA
+    agent = TestAgent(llm=FakeLLMClient(scripted_responses=[_resp("done")]))
+
+    assert await agent.my_task() == "done"
+    assert [event.content for event in _events(agent, LLMOutput)] == ["done"]
+    assert _events(agent, ToolCallEvent) == []
+    diagnostic = _events(agent, TextOnlyReply)[0]
+    assert diagnostic.handler == "return_text_as_result"
+    assert diagnostic.action == "return_result"
 
 
 @pytest.mark.asyncio
-async def test_text_only_backstop_aborts_after_threshold():
-    """Repeated text-only drift (no recovery) still aborts via the backstop."""
+async def test_default_does_not_treat_valid_string_as_result():
+    class TestAgent(Agent, llm=_TEST_LLM):
+        @strategy(CodeActStrategy())
+        async def my_task(self) -> str:
+            """Return a string."""
+            ...
 
+    fake_llm = FakeLLMClient(scripted_responses=[_resp("prose"), _resp(tool_calls=[_ret("done")])])
+    agent = TestAgent(llm=fake_llm)
+
+    assert await agent.my_task() == "done"
+    assert [event.content for event in _events(agent, LLMOutput)] == ["prose"]
+    assert any(event.event_type == "Error" for event in agent.event_manager.values())
+
+
+@pytest.mark.asyncio
+async def test_callback_can_synthesize_execute_python_without_replacing_output():
+    def execute_text(context):
+        return TextOnlyResponseAction.tool_calls(
+            ToolCall(
+                id="synthetic_cell",
+                name="execute_python",
+                arguments=json.dumps({"code": f"print({context.content!r})"}),
+            )
+        )
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        @strategy(CodeActStrategy(on_text_only=execute_text))
+        async def my_task(self) -> str:
+            """Return a string."""
+            ...
+
+    fake_llm = FakeLLMClient(scripted_responses=[_resp("hello"), _resp(tool_calls=[_ret("done")])])
+    agent = TestAgent(llm=fake_llm)
+
+    assert await agent.my_task() == "done"
+    assert [event.content for event in _events(agent, LLMOutput)] == ["hello"]
+    assert [event.tool_call_id for event in _events(agent, ToolCallEvent)] == [
+        "synthetic_cell",
+        "c_ret",
+    ]
+    python_output = _events(agent, PythonOutput)[0]
+    assert python_output.tool_call_id == "synthetic_cell"
+    assert python_output.stdout == "hello\n"
+    diagnostic = _events(agent, TextOnlyReply)[0]
+    assert diagnostic.handler.endswith("execute_text")
+    assert diagnostic.action == "tool_calls"
+
+
+@pytest.mark.asyncio
+async def test_async_callback_is_supported():
+    async def return_text(context):
+        return TextOnlyResponseAction.return_result(context.content.upper())
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        @strategy(CodeActStrategy(on_text_only=return_text))
+        async def my_task(self) -> str:
+            """Return a string."""
+            ...
+
+    agent = TestAgent(llm=FakeLLMClient(scripted_responses=[_resp("done")]))
+    assert await agent.my_task() == "DONE"
+
+
+@pytest.mark.asyncio
+async def test_text_only_backstop_still_aborts():
     class TestAgent(Agent, llm=_TEST_LLM):
         @strategy(
             CodeActStrategy(
@@ -108,124 +193,52 @@ async def test_text_only_backstop_aborts_after_threshold():
             """Return a dict."""
             ...
 
-    fake_llm = FakeLLMClient(scripted_responses=[_resp("still chatting") for _ in range(6)])
-    agent = TestAgent(llm=fake_llm)
+    agent = TestAgent(
+        llm=FakeLLMClient(scripted_responses=[_resp("still chatting") for _ in range(4)])
+    )
     with pytest.raises(GenerationError, match="plain text without a tool call"):
         await agent.my_task()
 
-    # Three drifts recorded, none recovered.
-    drifts = _drifts(agent)
-    assert len(drifts) == 3, f"expected 3 drifts before abort, got {len(drifts)}"
-    assert all(d.recovered is False for d in drifts)
-    # A correction was offered on each drift.
-    assert len([e for e in _errors(agent) if "no tool call" in e.content]) == 3
+    diagnostics = _events(agent, TextOnlyReply)
+    assert len(diagnostics) == 3
+    assert [event.consecutive_text_only for event in diagnostics] == [1, 2, 3]
+
+
+def test_text_only_diagnostic_is_not_model_visible():
+    from nooa.context_blocks.roles import Role
+
+    assert TextOnlyReply._role == Role.METADATA
 
 
 @pytest.mark.asyncio
-async def test_multiple_drifts_all_marked_recovered():
-    """Several consecutive drifts before a real tool call: all flip recovered=True."""
-
+async def test_text_only_output_survives_sqlite_resume(tmp_path):
     class TestAgent(Agent, llm=_TEST_LLM):
-        @strategy(CodeActStrategy(config=CodeActConfig(max_retries=8, max_iterations=12)))
+        @strategy(CodeActStrategy())
         async def my_task(self) -> dict:
             """Return a dict."""
             ...
 
+    db_path = tmp_path / "text-only-recovery.db"
+    storage = SQLiteStorageManager(db_path)
     fake_llm = FakeLLMClient(
         scripted_responses=[
-            _resp("thinking 1"),  # drift 1 (Route A, non-str → correction)
-            _resp("thinking 2"),  # drift 2
-            _resp(tool_calls=[_ret({"ok": True})]),  # recovery
+            _resp("I should have used a tool."),
+            _resp(tool_calls=[_ret({"ok": True})]),
         ]
     )
-    agent = TestAgent(llm=fake_llm)
-    result = await agent.my_task()
-    assert result == {"ok": True}
+    agent = TestAgent(llm=fake_llm, storage=storage)
 
-    drifts = _drifts(agent)
-    assert len(drifts) == 2
-    assert all(d.recovered is True for d in drifts), (
-        "all drifts before the recovering tool call must be marked recovered"
-    )
+    assert await agent.my_task() == {"ok": True}
+    storage.close()
 
-
-@pytest.mark.asyncio
-async def test_route_b_does_not_add_contradictory_correction():
-    """Route B (synthetic_comment) injects its own synthetic tool result, so it must
-    NOT also add a 'no tool call' Error — that would contradict the synthetic call."""
-
-    class TestAgent(Agent, llm=_TEST_LLM):
-        @strategy(
-            CodeActStrategy(
-                config=CodeActConfig(
-                    max_retries=8,
-                    max_iterations=12,
-                    text_only_stop_behavior="synthetic_comment",
-                )
-            )
-        )
-        async def my_task(self) -> str:
-            """Return a string."""
-            ...
-
-    fake_llm = FakeLLMClient(
-        scripted_responses=[
-            _resp("some prose, no tool call"),  # Route B drift
-            _resp(tool_calls=[_ret("done")]),  # recovery
+    reopened = SQLiteStorageManager(db_path)
+    try:
+        resumed = EventManager(backend=reopened.event_backend).values()
+        assert [event.content for event in resumed if isinstance(event, LLMOutput)] == [
+            "I should have used a tool."
         ]
-    )
-    agent = TestAgent(llm=fake_llm)
-    result = await agent.my_task()
-    assert result == "done"
-
-    # Drift recorded and recovered.
-    drifts = _drifts(agent)
-    assert len(drifts) == 1
-    assert drifts[0].route == "synthetic_comment"
-    assert drifts[0].recovered is True
-    # No contradictory "no tool call" Error correction in Route B.
-    assert not [e for e in _errors(agent) if "no tool call" in e.content], (
-        "Route B must not add a corrective Error (it has its own synthetic result)"
-    )
-
-
-@pytest.mark.asyncio
-async def test_route_b_synthetic_comment_does_not_reuse_next_cell_number():
-    """A synthetic comment and the next real cell have distinct execution counts."""
-
-    class TestAgent(Agent, llm=_TEST_LLM):
-        @strategy(
-            CodeActStrategy(
-                config=CodeActConfig(
-                    max_retries=8,
-                    max_iterations=12,
-                    text_only_stop_behavior="synthetic_comment",
-                )
-            )
-        )
-        async def my_task(self) -> str:
-            """Return a string."""
-            ...
-
-    fake_llm = FakeLLMClient(
-        scripted_responses=[
-            _resp("some prose, no tool call"),
-            _resp(
-                tool_calls=[
-                    ToolCall(
-                        id="real_cell",
-                        name="execute_python",
-                        arguments=json.dumps({"code": "'computed'"}),
-                    )
-                ]
-            ),
-            _resp(tool_calls=[_ret("done")]),
-        ]
-    )
-    agent = TestAgent(llm=fake_llm)
-
-    assert await agent.my_task() == "done"
-    outputs = [event for event in agent.event_manager.values() if isinstance(event, PythonOutput)]
-    assert [event.execution_count for event in outputs] == [1, 2]
-    assert outputs[1].tool_call_id == "real_cell"
-    assert outputs[1].value == "computed"
+        diagnostics = [event for event in resumed if isinstance(event, TextOnlyReply)]
+        assert len(diagnostics) == 1
+        assert diagnostics[0].action == "retry"
+    finally:
+        reopened.close()

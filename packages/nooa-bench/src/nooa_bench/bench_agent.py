@@ -206,13 +206,7 @@ class BenchAgent(
             _logger.error("BenchAgent failed: %s", e)
             return {"response": "", "success": False, "error": str(e)}
 
-    @strategy(
-        CodeActStrategy(
-            config=CodeActConfig(
-                max_iterations=300, max_retries=10, text_only_stop_behavior="synthetic_comment"
-            )
-        )
-    )
+    @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=300, max_retries=10)))
     async def _solve_task(self, description: str) -> TaskResult:
         """Solve the task.
 

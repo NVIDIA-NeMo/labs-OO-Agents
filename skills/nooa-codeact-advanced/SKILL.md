@@ -42,7 +42,6 @@ class Notifier(Agent, llm=llm):
 | `max_iterations` | `None` | **Unlimited.** The loop then stops only on completion, the error budget, or a hard abort. |
 | `max_retries` | `3` | **Cumulative session error budget, not consecutive** (the counter is never reset). LLM API errors, bad tool JSON, empty code, and `return_result` validation failures all count. |
 | `max_consecutive_text_only` | `3` | Consecutive no-tool-call text replies before hard abort; `0` disables. Any real tool call resets the counter. |
-| `text_only_stop_behavior` | `"return_result"` | Text-only reply → try to validate the text as the final result; on failure, a visible correction `Error` is added. `"synthetic_reasoning"` instead converts the text to a no-op `reasoning(...)` cell whose tool result says the task is NOT finished. |
 | `cell_timeout` | `None` | Per-cell `asyncio.wait_for` limit in seconds; `None` = unlimited. Cannot interrupt a truly blocking sync syscall — that's what the blocking-call AST validation is for. |
 | `max_tokens` / `temperature` / `top_p` | `None` | Passed to every generation call when set (model defaults otherwise). On empty responses with `finish_reason="length"` CodeAct aborts and tells you to raise `max_tokens` (16384+ for reasoning models). |
 | `translate_tool_calls` | `False` | When a weak model calls an agent method directly as a tool (instead of via `execute_python`), rewrite it into equivalent code and run it — teaching the right pattern. Off = error listing the two valid tools. |
@@ -50,7 +49,7 @@ class Notifier(Agent, llm=llm):
 | `prefill` | `InspectInputsPrefill()` | See Prefill above. |
 | `max_tool_calls` | `None` | **Dead — declared but never read.** Setting it does nothing. |
 
-`tool_choice` is hardcoded `"auto"`. There is no `allow_text_response` option (older docs mention one) — text handling is entirely the two text-only knobs.
+`tool_choice` is hardcoded `"auto"`. Text-only output is retained as the original assistant turn. By default, CodeAct appends a visible `Error` asking the model to use a tool and retries. To accept bare text as the result instead, construct the strategy with `CodeActStrategy(on_text_only=return_text_as_result)`. Custom callbacks may return a `TextOnlyResponseAction` to append feedback or synthesize an `execute_python` call without replacing the original turn.
 
 ## `return_result` mechanics
 
