@@ -19,7 +19,7 @@ from nooa import Agent, strategy
 from nooa.config import CodeActConfig
 from nooa.errors import GenerationError
 from nooa.strategies.codeact import CodeActStrategy
-from nooa.unifiedllm import CompletionClient, ResponsesClient
+from nooa.unifiedllm import CompletionClient, ResponsesClient, create_tool_from_callable
 from nooa.unifiedllm.unifiedllm import (
     _map_completion_finish_reason,
     _map_responses_finish_reason,
@@ -49,6 +49,10 @@ def make_tool_call(id: str, name: str, arguments: str) -> ChatCompletionMessageT
     return ChatCompletionMessageToolCall(
         id=id, function=Function(name=name, arguments=arguments), type="function"
     )
+
+
+def do_thing() -> None:
+    """A test tool."""
 
 
 class TestMapCompletionFinishReason:
@@ -156,6 +160,33 @@ class TestCompletionClientPropagation:
         resp = make_mock_response(content=None, tool_calls=[tc], finish_reason="length")
         with patch("litellm.acompletion", new_callable=AsyncMock, return_value=resp):
             out = await client.acall([{"role": "user", "content": "Hi"}])
+        assert out.finish_reason == "length"
+        assert len(out.tool_calls) == 1
+
+    def test_sync_length_takes_precedence_over_xml_tool_fallback(self, client):
+        resp = make_mock_response(
+            content='<tool_call>{"name":"do_thing","arguments":{}}</tool_call>',
+            finish_reason="length",
+        )
+        with patch("litellm.completion", return_value=resp):
+            out = client.call(
+                [{"role": "user", "content": "Hi"}],
+                tools=[create_tool_from_callable(do_thing)],
+            )
+        assert out.finish_reason == "length"
+        assert len(out.tool_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_async_length_takes_precedence_over_xml_tool_fallback(self, client):
+        resp = make_mock_response(
+            content='<tool_call>{"name":"do_thing","arguments":{}}</tool_call>',
+            finish_reason="length",
+        )
+        with patch("litellm.acompletion", new_callable=AsyncMock, return_value=resp):
+            out = await client.acall(
+                [{"role": "user", "content": "Hi"}],
+                tools=[create_tool_from_callable(do_thing)],
+            )
         assert out.finish_reason == "length"
         assert len(out.tool_calls) == 1
 

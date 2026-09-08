@@ -1919,7 +1919,9 @@ class CompletionClient(UnifiedLLM):
                     raw_response=raw_response,
                     content="",
                     tool_calls=xml_tool_calls,
-                    finish_reason="tool_calls",
+                    finish_reason=_finish_reason_for_tool_calls(
+                        _map_completion_finish_reason(raw_response)
+                    ),
                     assistant_message={
                         "role": "assistant",
                         "content": text_content,
@@ -2091,7 +2093,9 @@ class CompletionClient(UnifiedLLM):
                     raw_response=raw_response,
                     content="",
                     tool_calls=xml_tool_calls,
-                    finish_reason="tool_calls",
+                    finish_reason=_finish_reason_for_tool_calls(
+                        _map_completion_finish_reason(raw_response)
+                    ),
                     assistant_message={
                         "role": "assistant",
                         "content": text_content,
