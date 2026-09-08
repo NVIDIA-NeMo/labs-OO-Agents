@@ -77,7 +77,7 @@ class RuntimeServices(Protocol):
         Returns:
             Tuple of (LLMResponse, event_id) where:
             - LLMResponse has content, reasoning, usage
-            - event_id can be used for event_manager.update() (e.g., strip reasoning)
+            - event_id identifies the append-only provider turn for inspection or linking
         """
         ...
 

@@ -290,7 +290,7 @@ class PredictStrategy(GenerationStrategy):
                 logger.debug(f"[PREDICT attempt={attempt}] Validation successful")
 
                 if self.config.output_serialization == "tool_call":
-                    self._replace_with_tool_call(runtime, _event_id, validated_data)
+                    self._append_tool_call(runtime, validated_data)
 
                 return validated_data
 
@@ -451,9 +451,8 @@ class PredictStrategy(GenerationStrategy):
         except TypeError:
             return str(value)
 
-    def _replace_with_tool_call(self, runtime: RuntimeServices, event_id: str, result: Any) -> None:
-        """Replace Predict's LLMOutput with a synthetic return_result tool call."""
-        runtime.event_manager.remove(event_id)
+    def _append_tool_call(self, runtime: RuntimeServices, result: Any) -> None:
+        """Append a synthetic return_result without replacing the provider turn."""
         tool_call_id = f"predict_{uuid4().hex[:8]}"
         runtime.event_manager.add(
             ToolCallEvent(

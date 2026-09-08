@@ -376,20 +376,17 @@ class PurePythonStrategy(CompositeStrategy):
 
                 if not code:
                     session.record_error()
-                    # Remove the empty assistant event — some APIs reject empty content
                     if generate_event_id is not None:
-                        # Preserve LLM output for trace visibility before removing
                         _evt = runtime.event_manager.get(generate_event_id)
                         _raw = getattr(_evt, "content", "") if _evt else ""
                         runtime.event_manager.add(
                             DebugTrace(
                                 content=(
-                                    "Removed LLM output (empty code extraction): "
+                                    "Empty code extraction from retained LLM output: "
                                     f"raw response({len(_raw)} chars)={_raw!r}"
                                 )
                             )
                         )
-                        runtime.event_manager.remove(generate_event_id)
                     await self._send_empty_response_error(runtime, call.method_name)
                     continue
 
@@ -588,8 +585,7 @@ class PurePythonStrategy(CompositeStrategy):
 
         Returns:
             (code, event_id): code ready for execution (without fences/XML),
-            and the event_id of the LLMOutput event so the caller can remove
-            it if empty (some APIs reject empty assistant messages).
+            and the event_id of the exact provider LLMOutput event.
         """
         logger.debug(
             f"[PURE_PYTHON] Loop iteration: iter={session.iteration}/{session.max_iterations}, "
@@ -604,25 +600,16 @@ class PurePythonStrategy(CompositeStrategy):
         try:
             code = self._strip_wrappers(raw_code)
         except XMLFormatError as e:
-            # Preserve LLM output for trace visibility before removing
             runtime.event_manager.add(
                 DebugTrace(
                     content=(
-                        f"Removed LLM output (XML format error): "
+                        f"Retained LLM output with XML format error: "
                         f"raw_code({len(raw_code)} chars)={raw_code!r}"
                     )
                 )
             )
-            # Remove the malformed LLMOutput — some APIs reject empty/malformed content
-            runtime.event_manager.remove(event_id)
             runtime.event_manager.add(Error(content=f"**Format Error**: {e}"))
             raise
-
-        # Store the unwrapped code in events so LLM learns to output plain Python.
-        # Note: legacy reasoning() calls are NOT rewritten — the builtin was
-        # removed, so they raise NameError and the model corrects itself from
-        # the error feedback.
-        runtime.event_manager.update(event_id, content=code)
 
         # Debug breadcrumbs: we keep these fairly high-signal so log output stays useful.
         logger.debug(
@@ -733,15 +720,6 @@ class PurePythonStrategy(CompositeStrategy):
         )
 
         if was_extracted:
-            # Update events to show unpacked code so LLM learns from example
-            # Find the most recent generated code event and update it
-            recent_events = runtime.event_manager.filter(limit=20)
-            for event in reversed(recent_events):
-                if event.event_type == "LLMOutput":
-                    runtime.event_manager.update(event.id, content=extracted_code)
-                    logger.debug(f"[PURE_PYTHON] Updated event {event.id} with unpacked code")
-                    break
-
             code = extracted_code
 
         # 1) Validate REPL policy (no classes, await async methods)

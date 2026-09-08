@@ -887,7 +887,7 @@ class ActorRuntime:
         Returns:
             Tuple of (LLMResponse, event_id) where:
             - LLMResponse from unifiedllm with content, reasoning, usage
-            - event_id can be used for event_manager.update() or event_manager.get()
+            - event_id identifies the canonical provider turn for inspection or linking
         """
         if self._current_method is None:
             raise RuntimeError("generate() called with no current method context")

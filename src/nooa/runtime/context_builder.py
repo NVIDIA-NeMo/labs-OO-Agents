@@ -462,7 +462,7 @@ def _phase_events(
         # append-only history without producing an invalid message.
         if (
             isinstance(event, LLMOutput)
-            and not event.content
+            and not event.content.strip()
             and not event.tool_calls
             and not getattr(event, "llm_state", None)
             and not getattr(event, "reasoning", None)

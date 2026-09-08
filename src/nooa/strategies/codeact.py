@@ -960,14 +960,13 @@ Standard Python builtins and agent instance (`self`) are available."""
                     continue
 
                 # Output-limit responses are incomplete even when they carry
-                # partial text. Preserve non-empty text in its LLMOutput for
-                # diagnostics, but never let a text-only handler accept it as
-                # a successful result.
+                # partial text. Preserve the exact LLMOutput for diagnostics,
+                # but never let a text-only handler accept it as a successful
+                # result. Empty turns are filtered from provider projection.
                 if response.finish_reason == "length":
                     session.record_error()
                     if not response.content and not response.tool_calls:
                         get_harness_metrics().empty_response()
-                        runtime.event_manager.remove(event_id)
                     runtime.event_manager.add(
                         DebugTrace(
                             content=f"Truncated response: {_response_debug_details(response)}"
@@ -1133,12 +1132,12 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # Empty response - error
                 get_harness_metrics().empty_response()
                 session.record_error()
-                # Capture raw LLM response for debugging before removing the event
+                # Keep the canonical provider turn and append recovery feedback.
+                # Context projection omits empty assistant messages from the
+                # next request without mutating the event journal.
                 runtime.event_manager.add(
                     DebugTrace(content=f"Empty response: {_response_debug_details(response)}")
                 )
-                # Remove the empty assistant event - APIs reject empty content
-                runtime.event_manager.remove(event_id)
                 feedback = await self._tool_use_reminder(runtime, reason="Empty response received.")
                 runtime.event_manager.add(Error(content=feedback))
 
@@ -1636,7 +1635,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # Emit a synthetic return_result ToolCallEvent so the final
                 # answer appears in the trajectory (otherwise the inline
                 # path leaves no trace of the value).  Mirrors PredictStrategy's
-                # _replace_with_tool_call pattern in predict.py.
+                # append-only synthetic tool-call pattern.
                 self._emit_synthetic_inline_return(runtime, validated)
                 logger.info("[CODEACT] Task completed successfully via inline return_result()")
                 return ("TASK_COMPLETE", validated)
@@ -1933,8 +1932,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         observability, we emit a synthetic ``ToolCallEvent`` with the
         captured value.
 
-        Mirrors :meth:`PredictStrategy._replace_with_tool_call` in
-        ``predict.py``. The event carries
+        Mirrors :meth:`PredictStrategy._append_tool_call`. The event carries
         ``metadata.synthetic = True`` and
         ``metadata.synthetic_type = "codeact_inline_return"`` so
         downstream consumers can distinguish framework-emitted markers
