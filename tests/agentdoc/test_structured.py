@@ -876,3 +876,24 @@ class TestPropertyExtraction:
         result = doc(Agent)
         assert "name" in result
         assert "upper_name" in result
+
+
+def test_plain_class_fields_support_unhashable_equal_metaclass_mro():
+    class EqualUnhashableMeta(type):
+        __hash__ = None
+
+        def __eq__(cls, other):
+            return isinstance(other, EqualUnhashableMeta)
+
+    left = EqualUnhashableMeta("Left", (), {"__annotations__": {"left": int, "shared": str}})
+    right = EqualUnhashableMeta("Right", (), {"__annotations__": {"right": int}})
+    child = EqualUnhashableMeta(
+        "Child",
+        (left, right),
+        {"__annotations__": {"shared": bool, "child": int}},
+    )
+
+    info = extract_type_info(child)
+
+    assert [field.name for field in info.fields] == ["left", "shared", "right", "child"]
+    assert next(field for field in info.fields if field.name == "shared").type == "bool"

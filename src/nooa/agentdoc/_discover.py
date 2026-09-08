@@ -10,6 +10,23 @@ import inspect
 import typing
 from typing import Any
 
+
+class _IdentityTypeSet:
+    """Minimal add/iteration collection that deduplicates types by identity."""
+
+    def __init__(self) -> None:
+        self._items: list[type] = []
+        self._ids: set[int] = set()
+
+    def add(self, item: type) -> None:
+        if id(item) not in self._ids:
+            self._ids.add(id(item))
+            self._items.append(item)
+
+    def __iter__(self):
+        return iter(self._items)
+
+
 # Builtins to exclude from referenced types
 BUILTIN_TYPE_NAMES = {
     "str",
@@ -50,11 +67,17 @@ STDLIB_MODULES = {
 }
 
 
+def _identity_contains(items: Any, candidate: type) -> bool:
+    """Return whether *items* contains candidate by identity, without hashing it."""
+    return items is not None and any(item is candidate for item in items)
+
+
 def discover_referenced_types(
     obj: type | Any,
     *,
     seen: set[type] | None = None,
     field_names: set[str] | None = None,
+    type_info: Any = None,
 ) -> list[type]:
     """Discover all custom types referenced in a class or callable's interface.
 
@@ -77,7 +100,7 @@ def discover_referenced_types(
     Returns:
         List of unique custom type objects not in `seen`, sorted by name
     """
-    discovered: set[type] = set()
+    discovered = _IdentityTypeSet()
 
     # Handle callable (function/method) directly
     if inspect.isfunction(obj) or inspect.ismethod(obj):
@@ -85,9 +108,9 @@ def discover_referenced_types(
 
         # Filter to only custom types, excluding already-seen types
         custom_types = [
-            t for t in discovered if _is_custom_type(t) and (seen is None or t not in seen)
+            t for t in discovered if _is_custom_type(t) and not _identity_contains(seen, t)
         ]
-        return sorted(custom_types, key=lambda t: t.__name__)
+        return sorted(custom_types, key=lambda t: (t.__name__, t.__module__, t.__qualname__))
 
     # Instances use their type-level contract, with per-instance visibility.
     # Built-in values are not documentable API objects.
@@ -104,10 +127,9 @@ def discover_referenced_types(
     # non-annotated attrs).
     # Use the same extraction that extract_type_info uses for consistency
     from nooa.agentdoc._structured import extract_type_info
+    from nooa.agentdoc._visibility import is_hidden_field
 
-    type_info = extract_type_info(type_obj)
-    if visibility_obj is not None:
-        from nooa.agentdoc._visibility import is_hidden_field
+    type_info = type_info or extract_type_info(type_obj)
 
     for field in type_info.fields:
         if field_names is not None and field.name not in field_names:
@@ -162,11 +184,11 @@ def discover_referenced_types(
         _extract_types_from_callable(attr, discovered)
 
     # Filter to only custom types, excluding already-seen types
-    custom_types = [t for t in discovered if _is_custom_type(t) and (seen is None or t not in seen)]
-    return sorted(custom_types, key=lambda t: t.__name__)
+    custom_types = [t for t in discovered if _is_custom_type(t) and not _identity_contains(seen, t)]
+    return sorted(custom_types, key=lambda t: (t.__name__, t.__module__, t.__qualname__))
 
 
-def _extract_types_from_callable(attr: Any, discovered: set[type]) -> None:
+def _extract_types_from_callable(attr: Any, discovered: Any) -> None:
     """Extract referenced types from a callable's parameter and return annotations.
 
     Handles ``from __future__ import annotations`` (PEP 563), where every annotation
@@ -229,7 +251,7 @@ def _extract_types_from_callable(attr: Any, discovered: set[type]) -> None:
 
 
 def _extract_types_from_field(
-    cls: type, field_name: str, field_type_str: str, discovered: set[type]
+    cls: type, field_name: str, field_type_str: str, discovered: Any
 ) -> None:
     """Extract types from a field, looking at class attributes and annotations.
 
@@ -274,7 +296,7 @@ def _extract_types_from_field(
         _extract_types_from_type_string(cls, field_type_str, discovered)
 
 
-def _extract_types_from_type_string(cls: type, type_str: str, discovered: set[type]) -> None:
+def _extract_types_from_type_string(cls: type, type_str: str, discovered: Any) -> None:
     """Try to evaluate a type string and extract types from it.
 
     This handles cases like "list[WorkerAgent]" where the type came from __init__.
@@ -305,7 +327,7 @@ def _extract_types_from_type_string(cls: type, type_str: str, discovered: set[ty
         pass  # Can't evaluate - might be a complex expression or unavailable type
 
 
-def _extract_types_from_hint(type_hint: Any, discovered: set[type]) -> None:
+def _extract_types_from_hint(type_hint: Any, discovered: Any) -> None:
     """Extract all type objects from a type hint, recursively.
 
     Handles:
