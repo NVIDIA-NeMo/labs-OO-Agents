@@ -82,7 +82,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class TextOnlyResponseContext:
-    """The untouched model turn passed to a CodeAct text-only handler."""
+    """Input passed to a CodeAct text-only response handler.
+
+    ``CodeActStrategy`` creates this context only when the model returns no
+    tool call. The original response has already been preserved in history.
+    """
 
     response: LLMResponse
     content: str
@@ -92,7 +96,12 @@ class TextOnlyResponseContext:
 
 @dataclass(frozen=True)
 class TextOnlyResponseAction:
-    """What CodeAct should do after preserving a text-only model turn."""
+    """Decision returned by a CodeAct text-only response handler.
+
+    This is not a strategy or decorator argument. Pass a sync or async callback
+    as ``CodeActStrategy(on_text_only=handler)``; that callback receives a
+    :class:`TextOnlyResponseContext` and returns one of these actions.
+    """
 
     kind: Literal["return_result", "retry", "tool_calls"]
     value: Any = None
@@ -124,13 +133,13 @@ type TextOnlyResponseHandler = Callable[
 
 
 def return_text_as_result(context: TextOnlyResponseContext) -> TextOnlyResponseAction:
-    """Opt-in handler: submit non-empty text (or ``None``) as the result."""
+    """Opt-in handler that validates non-empty text (or ``None``) as the result."""
     value = context.content if context.content.strip() else None
     return TextOnlyResponseAction.return_result(value)
 
 
 def retry_text_only_response(context: TextOnlyResponseContext) -> TextOnlyResponseAction:
-    """Built-in handler that tells the model to use a CodeAct tool."""
+    """Default handler that returns a model-visible tool-use correction."""
     return TextOnlyResponseAction.retry(_text_only_correction(context))
 
 
@@ -396,6 +405,12 @@ class CodeActStrategy(CompositeStrategy):
         def quick_task(self, x: int) -> dict:
             '''Task with custom iteration limit.'''
             ...
+
+        # Opt in when a bare prose response is a valid final result.
+        @strategy(CodeActStrategy(on_text_only=return_text_as_result))
+        def summarize(self, text: str) -> str:
+            '''Summarize the text.'''
+            ...
     """
 
     def __init__(
@@ -414,8 +429,13 @@ class CodeActStrategy(CompositeStrategy):
                 ``format(error, code=None, *, line_offset=0, max_error=None,
                 tail_chars=None)``.
             on_text_only: Callback that chooses how to recover when the model
-                returns text without a tool call. The default appends an Error
-                asking the model to use ``execute_python`` or ``return_result``.
+                returns text without a tool call. It receives a
+                ``TextOnlyResponseContext`` and returns (or awaits to) a
+                ``TextOnlyResponseAction``. The default preserves the model
+                turn, appends an ``Error`` asking it to use ``execute_python``
+                or ``return_result``, and retries. Use
+                ``return_text_as_result`` to opt into validating bare text as
+                the method result.
 
         Note:
             Prefill is always enabled and uses InspectInputsPrefill internally.

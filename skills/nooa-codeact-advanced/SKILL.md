@@ -1,6 +1,6 @@
 ---
 name: nooa-codeact-advanced
-description: Advanced tuning of NOOA strategies — CodeAct prefill (understanding, disabling, custom, pre-ellipsis code), loop guards (max_iterations, retries, text-only stop), truncation tuning (TruncationConfig/CaptureConfig/FormatConfig), code restrictions (RestrictionsConfig), execution environment internals, and PredictStrategy tuning (retries, param guards, output_serialization). Use when configuring CodeActConfig or PredictConfig beyond defaults, writing a custom prefill, restricting generated code, or debugging truncation/eviction behavior.
+description: Advanced tuning of NOOA strategies — CodeAct prefill, loop guards, text-only recovery callbacks, truncation, code restrictions, execution internals, and PredictStrategy tuning. Use when configuring CodeActConfig or PredictConfig beyond defaults, handling models that return prose instead of tool calls, writing a custom prefill, restricting generated code, or debugging truncation and eviction.
 compatibility: nooa package
 ---
 
@@ -10,7 +10,7 @@ The authoring basics are in `nooa-agent-authoring`. This skill covers the deep c
 
 ## Config plumbing rules (read first)
 
-- Strategy constructors take **`config=` only**: `CodeActStrategy(config=CodeActConfig(...))`, `PredictStrategy(PredictConfig(...))`. Flat kwargs (`CodeActStrategy(max_iterations=10)`, `CodeActStrategy(prefill=...)`) do not exist, despite some docstring examples.
+- Configuration fields go through **`config=`**: `CodeActStrategy(config=CodeActConfig(...))`, `PredictStrategy(PredictConfig(...))`. Flat config kwargs (`CodeActStrategy(max_iterations=10)`, `CodeActStrategy(prefill=...)`) do not exist. Strategy-level extension points such as `CodeActStrategy(on_text_only=...)` and `CodeActStrategy(error_formatter=...)` are separate keyword arguments.
 - All config objects are frozen Pydantic models with `merge_with(other)`: only fields explicitly set on `other` override. **Configs must be freshly constructed** — anything round-tripped through `model_dump()`/`model_validate()` has an empty `model_fields_set` and `merge_with` raises.
 - Truncation layers: framework default → `Agent` class kwarg `truncation=` → instance kwarg → `@strategy(..., truncation=...)` per method. `TruncationConfig.merge_with` deep-merges sub-configs field-by-field; the strategy configs merge flat.
 
@@ -49,7 +49,64 @@ class Notifier(Agent, llm=llm):
 | `prefill` | `InspectInputsPrefill()` | See Prefill above. |
 | `max_tool_calls` | `None` | **Dead — declared but never read.** Setting it does nothing. |
 
-`tool_choice` is hardcoded `"auto"`. Text-only output is retained as the original assistant turn. By default, CodeAct appends a visible `Error` asking the model to use a tool and retries. To accept bare text as the result instead, construct the strategy with `CodeActStrategy(on_text_only=return_text_as_result)`. Custom callbacks may return a `TextOnlyResponseAction` to append feedback or synthesize an `execute_python` call without replacing the original turn.
+`tool_choice` is hardcoded `"auto"`.
+
+## Text-only recovery callback
+
+CodeAct expects each model turn to call `execute_python` or `return_result`.
+When a model emits only prose, NOOA preserves that exact assistant turn and
+then invokes the strategy's `on_text_only` callback.
+
+Do not pass `TextOnlyResponseAction` to `@strategy`. The objects have distinct
+roles:
+
+```text
+@strategy attaches CodeActStrategy to a method
+    -> CodeActStrategy(on_text_only=handler) registers the callback
+        -> handler(TextOnlyResponseContext) returns TextOnlyResponseAction
+```
+
+The callback may be synchronous or asynchronous. Its context contains the
+untouched `LLMResponse`, normalized text, current method call, and declared
+return type. Its action chooses one of three append-only recovery paths:
+
+| Action constructor | Effect |
+|---|---|
+| `TextOnlyResponseAction.return_result(value)` | Validate `value` through CodeAct's normal result path. Invalid values produce model-visible correction feedback. |
+| `TextOnlyResponseAction.retry(*events)` | Append feedback events, then ask the model again. |
+| `TextOnlyResponseAction.tool_calls(*calls)` | Run synthetic calls while retaining the original assistant turn. Use `execute_python`, not TUI-only tools. |
+
+The safe default is `retry_text_only_response`: it appends an `Error` asking
+the model to call `return_result(value)` or `execute_python(code)`, then retries.
+Opt into accepting prose only when that is appropriate for the method contract:
+
+```python
+from nooa import Agent, CodeActStrategy, return_text_as_result, strategy
+
+
+class Summarizer(Agent, llm=llm):
+    @strategy(CodeActStrategy(on_text_only=return_text_as_result))
+    async def summarize(self, text: str) -> str:
+        """Summarize the text."""
+        ...
+```
+
+For custom policy, return an action from the callback:
+
+```python
+from nooa import TextOnlyResponseAction, TextOnlyResponseContext
+from nooa.events import Error
+
+
+def require_tool(context: TextOnlyResponseContext) -> TextOnlyResponseAction:
+    return TextOnlyResponseAction.retry(
+        Error(content=f"Plain text cannot finish {context.call.method_name}; call a tool.")
+    )
+
+
+@strategy(CodeActStrategy(on_text_only=require_tool))
+async def investigate(self, question: str) -> str: ...
+```
 
 ## `return_result` mechanics
 

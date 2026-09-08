@@ -195,7 +195,16 @@ async def classify(self, text: str) -> Intent: ...
 async def implement(self, task: str) -> str: ...
 ```
 
-**Constructors take `config=` only.** `PredictStrategy(max_retries=3)` and `CodeActStrategy(max_iterations=10)` are errors — wrap options in `PredictConfig(...)`/`CodeActConfig(...)`. Useful `CodeActConfig` fields: `max_iterations`, `max_retries`, `cell_timeout`, `max_tokens`, `temperature`, `max_consecutive_text_only`, `restrictions`.
+**Configuration fields go through `config=`.** `PredictStrategy(max_retries=3)` and `CodeActStrategy(max_iterations=10)` are errors — wrap options in `PredictConfig(...)`/`CodeActConfig(...)`. Strategy-level extension points such as `CodeActStrategy(on_text_only=...)` remain direct constructor arguments. Useful `CodeActConfig` fields: `max_iterations`, `max_retries`, `cell_timeout`, `max_tokens`, `temperature`, `max_consecutive_text_only`, `restrictions`.
+
+CodeAct preserves a model response that contains prose but no tool call. By
+default it appends an `Error` asking the model to use `execute_python` or
+`return_result`, then retries. For a method where prose is a valid final value,
+use `CodeActStrategy(on_text_only=return_text_as_result)`. `on_text_only`
+receives a sync or async callback; the callback receives
+`TextOnlyResponseContext` and returns `TextOnlyResponseAction`. The action is
+the callback result—it is not passed to `@strategy`. See
+`nooa-codeact-advanced` for custom retry and synthetic-tool examples.
 
 `max_iterations` is a safety net, not the main tuning dial — decompose the task instead of raising the cap. For prefill control, truncation tuning, code restrictions, and the full config surface, see `nooa-codeact-advanced`.
 
