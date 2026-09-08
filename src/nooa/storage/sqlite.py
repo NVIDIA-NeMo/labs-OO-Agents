@@ -837,7 +837,7 @@ class SQLiteStorageManager:
         """Return the snapshot_id of the most recently saved snapshot, or None."""
         with self._db_lock:
             row = self._conn.execute(
-                "SELECT snapshot_id FROM snapshots ORDER BY created_at DESC LIMIT 1"
+                "SELECT snapshot_id FROM snapshots ORDER BY created_at DESC, rowid DESC LIMIT 1"
             ).fetchone()
             return row[0] if row is not None else None
 
