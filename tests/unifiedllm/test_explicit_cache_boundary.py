@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import litellm
 import pytest
 
 from nooa._llm_state import ReplayCarryingMessage, carried_cache_boundary
@@ -364,10 +365,46 @@ def test_replay_expansion_stays_inside_the_stable_prefix() -> None:
 
 
 def test_gemini_gets_no_invented_inline_cache_field() -> None:
-    client = CompletionClient(model="gemini/gemini-2.5-pro")
+    client = CompletionClient(
+        model="gemini/gemini-2.5-pro", cache_control_injection_points=[]
+    )
     messages, _, enabled = client._prepare_cache_boundary(_render("state-a"), responses=False)
 
     assert enabled is False
     assert "cache_control" not in repr(messages)
     assert "prompt_cache_breakpoint" not in repr(messages)
     assert not any(carried_cache_boundary(item) for item in messages)
+
+
+@pytest.mark.asyncio
+async def test_gemini_boundary_is_inert_on_the_actual_call_path() -> None:
+    """The neutral boundary must not become a native Gemini wire field.
+
+    ``cache_control_injection_points`` is an older, separate gateway-level
+    extension point. Disable it here so this regression pins only the automatic
+    dynamic-context boundary introduced by this change.
+    """
+    client = CompletionClient(
+        model="gemini/gemini-2.5-pro", cache_control_injection_points=[]
+    )
+    response = litellm.ModelResponse(
+        model="gemini-2.5-pro",
+        choices=[
+            litellm.Choices(
+                index=0,
+                finish_reason="stop",
+                message=litellm.Message(role="assistant", content="ok"),
+            )
+        ],
+    )
+    try:
+        with patch("litellm.acompletion", new_callable=AsyncMock) as request:
+            request.return_value = response
+            await client.acall(_render("state-a"))
+        assert request.await_args is not None
+        sent = request.await_args.kwargs["messages"]
+        assert "cache_control" not in repr(sent)
+        assert "prompt_cache_breakpoint" not in repr(sent)
+        assert not any(carried_cache_boundary(item) for item in sent)
+    finally:
+        await client.aclose()
