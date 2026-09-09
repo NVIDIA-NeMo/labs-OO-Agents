@@ -619,11 +619,7 @@ class TestEndToEndPipelines:
             }
         )
         assert "reasoning_items" not in type(legacy_event).model_fields
-        blocks = [
-            ResolvedBlock(
-                key="tc", content="", role=Role.ASSISTANT, event=legacy_event
-            )
-        ]
+        blocks = [ResolvedBlock(key="tc", content="", role=Role.ASSISTANT, event=legacy_event)]
 
         messages = XMLBlockFormatter().format(blocks)
         openai_input = OpenAIProviderFormatter().format(messages)

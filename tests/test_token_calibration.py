@@ -104,9 +104,7 @@ class TestUpdateTokenCalibration:
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Hello, how are you?"},
         ]
-        _update_token_calibration(
-            "gpt-4o", messages, LLMUsage(input_tokens=50, output_tokens=10)
-        )
+        _update_token_calibration("gpt-4o", messages, LLMUsage(input_tokens=50, output_tokens=10))
         ratio = _token_calibration.ratio("gpt-4o")
         # API reports 50 prompt tokens; litellm raw estimate is ~9 tokens for this text
         # Ratio should be significantly > 1.0 (50/9 ≈ 5.6)
@@ -128,8 +126,6 @@ class TestUpdateTokenCalibration:
                 ],
             }
         ]
-        _update_token_calibration(
-            "gpt-4o", messages, LLMUsage(input_tokens=30, output_tokens=5)
-        )
+        _update_token_calibration("gpt-4o", messages, LLMUsage(input_tokens=30, output_tokens=5))
         ratio = _token_calibration.ratio("gpt-4o")
         assert ratio > 0  # didn't crash on multipart

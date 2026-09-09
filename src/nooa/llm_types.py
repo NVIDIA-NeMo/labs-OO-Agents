@@ -80,6 +80,7 @@ class LLMUsage(BaseModel):
             cost_usd=float(first(value, "cost_usd", "cost") or 0.0),
         )
 
+
 class LLMResponse(EventBase):
     """Canonical response produced by UnifiedLLM and persisted by NOOA.
 

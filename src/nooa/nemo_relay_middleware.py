@@ -102,6 +102,7 @@ def _response_for_relay(response: Any) -> dict[str, Any]:
         return result
     return {}
 
+
 if TYPE_CHECKING:
     from nooa.runtime.event_manager import EventManager
     from nooa.runtime.middleware import (

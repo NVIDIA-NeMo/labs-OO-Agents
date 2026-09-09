@@ -118,6 +118,7 @@ def test_reasoning_none_keeps_chat_completions() -> None:
     finally:
         client.close()
 
+
 def test_custom_api_base_keeps_chat_completions_by_default() -> None:
     client = _client(api_base="https://gateway.example/v1")
     chat_endpoint = MagicMock(return_value=_chat_response())

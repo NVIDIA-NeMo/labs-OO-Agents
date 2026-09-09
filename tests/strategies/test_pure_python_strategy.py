@@ -212,9 +212,7 @@ class TestPurePythonStrategyExecute:
 
         # Get LLM-generated events (exclude synthetic prefill events)
         history_events = agent_instance.event_manager.values()
-        assistant_events = [
-            e for e in history_events if e.event_type == "LLMResponse"
-        ]
+        assistant_events = [e for e in history_events if e.event_type == "LLMResponse"]
 
         # Should have 2 assistant events (one per LLM call)
         assert len(assistant_events) >= 2
@@ -329,9 +327,7 @@ return x + 1
 
         # The canonical assistant event keeps the exact provider response.
         history_events = agent_instance.event_manager.values()
-        assistant_events = [
-            e for e in history_events if e.event_type == "LLMResponse"
-        ]
+        assistant_events = [e for e in history_events if e.event_type == "LLMResponse"]
 
         assert len(assistant_events) >= 1
         assert assistant_events[0].content == fenced_code
@@ -563,9 +559,7 @@ return x + 1
 
         # The canonical assistant event keeps the exact provider response.
         history_events = agent_instance.event_manager.values()
-        assistant_events = [
-            e for e in history_events if e.event_type == "LLMResponse"
-        ]
+        assistant_events = [e for e in history_events if e.event_type == "LLMResponse"]
 
         assert len(assistant_events) >= 1
         assert assistant_events[0].content == wrapped_response

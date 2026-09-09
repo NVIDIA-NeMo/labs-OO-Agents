@@ -1452,7 +1452,9 @@ class TestCodeActStrategyEventSequence:
         # The empty assistant turn is retained and the only tool event is the
         # model's successful self-correction.
         all_events = agent_instance.event_manager.values()
-        llm_responses = [e for e in all_events if e.event_type == "LLMResponse" and not e.tool_calls]
+        llm_responses = [
+            e for e in all_events if e.event_type == "LLMResponse" and not e.tool_calls
+        ]
         assert [event.content for event in llm_responses] == [""]
         tool_call_events = [e for e in all_events if e.event_type == "ToolCallEvent"]
         assert len(tool_call_events) == 1

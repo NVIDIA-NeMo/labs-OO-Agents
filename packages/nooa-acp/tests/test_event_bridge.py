@@ -81,9 +81,7 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path):
         )
     )
     agent.event_manager.add(
-        LLMResponse(
-            usage={"prompt_tokens": 40, "completion_tokens": 10, "cost_usd": 0.25}
-        )
+        LLMResponse(usage={"prompt_tokens": 40, "completion_tokens": 10, "cost_usd": 0.25})
     )
     await bridge.flush()
 
@@ -208,9 +206,7 @@ async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
 
     agent.event_manager.add(AgentMessage(content="alive"))
     agent.event_manager.add(
-        LLMResponse(
-            usage={"prompt_tokens": 40, "completion_tokens": 10, "cost_usd": 0.25}
-        )
+        LLMResponse(usage={"prompt_tokens": 40, "completion_tokens": 10, "cost_usd": 0.25})
     )
     await bridge.flush()
 
@@ -232,9 +228,7 @@ async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
     sized_client = _RecordingClient()
     sized_bridge = ACPEventBridge(sized, sized_client, "session-2")  # type: ignore[arg-type]
     sized.event_manager.add(
-        LLMResponse(
-            usage={"prompt_tokens": 40, "completion_tokens": 10, "cost_usd": 0.25}
-        )
+        LLMResponse(usage={"prompt_tokens": 40, "completion_tokens": 10, "cost_usd": 0.25})
     )
     await sized_bridge.flush()
     assert any(isinstance(update, UsageUpdate) for _, update in sized_client.updates)
