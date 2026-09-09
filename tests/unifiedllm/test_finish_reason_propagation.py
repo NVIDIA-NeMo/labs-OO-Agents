@@ -393,7 +393,7 @@ class TestCodeActAbortOnRealLengthPath:
             assert await agent_instance.my_task() == "done"
 
         events = agent_instance.event_manager.values()
-        first_output = next(event for event in events if event.event_type == "LLMOutput")
+        first_output = next(event for event in events if event.event_type == "LLMResponse")
         execution = next(
             event
             for event in events

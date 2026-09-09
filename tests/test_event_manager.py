@@ -4,7 +4,7 @@
 
 import pytest
 
-from nooa.events import Error, Feedback, LLMOutput, Task
+from nooa.events import Error, Feedback, LLMResponse, Task
 from nooa.runtime.event_backend import InMemoryBackend, _tag_max_num
 from nooa.runtime.event_manager import EventManager
 
@@ -49,7 +49,7 @@ def test_basic_conversation_flow():
     hm.add(Task(prompt="Write a function to add two numbers"))
 
     # Add LLM response
-    hm.add(LLMOutput(content="I'll write that for you"))
+    hm.add(LLMResponse(content="I'll write that for you"))
 
     # Convert to OpenAI format via formatter
     messages = _format_events_for_test(hm.values())
@@ -69,13 +69,13 @@ def test_error_feedback_flow():
     hm.add(Task(prompt="Generate code"))
 
     # Assistant response (with error)
-    hm.add(LLMOutput(content="def foo(): syntax error"))
+    hm.add(LLMResponse(content="def foo(): syntax error"))
 
     # Error feedback
     hm.add(Error(content="SyntaxError: invalid syntax"))
 
     # Retry response
-    hm.add(LLMOutput(content="def foo(): pass"))
+    hm.add(LLMResponse(content="def foo(): pass"))
 
     messages = _format_events_for_test(hm.values())
     assert len(messages) == 4
@@ -91,7 +91,7 @@ def test_execution_feedback_flow():
     hm.add(Task(prompt="Solve the problem"))
 
     # Assistant code
-    hm.add(LLMOutput(content="print('exploring')"))
+    hm.add(LLMResponse(content="print('exploring')"))
 
     # Execution feedback
     hm.add(Feedback(content="Output:\n```\nexploring\n```\nDefine `solve` to complete."))
@@ -138,7 +138,7 @@ def test_len():
     hm.add(Task(prompt="One"))
     assert len(hm) == 1
 
-    hm.add(LLMOutput(content="Two"))
+    hm.add(LLMResponse(content="Two"))
     assert len(hm) == 2
 
 
@@ -279,7 +279,7 @@ def test_filter_by_query_basic():
     hm = EventManager()
     hm.add(Task(prompt="Find the database schema"))
     hm.add(Task(prompt="Query the user table"))
-    hm.add(LLMOutput(content="Here is the schema information"))
+    hm.add(LLMResponse(content="Here is the schema information"))
 
     # Filter for "schema" should return 2 events
     results = hm.filter(query="schema")

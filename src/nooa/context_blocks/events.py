@@ -232,18 +232,10 @@ class ToolCallEvent(EventBase):
     tool_call_id: Annotated[str, Field(description="Unique identifier for this tool call")]
     name: Annotated[str, Field(description="Name of the tool being called")]
     arguments: Annotated[dict[str, Any], Field(description="Arguments passed to the tool")]
-    reasoning_items: list[dict[str, Any]] | None = Field(
+    llm_response_id: str | None = Field(
         default=None,
         repr=False,
-        description=(
-            "Opaque provider reasoning state that must accompany this assistant "
-            "tool call when conversation history is replayed"
-        ),
-    )
-    llm_output_id: str | None = Field(
-        default=None,
-        repr=False,
-        description="Canonical LLMOutput event that emitted this tool call",
+        description="Canonical LLMResponse event that emitted this tool call",
     )
 
     # Nested result (filled after execution via EventManager.update())

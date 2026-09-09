@@ -960,7 +960,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     continue
 
                 # Output-limit responses are incomplete even when they carry
-                # partial text. Preserve the exact LLMOutput for diagnostics,
+                # partial text. Preserve the exact LLMResponse for diagnostics,
                 # but never let a text-only handler accept it as a successful
                 # result. Empty turns are filtered from provider projection.
                 if response.finish_reason == "length":
@@ -999,14 +999,6 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # Consider making extensible in the future.
                 if response.finish_reason == "tool_calls" and response.tool_calls:
                     tool_calls = response.tool_calls
-                    assistant_message = getattr(response, "assistant_message", None)
-                    reasoning_items = (
-                        assistant_message.get("reasoning_items")
-                        if isinstance(assistant_message, dict)
-                        else None
-                    )
-                    if not isinstance(reasoning_items, list):
-                        reasoning_items = None
                     # A real tool call counts as progress: reset the consecutive
                     # text-only guard (issue 185) before executing, so a single
                     # exec mid-stream rescues the run from accidental drift.
@@ -1019,7 +1011,6 @@ Standard Python builtins and agent instance (`self`) are available."""
                         call,
                         return_type,
                         event_id or "",
-                        reasoning_items=reasoning_items,
                     )
                     if result.completed:
                         turn_state.success = True
@@ -1029,14 +1020,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     continue
 
                 # ── Text-only response (no tool call) ──────────────────────
-                _raw_content = response.content
-                _text = (
-                    _raw_content.model_dump_json()
-                    if isinstance(_raw_content, BaseModel)
-                    else str(_raw_content)
-                    if _raw_content
-                    else ""
-                )
+                _text = response.content
                 _has_text = bool(_text.strip())
 
                 if _has_text or response.finish_reason == "stop":
@@ -1056,7 +1040,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                         )
 
                     # Capture the drift faithfully for /bug reports. The original
-                    # LLMOutput remains the assistant turn; the handler may only
+                    # LLMResponse remains the assistant turn; the handler may only
                     # append recovery events after it.
                     runtime.event_manager.add(
                         TextOnlyReply(
@@ -1103,7 +1087,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                             call,
                             return_type,
                             event_id or "",
-                            preserve_llm_output=True,
+                            preserve_llm_response=True,
                         )
                         if result.completed:
                             turn_state.success = True
@@ -1222,17 +1206,16 @@ Standard Python builtins and agent instance (`self`) are available."""
         call: "CurrentCall",
         return_type: Any,
         event_id: str,
-        reasoning_items: list[dict[str, Any]] | None = None,
-        preserve_llm_output: bool = False,
+        preserve_llm_response: bool = False,
     ) -> _ToolCallsResult:
         """Process tool calls from a single LLM turn.
 
         Executes tool calls sequentially, stopping at the first error.
         Returns a _ToolCallsResult indicating whether the task completed.
 
-        ``preserve_llm_output`` distinguishes calls synthesized by a text-only
+        ``preserve_llm_response`` distinguishes calls synthesized by a text-only
         response handler from calls already recorded on the provider's
-        canonical LLMOutput event.
+        canonical LLMResponse event.
         """
         # Handle tool calls - process ALL tool calls sequentially
         # Some LLMs return multiple tool calls in one response even when
@@ -1244,13 +1227,13 @@ Standard Python builtins and agent instance (`self`) are available."""
         if num_tool_calls > 1:
             logger.debug(f"[CODEACT] Processing {num_tool_calls} tool calls sequentially")
 
-        llm_output = runtime.event_manager.get(event_id) if not preserve_llm_output else None
-        llm_output_id = getattr(llm_output, "id", None)
+        llm_response = runtime.event_manager.get(event_id) if not preserve_llm_response else None
+        llm_response_id = getattr(llm_response, "id", None)
 
         # Process each tool call in order, stopping at the first error.
         # If one cell fails, subsequent cells likely depend on its output
         # and would cascade into confusing errors.
-        for tool_call_index, tool_call in enumerate(tool_calls):
+        for tool_call in tool_calls:
             # Parse arguments
             try:
                 args = json.loads(tool_call.arguments)
@@ -1268,8 +1251,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     tool_call_id=tool_call.id,
                     name=tool_call.name,
                     arguments=args,
-                    llm_output_id=llm_output_id,
-                    reasoning_items=(reasoning_items if tool_call_index == 0 else None),
+                    llm_response_id=llm_response_id,
                     result=None,  # Will be updated after execution
                 )
             )

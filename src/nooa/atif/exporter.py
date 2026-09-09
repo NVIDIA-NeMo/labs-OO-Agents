@@ -3,7 +3,7 @@
 """ATIF v1.7 exporter — event-driven state machine.
 
 Consumes the framework's own event stream (Task, BeforeTurn,
-SystemPrompt, LLMComplete, LLMOutput, ToolCallEvent, PythonOutput,
+SystemPrompt, LLMResponse, ToolCallEvent, PythonOutput,
 AfterTurn, etc.) and assembles an in-memory :class:`Trajectory`
 Pydantic model that is serialized to disk atomically. Handles
 single-trajectory runs as well as nesting, concurrency, compaction,
@@ -48,8 +48,7 @@ if TYPE_CHECKING:
         AfterTurn,
         BeforeTurn,
         Error,
-        LLMComplete,
-        LLMOutput,
+        LLMResponse,
         Notification,
         PythonOutput,
         Reasoning,
@@ -111,7 +110,7 @@ class _PendingStep:
         self.reasoning_content: str | None = None
         self.message: str = ""
         self.extra: dict[str, Any] = {}
-        self.llm_call_count: int = 0  # bumped by LLMComplete
+        self.llm_call_count: int = 0  # bumped by LLMResponse
 
 
 class _DispatchStep(NamedTuple):
@@ -139,8 +138,7 @@ _HANDLER_DISPATCH: dict[str, str] = {
     "AfterAgentCall": "on_after_agent_call",
     "BeforeTurn": "on_before_turn",
     "SystemPrompt": "on_system_prompt",
-    "LLMComplete": "on_llm_complete",
-    "LLMOutput": "on_llm_output",
+    "LLMResponse": "on_llm_response",
     "Reasoning": "on_reasoning",
     "ToolCallEvent": "on_tool_call_event",
     "PythonOutput": "on_python_output",
@@ -229,12 +227,11 @@ class AtifExporter:
       * Trajectory root is initialised in ``__init__``.
       * ``BeforeTurn`` opens a ``_PendingStep`` keyed by
         ``generation_id``.
-      * ``LLMComplete`` fills metrics, model_name, tool_calls,
-        reasoning_content on the matching pending step.
-      * ``LLMOutput`` sets the pending step's assistant message text.
+      * ``LLMResponse`` fills the matching step's assistant message, metrics,
+        model name, tool calls, and reasoning.
       * ``ToolCallEvent`` (creation) registers the tool_call_id ⇆
         Python event-reference mapping; tool_calls[i] entries are
-        already in place from ``LLMComplete``.
+        already in place from ``LLMResponse``.
       * ``PythonOutput`` registers observation content for an
         ``execute_python`` call (the dominant case).
       * ``AfterTurn`` closes the pending step: builds
@@ -355,7 +352,7 @@ class AtifExporter:
         """Route every event off the EventManager's wildcard subscription.
 
         Specific event types listed in :data:`_HANDLER_DISPATCH` route to
-        their dedicated handlers (``on_task``, ``on_llm_complete``, etc.).
+        their dedicated handlers (``on_task``, ``on_llm_response``, etc.).
 
         Custom :class:`EventBase` subclasses defined outside the framework
         (or added in future releases) fall through to
@@ -484,7 +481,7 @@ class AtifExporter:
           (the LLM saw the same system prompt — no information added).
         - **Subsequent occurrences with different content**: stash the
           new content in ``_pending_system_drift``;
-          :meth:`on_llm_complete` will annotate the next agent step
+          :meth:`on_llm_response` will annotate the next agent step
           with ``extra.system_prompt_changed = True`` and
           ``extra.system_prompt = <new content>``.
 
@@ -619,40 +616,42 @@ class AtifExporter:
             ):
                 self._run_token = _atif_exporter_var.set(self)
 
-    def on_llm_complete(self, event: LLMComplete) -> None:
-        """``LLMComplete`` ⇒ fill metrics / tool_calls / model_name / reasoning."""
+    def on_llm_response(self, event: LLMResponse) -> None:
+        """Populate a pending step from the one canonical response event."""
         with self._lock:
             ps = self._pending.get(event.generation_id)
             if ps is None:
                 logger.debug(
-                    "atif: LLMComplete for unknown generation_id=%s (ignored)",
+                    "atif: LLMResponse for unknown generation_id=%s (ignored)",
                     event.generation_id,
                 )
                 return
             ps.model_name = event.model_name or ps.model_name
+            usage = event.usage
             ps.metrics = MetricsSchema(
-                prompt_tokens=event.prompt_tokens,
-                completion_tokens=event.completion_tokens,
-                cached_tokens=event.cached_tokens,
-                cost_usd=event.cost_usd,
-                extra={"reasoning_tokens": event.reasoning_tokens}
-                if event.reasoning_tokens
+                prompt_tokens=usage.input_tokens if usage else 0,
+                completion_tokens=usage.output_tokens if usage else 0,
+                cached_tokens=usage.cached_input_tokens if usage else 0,
+                cost_usd=usage.cost_usd if usage else 0.0,
+                extra={"reasoning_tokens": usage.reasoning_tokens}
+                if usage and usage.reasoning_tokens
                 else None,
             )
             ps.tool_calls = [
                 ToolCallSchema(
-                    tool_call_id=tc["tool_call_id"],
-                    function_name=tc["function_name"],
-                    arguments=_parse_arguments(tc.get("arguments")),
+                    tool_call_id=tc.id,
+                    function_name=tc.name,
+                    arguments=_parse_arguments(tc.arguments),
                 )
                 for tc in event.tool_calls
             ]
-            if event.reasoning_content:
+            if event.reasoning:
                 # Accumulate alongside any Reasoning events that fired pre-LLM.
                 if ps.reasoning_content:
-                    ps.reasoning_content += "\n" + event.reasoning_content
+                    ps.reasoning_content += "\n" + event.reasoning
                 else:
-                    ps.reasoning_content = event.reasoning_content
+                    ps.reasoning_content = event.reasoning
+            ps.message = event.replay_content
             ps.llm_call_count += 1
             # Per-turn dynamic context envelope (re-rendered every LLM call
             # from current agent state — see runtime/actor.py
@@ -673,20 +672,6 @@ class AtifExporter:
                 self._system_content_hash = hash(self._pending_system_drift)
                 self._pending_system_drift = None
 
-    def on_llm_output(self, event: LLMOutput) -> None:
-        """``LLMOutput`` ⇒ set the assistant message text on the current pending step.
-
-        We use the most-recently-opened pending step. If multiple are
-        active (concurrent generation), keyed dispatch handles it; this
-        fallback covers the simple linear case.
-        """
-        with self._lock:
-            ps = self._most_recent_pending()
-            if ps is None:
-                logger.debug("atif: LLMOutput with no pending step (ignored)")
-                return
-            ps.message = event.content
-
     def on_tool_call_event(self, event: ToolCallEvent) -> None:
         """``ToolCallEvent`` ⇒ index by tool_call_id for later result lookup.
 
@@ -700,7 +685,7 @@ class AtifExporter:
         _emit_synthetic_inline_return``), append it to the current
         pending step's ``tool_calls``. This makes framework-emitted
         completion markers visible in the trajectory even though
-        ``LLMComplete.tool_calls`` did not include them.
+        ``LLMResponse.tool_calls`` did not include them.
         """
         with self._lock:
             self._tool_call_events[event.tool_call_id] = event

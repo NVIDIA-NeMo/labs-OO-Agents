@@ -37,7 +37,6 @@ def _resp(content: str, tool_calls: list | None = None) -> LLMResponse:
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
-        assistant_message={"role": "assistant", "content": content},
     )
 
 
@@ -216,8 +215,8 @@ class TestCodeActStrategySimpleExecution:
         assert result == 15
 
     @pytest.mark.asyncio
-    async def test_reasoning_items_replayed_with_tool_call_history(self):
-        """Opaque reasoning state is retained for the next CodeAct turn."""
+    async def test_reasoning_items_are_stored_once_and_fail_closed_on_replay(self):
+        """The IR retains opaque state but does not replay it before #310's gate."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
             async def compute(self) -> int:
@@ -233,7 +232,7 @@ class TestCodeActStrategySimpleExecution:
         first_response = _resp(
             "", tool_calls=[_tool_call("value = 42\nprint(value)", call_id="call_reasoning")]
         )
-        first_response.assistant_message["reasoning_items"] = [reasoning_item]
+        first_response.llm_state = {"reasoning_items": [reasoning_item]}
         fake_llm = FakeLLMClient(
             scripted_responses=[
                 first_response,
@@ -248,7 +247,7 @@ class TestCodeActStrategySimpleExecution:
         output_event = next(
             event
             for event in agent_instance.event_manager.values()
-            if event.event_type == "LLMOutput"
+            if event.event_type == "LLMResponse"
             and event.tool_calls
             and event.tool_calls[0].id == "call_reasoning"
         )
@@ -257,14 +256,15 @@ class TestCodeActStrategySimpleExecution:
             for event in agent_instance.event_manager.values()
             if event.event_type == "ToolCallEvent" and event.tool_call_id == "call_reasoning"
         )
-        assert tool_call_event.reasoning_items == [reasoning_item]
-        assert tool_call_event.llm_output_id == output_event.id
+        assert "reasoning_items" not in type(tool_call_event).model_fields
+        assert tool_call_event.llm_response_id == output_event.id
+        assert output_event.llm_state == {"reasoning_items": [reasoning_item]}
         replayed_tool_call = next(
             message
             for message in fake_llm.last_messages
             if message.get("role") == "assistant" and message.get("tool_calls")
         )
-        assert replayed_tool_call["reasoning_items"] == [reasoning_item]
+        assert "reasoning_items" not in replayed_tool_call
 
     @pytest.mark.asyncio
     async def test_multiple_tool_calls_then_result(self):
@@ -1060,7 +1060,7 @@ class TestCodeActStrategyEventSequence:
         The architecture nests ToolResult inside ToolCallEvent.result,
         so there are no separate tool_result events.
 
-        Each provider turn remains as LLMOutput before its execution events.
+        Each provider turn remains as LLMResponse before its execution events.
         """
 
         class TestAgent(Agent, llm=_TEST_LLM):
@@ -1090,14 +1090,14 @@ class TestCodeActStrategyEventSequence:
         events = agent_instance.event_manager.values()
         event_types = [e.event_type for e in events]
 
-        # LLMOutput is the canonical provider turn. ToolResult remains nested
+        # LLMResponse is the canonical provider turn. ToolResult remains nested
         # in ToolCallEvent, with no separate tool-result event.
         assert event_types == [
             "Task",
-            "LLMOutput",
+            "LLMResponse",
             "ToolCallEvent",
             "PythonOutput",
-            "LLMOutput",
+            "LLMResponse",
             "ToolCallEvent",
         ]
 
@@ -1106,7 +1106,7 @@ class TestCodeActStrategyEventSequence:
         tool_call_event = events[2]
         assert first_output.tool_calls[0].id == "call_abc123"
         assert tool_call_event.event_type == "ToolCallEvent"
-        assert tool_call_event.llm_output_id == first_output.id
+        assert tool_call_event.llm_response_id == first_output.id
         assert tool_call_event.tool_call_id == "call_abc123"
         assert tool_call_event.name == "execute_python"
         assert "code" in tool_call_event.arguments
@@ -1124,13 +1124,13 @@ class TestCodeActStrategyEventSequence:
         return_output = events[4]
         return_call_event = events[5]
         assert return_call_event.event_type == "ToolCallEvent"
-        assert return_call_event.llm_output_id == return_output.id
+        assert return_call_event.llm_response_id == return_output.id
         assert return_call_event.name == "return_result"
         assert return_call_event.result is not None
 
     @pytest.mark.asyncio
     async def test_tool_turn_is_retained_but_not_rendered_twice(self):
-        """The canonical LLMOutput persists while ToolCallEvent drives replay."""
+        """The canonical LLMResponse persists while ToolCallEvent drives replay."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
             @strategy(CodeActStrategy(config=CodeActConfig()))
@@ -1151,13 +1151,13 @@ class TestCodeActStrategyEventSequence:
         assert result == "done"
 
         events = agent_instance.event_manager.values()
-        outputs = [event for event in events if event.event_type == "LLMOutput"]
+        outputs = [event for event in events if event.event_type == "LLMResponse"]
         calls = [event for event in events if event.event_type == "ToolCallEvent"]
         assert len(outputs) == len(calls) == 2
         assert [output.tool_calls[0].id for output in outputs] == [
             call.tool_call_id for call in calls
         ]
-        assert [call.llm_output_id for call in calls] == [output.id for output in outputs]
+        assert [call.llm_response_id for call in calls] == [output.id for output in outputs]
         assert not any(
             message.get("role") == "assistant"
             and not message.get("tool_calls")
@@ -1204,8 +1204,8 @@ class TestCodeActStrategyEventSequence:
 
         # The original assistant turn is preserved; no synthetic provider tool
         # exchange is added to history.
-        llm_outputs = [e for e in events if e.event_type == "LLMOutput" and not e.tool_calls]
-        assert [event.content for event in llm_outputs] == ["The answer is 42."]
+        llm_responses = [e for e in events if e.event_type == "LLMResponse" and not e.tool_calls]
+        assert [event.content for event in llm_responses] == ["The answer is 42."]
         tool_call_events = [e for e in events if e.event_type == "ToolCallEvent"]
         assert tool_call_events == []
 
@@ -1241,7 +1241,6 @@ class TestCodeActStrategyEventSequence:
             content=ThoughtModel(thought="I need to reason carefully here."),
             tool_calls=[],
             finish_reason="stop",
-            assistant_message={"role": "assistant", "content": ""},
         )
         fake_llm = FakeLLMClient(
             scripted_responses=[
@@ -1256,9 +1255,9 @@ class TestCodeActStrategyEventSequence:
         assert "I need to reason carefully here." in result
 
         events = agent_instance.event_manager.values()
-        llm_outputs = [e for e in events if e.event_type == "LLMOutput" and not e.tool_calls]
-        assert len(llm_outputs) == 1
-        assert "I need to reason carefully here." in llm_outputs[0].content
+        llm_responses = [e for e in events if e.event_type == "LLMResponse" and not e.tool_calls]
+        assert len(llm_responses) == 1
+        assert "I need to reason carefully here." in llm_responses[0].content
         tool_call_events = [e for e in events if e.event_type == "ToolCallEvent"]
         assert tool_call_events == []
 
@@ -1301,8 +1300,8 @@ class TestCodeActStrategyEventSequence:
         events = agent_instance.event_manager.values()
         # The text-only assistant turn is retained, followed by a user correction
         # and the model's real return_result call.
-        llm_outputs = [e for e in events if e.event_type == "LLMOutput" and not e.tool_calls]
-        assert [event.content for event in llm_outputs] == [
+        llm_responses = [e for e in events if e.event_type == "LLMResponse" and not e.tool_calls]
+        assert [event.content for event in llm_responses] == [
             "I have successfully completed the computation!"
         ]
         corrections = [e for e in events if e.event_type == "Error"]
@@ -1344,8 +1343,8 @@ class TestCodeActStrategyEventSequence:
         assert result is None
 
         events = agent_instance.event_manager.values()
-        llm_outputs = [e for e in events if e.event_type == "LLMOutput"]
-        assert [event.content for event in llm_outputs] == [""]
+        llm_responses = [e for e in events if e.event_type == "LLMResponse"]
+        assert [event.content for event in llm_responses] == [""]
         tool_call_events = [e for e in events if e.event_type == "ToolCallEvent"]
         assert tool_call_events == []
 
@@ -1401,7 +1400,6 @@ class TestCodeActStrategyEventSequence:
             content=ThoughtModel(thought="I should calculate this."),
             tool_calls=[_tool_call("x = 6 * 7", call_id="c1")],
             finish_reason="tool_calls",
-            assistant_message={"role": "assistant", "content": ""},
         )
         fake_llm = FakeLLMClient(
             scripted_responses=[
@@ -1420,7 +1418,7 @@ class TestCodeActStrategyEventSequence:
         ]
         assert len(exec_calls) == 1
         assert exec_calls[0].arguments["code"] == "x = 6 * 7"
-        output = next(e for e in events if e.event_type == "LLMOutput" and e.content)
+        output = next(e for e in events if e.event_type == "LLMResponse" and e.content)
         assert output.content == '{"thought":"I should calculate this."}'
         assert output.tool_calls[0].arguments == json.dumps({"code": "x = 6 * 7"})
 
@@ -1454,8 +1452,8 @@ class TestCodeActStrategyEventSequence:
         # The empty assistant turn is retained and the only tool event is the
         # model's successful self-correction.
         all_events = agent_instance.event_manager.values()
-        llm_outputs = [e for e in all_events if e.event_type == "LLMOutput" and not e.tool_calls]
-        assert [event.content for event in llm_outputs] == [""]
+        llm_responses = [e for e in all_events if e.event_type == "LLMResponse" and not e.tool_calls]
+        assert [event.content for event in llm_responses] == [""]
         tool_call_events = [e for e in all_events if e.event_type == "ToolCallEvent"]
         assert len(tool_call_events) == 1
         assert tool_call_events[0].name == "return_result"
@@ -1493,13 +1491,13 @@ class TestCodeActStrategyEventSequence:
         # Each provider response is retained immediately before its execution projection.
         assert event_types == [
             "Task",
-            "LLMOutput",
+            "LLMResponse",
             "ToolCallEvent",
             "PythonOutput",
-            "LLMOutput",
+            "LLMResponse",
             "ToolCallEvent",
             "PythonOutput",
-            "LLMOutput",
+            "LLMResponse",
             "ToolCallEvent",
         ], f"Expected correct sequence with nested results, got {event_types}"
 
@@ -1512,7 +1510,7 @@ class TestCodeActStrategyEventSequence:
 
     @pytest.mark.asyncio
     async def test_content_plus_tool_calls_preserves_turn_and_arguments(self):
-        """Assistant prose remains on LLMOutput and execution stays exact."""
+        """Assistant prose remains on LLMResponse and execution stays exact."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
             @strategy(CodeActStrategy(config=CodeActConfig()))
@@ -1539,7 +1537,7 @@ class TestCodeActStrategyEventSequence:
         events = agent_instance.event_manager.values()
         tool_call = next(e for e in events if e.event_type == "ToolCallEvent")
         assert tool_call.arguments["code"] == "x = 42"
-        output = next(e for e in events if e.event_type == "LLMOutput" and e.content)
+        output = next(e for e in events if e.event_type == "LLMResponse" and e.content)
         assert output.content == "Let me work through this step by step."
         assert output.tool_calls[0].arguments == json.dumps({"code": "x = 42"})
 
@@ -1615,8 +1613,8 @@ class TestCodeActStrategyEventSequence:
 
         # The three assistant turns remain in history without fabricated tool calls.
         events = agent_instance.event_manager.values()
-        llm_outputs = [e for e in events if e.event_type == "LLMOutput"]
-        assert len(llm_outputs) == 3
+        llm_responses = [e for e in events if e.event_type == "LLMResponse"]
+        assert len(llm_responses) == 3
         return_result_calls = [
             e for e in events if e.event_type == "ToolCallEvent" and e.name == "return_result"
         ]
@@ -1750,7 +1748,7 @@ class TestCodeActStrategyEventSequence:
             e for e in events if e.event_type == "ToolCallEvent" and e.name == "execute_python"
         ]
         assert [call.arguments["code"] for call in exec_calls] == ["x = 1", "y = 2"]
-        output = next(event for event in events if event.event_type == "LLMOutput")
+        output = next(event for event in events if event.event_type == "LLMResponse")
         assert output.content == "Thinking aloud."
         assert [call.arguments for call in output.tool_calls] == [
             json.dumps({"code": "x = 1"}),
@@ -2868,7 +2866,7 @@ class TestCodeActMultiToolCallsPerResponse:
         multi_turn = next(
             event
             for event in events
-            if event.event_type == "LLMOutput" and len(event.tool_calls) == 3
+            if event.event_type == "LLMResponse" and len(event.tool_calls) == 3
         )
         projected_calls = [
             event
@@ -2880,7 +2878,7 @@ class TestCodeActMultiToolCallsPerResponse:
             "call_2",
             "call_3",
         ]
-        assert {call.llm_output_id for call in projected_calls} == {multi_turn.id}
+        assert {call.llm_response_id for call in projected_calls} == {multi_turn.id}
 
     @pytest.mark.asyncio
     async def test_multi_tool_calls_stop_on_first_error(self):

@@ -25,7 +25,6 @@ def _resp(content: str) -> LLMResponse:
         content=content,
         tool_calls=[],
         finish_reason="stop",
-        assistant_message={"role": "assistant", "content": content},
     )
 
 

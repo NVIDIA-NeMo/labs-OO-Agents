@@ -25,7 +25,8 @@ from nooa.context_blocks.models import (
     Role,
     ToolCallInfo,
 )
-from nooa.events import LLMOutput, LLMToolCall
+from nooa.events import LLMResponse
+from nooa.unifiedllm import ToolCall
 
 
 def _tool_call_block(
@@ -35,8 +36,7 @@ def _tool_call_block(
     name: str,
     arguments: dict,
     result_content: str | None = None,
-    reasoning_items: list[dict] | None = None,
-    llm_output_id: str | None = None,
+    llm_response_id: str | None = None,
 ) -> ResolvedBlock:
     """Helper: ResolvedBlock carrying a ToolCallEvent."""
     result = (
@@ -48,8 +48,7 @@ def _tool_call_block(
         tool_call_id=tool_call_id,
         name=name,
         arguments=arguments,
-        reasoning_items=reasoning_items,
-        llm_output_id=llm_output_id,
+        llm_response_id=llm_response_id,
         result=result,
     )
     return ResolvedBlock(key=key, content="", role=Role.ASSISTANT, event=event)
@@ -141,15 +140,15 @@ class TestXMLBlockFormatter:
         assert XMLBlockFormatter().format_type == "xml"
 
     def test_groups_linked_executions_under_original_assistant_turn(self):
-        turn = LLMOutput(
+        turn = LLMResponse(
             content="I will run both.",
             tool_calls=(
-                LLMToolCall(
+                ToolCall(
                     id="call_1",
                     name="execute_python",
                     arguments='{"code":"first()"}',
                 ),
-                LLMToolCall(
+                ToolCall(
                     id="call_2",
                     name="execute_python",
                     arguments='{"code":"second()"}',
@@ -163,7 +162,7 @@ class TestXMLBlockFormatter:
             name="execute_python",
             arguments={"code": "first()"},
             result_content="status: complete",
-            llm_output_id=turn.id,
+            llm_response_id=turn.id,
         )
         call_2 = _tool_call_block(
             key="call_2",
@@ -171,7 +170,7 @@ class TestXMLBlockFormatter:
             name="execute_python",
             arguments={"code": "second()"},
             result_content="status: complete",
-            llm_output_id=turn.id,
+            llm_response_id=turn.id,
         )
 
         messages = XMLBlockFormatter().format(
@@ -203,11 +202,11 @@ class TestXMLBlockFormatter:
         assert [message.tool_call_id for message in messages[2:4]] == ["call_1", "call_2"]
 
     def test_unexecuted_call_gets_a_matching_result(self):
-        turn = LLMOutput(
+        turn = LLMResponse(
             content="",
             tool_calls=(
-                LLMToolCall(id="call_1", name="one", arguments="{}"),
-                LLMToolCall(id="call_2", name="two", arguments="{}"),
+                ToolCall(id="call_1", name="one", arguments="{}"),
+                ToolCall(id="call_2", name="two", arguments="{}"),
             ),
             finish_reason="tool_calls",
         )
@@ -216,7 +215,7 @@ class TestXMLBlockFormatter:
             name="one",
             arguments={},
             result_content="failed",
-            llm_output_id=turn.id,
+            llm_response_id=turn.id,
         )
 
         messages = XMLBlockFormatter().format(
@@ -241,10 +240,10 @@ class TestXMLBlockFormatter:
     def test_incomplete_or_malformed_tool_batch_is_not_replayed(
         self, finish_reason, arguments, content
     ):
-        turn = LLMOutput(
+        turn = LLMResponse(
             content=content,
             tool_calls=(
-                LLMToolCall(
+                ToolCall(
                     id="partial",
                     name="execute_python",
                     arguments=arguments,
@@ -270,11 +269,45 @@ class TestXMLBlockFormatter:
             "messages": ([{"role": "assistant", "content": content}] if content else []),
         }
 
+    @pytest.mark.parametrize(
+        "response",
+        [
+            LLMResponse(content="", reasoning="private thought"),
+            LLMResponse(content="", llm_state={"opaque": "state"}),
+        ],
+        ids=["reasoning-only", "state-only"],
+    )
+    def test_unprojected_response_fields_do_not_create_empty_assistant_messages(self, response):
+        messages = XMLBlockFormatter().format(
+            [ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=response)]
+        )
+
+        assert all(message.role is not Role.ASSISTANT for message in messages)
+
+    def test_event_type_spoof_does_not_impersonate_an_llm_response(self):
+        from nooa.events import Message
+
+        event = Message(content="ordinary message", event_type="LLMResponse")
+
+        assert XMLBlockFormatter().format_event(event) == "ordinary message"
+
+    def test_llm_response_subclass_keeps_canonical_semantics(self):
+        class CustomLLMResponse(LLMResponse):
+            pass
+
+        response = CustomLLMResponse(content="", llm_state={"opaque": "state"})
+
+        messages = XMLBlockFormatter().format(
+            [ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=response)]
+        )
+
+        assert all(message.role is not Role.ASSISTANT for message in messages)
+
     def test_linked_execution_falls_back_to_standalone_when_carrier_is_rejected(self):
-        turn = LLMOutput(
+        turn = LLMResponse(
             content="",
             tool_calls=(
-                LLMToolCall(
+                ToolCall(
                     id="partial",
                     name="execute_python",
                     arguments='{"code":"partial()"}',
@@ -287,7 +320,7 @@ class TestXMLBlockFormatter:
             name="execute_python",
             arguments={"code": "completed()"},
             result_content="status: complete",
-            llm_output_id=turn.id,
+            llm_response_id=turn.id,
         )
 
         messages = XMLBlockFormatter().format(
@@ -568,20 +601,27 @@ class TestEndToEndPipelines:
         assert "# Persona" in result["system"]
         assert result["messages"][0]["content"] == "Hello"
 
-    def test_reasoning_items_survive_tool_call_pipeline(self):
+    def test_legacy_reasoning_items_fail_closed_without_provider_gate(self):
+        """Removed opaque legacy fields are ignored and cannot be emitted."""
         reasoning_item = {
             "id": "rs_123",
             "type": "reasoning",
             "encrypted_content": "encrypted-state",
             "summary": [],
         }
+        legacy_event = ToolCallEvent.model_validate(
+            {
+                "tool_call_id": "call_123",
+                "name": "search",
+                "arguments": {"query": "weather"},
+                "result": {"tool_call_id": "call_123", "content": "sunny"},
+                "reasoning_items": [reasoning_item],
+            }
+        )
+        assert "reasoning_items" not in type(legacy_event).model_fields
         blocks = [
-            _tool_call_block(
-                tool_call_id="call_123",
-                name="search",
-                arguments={"query": "weather"},
-                result_content="sunny",
-                reasoning_items=[reasoning_item],
+            ResolvedBlock(
+                key="tc", content="", role=Role.ASSISTANT, event=legacy_event
             )
         ]
 
@@ -590,10 +630,14 @@ class TestEndToEndPipelines:
         responses_input = ResponsesProviderFormatter().format(messages)
 
         openai_tool_call = next(message for message in openai_input if "tool_calls" in message)
-        assert openai_tool_call["reasoning_items"] == [reasoning_item]
-        reasoning_index = responses_input.index(reasoning_item)
-        assert responses_input[reasoning_index + 1]["type"] == "function_call"
-        assert responses_input[reasoning_index + 2]["type"] == "function_call_output"
+        assert "reasoning_items" not in openai_tool_call
+        assert reasoning_item not in responses_input
+        function_call_index = next(
+            index
+            for index, item in enumerate(responses_input)
+            if item.get("type") == "function_call"
+        )
+        assert responses_input[function_call_index + 1]["type"] == "function_call_output"
 
 
 class TestBlockFormatterFormatEvent:

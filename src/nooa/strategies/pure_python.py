@@ -513,7 +513,7 @@ class PurePythonStrategy(CompositeStrategy):
         Executes prefill code as a synthetic first turn through the normal
         execution path. Results persist in session_locals for subsequent turns.
         """
-        from nooa.events import LLMOutput
+        from nooa.context_blocks.events import AssistantEvent
 
         if not self.prefill:
             return
@@ -526,10 +526,9 @@ class PurePythonStrategy(CompositeStrategy):
 
         logger.debug(f"[PURE_PYTHON] Running prefill for {call.method_name}")
 
-        # Add as assistant message (as if LLM output this code)
-        # Mark with metadata so it's identifiable in traces
+        # This is an assistant-role prompt artifact, not a provider response.
         runtime.event_manager.add(
-            LLMOutput(
+            AssistantEvent(
                 content=code,
                 metadata={"prefill": True, "prefill_type": "inspect_inputs"},
             )
@@ -585,7 +584,7 @@ class PurePythonStrategy(CompositeStrategy):
 
         Returns:
             (code, event_id): code ready for execution (without fences/XML),
-            and the event_id of the exact provider LLMOutput event.
+            and the event_id of the exact provider LLMResponse event.
         """
         logger.debug(
             f"[PURE_PYTHON] Loop iteration: iter={session.iteration}/{session.max_iterations}, "

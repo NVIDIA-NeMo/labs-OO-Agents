@@ -169,7 +169,7 @@ async def test_function_body_extraction_when_wrapped_in_function_definition():
 
     # The canonical assistant turn remains byte-for-byte provider output.
     history_events = agent_instance.event_manager.values()
-    assistant_events = [e for e in history_events if e.event_type == "LLMOutput"]
+    assistant_events = [e for e in history_events if e.event_type == "LLMResponse"]
 
     # Should have at least one assistant event
     assert len(assistant_events) >= 1
@@ -227,7 +227,7 @@ async def find_negative_sentiment(self) -> str:
 
     # The canonical assistant turn remains byte-for-byte provider output.
     history_events = agent_instance.event_manager.values()
-    assistant_events = [e for e in history_events if e.event_type == "LLMOutput"]
+    assistant_events = [e for e in history_events if e.event_type == "LLMResponse"]
 
     # Should have at least one assistant event
     assert len(assistant_events) >= 1

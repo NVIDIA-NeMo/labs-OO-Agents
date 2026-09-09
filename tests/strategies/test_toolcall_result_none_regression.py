@@ -50,7 +50,6 @@ def _resp(content: str, tool_calls: list | None = None) -> LLMResponse:
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
-        assistant_message={"role": "assistant", "content": content},
     )
 
 
@@ -477,7 +476,6 @@ class TestTranslatedToolCallPath:
                         )
                     ],
                     finish_reason="tool_calls",
-                    assistant_message={"role": "assistant", "content": ""},
                 ),
                 # Then return the result
                 _resp("", tool_calls=[_return_result(call_id="call_ret", result=3)]),
@@ -524,7 +522,6 @@ class TestTranslatedToolCallPath:
                         )
                     ],
                     finish_reason="tool_calls",
-                    assistant_message={"role": "assistant", "content": ""},
                 ),
                 # Then return valid result
                 _resp("", tool_calls=[_return_result(call_id="call_ok", result=42)]),
@@ -588,8 +585,8 @@ class TestStopToReturnResultPath:
             await agent_instance.get_number()
 
         events = agent_instance.event_manager.values()
-        llm_outputs = [e for e in events if e.event_type == "LLMOutput"]
-        assert [e.content for e in llm_outputs] == ["hello world"]
+        llm_responses = [e for e in events if e.event_type == "LLMResponse"]
+        assert [e.content for e in llm_responses] == ["hello world"]
         tool_call_events = [e for e in events if e.event_type == "ToolCallEvent"]
         assert tool_call_events == []
 
@@ -616,7 +613,6 @@ class TestStopToReturnResultPath:
                     content="",
                     tool_calls=[],
                     finish_reason="stop",
-                    assistant_message={"role": "assistant", "content": ""},
                 ),
             ]
         )
@@ -626,8 +622,8 @@ class TestStopToReturnResultPath:
         assert result is None
 
         events = agent_instance.event_manager.values()
-        llm_outputs = [e for e in events if e.event_type == "LLMOutput"]
-        assert [e.content for e in llm_outputs] == [""]
+        llm_responses = [e for e in events if e.event_type == "LLMResponse"]
+        assert [e.content for e in llm_responses] == [""]
         tool_call_events = [e for e in events if e.event_type == "ToolCallEvent"]
         assert tool_call_events == []
 

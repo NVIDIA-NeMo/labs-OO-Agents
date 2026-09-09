@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 from nooa import Agent
 from nooa.context_blocks import ResultStatus
-from nooa.events import LLMOutput, PythonOutput, Task
+from nooa.events import LLMResponse, PythonOutput, Task
 from nooa.runtime.event_manager import EventManager
 from nooa.runtime.events import EventsApi
 from nooa.unifiedllm import FakeLLMClient
@@ -135,17 +135,17 @@ class TestEventManagerOn:
         """on() should dispatch to correct handlers based on event_type."""
         manager = EventManager()
         task_handler = MagicMock()
-        llm_output_handler = MagicMock()
+        llm_response_handler = MagicMock()
 
         # Register handlers by event_type
         manager.on("Task", task_handler)
-        manager.on("LLMOutput", llm_output_handler)
+        manager.on("LLMResponse", llm_response_handler)
 
         manager.add(Task(prompt="Question"))
-        manager.add(LLMOutput(content="Answer"))  # Uses LLMOutput via alias
+        manager.add(LLMResponse(content="Answer"))  # Uses LLMResponse via alias
 
         task_handler.assert_called_once()
-        llm_output_handler.assert_called_once()
+        llm_response_handler.assert_called_once()
 
     def test_on_returns_unsubscribe_function(self):
         """on() should return function to unsubscribe."""
@@ -166,7 +166,7 @@ class TestEventManagerOn:
         manager.on("*", handler)
 
         manager.add(Task(prompt="Task"))
-        manager.add(LLMOutput(content="Response"))
+        manager.add(LLMResponse(content="Response"))
 
         assert handler.call_count == 2
 
@@ -270,7 +270,7 @@ class TestEventManagerQuery:
         event1.metadata["call_id"] = "call_1"
         manager.add(event1)
 
-        event2 = LLMOutput(content="Response 1")
+        event2 = LLMResponse(content="Response 1")
         event2.metadata["call_id"] = "call_1"
         manager.add(event2)
 
@@ -418,7 +418,7 @@ class TestOpenAIProviderFormatter:
         """format_events() converts events to OpenAI format."""
         manager = EventManager()
         manager.add(Task(prompt="Hello"))
-        manager.add(LLMOutput(content="Hi there"))
+        manager.add(LLMResponse(content="Hi there"))
 
         messages = _format_events_for_test(manager.values())
         assert len(messages) == 2

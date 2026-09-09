@@ -65,7 +65,6 @@ def _resp(content: str, tool_calls: list | None = None) -> LLMResponse:
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
-        assistant_message={"role": "assistant", "content": content},
     )
 
 
@@ -92,7 +91,6 @@ def _llm_resp(content: str) -> LLMResponse:
         content=content,
         tool_calls=[],
         finish_reason="stop",
-        assistant_message={"role": "assistant", "content": content},
     )
 
 
@@ -1291,54 +1289,42 @@ class TestPredictStrategyParseResponse:
             value: int
 
         s = PredictStrategy()
-        mock = MagicMock()
-        mock.content = M(value=42)
-        mock.reasoning = None
-        result = s._parse_llm_response(mock, "test")
+        response = LLMResponse(content='{"value":42}', parsed=M(value=42))
+        result = s._parse_llm_response(response, "test")
         assert result == {"value": 42}
 
     def test_dict_content(self):
         s = PredictStrategy()
-        mock = MagicMock()
-        mock.content = {"key": "val"}
-        mock.reasoning = None
-        result = s._parse_llm_response(mock, "test")
+        response = LLMResponse(content='{"key":"val"}', parsed={"key": "val"})
+        result = s._parse_llm_response(response, "test")
         assert result == {"key": "val"}
 
     def test_string_json_content(self):
         s = PredictStrategy()
-        mock = MagicMock()
-        mock.content = '{"value": 123}'
-        mock.reasoning = None
-        result = s._parse_llm_response(mock, "test")
+        response = LLMResponse(content='{"value": 123}')
+        result = s._parse_llm_response(response, "test")
         assert result == {"value": 123}
 
     def test_non_dict_json_wrapped(self):
         """Non-dict JSON (e.g., list) is wrapped in {"value": ...}."""
         s = PredictStrategy()
-        mock = MagicMock()
-        mock.content = "[1, 2, 3]"
-        mock.reasoning = None
-        result = s._parse_llm_response(mock, "test")
+        response = LLMResponse(content="[1, 2, 3]")
+        result = s._parse_llm_response(response, "test")
         assert result == {"value": [1, 2, 3]}
 
     def test_reasoning_fallback(self):
         """When content is empty, falls back to reasoning field."""
         s = PredictStrategy()
-        mock = MagicMock()
-        mock.content = None
-        mock.reasoning = '{"value": 99}'
-        result = s._parse_llm_response(mock, "test")
+        response = LLMResponse(content="", reasoning='{"value": 99}')
+        result = s._parse_llm_response(response, "test")
         assert result == {"value": 99}
 
     def test_empty_content_raises_json_error(self):
         """Empty content/reasoning causes JSONDecodeError."""
         s = PredictStrategy()
-        mock = MagicMock()
-        mock.content = None
-        mock.reasoning = None
+        response = LLMResponse(content="")
         with pytest.raises(json.JSONDecodeError):
-            s._parse_llm_response(mock, "test")
+            s._parse_llm_response(response, "test")
 
 
 class TestPredictStrategyExtractRaw:

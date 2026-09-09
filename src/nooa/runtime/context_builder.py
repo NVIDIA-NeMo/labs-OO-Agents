@@ -30,7 +30,7 @@ from nooa.context_blocks import (
     ResolvedBlock,
     Role,
 )
-from nooa.events import LLMOutput
+from nooa.events import LLMResponse
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import FormatConfig
@@ -461,8 +461,8 @@ def _phase_events(
         # event, so removing only the provider-visible block preserves the
         # append-only history without producing an invalid message.
         if (
-            isinstance(event, LLMOutput)
-            and not event.content.strip()
+            isinstance(event, LLMResponse)
+            and not event.replay_content.strip()
             and not event.tool_calls
             and not getattr(event, "llm_state", None)
             and not getattr(event, "reasoning", None)

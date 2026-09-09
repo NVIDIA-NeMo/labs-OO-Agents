@@ -16,7 +16,7 @@ from nooa import (
 from nooa.config import CodeActConfig
 from nooa.context_blocks import ToolCallEvent
 from nooa.errors import GenerationError
-from nooa.events import LLMOutput, PythonOutput, TextOnlyReply
+from nooa.events import PythonOutput, TextOnlyReply
 from nooa.runtime.event_manager import EventManager
 from nooa.runtime.harness_metrics import HarnessMetrics
 from nooa.storage import SQLiteStorageManager
@@ -33,7 +33,6 @@ def _resp(content="", tool_calls=None, finish_reason=None, reasoning=None):
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
-        assistant_message={"role": "assistant", "content": content},
         reasoning=reasoning,
     )
 
@@ -51,7 +50,7 @@ def _events(agent, event_type):
 
 
 def _text_outputs(agent):
-    return [event for event in _events(agent, LLMOutput) if not event.tool_calls]
+    return [event for event in _events(agent, LLMResponse) if not event.tool_calls]
 
 
 @pytest.mark.asyncio
@@ -112,7 +111,7 @@ async def test_return_text_as_result_is_opt_in():
     agent = TestAgent(llm=FakeLLMClient(scripted_responses=[_resp("done")]))
 
     assert await agent.my_task() == "done"
-    assert [event.content for event in _events(agent, LLMOutput)] == ["done"]
+    assert [event.content for event in _events(agent, LLMResponse)] == ["done"]
     assert _events(agent, ToolCallEvent) == []
     diagnostic = _events(agent, TextOnlyReply)[0]
     assert diagnostic.handler == "return_text_as_result"
@@ -141,7 +140,7 @@ async def test_error_finish_reason_never_calls_text_only_handler():
         await agent.my_task()
 
     assert calls == []
-    assert [event.content for event in _events(agent, LLMOutput)] == ["partial"]
+    assert [event.content for event in _events(agent, LLMResponse)] == ["partial"]
     assert _events(agent, TextOnlyReply) == []
 
 
@@ -310,7 +309,7 @@ async def test_text_only_output_survives_sqlite_resume(tmp_path):
         assert [
             event.content
             for event in resumed
-            if isinstance(event, LLMOutput) and not event.tool_calls
+            if isinstance(event, LLMResponse) and not event.tool_calls
         ] == ["I should have used a tool."]
         diagnostics = [event for event in resumed if isinstance(event, TextOnlyReply)]
         assert len(diagnostics) == 1

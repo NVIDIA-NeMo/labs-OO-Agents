@@ -31,7 +31,6 @@ from nooa.events import (
     BeforeTurn,
     Error,
     Feedback,
-    LLMOutput,
     Message,
     PythonOutput,
     Reasoning,
@@ -40,6 +39,7 @@ from nooa.events import (
     TuiSessionCleared,
     TuiSessionResumed,
 )
+from nooa.llm_types import LLMResponse
 from nooa.storage.json_snapshot import snapshot_from_dict, snapshot_to_dict
 from nooa.storage.snapshot import AgentSnapshot
 
@@ -82,7 +82,7 @@ for _cls in (
     Reasoning,
     Error,
     Feedback,
-    LLMOutput,
+    LLMResponse,
     PythonOutput,
     Summary,
     BeforeTurn,

@@ -62,7 +62,6 @@ class FakeLLM:
                 )
             ],
             finish_reason="tool_calls",
-            assistant_message={},
         )
 
 

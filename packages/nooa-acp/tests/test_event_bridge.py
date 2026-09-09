@@ -25,7 +25,7 @@ from nooa_cli.coding import (
 )
 
 from nooa.context_blocks.events import ResultStatus, ToolCallEvent
-from nooa.events import LLMComplete, PythonOutput
+from nooa.events import LLMResponse, PythonOutput
 from nooa.interactive import AgentMessage
 from nooa.unifiedllm import FakeLLMClient
 
@@ -80,7 +80,11 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path):
             stdout="hello\n",
         )
     )
-    agent.event_manager.add(LLMComplete(prompt_tokens=40, completion_tokens=10, cost_usd=0.25))
+    agent.event_manager.add(
+        LLMResponse(
+            usage={"prompt_tokens": 40, "completion_tokens": 10, "cost_usd": 0.25}
+        )
+    )
     await bridge.flush()
 
     updates = [update for _, update in client.updates]
@@ -203,7 +207,11 @@ async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
     bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
 
     agent.event_manager.add(AgentMessage(content="alive"))
-    agent.event_manager.add(LLMComplete(prompt_tokens=40, completion_tokens=10, cost_usd=0.25))
+    agent.event_manager.add(
+        LLMResponse(
+            usage={"prompt_tokens": 40, "completion_tokens": 10, "cost_usd": 0.25}
+        )
+    )
     await bridge.flush()
 
     # Positive control: prove the bridge is actually forwarding before asserting
@@ -217,13 +225,17 @@ async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
     await agent.close()
 
     # Paired positive: the same event with a known context window must emit a
-    # UsageUpdate. Without this, `return` at the top of _on_llm_complete passes
+    # UsageUpdate. Without this, `return` at the top of _on_llm_response passes
     # both halves — an AgentMessageChunk control comes from a different handler
     # and cannot tell "the guard works" from "usage never fires".
     sized = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     sized_client = _RecordingClient()
     sized_bridge = ACPEventBridge(sized, sized_client, "session-2")  # type: ignore[arg-type]
-    sized.event_manager.add(LLMComplete(prompt_tokens=40, completion_tokens=10, cost_usd=0.25))
+    sized.event_manager.add(
+        LLMResponse(
+            usage={"prompt_tokens": 40, "completion_tokens": 10, "cost_usd": 0.25}
+        )
+    )
     await sized_bridge.flush()
     assert any(isinstance(update, UsageUpdate) for _, update in sized_client.updates)
     await sized_bridge.close()

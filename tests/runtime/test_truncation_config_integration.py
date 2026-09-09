@@ -317,7 +317,6 @@ class TestTokenBudgetIntegration:
                         )
                     ],
                     finish_reason="tool_calls",
-                    assistant_message={"role": "assistant", "content": ""},
                     reasoning=None,
                     usage={"prompt_tokens": 11, "completion_tokens": 3},
                 )

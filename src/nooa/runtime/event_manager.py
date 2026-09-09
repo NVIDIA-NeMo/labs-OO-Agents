@@ -188,7 +188,7 @@ class EventManager:
         """Subscribe to events of a specific type.
 
         Args:
-            event_type: Event type (e.g., "Task", "LLMOutput", "Error")
+            event_type: Event type (e.g., "Task", "LLMResponse", "Error")
                        or "*" for all events.
             handler: Callback function receiving Event.
 
@@ -409,8 +409,10 @@ class EventManager:
         """Extract searchable text from an event's public fields."""
         parts: list[str] = []
 
-        # Get all public fields from model_dump (excludes private fields)
-        for _field_name, value in event.model_dump().items():
+        # Opaque replay state is durable but not a conversational/search field.
+        for field_name, value in event.model_dump().items():
+            if field_name == "llm_state":
+                continue
             if value is not None:
                 if isinstance(value, list):
                     parts.append(" ".join(str(item) for item in value))

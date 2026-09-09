@@ -22,8 +22,7 @@ from nooa.context_blocks.roles import Role
 from nooa.events import (
     AfterTurn,
     BeforeTurn,
-    LLMComplete,
-    LLMOutput,
+    LLMResponse,
     SystemPrompt,
     Task,
 )
@@ -148,7 +147,7 @@ class TestCustomEventDispatch:
     def test_known_event_types_still_route_to_specific_handlers(self, tmp_path: Path) -> None:
         """The wildcard dispatcher must not duplicate or skip framework events.
 
-        Pin that Task, BeforeTurn, LLMComplete, AfterTurn still produce
+        Pin that Task, BeforeTurn, LLMResponse, AfterTurn still produce
         the same trajectory shape as before — specific handlers ran, no
         generic-event fallback triggered.
         """
@@ -164,14 +163,13 @@ class TestCustomEventDispatch:
             )
         )
         exporter._dispatch_event(
-            LLMComplete(
+            LLMResponse(
                 model_name="fake",
-                prompt_tokens=10,
-                completion_tokens=2,
+                usage={"prompt_tokens": 10, "completion_tokens": 2},
                 generation_id="gen-1",
+                content="answered",
             )
         )
-        exporter._dispatch_event(LLMOutput(content="answered"))
         exporter._dispatch_event(
             AfterTurn(
                 method_name="run",
@@ -188,7 +186,7 @@ class TestCustomEventDispatch:
         sources = [s.source for s in traj.steps]
         assert sources == ["system", "user", "agent"]
         agent_step = traj.steps[2]
-        # Specific LLMComplete handler ran ⇒ metrics populated, llm_call_count=1.
+        # Specific LLMResponse handler ran ⇒ metrics populated, llm_call_count=1.
         assert agent_step.metrics is not None
         assert agent_step.metrics.prompt_tokens == 10
         assert agent_step.llm_call_count == 1
@@ -234,7 +232,6 @@ class TestWildcardSubscription:
                 content="",
                 tool_calls=tool_calls or [],
                 finish_reason="tool_calls" if tool_calls else "stop",
-                assistant_message={"role": "assistant", "content": ""},
                 usage={"prompt_tokens": 5, "completion_tokens": 1},
             )
 

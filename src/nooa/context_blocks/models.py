@@ -300,10 +300,6 @@ class RenderedMessage(BaseModel):
         default_factory=tuple,
         description="Complete ordered tool-call batch on an assistant turn",
     )
-    reasoning_items: list[dict[str, Any]] | None = Field(
-        default=None,
-        description="Opaque provider reasoning state associated with an assistant tool call",
-    )
     tool_call_id: str | None = Field(
         default=None, description="Tool-call id this message is a result for"
     )

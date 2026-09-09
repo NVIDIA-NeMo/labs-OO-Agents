@@ -85,7 +85,7 @@ async def solve(self, problem: str) -> str:
 
 ## Events
 
-Event history is what fills the LLM's conversation window. Key model-visible event types (names have no "Event" suffix): `Task`, `Message`, `Reasoning`, `Error`, `Feedback`, `LLMOutput`, `PythonOutput`, `Summary`, `Notification`. Runtime-only events (never shown to the LLM) include `BeforeAgentCall`/`AfterAgentCall`, `LLMCallStart`/`LLMCallEnd`, `LLMComplete` (token/cost metrics).
+Event history is what fills the LLM's conversation window. Key model-visible event types (names have no "Event" suffix): `Task`, `Message`, `Reasoning`, `Error`, `Feedback`, `LLMResponse`, `PythonOutput`, `Summary`, `Notification`. `LLMResponse` is both the canonical assistant turn and the home of its token/cost metadata; renderers expose only its conversational fields. Runtime-only events (never shown to the LLM) include `BeforeAgentCall`/`AfterAgentCall` and `LLMCallStart`/`LLMCallEnd`.
 
 ```python
 # Query (AND semantics; chronological; limit keeps most recent)

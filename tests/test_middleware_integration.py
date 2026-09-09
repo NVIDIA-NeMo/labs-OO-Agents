@@ -122,7 +122,6 @@ class TestLLMCallMiddlewareViaGenerate:
                 content="faked",
                 tool_calls=[],
                 finish_reason="stop",
-                assistant_message={"role": "assistant", "content": "faked"},
                 reasoning=None,
                 usage=None,
             )
@@ -607,7 +606,6 @@ class TestNestedGenerationReentry:
                 content="",
                 tool_calls=tc_list,
                 finish_reason="tool_calls",
-                assistant_message={"role": "assistant", "content": ""},
             )
 
         # outer: exec code that calls inner, then return
@@ -709,7 +707,6 @@ class TestAgentCallMiddleware:
                         )
                     ],
                     finish_reason="tool_calls",
-                    assistant_message={"role": "assistant", "content": ""},
                 ),
             ]
         )
@@ -752,7 +749,6 @@ class TestAgentCallMiddleware:
                         )
                     ],
                     finish_reason="tool_calls",
-                    assistant_message={"role": "assistant", "content": ""},
                 ),
             ]
         )
@@ -798,7 +794,6 @@ class TestAgentCallMiddleware:
                         )
                     ],
                     finish_reason="tool_calls",
-                    assistant_message={"role": "assistant", "content": ""},
                 ),
             ]
         )
@@ -895,7 +890,6 @@ class TestAgentCallMiddleware:
                         )
                     ],
                     finish_reason="tool_calls",
-                    assistant_message={"role": "assistant", "content": ""},
                 ),
                 LLMResponse(
                     raw_response=None,
@@ -908,7 +902,6 @@ class TestAgentCallMiddleware:
                         )
                     ],
                     finish_reason="tool_calls",
-                    assistant_message={"role": "assistant", "content": ""},
                 ),
             ]
         )

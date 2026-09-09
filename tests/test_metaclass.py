@@ -909,7 +909,6 @@ async def test_no_trace_outer_strategy_inner_ordering_also_suppresses_hooks():
             content=content,
             tool_calls=[],
             finish_reason="stop",
-            assistant_message={"role": "assistant", "content": content},
         )
 
     mock_hooks = MagicMock(spec=InstrumentationHooks)
@@ -947,7 +946,6 @@ async def test_no_trace_decorator_suppresses_hooks_on_generation_method():
             content=content,
             tool_calls=[],
             finish_reason="stop",
-            assistant_message={"role": "assistant", "content": content},
         )
 
     mock_hooks = MagicMock(spec=InstrumentationHooks)
@@ -985,7 +983,6 @@ async def test_no_trace_on_generation_method_in_enable_tracing_class_suppresses_
             content=content,
             tool_calls=[],
             finish_reason="stop",
-            assistant_message={"role": "assistant", "content": content},
         )
 
     mock_hooks = MagicMock(spec=InstrumentationHooks)

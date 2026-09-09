@@ -20,7 +20,6 @@ def _resp(content: str) -> LLMResponse:
         content=content,
         tool_calls=[],
         finish_reason="stop",
-        assistant_message={"role": "assistant", "content": content},
     )
 
 
@@ -214,9 +213,7 @@ class TestPurePythonStrategyExecute:
         # Get LLM-generated events (exclude synthetic prefill events)
         history_events = agent_instance.event_manager.values()
         assistant_events = [
-            e
-            for e in history_events
-            if e.event_type == "LLMOutput" and not (e.metadata or {}).get("prefill")
+            e for e in history_events if e.event_type == "LLMResponse"
         ]
 
         # Should have 2 assistant events (one per LLM call)
@@ -333,9 +330,7 @@ return x + 1
         # The canonical assistant event keeps the exact provider response.
         history_events = agent_instance.event_manager.values()
         assistant_events = [
-            e
-            for e in history_events
-            if e.event_type == "LLMOutput" and not (e.metadata or {}).get("prefill")
+            e for e in history_events if e.event_type == "LLMResponse"
         ]
 
         assert len(assistant_events) >= 1
@@ -569,9 +564,7 @@ return x + 1
         # The canonical assistant event keeps the exact provider response.
         history_events = agent_instance.event_manager.values()
         assistant_events = [
-            e
-            for e in history_events
-            if e.event_type == "LLMOutput" and not (e.metadata or {}).get("prefill")
+            e for e in history_events if e.event_type == "LLMResponse"
         ]
 
         assert len(assistant_events) >= 1

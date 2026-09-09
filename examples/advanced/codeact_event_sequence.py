@@ -9,7 +9,7 @@ Expected sequence:
 1. Task - The initial task/prompt
 2. ToolCallEvent - The LLM's request to call execute_python
 3. ToolResultEvent - The result of code execution
-4. LLMOutput - The final structured output
+4. LLMResponse - The final structured output
 
 Run with:
     uv run python examples/advanced/codeact_event_sequence.py

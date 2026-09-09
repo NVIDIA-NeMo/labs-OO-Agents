@@ -665,10 +665,13 @@ class PredictStrategy(GenerationStrategy):
             json.JSONDecodeError: If string content cannot be parsed as JSON
             GenerationError: If response type is unexpected
         """
-        # For structured output, the JSON result should be in the content field.
-        # The reasoning field contains the model's thinking process (not JSON).
-        # Try content first, then fall back to reasoning only if content is empty.
-        if llm_response.content:
+        # UnifiedLLM keeps the validated object in ``parsed`` while ``content``
+        # remains the durable provider text. Plain reasoning is only a fallback
+        # for providers that place their requested JSON there.
+        if llm_response.parsed is not None:
+            content_to_parse = llm_response.parsed
+            source = "parsed content"
+        elif llm_response.content:
             content_to_parse = llm_response.content
             source = "content"
         elif llm_response.reasoning:
@@ -682,8 +685,7 @@ class PredictStrategy(GenerationStrategy):
 
         logger.debug(f"[PREDICT] Parsing: using={source}, type={type(content_to_parse).__name__}")
 
-        # Validated Pydantic model directly in response.content
-        # Convert to dict for our validation layer
+        # Convert UnifiedLLM's validated Pydantic value to the validation layer's dict.
         if isinstance(content_to_parse, BaseModel):
             return content_to_parse.model_dump()
 

@@ -11,7 +11,7 @@ import pytest
 from nooa import Agent, return_text_as_result, strategy
 from nooa.config import CodeActConfig
 from nooa.errors import GenerationError
-from nooa.events import DebugTrace, Error, LLMOutput
+from nooa.events import DebugTrace, Error
 from nooa.strategies.codeact import CodeActStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
@@ -31,7 +31,6 @@ def _resp(
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
-        assistant_message={"role": "assistant", "content": content},
     )
 
 
@@ -72,7 +71,7 @@ class TestMaxTokensExhaustedError:
         assert len(max_tokens_errors) == 0, (
             f"max_tokens error should not be an Error event (LLM-visible), got: {max_tokens_errors}"
         )
-        assert [event.content for event in all_events if isinstance(event, LLMOutput)] == [""]
+        assert [event.content for event in all_events if isinstance(event, LLMResponse)] == [""]
 
     @pytest.mark.asyncio
     async def test_finish_reason_length_does_not_return_partial_text(self):
@@ -96,7 +95,7 @@ class TestMaxTokensExhaustedError:
             await agent_instance.my_task()
 
         events = agent_instance.event_manager.values()
-        assert [event.content for event in events if isinstance(event, LLMOutput)] == [
+        assert [event.content for event in events if isinstance(event, LLMResponse)] == [
             "truncated partial"
         ]
         assert not any(event.event_type == "TextOnlyReply" for event in events)
@@ -160,7 +159,7 @@ class TestMaxTokensExhaustedError:
         assert [
             event.content
             for event in agent_instance.event_manager.values()
-            if isinstance(event, LLMOutput)
+            if isinstance(event, LLMResponse)
         ] == ["", ""]
         assert not any(
             message.get("role") == "assistant"

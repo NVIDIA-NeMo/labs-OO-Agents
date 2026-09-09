@@ -184,7 +184,7 @@ class TestReflexionStrategyExecute:
         mock_runtime.generate = AsyncMock(
             return_value=(
                 MagicMock(
-                    content=ReflectionOutput(
+                    parsed=ReflectionOutput(
                         is_satisfactory=True,
                         reasoning="Result looks good",
                     ),
@@ -220,7 +220,7 @@ class TestReflexionStrategyExecute:
                 # First reflection: not satisfactory
                 (
                     MagicMock(
-                        content=ReflectionOutput(
+                        parsed=ReflectionOutput(
                             is_satisfactory=False,
                             issues=["Needs improvement"],
                             suggestions=["Try harder"],
@@ -231,7 +231,7 @@ class TestReflexionStrategyExecute:
                 # Second reflection: satisfactory
                 (
                     MagicMock(
-                        content=ReflectionOutput(
+                        parsed=ReflectionOutput(
                             is_satisfactory=True,
                             reasoning="Now it's good",
                         ),
@@ -265,7 +265,7 @@ class TestReflexionStrategyExecute:
         mock_runtime.generate = AsyncMock(
             return_value=(
                 MagicMock(
-                    content=ReflectionOutput(
+                    parsed=ReflectionOutput(
                         is_satisfactory=False,
                         issues=["Still not good"],
                     ),
@@ -306,7 +306,7 @@ class TestReflexionStrategyErrorHandling:
         mock_runtime.generate = AsyncMock(
             return_value=(
                 MagicMock(
-                    content=ReflectionOutput(is_satisfactory=True),
+                    parsed=ReflectionOutput(is_satisfactory=True),
                 ),
                 "event_123",
             )
@@ -364,7 +364,7 @@ class TestReflexionStrategyErrorHandling:
         mock_runtime.generate = AsyncMock(
             return_value=(
                 MagicMock(
-                    content=ReflectionOutput(is_satisfactory=True),
+                    parsed=ReflectionOutput(is_satisfactory=True),
                 ),
                 "event_123",
             )
@@ -403,7 +403,7 @@ class TestReflexionStrategyReflectionParsing:
         mock_runtime.generate = AsyncMock(
             return_value=(
                 MagicMock(
-                    content={
+                    parsed={
                         "is_satisfactory": True,
                         "issues": [],
                         "suggestions": [],
@@ -571,7 +571,7 @@ class TestReflexionStrategyHistoryInteraction:
                 # First reflection: not satisfactory
                 (
                     MagicMock(
-                        content=ReflectionOutput(
+                        parsed=ReflectionOutput(
                             is_satisfactory=False,
                             issues=["Not good enough"],
                             suggestions=["Do better"],
@@ -582,7 +582,7 @@ class TestReflexionStrategyHistoryInteraction:
                 # Second reflection: satisfactory
                 (
                     MagicMock(
-                        content=ReflectionOutput(is_satisfactory=True),
+                        parsed=ReflectionOutput(is_satisfactory=True),
                     ),
                     "event_2",
                 ),
@@ -619,7 +619,7 @@ class TestReflexionStrategyHistoryInteraction:
         mock_runtime.generate = AsyncMock(
             return_value=(
                 MagicMock(
-                    content=ReflectionOutput(
+                    parsed=ReflectionOutput(
                         is_satisfactory=True,
                         reasoning="Analysis looks complete",
                     ),

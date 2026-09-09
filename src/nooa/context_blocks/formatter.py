@@ -23,10 +23,11 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import FormatConfig
+    from nooa.llm_types import LLMResponse
 
 from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ToolCallEvent
@@ -36,9 +37,15 @@ from nooa.context_blocks.models import (
     Role,
     ToolCallInfo,
 )
-from nooa.events import LLMOutput
 
 logger = logging.getLogger(__name__)
+
+
+def _is_llm_response(event: EventBase | None) -> TypeGuard["LLMResponse"]:
+    """Recognize canonical turns without a module-initialization cycle."""
+    from nooa.llm_types import LLMResponse
+
+    return isinstance(event, LLMResponse)
 
 
 class FormatType(StrEnum):
@@ -103,7 +110,7 @@ class BlockFormatter(ABC):
         string. ToolCallEvents are handled structurally by :meth:`format` —
         they are not routed through ``format_event``.
 
-        ASSISTANT-role events (``Message``, ``Reasoning``, ``LLMOutput``) with
+        ASSISTANT-role events (``Message``, ``Reasoning``, ``LLMResponse``) with
         string content replay verbatim — no ``EventName(...)`` repr — so the
         model's past turns look exactly like what it naturally emits.
         Non-string content (e.g. structured Pydantic models from Predict)
@@ -114,6 +121,8 @@ class BlockFormatter(ABC):
         No OOM-safety cap is applied here — that belongs to L2 (stdout/stderr
         capture).
         """
+        if _is_llm_response(event):
+            return event.replay_content
         if getattr(event, "_role", None) is Role.ASSISTANT:
             content = getattr(event, "content", None)
             if isinstance(content, str):
@@ -159,7 +168,7 @@ def _xml_message_content(block: ResolvedBlock) -> str:
       class name is already inside the rendered content
       (``PythonOutput(...)``, ``Task(...)``) — nothing is lost, and the
       tag stays uniform across event types.
-    * ASSISTANT-role events (``Message``, ``Reasoning``, ``LLMOutput``)
+    * ASSISTANT-role events (``Message``, ``Reasoning``, ``LLMResponse``)
       are the LLM's own outputs: they pass through **unwrapped** so the
       model's past turns replay exactly as it produced them. Wrapping
       them (the old ``<agent>`` tag) taught models to emit
@@ -217,7 +226,7 @@ def _tool_result_message(event: ToolCallEvent) -> RenderedMessage:
     )
 
 
-def _is_replayable_tool_call_turn(event: LLMOutput) -> bool:
+def _is_replayable_tool_call_turn(event: Any) -> bool:
     """Return whether a captured turn is safe to project as provider tool calls."""
     if event.finish_reason != "tool_calls" or not event.tool_calls:
         return False
@@ -248,15 +257,12 @@ def _event_block_to_messages(
     """
     from nooa.context_blocks.models import BlockPart
 
-    if (
-        isinstance(block.event, LLMOutput)
-        and block.event.tool_calls
-        and not _is_replayable_tool_call_turn(block.event)
-        and not block.content
-    ):
-        # Keep incomplete/malformed provider turns in the public event IR,
-        # but do not synthesize an empty assistant message for them.
-        return []
+    if _is_llm_response(block.event) and not _is_replayable_tool_call_turn(block.event):
+        # Keep incomplete, reasoning-only, and state-only provider turns in the
+        # public event IR. Until their fields have an explicit projection,
+        # never synthesize an empty assistant message for them.
+        if not block.event.replay_content:
+            return []
 
     if isinstance(block.event, ToolCallEvent):
         event = block.event
@@ -270,7 +276,6 @@ def _event_block_to_messages(
                         arguments=event.arguments,
                     ),
                 ),
-                reasoning_items=event.reasoning_items,
             ),
             _tool_result_message(event),
         ]
@@ -299,49 +304,40 @@ def _event_blocks_to_messages(
 ) -> list[RenderedMessage]:
     """Project the public event-list IR into neutral conversation turns.
 
-    ``LLMOutput`` is the canonical assistant turn. Linked ``ToolCallEvent``
+    ``LLMResponse`` is the canonical assistant turn. Linked ``ToolCallEvent``
     objects describe executions of calls from that turn; they are not separate
     assistant turns. Grouping here preserves the provider's call batch and
     prevents call/result interleaving from changing its meaning.
 
     Legacy and synthetic ``ToolCallEvent`` objects without a visible linked
-    ``LLMOutput`` remain independently renderable.
+    ``LLMResponse`` remain independently renderable.
     """
     visible_turn_ids = {
         block.event.id
         for block in blocks
-        if isinstance(block.event, LLMOutput) and _is_replayable_tool_call_turn(block.event)
+        if _is_llm_response(block.event) and _is_replayable_tool_call_turn(block.event)
     }
     executions: dict[str, dict[str, ToolCallEvent]] = {}
     for block in blocks:
         event = block.event
         if (
             isinstance(event, ToolCallEvent)
-            and event.llm_output_id is not None
-            and event.llm_output_id in visible_turn_ids
+            and event.llm_response_id is not None
+            and event.llm_response_id in visible_turn_ids
         ):
-            executions.setdefault(event.llm_output_id, {})[event.tool_call_id] = event
+            executions.setdefault(event.llm_response_id, {})[event.tool_call_id] = event
 
     messages: list[RenderedMessage] = []
     for block in blocks:
         event = block.event
-        if isinstance(event, LLMOutput) and _is_replayable_tool_call_turn(event):
+        if _is_llm_response(event) and _is_replayable_tool_call_turn(event):
             by_call_id = executions.get(event.id, {})
-            reasoning_items = next(
-                (
-                    execution.reasoning_items
-                    for call in event.tool_calls
-                    if (execution := by_call_id.get(call.id)) is not None
-                    and execution.reasoning_items
-                ),
-                None,
-            )
             messages.append(
                 RenderedMessage(
                     role=Role.ASSISTANT,
                     # Event projection stores the raw object on a contentless
-                    # block; the canonical provider text lives on LLMOutput.
-                    content=event.content or None,
+                    # block; the canonical provider text lives on LLMResponse.
+                    content=event.replay_content or None,
                     tool_calls=tuple(
                         ToolCallInfo(
                             id=call.id,
@@ -350,7 +346,6 @@ def _event_blocks_to_messages(
                         )
                         for call in event.tool_calls
                     ),
-                    reasoning_items=reasoning_items,
                 )
             )
             for call in event.tool_calls:
@@ -359,7 +354,7 @@ def _event_blocks_to_messages(
                     messages.append(_tool_result_message(execution))
                     continue
                 logger.warning(
-                    "LLMOutput %s tool call %s has no execution event — emitting "
+                    "LLMResponse %s tool call %s has no execution event — emitting "
                     "placeholder tool_result to preserve protocol ordering.",
                     event.id,
                     call.id,
@@ -375,8 +370,8 @@ def _event_blocks_to_messages(
 
         if (
             isinstance(event, ToolCallEvent)
-            and event.llm_output_id is not None
-            and event.llm_output_id in visible_turn_ids
+            and event.llm_response_id is not None
+            and event.llm_response_id in visible_turn_ids
         ):
             continue
 
@@ -568,8 +563,6 @@ class OpenAIProviderFormatter(ProviderFormatter):
                         for call in msg.tool_calls
                     ],
                 }
-                if msg.reasoning_items:
-                    assistant_message["reasoning_items"] = msg.reasoning_items
                 out.append(assistant_message)
             elif msg.tool_call_id is not None:
                 out.append(
@@ -670,8 +663,6 @@ class ResponsesProviderFormatter(ProviderFormatter):
                 # Preserve assistant text that precedes the tool call
                 if msg.content and msg.role == Role.ASSISTANT:
                     out.append({"role": "assistant", "content": msg.content})
-                if msg.reasoning_items:
-                    out.extend(msg.reasoning_items)
                 for call in msg.tool_calls:
                     out.append(
                         {

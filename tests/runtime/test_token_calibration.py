@@ -56,7 +56,6 @@ class TestTokenCalibration:
                     content="ok",
                     tool_calls=[],
                     finish_reason="stop",
-                    assistant_message={"role": "assistant", "content": "ok"},
                     usage={"prompt_tokens": 500, "completion_tokens": 7},
                 )
             ]
@@ -106,7 +105,6 @@ class TestTokenCalibration:
                     content="ok",
                     tool_calls=[],
                     finish_reason="stop",
-                    assistant_message={"role": "assistant", "content": "ok"},
                     usage={"prompt_tokens": 150_000, "completion_tokens": 9},
                 )
             ]
@@ -146,7 +144,6 @@ class TestTokenCalibration:
                     content="ok",
                     tool_calls=[],
                     finish_reason="stop",
-                    assistant_message={"role": "assistant", "content": "ok"},
                     usage={"prompt_tokens": 5_000, "completion_tokens": 4},
                 )
             ]
@@ -221,7 +218,6 @@ class TestActualTokenStats:
                     content="ok",
                     tool_calls=[],
                     finish_reason="stop",
-                    assistant_message={"role": "assistant", "content": "ok"},
                     usage={"prompt_tokens": 12_345, "completion_tokens": 7},
                 )
             ]
@@ -256,7 +252,6 @@ class TestActualTokenStats:
                     content="ok",
                     tool_calls=[],
                     finish_reason="stop",
-                    assistant_message={"role": "assistant", "content": "ok"},
                     usage=None,
                 )
             ]

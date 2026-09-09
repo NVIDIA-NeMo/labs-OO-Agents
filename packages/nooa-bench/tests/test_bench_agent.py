@@ -6,10 +6,11 @@ from __future__ import annotations
 
 import pytest
 from nooa_bench import bench_agent as bench_agent_module
+from nooa_bench import runner
 from nooa_bench.bench_agent import BenchAgent, TaskResult
 
 from nooa.agentdoc import doc
-from nooa.unifiedllm import FakeLLMClient
+from nooa.unifiedllm import FakeLLMClient, LLMResponse
 
 
 class _FakeShell:
@@ -32,6 +33,22 @@ class _FakeRepo:
     def __init__(self, root: str, session: object | None = None) -> None:
         self.root = root
         self.session = session
+
+
+def test_trajectory_excludes_opaque_provider_state(monkeypatch, tmp_path):
+    response = LLMResponse(
+        content="public answer",
+        llm_state={"encrypted_content": "provider-secret"},
+    )
+    agent = type("Agent", (), {"event_manager": {response.id: response}})()
+    monkeypatch.setattr(runner, "LOGS_DIR", tmp_path)
+
+    runner._write_trajectory(agent)
+
+    payload = (tmp_path / "trajectory.json").read_text()
+    assert "public answer" in payload
+    assert "provider-secret" not in payload
+    assert "llm_state" not in payload
 
 
 def test_task_result_model():

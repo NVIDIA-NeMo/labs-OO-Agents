@@ -1,6 +1,6 @@
 ---
 name: nooa-middleware-hooks
-description: Intercept and observe NOOA execution — middleware via event_manager.intercept() (guardrails, input/output transforms, blocking), event observers via event_manager.on() (react to Task/Error/LLMComplete/turn events), and the InstrumentationHooks protocol for observability backends. Use when adding guardrails, redacting or rewriting prompts, blocking or faking an LLM call or code execution, rate-limiting agent methods, subscribing to lifecycle events, or wiring custom telemetry.
+description: Intercept and observe NOOA execution — middleware via event_manager.intercept() (guardrails, input/output transforms, blocking), event observers via event_manager.on() (react to Task/Error/LLMResponse/turn events), and the InstrumentationHooks protocol for observability backends. Use when adding guardrails, redacting or rewriting prompts, blocking or faking an LLM call or code execution, rate-limiting agent methods, subscribing to lifecycle events, or wiring custom telemetry.
 compatibility: nooa package
 ---
 
@@ -44,7 +44,7 @@ unsubscribe()                                       # intercept() returns a remo
 Verified semantics:
 
 - **Order**: registration order = execution order; first registered is outermost. Nesting across kinds: `agent_call` → per-turn `llm_call` → per-cell `execute_python`.
-- **Short-circuiting** (don't call `nxt`) is allowed for guardrails/caching, but you MUST set the output slot (`ctx.result` / `ctx.response`) — the runtime raises `RuntimeError` if middleware returns without it. To fake an LLM turn, construct an `LLMResponse` (`content`, `tool_calls=[]`, `finish_reason="stop"`, `assistant_message={...}`, `raw_response=None`).
+- **Short-circuiting** (don't call `nxt`) is allowed for guardrails/caching, but you MUST set the output slot (`ctx.result` / `ctx.response`) — the runtime raises `RuntimeError` if middleware returns without it. To fake an LLM turn, return a fresh `LLMResponse(content=..., tool_calls=[], finish_reason="stop")`; response instances cannot be reused across turns because runtime correlation data is stamped onto the same object that is recorded.
 - **Blocking**: raise from the middleware — the exception propagates to the caller exactly like a failure of the wrapped operation (for `llm_call`, CodeAct counts it against its session error budget).
 - **Exceptions are NOT swallowed** — middleware is control flow, unlike hooks.
 - Per-agent: registered on that agent's `EventManager`; subagents have their own.
@@ -63,8 +63,8 @@ unsub = agent.event_manager.on("Error", lambda e: log.warning("agent error: %s",
 agent.event_manager.on("*", audit)                 # wildcard: every event
 ```
 
-- Useful runtime-only events (never rendered to the model): `BeforeTurn` / `AfterTurn` (per generation turn; `AfterTurn.is_final` marks method completion) and `LLMComplete` (tokens, cost, model_name, tool_calls, reasoning metadata per round-trip — emitted precisely so you don't need `intercept("llm_call")` just to read LLM metrics).
-- Model-visible events (`Task`, `Message`, `Error`, `PythonOutput`, ...) are observable the same way — see `nooa-context-and-state` for the full list.
+- Useful runtime-only events (never rendered to the model): `BeforeTurn` / `AfterTurn` (per generation turn; `AfterTurn.is_final` marks method completion) and `LLMCallStart` / `LLMCallEnd`.
+- `LLMResponse` is the canonical, model-visible assistant turn. It also carries hidden token, cost, model, and reasoning metadata, so observers can read LLM metrics without wrapping `intercept("llm_call")`. Other model-visible events (`Task`, `Message`, `Error`, `PythonOutput`, ...) are observable the same way — see `nooa-context-and-state` for the full list.
 - The summarizers are the house pattern: subscribe to `AfterTurn` to *schedule* work, apply it at the next `BeforeTurn` (`agents/summarization.py:159-160`).
 
 ## InstrumentationHooks (`set_hooks`)
@@ -90,7 +90,7 @@ set_hooks(TimingHooks())   # set_hooks(None) removes
 
 ## Pitfalls
 
-- Don't use hooks for app logic (they're swallowed-exception observational); don't use middleware for metrics you can get from `LLMComplete` (you'd pay complexity for nothing).
+- Don't use hooks for app logic (they're swallowed-exception observational); don't use middleware for metrics you can get from `LLMResponse` (you'd pay complexity for nothing).
 - `AgentCallContext.result` uses a not-set sentinel — a short-circuiting `agent_call` middleware that "returns None" on purpose must still assign `ctx.result = None`.
 - Middleware lives on the instance's event manager: install in `__init__` (after `super().__init__()`) or on the constructed agent, not on the class.
 - Keep `llm_call` middleware fast — it's on the critical path of every turn, and runs again on context-window retries.

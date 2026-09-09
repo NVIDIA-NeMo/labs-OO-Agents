@@ -95,7 +95,7 @@ async def test_default_reasoning_tool_call_uses_responses_bridge(model: str) -> 
 
         responses.assert_called_once()
         assert result.finish_reason == "tool_calls"
-        assert result.assistant_message["reasoning_items"] == [REASONING_ITEM]
+        assert result.llm_state == {"reasoning_items": [REASONING_ITEM]}
     finally:
         await client.aclose()
 
@@ -118,7 +118,6 @@ def test_reasoning_none_keeps_chat_completions() -> None:
     finally:
         client.close()
 
-
 def test_custom_api_base_keeps_chat_completions_by_default() -> None:
     client = _client(api_base="https://gateway.example/v1")
     chat_endpoint = MagicMock(return_value=_chat_response())
@@ -134,50 +133,5 @@ def test_custom_api_base_keeps_chat_completions_by_default() -> None:
 
         chat_endpoint.assert_called_once()
         assert result.content == "done"
-    finally:
-        client.close()
-
-
-def test_reasoning_items_round_trip_into_next_responses_request() -> None:
-    client = _client()
-    try:
-        with (
-            patch(
-                "litellm.responses",
-                side_effect=[_responses_tool_call(), _responses_tool_call()],
-            ) as responses,
-            patch(
-                "litellm.main._complete_custom_openai",
-                side_effect=AssertionError("chat endpoint should not be used"),
-            ),
-        ):
-            first = client.call(
-                messages=[{"role": "user", "content": "Run Python."}],
-                tools=[TOOL],
-            )
-            client.call(
-                messages=[
-                    {"role": "user", "content": "Run Python."},
-                    first.assistant_message,
-                    {
-                        "role": "tool",
-                        "tool_call_id": first.tool_calls[0].id,
-                        "content": "1",
-                    },
-                ],
-                tools=[TOOL],
-            )
-
-        second_input = responses.call_args_list[1].kwargs["input"]
-        reasoning_index = second_input.index(REASONING_ITEM)
-        function_call_index = next(
-            index for index, item in enumerate(second_input) if item.get("type") == "function_call"
-        )
-        output_index = next(
-            index
-            for index, item in enumerate(second_input)
-            if item.get("type") == "function_call_output"
-        )
-        assert reasoning_index < function_call_index < output_index
     finally:
         client.close()

@@ -30,7 +30,7 @@ from nooa.context_blocks.utils import truncating_pformat
 from nooa.events import (
     Error,
     Feedback,
-    LLMOutput,
+    LLMResponse,
     Message,
     PythonOutput,
     Reasoning,
@@ -95,8 +95,8 @@ def plain_event_content(
             parts.append(f"Out[{event.execution_count}]: {value_str}")
         return "\n".join(parts) if parts else "(no output)"
 
-    # Error, Message, Reasoning, LLMOutput, Feedback — use content directly
-    if isinstance(event, (Error, Message, Reasoning, LLMOutput, Feedback)):
+    # Error, Message, Reasoning, LLMResponse, Feedback — use content directly
+    if isinstance(event, (Error, Message, Reasoning, LLMResponse, Feedback)):
         return event.content
 
     # Fallback

@@ -51,7 +51,6 @@ def _resp(content: str, tool_calls: list | None = None) -> LLMResponse:
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
-        assistant_message={"role": "assistant", "content": content},
     )
 
 
@@ -1342,7 +1341,7 @@ class TestPurePythonExecuteErrors:
 
         assert result == 99
         outputs = [
-            event for event in agent.event_manager.values() if event.event_type == "LLMOutput"
+            event for event in agent.event_manager.values() if event.event_type == "LLMResponse"
         ]
         assert [event.content for event in outputs] == [
             "<tool_code><code>return 42</code></tool_code>",
@@ -1371,7 +1370,7 @@ class TestPurePythonExecuteErrors:
         outputs = [
             event.content
             for event in agent.event_manager.values()
-            if event.event_type == "LLMOutput"
+            if event.event_type == "LLMResponse"
         ]
         assert outputs == ["", "return 42"]
 
@@ -1398,7 +1397,7 @@ class TestPurePythonExecuteErrors:
         outputs = [
             event.content
             for event in agent.event_manager.values()
-            if event.event_type == "LLMOutput"
+            if event.event_type == "LLMResponse"
         ]
         assert outputs == [whitespace, "return 42"]
         assert not any(
@@ -1582,7 +1581,8 @@ class TestPurePythonRunPrefill:
         await strat._run_prefill(rt, call, builtins, session)
 
         event_types = [type(e).__name__ for e in added_events]
-        assert "LLMOutput" in event_types
+        assert "AssistantEvent" in event_types
+        assert "LLMResponse" not in event_types
         assert "PythonOutput" in event_types
         assert "Feedback" not in event_types
 

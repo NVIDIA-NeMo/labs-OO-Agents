@@ -32,8 +32,7 @@ from nooa.events import (
     BeforeTurn,
     Error,
     Feedback,
-    LLMOutput,
-    LLMToolCall,
+    LLMResponse,
     Message,
     PythonOutput,
     Reasoning,
@@ -42,6 +41,7 @@ from nooa.events import (
 )
 from nooa.runtime.event_backend import InMemoryBackend
 from nooa.storage.sqlite import SQLiteEventBackend
+from nooa.unifiedllm import ToolCall
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -119,8 +119,8 @@ _ALL_EVENTS = [
     ),
     (
         "9",
-        LLMOutput(content="result = compute()"),
-        LLMOutput,
+        LLMResponse(content="result = compute()"),
+        LLMResponse,
         Role.ASSISTANT,
     ),
     (
@@ -233,10 +233,10 @@ def test_event_roundtrip_via_all_events(backend, tag, event, expected_type, expe
 @pytest.mark.parametrize(
     "event",
     [
-        LLMOutput(
+        LLMResponse(
             content="done",
             tool_calls=(
-                LLMToolCall(
+                ToolCall(
                     id="call-state",
                     name="execute_python",
                     arguments='{"code":"print(1)"}',
@@ -244,13 +244,20 @@ def test_event_roundtrip_via_all_events(backend, tag, event, expected_type, expe
             ),
             finish_reason="tool_calls",
             reasoning="Check the inputs before running the tool.",
+            llm_state={"opaque": {"provider": "state"}},
+            usage={
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cached_input_tokens": 75,
+            },
+            model_name="provider/model",
+            generation_id="generation-1",
         ),
         ToolCallEvent(
             tool_call_id="tc-state",
             name="execute_python",
             arguments={"code": "print(1)"},
-            llm_output_id="assistant-turn-id",
-            reasoning_items=[{"type": "reasoning", "encrypted_content": "opaque"}],
+            llm_response_id="assistant-turn-id",
         ),
     ],
     ids=["llm-output", "tool-call"],
@@ -262,21 +269,24 @@ def test_assistant_turn_ir_survives_backend_roundtrip(backend, event):
     restored = backend.get("state")
 
     assert restored is not None
-    if isinstance(event, LLMOutput):
+    if isinstance(event, LLMResponse):
         assert restored.tool_calls == event.tool_calls
         assert restored.finish_reason == event.finish_reason
         assert restored.reasoning == event.reasoning
+        assert restored.llm_state == event.llm_state
+        assert restored.usage == event.usage
+        assert restored.model_name == event.model_name
+        assert restored.generation_id == event.generation_id
     else:
-        assert restored.llm_output_id == event.llm_output_id
-        assert restored.reasoning_items == event.reasoning_items
+        assert restored.llm_response_id == event.llm_response_id
 
 
 def test_linked_assistant_turn_renders_after_backend_roundtrip(backend):
     """A persisted canonical turn and its execution retain their relationship."""
-    turn = LLMOutput(
+    turn = LLMResponse(
         content="I will run it.",
         tool_calls=(
-            LLMToolCall(
+            ToolCall(
                 id="call-roundtrip",
                 name="execute_python",
                 arguments='{"code":"print(1)"}',
@@ -288,7 +298,7 @@ def test_linked_assistant_turn_renders_after_backend_roundtrip(backend):
         tool_call_id="call-roundtrip",
         name="execute_python",
         arguments={"code": "print(1)"},
-        llm_output_id=turn.id,
+        llm_response_id=turn.id,
         result=ToolResult(tool_call_id="call-roundtrip", content="status: complete"),
     )
     backend.store("turn", turn)
