@@ -163,10 +163,13 @@ def create_standalone_wrapper(
     Args:
         func: Original async function with an ellipsis body.
         strategy: GenerationStrategy instance resolved from the decorator.
-        llm: Optional explicit LLM client from ``@strategy(..., llm=...)``.
-            Always a client, never a resolver callable: standalone functions
-            have no agent instance to bind one against, so ``@strategy``
-            rejects callables here at decoration time.
+        llm: Optional explicit LLM value from ``@strategy(..., llm=...)``.
+            A client, or a registry alias / litellm model string (resolved
+            lazily on first call and cached per wrapper — one decorated
+            function object — since standalone functions have no agent
+            instance to cache on). Never a resolver callable: standalone
+            functions have no agent instance to bind one against, so
+            ``@strategy`` rejects callables here at decoration time.
 
     Returns:
         Async callable with the same signature as *func*.
@@ -186,9 +189,25 @@ def create_standalone_wrapper(
     #     instead of stacking on one shard)
     _standalone_agent_id = f"standalone:{_PROCESS_AGENT_ID}:{func.__module__}:{func.__qualname__}"
 
+    # Aliases resolved per (wrapper, alias): standalone functions have no
+    # agent instance to cache on, and a fresh stub is built per call, so the
+    # wrapper closure is the only stable place to remember a resolved client.
+    # Shared resolution lives in nooa.method_llm.resolve_alias so this path
+    # and the agent-method path report identical errors.
+    _alias_cache: dict[str, Any] = {}
+
     @wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
         resolved_llm = llm
+        if isinstance(resolved_llm, str):
+            from nooa.method_llm import resolve_alias
+
+            resolved_llm = resolve_alias(
+                resolved_llm,
+                _alias_cache,
+                func.__name__,
+                origin="standalone @strategy(llm=...)",
+            )
         if resolved_llm is None:
             # Cascade: inherit LLM from a calling agent if we're inside one
             from nooa.runtime.context_vars import _parent_agent_var
