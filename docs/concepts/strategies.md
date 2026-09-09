@@ -54,6 +54,57 @@ variables, helper definitions persist across cells, and generated code can call
 visible methods and tools on `self`. The loop ends when a value validates
 against the return annotation.
 
+### Recovering from a text-only CodeAct turn
+
+CodeAct expects every model turn to call `execute_python` or `return_result`,
+but models sometimes emit plain prose instead. NOOA keeps that original
+assistant turn in history, then asks a configurable callback what to do:
+
+```python
+from nooa import CodeActStrategy, return_text_as_result, strategy
+
+
+class Summarizer(Agent, llm=llm):
+    @strategy(CodeActStrategy(on_text_only=return_text_as_result))
+    async def summarize(self, text: str) -> str:
+        """Summarize the text."""
+        ...
+```
+
+`TextOnlyResponseAction` is the callback's return value; it is not passed to
+`@strategy`. The wiring is:
+
+1. `@strategy(...)` attaches a `CodeActStrategy` to the method.
+2. `CodeActStrategy(on_text_only=handler)` registers a sync or async callback.
+3. When a text-only response occurs, the handler receives a
+   `TextOnlyResponseContext` and returns a `TextOnlyResponseAction`.
+
+The default handler, `retry_text_only_response`, appends a model-visible
+`Error` telling the model to use one of its tools and retries. The opt-in
+`return_text_as_result` handler validates the bare text against the method's
+return type. Custom handlers can return `TextOnlyResponseAction.return_result`,
+`.retry`, or `.tool_calls`; all paths preserve the provider's original turn.
+
+For example, an application can supply its own model-visible correction:
+
+```python
+from nooa import TextOnlyResponseAction, TextOnlyResponseContext
+from nooa.events import Error
+
+
+def require_tool(context: TextOnlyResponseContext) -> TextOnlyResponseAction:
+    return TextOnlyResponseAction.retry(
+        Error(content=f"Plain text cannot finish {context.call.method_name}; call a tool.")
+    )
+
+
+class Investigator(Agent, llm=llm):
+    @strategy(CodeActStrategy(on_text_only=require_tool))
+    async def investigate(self, question: str) -> str:
+        """Investigate the question."""
+        ...
+```
+
 ## Strategy selection is not model selection
 
 The strategy controls the interaction pattern. The LLM setting controls which

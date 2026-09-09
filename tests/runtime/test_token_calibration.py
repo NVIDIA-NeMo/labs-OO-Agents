@@ -9,7 +9,7 @@ remain fallback diagnostics and recovery inputs, not the primary token signal.
 
 import pytest
 
-from nooa import Agent
+from nooa import Agent, CodeActStrategy, return_text_as_result, strategy
 from nooa.context_blocks.events import ResultStatus, ToolCallEvent, ToolResult
 from nooa.events import Message
 from nooa.unifiedllm import FakeLLMClient, LLMResponse
@@ -63,6 +63,7 @@ class TestTokenCalibration:
         )
 
         class A(Agent, llm=llm):
+            @strategy(CodeActStrategy(on_text_only=return_text_as_result))
             async def respond(self, prompt: str) -> str:
                 """Respond to {prompt}."""
                 ...
@@ -112,6 +113,7 @@ class TestTokenCalibration:
         )
 
         class A(Agent, llm=llm):
+            @strategy(CodeActStrategy(on_text_only=return_text_as_result))
             async def respond(self, prompt: str) -> str:
                 """Respond to {prompt}."""
                 ...
@@ -151,6 +153,7 @@ class TestTokenCalibration:
         )
 
         class A(Agent, llm=llm):
+            @strategy(CodeActStrategy(on_text_only=return_text_as_result))
             async def respond(self, prompt: str) -> str:
                 """Respond to {prompt}."""
                 ...
@@ -225,6 +228,7 @@ class TestActualTokenStats:
         )
 
         class A(Agent, llm=llm):
+            @strategy(CodeActStrategy(on_text_only=return_text_as_result))
             async def respond(self, prompt: str) -> str:
                 """Respond to {prompt}."""
                 ...
@@ -259,6 +263,7 @@ class TestActualTokenStats:
         )
 
         class A(Agent, llm=llm):
+            @strategy(CodeActStrategy(on_text_only=return_text_as_result))
             async def respond(self, prompt: str) -> str:
                 """Respond to {prompt}."""
                 ...

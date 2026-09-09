@@ -557,6 +557,20 @@ class TestPhaseEvents:
         assert result[0].event is event
         assert result[0].content == ""  # Deferred — serialized at render time
 
+    def test_empty_llm_output_is_persisted_but_not_provider_visible(self):
+        from nooa.events import LLMOutput
+        from nooa.runtime.context_builder import _phase_events
+
+        empty = LLMOutput(content="", tag="1")
+        visible = LLMOutput(content="answer", tag="2")
+        events = [empty, visible]
+        em = _make_event_manager(events)
+
+        result = _phase_events([], em)
+
+        assert [block.event for block in result] == [visible]
+        assert em.values() == events
+
     def test_current_call_query_keeps_task_event(self):
         """EventQuery.current_call() must keep the task so LLM gets system + task.
 

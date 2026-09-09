@@ -126,11 +126,7 @@ class TextOnlyReply(EventBase):  # type: ignore[misc]
     but ``Role.METADATA`` — never rendered to the model, so capturing a
     text-only reply does not change generation. This is the durable, structured record that
     powers ``/bug`` capture and time-travel replay; the model-visible
-    correction is a separate ``Error``/``Feedback`` event (``Role.USER``).
-
-    Replaces the lossy ``DebugTrace`` previously written on the CodeAct
-    text-only path, which truncated the content and could not be relied on by
-    downstream consumers.
+    recovery action is recorded separately and may be supplied by the host.
     """
 
     _role: ClassVar[Role] = Role.METADATA
@@ -141,22 +137,17 @@ class TextOnlyReply(EventBase):  # type: ignore[misc]
     finish_reason: Annotated[
         str, Field(description="LLM finish_reason for the text-only turn (e.g. 'stop')")
     ] = ""
-    route: Annotated[
+    handler: Annotated[
         str,
-        Field(description="Handling route: 'return_result' or 'synthetic_comment'"),
+        Field(description="Qualified name of the text-only response handler"),
+    ] = ""
+    action: Annotated[
+        str,
+        Field(description="Handler action: 'return_result', 'retry', or 'tool_calls'"),
     ] = ""
     consecutive_text_only: Annotated[
         int, Field(description="Count of consecutive text-only turns including this one")
     ] = 0
-    recovered: Annotated[
-        bool,
-        Field(
-            description=(
-                "Set True on a later turn if the model issued a real tool call "
-                "after this text-only reply (i.e. the corrective feedback worked)."
-            )
-        ),
-    ] = False
 
 
 class LLMOutput(EventBase):  # type: ignore[misc]

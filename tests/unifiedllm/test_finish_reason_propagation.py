@@ -19,7 +19,7 @@ from nooa import Agent, strategy
 from nooa.config import CodeActConfig
 from nooa.errors import GenerationError
 from nooa.strategies.codeact import CodeActStrategy
-from nooa.unifiedllm import CompletionClient, ResponsesClient
+from nooa.unifiedllm import CompletionClient, ResponsesClient, create_tool_from_callable
 from nooa.unifiedllm.unifiedllm import (
     _map_completion_finish_reason,
     _map_responses_finish_reason,
@@ -49,6 +49,10 @@ def make_tool_call(id: str, name: str, arguments: str) -> ChatCompletionMessageT
     return ChatCompletionMessageToolCall(
         id=id, function=Function(name=name, arguments=arguments), type="function"
     )
+
+
+def do_thing() -> None:
+    """A test tool."""
 
 
 class TestMapCompletionFinishReason:
@@ -142,14 +146,48 @@ class TestCompletionClientPropagation:
             out = client.call([{"role": "user", "content": "Hi"}])
         assert out.finish_reason == "error"
 
-    def test_tool_calls_preserved_even_if_provider_reports_length(self, client):
-        # When tool calls are present the client keeps "tool_calls" regardless of
-        # the provider's raw finish_reason.
+    def test_sync_length_takes_precedence_over_parsed_tool_calls(self, client):
         tc = make_tool_call("call_1", "do_thing", "{}")
         resp = make_mock_response(content=None, tool_calls=[tc], finish_reason="length")
         with patch("litellm.completion", return_value=resp):
             out = client.call([{"role": "user", "content": "Hi"}])
-        assert out.finish_reason == "tool_calls"
+        assert out.finish_reason == "length"
+        assert len(out.tool_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_async_length_takes_precedence_over_parsed_tool_calls(self, client):
+        tc = make_tool_call("call_1", "do_thing", "{}")
+        resp = make_mock_response(content=None, tool_calls=[tc], finish_reason="length")
+        with patch("litellm.acompletion", new_callable=AsyncMock, return_value=resp):
+            out = await client.acall([{"role": "user", "content": "Hi"}])
+        assert out.finish_reason == "length"
+        assert len(out.tool_calls) == 1
+
+    def test_sync_length_takes_precedence_over_xml_tool_fallback(self, client):
+        resp = make_mock_response(
+            content='<tool_call>{"name":"do_thing","arguments":{}}</tool_call>',
+            finish_reason="length",
+        )
+        with patch("litellm.completion", return_value=resp):
+            out = client.call(
+                [{"role": "user", "content": "Hi"}],
+                tools=[create_tool_from_callable(do_thing)],
+            )
+        assert out.finish_reason == "length"
+        assert len(out.tool_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_async_length_takes_precedence_over_xml_tool_fallback(self, client):
+        resp = make_mock_response(
+            content='<tool_call>{"name":"do_thing","arguments":{}}</tool_call>',
+            finish_reason="length",
+        )
+        with patch("litellm.acompletion", new_callable=AsyncMock, return_value=resp):
+            out = await client.acall(
+                [{"role": "user", "content": "Hi"}],
+                tools=[create_tool_from_callable(do_thing)],
+            )
+        assert out.finish_reason == "length"
         assert len(out.tool_calls) == 1
 
 
@@ -161,6 +199,22 @@ def _make_responses_api_response(status: str, reason: str | None = None):
         usage=None,
         status=status,
         incomplete_details=details,
+    )
+
+
+def _make_incomplete_responses_tool_response():
+    return SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="function_call",
+                call_id="call_1",
+                name="do_thing",
+                arguments="{}",
+            )
+        ],
+        usage=None,
+        status="incomplete",
+        incomplete_details=SimpleNamespace(reason="max_output_tokens"),
     )
 
 
@@ -196,6 +250,21 @@ class TestResponsesClientPropagation:
             out = client.call([{"role": "user", "content": "Hi"}])
         assert out.finish_reason == "error"
 
+    def test_sync_length_takes_precedence_over_parsed_tool_calls(self, client):
+        resp = _make_incomplete_responses_tool_response()
+        with patch("litellm.responses", return_value=resp):
+            out = client.call([{"role": "user", "content": "Hi"}])
+        assert out.finish_reason == "length"
+        assert len(out.tool_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_async_length_takes_precedence_over_parsed_tool_calls(self, client):
+        resp = _make_incomplete_responses_tool_response()
+        with patch("litellm.aresponses", new_callable=AsyncMock, return_value=resp):
+            out = await client.acall([{"role": "user", "content": "Hi"}])
+        assert out.finish_reason == "length"
+        assert len(out.tool_calls) == 1
+
 
 class TestCodeActAbortOnRealLengthPath:
     """End-to-end: a real CompletionClient truncation triggers CodeAct's abort."""
@@ -225,3 +294,30 @@ class TestCodeActAbortOnRealLengthPath:
 
         # Abort must be immediate: a single call, no retry loop.
         assert mock_acompletion.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_truncated_tool_call_is_never_executed(self):
+        length_response = make_mock_response(
+            content="",
+            tool_calls=[make_tool_call("call_1", "execute_python", '{"code":"x = 42"}')],
+            finish_reason="length",
+        )
+        real_llm = CompletionClient(model="test-model")
+
+        class TestAgent(Agent, llm=real_llm):
+            @strategy(CodeActStrategy(config=CodeActConfig(max_retries=3, max_iterations=10)))
+            async def my_task(self) -> str:
+                """A task."""
+                ...
+
+        agent_instance = TestAgent(llm=real_llm)
+        with patch(
+            "litellm.acompletion", new_callable=AsyncMock, return_value=length_response
+        ) as mock_acompletion:
+            with pytest.raises(GenerationError, match="max_tokens"):
+                await agent_instance.my_task()
+
+        assert mock_acompletion.call_count == 1
+        assert all(
+            event.event_type != "ToolCallEvent" for event in agent_instance.event_manager.values()
+        )

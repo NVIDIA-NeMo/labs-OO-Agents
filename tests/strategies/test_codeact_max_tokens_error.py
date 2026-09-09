@@ -3,12 +3,14 @@
 """Test that empty response with finish_reason='length' raises immediately with an actionable message."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
-from nooa import Agent, strategy
+from nooa import Agent, return_text_as_result, strategy
 from nooa.config import CodeActConfig
 from nooa.errors import GenerationError
+from nooa.events import DebugTrace
 from nooa.strategies.codeact import CodeActStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
@@ -69,18 +71,71 @@ class TestMaxTokensExhaustedError:
         )
 
     @pytest.mark.asyncio
+    async def test_finish_reason_length_does_not_return_partial_text(self):
+        """A text-only handler cannot accept output truncated at max_tokens."""
+
+        class TestAgent(Agent, llm=_TEST_LLM):
+            @strategy(CodeActStrategy(on_text_only=return_text_as_result))
+            async def my_task(self) -> str:
+                """A task."""
+                ...
+
+        agent_instance = TestAgent(
+            llm=FakeLLMClient(
+                scripted_responses=[
+                    _resp("truncated partial", finish_reason="length"),
+                ]
+            )
+        )
+
+        with pytest.raises(GenerationError, match="max_tokens"):
+            await agent_instance.my_task()
+
+        events = agent_instance.event_manager.values()
+        assert [event.content for event in events if event.event_type == "LLMOutput"] == [
+            "truncated partial"
+        ]
+        assert not any(event.event_type == "TextOnlyReply" for event in events)
+
+    @pytest.mark.asyncio
+    async def test_truncation_diagnostics_do_not_persist_provider_output(self):
+        """Debug metadata records output shape without opaque provider payloads."""
+
+        class TestAgent(Agent, llm=_TEST_LLM):
+            @strategy(CodeActStrategy())
+            async def my_task(self) -> str:
+                """A task."""
+                ...
+
+        response = _resp("partial", finish_reason="length")
+        response.raw_response = SimpleNamespace(
+            output=[
+                {
+                    "type": "reasoning",
+                    "encrypted_content": "must-never-enter-debug-events",
+                },
+                {"type": "message", "content": []},
+            ]
+        )
+        agent_instance = TestAgent(llm=FakeLLMClient(scripted_responses=[response]))
+
+        with pytest.raises(GenerationError, match="max_tokens"):
+            await agent_instance.my_task()
+
+        debug = next(
+            event.content
+            for event in agent_instance.event_manager.values()
+            if isinstance(event, DebugTrace)
+        )
+        assert "must-never-enter-debug-events" not in debug
+        assert "raw_response.output_count=2; output_types=['reasoning', 'message']" in debug
+
+    @pytest.mark.asyncio
     async def test_empty_response_without_length_retries_normally(self):
         """When empty response has finish_reason != 'length', normal retry logic applies."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(
-                CodeActStrategy(
-                    config=CodeActConfig(
-                        max_retries=2,
-                        text_only_stop_behavior="synthetic_comment",
-                    )
-                )
-            )
+            @strategy(CodeActStrategy(config=CodeActConfig(max_retries=2)))
             async def my_task(self) -> str:
                 """A task."""
                 ...

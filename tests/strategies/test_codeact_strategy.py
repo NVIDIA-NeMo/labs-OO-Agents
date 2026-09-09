@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from nooa import Agent, strategy
 from nooa.config import CodeActConfig
 from nooa.events import PythonOutput, ResultStatus
-from nooa.strategies.codeact import CodeActStrategy
+from nooa.strategies.codeact import CodeActStrategy, return_text_as_result
 from nooa.strategies.codeact_errors import (
     format_validation_error,
     get_type_example,
@@ -1158,13 +1158,18 @@ class TestCodeActStrategyEventSequence:
         """Text-only LLM response (finish_reason=stop) routes through return_result validation.
 
         When the LLM returns finish_reason="stop" with text content, the strategy
-        constructs a synthetic return_result(content) tool call and routes it through
-        validation. If the return type matches (e.g. str), the session terminates
-        successfully with the content as the return value.
+        validates the content as a return_result value without persisting a tool
+        call the model did not make. If the return type matches (e.g. str), the
+        session terminates successfully with the content as the return value.
         """
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(CodeActStrategy(config=CodeActConfig()))
+            @strategy(
+                CodeActStrategy(
+                    config=CodeActConfig(),
+                    on_text_only=return_text_as_result,
+                )
+            )
             async def think_and_answer(self) -> str:
                 """A task that requires thinking."""
                 ...
@@ -1185,13 +1190,12 @@ class TestCodeActStrategyEventSequence:
         events = agent_instance.event_manager.values()
         event_types = [e.event_type for e in events]
 
-        # The synthetic return_result ToolCallEvent should be present
+        # The original assistant turn is preserved; no synthetic provider tool
+        # exchange is added to history.
+        llm_outputs = [e for e in events if e.event_type == "LLMOutput"]
+        assert [event.content for event in llm_outputs] == ["The answer is 42."]
         tool_call_events = [e for e in events if e.event_type == "ToolCallEvent"]
-        assert len(tool_call_events) == 1
-        synthetic = tool_call_events[0]
-        assert synthetic.name == "return_result"
-        assert synthetic.result is not None
-        assert synthetic.result.result_status == ResultStatus.COMPLETE
+        assert tool_call_events == []
 
         # No error event should be added
         assert "Error" not in event_types
@@ -1210,7 +1214,12 @@ class TestCodeActStrategyEventSequence:
             thought: str
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(CodeActStrategy(config=CodeActConfig()))
+            @strategy(
+                CodeActStrategy(
+                    config=CodeActConfig(),
+                    on_text_only=return_text_as_result,
+                )
+            )
             async def think_and_answer(self) -> str:
                 """A task that requires thinking."""
                 ...
@@ -1235,10 +1244,11 @@ class TestCodeActStrategyEventSequence:
         assert "I need to reason carefully here." in result
 
         events = agent_instance.event_manager.values()
+        llm_outputs = [e for e in events if e.event_type == "LLMOutput"]
+        assert len(llm_outputs) == 1
+        assert "I need to reason carefully here." in llm_outputs[0].content
         tool_call_events = [e for e in events if e.event_type == "ToolCallEvent"]
-        assert len(tool_call_events) == 1
-        assert tool_call_events[0].name == "return_result"
-        assert tool_call_events[0].result.result_status == ResultStatus.COMPLETE
+        assert tool_call_events == []
 
     @pytest.mark.asyncio
     async def test_text_only_stop_with_typed_return_gives_validation_error(self):
@@ -1251,7 +1261,12 @@ class TestCodeActStrategyEventSequence:
         """
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(CodeActStrategy(config=CodeActConfig()))
+            @strategy(
+                CodeActStrategy(
+                    config=CodeActConfig(),
+                    on_text_only=return_text_as_result,
+                )
+            )
             async def compute_stats(self) -> dict:
                 """Compute statistics and return a dict."""
                 ...
@@ -1272,21 +1287,18 @@ class TestCodeActStrategyEventSequence:
         assert result == {"mean": 42, "count": 10}
 
         events = agent_instance.event_manager.values()
-        # Should see: Task → synthetic return_result (with error) → real return_result (success)
+        # The text-only assistant turn is retained, followed by a user correction
+        # and the model's real return_result call.
+        llm_outputs = [e for e in events if e.event_type == "LLMOutput"]
+        assert [event.content for event in llm_outputs] == [
+            "I have successfully completed the computation!"
+        ]
+        corrections = [e for e in events if e.event_type == "Error"]
+        assert any("attempted result was invalid" in e.content for e in corrections)
         tool_call_events = [e for e in events if e.event_type == "ToolCallEvent"]
-        assert len(tool_call_events) == 2
-
-        # First tool call is the synthetic return_result that failed validation
-        first = tool_call_events[0]
-        assert first.name == "return_result"
-        assert first.result is not None
-        assert first.result.result_status == ResultStatus.ERROR
-        assert "Invalid result" in first.result.content
-
-        # Second tool call is the real return_result that succeeded
-        second = tool_call_events[1]
-        assert second.name == "return_result"
-        assert second.result.result_status == ResultStatus.COMPLETE
+        assert len(tool_call_events) == 1
+        assert tool_call_events[0].name == "return_result"
+        assert tool_call_events[0].result.result_status == ResultStatus.COMPLETE
 
     @pytest.mark.asyncio
     async def test_stop_no_content_with_none_return_type_terminates(self):
@@ -1297,7 +1309,12 @@ class TestCodeActStrategyEventSequence:
         """
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(CodeActStrategy(config=CodeActConfig()))
+            @strategy(
+                CodeActStrategy(
+                    config=CodeActConfig(),
+                    on_text_only=return_text_as_result,
+                )
+            )
             async def do_side_effects(self) -> None:
                 """Perform work via side effects."""
                 ...
@@ -1315,18 +1332,14 @@ class TestCodeActStrategyEventSequence:
         assert result is None
 
         events = agent_instance.event_manager.values()
+        llm_outputs = [e for e in events if e.event_type == "LLMOutput"]
+        assert [event.content for event in llm_outputs] == [""]
         tool_call_events = [e for e in events if e.event_type == "ToolCallEvent"]
-        assert len(tool_call_events) == 1
-        assert tool_call_events[0].name == "return_result"
-        assert tool_call_events[0].result.result_status == ResultStatus.COMPLETE
+        assert tool_call_events == []
 
     @pytest.mark.asyncio
-    async def test_text_only_whitespace_response_treated_as_empty(self):
-        """Whitespace-only text response (no tool calls) is treated as empty, not synthetic.
-
-        "   " is truthy but str.strip() is falsy, so it should fall through to the
-        empty-response error handler rather than creating a synthetic comment.
-        """
+    async def test_text_only_whitespace_response_uses_default_retry(self):
+        """Whitespace-only stop output uses text-only recovery without synthetic calls."""
         from nooa.errors import GenerationError
 
         class TestAgent(Agent, llm=_TEST_LLM):
@@ -1429,16 +1442,15 @@ class TestCodeActStrategyEventSequence:
 
         assert result == "corrected answer"
 
-        # The synthetic return_result(None) should have failed validation
+        # The empty assistant turn is retained and the only tool event is the
+        # model's successful self-correction.
         all_events = agent_instance.event_manager.values()
+        llm_outputs = [e for e in all_events if e.event_type == "LLMOutput"]
+        assert [event.content for event in llm_outputs] == [""]
         tool_call_events = [e for e in all_events if e.event_type == "ToolCallEvent"]
-        assert len(tool_call_events) == 2
-        # First is the failed synthetic return_result(None)
+        assert len(tool_call_events) == 1
         assert tool_call_events[0].name == "return_result"
-        assert tool_call_events[0].result.result_status == ResultStatus.ERROR
-        # Second is the successful self-correction
-        assert tool_call_events[1].name == "return_result"
-        assert tool_call_events[1].result.result_status == ResultStatus.COMPLETE
+        assert tool_call_events[0].result.result_status == ResultStatus.COMPLETE
 
     @pytest.mark.asyncio
     async def test_multiple_tool_calls_event_sequence(self):
@@ -1603,15 +1615,14 @@ class TestCodeActStrategyEventSequence:
             f"Expected last text preview in message, got: {msg!r}"
         )
 
-        # Should have exactly 3 synthetic return_result events (all failed validation)
-        # then abort fires before the 4th
+        # The three assistant turns remain in history without fabricated tool calls.
         events = agent_instance.event_manager.values()
+        llm_outputs = [e for e in events if e.event_type == "LLMOutput"]
+        assert len(llm_outputs) == 3
         return_result_calls = [
             e for e in events if e.event_type == "ToolCallEvent" and e.name == "return_result"
         ]
-        assert len(return_result_calls) == 3, (
-            f"Expected exactly 3 return_result attempts before abort, got {len(return_result_calls)}"
-        )
+        assert return_result_calls == []
 
     @pytest.mark.asyncio
     async def test_text_only_counter_resets_on_real_tool_call(self):
@@ -1687,14 +1698,7 @@ class TestCodeActStrategyEventSequence:
         from nooa.errors import GenerationError
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(
-                CodeActStrategy(
-                    config=CodeActConfig(
-                        max_consecutive_text_only=2,
-                        text_only_stop_behavior="synthetic_comment",
-                    )
-                )
-            )
+            @strategy(CodeActStrategy(config=CodeActConfig(max_consecutive_text_only=2)))
             async def stuck(self) -> str:
                 """Task."""
                 ...
