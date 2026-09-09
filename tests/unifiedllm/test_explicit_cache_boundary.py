@@ -10,7 +10,7 @@ import httpx
 import litellm
 import pytest
 
-from nooa._llm_state import ReplayCarryingMessage, carried_cache_boundary
+from nooa._llm_state import ReplayCarryingMessage, carried_cache_boundary, carry_replay_batch
 from nooa.context_blocks.events import UserEvent
 from nooa.context_blocks.formatter import OpenAIProviderFormatter
 from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
@@ -320,18 +320,17 @@ def test_replay_expansion_stays_inside_the_stable_prefix() -> None:
     transformed, instructions = client._transform_messages(
         [
             {"role": "user", "content": "run it"},
-            ReplayCarryingMessage(
-                {
-                    "_batch": [
-                        {
-                            "type": "function_call",
-                            "call_id": "c1",
-                            "name": "run",
-                            "arguments": "{}",
-                        }
-                    ]
-                },
+            *carry_replay_batch(
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": "c1",
+                        "name": "run",
+                        "arguments": "{}",
+                    }
+                ],
                 state,
+                None,
             ),
             {"type": "function_call_output", "call_id": "c1", "output": "done"},
             ReplayCarryingMessage(
