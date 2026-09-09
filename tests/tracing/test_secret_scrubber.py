@@ -236,6 +236,34 @@ class TestScrubValue:
         assert "opaque-openai-state" not in result
         assert count == 1
 
+    @pytest.mark.parametrize(
+        ("provider_state", "secret"),
+        [
+            (
+                {"thinking_blocks": [{"type": "thinking", "signature": "anthropic-sig"}]},
+                "anthropic-sig",
+            ),
+            (
+                {"thinking_blocks": [{"type": "redacted_thinking", "data": "opaque-data"}]},
+                "opaque-data",
+            ),
+            (
+                {"provider_specific_fields": {"thought_signature": "gemini-sig"}},
+                "gemini-sig",
+            ),
+            (
+                {"provider_specific_fields": {"thought_signatures": ["gemini-sig"]}},
+                "gemini-sig",
+            ),
+        ],
+    )
+    def test_cross_provider_opaque_state_is_redacted(self, provider_state, secret):
+        result, count = scrub_value(provider_state)
+
+        assert secret not in repr(result)
+        assert REDACTED in repr(result)
+        assert count == 1
+
 
 class TestScrubStats:
     def test_record_and_snapshot(self):

@@ -228,6 +228,22 @@ def test_safe_msg_to_dict_redacts_private_replay_envelope(json_encoded):
     assert message[LLM_STATE_KEY]["payload"]["future_provider_blob"] == "opaque-state"
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"thinking_blocks": [{"type": "thinking", "signature": "anthropic-sig"}]},
+        {"thinking_blocks": [{"type": "redacted_thinking", "data": "opaque-data"}]},
+        {"provider_specific_fields": {"thought_signature": "gemini-sig"}},
+    ],
+)
+def test_safe_msg_to_dict_redacts_cross_provider_state(message):
+    safe = _safe_msg_to_dict(message)
+
+    assert "anthropic-sig" not in repr(safe)
+    assert "opaque-data" not in repr(safe)
+    assert "gemini-sig" not in repr(safe)
+
+
 class TestSentBlocksBounding:
     """Tests for single-session tracking and deferred hash marking."""
 

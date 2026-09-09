@@ -51,7 +51,9 @@ _SENSITIVE_KEYS = frozenset(
 # Provider-owned replay state is not a user credential, but it has the same
 # telemetry rule: it may go back to its issuer and nowhere else. Provider
 # adapters add their exact wire keys here as support is introduced.
-_OPAQUE_PROVIDER_STATE_KEYS = frozenset({"encrypted_content", "nooa_llm_state"})
+_OPAQUE_PROVIDER_STATE_KEYS = frozenset(
+    {"encrypted_content", "nooa_llm_state", "thought_signature", "thought_signatures"}
+)
 
 
 def _is_sensitive_key(key: Any) -> bool:
@@ -247,8 +249,15 @@ def scrub_value(value: Any) -> tuple[Any, int]:
     if isinstance(value, dict):
         scrubbed_mapping: dict[Any, Any] = {}
         count = 0
+        is_thinking = value.get("type") == "thinking"
+        is_redacted_thinking = value.get("type") == "redacted_thinking"
         for key, item in value.items():
-            if reason := _redact_key(key):
+            reason = _redact_key(key)
+            if reason is None and is_thinking and key == "signature":
+                reason = "opaque_provider_state"
+            if reason is None and is_redacted_thinking and key == "data":
+                reason = "opaque_provider_state"
+            if reason is not None:
                 scrubbed_mapping[key] = REDACTED
                 stats.record(reason)
                 count += 1
