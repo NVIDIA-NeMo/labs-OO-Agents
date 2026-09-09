@@ -16,21 +16,31 @@ from nooa.context_blocks.roles import Role
 class ToolCall(BaseModel):
     """Provider-independent tool call exactly as emitted by the model."""
 
-    id: str
-    name: str
-    arguments: str
+    id: str = Field(description="Provider-assigned identifier used to match the tool result")
+    name: str = Field(description="Name of the tool requested by the model")
+    arguments: str = Field(description="Exact JSON argument string emitted by the model")
 
 
 class LLMUsage(BaseModel):
     """Normalized usage reported for one successful LLM response."""
 
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cached_input_tokens: int = 0
-    cache_write_input_tokens: int = 0
-    reasoning_tokens: int = 0
-    total_tokens: int = 0
-    cost_usd: float = 0.0
+    input_tokens: int = Field(default=0, description="Total input tokens reported by the provider")
+    output_tokens: int = Field(default=0, description="Total output tokens reported by the provider")
+    cached_input_tokens: int = Field(
+        default=0, description="Input tokens read from the provider's prompt cache"
+    )
+    cache_write_input_tokens: int = Field(
+        default=0, description="Input tokens written to the provider's prompt cache"
+    )
+    reasoning_tokens: int = Field(
+        default=0, description="Output tokens attributed to reasoning by the provider"
+    )
+    total_tokens: int = Field(
+        default=0, description="Total input and output tokens reported by the provider"
+    )
+    cost_usd: float = Field(
+        default=0.0, description="Estimated call cost in US dollars, when available"
+    )
 
     @classmethod
     def from_provider(cls, value: Any) -> LLMUsage | None:
@@ -95,7 +105,10 @@ class LLMResponse(EventBase):
         default=None,
         exclude=True,
         repr=False,
-        description="Non-serialized provider response retained on the live in-memory object",
+        description=(
+            "Live provider SDK response; excluded from persistence because it is "
+            "provider-specific, may not be serializable, and duplicates normalized fields"
+        ),
     )
     content: Annotated[
         str,
@@ -106,7 +119,10 @@ class LLMResponse(EventBase):
         default=None,
         exclude=True,
         repr=False,
-        description="Non-serialized typed result retained on the live in-memory object",
+        description=(
+            "Live typed return value; excluded from persistence because arbitrary Python "
+            "objects are not a durable wire format (the source JSON remains in content)"
+        ),
     )
     tool_calls: list[ToolCall] = Field(
         default_factory=list,
@@ -116,7 +132,10 @@ class LLMResponse(EventBase):
     finish_reason: Literal["stop", "tool_calls", "length", "error"] = Field(
         default="stop",
         repr=False,
-        description="Normalized provider finish reason",
+        description=(
+            "NOOA-normalized outcome: stop, tool_calls, length, or error; provider-specific "
+            "finish reasons are deliberately collapsed into these four portable values"
+        ),
     )
     reasoning: str | None = Field(
         default=None,
@@ -144,7 +163,10 @@ class LLMResponse(EventBase):
     dynamic_context: str = Field(
         default="",
         repr=False,
-        description="Trailing dynamic context rendered for this request",
+        description=(
+            "Snapshot of the trailing dynamic context block included in the request that "
+            "produced this response, retained for session export and debugging"
+        ),
     )
 
     @field_validator("usage", mode="before")
