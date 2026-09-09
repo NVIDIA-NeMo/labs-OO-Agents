@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for secret scrubbing in telemetry."""
 
+import json
+
 import pytest
 
 from nooa.tracing._secret_scrubber import (
@@ -214,6 +216,25 @@ class TestScrubValue:
         )
         assert result == {"safe": {"client_secret": REDACTED, "refresh_token": REDACTED}}
         assert count == 2
+
+    def test_openai_encrypted_reasoning_is_redacted_from_mapping(self):
+        result, count = scrub_value(
+            {"input": [{"type": "reasoning", "encrypted_content": "opaque-openai-state"}]}
+        )
+
+        assert result["input"][0]["encrypted_content"] == REDACTED
+        assert count == 1
+
+    def test_openai_encrypted_reasoning_is_redacted_from_json_attribute(self):
+        attribute = json.dumps(
+            {"input": [{"type": "reasoning", "encrypted_content": "opaque-openai-state"}]}
+        )
+
+        result, count = scrub_value(attribute)
+
+        assert json.loads(result)["input"][0]["encrypted_content"] == REDACTED
+        assert "opaque-openai-state" not in result
+        assert count == 1
 
 
 class TestScrubStats:

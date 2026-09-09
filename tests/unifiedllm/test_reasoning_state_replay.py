@@ -9,7 +9,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from litellm.types.utils import ModelResponse
 
-from nooa._llm_state import LLM_STATE_KEY, StateCarryingMessage, carried_state
+from nooa._llm_state import (
+    LLM_STATE_KEY,
+    StateCarryingMessage,
+    carried_replay_batch,
+    carried_state,
+)
 from nooa.context_blocks.formatter import (
     OpenAIProviderFormatter,
     ResponsesProviderFormatter,
@@ -162,6 +167,26 @@ def test_responses_multi_call_state_preserves_provider_order() -> None:
             "call_1",
             "call_2",
         ]
+    finally:
+        client.close()
+
+
+def test_split_responses_replay_batch_keeps_public_call_but_drops_state() -> None:
+    """Middleware may edit public items, but cannot reattach state to new neighbors."""
+    client = ResponsesClient(model="openai/gpt-5.6", api_key="account-a")
+    try:
+        with patch("litellm.responses", return_value=_responses(REASONING, CALL, CALL_2)):
+            first = client.call([{"role": "user", "content": "run"}], tools=[TOOL])
+        rendered = [item for item in _render_responses(first) if carried_replay_batch(item)]
+        assert len(rendered) == 2
+
+        with patch("litellm.responses", return_value=_responses(MESSAGE)) as call:
+            client.call(rendered[:1], tools=[TOOL])
+
+        replay = call.call_args.kwargs["input"]
+        assert [item.get("call_id") for item in replay] == ["call_1"]
+        assert REASONING not in replay
+        assert "provider-secret" not in repr(replay)
     finally:
         client.close()
 

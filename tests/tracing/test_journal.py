@@ -22,6 +22,7 @@ from nooa.tracing._context_sideband import (
 )
 from nooa.tracing._litellm_journal import (
     MessageJournalCallback,
+    _safe_msg_to_dict,
 )
 
 
@@ -126,6 +127,19 @@ class TestJournalCallbackPreApiCall:
         skeleton, _ = cb._call_inputs["cid"]
         assert skeleton == [{"role": "user", "content": "hello"}]
 
+    def test_no_sideband_redacts_opaque_state_from_raw_messages(self, session_ctx):
+        cb = MessageJournalCallback("http://localhost:5001")
+        set_journal_payload(None)
+
+        cb.log_pre_api_call(
+            "m",
+            [{"type": "reasoning", "encrypted_content": "opaque-openai-state"}],
+            {"litellm_call_id": "cid"},
+        )
+
+        skeleton, _ = cb._call_inputs["cid"]
+        assert skeleton == [{"type": "reasoning", "encrypted_content": "[REDACTED]"}]
+
 
 class TestJournalCallbackSuccessEvent:
     def test_success_posts_call_record(self, session_ctx):
@@ -167,6 +181,35 @@ class TestJournalCallbackSuccessEvent:
         assert len(block_posts) >= 1
         all_blocks = {e["hash"]: e["content"] for post in block_posts for e in post[1]}
         assert all_blocks[answer_hash] == "answer"
+
+    def test_success_redacts_opaque_state_from_provider_output(self, session_ctx):
+        cb = MessageJournalCallback("http://localhost:5001")
+        calls, fake_post = _posts()
+        response = SimpleNamespace(
+            output=[{"type": "reasoning", "encrypted_content": "opaque-openai-state"}],
+            usage=None,
+        )
+
+        with patch(
+            "nooa.tracing._litellm_journal._post_json",
+            side_effect=fake_post,
+        ):
+            cb.log_pre_api_call("m", [], {"litellm_call_id": "cid"})
+            cb.log_success_event({"litellm_call_id": "cid", "model": "m"}, response, 1.0, 2.0)
+
+        record = next(payload for url, payload in calls if url.endswith("/v1/journal/calls"))
+        assert record["output_messages"] == [
+            {"type": "reasoning", "encrypted_content": "[REDACTED]"}
+        ]
+        assert "opaque-openai-state" not in repr(record)
+
+
+def test_safe_msg_to_dict_redacts_json_encoded_opaque_state():
+    message = {"content": '{"encrypted_content":"opaque-openai-state"}'}
+
+    safe = _safe_msg_to_dict(message)
+
+    assert "opaque-openai-state" not in safe["content"]
 
 
 class TestSentBlocksBounding:

@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import MagicMock
 
+from nooa._llm_state import carried_replay_batch, carried_state, carry_replay_batch
 from nooa.nemo_relay_middleware import (
     install_nemo_relay,
     nemo_relay_agent_call_middleware,
@@ -129,6 +130,31 @@ def _make_exec_ctx(code: str = "x = 1", agent: Any = None) -> ExecutePythonConte
 
 class TestLLMRequestIntercepts:
     """Verify that LLM request intercepts (header injection) work end-to-end."""
+
+    @pytest.mark.asyncio
+    async def test_noop_relay_roundtrip_preserves_private_message_sidecars(self):
+        """Relay's JSON copy must not erase state when no intercept changed input."""
+        messages = carry_replay_batch(
+            [{"type": "reasoning", "summary": []}, {"type": "function_call", "id": "fc-1"}],
+            {"scope": "issuer", "payload": {"encrypted_content": "opaque"}},
+        )
+        ctx = _make_llm_ctx(messages=messages)
+        seen: list[list[dict[str, Any]]] = []
+
+        async def nxt(c):
+            seen.append(c.messages)
+            c.response = FakeLLMResponse()
+            return c
+
+        await nemo_relay_llm_middleware(ctx, nxt)
+
+        assert seen[0] is messages
+        assert carried_state(seen[0][0]) == {
+            "scope": "issuer",
+            "payload": {"encrypted_content": "opaque"},
+        }
+        assert carried_replay_batch(seen[0][0]) is not None
+        assert carried_replay_batch(seen[0][1]) == carried_replay_batch(seen[0][0])
 
     @pytest.mark.asyncio
     async def test_request_intercept_injects_header(self):

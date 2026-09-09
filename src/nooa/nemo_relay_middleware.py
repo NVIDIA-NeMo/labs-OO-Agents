@@ -224,7 +224,12 @@ async def nemo_relay_llm_middleware(
         if hasattr(req, "content") and isinstance(req.content, dict):
             intercepted = req.content
             intercepted_msgs = intercepted.get("messages")
-            if intercepted_msgs is not None:
+            # Relay crosses a JSON boundary, so even a no-op request returns
+            # fresh plain dicts. Keep NOOA's original dict subclasses when the
+            # public payload is unchanged: their non-JSON sidecars carry opaque
+            # replay state to UnifiedLLM. A real intercept change replaces the
+            # originals and therefore drops private state fail-closed.
+            if intercepted_msgs is not None and intercepted_msgs != ctx.messages:
                 ctx.messages = intercepted_msgs
             # Propagate any supported param changes from the intercept.
             for key in _PROPAGATABLE_LLM_PARAMS:

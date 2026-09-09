@@ -15,6 +15,7 @@ Usage::
     provider.add_span_processor(SecretScrubSpanProcessor(inner_processor))
 """
 
+import json
 import logging
 import re
 import threading
@@ -47,12 +48,30 @@ _SENSITIVE_KEYS = frozenset(
     }
 )
 
+# Provider-owned replay state is not a user credential, but it has the same
+# telemetry rule: it may go back to its issuer and nowhere else. Provider
+# adapters add their exact wire keys here as support is introduced.
+_OPAQUE_PROVIDER_STATE_KEYS = frozenset({"encrypted_content"})
+
 
 def _is_sensitive_key(key: Any) -> bool:
     normalized = re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_")
     return normalized in _SENSITIVE_KEYS or any(
         normalized.endswith(f"_{sensitive}") for sensitive in _SENSITIVE_KEYS
     )
+
+
+def _is_opaque_provider_state_key(key: Any) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_")
+    return normalized in _OPAQUE_PROVIDER_STATE_KEYS
+
+
+def _redact_key(key: Any) -> str | None:
+    if _is_sensitive_key(key):
+        return "sensitive_key"
+    if _is_opaque_provider_state_key(key):
+        return "opaque_provider_state"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -214,19 +233,29 @@ def scrub_value(value: Any) -> tuple[Any, int]:
     number of secrets redacted within this value.
     """
     if isinstance(value, str):
-        return scrub_string(value)
+        # OpenInference records LLM inputs as JSON string span attributes.
+        # Parse only valid JSON and serialize it again only if the recursive
+        # walk found additional keyed state to redact.
+        try:
+            decoded = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return scrub_string(value)
+        decoded, json_count = scrub_value(decoded)
+        if json_count:
+            return json.dumps(decoded, separators=(",", ":")), json_count
+        return value, 0
     if isinstance(value, dict):
-        scrubbed: dict[Any, Any] = {}
+        scrubbed_mapping: dict[Any, Any] = {}
         count = 0
         for key, item in value.items():
-            if _is_sensitive_key(key):
-                scrubbed[key] = REDACTED
-                stats.record("sensitive_key")
+            if reason := _redact_key(key):
+                scrubbed_mapping[key] = REDACTED
+                stats.record(reason)
                 count += 1
             else:
-                scrubbed[key], n = scrub_value(item)
+                scrubbed_mapping[key], n = scrub_value(item)
                 count += n
-        return scrubbed, count
+        return scrubbed_mapping, count
     if isinstance(value, (list, tuple)):
         new_items = []
         count = 0
@@ -268,9 +297,9 @@ try:
                 redacted_count = 0
 
                 for key, value in span.attributes.items():
-                    if _is_sensitive_key(key):
+                    if reason := _redact_key(key):
                         new_value, n = REDACTED, 1
-                        stats.record("sensitive_key")
+                        stats.record(reason)
                     else:
                         new_value, n = scrub_value(value)
                     scrubbed[key] = new_value
