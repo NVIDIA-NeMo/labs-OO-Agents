@@ -1089,7 +1089,7 @@ def _update_token_calibration(
       and inflated the ratio (observed ~2.7x), which then scaled every
       displayed/triggering token count up by that bogus factor.
     """
-    actual = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+    actual = usage.input_tokens
     if actual <= 0:
         return
     # Calibration is best-effort: it must NEVER raise out of the (already paid)

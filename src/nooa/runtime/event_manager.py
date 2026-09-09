@@ -410,9 +410,7 @@ class EventManager:
         parts: list[str] = []
 
         # Opaque replay state is durable but not a conversational/search field.
-        for field_name, value in event.model_dump().items():
-            if field_name == "llm_state":
-                continue
+        for value in event.model_dump(exclude={"llm_state"}).values():
             if value is not None:
                 if isinstance(value, list):
                     parts.append(" ".join(str(item) for item in value))

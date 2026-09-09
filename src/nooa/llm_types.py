@@ -80,19 +80,6 @@ class LLMUsage(BaseModel):
             cost_usd=float(first(value, "cost_usd", "cost") or 0.0),
         )
 
-    def get(self, key: str, default: Any = None) -> Any:
-        """Support the small dict-like surface used by token calibration."""
-        aliases = {
-            "prompt_tokens": "input_tokens",
-            "completion_tokens": "output_tokens",
-            "cached_tokens": "cached_input_tokens",
-            "cache_read_input_tokens": "cached_input_tokens",
-            "cache_creation_input_tokens": "cache_write_input_tokens",
-            "cost": "cost_usd",
-        }
-        return getattr(self, aliases.get(key, key), default)
-
-
 class LLMResponse(EventBase):
     """Canonical response produced by UnifiedLLM and persisted by NOOA.
 
@@ -192,11 +179,6 @@ class LLMResponse(EventBase):
                 value = dict(value)
                 value["model_name"] = raw_model
         return value
-
-    @property
-    def message(self) -> Any:
-        """Return content for callers that use the historical message alias."""
-        return self.parsed if self.parsed is not None else self.content
 
     @property
     def replay_content(self) -> str:

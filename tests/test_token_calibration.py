@@ -4,6 +4,7 @@
 
 import pytest
 
+from nooa.llm_types import LLMUsage
 from nooa.unifiedllm.unifiedllm import (
     TokenCalibration,
     _token_calibration,
@@ -104,7 +105,7 @@ class TestUpdateTokenCalibration:
             {"role": "user", "content": "Hello, how are you?"},
         ]
         _update_token_calibration(
-            "gpt-4o", messages, {"prompt_tokens": 50, "completion_tokens": 10}
+            "gpt-4o", messages, LLMUsage(input_tokens=50, output_tokens=10)
         )
         ratio = _token_calibration.ratio("gpt-4o")
         # API reports 50 prompt tokens; litellm raw estimate is ~9 tokens for this text
@@ -114,7 +115,7 @@ class TestUpdateTokenCalibration:
 
     def test_skips_empty_usage(self):
         messages = [{"role": "user", "content": "hello"}]
-        _update_token_calibration("gpt-4o", messages, {"prompt_tokens": 0})
+        _update_token_calibration("gpt-4o", messages, LLMUsage(input_tokens=0))
         assert _token_calibration.ratio("gpt-4o") == 1.0  # unchanged
 
     def test_handles_multipart_content(self):
@@ -127,6 +128,8 @@ class TestUpdateTokenCalibration:
                 ],
             }
         ]
-        _update_token_calibration("gpt-4o", messages, {"prompt_tokens": 30, "completion_tokens": 5})
+        _update_token_calibration(
+            "gpt-4o", messages, LLMUsage(input_tokens=30, output_tokens=5)
+        )
         ratio = _token_calibration.ratio("gpt-4o")
         assert ratio > 0  # didn't crash on multipart
