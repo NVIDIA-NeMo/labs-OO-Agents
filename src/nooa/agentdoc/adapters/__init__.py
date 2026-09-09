@@ -17,7 +17,8 @@ Or register all adapters for installed libraries at once:
 
 Available adapters:
     plotly — plotly, plotly.express, plotly.graph_objects
-    pandas — pandas.DataFrame, pandas.Series
+    pandas — pandas.DataFrame, pandas.Series (doc + pformat previews)
+    numpy — numpy.ndarray (pformat previews)
 """
 
 
@@ -42,6 +43,13 @@ def register_all():
         import nooa.agentdoc.adapters.pandas as _  # noqa: F401
 
         registered.append("pandas")
+    except ImportError:
+        pass
+
+    try:
+        import nooa.agentdoc.adapters.numpy as _  # noqa: F401
+
+        registered.append("numpy")
     except ImportError:
         pass
 

@@ -48,9 +48,13 @@ from nooa.agentdoc.protocols import (
     SupportsTypeInfo,
 )
 from nooa.agentdoc.registry import (
+    PreviewBudget,
     clear_registry,
+    get_preview_extractor,
     get_type_info_extractor,
+    register_preview_extractor,
     register_type_info_extractor,
+    unregister_preview_extractor,
     unregister_type_info_extractor,
 )
 
@@ -83,6 +87,11 @@ __all__ = [
     "get_type_info_extractor",
     "unregister_type_info_extractor",
     "clear_registry",
+    # Value previews
+    "PreviewBudget",
+    "register_preview_extractor",
+    "get_preview_extractor",
+    "unregister_preview_extractor",
     # Helpers
     "has_type_info",
 ]
