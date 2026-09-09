@@ -86,9 +86,7 @@ def test_cache_mapping_must_match_the_client_api_style() -> None:
 
 @pytest.mark.asyncio
 async def test_openai_marks_the_stable_prefix_before_dynamic_context() -> None:
-    client = ResponsesClient(
-        model="openai/gpt-5.6", api_key="test", cache_breakpoint="openai"
-    )
+    client = ResponsesClient(model="openai/gpt-5.6", api_key="test", cache_breakpoint="openai")
     try:
         with patch("litellm.aresponses", new_callable=AsyncMock) as request:
             request.return_value = _responses_output()
@@ -99,9 +97,7 @@ async def test_openai_marks_the_stable_prefix_before_dynamic_context() -> None:
         assert first["extra_body"]["prompt_cache_options"] == {"mode": "explicit"}
         assert first["input"][:-1] == second["input"][:-1]
         assert first["input"][-1] != second["input"][-1]
-        assert first["input"][-2]["content"][-1]["prompt_cache_breakpoint"] == {
-            "mode": "explicit"
-        }
+        assert first["input"][-2]["content"][-1]["prompt_cache_breakpoint"] == {"mode": "explicit"}
         assert "prompt_cache_breakpoint" not in first["input"][-1]["content"]
     finally:
         await client.aclose()
@@ -182,9 +178,7 @@ async def test_openai_fields_reach_the_serialized_http_body() -> None:
                         "type": "message",
                         "status": "completed",
                         "role": "assistant",
-                        "content": [
-                            {"type": "output_text", "text": "ok", "annotations": []}
-                        ],
+                        "content": [{"type": "output_text", "text": "ok", "annotations": []}],
                     }
                 ],
                 "parallel_tool_calls": False,
@@ -217,9 +211,7 @@ async def test_openai_fields_reach_the_serialized_http_body() -> None:
         await client.aclose()
 
     assert bodies[0]["prompt_cache_options"] == {"mode": "explicit"}
-    assert bodies[0]["input"][-2]["content"][-1]["prompt_cache_breakpoint"] == {
-        "mode": "explicit"
-    }
+    assert bodies[0]["input"][-2]["content"][-1]["prompt_cache_breakpoint"] == {"mode": "explicit"}
     assert "cache_boundary" not in repr(bodies[0])
 
 
@@ -365,9 +357,7 @@ def test_replay_expansion_stays_inside_the_stable_prefix() -> None:
 
 
 def test_gemini_gets_no_invented_inline_cache_field() -> None:
-    client = CompletionClient(
-        model="gemini/gemini-2.5-pro", cache_control_injection_points=[]
-    )
+    client = CompletionClient(model="gemini/gemini-2.5-pro", cache_control_injection_points=[])
     messages, _, enabled = client._prepare_cache_boundary(_render("state-a"), responses=False)
 
     assert enabled is False
@@ -384,9 +374,7 @@ async def test_gemini_boundary_is_inert_on_the_actual_call_path() -> None:
     extension point. Disable it here so this regression pins only the automatic
     dynamic-context boundary introduced by this change.
     """
-    client = CompletionClient(
-        model="gemini/gemini-2.5-pro", cache_control_injection_points=[]
-    )
+    client = CompletionClient(model="gemini/gemini-2.5-pro", cache_control_injection_points=[])
     response = litellm.ModelResponse(
         model="gemini-2.5-pro",
         choices=[
