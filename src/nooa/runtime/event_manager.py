@@ -48,6 +48,19 @@ EventHandler = Callable[[EventBase], None]
 # Monotonic counter for stable EventManager identity (middleware re-entry guard).
 _em_id_counter = itertools.count(1)
 
+# Old rows are migrated at the persistence boundary, but subscriptions are
+# executable application code and should be updated instead of silently going
+# dead after an event rename.
+_REMOVED_EVENT_SUBSCRIPTIONS = {
+    "LLMOutput": (
+        "Cannot subscribe to removed event type 'LLMOutput'. "
+        "Subscribe to 'LLMResponse' instead. LLMResponse is the canonical "
+        "assistant-turn event and includes content, reasoning, tool calls, "
+        "usage, and replay state. Stored LLMOutput rows are migrated to "
+        "LLMResponse automatically when a session is loaded."
+    ),
+}
+
 
 def _make_next(
     mw_fn: Callable[..., Awaitable[Any]],
@@ -194,7 +207,15 @@ class EventManager:
 
         Returns:
             Unsubscribe function - call to remove handler.
+
+        Raises:
+            ValueError: If *event_type* names a removed event API. The error
+                identifies its replacement; persisted legacy rows remain
+                readable through storage migration.
         """
+        if message := _REMOVED_EVENT_SUBSCRIPTIONS.get(event_type):
+            raise ValueError(message)
+
         self._handlers[event_type].append(handler)
 
         def unsubscribe() -> None:

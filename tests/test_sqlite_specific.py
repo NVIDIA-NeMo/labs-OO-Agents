@@ -66,6 +66,40 @@ def test_deserialize_legacy_llm_output_as_canonical_response(sqlite_conn):
     assert response.content == "saved assistant text"
 
 
+def test_archived_legacy_llm_output_migrates_without_becoming_active(sqlite_conn):
+    """Archived session history is upgraded on read without changing its status."""
+    backend = SQLiteEventBackend(sqlite_conn)
+    legacy = {
+        "event_type": "LLMOutput",
+        "id": "archived-legacy-response",
+        "metadata": {},
+        "status": "archived",
+        "tag": "4",
+        "timestamp": "2025-01-01T00:00:00",
+        "content": "archived assistant text",
+    }
+    sqlite_conn.execute(
+        "INSERT INTO events (tag, event_id, event_type, status, data, insertion_order) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "4",
+            "archived-legacy-response",
+            "LLMOutput",
+            "archived",
+            json.dumps(legacy),
+            0,
+        ),
+    )
+    sqlite_conn.commit()
+
+    response = backend.get("4")
+
+    assert isinstance(response, LLMResponse)
+    assert response.content == "archived assistant text"
+    assert response.status.value == "archived"
+    assert backend.active_tags() == []
+
+
 def test_deserialize_unknown_event_type_falls_back_to_metadata(sqlite_conn):
     """An event_type not in the registry must deserialize as Metadata, not raise."""
     backend = SQLiteEventBackend(sqlite_conn)

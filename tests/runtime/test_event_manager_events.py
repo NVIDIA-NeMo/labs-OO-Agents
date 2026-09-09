@@ -4,6 +4,8 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from nooa import Agent
 from nooa.context_blocks import ResultStatus
 from nooa.events import LLMResponse, PythonOutput, Task
@@ -107,6 +109,19 @@ class TestEventManagerAdd:
 
 class TestEventManagerOn:
     """Tests for EventManager.on() method."""
+
+    def test_removed_llm_output_subscription_explains_migration(self):
+        """Executable consumers fail loudly; stored legacy rows still migrate."""
+        manager = EventManager()
+
+        with pytest.raises(ValueError) as exc_info:
+            manager.on("LLMOutput", lambda _event: None)
+
+        message = str(exc_info.value)
+        assert "removed event type 'LLMOutput'" in message
+        assert "Subscribe to 'LLMResponse' instead" in message
+        assert "Stored LLMOutput rows are migrated" in message
+        assert "LLMOutput" not in manager._handlers
 
     def test_on_registers_handler(self):
         """on() should register handler for event type."""
