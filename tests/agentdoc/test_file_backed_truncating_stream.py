@@ -80,7 +80,7 @@ class TestFileBackedBasicBehavior:
         text = "Hello 世界! 🚀 café"
         buf.write(text)
         assert buf.getvalue() == text
-        with open(buf.file_path) as f:
+        with open(buf.file_path, encoding="utf-8") as f:
             assert f.read() == text
 
 

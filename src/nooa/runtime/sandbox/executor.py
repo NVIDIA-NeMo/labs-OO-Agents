@@ -461,9 +461,9 @@ class SandboxedExecutor:
     def _classify_worker_death(self, exc: WorkerDiedError) -> Exception:
         proc = self._proc
         code = getattr(proc, "exitcode", None)
-        if code == -signal.SIGXCPU:
+        if hasattr(signal, "SIGXCPU") and code == -signal.SIGXCPU:
             return CellTimeoutError("cell exceeded its CPU-time limit and was killed")
-        if code == -signal.SIGKILL:
+        if hasattr(signal, "SIGKILL") and code == -signal.SIGKILL:
             return CellMemoryError(
                 "worker was killed (out-of-memory or resource limit). "
                 "Reduce the cell's memory use or raise max_memory_mb."

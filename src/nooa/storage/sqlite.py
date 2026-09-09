@@ -7,7 +7,10 @@ Provides persistent storage using stdlib sqlite3 — no new dependencies.
 
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 import json
 import logging
 import os
@@ -645,7 +648,8 @@ def _acquire_session_lock(lock_path: str) -> int:
     """
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         os.close(fd)
         owner_pid = _read_lock_pid(lock_path)
@@ -873,7 +877,8 @@ class SQLiteStorageManager:
                     conn.close()
         finally:
             if self._lock_fd is not None:
-                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+                if fcntl is not None:
+                    fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
                 os.close(self._lock_fd)
                 self._lock_fd = None
 
