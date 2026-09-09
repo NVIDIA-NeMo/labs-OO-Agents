@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the cached renderer (static-prefix / events / dynamic-suffix)."""
 
+from nooa._llm_state import LLM_STATE_KEY, carried_state
 from nooa.context_blocks.events import (
     AssistantEvent,
     ToolCallEvent,
@@ -15,6 +16,7 @@ from nooa.context_blocks.formatter import (
 from nooa.context_blocks.models import BlockMetadata, DynamicContext, ResolvedBlock, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
+from nooa.events import LLMResponse
 
 
 def _static_block(key: str, content: str, expr: str | None = None) -> ResolvedBlock:
@@ -219,6 +221,55 @@ class TestCachedRendererEndToEndOpenAI:
         assert msg1["content"] == msg2["content"] == msg3["content"]
         # And specifically: no context envelope leaked into the user-event msg.
         assert "<context>" not in msg1["content"]
+
+    def test_opaque_state_is_appended_without_changing_cacheable_prefix(self):
+        user_event = UserEvent(content="please solve the task", tag="1")
+        user_block = ResolvedBlock(
+            key="event_1",
+            content=user_event.content,
+            role=Role.USER,
+            metadata=BlockMetadata(tag="1"),
+            event=user_event,
+        )
+        first = render_context(
+            [
+                _static_block("sys", "stable instructions"),
+                user_block,
+                _dynamic_block("live_state", "version one"),
+            ],
+            block_formatter=CachedBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+
+        state = {
+            "version": 1,
+            "scope": "responses:openai:sha256:test",
+            "format": "openai-responses",
+            "payload": {"items": [{"type": "reasoning", "encrypted_content": "opaque"}]},
+        }
+        turn = LLMResponse(content="answer", llm_state=state, tag="2")
+        second = render_context(
+            [
+                _static_block("sys", "stable instructions"),
+                user_block,
+                ResolvedBlock(
+                    key="event_2",
+                    content=turn.content,
+                    role=Role.ASSISTANT,
+                    metadata=BlockMetadata(tag="2"),
+                    event=turn,
+                ),
+                _dynamic_block("live_state", "version two"),
+            ],
+            block_formatter=CachedBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+
+        assert first[:-1] == second[: len(first) - 1]
+        assert first[-1] != second[-1]
+        assert all(LLM_STATE_KEY not in message for message in second)
+        assert carried_state(second[2]) == state
+        assert "version two" in second[-1]["content"]
 
     def test_volatile_appended_after_assistant(self):
         asst_event = AssistantEvent(content="done")

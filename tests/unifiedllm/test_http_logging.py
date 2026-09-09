@@ -9,7 +9,23 @@ from threading import Thread
 import httpx
 import pytest
 
-from nooa.unifiedllm.http_logging import enable_http_request_logging
+from nooa.unifiedllm.http_logging import _redact_opaque_state, enable_http_request_logging
+
+
+def test_opaque_reasoning_state_is_redacted_from_http_debug_payloads() -> None:
+    payload = {
+        "input": [
+            {"encrypted_content": "provider-secret"},
+            {"_nooa_llm_state": {"payload": {"items": ["opaque"]}}},
+        ]
+    }
+
+    redacted = _redact_opaque_state(payload)
+
+    assert redacted["input"] == [
+        {"encrypted_content": "[REDACTED]"},
+        {"_nooa_llm_state": "[REDACTED]"},
+    ]
 
 
 class _SecretHeaderHandler(BaseHTTPRequestHandler):

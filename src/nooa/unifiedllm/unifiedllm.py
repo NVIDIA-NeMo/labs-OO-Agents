@@ -17,16 +17,10 @@ from typing import Any, Literal, cast
 import litellm
 from pydantic import BaseModel, RootModel
 
-from nooa._llm_state import (
-    LLM_STATE_KEY,
-    carried_reasoning,
-    carried_replay_batch,
-    carried_state,
-    demote_chat_reasoning,
-    demote_responses_batch,
-)
+from nooa._llm_state import LLM_STATE_KEY, carried_state
 from nooa.llm_types import LLMResponse, LLMUsage, ToolCall
 
+from . import replay_state
 from .http_config import HttpConfig
 from .retry import EmptyContentError, sync_retry, with_retry
 from .retry_config import RetryConfig
@@ -1540,49 +1534,8 @@ def _extract_reasoning_and_usage(raw_response: Any) -> tuple[str | None, LLMUsag
     return reasoning, usage
 
 
-def _completion_llm_state(message: Any) -> dict[str, Any] | None:
-    """Capture opaque Chat-Completions reasoning without duplicating the turn.
-
-    LiteLLM 1.97 bridges GPT-5.4+ function-tool requests to the Responses API
-    and returns the encrypted reasoning state as ``reasoning_items`` on the
-    chat-shaped message. Public content and tool calls already have canonical
-    fields on :class:`LLMResponse`; only the opaque provider state belongs here.
-    """
-    reasoning_items = getattr(message, "reasoning_items", None)
-    if not reasoning_items:
-        return None
-    return {"reasoning_items": [_opaque_item(item) for item in reasoning_items]}
-
-
-def _opaque_item(item: Any) -> Any:
-    """Detach one provider-owned item for durable storage."""
-    if hasattr(item, "model_dump"):
-        return item.model_dump(exclude_none=True)
-    return copy.deepcopy(item)
-
-
 def _item_field(item: Any, name: str) -> Any:
     return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
-
-
-def _responses_llm_state(output: list[Any]) -> dict[str, Any] | None:
-    """Capture opaque Responses items plus lightweight ordering anchors."""
-    reasoning_items: list[Any] = []
-    order: list[dict[str, Any]] = []
-    for item in output:
-        item_type = _item_field(item, "type")
-        if item_type == "reasoning":
-            order.append({"type": "reasoning", "index": len(reasoning_items)})
-            reasoning_items.append(_opaque_item(item))
-        elif item_type == "function_call":
-            call_id = _item_field(item, "call_id")
-            if isinstance(call_id, str):
-                order.append({"type": "function_call", "call_id": call_id})
-        elif item_type == "message":
-            order.append({"type": "message"})
-    if not reasoning_items:
-        return None
-    return {"items": reasoning_items, "order": order}
 
 
 def _extract_xml_tool_calls(content: str) -> list["ToolCall"]:
@@ -1722,6 +1675,7 @@ class CompletionClient(UnifiedLLM):
         http_config: HttpConfig | None = None,
         # use system as default for cache_control_injection_points
         cache_control_injection_points: list[dict[str, Any]] | None = None,
+        replay_scope: str | None = None,
         **config,
     ):
         """
@@ -1746,10 +1700,13 @@ class CompletionClient(UnifiedLLM):
                 enable prompt caching (for example: {"role": "system"} or
                 {"role": "tool", "position": "last"}). Applied to all calls.
                 Note: Do NOT manually add cache_control to message content when using this.
+            replay_scope: Optional compatibility name for verified model aliases.
+                Provider, endpoint, credential/account, and API style must still match.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
         super().__init__(model, **config)
         self.retry_config = retry_config or RetryConfig()
+        self._replay_scope = replay_scope
         self._http_config = http_config or HttpConfig()
         self._http = _ClientHttp.for_completion(self.model, self.config, self._http_config)
         # Only set default if explicitly None (not if empty list is passed)
@@ -1784,7 +1741,9 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
-        messages = demote_chat_reasoning(messages)
+        call_config = {**self.config, **kwargs}
+        state_scope = replay_state.replay_scope(self.model, "chat", call_config, self._replay_scope)
+        messages = replay_state.prepare_chat_messages(messages, state_scope)
 
         # Inject cache_control at the message level for prompt caching
         cache_points = (
@@ -1877,7 +1836,7 @@ class CompletionClient(UnifiedLLM):
                 ),
                 reasoning=reasoning,
                 usage=usage,
-                llm_state=_completion_llm_state(response_message),
+                llm_state=replay_state.capture_chat_state(response_message, state_scope),
             )
 
         text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
@@ -1896,7 +1855,9 @@ class CompletionClient(UnifiedLLM):
                     ),
                     reasoning=reasoning,
                     usage=usage,
-                    llm_state=_completion_llm_state(raw_response.choices[0].message),
+                    llm_state=replay_state.capture_chat_state(
+                        raw_response.choices[0].message, state_scope
+                    ),
                 )
 
         if output_model:
@@ -1918,7 +1879,9 @@ class CompletionClient(UnifiedLLM):
                 finish_reason=_map_completion_finish_reason(raw_response),
                 reasoning=reasoning,
                 usage=usage,
-                llm_state=_completion_llm_state(raw_response.choices[0].message),
+                llm_state=replay_state.capture_chat_state(
+                    raw_response.choices[0].message, state_scope
+                ),
             )
 
         return LLMResponse(
@@ -1928,7 +1891,7 @@ class CompletionClient(UnifiedLLM):
             finish_reason=_map_completion_finish_reason(raw_response),
             reasoning=reasoning,
             usage=usage,
-            llm_state=_completion_llm_state(raw_response.choices[0].message),
+            llm_state=replay_state.capture_chat_state(raw_response.choices[0].message, state_scope),
         )
 
     async def acall(
@@ -1946,7 +1909,9 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
-        messages = demote_chat_reasoning(messages)
+        call_config = {**self.config, **kwargs}
+        state_scope = replay_state.replay_scope(self.model, "chat", call_config, self._replay_scope)
+        messages = replay_state.prepare_chat_messages(messages, state_scope)
 
         # Inject cache_control at the message level for prompt caching
         cache_points = (
@@ -2041,7 +2006,7 @@ class CompletionClient(UnifiedLLM):
                 ),
                 reasoning=reasoning,
                 usage=usage,
-                llm_state=_completion_llm_state(response_message),
+                llm_state=replay_state.capture_chat_state(response_message, state_scope),
             )
 
         text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
@@ -2060,7 +2025,9 @@ class CompletionClient(UnifiedLLM):
                     ),
                     reasoning=reasoning,
                     usage=usage,
-                    llm_state=_completion_llm_state(raw_response.choices[0].message),
+                    llm_state=replay_state.capture_chat_state(
+                        raw_response.choices[0].message, state_scope
+                    ),
                 )
 
         if output_model:
@@ -2082,7 +2049,9 @@ class CompletionClient(UnifiedLLM):
                 finish_reason=_map_completion_finish_reason(raw_response),
                 reasoning=reasoning,
                 usage=usage,
-                llm_state=_completion_llm_state(raw_response.choices[0].message),
+                llm_state=replay_state.capture_chat_state(
+                    raw_response.choices[0].message, state_scope
+                ),
             )
 
         return LLMResponse(
@@ -2092,7 +2061,7 @@ class CompletionClient(UnifiedLLM):
             finish_reason=_map_completion_finish_reason(raw_response),
             reasoning=reasoning,
             usage=usage,
-            llm_state=_completion_llm_state(raw_response.choices[0].message),
+            llm_state=replay_state.capture_chat_state(raw_response.choices[0].message, state_scope),
         )
 
 
@@ -2193,6 +2162,7 @@ class ResponsesClient(UnifiedLLM):
         retry_config: RetryConfig | None = None,
         http_config: HttpConfig | None = None,
         cache_control_injection_points: list[dict[str, Any]] | None = None,
+        replay_scope: str | None = None,
         **config,
     ):
         """
@@ -2218,10 +2188,13 @@ class ResponsesClient(UnifiedLLM):
             cache_control_injection_points: Optional list of role/position rules to
                 enable prompt caching (for example: {"role": "system"} or
                 {"role": "tool", "position": "last"}). Applied to all calls.
+            replay_scope: Optional compatibility name for verified model aliases.
+                Provider, endpoint, credential/account, and API style must still match.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
         super().__init__(model, **config)
         self.retry_config = retry_config or RetryConfig()
+        self._replay_scope = replay_scope
         self._http_config = http_config or HttpConfig()
         self._http = _ClientHttp.for_responses(self.model, self.config, self._http_config)
         # Only set default if explicitly None (not if empty list is passed)
@@ -2278,6 +2251,10 @@ class ResponsesClient(UnifiedLLM):
         # OpenAIGPTConfig.remove_cache_control_flag strip — so leaving the marker
         # on OpenAI/Azure/NIM Responses calls triggers a 400 "Unknown parameter:
         # input[N].cache_control" at the gateway.
+        call_config = {**self.config, **kwargs}
+        state_scope = replay_state.replay_scope(
+            self.model, "responses", call_config, self._replay_scope
+        )
         if _is_anthropic_model(self.model):
             cache_points = (
                 self.cache_control_injection_points
@@ -2287,7 +2264,7 @@ class ResponsesClient(UnifiedLLM):
             prepared_messages = self._inject_cache_control(messages, cache_points)
         else:
             prepared_messages = messages
-        input_messages, instructions = self._transform_messages(prepared_messages)
+        input_messages, instructions = self._transform_messages(prepared_messages, state_scope)
 
         api_params = {
             "model": self.model,
@@ -2313,6 +2290,8 @@ class ResponsesClient(UnifiedLLM):
 
         if reasoning := self.config.get("reasoning"):
             api_params["reasoning"] = reasoning
+
+        replay_state.add_encrypted_reasoning_include(api_params, state_scope)
 
         http_client = self._http
         assert http_client is not None
@@ -2335,11 +2314,17 @@ class ResponsesClient(UnifiedLLM):
             _update_token_calibration(self.model, messages, usage, tools=api_params.get("tools"))
 
         output: list[Any] = raw_response.output  # type: ignore[assignment]
-        raw_tool_calls = [item for item in output if item.type == "function_call"]
+        raw_tool_calls = [
+            item for item in output if replay_state.response_item_type(item) == "function_call"
+        ]
 
         if raw_tool_calls:
             tool_calls = [
-                ToolCall(id=tc.call_id or "", name=tc.name or "", arguments=tc.arguments or "")
+                ToolCall(
+                    id=_item_field(tc, "call_id") or "",
+                    name=_item_field(tc, "name") or "",
+                    arguments=_item_field(tc, "arguments") or "",
+                )
                 for tc in raw_tool_calls
             ]
 
@@ -2352,7 +2337,7 @@ class ResponsesClient(UnifiedLLM):
                 ),
                 reasoning=None,  # Responses API doesn't have reasoning
                 usage=usage,
-                llm_state=_responses_llm_state(output),
+                llm_state=replay_state.capture_responses_state(output, state_scope),
             )
 
         text_content = self._extract_text_from_output(raw_response)
@@ -2369,7 +2354,7 @@ class ResponsesClient(UnifiedLLM):
                 finish_reason=_map_responses_finish_reason(raw_response),
                 reasoning=None,
                 usage=usage,
-                llm_state=_responses_llm_state(output),
+                llm_state=replay_state.capture_responses_state(output, state_scope),
             )
 
         return LLMResponse(
@@ -2379,7 +2364,7 @@ class ResponsesClient(UnifiedLLM):
             finish_reason=_map_responses_finish_reason(raw_response),
             reasoning=None,
             usage=usage,
-            llm_state=_responses_llm_state(output),
+            llm_state=replay_state.capture_responses_state(output, state_scope),
         )
 
     async def acall(
@@ -2398,6 +2383,10 @@ class ResponsesClient(UnifiedLLM):
         """
         # See ResponsesClient.call for why cache_control injection is gated on
         # Anthropic models only.
+        call_config = {**self.config, **kwargs}
+        state_scope = replay_state.replay_scope(
+            self.model, "responses", call_config, self._replay_scope
+        )
         if _is_anthropic_model(self.model):
             cache_points = (
                 self.cache_control_injection_points
@@ -2407,7 +2396,7 @@ class ResponsesClient(UnifiedLLM):
             prepared_messages = self._inject_cache_control(messages, cache_points)
         else:
             prepared_messages = messages
-        input_messages, instructions = self._transform_messages(prepared_messages)
+        input_messages, instructions = self._transform_messages(prepared_messages, state_scope)
 
         api_params = {
             "model": self.model,
@@ -2434,6 +2423,8 @@ class ResponsesClient(UnifiedLLM):
         if reasoning := self.config.get("reasoning"):
             api_params["reasoning"] = reasoning
 
+        replay_state.add_encrypted_reasoning_include(api_params, state_scope)
+
         http_client = self._http
         assert http_client is not None
         if http_client.async_client is not None:
@@ -2455,11 +2446,17 @@ class ResponsesClient(UnifiedLLM):
             _update_token_calibration(self.model, messages, usage, tools=api_params.get("tools"))
 
         output: list[Any] = raw_response.output  # type: ignore[assignment]
-        raw_tool_calls = [item for item in output if item.type == "function_call"]
+        raw_tool_calls = [
+            item for item in output if replay_state.response_item_type(item) == "function_call"
+        ]
 
         if raw_tool_calls:
             tool_calls = [
-                ToolCall(id=tc.call_id or "", name=tc.name or "", arguments=tc.arguments or "")
+                ToolCall(
+                    id=_item_field(tc, "call_id") or "",
+                    name=_item_field(tc, "name") or "",
+                    arguments=_item_field(tc, "arguments") or "",
+                )
                 for tc in raw_tool_calls
             ]
 
@@ -2472,7 +2469,7 @@ class ResponsesClient(UnifiedLLM):
                 ),
                 reasoning=None,
                 usage=usage,
-                llm_state=_responses_llm_state(output),
+                llm_state=replay_state.capture_responses_state(output, state_scope),
             )
 
         text_content = self._extract_text_from_output(raw_response)
@@ -2489,7 +2486,7 @@ class ResponsesClient(UnifiedLLM):
                 finish_reason=_map_responses_finish_reason(raw_response),
                 reasoning=None,
                 usage=usage,
-                llm_state=_responses_llm_state(output),
+                llm_state=replay_state.capture_responses_state(output, state_scope),
             )
 
         return LLMResponse(
@@ -2499,11 +2496,13 @@ class ResponsesClient(UnifiedLLM):
             finish_reason=_map_responses_finish_reason(raw_response),
             reasoning=None,
             usage=usage,
-            llm_state=_responses_llm_state(output),
+            llm_state=replay_state.capture_responses_state(output, state_scope),
         )
 
     def _transform_messages(
-        self, messages: list[dict[str, Any]]
+        self,
+        messages: list[dict[str, Any]],
+        state_scope: str | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
         """Transform messages to Responses API format and extract instructions.
 
@@ -2520,31 +2519,19 @@ class ResponsesClient(UnifiedLLM):
         instructions_parts: list[str] = []
         transformed: list[dict[str, Any]] = []
 
-        skip_batch_items = 0
-        for index, original in enumerate(messages):
-            if skip_batch_items:
-                skip_batch_items -= 1
-                continue
+        for original in messages:
             state = copy.deepcopy(carried_state(original))
-            reasoning = carried_reasoning(original)
             msg = copy.deepcopy(dict(original))
             msg.pop(LLM_STATE_KEY, None)
+            # Provider state supplied outside a valid NOOA envelope is never
+            # accepted, even if a caller constructs wire dictionaries directly.
+            msg.pop("reasoning_items", None)
 
-            batch_info = carried_replay_batch(original)
-            if batch_info is not None and (state is not None or reasoning is not None):
-                batch_id, batch_size = batch_info
-                candidates = messages[index : index + batch_size]
-                if len(candidates) == batch_size and all(
-                    carried_replay_batch(item) == (batch_id, batch_size) for item in candidates
-                ):
-                    batch = [copy.deepcopy(dict(item)) for item in candidates]
-                    transformed.extend(demote_responses_batch(batch, state, reasoning))
-                    skip_batch_items = batch_size - 1
-                    continue
-                # Middleware changed the batch. Keep its public items, but do
-                # not attach private reasoning or state to different neighbors.
-                state = None
-                reasoning = None
+            if "_batch" in msg:
+                transformed.extend(
+                    replay_state.prepare_responses_batch(msg.pop("_batch"), state, state_scope)
+                )
+                continue
 
             # System messages → extract to instructions
             if msg.get("role") == "system":
@@ -2555,10 +2542,14 @@ class ResponsesClient(UnifiedLLM):
 
             # Already in native Responses format (from ResponsesProviderFormatter)
             if "type" in msg:
-                if state is not None or reasoning is not None:
-                    transformed.extend(demote_responses_batch([msg], state, reasoning))
-                else:
-                    transformed.append(msg)
+                if replay_state.response_item_type(msg) == "reasoning":
+                    continue
+                if state:
+                    transformed.extend(
+                        replay_state.prepare_responses_batch([msg], state, state_scope)
+                    )
+                    continue
+                transformed.append(msg)
                 continue
 
             # Legacy OpenAI format: tool result messages
@@ -2609,7 +2600,7 @@ class ResponsesClient(UnifiedLLM):
                             "arguments": fn.get("arguments", ""),
                         }
                     )
-                transformed.extend(demote_responses_batch(batch, state, reasoning))
+                transformed.extend(replay_state.prepare_responses_batch(batch, state, state_scope))
                 continue
 
             # User/Assistant text messages → passthrough with cache_control preservation
@@ -2620,8 +2611,10 @@ class ResponsesClient(UnifiedLLM):
                 item = {"role": msg["role"], "content": content}
                 if "cache_control" in msg:
                     item["cache_control"] = msg["cache_control"]
-                if (state is not None or reasoning is not None) and msg.get("role") == "assistant":
-                    transformed.extend(demote_responses_batch([item], state, reasoning))
+                if state and msg.get("role") == "assistant":
+                    transformed.extend(
+                        replay_state.prepare_responses_batch([item], state, state_scope)
+                    )
                 else:
                     transformed.append(item)
                 continue
@@ -2637,10 +2630,11 @@ class ResponsesClient(UnifiedLLM):
             return response.output_text
         if hasattr(response, "output"):
             for item in response.output:
-                if item.type == "message":
+                if replay_state.response_item_type(item) == "message":
                     texts = []
-                    for content_item in item.content:
-                        if hasattr(content_item, "text"):
-                            texts.append(content_item.text)  # type: ignore
+                    for content_item in _item_field(item, "content") or []:
+                        text = _item_field(content_item, "text")
+                        if isinstance(text, str):
+                            texts.append(text)
                     return "\n".join(texts)
         return ""

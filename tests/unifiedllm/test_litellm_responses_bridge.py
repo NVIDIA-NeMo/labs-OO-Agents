@@ -95,7 +95,9 @@ async def test_default_reasoning_tool_call_uses_responses_bridge(model: str) -> 
 
         responses.assert_called_once()
         assert result.finish_reason == "tool_calls"
-        assert result.llm_state == {"reasoning_items": [REASONING_ITEM]}
+        assert result.llm_state is not None
+        assert result.llm_state["format"] == "litellm-chat"
+        assert result.llm_state["payload"] == {"reasoning_items": [REASONING_ITEM]}
     finally:
         await client.aclose()
 

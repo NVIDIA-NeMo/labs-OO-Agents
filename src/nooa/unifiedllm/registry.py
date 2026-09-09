@@ -38,6 +38,10 @@ YAML schema::
         top_p: 1.0                           # optional
         max_tokens: 4096                     # optional
         drop_params: true                    # optional, defaults to true
+        store: false                         # optional Responses API control
+        include:                             # optional Responses API output fields
+          - reasoning.encrypted_content
+        replay_scope: my-upstream-group      # optional verified replay compatibility override
 
 Set a model to ``null`` in a later layer to remove it.
 """
@@ -385,6 +389,9 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
         "allowed_openai_params",
         "additional_drop_params",
         "extra_body",
+        "store",
+        "include",
+        "replay_scope",
     ):
         if key in config and key not in overrides:
             params[key] = config[key]

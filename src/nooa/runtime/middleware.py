@@ -26,7 +26,7 @@ context object and *nxt* calls the rest of the chain.
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, SkipValidation
 
 from nooa.agent import Agent
 from nooa.events import ExecutionResult
@@ -104,7 +104,10 @@ class LLMCallContext(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    messages: list[dict[str, Any]]
+    # Preserve in-memory message subclasses used for non-serializable provider
+    # replay state. Messages are runtime-produced and middleware intentionally
+    # receives a mutable list, so coercing each dict provides no safety here.
+    messages: SkipValidation[list[dict[str, Any]]]
     params: dict[str, Any] = {}
     agent: Agent | None = None
     runtime: ActorRuntime | None = None

@@ -13,6 +13,8 @@ from pydantic import BaseModel
 
 from nooa.unifiedllm.unifiedllm import LLMResponse, LLMUsage, Tool, ToolCall, UnifiedLLM
 
+from .replay_state import prepare_chat_messages
+
 
 class FakeLLMClient(UnifiedLLM):
     """
@@ -81,7 +83,8 @@ class FakeLLMClient(UnifiedLLM):
         """
         async with self._lock:
             self.call_count += 1
-            self.last_messages = messages
+            # A non-provider test client must never observe private replay state.
+            self.last_messages = prepare_chat_messages(messages, None)
             self.last_tools = tools
 
             # Return next response from queue, or empty response if none left
@@ -108,7 +111,7 @@ class FakeLLMClient(UnifiedLLM):
         """Synchronous version of acall for UnifiedLLM compatibility."""
         # For sync call, we don't need locking since tests are usually single-threaded
         self.call_count += 1
-        self.last_messages = messages
+        self.last_messages = prepare_chat_messages(messages, None)
         self.last_tools = tools
 
         if self._response_queue:

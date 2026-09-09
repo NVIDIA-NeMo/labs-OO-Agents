@@ -251,6 +251,10 @@ class TestGetLlmClient:
                   - reasoning_effort
                 extra_body:
                   trace: true
+                store: false
+                include:
+                  - reasoning.encrypted_content
+                replay_scope: nvidia-openai
             """,
         )
         reload_registry(path)
@@ -261,6 +265,10 @@ class TestGetLlmClient:
         assert llm.config["reasoning_effort"] == "high"
         assert llm.config["allowed_openai_params"] == ["reasoning_effort"]
         assert llm.config["extra_body"] == {"trace": True}
+        assert llm.config["store"] is False
+        assert llm.config["include"] == ["reasoning.encrypted_content"]
+        assert llm._replay_scope == "nvidia-openai"
+        assert "replay_scope" not in llm.config
 
     def test_drop_params_default_true(self):
         llm = get_llm_client("gpt-4o-mini")
