@@ -51,23 +51,21 @@ _logger = logging.getLogger(__name__)
 
 def _relay_response(response: LLMResponse) -> dict[str, Any]:
     """Project the canonical response only when NeMo Relay needs wire JSON."""
-    message: dict[str, Any] = {"role": "assistant", "content": response.content}
-    if response.tool_calls:
-        message["tool_calls"] = [
-            {
-                "id": call.id,
-                "type": "function",
-                "function": {"name": call.name, "arguments": call.arguments},
-            }
-            for call in response.tool_calls
-        ]
-    if response.reasoning:
-        message["reasoning_content"] = response.reasoning
-
-    result: dict[str, Any] = {
-        "message": message,
-        "finish_reason": response.finish_reason,
-    }
+    result: dict[str, Any] = {"finish_reason": response.finish_reason}
+    if response.content or response.tool_calls or response.reasoning:
+        message: dict[str, Any] = {"role": "assistant", "content": response.content}
+        if response.tool_calls:
+            message["tool_calls"] = [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {"name": call.name, "arguments": call.arguments},
+                }
+                for call in response.tool_calls
+            ]
+        if response.reasoning:
+            message["reasoning_content"] = response.reasoning
+        result["message"] = message
     if response.usage is not None:
         result["usage"] = {
             "prompt_tokens": response.usage.input_tokens,

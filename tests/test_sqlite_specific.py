@@ -9,12 +9,14 @@ These tests cover behavior that only applies to SQLiteEventBackend:
 - register_event_type() overwrite warning
 """
 
+import json
 import logging
 from typing import Literal
 
 from nooa.context_blocks import EventBase, Metadata
 from nooa.context_blocks.events import AssistantEvent, ToolCallEvent, UserEvent
 from nooa.storage.sqlite import _CONTEXT_BLOCKS_TYPES, SQLiteEventBackend
+from nooa.unifiedllm import LLMResponse
 
 # ---------------------------------------------------------------------------
 # _CONTEXT_BLOCKS_TYPES sanity
@@ -44,10 +46,28 @@ def test_context_blocks_types_all_are_event_base_subclasses():
 # ---------------------------------------------------------------------------
 
 
+def test_deserialize_legacy_llm_output_as_canonical_response(sqlite_conn):
+    """Existing sessions retain assistant text after the event migration."""
+    backend = SQLiteEventBackend(sqlite_conn)
+    legacy = {
+        "event_type": "LLMOutput",
+        "id": "legacy-response",
+        "metadata": {},
+        "status": "active",
+        "tag": "1",
+        "timestamp": "2025-01-01T00:00:00",
+        "content": "saved assistant text",
+    }
+
+    response = backend._deserialize(json.dumps(legacy))
+
+    assert isinstance(response, LLMResponse)
+    assert response.event_type == "LLMResponse"
+    assert response.content == "saved assistant text"
+
+
 def test_deserialize_unknown_event_type_falls_back_to_metadata(sqlite_conn):
     """An event_type not in the registry must deserialize as Metadata, not raise."""
-    import json
-
     backend = SQLiteEventBackend(sqlite_conn)
 
     # Insert a row with an unrecognised event_type directly
@@ -77,8 +97,6 @@ def test_deserialize_unknown_event_type_falls_back_to_metadata(sqlite_conn):
 
 def test_deserialize_unknown_type_logs_warning(sqlite_conn, caplog):
     """_deserialize() must log a warning when falling back to Metadata."""
-    import json
-
     backend = SQLiteEventBackend(sqlite_conn)
 
     unknown_json = json.dumps(

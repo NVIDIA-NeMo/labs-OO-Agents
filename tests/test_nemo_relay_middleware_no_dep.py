@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import nooa.nemo_relay_middleware as nm
-from nooa.unifiedllm import LLMResponse, ToolCall
+from nooa.unifiedllm import LLMResponse, LLMUsage, ToolCall
 
 
 def test_canonical_response_projects_to_relay_shape_without_private_state():
@@ -24,7 +24,7 @@ def test_canonical_response_projects_to_relay_shape_without_private_state():
         finish_reason="tool_calls",
         reasoning="plain reasoning",
         llm_state={"opaque": "provider-only"},
-        usage={"input_tokens": 12, "output_tokens": 3, "cached_input_tokens": 8},
+        usage=LLMUsage(input_tokens=12, output_tokens=3, cached_input_tokens=8),
     )
 
     payload = nm._relay_response(response)
@@ -61,6 +61,13 @@ def test_canonical_response_never_exposes_private_raw_response_to_relay():
     assert payload["message"]["content"] == "public answer"
     assert "provider-secret" not in repr(payload)
     raw.model_dump.assert_not_called()
+
+
+def test_state_only_response_does_not_create_a_relay_message():
+    payload = nm._relay_response(LLMResponse(llm_state={"opaque": "provider-only"}))
+
+    assert "message" not in payload
+    assert "provider-only" not in repr(payload)
 
 
 @pytest.fixture()
