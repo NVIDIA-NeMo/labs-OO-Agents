@@ -52,7 +52,14 @@ _SENSITIVE_KEYS = frozenset(
 # telemetry rule: it may go back to its issuer and nowhere else. Provider
 # adapters add their exact wire keys here as support is introduced.
 _OPAQUE_PROVIDER_STATE_KEYS = frozenset(
-    {"encrypted_content", "nooa_llm_state", "thought_signature", "thought_signatures"}
+    {
+        "encrypted_content",
+        "nooa_llm_state",
+        "thought_signature",
+        "thought_signatures",
+        "thoughtsignature",
+        "thoughtsignatures",
+    }
 )
 
 
@@ -81,6 +88,11 @@ def _redact_key(key: Any) -> str | None:
 # ---------------------------------------------------------------------------
 
 _SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    # LiteLLM may append Gemini thought signatures to tool-call IDs.
+    (
+        "gemini_inline_thought_signature",
+        re.compile(r"__thought__(?P<secret>[A-Za-z0-9+/=_-]+)"),
+    ),
     # AWS Access Key IDs (AKIA, ASIA, AIDA, AROA + 16 alphanumeric)
     ("aws_access_key", re.compile(r"(?P<secret>(?:AKIA|ASIA|AIDA|AROA)[A-Z0-9]{16})")),
     # AWS Secret Access Keys (40-char base64 after known prefix)

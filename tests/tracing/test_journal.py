@@ -234,6 +234,8 @@ def test_safe_msg_to_dict_redacts_private_replay_envelope(json_encoded):
         {"thinking_blocks": [{"type": "thinking", "signature": "anthropic-sig"}]},
         {"thinking_blocks": [{"type": "redacted_thinking", "data": "opaque-data"}]},
         {"provider_specific_fields": {"thought_signature": "gemini-sig"}},
+        {"providerSpecificFields": {"thoughtSignature": "gemini-camel-sig"}},
+        {"tool_calls": [{"id": "call_1__thought__Z2VtaW5pLXNpZw=="}]},
     ],
 )
 def test_safe_msg_to_dict_redacts_cross_provider_state(message):
@@ -242,6 +244,8 @@ def test_safe_msg_to_dict_redacts_cross_provider_state(message):
     assert "anthropic-sig" not in repr(safe)
     assert "opaque-data" not in repr(safe)
     assert "gemini-sig" not in repr(safe)
+    assert "gemini-camel-sig" not in repr(safe)
+    assert "Z2VtaW5pLXNpZw==" not in repr(safe)
 
 
 class TestSentBlocksBounding:

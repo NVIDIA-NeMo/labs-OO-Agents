@@ -255,6 +255,14 @@ class TestScrubValue:
                 {"provider_specific_fields": {"thought_signatures": ["gemini-sig"]}},
                 "gemini-sig",
             ),
+            (
+                {"providerSpecificFields": {"thoughtSignature": "gemini-camel-sig"}},
+                "gemini-camel-sig",
+            ),
+            (
+                {"providerSpecificFields": {"thoughtSignatures": ["gemini-camel-sig"]}},
+                "gemini-camel-sig",
+            ),
         ],
     )
     def test_cross_provider_opaque_state_is_redacted(self, provider_state, secret):
@@ -262,6 +270,19 @@ class TestScrubValue:
 
         assert secret not in repr(result)
         assert REDACTED in repr(result)
+        assert count == 1
+
+    def test_gemini_inline_tool_call_signature_is_redacted_from_flat_string(self):
+        result, count = scrub_value("call_1__thought__Z2VtaW5pLXNpZw==")
+
+        assert result == f"call_1__thought__{REDACTED}"
+        assert count == 1
+
+    def test_gemini_inline_tool_call_signature_is_redacted_from_json_attribute(self):
+        result, count = scrub_value('{"tool_calls":[{"id":"call_1__thought__Z2VtaW5pLXNpZw=="}]}')
+
+        assert "Z2VtaW5pLXNpZw==" not in result
+        assert REDACTED in result
         assert count == 1
 
 
