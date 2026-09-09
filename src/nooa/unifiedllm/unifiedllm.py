@@ -17,7 +17,7 @@ from typing import Any, Literal, cast
 import litellm
 from pydantic import BaseModel, RootModel
 
-from nooa._llm_state import LLM_STATE_KEY, carried_state
+from nooa._llm_state import LLM_STATE_KEY, carried_replay_batch, carried_state
 from nooa.llm_types import LLMResponse, LLMUsage, ToolCall
 
 from . import replay_state
@@ -2519,7 +2519,11 @@ class ResponsesClient(UnifiedLLM):
         instructions_parts: list[str] = []
         transformed: list[dict[str, Any]] = []
 
-        for original in messages:
+        skip_batch_items = 0
+        for index, original in enumerate(messages):
+            if skip_batch_items:
+                skip_batch_items -= 1
+                continue
             state = copy.deepcopy(carried_state(original))
             msg = copy.deepcopy(dict(original))
             msg.pop(LLM_STATE_KEY, None)
@@ -2527,11 +2531,25 @@ class ResponsesClient(UnifiedLLM):
             # accepted, even if a caller constructs wire dictionaries directly.
             msg.pop("reasoning_items", None)
 
-            if "_batch" in msg:
-                transformed.extend(
-                    replay_state.prepare_responses_batch(msg.pop("_batch"), state, state_scope)
-                )
-                continue
+            batch_info = carried_replay_batch(original)
+            if batch_info is not None and state is not None:
+                batch_id, batch_size = batch_info
+                candidates = messages[index : index + batch_size]
+                if len(candidates) == batch_size and all(
+                    carried_replay_batch(item) == (batch_id, batch_size) for item in candidates
+                ):
+                    batch = [copy.deepcopy(dict(item)) for item in candidates]
+                    for item in batch:
+                        item.pop(LLM_STATE_KEY, None)
+                        item.pop("reasoning_items", None)
+                    transformed.extend(
+                        replay_state.prepare_responses_batch(batch, state, state_scope)
+                    )
+                    skip_batch_items = batch_size - 1
+                    continue
+                # A middleware split or mutated the batch. Keep the public item,
+                # but fail closed instead of associating state with new neighbors.
+                state = None
 
             # System messages → extract to instructions
             if msg.get("role") == "system":

@@ -64,6 +64,38 @@ class TestResponsesProviderFormatter:
             }
         ]
 
+    def test_stateful_tool_batch_remains_valid_public_responses_input(self):
+        """Replay metadata must not replace public items with a private wrapper key."""
+        result = ResponsesProviderFormatter().format(
+            [
+                RenderedMessage(
+                    role=Role.ASSISTANT,
+                    content="I will run it.",
+                    tool_calls=(
+                        ToolCallInfo(
+                            id="call_123",
+                            name="execute_python",
+                            arguments={"code": "print(1)"},
+                        ),
+                    ),
+                    llm_state={"opaque": "provider-only"},
+                )
+            ]
+        )
+
+        assert result == [
+            {"role": "assistant", "content": "I will run it."},
+            {
+                "type": "function_call",
+                "call_id": "call_123",
+                "name": "execute_python",
+                "arguments": json.dumps({"code": "print(1)"}),
+            },
+        ]
+        assert all("role" in item or "type" in item for item in result)
+        assert "_batch" not in json.dumps(result)
+        assert "provider-only" not in json.dumps(result)
+
     def test_tool_result_format(self):
         """Tool results become function_call_output items."""
         messages = [
