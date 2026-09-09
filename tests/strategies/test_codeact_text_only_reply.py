@@ -311,9 +311,7 @@ async def test_text_only_output_survives_sqlite_resume(tmp_path):
             event.content
             for event in resumed
             if isinstance(event, LLMOutput) and not event.tool_calls
-        ] == [
-            "I should have used a tool."
-        ]
+        ] == ["I should have used a tool."]
         diagnostics = [event for event in resumed if isinstance(event, TextOnlyReply)]
         assert len(diagnostics) == 1
         assert diagnostics[0].action == "retry"
