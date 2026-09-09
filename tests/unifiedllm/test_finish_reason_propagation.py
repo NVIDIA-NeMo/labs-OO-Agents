@@ -197,6 +197,16 @@ class TestCompletionClientPropagation:
             out = client.call([{"role": "user", "content": "Hi"}])
         assert out.content == "I will use the tool."
 
+    def test_sync_tool_call_normalizes_missing_arguments(self, client):
+        tc = make_tool_call("call_1", "do_thing", "{}")
+        tc.function.arguments = None  # type: ignore[assignment]
+        response = make_mock_response(content=None, tool_calls=[tc])
+
+        with patch("litellm.completion", return_value=response):
+            out = client.call([{"role": "user", "content": "Hi"}])
+
+        assert out.tool_calls[0].arguments == ""
+
     @pytest.mark.asyncio
     async def test_async_tool_call_preserves_accompanying_text(self, client):
         tc = make_tool_call("call_1", "do_thing", "{}")

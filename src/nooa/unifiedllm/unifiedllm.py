@@ -1897,7 +1897,7 @@ class CompletionClient(UnifiedLLM):
                 ToolCall(
                     id=replay_state.public_tool_call_id(tc, state_scope),
                     name=tc.function.name or "",
-                    arguments=tc.function.arguments,
+                    arguments=tc.function.arguments or "",
                 )
                 for tc in raw_tool_calls
             ]
