@@ -140,7 +140,7 @@ def _report(
         f"- Baseline: {baseline_requests} requests, {baseline_messages} messages, {baseline_chars:,} serialized message characters",
         f"- Candidate: {candidate_requests} requests, {candidate_messages} messages, {candidate_chars:,} serialized message characters",
         f"- Raw captures byte-identical: {result['exact_bytes_equal']}",
-        "- Normalization: generated IDs, CRLF, trailing whitespace, and the legacy outer `<context>` envelope/separators",
+        "- Normalization: transport-only cache metadata, generated IDs, CRLF, trailing whitespace, and the legacy outer `<context>` envelope/separators",
         "",
     ]
     if result["diff"]:
@@ -204,6 +204,7 @@ def main() -> None:
         "passed": result["passed"],
         "exact_bytes_equal": result["exact_bytes_equal"],
         "normalization": [
+            "transport-only cache-boundary field and request option",
             "generated UUID and prefill IDs",
             "CRLF",
             "trailing whitespace",

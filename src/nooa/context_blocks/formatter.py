@@ -33,7 +33,9 @@ if TYPE_CHECKING:
 
 from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ToolCallEvent
+from nooa.context_blocks.exceptions import UnsupportedContextLayout
 from nooa.context_blocks.models import (
+    CACHE_BOUNDARY_MESSAGE_KEY,
     RenderedMessage,
     ResolvedBlock,
     Role,
@@ -556,12 +558,28 @@ def _with_replay_data(
     return ReplayCarryingMessage(message, state, reasoning) if state or reasoning else message
 
 
+def _preserve_cache_boundary(
+    out: list[dict[str, Any]], start: int, msg: RenderedMessage
+) -> None:
+    """Attach the neutral boundary to the last wire item emitted for ``msg``."""
+    if not msg.cache_boundary_after:
+        return
+    if len(out) == start:
+        raise UnsupportedContextLayout("provider formatter dropped a cache boundary")
+    out[-1][CACHE_BOUNDARY_MESSAGE_KEY] = True
+
+
 class OpenAIProviderFormatter(ProviderFormatter):
     """Emit OpenAI-compatible messages (``list[dict]``)."""
 
     def format(self, messages: list[RenderedMessage]) -> list[dict]:
         out: list[dict] = []
         for msg in messages:
+            start = len(out)
+            if msg.role in (Role.RUNTIME_EVENT, Role.METADATA):
+                raise UnsupportedContextLayout(
+                    f"OpenAI cannot represent context role {msg.role.value!r}"
+                )
             if msg.tool_calls:
                 assistant_message = {
                     "role": "assistant",
@@ -590,8 +608,6 @@ class OpenAIProviderFormatter(ProviderFormatter):
             elif msg.images:
                 _append_openai_image_message(out, msg)
             else:
-                if msg.role in (Role.RUNTIME_EVENT, Role.METADATA):
-                    continue
                 out.append(
                     _with_replay_data(
                         {"role": msg.role.value, "content": msg.content or ""},
@@ -599,6 +615,7 @@ class OpenAIProviderFormatter(ProviderFormatter):
                         msg.reasoning,
                     )
                 )
+            _preserve_cache_boundary(out, start, msg)
         return out
 
 
@@ -608,12 +625,29 @@ class AnthropicProviderFormatter(ProviderFormatter):
     def format(self, messages: list[RenderedMessage]) -> dict:
         system_parts: list[str] = []
         out: list[dict] = []
+        saw_non_system = False
+        system_boundary = False
         for msg in messages:
+            if msg.role in (Role.RUNTIME_EVENT, Role.METADATA):
+                raise UnsupportedContextLayout(
+                    f"Anthropic cannot represent context role {msg.role.value!r}"
+                )
             if msg.role == Role.SYSTEM:
+                if saw_non_system:
+                    raise UnsupportedContextLayout(
+                        "Anthropic requires all system context before conversation messages"
+                    )
+                if system_boundary:
+                    raise UnsupportedContextLayout(
+                        "Anthropic system string cannot preserve an internal cache boundary"
+                    )
                 if msg.content:
                     system_parts.append(msg.content)
+                system_boundary = msg.cache_boundary_after
                 continue
 
+            saw_non_system = True
+            start = len(out)
             if msg.tool_calls:
                 content: list[dict[str, Any]] = []
                 if msg.content:
@@ -657,8 +691,6 @@ class AnthropicProviderFormatter(ProviderFormatter):
                 content_parts.extend(msg.images)
                 out.append({"role": role.value, "content": content_parts})
             else:
-                if msg.role in (Role.RUNTIME_EVENT, Role.METADATA):
-                    continue
                 role = msg.role if msg.role in (Role.USER, Role.ASSISTANT) else Role.USER
                 out.append(
                     _with_replay_data(
@@ -667,8 +699,15 @@ class AnthropicProviderFormatter(ProviderFormatter):
                         msg.reasoning,
                     )
                 )
+            _preserve_cache_boundary(out, start, msg)
 
-        return {"system": "\n\n".join(system_parts), "messages": out}
+        result: dict[str, Any] = {
+            "system": "\n\n".join(system_parts),
+            "messages": out,
+        }
+        if system_boundary:
+            result[CACHE_BOUNDARY_MESSAGE_KEY] = True
+        return result
 
 
 class ResponsesProviderFormatter(ProviderFormatter):
@@ -685,12 +724,21 @@ class ResponsesProviderFormatter(ProviderFormatter):
 
     def format(self, messages: list[RenderedMessage]) -> list[dict]:
         out: list[dict] = []
+        saw_non_system = False
         for msg in messages:
+            start = len(out)
+            if msg.role in (Role.RUNTIME_EVENT, Role.METADATA):
+                raise UnsupportedContextLayout(
+                    f"Responses cannot represent context role {msg.role.value!r}"
+                )
             if msg.role == Role.SYSTEM:
+                if saw_non_system:
+                    raise UnsupportedContextLayout(
+                        "Responses requires all system context before conversation messages"
+                    )
                 out.append({"role": "system", "content": msg.content or ""})
-                continue
-
-            if msg.tool_calls:
+            elif msg.tool_calls:
+                saw_non_system = True
                 # Preserve assistant text that precedes the tool call
                 batch: list[dict[str, Any]] = []
                 if msg.content and msg.role == Role.ASSISTANT:
@@ -709,6 +757,7 @@ class ResponsesProviderFormatter(ProviderFormatter):
                 else:
                     out.extend(batch)
             elif msg.tool_call_id is not None:
+                saw_non_system = True
                 out.append(
                     {
                         "type": "function_call_output",
@@ -717,6 +766,7 @@ class ResponsesProviderFormatter(ProviderFormatter):
                     }
                 )
             elif msg.images:
+                saw_non_system = True
                 role = msg.role if msg.role in (Role.USER, Role.ASSISTANT) else Role.USER
                 content_parts: list[dict] = []
                 if msg.content:
@@ -747,12 +797,12 @@ class ResponsesProviderFormatter(ProviderFormatter):
                         content_parts.append(img)
                 out.append({"role": role.value, "content": content_parts})
             else:
-                if msg.role in (Role.RUNTIME_EVENT, Role.METADATA):
-                    continue
+                saw_non_system = True
                 role = msg.role if msg.role in (Role.USER, Role.ASSISTANT) else Role.USER
                 message = {"role": role.value, "content": msg.content or ""}
                 if (msg.llm_state or msg.reasoning) and role == Role.ASSISTANT:
                     out.extend(carry_replay_batch([message], msg.llm_state, msg.reasoning))
                 else:
                     out.append(message)
+            _preserve_cache_boundary(out, start, msg)
         return out

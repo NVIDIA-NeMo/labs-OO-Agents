@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 import litellm
 import pytest
 
+from nooa.context_blocks.models import CACHE_BOUNDARY_MESSAGE_KEY
 from nooa.unifiedllm import CompletionClient
 
 
@@ -93,6 +94,77 @@ class TestInjectCacheControl:
         result = client._inject_cache_control(messages, injection_points)
 
         assert "cache_control" not in result[0]
+
+    def test_explicit_boundary_is_exact_and_overrides_role_rules(self, client):
+        messages = [
+            {"role": "system", "content": "System"},
+            {
+                "role": "user",
+                "content": "First",
+                CACHE_BOUNDARY_MESSAGE_KEY: True,
+            },
+            {"role": "user", "content": "Second"},
+        ]
+        result = client._inject_cache_control(messages, [{"role": "system"}])
+
+        assert "cache_control" not in result[0]
+        assert result[1]["cache_control"] == {"type": "ephemeral"}
+        assert "cache_control" not in result[2]
+        assert all(CACHE_BOUNDARY_MESSAGE_KEY not in message for message in result)
+        assert CACHE_BOUNDARY_MESSAGE_KEY in messages[1]
+
+    def test_unsupported_explicit_boundary_is_consumed(self, client):
+        messages = [{"role": "user", "content": "Hi", CACHE_BOUNDARY_MESSAGE_KEY: True}]
+        result = client._inject_cache_control(messages, [], explicit_supported=False)
+        assert result == [{"role": "user", "content": "Hi"}]
+
+    @pytest.mark.parametrize("content", ["working", None])
+    def test_completion_anthropic_tool_call_boundary_follows_tool_use(self, content):
+        from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+        client = CompletionClient(model="anthropic/claude-haiku-4-5")
+        messages = [
+            {"role": "user", "content": "run it"},
+            {
+                "role": "assistant",
+                "content": content,
+                "tool_calls": [
+                    {
+                        "id": "tc1",
+                        "type": "function",
+                        "function": {"name": "run", "arguments": "{}"},
+                    }
+                ],
+                CACHE_BOUNDARY_MESSAGE_KEY: True,
+            },
+            {"role": "tool", "tool_call_id": "tc1", "content": "done"},
+        ]
+        result = client._inject_cache_control(messages, [])
+        transformed = AnthropicConfig().transform_request(
+            model="claude-haiku-4-5",
+            messages=result,
+            optional_params={},
+            litellm_params={},
+            headers={},
+        )
+
+        assistant_blocks = transformed["messages"][1]["content"]
+        assert assistant_blocks[-1]["type"] == "tool_use"
+        assert assistant_blocks[-1]["cache_control"] == {"type": "ephemeral"}
+        if content:
+            assert "cache_control" not in assistant_blocks[0]
+        assert CACHE_BOUNDARY_MESSAGE_KEY in messages[1]
+
+    def test_false_internal_marker_is_removed_without_suppressing_legacy_rules(self, client):
+        messages = [{"role": "system", "content": "System", CACHE_BOUNDARY_MESSAGE_KEY: False}]
+        result = client._inject_cache_control(messages, [{"role": "system"}])
+        assert result == [
+            {
+                "role": "system",
+                "content": "System",
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +271,30 @@ class TestCacheControlEndToEnd:
             assert sent_messages[0].get("cache_control") == {"type": "ephemeral"}
             # User message should not
             assert "cache_control" not in sent_messages[1]
+
+    @pytest.mark.asyncio
+    async def test_acall_maps_only_explicit_boundary_when_present(self):
+        client = CompletionClient(model="test-model")
+        mock_response = make_mock_response()
+        messages = [
+            {"role": "system", "content": "System"},
+            {
+                "role": "user",
+                "content": "Boundary",
+                CACHE_BOUNDARY_MESSAGE_KEY: True,
+            },
+            {"role": "tool", "content": "Result", "tool_call_id": "tc"},
+        ]
+
+        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
+            mock_acompletion.return_value = mock_response
+            await client.acall(messages)
+
+        sent = mock_acompletion.call_args.kwargs["messages"]
+        assert "cache_control" not in sent[0]
+        assert sent[1]["cache_control"] == {"type": "ephemeral"}
+        assert "cache_control" not in sent[2]
+        assert CACHE_BOUNDARY_MESSAGE_KEY in messages[1]
 
     @pytest.mark.asyncio
     async def test_acall_no_injection_points_skips(self):

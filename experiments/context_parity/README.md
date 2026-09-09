@@ -10,7 +10,7 @@ Does the context-view refactor preserve the complete LLM request produced by NOO
 
 The scenarios cover Predict composition and precedence, event filtering, dynamic-expression failure, legacy `SkillRegistry` context, two-turn CodeAct with changing dynamic state, and context-budget eviction. New custom skill views are excluded because they have no legacy equivalent.
 
-The comparator preserves order and content. It normalizes generated IDs, CRLF line endings, trailing whitespace, and the legacy formatter's outer `<context>` envelope/inter-block separators. It does not ignore rewording, block changes, role changes, message reordering, tool changes, or schema changes.
+The comparator preserves order and content. Capture removes only NOOA's transport-only cache-boundary field and request option. Comparison normalizes generated IDs, CRLF line endings, trailing whitespace, and the legacy formatter's outer `<context>` envelope/inter-block separators. It does not ignore rewording, block changes, role changes, message reordering, tool changes, or schema changes.
 
 ## Metrics
 

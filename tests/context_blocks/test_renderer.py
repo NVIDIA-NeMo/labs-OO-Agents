@@ -7,13 +7,23 @@ them via BlockFormatter + ProviderFormatter. No eval function, no expression
 evaluation, no class — just a pure function.
 """
 
+import pytest
+
+from nooa import Block, CacheBoundary
+from nooa.context_blocks.events import ToolCallEvent, ToolResult
+from nooa.context_blocks.exceptions import UnsupportedContextLayout
 from nooa.context_blocks.formatter import (
     AnthropicProviderFormatter,
     MarkdownBlockFormatter,
     OpenAIProviderFormatter,
     XMLBlockFormatter,
 )
-from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
+from nooa.context_blocks.models import (
+    CACHE_BOUNDARY_MESSAGE_KEY,
+    BlockMetadata,
+    ResolvedBlock,
+    Role,
+)
 from nooa.context_blocks.renderer import render_context
 
 
@@ -34,6 +44,130 @@ class TestRenderContextBasic:
         ).output
 
         assert result == []
+
+    def test_boundary_splits_messages_without_adding_content(self):
+        result = render_context(
+            [
+                Block(key="first", content="first", role=Role.USER),
+                CacheBoundary(),
+                Block(key="second", content="second", role=Role.USER),
+            ],
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+
+        assert len(result) == 2
+        assert result[0][CACHE_BOUNDARY_MESSAGE_KEY] is True
+        assert CACHE_BOUNDARY_MESSAGE_KEY not in result[1]
+        rendered = "".join(message["content"] for message in result)
+        assert "first" in rendered and "second" in rendered
+
+    def test_boundary_after_system_only_context_is_preserved(self):
+        result = render_context(
+            [Block(key="system", content="system"), CacheBoundary()],
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+
+        assert len(result) == 1
+        assert result[0]["role"] == "system"
+        assert result[0][CACHE_BOUNDARY_MESSAGE_KEY] is True
+
+    def test_leading_and_consecutive_boundaries_are_noops(self):
+        result = render_context(
+            [CacheBoundary(), CacheBoundary(), Block(key="only", content="only")],
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+        assert len(result) == 1
+        assert CACHE_BOUNDARY_MESSAGE_KEY not in result[0]
+
+    def test_boundary_after_tool_event_marks_complete_result(self):
+        event = ToolCallEvent(
+            tool_call_id="tc_1",
+            name="execute_python",
+            arguments={"code": "1 + 1"},
+            result=ToolResult(tool_call_id="tc_1", content="2"),
+        )
+        result = render_context(
+            [event, CacheBoundary()],
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+        assert [message["role"] for message in result] == ["assistant", "tool"]
+        assert result[-1][CACHE_BOUNDARY_MESSAGE_KEY] is True
+
+    def test_boundary_prevents_plain_formatter_cross_segment_merge(self):
+        from nooa.events import PythonOutput, ResultStatus
+        from nooa.strategies.codeact_lite import PlainCodeActBlockFormatter
+
+        event = ToolCallEvent(
+            tool_call_id="tc_1",
+            name="execute_python",
+            arguments={"code": "print(2)"},
+            result=ToolResult(tool_call_id="tc_1", content="status: complete"),
+        )
+        output = PythonOutput(
+            tool_call_id="tc_1",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="2",
+        )
+        result = render_context(
+            [event, CacheBoundary(), output],
+            block_formatter=PlainCodeActBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+        assert [message["role"] for message in result] == [
+            "assistant",
+            "tool",
+            "user",
+        ]
+        assert result[1][CACHE_BOUNDARY_MESSAGE_KEY] is True
+        assert "2" in result[2]["content"]
+
+    def test_incomplete_tool_event_is_rejected(self):
+        event = ToolCallEvent(
+            tool_call_id="tc_1",
+            name="execute_python",
+            arguments={"code": "1 + 1"},
+            result=None,
+        )
+        with pytest.raises(UnsupportedContextLayout, match="has no result"):
+            render_context(
+                [event],
+                block_formatter=XMLBlockFormatter(),
+                provider_formatter=OpenAIProviderFormatter(),
+            )
+
+    def test_incomplete_resolved_tool_event_cannot_use_python_output_as_result(self):
+        from nooa.events import PythonOutput, ResultStatus
+        from nooa.strategies.codeact_lite import PlainCodeActBlockFormatter
+
+        event = ToolCallEvent(
+            tool_call_id="tc_1",
+            name="execute_python",
+            arguments={"code": "print(2)"},
+            result=None,
+        )
+        orphan = ResolvedBlock(key="tool", content="", event=event, role=Role.ASSISTANT)
+        output = ResolvedBlock(
+            key="output",
+            content="",
+            event=PythonOutput(
+                tool_call_id="tc_1",
+                execution_status=ResultStatus.COMPLETE,
+                execution_count=1,
+                stdout="2",
+            ),
+            role=Role.USER,
+        )
+        with pytest.raises(UnsupportedContextLayout, match="has no result"):
+            render_context(
+                [orphan, output],
+                block_formatter=PlainCodeActBlockFormatter(),
+                provider_formatter=OpenAIProviderFormatter(),
+            )
 
     def test_render_single_system_block(self):
         """render_context() formats a single system block."""

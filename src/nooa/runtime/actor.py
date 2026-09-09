@@ -1004,7 +1004,11 @@ class ActorRuntime:
             if has_mw:
                 from nooa.runtime.middleware import LLMCallContext
 
-                params: dict[str, Any] = {**kwargs, "tools": tools}
+                params: dict[str, Any] = {
+                    **kwargs,
+                    "tools": tools,
+                    "cache_control_injection_points": [],
+                }
                 if output_model is not None:
                     params["output_model"] = output_model
                 ctx = LLMCallContext(
@@ -1027,6 +1031,7 @@ class ActorRuntime:
                     )
                     om = ctx.params.get("output_model", None)
                     call_params = {k: v for k, v in ctx.params.items() if k != "output_model"}
+                    call_params["cache_control_injection_points"] = []
                     _mw_strategy = _current_strategy_var.get()
                     _mw_strategy_tag = (
                         type(_mw_strategy).__name__ if _mw_strategy is not None else "default"
@@ -1116,6 +1121,7 @@ class ActorRuntime:
                 #     keeping shared-prefix caching (system prompt + strategy
                 #     prompt + execution_context + agent doc all match).
                 _kwargs = dict(kwargs)
+                _kwargs["cache_control_injection_points"] = []
                 _current_strategy = _current_strategy_var.get()
                 _strategy_tag = (
                     type(_current_strategy).__name__ if _current_strategy is not None else "default"

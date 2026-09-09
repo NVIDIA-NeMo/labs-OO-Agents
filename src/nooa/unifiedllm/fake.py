@@ -81,7 +81,7 @@ class FakeLLMClient(UnifiedLLM):
         """
         async with self._lock:
             self.call_count += 1
-            self.last_messages = messages
+            self.last_messages = self._inject_cache_control(messages, [], explicit_supported=False)
             self.last_tools = tools
 
             # Return next response from queue, or empty response if none left
@@ -108,7 +108,7 @@ class FakeLLMClient(UnifiedLLM):
         """Synchronous version of acall for UnifiedLLM compatibility."""
         # For sync call, we don't need locking since tests are usually single-threaded
         self.call_count += 1
-        self.last_messages = messages
+        self.last_messages = self._inject_cache_control(messages, [], explicit_supported=False)
         self.last_tools = tools
 
         if self._response_queue:

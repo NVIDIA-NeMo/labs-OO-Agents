@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for cache_control injection in ResponsesClient."""
 
+from copy import deepcopy
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from nooa.context_blocks.models import CACHE_BOUNDARY_MESSAGE_KEY
 from nooa.unifiedllm import ResponsesClient
 
 
@@ -118,6 +120,34 @@ class TestResponsesClientCacheControlInjection:
         input_msgs, _ = client._transform_messages(prepared)
         user_msgs = [m for m in input_msgs if m.get("role") == "user"]
         assert user_msgs[0].get("cache_control") == {"type": "ephemeral"}
+
+    def test_direct_nested_assistant_annotation_is_not_moved(self, client):
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "working",
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                "tool_calls": [
+                    {
+                        "id": "tc1",
+                        "type": "function",
+                        "function": {"name": "run", "arguments": "{}"},
+                    }
+                ],
+            }
+        ]
+        original = deepcopy(messages)
+
+        transformed, _ = client._transform_messages(messages)
+
+        assert transformed[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+        assert "cache_control" not in transformed[1]
+        assert messages == original
 
 
 class TestToolOutputNotCorrupted:
@@ -254,6 +284,81 @@ class TestResponsesClientEndToEnd:
             assert isinstance(last_user["content"], list)
             assert last_user["content"][0]["cache_control"] == {"type": "ephemeral"}
 
+    @pytest.mark.asyncio
+    async def test_explicit_boundary_maps_to_exact_native_item(self):
+        client = ResponsesClient(model=self.ANTHROPIC_MODEL)
+        mock_response = make_mock_responses_response()
+        messages = [
+            {"role": "system", "content": "System"},
+            {
+                "type": "function_call_output",
+                "call_id": "tc1",
+                "output": "first",
+                CACHE_BOUNDARY_MESSAGE_KEY: True,
+            },
+            {"role": "user", "content": "next"},
+        ]
+
+        with patch("litellm.aresponses", new_callable=AsyncMock) as mock_aresponses:
+            mock_aresponses.return_value = mock_response
+            await client.acall(messages)
+
+        sent = mock_aresponses.call_args.kwargs["input"]
+        assert sent[0]["cache_control"] == {"type": "ephemeral"}
+        assert "cache_control" not in sent[1]
+        assert CACHE_BOUNDARY_MESSAGE_KEY in messages[1]
+
+    @pytest.mark.asyncio
+    async def test_legacy_tool_call_boundary_follows_complete_expansion(self):
+        client = ResponsesClient(model=self.ANTHROPIC_MODEL)
+        mock_response = make_mock_responses_response()
+        messages = [
+            {
+                "role": "assistant",
+                "content": "working",
+                "tool_calls": [
+                    {
+                        "id": "tc1",
+                        "type": "function",
+                        "function": {"name": "run", "arguments": "{}"},
+                    }
+                ],
+                CACHE_BOUNDARY_MESSAGE_KEY: True,
+            }
+        ]
+
+        with patch("litellm.aresponses", new_callable=AsyncMock) as mock_aresponses:
+            mock_aresponses.return_value = mock_response
+            await client.acall(messages)
+
+        sent = mock_aresponses.call_args.kwargs["input"]
+        assert sent[0]["role"] == "assistant"
+        assert not _has_cache_control_anywhere(sent[0])
+        assert sent[1]["type"] == "function_call"
+        assert sent[1]["cache_control"] == {"type": "ephemeral"}
+        assert CACHE_BOUNDARY_MESSAGE_KEY in messages[0]
+
+    @pytest.mark.asyncio
+    async def test_explicit_system_boundary_is_content_preserving_noop(self):
+        client = ResponsesClient(model=self.ANTHROPIC_MODEL)
+        mock_response = make_mock_responses_response()
+        messages = [
+            {
+                "role": "system",
+                "content": "System",
+                CACHE_BOUNDARY_MESSAGE_KEY: True,
+            },
+            {"role": "user", "content": "next"},
+        ]
+
+        with patch("litellm.aresponses", new_callable=AsyncMock) as mock_aresponses:
+            mock_aresponses.return_value = mock_response
+            await client.acall(messages)
+
+        sent = mock_aresponses.call_args.kwargs
+        assert sent["instructions"] == "System"
+        assert not any(_has_cache_control_anywhere(item) for item in sent["input"])
+
 
 def _has_cache_control_anywhere(item: dict) -> bool:
     """Recursively check whether `cache_control` appears anywhere in an input[] item."""
@@ -355,3 +460,22 @@ class TestNonAnthropicResponsesPath:
                 assert not _has_cache_control_anywhere(item), (
                     f"cache_control leaked to input[{i}] (sync path): {item!r}"
                 )
+
+    @pytest.mark.asyncio
+    async def test_explicit_boundary_is_stripped_for_non_anthropic(self):
+        client = ResponsesClient(model="openai/openai/openai/gpt-5.5")
+        mock_response = make_mock_responses_response()
+        messages = [
+            {
+                "role": "user",
+                "content": "Hi",
+                CACHE_BOUNDARY_MESSAGE_KEY: True,
+            }
+        ]
+
+        with patch("litellm.aresponses", new_callable=AsyncMock) as mock_aresponses:
+            mock_aresponses.return_value = mock_response
+            await client.acall(messages)
+
+        assert mock_aresponses.call_args.kwargs["input"] == [{"role": "user", "content": "Hi"}]
+        assert CACHE_BOUNDARY_MESSAGE_KEY in messages[0]

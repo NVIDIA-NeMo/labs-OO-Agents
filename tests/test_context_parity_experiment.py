@@ -2,8 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the deterministic context-parity comparator."""
 
+import importlib
 from copy import deepcopy
 
+import experiments.context_parity.capture as capture_module
+import nooa.agent as agent_module
+import nooa.runtime.method_wrapper as method_wrapper
+from experiments.context_parity.capture import _request_messages, _request_options
 from experiments.context_parity.run import canonicalize, compare_captures
 
 
@@ -59,3 +64,41 @@ def test_canonicalize_does_not_mutate_capture():
     original = deepcopy(capture)
     canonicalize(capture)
     assert capture == original
+
+
+def test_capture_removes_only_exact_transport_metadata():
+    messages = [
+        {
+            "role": "user",
+            "content": {"_nooa_cache_boundary": "user data"},
+            "_nooa_cache_boundary": True,
+        }
+    ]
+    options = {
+        "cache_control_injection_points": [],
+        "user_cache_control_injection_points": ["keep"],
+        "metadata": {"cache_control_injection_points": "keep"},
+    }
+
+    assert _request_options({"cache_control_injection_points": [{"role": "system"}]}) == {
+        "cache_control_injection_points": [{"role": "system"}]
+    }
+
+    assert _request_messages(messages) == [
+        {"role": "user", "content": {"_nooa_cache_boundary": "user data"}}
+    ]
+    assert _request_options(options) == {
+        "user_cache_control_injection_points": ["keep"],
+        "metadata": {"cache_control_injection_points": "keep"},
+    }
+
+
+def test_importing_capture_does_not_mutate_framework_state(monkeypatch):
+    sentinel_flush = object()
+    monkeypatch.setattr(agent_module, "_auto_tracing_attempted", False)
+    monkeypatch.setattr(method_wrapper, "_flush_litellm_journal", sentinel_flush)
+
+    importlib.reload(capture_module)
+
+    assert agent_module._auto_tracing_attempted is False
+    assert method_wrapper._flush_litellm_journal is sentinel_flush

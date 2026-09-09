@@ -14,7 +14,12 @@ class Block:
     metadata: BlockMetadata | None = None
 
 
-ContextItem = Block | EventBase
+@dataclass(frozen=True)
+class CacheBoundary:
+    """Request caching of the rendered prefix ending here, where supported."""
+
+
+ContextItem = Block | EventBase | CacheBoundary
 
 
 class ContextView[Owner](Protocol):
@@ -25,7 +30,9 @@ class ContextView[Owner](Protocol):
     ) -> AsyncIterator[ContextItem]: ...
 ```
 
-`Block.content` is materialized; `metadata` carries optional rendering and budget hints. Events remain typed. The runtime collects the selected view into an immutable `tuple[Block | EventBase, ...]` before rendering. No additional assembled-context type is needed.
+`Block.content` is materialized; `metadata` carries optional rendering and budget hints. Events remain typed. `CacheBoundary` is a structural marker: it has no content or token cost and is not evictable. In the default view, `metadata.static` controls prefix placement independently of evaluation timing.
+
+The runtime assembles the selected view for every LLM request and collects it into a `tuple[ContextItem, ...]`; membership and order then remain fixed through rendering. No additional assembled-context type is needed.
 
 `CurrentCall` is the immutable invocation snapshot. In addition to method inputs and the resolved strategy and event query, context views may read the resolved `model`, `provider`, `context_window`, and `context_budget`. Internal formatting and token-counting data support the helpers. It contains no LLM client or credentials.
 
@@ -62,16 +69,16 @@ async def assemble(self, agent, call):
     yield Block(key="state", content=context_text(state, call=call))
 ```
 
-Small optional helpers provide reusable mechanisms:
+Small optional helpers each do one job:
 
 ```python
 context_text(value, *, call) -> str
-collect_context(view, owner, call) -> tuple[ContextItem, ...]
+async collect_context(view, owner, call) -> tuple[ContextItem, ...]
 apply_context_budget(items, *, call, evictable) -> tuple[ContextItem, ...]
-evaluate_context_expression(expression, *, owner, call) -> object
+async evaluate_context_expression(expression, *, owner, call) -> object
 ```
 
-A source helper may retrieve, evaluate, or format one source. It does not select other sources or decide global precedence, placement, or order.
+`context_text` formats one value; `collect_context` validates and retains yielded order; expression evaluation binds `self` to `owner`; budgeting follows the caller's eviction order and counts blocks only, so it is not a full rendered-request limit. A source helper may retrieve, evaluate, or format one source. It does not select other sources or decide global precedence, placement, or order.
 
 ## Defaults
 
@@ -100,25 +107,30 @@ class DefaultAgentView(ContextView[Agent]):
             else:
                 custom_skills.extend(contribution)
 
-        # Later sources replace earlier blocks with the same key.
-        for source in (
-            await strategy_context_blocks(call.strategy, agent, call),
-            await decorator_context_blocks(call),
-            await scoped_context_blocks(call),
+        # Later sources replace in place, append new keys, and remove None values.
+        for overrides, static_keys in (
+            (call.strategy.get_block_overrides(), call.strategy.get_static_block_keys()),
+            (call.decorator_context, None),
+            (call.scoped_context, None),
         ):
-            blocks = replace_by_key(blocks, source)
+            blocks = await apply_context_overrides(
+                blocks, overrides, agent=agent, call=call, static_keys=static_keys
+            )
 
         blocks = remove_disabled(blocks, agent.context_manager.disabled())
         blocks = order_blocks(blocks, call.strategy.get_block_order())
         prefix, trailing = partition_blocks(blocks)
 
-        items = [*prefix, *custom_skills, *visible_events(agent, call), *trailing]
+        items = [*prefix, *custom_skills, *visible_events(agent, call)]
+        if items:
+            items.append(CacheBoundary())
+        items.extend(trailing)
         evictable = [*reversed(user_blocks(trailing)), *reversed(framework_blocks(trailing))]
         for item in apply_context_budget(items, call=call, evictable=evictable):
             yield item
 ```
 
-Each `*_blocks` helper materializes only its named source. The generic list helpers contain no source selection or ordering policy. Changing or removing a source is a local edit to `assemble()`.
+`apply_context_overrides` exposes replacement, deletion, inherited placement, and explicit prefix hints. Changing or removing a source is a local edit to `assemble()`.
 
 ```python
 class DefaultSkillView(ContextView[Skill]):
@@ -138,7 +150,9 @@ class DefaultSkillView(ContextView[Skill]):
             )
 ```
 
-Registry skills participate when active; directly attached public skills are active by default. Hidden and inactive skills contribute nothing. `DefaultSkillView` emits only explicitly declared context; it never dumps skill documentation.
+A skill view produces only that skill's ordered contribution; the agent view decides whether and where to include it. Native views normally read `skill` state directly. The fallback `DefaultSkillView` preserves the legacy `context_block` binding to `call.agent`; its block joins the keyed default pipeline, while custom contributions are inserted intact without implicit merging or manager policy.
+
+Registry skills participate when active; directly attached public skills are active by default. Hidden and inactive skills contribute nothing. `DefaultSkillView` emits only explicitly declared context; it never dumps skill documentation. The default agent view places custom skill contributions before visible events; a custom agent view may place volatile skill state after the cache boundary.
 
 ## Model-specific content
 
@@ -148,17 +162,20 @@ Model-specific prompt content remains view policy, not formatter policy. A custo
 
 ```text
 resolve view
-    -> view assembles Block | EventBase items
-    -> tuple[Block | EventBase, ...]
+    -> view assembles ContextItem items
+    -> tuple[ContextItem, ...]
     -> ContextRenderer
     -> ProviderFormatter
+    -> UnifiedLLM
 ```
 
 - The selected agent view owns content, membership, materialization, filtering, global order, adaptation, and budget policy.
 - A nested view owns the content and local order of its contribution.
 - Source-specific helpers translate existing state APIs; they do not choose global placement.
-- The renderer expands each item in place and serializes it.
-- The provider formatter only adapts message shape and cache annotations.
+- The renderer expands content items in place, emits no boundary text, and preserves exact boundary positions through message coalescing. A boundary after an event remains after its complete expansion.
+- The provider formatter preserves neutral cache positions while adapting message shape. UnifiedLLM maps only view-emitted boundaries to provider annotations, or ignores unsupported caching; legacy role-based injection does not apply.
+- The selected agent view owns cache placement. The default adds at most one boundary after visible history and before trailing context; custom views receive none implicitly.
+- Bounded serialization is formatting; recovery for missing data or other invented content belongs to event production or view policy.
 - Downstream stages preserve semantics or raise `UnsupportedContextLayout`; they never reorder, omit, resolve, evict, repair, or add context.
 
 ## Migration
@@ -182,5 +199,8 @@ Keep `agent.context`, context managers, event creation, strategy/scoped override
 - the standalone default module imports no `nooa.runtime.*`;
 - an external custom view ignores a sentinel `context_manager` and completes Predict and CodeAct calls;
 - event expansion preserves position;
+- cache boundaries preserve their exact position through complete event expansion, emit no content, cost no tokens, and map correctly or become a no-op, including with empty history or no trailing context;
+- a custom view with no cache boundary receives no implicit marker;
+- overrides preserve placement and support `None` deletion;
 - renderers preserve order or reject the layout;
 - existing Predict, CodeAct, tool, skill, context, capability, and quickstart behavior remains covered.

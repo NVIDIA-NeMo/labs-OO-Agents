@@ -254,6 +254,9 @@ class BlockPart(BaseModel):
 
 MessagePart = Annotated[TextPart | BlockPart, Field(discriminator="kind")]
 
+# Internal wire marker consumed by UnifiedLLM before provider calls.
+CACHE_BOUNDARY_MESSAGE_KEY = "_nooa_cache_boundary"
+
 
 class RenderedMessage(BaseModel):
     """Neutral message emitted by a BlockFormatter.
@@ -315,6 +318,10 @@ class RenderedMessage(BaseModel):
     )
     images: list[dict[str, Any]] | None = Field(
         default=None, description="Optional image parts (LiteLLM shape)"
+    )
+    cache_boundary_after: bool = Field(
+        default=False,
+        description="Whether the provider-cacheable prefix ends after this message",
     )
 
 

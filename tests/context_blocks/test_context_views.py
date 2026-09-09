@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from nooa import (
     Agent,
     Block,
+    CacheBoundary,
     ContextView,
     DefaultAgentView,
     DefaultSkillView,
@@ -50,6 +51,29 @@ async def test_assembly_is_stable_and_immutable():
     assert [item.key for item in result] == ["one"]
     with pytest.raises(ValidationError):
         result[0].content = "changed"
+
+
+async def test_collection_accepts_structural_cache_boundary():
+    class BoundaryView:
+        async def assemble(self, owner, call):
+            yield Block(key="one", content="one")
+            yield CacheBoundary()
+
+    call = CurrentCall(id="1", method_name="run", decorator="plan")
+    assert await collect_context(BoundaryView(), object(), call) == (
+        Block(key="one", content="one"),
+        CacheBoundary(),
+    )
+
+
+async def test_collection_rejects_unknown_item_type():
+    class InvalidView:
+        async def assemble(self, owner, call):
+            yield "not context"
+
+    call = CurrentCall(id="1", method_name="run", decorator="plan")
+    with pytest.raises(TypeError, match="Block, EventBase, or CacheBoundary"):
+        await collect_context(InvalidView(), object(), call)
 
 
 def test_context_text_uses_call_format():
@@ -148,7 +172,7 @@ async def test_hidden_skill_contributes_nothing():
         async def run(self): ...
 
     items = await Example().runtime._prepare_context(Example.run)
-    assert "hidden_skill" not in [item.key for item in items]
+    assert "hidden_skill" not in [getattr(item, "key", None) for item in items]
 
 
 async def test_registry_skill_contributes_only_while_active():
@@ -170,7 +194,7 @@ async def test_registry_skill_contributes_only_while_active():
 
     agent = Example()
     inactive = await agent.runtime._prepare_context(Example.run)
-    assert "registered" not in [item.key for item in inactive]
+    assert "registered" not in [getattr(item, "key", None) for item in inactive]
 
     agent.skills.activate(["test.registered"])
     active = await agent.runtime._prepare_context(Example.run)
@@ -180,7 +204,7 @@ async def test_registry_skill_contributes_only_while_active():
 
     agent.skills.deactivate(["test.registered"])
     inactive_again = await agent.runtime._prepare_context(Example.run)
-    assert "registered" not in [item.key for item in inactive_again]
+    assert "registered" not in [getattr(item, "key", None) for item in inactive_again]
 
 
 async def test_legacy_skill_block_is_materialized_by_default_skill_view():
@@ -257,8 +281,121 @@ async def test_default_skill_shorthand_keeps_legacy_trailing_order():
     items = await agent.runtime._prepare_context(Example.run)
     skill_index = next(i for i, item in enumerate(items) if getattr(item, "key", None) == "skill")
     event_index = items.index(event)
+    boundary_index = items.index(CacheBoundary())
     tail_index = next(i for i, item in enumerate(items) if getattr(item, "key", None) == "tail")
-    assert event_index < tail_index < skill_index
+    assert event_index < boundary_index < tail_index < skill_index
+
+
+async def test_default_view_places_one_boundary_before_trailing_context():
+    class Example(Agent, llm=object(), context={"tail": DynamicContext("'tail'")}):
+        async def run(self): ...
+
+    agent = Example()
+    event = UserEvent(content="event")
+    agent.event_manager.add(event)
+    items = await agent.runtime._prepare_context(Example.run)
+
+    boundaries = [i for i, item in enumerate(items) if isinstance(item, CacheBoundary)]
+    tail = next(i for i, item in enumerate(items) if getattr(item, "key", None) == "tail")
+    assert boundaries == [items.index(event) + 1]
+    assert boundaries[0] < tail
+
+
+async def test_empty_llm_output_is_persisted_but_not_provider_visible():
+    from nooa.events import LLMOutput
+
+    class Example(Agent, llm=object()):
+        async def run(self): ...
+
+    agent = Example()
+    empty = LLMOutput(content="", tag="empty")
+    visible = LLMOutput(content="answer", tag="visible")
+    agent.event_manager.add(empty)
+    agent.event_manager.add(visible)
+
+    items = await agent.runtime._prepare_context(Example.run)
+
+    assert empty not in items
+    assert visible in items
+    assert empty in agent.event_manager.values()
+
+
+async def test_default_view_boundary_with_empty_history_and_no_trailing_context():
+    class Example(Agent, llm=object()):
+        async def run(self): ...
+
+    agent = Example()
+    agent.context["state"] = None
+    items = await agent.runtime._prepare_context(Example.run)
+    assert isinstance(items[-1], CacheBoundary)
+    assert sum(isinstance(item, CacheBoundary) for item in items) == 1
+
+
+async def test_custom_view_without_boundary_gets_no_implicit_boundary():
+    class Example(Agent, llm=object(), context_view=NamedView("only")):
+        async def run(self): ...
+
+    items = await Example().runtime._prepare_context(Example.run)
+    assert not any(isinstance(item, CacheBoundary) for item in items)
+
+
+async def test_actor_disables_legacy_role_based_cache_injection():
+    from nooa.errors import GenerationError
+    from nooa.unifiedllm import FakeLLMClient
+
+    class StopCall(Exception):
+        pass
+
+    class RecordingClient(FakeLLMClient):
+        options: dict[str, Any]
+
+        async def acall(self, messages, tools=None, output_model=None, **kwargs):
+            self.options = kwargs
+            raise StopCall
+
+    client = RecordingClient()
+
+    class Example(Agent, llm=client, context_view=NamedView("only")):
+        async def run(self) -> str: ...
+
+    with pytest.raises(GenerationError):
+        await Example().run()
+    assert client.options["cache_control_injection_points"] == []
+
+
+async def test_actor_disables_legacy_cache_injection_through_middleware():
+    from nooa.errors import GenerationError
+    from nooa.unifiedllm import FakeLLMClient
+
+    class RecordingClient(FakeLLMClient):
+        options: list[dict[str, Any]]
+
+        def __init__(self):
+            super().__init__()
+            self.options = []
+
+        async def acall(self, messages, tools=None, output_model=None, **kwargs):
+            self.options.append(kwargs)
+            raise RuntimeError("stop")
+
+    client = RecordingClient()
+
+    class Example(Agent, llm=client, context_view=NamedView("only")):
+        async def run(self) -> str: ...
+
+    agent = Example()
+    observed: list[list[dict[str, Any]]] = []
+
+    async def middleware(ctx, next_call):
+        observed.append(ctx.params["cache_control_injection_points"])
+        ctx.params.pop("cache_control_injection_points")
+        return await next_call(ctx)
+
+    agent.event_manager.intercept("llm_call", middleware)
+    with pytest.raises(GenerationError):
+        await agent.run()
+    assert observed and all(value == [] for value in observed)
+    assert all(value["cache_control_injection_points"] == [] for value in client.options)
 
 
 async def test_agent_view_controls_exact_skill_placement():
@@ -338,6 +475,27 @@ def test_budget_helper_allows_adaptation_before_budgeting():
     original = Block(key="prompt", content="too long")
     adapted = original.model_copy(update={"content": "ok"})
     assert apply_context_budget((adapted,), call=call, evictable=(adapted,)) == (adapted,)
+
+
+def test_budget_counts_replacement_notice_and_ignores_boundary():
+    counted: list[str] = []
+
+    def counter(value: str) -> int:
+        counted.append(value)
+        return len(value)
+
+    call = CurrentCall(
+        id="1",
+        method_name="run",
+        decorator="plan",
+        context_budget=0,
+        _context_token_counter=counter,
+    )
+    block = Block(key="large", content="large")
+    result = apply_context_budget((block, CacheBoundary()), call=call, evictable=(block,))
+    assert result[1] == CacheBoundary()
+    assert result[0].content.startswith("EVICTED:")
+    assert result[0].content in counted
 
 
 async def test_current_call_exposes_call_overridden_model_and_budget():

@@ -24,15 +24,11 @@ from nooa.skill_registry import SkillRegistry
 from nooa.strategies import PredictStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
+CACHE_BOUNDARY_MESSAGE_KEY = "_nooa_cache_boundary"
+
 
 async def _no_flush() -> None:
     pass
-
-
-# Keep the experiment hermetic: neither automatic dev-viewer probing nor trace
-# callback draining contributes to context construction.
-agent_module._auto_tracing_attempted = True
-method_wrapper._flush_litellm_journal = _no_flush
 
 
 def _jsonable(value: Any) -> Any:
@@ -49,6 +45,26 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_jsonable(item) for item in value]
     return repr(value)
+
+
+def _request_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove NOOA's transport-only marker while preserving all prompt data."""
+    normalized = []
+    for message in messages:
+        message = dict(message)
+        message.pop(CACHE_BOUNDARY_MESSAGE_KEY, None)
+        normalized.append(message)
+    return normalized
+
+
+def _request_options(options: dict[str, Any]) -> dict[str, Any]:
+    """Remove only runtime-owned, non-content request options."""
+    return {
+        key: value
+        for key, value in options.items()
+        if key != "prompt_cache_key"
+        and not (key == "cache_control_injection_points" and value == [])
+    }
 
 
 class CapturingFakeLLMClient(FakeLLMClient):
@@ -75,10 +91,10 @@ class CapturingFakeLLMClient(FakeLLMClient):
                 }
                 for tool in tools
             ]
-        stable_kwargs = {key: value for key, value in kwargs.items() if key != "prompt_cache_key"}
+        stable_kwargs = _request_options(kwargs)
         self.requests.append(
             {
-                "messages": _jsonable(messages),
+                "messages": _jsonable(_request_messages(messages)),
                 "tools": _jsonable(tool_contracts),
                 "output_schema": _jsonable(output_model),
                 "options": _jsonable(stable_kwargs),
@@ -305,10 +321,15 @@ async def capture() -> dict[str, Any]:
         "codeact_multiturn": codeact_multiturn,
         "budget_eviction": budget_eviction,
     }
-    return {
-        "schema_version": 1,
-        "scenarios": {name: await scenario() for name, scenario in scenarios.items()},
-    }
+    # Keep the experiment hermetic without changing process state at import time.
+    with (
+        patch.object(agent_module, "_auto_tracing_attempted", True),
+        patch.object(method_wrapper, "_flush_litellm_journal", _no_flush),
+    ):
+        return {
+            "schema_version": 1,
+            "scenarios": {name: await scenario() for name, scenario in scenarios.items()},
+        }
 
 
 def main() -> None:

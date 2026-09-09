@@ -19,6 +19,7 @@ from nooa.context_blocks.formatter import (
     XMLBlockFormatter,
 )
 from nooa.context_blocks.models import (
+    CACHE_BOUNDARY_MESSAGE_KEY,
     BlockMetadata,
     RenderedMessage,
     ResolvedBlock,
@@ -427,6 +428,28 @@ class TestOpenAIProviderFormatter:
         assert len(result) == 2
         assert result[1] == {"role": "user", "content": "Hello"}
 
+    def test_boundary_is_preserved_on_exact_wire_message(self):
+        messages = [
+            RenderedMessage(role=Role.USER, content="first", cache_boundary_after=True),
+            RenderedMessage(role=Role.USER, content="second"),
+        ]
+        result = OpenAIProviderFormatter().format(messages)
+        assert result[0][CACHE_BOUNDARY_MESSAGE_KEY] is True
+        assert CACHE_BOUNDARY_MESSAGE_KEY not in result[1]
+
+    def test_boundary_is_preserved_on_multimodal_message(self):
+        messages = [
+            RenderedMessage(
+                role=Role.USER,
+                content="caption",
+                images=[{"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}],
+                cache_boundary_after=True,
+            )
+        ]
+        result = OpenAIProviderFormatter().format(messages)
+        assert result[0][CACHE_BOUNDARY_MESSAGE_KEY] is True
+        assert result[0]["content"][0] == {"type": "text", "text": "caption"}
+
     def test_assistant_message(self):
         messages = [
             RenderedMessage(role=Role.SYSTEM, content="System"),
@@ -580,6 +603,14 @@ class TestAnthropicProviderFormatter:
         assert len(result["messages"]) == 1
         assert result["messages"][0]["role"] == "user"
 
+    def test_internal_system_boundary_is_rejected(self):
+        messages = [
+            RenderedMessage(role=Role.SYSTEM, content="first", cache_boundary_after=True),
+            RenderedMessage(role=Role.SYSTEM, content="second"),
+        ]
+        with pytest.raises(UnsupportedContextLayout, match="internal cache boundary"):
+            AnthropicProviderFormatter().format(messages)
+
 
 class TestEndToEndPipelines:
     """Compose BlockFormatter + ProviderFormatter through the neutral type."""
@@ -639,6 +670,20 @@ class TestEndToEndPipelines:
             if item.get("type") == "function_call"
         )
         assert responses_input[function_call_index + 1]["type"] == "function_call_output"
+
+    def test_responses_boundary_follows_complete_tool_expansion(self):
+        messages = [
+            RenderedMessage(
+                role=Role.ASSISTANT,
+                tool_call=ToolCallInfo(id="tc", name="run", arguments={}),
+                reasoning_items=[{"type": "reasoning", "id": "reasoning"}],
+                cache_boundary_after=True,
+            )
+        ]
+        result = ResponsesProviderFormatter().format(messages)
+        assert result[-1]["type"] == "function_call"
+        assert result[-1][CACHE_BOUNDARY_MESSAGE_KEY] is True
+        assert CACHE_BOUNDARY_MESSAGE_KEY not in result[0]
 
 
 class TestBlockFormatterFormatEvent:

@@ -3,6 +3,7 @@
 """Composable context assembly contracts and reusable mechanisms."""
 
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
@@ -27,7 +28,12 @@ class Block(BaseModel):
     metadata: BlockMetadata | None = None
 
 
-type ContextItem = Block | EventBase
+@dataclass(frozen=True)
+class CacheBoundary:
+    """Request caching of the rendered prefix ending here, where supported."""
+
+
+type ContextItem = Block | EventBase | CacheBoundary
 
 
 @runtime_checkable
@@ -56,10 +62,10 @@ async def collect_context[Owner](
     """Collect and validate a view into one immutable snapshot."""
     items: list[ContextItem] = []
     async for item in view.assemble(owner, call):
-        if not isinstance(item, (Block, EventBase)):
+        if not isinstance(item, (Block, EventBase, CacheBoundary)):
             raise TypeError(
                 f"{type(view).__name__}.assemble() yielded {type(item).__name__}; "
-                "expected Block or EventBase"
+                "expected Block, EventBase, or CacheBoundary"
             )
         items.append(item)
     return tuple(items)
@@ -136,18 +142,18 @@ def apply_context_budget(
         if not isinstance(block, Block):
             continue
         size = counter(block.content)
-        update: dict[str, Any] = {
-            "content": f"EVICTED: over context budget (block_tokens={size:,})"
-        }
+        replacement = f"EVICTED: over context budget (block_tokens={size:,})"
+        update: dict[str, Any] = {"content": replacement}
         if block.metadata is not None:
             update["metadata"] = block.metadata.model_copy(update={"truncated": True})
         result[index] = block.model_copy(update=update)
-        total -= size
+        total += counter(replacement) - size
     return tuple(result)
 
 
 __all__ = [
     "Block",
+    "CacheBoundary",
     "ContextItem",
     "ContextView",
     "apply_context_budget",

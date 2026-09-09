@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from nooa.config.truncation_config import FormatConfig
 
 from nooa.context_blocks.events import EventBase, ToolCallEvent
+from nooa.context_blocks.exceptions import UnsupportedContextLayout
 from nooa.context_blocks.formatter import (
     FORMAT_PLAIN,
     FORMAT_XML,
@@ -100,10 +101,17 @@ def render_context(
     which lets method-level ``@strategy(truncation=...)`` affect events from
     that method without re-rendering the rest of the context under that config.
     """
-    from nooa.context_view import Block
+    from nooa.context_view import Block, CacheBoundary
 
     resolved: list[ResolvedBlock] = []
+    segments: list[tuple[list[ResolvedBlock], bool]] = []
+    segment: list[ResolvedBlock] = []
     for item in blocks:
+        if isinstance(item, CacheBoundary):
+            if segment:
+                segments.append((segment, True))
+                segment = []
+            continue
         if isinstance(item, ResolvedBlock):
             block = item
         elif isinstance(item, Block):
@@ -123,7 +131,14 @@ def render_context(
                 event=item,
             )
         else:
-            raise TypeError(f"Expected Block or EventBase, got {type(item).__name__}")
+            raise TypeError(
+                f"Expected Block, EventBase, or CacheBoundary, got {type(item).__name__}"
+            )
+
+        if isinstance(block.event, ToolCallEvent) and block.event.result is None:
+            raise UnsupportedContextLayout(
+                f"ToolCallEvent {block.event.tool_call_id!r} has no result"
+            )
 
         if block.event is not None and not isinstance(block.event, ToolCallEvent):
             resolved_event_format = (
@@ -134,6 +149,10 @@ def render_context(
             content = block_formatter.format_event(block.event, event_format=resolved_event_format)
             block = block.model_copy(update={"content": content})
         resolved.append(block)
+        segment.append(block)
+
+    if segment:
+        segments.append((segment, False))
 
     context_blocks = [block for block in resolved if block.event is None]
     event_blocks = [block for block in resolved if block.event is not None]
@@ -156,7 +175,16 @@ def render_context(
     )
 
     # Neutral message list → provider wire format.
-    messages = block_formatter.format(resolved)
+    messages: list[RenderedMessage] = []
+    for segment, boundary_after in segments:
+        rendered = block_formatter.format(segment)
+        if boundary_after:
+            if not rendered:
+                raise UnsupportedContextLayout(
+                    f"{type(block_formatter).__name__} emitted no message before CacheBoundary"
+                )
+            rendered[-1] = rendered[-1].model_copy(update={"cache_boundary_after": True})
+        messages.extend(rendered)
     output = provider_formatter.format(messages)
     return RenderResult(
         output=output,

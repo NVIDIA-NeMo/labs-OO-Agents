@@ -359,6 +359,7 @@ class TestContextWindowRecovery:
 
         call_count = 0
         received_max_tokens = []
+        received_cache_points = []
 
         original_acall = llm.acall
 
@@ -366,6 +367,7 @@ class TestContextWindowRecovery:
             nonlocal call_count
             call_count += 1
             received_max_tokens.append(kw.get("max_tokens"))
+            received_cache_points.append(kw.get("cache_control_injection_points"))
             if call_count == 1:
                 raise error
             return await original_acall(messages, **kw)
@@ -387,6 +389,7 @@ class TestContextWindowRecovery:
             f"Retry max_tokens ({received_max_tokens[1]}) should be less than original (64000)"
         )
         assert received_max_tokens[1] >= 1024, "Retry max_tokens should be >= minimum"
+        assert received_cache_points == [[], []]
 
     @pytest.mark.asyncio
     async def test_non_context_window_errors_still_propagate(self):

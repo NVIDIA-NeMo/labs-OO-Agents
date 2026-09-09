@@ -25,6 +25,7 @@ from nooa._llm_state import (
     demote_chat_reasoning,
     demote_responses_batch,
 )
+from nooa.context_blocks.models import CACHE_BOUNDARY_MESSAGE_KEY
 from nooa.llm_types import LLMResponse, LLMUsage, ToolCall
 
 from .http_config import HttpConfig
@@ -1195,7 +1196,13 @@ class UnifiedLLM(ABC):
             msg["cache_control"] = {"type": "ephemeral"}
 
     def _inject_cache_control(
-        self, messages: list[dict[str, Any]], injection_points: list[dict[str, Any]]
+        self,
+        messages: list[dict[str, Any]],
+        injection_points: list[dict[str, Any]],
+        *,
+        explicit_supported: bool = True,
+        ignored_explicit_roles: frozenset[str] = frozenset(),
+        defer_tool_call_boundary: bool = False,
     ) -> list[dict[str, Any]]:
         """Add cache_control to designated messages for prompt caching.
 
@@ -1204,7 +1211,10 @@ class UnifiedLLM(ABC):
         This format also survives OpenAI SDK validation since the SDK only strips
         extra fields from content blocks, not from messages themselves.
 
-        Supports two injection modes:
+        View-emitted ``CacheBoundary`` markers take precedence over configured
+        rules. They are mapped at their exact message when supported and removed
+        without changing content otherwise. Without an explicit marker, two
+        compatibility modes remain for direct UnifiedLLM callers:
 
         1. **Role-based** (existing): marks ALL messages of a given role.
            ``{"role": "system"}``
@@ -1229,7 +1239,36 @@ class UnifiedLLM(ABC):
         Returns:
             A deep copy of messages with cache_control injected at breakpoints.
         """
-        if not injection_points:
+        has_explicit_markers = any(CACHE_BOUNDARY_MESSAGE_KEY in msg for msg in messages)
+        has_explicit_boundaries = any(bool(msg.get(CACHE_BOUNDARY_MESSAGE_KEY)) for msg in messages)
+        if not injection_points and not has_explicit_markers:
+            return messages
+
+        messages = [copy.deepcopy(msg) for msg in messages]
+
+        explicit_targets: list[dict[str, Any]] = []
+        for msg in messages:
+            if msg.pop(CACHE_BOUNDARY_MESSAGE_KEY, False):
+                explicit_targets.append(msg)
+
+        if has_explicit_boundaries:
+            if explicit_supported:
+                anthropic = _is_anthropic_model(self.model)
+                for msg in explicit_targets:
+                    if msg.get("role") in ignored_explicit_roles:
+                        continue
+                    if anthropic and msg.get("role") != "system":
+                        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                            if defer_tool_call_boundary:
+                                msg["cache_control"] = {"type": "ephemeral"}
+                            else:
+                                msg["tool_calls"][-1]["cache_control"] = {
+                                    "type": "ephemeral"
+                                }
+                        else:
+                            self._inject_cache_control_on_content(msg)
+                    else:
+                        msg["cache_control"] = {"type": "ephemeral"}
             return messages
 
         roles_to_cache_all: set[str] = set()
@@ -1245,8 +1284,6 @@ class UnifiedLLM(ABC):
 
         if not roles_to_cache_all and not roles_to_cache_last:
             return messages
-
-        messages = [copy.deepcopy(msg) for msg in messages]
 
         # Map role names to native Responses API type equivalents
         _ROLE_TO_TYPE = {"tool": "function_call_output"}
@@ -2273,20 +2310,23 @@ class ResponsesClient(UnifiedLLM):
         Handles both native Responses format (from ResponsesProviderFormatter) and
         legacy OpenAI Chat format. System messages are extracted to the `instructions` param.
         """
-        # Inject cache_control only for Anthropic-served models. litellm.responses
-        # passes input[] through verbatim — no equivalent of the Chat Completions
-        # OpenAIGPTConfig.remove_cache_control_flag strip — so leaving the marker
-        # on OpenAI/Azure/NIM Responses calls triggers a 400 "Unknown parameter:
-        # input[N].cache_control" at the gateway.
+        # Responses only supports cache_control for Anthropic-served models.
+        # Explicit system boundaries cannot survive extraction into instructions,
+        # so they are consumed as unsupported no-ops.
         if _is_anthropic_model(self.model):
             cache_points = (
                 self.cache_control_injection_points
                 if cache_control_injection_points is None
                 else cache_control_injection_points
             )
-            prepared_messages = self._inject_cache_control(messages, cache_points)
+            prepared_messages = self._inject_cache_control(
+                messages,
+                cache_points,
+                ignored_explicit_roles=frozenset({"system"}),
+                defer_tool_call_boundary=True,
+            )
         else:
-            prepared_messages = messages
+            prepared_messages = self._inject_cache_control(messages, [], explicit_supported=False)
         input_messages, instructions = self._transform_messages(prepared_messages)
 
         api_params = {
@@ -2396,17 +2436,21 @@ class ResponsesClient(UnifiedLLM):
         Handles both native Responses format (from ResponsesProviderFormatter) and
         legacy OpenAI Chat format. System messages are extracted to the `instructions` param.
         """
-        # See ResponsesClient.call for why cache_control injection is gated on
-        # Anthropic models only.
+        # See ResponsesClient.call for provider/layout handling.
         if _is_anthropic_model(self.model):
             cache_points = (
                 self.cache_control_injection_points
                 if cache_control_injection_points is None
                 else cache_control_injection_points
             )
-            prepared_messages = self._inject_cache_control(messages, cache_points)
+            prepared_messages = self._inject_cache_control(
+                messages,
+                cache_points,
+                ignored_explicit_roles=frozenset({"system"}),
+                defer_tool_call_boundary=True,
+            )
         else:
-            prepared_messages = messages
+            prepared_messages = self._inject_cache_control(messages, [], explicit_supported=False)
         input_messages, instructions = self._transform_messages(prepared_messages)
 
         api_params = {
@@ -2609,7 +2653,10 @@ class ResponsesClient(UnifiedLLM):
                             "arguments": fn.get("arguments", ""),
                         }
                     )
-                transformed.extend(demote_responses_batch(batch, state, reasoning))
+                emitted = demote_responses_batch(batch, state, reasoning)
+                if "cache_control" in msg and emitted:
+                    emitted[-1]["cache_control"] = msg["cache_control"]
+                transformed.extend(emitted)
                 continue
 
             # User/Assistant text messages → passthrough with cache_control preservation

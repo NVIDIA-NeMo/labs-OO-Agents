@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the cached renderer (static-prefix / events / dynamic-suffix)."""
 
+from nooa import Block, CacheBoundary
 from nooa.context_blocks.events import (
     AssistantEvent,
     ToolCallEvent,
@@ -12,7 +13,13 @@ from nooa.context_blocks.formatter import (
     AnthropicProviderFormatter,
     OpenAIProviderFormatter,
 )
-from nooa.context_blocks.models import BlockMetadata, DynamicContext, ResolvedBlock, Role
+from nooa.context_blocks.models import (
+    CACHE_BOUNDARY_MESSAGE_KEY,
+    BlockMetadata,
+    DynamicContext,
+    ResolvedBlock,
+    Role,
+)
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 
@@ -54,6 +61,20 @@ class TestImmutableMetadata:
 
 
 class TestCachedBlockFormatterPartition:
+    def test_renderer_preserves_explicit_boundary_between_same_role_blocks(self):
+        output = render_context(
+            [
+                Block(key="first", content="first", role=Role.USER),
+                CacheBoundary(),
+                Block(key="second", content="second", role=Role.USER),
+            ],
+            block_formatter=CachedBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+        assert len(output) == 2
+        assert output[0][CACHE_BOUNDARY_MESSAGE_KEY] is True
+        assert CACHE_BOUNDARY_MESSAGE_KEY not in output[1]
+
     def test_all_static_single_system_message(self):
         fmt = CachedBlockFormatter()
         messages = fmt.format([_static_block("a", "A"), _static_block("b", "B")])

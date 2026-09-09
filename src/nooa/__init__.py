@@ -28,6 +28,7 @@ from nooa.agentdoc import hidden, spec  # noqa: E402
 from nooa.context_blocks import Context, ContextWindowStats, DynamicContext  # noqa: E402
 from nooa.context_view import (  # noqa: E402
     Block,
+    CacheBoundary,
     ContextItem,
     ContextView,
     apply_context_budget,
@@ -125,6 +126,7 @@ __all__ = [
     "Context",  # Re-exported from context_blocks
     "DynamicContext",  # Re-exported from context_blocks (deprecated, use Context)
     "Block",
+    "CacheBoundary",
     "ContextItem",
     "ContextView",
     "DefaultAgentView",

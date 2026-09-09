@@ -10,6 +10,7 @@ from nooa.context_blocks import BlockMetadata, Context, DynamicContext, Role
 from nooa.context_blocks.events import EventBase
 from nooa.context_view import (
     Block,
+    CacheBoundary,
     ContextItem,
     ContextView,
     apply_context_budget,
@@ -236,8 +237,8 @@ def visible_events(agent: "Agent", call: "CurrentCall") -> tuple[EventBase, ...]
         and not (
             isinstance(event, LLMOutput)
             and not event.content
-            and not event.llm_state
-            and not event.reasoning
+            and not getattr(event, "llm_state", None)
+            and not getattr(event, "reasoning", None)
         )
     )
 
@@ -312,6 +313,8 @@ class DefaultAgentView(ContextView["Agent"]):
 
         items: list[ContextItem] = [*prefix, *custom_skill_items]
         items.extend(visible_events(owner, call))
+        if items:
+            items.append(CacheBoundary())
         items.extend(trailing)
 
         evictable = tuple(
