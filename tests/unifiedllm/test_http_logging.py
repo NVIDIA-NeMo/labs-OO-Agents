@@ -16,6 +16,9 @@ def test_opaque_reasoning_state_is_redacted_from_http_debug_payloads() -> None:
     payload = {
         "input": [
             {"encrypted_content": "provider-secret"},
+            {"type": "thinking", "thinking": "visible", "signature": "anthropic-secret"},
+            {"type": "redacted_thinking", "data": "anthropic-redacted"},
+            {"thought_signature": "gemini-secret"},
             {"_nooa_llm_state": {"payload": {"items": ["opaque"]}}},
         ]
     }
@@ -24,6 +27,9 @@ def test_opaque_reasoning_state_is_redacted_from_http_debug_payloads() -> None:
 
     assert redacted["input"] == [
         {"encrypted_content": "[REDACTED]"},
+        {"type": "thinking", "thinking": "visible", "signature": "[REDACTED]"},
+        {"type": "redacted_thinking", "data": "[REDACTED]"},
+        {"thought_signature": "[REDACTED]"},
         {"_nooa_llm_state": "[REDACTED]"},
     ]
 

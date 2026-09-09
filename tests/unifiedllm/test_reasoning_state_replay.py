@@ -823,12 +823,13 @@ async def test_responses_reasoning_uses_per_call_override() -> None:
 
 
 @pytest.mark.parametrize("model", ["anthropic/claude-sonnet-4-5", "gemini/gemini-2.5-pro"])
-def test_non_openai_chat_provider_cannot_receive_reasoning_state(model: str) -> None:
-    assert replay_scope(model, "chat", {"api_key": "account-a"}) is None
+def test_non_openai_chat_provider_cannot_receive_openai_reasoning_state(model: str) -> None:
+    scope = replay_scope(model, "chat", {"api_key": "account-a"})
+    assert scope is not None
     client = CompletionClient(model=model, api_key="account-a")
     crafted = {
         "version": 1,
-        "scope": f"chat:{model.split('/', 1)[0]}:crafted",
+        "scope": scope,
         "format": "litellm-chat",
         "payload": {"reasoning_items": [REASONING]},
     }

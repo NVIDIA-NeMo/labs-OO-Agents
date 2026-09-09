@@ -8,13 +8,24 @@ from pathlib import Path
 from nooa._llm_state import LLM_STATE_KEY
 from nooa.tracing._secret_scrubber import REDACTED, _is_sensitive_key, scrub_value
 
+_OPAQUE_STATE_KEYS = {
+    LLM_STATE_KEY,
+    "encrypted_content",
+    "signature",
+    "thought_signature",
+    "thought_signatures",
+    "thoughtSignature",
+    "thoughtSignatures",
+}
+
 
 def _redact_opaque_state(value):
-    """Remove replay envelopes and encrypted reasoning from debug logs."""
+    """Remove provider-owned reasoning state from debug logs."""
     if isinstance(value, dict):
+        redacted_thinking = value.get("type") == "redacted_thinking"
         return {
             key: REDACTED
-            if key in {LLM_STATE_KEY, "encrypted_content"}
+            if key in _OPAQUE_STATE_KEYS or (redacted_thinking and key == "data")
             else _redact_opaque_state(item)
             for key, item in value.items()
         }

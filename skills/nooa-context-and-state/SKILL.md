@@ -87,6 +87,8 @@ async def solve(self, problem: str) -> str:
 
 Event history is what fills the LLM's conversation window. Key model-visible event types (names have no "Event" suffix): `Task`, `Message`, `Reasoning`, `Error`, `Feedback`, `LLMResponse`, `PythonOutput`, `Summary`, `Notification`. `LLMResponse` is both the canonical assistant turn and the home of its token/cost metadata; renderers expose only its conversational fields. Runtime-only events (never shown to the LLM) include `BeforeAgentCall`/`AfterAgentCall` and `LLMCallStart`/`LLMCallEnd`.
 
+`LLMResponse.reasoning` is provider-exposed text and remains useful across model switches, where UnifiedLLM replays it as ordinary assistant text. `LLMResponse.llm_state` is opaque provider state; it is persisted for resume but is replayed only through a matching provider/API/issuer gate.
+
 ```python
 # Query (AND semantics; chronological; limit keeps most recent)
 recent = agent.events.query(limit=20)

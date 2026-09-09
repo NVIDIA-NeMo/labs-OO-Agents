@@ -1894,7 +1894,11 @@ class CompletionClient(UnifiedLLM):
         if raw_tool_calls:
             response_message = raw_response.choices[0].message
             tool_calls = [
-                ToolCall(id=tc.id, name=tc.function.name or "", arguments=tc.function.arguments)
+                ToolCall(
+                    id=replay_state.public_tool_call_id(tc, state_scope),
+                    name=tc.function.name or "",
+                    arguments=tc.function.arguments,
+                )
                 for tc in raw_tool_calls
             ]
 
@@ -2066,7 +2070,9 @@ class CompletionClient(UnifiedLLM):
             response_message = raw_response.choices[0].message
             tool_calls = [
                 ToolCall(
-                    id=tc.id, name=tc.function.name or "", arguments=tc.function.arguments or ""
+                    id=replay_state.public_tool_call_id(tc, state_scope),
+                    name=tc.function.name or "",
+                    arguments=tc.function.arguments or "",
                 )  # type: ignore[union-attr]
                 for tc in raw_tool_calls
             ]
@@ -2385,6 +2391,7 @@ class ResponsesClient(UnifiedLLM):
             )
 
         output: list[Any] = raw_response.output  # type: ignore[assignment]
+        reasoning = replay_state.responses_reasoning_text(output)
         raw_tool_calls = [
             item for item in output if replay_state.response_item_type(item) == "function_call"
         ]
@@ -2406,7 +2413,7 @@ class ResponsesClient(UnifiedLLM):
                 finish_reason=_finish_reason_for_tool_calls(
                     _map_responses_finish_reason(raw_response)
                 ),
-                reasoning=None,  # Responses API doesn't have reasoning
+                reasoning=reasoning,
                 usage=usage,
                 llm_state=replay_state.capture_responses_state(output, state_scope),
             )
@@ -2423,7 +2430,7 @@ class ResponsesClient(UnifiedLLM):
                 parsed=parsed_content,
                 tool_calls=[],
                 finish_reason=_map_responses_finish_reason(raw_response),
-                reasoning=None,
+                reasoning=reasoning,
                 usage=usage,
                 llm_state=replay_state.capture_responses_state(output, state_scope),
             )
@@ -2433,7 +2440,7 @@ class ResponsesClient(UnifiedLLM):
             content=text_content,
             tool_calls=[],
             finish_reason=_map_responses_finish_reason(raw_response),
-            reasoning=None,
+            reasoning=reasoning,
             usage=usage,
             llm_state=replay_state.capture_responses_state(output, state_scope),
         )
@@ -2518,6 +2525,7 @@ class ResponsesClient(UnifiedLLM):
             )
 
         output: list[Any] = raw_response.output  # type: ignore[assignment]
+        reasoning = replay_state.responses_reasoning_text(output)
         raw_tool_calls = [
             item for item in output if replay_state.response_item_type(item) == "function_call"
         ]
@@ -2539,7 +2547,7 @@ class ResponsesClient(UnifiedLLM):
                 finish_reason=_finish_reason_for_tool_calls(
                     _map_responses_finish_reason(raw_response)
                 ),
-                reasoning=None,
+                reasoning=reasoning,
                 usage=usage,
                 llm_state=replay_state.capture_responses_state(output, state_scope),
             )
@@ -2556,7 +2564,7 @@ class ResponsesClient(UnifiedLLM):
                 parsed=parsed_content,
                 tool_calls=[],
                 finish_reason=_map_responses_finish_reason(raw_response),
-                reasoning=None,
+                reasoning=reasoning,
                 usage=usage,
                 llm_state=replay_state.capture_responses_state(output, state_scope),
             )
@@ -2566,7 +2574,7 @@ class ResponsesClient(UnifiedLLM):
             content=text_content,
             tool_calls=[],
             finish_reason=_map_responses_finish_reason(raw_response),
-            reasoning=None,
+            reasoning=reasoning,
             usage=usage,
             llm_state=replay_state.capture_responses_state(output, state_scope),
         )

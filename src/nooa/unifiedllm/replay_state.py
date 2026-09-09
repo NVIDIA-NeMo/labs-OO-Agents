@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Compatibility-scoped capture and replay of opaque OpenAI reasoning state.
+"""Compatibility-scoped capture and replay of closed-provider reasoning state.
 
 The event IR treats provider state as an opaque dictionary. This module is the
 only code that opens its NOOA envelope or places the payload on provider wire
@@ -33,6 +33,13 @@ _STATE_VERSION = 1
 _CHAT_FORMAT = "litellm-chat"
 _RESPONSES_FORMAT = "openai-responses"
 _ENCRYPTED_REASONING_INCLUDE = "reasoning.encrypted_content"
+_INLINE_THOUGHT_SIGNATURE_SEPARATOR = "__thought__"
+_SUPPORTED_PROVIDERS = {
+    "openai",
+    "azure",
+    "anthropic",
+    "gemini",
+}
 
 
 def _field(value: Any, key: str, default: Any = None) -> Any:
@@ -102,10 +109,9 @@ def replay_scope(
     except Exception as exc:  # noqa: BLE001 - unknown routes fail closed
         logger.debug("Could not resolve opaque-state provider for %r: %s", model, exc)
         return None
-    # This PR understands only OpenAI's encrypted reasoning wire formats.
-    # Other providers may use similarly named fields with different replay
-    # contracts; they remain fail-closed until their adapters opt in.
-    if provider not in {"openai", "azure"}:
+    if provider not in _SUPPORTED_PROVIDERS or (
+        api_style == "responses" and provider not in {"openai", "azure"}
+    ):
         return None
 
     digest = hashlib.sha256(resolved_model.encode()).hexdigest()
@@ -138,73 +144,121 @@ def _matching_payload(state: Any, scope: str | None, state_format: str) -> dict 
     return cast(dict[str, Any], state["payload"])
 
 
-def _chat_public_carrier(message: Any) -> dict[str, Any] | None:
-    """Project the public assistant data to which opaque Chat state is bound."""
-    if _field(message, "role") != "assistant":
+def _is_state_only(state: Any) -> bool:
+    return (
+        isinstance(state, dict)
+        and state.get("version") == _STATE_VERSION
+        and isinstance(state.get("payload"), dict)
+        and state["payload"].get("state_only") is True
+    )
+
+
+def _scope_provider(scope: str | None) -> str | None:
+    if not isinstance(scope, str):
         return None
-    raw_calls = _field(message, "tool_calls")
-    if raw_calls is None:
-        raw_calls = []
-    if not isinstance(raw_calls, list):
-        return None
-
-    calls: list[dict[str, str]] = []
-    for call in raw_calls:
-        function = _field(call, "function")
-        call_id = _field(call, "id")
-        name = _field(function, "name")
-        arguments = _field(function, "arguments")
-        if isinstance(arguments, dict):
-            arguments = json.dumps(arguments)
-        if not all(isinstance(value, str) for value in (call_id, name, arguments)):
-            return None
-        calls.append({"id": call_id, "name": name, "arguments": arguments})
-
-    content = _field(message, "content")
-    if content is not None and not isinstance(content, str):
-        return None
-    content = (content or None) if calls else (content or "")
-    return {"content": content, "tool_calls": calls}
+    parts = scope.split(":", 2)
+    return parts[1] if len(parts) == 3 else None
 
 
-def _valid_chat_payload(payload: dict[str, Any]) -> bool:
-    if set(payload) - {"reasoning_items", "carrier", "state_only"}:
-        return False
-    items = payload.get("reasoning_items")
-    carrier = payload.get("carrier")
-    if not isinstance(items, list) or not items or not isinstance(carrier, dict):
-        return False
-    if set(carrier) != {"content", "tool_calls"}:
-        return False
-    if carrier.get("content") is not None and not isinstance(carrier.get("content"), str):
-        return False
-    calls = carrier.get("tool_calls")
-    if not isinstance(calls, list) or not all(
-        isinstance(call, dict)
-        and set(call) == {"id", "name", "arguments"}
-        and all(isinstance(call.get(key), str) for key in ("id", "name", "arguments"))
-        for call in calls
+def _sanitize_chat_payload(payload: dict[str, Any], scope: str | None) -> dict[str, Any]:
+    """Keep only replay fields whose LiteLLM Chat semantics NOOA knows."""
+    provider = _scope_provider(scope)
+    clean: dict[str, Any] = {}
+    fields_by_provider = {
+        "openai": ("reasoning_items", "thinking_blocks"),
+        "azure": ("reasoning_items", "thinking_blocks"),
+        "anthropic": ("thinking_blocks",),
+        "gemini": ("thinking_blocks",),
+    }
+    for key in fields_by_provider.get(provider or "", ()):
+        value = payload.get(key)
+        if isinstance(value, list) and value:
+            clean[key] = opaque_item(value)
+
+    provider_fields = (
+        payload.get("provider_specific_fields")
+        if provider in {"openai", "azure", "gemini"}
+        else None
+    )
+    signatures = (
+        provider_fields.get("thought_signatures") if isinstance(provider_fields, dict) else None
+    )
+    if (
+        isinstance(signatures, list)
+        and signatures
+        and all(isinstance(signature, str) and signature for signature in signatures)
     ):
-        return False
-    if len({call["id"] for call in calls}) != len(calls):
-        return False
-    if "state_only" in payload and payload["state_only"] is not True:
-        return False
-    return (payload.get("state_only") is True) == (carrier == {"content": "", "tool_calls": []})
+        clean["provider_specific_fields"] = {"thought_signatures": copy.deepcopy(signatures)}
+
+    tool_state = (
+        payload.get("tool_calls")
+        if provider in {"openai", "azure", "gemini"}
+        else None
+    )
+    if isinstance(tool_state, list):
+        calls: list[dict[str, Any] | None] = []
+        for item in tool_state:
+            fields = item.get("provider_specific_fields") if isinstance(item, dict) else None
+            signature = fields.get("thought_signature") if isinstance(fields, dict) else None
+            calls.append(
+                {"provider_specific_fields": {"thought_signature": signature}}
+                if isinstance(signature, str) and signature
+                else None
+            )
+        if any(item is not None for item in calls):
+            clean["tool_calls"] = calls
+
+    if clean and payload.get("state_only") is True:
+        clean["state_only"] = True
+    return clean
+
+
+def _tool_call_state(tool_call: Any) -> dict[str, Any] | None:
+    dumped = opaque_item(tool_call)
+    if not isinstance(dumped, dict):
+        return None
+    fields = dumped.get("provider_specific_fields")
+    signature = fields.get("thought_signature") if isinstance(fields, dict) else None
+    call_id = dumped.get("id")
+    if (
+        not signature
+        and isinstance(call_id, str)
+        and _INLINE_THOUGHT_SIGNATURE_SEPARATOR in call_id
+    ):
+        signature = call_id.split(_INLINE_THOUGHT_SIGNATURE_SEPARATOR, 1)[1]
+    if not isinstance(signature, str) or not signature:
+        return None
+    return {"provider_specific_fields": {"thought_signature": signature}}
+
+
+def public_tool_call_id(value: Any, scope: str | None) -> str:
+    """Return an application call id without LiteLLM's inline Gemini state."""
+    call_id = _field(value, "id", "")
+    if not isinstance(call_id, str):
+        return str(call_id or "")
+    if _scope_provider(scope) != "gemini":
+        return call_id
+    return call_id.split(_INLINE_THOUGHT_SIGNATURE_SEPARATOR, 1)[0]
 
 
 def capture_chat_state(message: Any, scope: str | None) -> dict | None:
-    items = _field(message, "reasoning_items")
-    if not isinstance(items, list) or not items:
+    payload: dict[str, Any] = {}
+    for key in ("reasoning_items", "thinking_blocks"):
+        value = _field(message, key)
+        if isinstance(value, list) and value:
+            payload[key] = opaque_item(value)
+
+    provider_fields = _field(message, "provider_specific_fields")
+    if isinstance(provider_fields, dict):
+        payload["provider_specific_fields"] = provider_fields
+
+    tool_state = [_tool_call_state(call) for call in (_field(message, "tool_calls") or [])]
+    if any(item is not None for item in tool_state):
+        payload["tool_calls"] = tool_state
+
+    payload = _sanitize_chat_payload(payload, scope)
+    if not payload:
         return None
-    carrier = _chat_public_carrier(message)
-    if carrier is None:
-        logger.warning("Discarding OpenAI Chat reasoning state with a malformed carrier.")
-        return None
-    payload: dict[str, Any] = {
-        "reasoning_items": [opaque_item(item) for item in items],
-        "carrier": carrier,
-    }
     if not _field(message, "content") and not _field(message, "tool_calls"):
         payload["state_only"] = True
     if not _valid_chat_payload(payload):
@@ -305,7 +359,52 @@ def _public_responses_carriers(items: list[dict[str, Any]]) -> list[dict[str, An
     return carriers
 
 
+def _strip_inline_signature(value: Any) -> Any:
+    if isinstance(value, str) and _INLINE_THOUGHT_SIGNATURE_SEPARATOR in value:
+        return value.split(_INLINE_THOUGHT_SIGNATURE_SEPARATOR, 1)[0]
+    return value
+
+
+def _strip_chat_state(message: dict[str, Any], *, strip_inline_signatures: bool) -> None:
+    for key in ("reasoning_items", "thinking_blocks", "provider_specific_fields"):
+        message.pop(key, None)
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            if strip_inline_signatures:
+                call["id"] = _strip_inline_signature(call.get("id"))
+            call.pop("provider_specific_fields", None)
+            function = call.get("function")
+            if isinstance(function, dict):
+                function.pop("provider_specific_fields", None)
+    if strip_inline_signatures and "tool_call_id" in message:
+        message["tool_call_id"] = _strip_inline_signature(message["tool_call_id"])
+
+
+def _restore_chat_state(message: dict[str, Any], payload: dict[str, Any]) -> None:
+    for key in ("reasoning_items", "thinking_blocks", "provider_specific_fields"):
+        if key in payload:
+            message[key] = copy.deepcopy(payload[key])
+    tool_calls = message.get("tool_calls")
+    tool_state = payload.get("tool_calls")
+    if not isinstance(tool_calls, list) or not isinstance(tool_state, list):
+        return
+    for call, state in zip(tool_calls, tool_state, strict=False):
+        if not isinstance(call, dict) or not isinstance(state, dict):
+            continue
+        fields = state.get("provider_specific_fields")
+        if isinstance(fields, dict):
+            call["provider_specific_fields"] = copy.deepcopy(fields)
+
+
 def capture_responses_state(output: list[Any], scope: str | None) -> dict | None:
+    # NOOA only knows the OpenAI/Azure Responses item contract. Other providers
+    # may expose a similarly shaped API through a gateway, but that is not
+    # evidence that their opaque state is wire-compatible.
+    if _scope_provider(scope) not in {"openai", "azure"}:
+        return None
     items: list[Any] = []
     order: list[dict[str, Any]] = []
     has_public_carrier = False
@@ -333,6 +432,19 @@ def capture_responses_state(output: list[Any], scope: str | None) -> dict | None
     return _envelope(scope, _RESPONSES_FORMAT, payload)
 
 
+def responses_reasoning_text(output: list[Any]) -> str | None:
+    """Return provider-visible Responses reasoning summaries as plain text."""
+    texts: list[str] = []
+    for item in output:
+        if response_item_type(item) != "reasoning":
+            continue
+        for summary in _field(item, "summary", []) or []:
+            text = _field(summary, "text")
+            if isinstance(text, str) and text:
+                texts.append(text)
+    return "\n".join(texts) or None
+
+
 def prepare_chat_messages(messages: list[dict[str, Any]], scope: str | None) -> list[dict]:
     """Strip private/raw state and restore only a matching Chat payload."""
     prepared: list[dict[str, Any]] = []
@@ -341,23 +453,16 @@ def prepare_chat_messages(messages: list[dict[str, Any]], scope: str | None) -> 
         reasoning = carried_reasoning(original)
         message = copy.deepcopy(dict(original))
         message.pop(LLM_STATE_KEY, None)
-        message.pop("reasoning_items", None)
+        source_scope = state.get("scope") if isinstance(state, dict) else None
+        _strip_chat_state(
+            message, strip_inline_signatures=_scope_provider(source_scope) == "gemini"
+        )
         payload = _matching_payload(state, scope, _CHAT_FORMAT)
-        restored = False
-        if payload is not None and not _valid_chat_payload(payload):
-            logger.warning(
-                "Opaque Chat reasoning state is malformed; portable reasoning text "
-                "will be replayed instead."
-            )
-        elif payload is not None and _chat_public_carrier(message) != payload["carrier"]:
-            logger.warning(
-                "Opaque Chat reasoning state was not replayed because its public assistant "
-                "carrier changed; portable reasoning text will be replayed instead."
-            )
-        elif payload is not None:
-            message["reasoning_items"] = payload["reasoning_items"]
-            restored = True
-        if not restored:
+        if payload is not None:
+            payload = _sanitize_chat_payload(payload, scope) or None
+        if payload:
+            _restore_chat_state(message, payload)
+        else:
             demote_reasoning_text(message, reasoning)
         if (
             not restored
@@ -394,7 +499,11 @@ def prepare_responses_batch(
 ) -> list[dict[str, Any]]:
     """Restore a matching Responses payload among its public turn carriers."""
     clean = _clean_responses_batch(batch)
-    payload = _matching_payload(state, scope, _RESPONSES_FORMAT)
+    payload = (
+        _matching_payload(state, scope, _RESPONSES_FORMAT)
+        if _scope_provider(scope) in {"openai", "azure"}
+        else None
+    )
     if payload is None:
         return demote_responses_batch(clean, state, reasoning)
     items = payload.get("items")
