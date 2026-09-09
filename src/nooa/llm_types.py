@@ -25,7 +25,9 @@ class LLMUsage(BaseModel):
     """Normalized usage reported for one successful LLM response."""
 
     input_tokens: int = Field(default=0, description="Total input tokens reported by the provider")
-    output_tokens: int = Field(default=0, description="Total output tokens reported by the provider")
+    output_tokens: int = Field(
+        default=0, description="Total output tokens reported by the provider"
+    )
     cached_input_tokens: int = Field(
         default=0, description="Input tokens read from the provider's prompt cache"
     )
