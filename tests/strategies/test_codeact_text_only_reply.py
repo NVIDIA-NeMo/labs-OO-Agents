@@ -145,6 +145,23 @@ async def test_error_finish_reason_never_calls_text_only_handler():
 
 
 @pytest.mark.asyncio
+async def test_empty_error_response_remains_durable():
+    class TestAgent(Agent, llm=_TEST_LLM):
+        @strategy(CodeActStrategy())
+        async def my_task(self) -> str:
+            """Return a string."""
+            ...
+
+    agent = TestAgent(llm=FakeLLMClient(scripted_responses=[_resp("", finish_reason="error")]))
+
+    with pytest.raises(GenerationError, match="incomplete response"):
+        await agent.my_task()
+
+    responses = _events(agent, LLMResponse)
+    assert [(event.content, event.finish_reason) for event in responses] == [("", "error")]
+
+
+@pytest.mark.asyncio
 async def test_default_does_not_treat_valid_string_as_result():
     class TestAgent(Agent, llm=_TEST_LLM):
         @strategy(CodeActStrategy())

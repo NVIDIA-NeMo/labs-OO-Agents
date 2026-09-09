@@ -986,7 +986,6 @@ Standard Python builtins and agent instance (`self`) are available."""
                     session.record_error()
                     if not response.content and not response.tool_calls:
                         get_harness_metrics().empty_response()
-                        runtime.event_manager.remove(event_id)
                     runtime.event_manager.add(
                         DebugTrace(content=f"Failed response: {_response_debug_details(response)}")
                     )

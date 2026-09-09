@@ -1567,8 +1567,7 @@ class TestCodeActStrategyEventSequence:
         events = agent_instance.event_manager.values()
         tool_calls = [e for e in events if e.event_type == "ToolCallEvent"]
         final_tc = tool_calls[0]
-        code = final_tc.arguments.get("code", "")
-        assert code == ""
+        assert final_tc.arguments == {"result": 7}
 
     @pytest.mark.asyncio
     async def test_text_only_loop_aborts_after_threshold(self):
