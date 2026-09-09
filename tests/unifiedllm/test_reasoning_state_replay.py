@@ -178,6 +178,7 @@ def test_reasoning_only_response_replays_without_empty_assistant_message() -> No
             client.call(rendered + [{"role": "user", "content": "continue"}])
 
         assert first.content == ""
+        assert first.llm_state is not None
         assert first.llm_state["payload"]["state_only"] is True
         replay = call.call_args_list[1].kwargs["input"]
         assert REASONING in replay
@@ -344,6 +345,7 @@ def test_chat_state_is_captured_replayed_and_api_style_scoped() -> None:
             first = client.call([{"role": "user", "content": "run"}], tools=[TOOL])
             client.call(_render_chat(first), tools=[TOOL])
 
+        assert first.llm_state is not None
         assert first.llm_state["format"] == "litellm-chat"
         assistant = next(
             item for item in call.call_args_list[1].kwargs["messages"] if item.get("tool_calls")
@@ -431,6 +433,7 @@ async def test_async_responses_capture_matches_sync() -> None:
         ) as call:
             response = await client.acall([{"role": "user", "content": "think"}])
 
+        assert response.llm_state is not None
         assert response.llm_state["payload"]["items"] == [REASONING]
         assert "reasoning.encrypted_content" in call.call_args.kwargs["include"]
     finally:
