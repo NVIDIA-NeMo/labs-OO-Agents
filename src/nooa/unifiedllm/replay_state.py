@@ -190,11 +190,7 @@ def _sanitize_chat_payload(payload: dict[str, Any], scope: str | None) -> dict[s
     ):
         clean["provider_specific_fields"] = {"thought_signatures": copy.deepcopy(signatures)}
 
-    tool_state = (
-        payload.get("tool_calls")
-        if provider in {"openai", "azure", "gemini"}
-        else None
-    )
+    tool_state = payload.get("tool_calls") if provider in {"openai", "azure", "gemini"} else None
     if isinstance(tool_state, list):
         calls: list[dict[str, Any] | None] = []
         for item in tool_state:

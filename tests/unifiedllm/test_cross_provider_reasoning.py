@@ -339,9 +339,7 @@ def test_state_only_turn_drops_empty_carrier_across_api_styles() -> None:
         "format": "openai-responses",
         "payload": {"items": [RESPONSES_REASONING], "order": [], "state_only": True},
     }
-    chat_carrier = ReplayCarryingMessage(
-        {"role": "assistant", "content": ""}, responses_state
-    )
+    chat_carrier = ReplayCarryingMessage({"role": "assistant", "content": ""}, responses_state)
     assert prepare_chat_messages([chat_carrier], "chat:openai:sha256:target") == []
 
     chat_state = {
@@ -350,11 +348,14 @@ def test_state_only_turn_drops_empty_carrier_across_api_styles() -> None:
         "format": "litellm-chat",
         "payload": {"reasoning_items": [{"type": "reasoning"}], "state_only": True},
     }
-    assert prepare_responses_batch(
-        [{"role": "assistant", "content": ""}],
-        chat_state,
-        "responses:openai:sha256:target",
-    ) == []
+    assert (
+        prepare_responses_batch(
+            [{"role": "assistant", "content": ""}],
+            chat_state,
+            "responses:openai:sha256:target",
+        )
+        == []
+    )
 
 
 def test_responses_demotion_keeps_native_output_content_valid() -> None:
