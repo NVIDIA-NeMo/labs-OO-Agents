@@ -204,6 +204,15 @@ def _sanitize_chat_payload(payload: dict[str, Any], scope: str | None) -> dict[s
         if any(item is not None for item in calls):
             clean["tool_calls"] = calls
 
+    tool_call_ids = payload.get("tool_call_ids")
+    if (
+        clean
+        and isinstance(tool_call_ids, list)
+        and tool_call_ids
+        and all(isinstance(call_id, str) and call_id for call_id in tool_call_ids)
+    ):
+        clean["tool_call_ids"] = copy.deepcopy(tool_call_ids)
+
     if clean and payload.get("state_only") is True:
         clean["state_only"] = True
     return clean
@@ -248,9 +257,16 @@ def capture_chat_state(message: Any, scope: str | None) -> dict | None:
     if isinstance(provider_fields, dict):
         payload["provider_specific_fields"] = provider_fields
 
-    tool_state = [_tool_call_state(call) for call in (_field(message, "tool_calls") or [])]
+    raw_tool_calls = list(_field(message, "tool_calls") or [])
+    tool_state = [_tool_call_state(call) for call in raw_tool_calls]
     if any(item is not None for item in tool_state):
         payload["tool_calls"] = tool_state
+
+    if payload and raw_tool_calls:
+        tool_call_ids = [public_tool_call_id(call, scope) for call in raw_tool_calls]
+        if not all(tool_call_ids) or len(set(tool_call_ids)) != len(tool_call_ids):
+            return None
+        payload["tool_call_ids"] = tool_call_ids
 
     payload = _sanitize_chat_payload(payload, scope)
     if not payload:
@@ -380,6 +396,19 @@ def _strip_chat_state(message: dict[str, Any], *, strip_inline_signatures: bool)
 
 
 def _restore_chat_state(message: dict[str, Any], payload: dict[str, Any]) -> None:
+    expected_call_ids = payload.get("tool_call_ids")
+    if expected_call_ids is not None:
+        tool_calls = message.get("tool_calls")
+        if (
+            not isinstance(tool_calls, list)
+            or [call.get("id") if isinstance(call, dict) else None for call in tool_calls]
+            != expected_call_ids
+        ):
+            return
+    elif isinstance(payload.get("tool_calls"), list):
+        # Positional per-call state cannot safely survive public call mutation.
+        return
+
     for key in ("reasoning_items", "thinking_blocks", "provider_specific_fields"):
         if key in payload:
             message[key] = copy.deepcopy(payload[key])
@@ -387,7 +416,9 @@ def _restore_chat_state(message: dict[str, Any], payload: dict[str, Any]) -> Non
     tool_state = payload.get("tool_calls")
     if not isinstance(tool_calls, list) or not isinstance(tool_state, list):
         return
-    for call, state in zip(tool_calls, tool_state, strict=False):
+    if len(tool_calls) != len(tool_state):
+        return
+    for call, state in zip(tool_calls, tool_state, strict=True):
         if not isinstance(call, dict) or not isinstance(state, dict):
             continue
         fields = state.get("provider_specific_fields")

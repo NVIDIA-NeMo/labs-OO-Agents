@@ -99,16 +99,7 @@ async def test_default_reasoning_tool_call_uses_responses_bridge(model: str) -> 
         assert result.llm_state["format"] == "litellm-chat"
         assert result.llm_state["payload"] == {
             "reasoning_items": [REASONING_ITEM],
-            "carrier": {
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "fc_123",
-                        "name": "execute_python",
-                        "arguments": '{"code":"print(1)"}',
-                    }
-                ],
-            },
+            "tool_call_ids": ["fc_123"],
         }
     finally:
         await client.aclose()

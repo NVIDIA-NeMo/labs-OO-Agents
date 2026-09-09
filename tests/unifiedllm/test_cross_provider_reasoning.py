@@ -166,7 +166,9 @@ def test_gemini_signatures_round_trip_without_becoming_public_call_ids() -> None
             client.call(_render(first), tools=[TOOL])
 
         assert [call.id for call in first.tool_calls] == ["call_1", "call_2"]
+        assert first.llm_state is not None
         assert "discard-me" not in json.dumps(first.llm_state)
+        assert first.llm_state["payload"]["tool_call_ids"] == ["call_1", "call_2"]
         assistant = next(
             message
             for message in completion.call_args_list[1].kwargs["messages"]
@@ -180,6 +182,33 @@ def test_gemini_signatures_round_trip_without_becoming_public_call_ids() -> None
             call["provider_specific_fields"]["thought_signature"]
             for call in assistant["tool_calls"]
         ] == [GEMINI_SIGNATURE, GEMINI_SIGNATURE_2]
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("mutation", ["drop", "reorder", "duplicate"])
+def test_gemini_tool_state_fails_closed_when_public_calls_change(mutation: str) -> None:
+    client = CompletionClient(model="gemini/gemini-2.5-pro", api_key="account-a")
+    try:
+        with patch("litellm.completion", return_value=_gemini_response()):
+            first = client.call([{"role": "user", "content": "run"}], tools=[TOOL])
+
+        assert first.llm_state is not None
+        rendered = _render(first)
+        assistant = next(message for message in rendered if message.get("tool_calls"))
+        if mutation == "drop":
+            assistant["tool_calls"].pop()
+        elif mutation == "reorder":
+            assistant["tool_calls"].reverse()
+        else:
+            assistant["tool_calls"][1]["id"] = assistant["tool_calls"][0]["id"]
+
+        prepared = prepare_chat_messages(rendered, first.llm_state["scope"])
+        replayed = next(message for message in prepared if message.get("tool_calls"))
+        assert "provider_specific_fields" not in replayed
+        assert all("provider_specific_fields" not in call for call in replayed["tool_calls"])
+        assert GEMINI_SIGNATURE not in json.dumps(prepared)
+        assert GEMINI_SIGNATURE_2 not in json.dumps(prepared)
     finally:
         client.close()
 
