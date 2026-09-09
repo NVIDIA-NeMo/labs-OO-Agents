@@ -222,6 +222,7 @@ testpaths = [
     "packages/nooa-cli/tests",
     "packages/nooa-acp/tests",
     "packages/nooa-bench/tests",
+    "packages/nooa-memory/tests",
     "tests/trace_explorer",
 ]
 pythonpath = [
