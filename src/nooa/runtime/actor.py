@@ -1254,6 +1254,7 @@ class ActorRuntime:
                 for tool_call in (getattr(response, "tool_calls", None) or [])
             ),
             finish_reason=getattr(response, "finish_reason", "") or "",
+            reasoning=getattr(response, "reasoning", None),
         )
         event_id = self.event_manager.add(event)
 

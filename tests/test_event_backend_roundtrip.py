@@ -243,6 +243,7 @@ def test_event_roundtrip_via_all_events(backend, tag, event, expected_type, expe
                 ),
             ),
             finish_reason="tool_calls",
+            reasoning="Check the inputs before running the tool.",
         ),
         ToolCallEvent(
             tool_call_id="tc-state",
@@ -264,6 +265,7 @@ def test_assistant_turn_ir_survives_backend_roundtrip(backend, event):
     if isinstance(event, LLMOutput):
         assert restored.tool_calls == event.tool_calls
         assert restored.finish_reason == event.finish_reason
+        assert restored.reasoning == event.reasoning
     else:
         assert restored.llm_output_id == event.llm_output_id
         assert restored.reasoning_items == event.reasoning_items

@@ -176,6 +176,11 @@ class LLMOutput(EventBase):  # type: ignore[misc]
         repr=False,
         description="Normalized finish reason returned by UnifiedLLM",
     )
+    reasoning: str | None = Field(
+        default=None,
+        repr=False,
+        description="Provider-exposed plain reasoning returned with this assistant turn",
+    )
 
 
 class PythonOutput(EventBase):  # type: ignore[misc]

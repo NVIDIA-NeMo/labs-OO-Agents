@@ -25,7 +25,7 @@ from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 _TEST_LLM = FakeLLMClient()
 
 
-def _resp(content="", tool_calls=None, finish_reason=None):
+def _resp(content="", tool_calls=None, finish_reason=None, reasoning=None):
     if finish_reason is None:
         finish_reason = "tool_calls" if tool_calls else "stop"
     return LLMResponse(
@@ -34,6 +34,7 @@ def _resp(content="", tool_calls=None, finish_reason=None):
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
         assistant_message={"role": "assistant", "content": content},
+        reasoning=reasoning,
     )
 
 
@@ -63,7 +64,7 @@ async def test_default_preserves_text_adds_error_and_retries():
 
     fake_llm = FakeLLMClient(
         scripted_responses=[
-            _resp("I think the answer is ready."),
+            _resp("I think the answer is ready.", reasoning="I checked the evidence."),
             _resp(tool_calls=[_ret({"ok": True})]),
         ]
     )
@@ -73,6 +74,7 @@ async def test_default_preserves_text_adds_error_and_retries():
 
     outputs = _text_outputs(agent)
     assert [event.content for event in outputs] == ["I think the answer is ready."]
+    assert outputs[0].reasoning == "I checked the evidence."
 
     diagnostics = _events(agent, TextOnlyReply)
     assert len(diagnostics) == 1
