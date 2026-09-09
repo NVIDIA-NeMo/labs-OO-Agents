@@ -51,15 +51,23 @@ _em_id_counter = itertools.count(1)
 # Old rows are migrated at the persistence boundary, but subscriptions are
 # executable application code and should be updated instead of silently going
 # dead after an event rename.
-_REMOVED_EVENT_SUBSCRIPTIONS = {
-    "LLMOutput": (
-        "Cannot subscribe to removed event type 'LLMOutput'. "
-        "Subscribe to 'LLMResponse' instead. LLMResponse is the canonical "
-        "assistant-turn event and includes content, reasoning, tool calls, "
-        "usage, and replay state. Stored LLMOutput rows are migrated to "
-        "LLMResponse automatically when a session is loaded."
-    ),
-}
+_REMOVED_EVENT_TYPES = frozenset({"LLMOutput", "LLMComplete"})
+
+
+def _validate_event_type_name(event_type: str, *, action: str) -> None:
+    """Reject event APIs folded into the canonical assistant-turn event."""
+    if event_type not in _REMOVED_EVENT_TYPES:
+        return
+    archive_note = (
+        " Stored LLMOutput rows are migrated to LLMResponse automatically when a session is loaded."
+        if event_type == "LLMOutput"
+        else " LLMComplete was a non-persisted runtime event, so no stored rows require migration."
+    )
+    raise ValueError(
+        f"Cannot {action} removed event type {event_type!r}. Use 'LLMResponse' instead. "
+        "LLMResponse is the canonical assistant-turn event and includes content, reasoning, "
+        f"tool calls, usage, and replay state.{archive_note}"
+    )
 
 
 def _make_next(
@@ -213,8 +221,7 @@ class EventManager:
                 identifies its replacement; persisted legacy rows remain
                 readable through storage migration.
         """
-        if message := _REMOVED_EVENT_SUBSCRIPTIONS.get(event_type):
-            raise ValueError(message)
+        _validate_event_type_name(event_type, action="subscribe to")
 
         self._handlers[event_type].append(handler)
 
@@ -392,6 +399,9 @@ class EventManager:
         Returns:
             List of matching events.
         """
+        if type is not None:
+            _validate_event_type_name(type, action="query")
+
         events = list(self._backend.all_events())
 
         # Apply type filter

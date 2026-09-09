@@ -110,18 +110,28 @@ class TestEventManagerAdd:
 class TestEventManagerOn:
     """Tests for EventManager.on() method."""
 
-    def test_removed_llm_output_subscription_explains_migration(self):
+    @pytest.mark.parametrize("event_type", ["LLMOutput", "LLMComplete"])
+    def test_removed_llm_event_subscription_explains_migration(self, event_type):
         """Executable consumers fail loudly; stored legacy rows still migrate."""
         manager = EventManager()
 
         with pytest.raises(ValueError) as exc_info:
-            manager.on("LLMOutput", lambda _event: None)
+            manager.on(event_type, lambda _event: None)
 
         message = str(exc_info.value)
-        assert "removed event type 'LLMOutput'" in message
-        assert "Subscribe to 'LLMResponse' instead" in message
-        assert "Stored LLMOutput rows are migrated" in message
-        assert "LLMOutput" not in manager._handlers
+        assert f"removed event type {event_type!r}" in message
+        assert "Use 'LLMResponse' instead" in message
+        if event_type == "LLMOutput":
+            assert "Stored LLMOutput rows are migrated" in message
+        else:
+            assert "non-persisted runtime event" in message
+        assert event_type not in manager._handlers
+
+    def test_removed_llm_output_query_fails_instead_of_returning_empty(self):
+        manager = EventManager()
+
+        with pytest.raises(ValueError, match="Use 'LLMResponse' instead"):
+            manager.filter(type="LLMOutput")
 
     def test_on_registers_handler(self):
         """on() should register handler for event type."""
