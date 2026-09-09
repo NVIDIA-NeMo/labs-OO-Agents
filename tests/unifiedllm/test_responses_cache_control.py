@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from nooa.context_blocks.formatter import ResponsesProviderFormatter
+from nooa.context_blocks.models import RenderedMessage, Role, ToolCallInfo
 from nooa.unifiedllm import ResponsesClient
 
 
@@ -118,6 +120,28 @@ class TestResponsesClientCacheControlInjection:
         input_msgs, _ = client._transform_messages(prepared)
         user_msgs = [m for m in input_msgs if m.get("role") == "user"]
         assert user_msgs[0].get("cache_control") == {"type": "ephemeral"}
+
+    def test_stateful_assistant_batch_is_visible_to_cache_injection(self, client):
+        messages = ResponsesProviderFormatter().format(
+            [
+                RenderedMessage(
+                    role=Role.ASSISTANT,
+                    content="I will run it.",
+                    tool_calls=(ToolCallInfo(id="c1", name="run", arguments="{}"),),
+                    llm_state={"opaque": "provider-only"},
+                )
+            ]
+        )
+
+        prepared = client._inject_cache_control(
+            messages, [{"role": "assistant", "position": "last"}]
+        )
+        input_messages, _ = client._transform_messages(prepared)
+
+        assistant = next(
+            message for message in input_messages if message.get("role") == "assistant"
+        )
+        assert assistant["cache_control"] == {"type": "ephemeral"}
 
 
 class TestToolOutputNotCorrupted:
