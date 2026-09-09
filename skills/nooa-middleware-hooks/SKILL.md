@@ -52,7 +52,7 @@ Verified semantics:
 - On a context-window error the runtime archives events, rebuilds messages, and retries — so `llm_call` middleware can run more than once per logical turn; keep it idempotent.
 - The tracing `on_messages_built` hook fires inside the innermost core, so traces show the **post-middleware** messages.
 
-Worked production example: `src/nooa/nemo_relay_middleware.py` installs all three kinds to route calls through NeMo Relay (guardrails/ATIF); `nemo_relay_scope(agent, name)` wraps install/uninstall. Runnable: `examples/quickstart/13_nemo_relay.py`. Test patterns (mutate/short-circuit/ordering): `tests/test_event_middleware.py`.
+Worked production example: `src/nooa/nemo_relay_middleware.py` installs all three kinds to route calls through NeMo Relay (guardrails/ATIF); `nemo_relay_scope(agent, name)` wraps install/uninstall. Runnable: `examples/quickstart/15_nemo_relay.py`. Test patterns (mutate/short-circuit/ordering): `tests/test_event_middleware.py`.
 
 ## Observers (`on`)
 
