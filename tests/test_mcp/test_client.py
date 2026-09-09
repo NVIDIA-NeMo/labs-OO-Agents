@@ -14,6 +14,7 @@ from datetime import timedelta  # noqa: E402
 from typing import Literal  # noqa: E402
 from unittest.mock import AsyncMock, MagicMock, patch  # noqa: E402
 
+from nooa.mcp import client as client_module  # noqa: E402
 from nooa.mcp import oauth  # noqa: E402
 from nooa.mcp.client import (  # noqa: E402
     MCPBaseClient,
@@ -312,6 +313,24 @@ def test_tool_call_timeout_default(client_class: type[MCPBaseClient], client_kwa
     assert client.tool_call_timeout == timedelta(seconds=60)
 
 
+@pytest.mark.parametrize(
+    ("uses_float_seconds", "expected"),
+    [
+        (False, timedelta(seconds=7.5)),
+        (True, 7.5),
+    ],
+)
+def test_session_timeout_matches_mcp_sdk_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    uses_float_seconds: bool,
+    expected: timedelta | float,
+):
+    """MCP 1.x expects timedelta while MCP 2.x expects float seconds."""
+    monkeypatch.setattr(client_module, "_MCP_READ_TIMEOUT_USES_FLOAT", uses_float_seconds)
+
+    assert client_module._session_read_timeout(timedelta(seconds=7.5)) == expected
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "client_fixture, transport_patch",
@@ -401,7 +420,9 @@ async def test_streamable_http_applies_tool_call_timeout(
     assert timeout.write == 90
     # Opening the connection is not a tool call and keeps its own short budget.
     assert timeout.connect == 5.0
-    assert mock_session_class.call_args.kwargs["read_timeout_seconds"] == timedelta(seconds=90)
+    assert mock_session_class.call_args.kwargs[
+        "read_timeout_seconds"
+    ] == client_module._session_read_timeout(timedelta(seconds=90))
 
 
 @pytest.mark.asyncio
@@ -433,7 +454,9 @@ async def test_session_enforces_tool_call_timeout(
         async with client.connect_to_server():
             pass
 
-    assert mock_session_class.call_args.kwargs["read_timeout_seconds"] == expected_timeout
+    assert mock_session_class.call_args.kwargs[
+        "read_timeout_seconds"
+    ] == client_module._session_read_timeout(expected_timeout)
 
 
 @pytest.mark.parametrize(

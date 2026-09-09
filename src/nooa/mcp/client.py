@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from importlib.metadata import version as distribution_version
 from typing import Any, Literal, override
 
 import httpx
@@ -20,6 +21,17 @@ from mcp.client.streamable_http import streamable_http_client
 # Establishing the connection is not a tool call, so it keeps its own short budget.
 # Matches the connect timeout the MCP SDK's own SSE transport defaults to.
 CONNECT_TIMEOUT_SECONDS = 5.0
+
+# MCP 1.x accepts ``timedelta`` while MCP 2.x accepts numeric seconds. Keep
+# NOOA's public timeout API stable and adapt only at the SDK boundary.
+_MCP_READ_TIMEOUT_USES_FLOAT = int(distribution_version("mcp").split(".", 1)[0]) >= 2
+
+
+def _session_read_timeout(timeout: timedelta) -> Any:
+    """Return the timeout representation expected by the installed MCP SDK."""
+    if _MCP_READ_TIMEOUT_USES_FLOAT:
+        return timeout.total_seconds()
+    return timeout
 
 
 class MCPBaseClient(ABC):
@@ -124,7 +136,11 @@ class MCPSSEClient(MCPBaseClient):
                 url=self._url,
                 headers=self._headers if self._headers else None,
             ) as (read, write),
-            ClientSession(read, write, read_timeout_seconds=self._tool_call_timeout) as session,
+            ClientSession(
+                read,
+                write,
+                read_timeout_seconds=_session_read_timeout(self._tool_call_timeout),
+            ) as session,
         ):
             await session.initialize()
             yield session
@@ -201,7 +217,11 @@ class MCPStdioClient(MCPBaseClient):
         )
         async with (
             stdio_client(server_params) as (read, write),
-            ClientSession(read, write, read_timeout_seconds=self._tool_call_timeout) as session,
+            ClientSession(
+                read,
+                write,
+                read_timeout_seconds=_session_read_timeout(self._tool_call_timeout),
+            ) as session,
         ):
             await session.initialize()
             yield session
@@ -303,7 +323,9 @@ class MCPStreamableHTTPClient(MCPBaseClient):
                 # Store the session ID callback for later retrieval
                 self._get_mcp_session_id = get_session_id
                 async with ClientSession(
-                    read, write, read_timeout_seconds=self._tool_call_timeout
+                    read,
+                    write,
+                    read_timeout_seconds=_session_read_timeout(self._tool_call_timeout),
                 ) as session:
                     await session.initialize()
                     yield session
