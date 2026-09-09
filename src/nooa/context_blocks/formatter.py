@@ -25,7 +25,13 @@ from collections.abc import Callable
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, TypeGuard
 
-from nooa._llm_state import ReplayCarryingMessage, carry_replay_batch
+from nooa._llm_state import (
+    ReplayCarryingMessage,
+    carry_replay_batch,
+    carried_reasoning,
+    carried_replay_batch,
+    carried_state,
+)
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import FormatConfig
@@ -556,12 +562,30 @@ def _with_replay_data(
     return ReplayCarryingMessage(message, state, reasoning) if state or reasoning else message
 
 
+def _carry_cache_boundary(
+    output: list[dict[str, Any]], start: int, message: RenderedMessage
+) -> None:
+    """Attach a before-message boundary to its first emitted wire item."""
+    if message.cache_boundary_before and len(output) > start:
+        item = output[start]
+        batch = carried_replay_batch(item)
+        output[start] = ReplayCarryingMessage(
+            dict(item),
+            carried_state(item),
+            carried_reasoning(item),
+            True,
+            replay_batch_id=batch[0] if batch else None,
+            replay_batch_size=batch[1] if batch else 0,
+        )
+
+
 class OpenAIProviderFormatter(ProviderFormatter):
     """Emit OpenAI-compatible messages (``list[dict]``)."""
 
     def format(self, messages: list[RenderedMessage]) -> list[dict]:
         out: list[dict] = []
         for msg in messages:
+            start = len(out)
             if msg.tool_calls:
                 assistant_message = {
                     "role": "assistant",
@@ -599,6 +623,7 @@ class OpenAIProviderFormatter(ProviderFormatter):
                         msg.reasoning,
                     )
                 )
+            _carry_cache_boundary(out, start, msg)
         return out
 
 
@@ -614,6 +639,7 @@ class AnthropicProviderFormatter(ProviderFormatter):
                     system_parts.append(msg.content)
                 continue
 
+            start = len(out)
             if msg.tool_calls:
                 content: list[dict[str, Any]] = []
                 if msg.content:
@@ -667,6 +693,7 @@ class AnthropicProviderFormatter(ProviderFormatter):
                         msg.reasoning,
                     )
                 )
+            _carry_cache_boundary(out, start, msg)
 
         return {"system": "\n\n".join(system_parts), "messages": out}
 
@@ -686,8 +713,10 @@ class ResponsesProviderFormatter(ProviderFormatter):
     def format(self, messages: list[RenderedMessage]) -> list[dict]:
         out: list[dict] = []
         for msg in messages:
+            start = len(out)
             if msg.role == Role.SYSTEM:
                 out.append({"role": "system", "content": msg.content or ""})
+                _carry_cache_boundary(out, start, msg)
                 continue
 
             if msg.tool_calls:
@@ -755,4 +784,5 @@ class ResponsesProviderFormatter(ProviderFormatter):
                     out.extend(carry_replay_batch([message], msg.llm_state, msg.reasoning))
                 else:
                     out.append(message)
+            _carry_cache_boundary(out, start, msg)
         return out

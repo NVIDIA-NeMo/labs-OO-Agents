@@ -71,6 +71,12 @@ stable content in the prefix: changing a prefix block invalidates cache reuse
 for that block and everything after it. Keep live or frequently changing blocks
 in the volatile suffix so the stable prefix remains reusable.
 
+The cached renderer automatically marks where that volatile suffix begins.
+Registry entries may translate the neutral marker with `cache_breakpoint:
+openai` for the Responses API or `cache_breakpoint: anthropic` for Chat. Gemini
+has no inline breakpoint mapping; its implicit prefix cache still benefits from
+the same stable-first layout.
+
 Per-method overrides via `ScopedContext`:
 
 ```python

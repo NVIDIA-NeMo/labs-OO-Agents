@@ -18,15 +18,27 @@ LLM_STATE_KEY = "_nooa_llm_state"
 
 
 class ReplayCarryingMessage(dict[str, Any]):
-    """A public wire message with replay metadata outside its mapping."""
+    """A public wire message with internal metadata outside its mapping.
 
-    __slots__ = ("llm_state", "reasoning", "replay_batch_id", "replay_batch_size")
+    Generic JSON serializers see only the ordinary dictionary fields. Built-in
+    UnifiedLLM clients read the attributes, gate opaque state by issuer, and
+    translate a provider-neutral cache boundary at the final wire edge.
+    """
+
+    __slots__ = (
+        "llm_state",
+        "reasoning",
+        "cache_boundary_before",
+        "replay_batch_id",
+        "replay_batch_size",
+    )
 
     def __init__(
         self,
         message: dict[str, Any],
         llm_state: dict[str, Any] | None = None,
         reasoning: str | None = None,
+        cache_boundary_before: bool = False,
         *,
         replay_batch_id: str | None = None,
         replay_batch_size: int = 0,
@@ -36,6 +48,7 @@ class ReplayCarryingMessage(dict[str, Any]):
         # adapter owns serialization and must not mutate caller input.
         self.llm_state = llm_state
         self.reasoning = reasoning
+        self.cache_boundary_before = cache_boundary_before
         self.replay_batch_id = replay_batch_id
         self.replay_batch_size = replay_batch_size
 
@@ -129,3 +142,8 @@ def demote_responses_batch(
         ]
     demote_reasoning_text(message, reasoning)
     return clean
+
+
+def carried_cache_boundary(message: Any) -> bool:
+    """Return whether the volatile suffix begins at this rendered message."""
+    return getattr(message, "cache_boundary_before", False) is True

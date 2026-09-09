@@ -41,6 +41,7 @@ YAML schema::
         store: false                         # optional Responses API control
         include:                             # optional Responses API output fields
           - reasoning.encrypted_content
+        cache_breakpoint: openai             # optional: openai or anthropic wire mapping
 
 Set a model to ``null`` in a later layer to remove it.
 """
@@ -390,6 +391,7 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
         "extra_body",
         "store",
         "include",
+        "cache_breakpoint",
     ):
         if key in config and key not in overrides:
             params[key] = config[key]

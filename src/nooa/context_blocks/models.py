@@ -312,6 +312,10 @@ class RenderedMessage(BaseModel):
         repr=False,
         description="Plain reasoning carried to UnifiedLLM for replay as assistant text",
     )
+    cache_boundary_before: bool = Field(
+        default=False,
+        description="The provider-cacheable prefix ends before this message",
+    )
     tool_call_id: str | None = Field(
         default=None, description="Tool-call id this message is a result for"
     )

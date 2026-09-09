@@ -139,7 +139,14 @@ class CachedBlockFormatter(BlockFormatter):
             # mutate the bytes of a historical event message whenever a later
             # turn becomes the new trailing event, breaking provider prompt
             # caching for the entire event tail (issue #208).
-            messages.append(RenderedMessage(role=Role.USER, content=suffix, parts=envelope_parts))
+            messages.append(
+                RenderedMessage(
+                    role=Role.USER,
+                    content=suffix,
+                    parts=envelope_parts,
+                    cache_boundary_before=True,
+                )
+            )
 
         return messages
 
