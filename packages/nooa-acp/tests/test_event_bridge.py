@@ -27,6 +27,7 @@ from nooa_cli.coding import (
 from nooa.context_blocks.events import ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput
 from nooa.interactive import AgentMessage
+from nooa.llm_types import LLMUsage
 from nooa.unifiedllm import FakeLLMClient
 
 
@@ -81,7 +82,7 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path):
         )
     )
     agent.event_manager.add(
-        LLMResponse(usage={"prompt_tokens": 40, "completion_tokens": 10, "cost_usd": 0.25})
+        LLMResponse(usage=LLMUsage(input_tokens=40, output_tokens=10, cost_usd=0.25))
     )
     await bridge.flush()
 
@@ -206,7 +207,7 @@ async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
 
     agent.event_manager.add(AgentMessage(content="alive"))
     agent.event_manager.add(
-        LLMResponse(usage={"prompt_tokens": 40, "completion_tokens": 10, "cost_usd": 0.25})
+        LLMResponse(usage=LLMUsage(input_tokens=40, output_tokens=10, cost_usd=0.25))
     )
     await bridge.flush()
 
@@ -228,7 +229,7 @@ async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
     sized_client = _RecordingClient()
     sized_bridge = ACPEventBridge(sized, sized_client, "session-2")  # type: ignore[arg-type]
     sized.event_manager.add(
-        LLMResponse(usage={"prompt_tokens": 40, "completion_tokens": 10, "cost_usd": 0.25})
+        LLMResponse(usage=LLMUsage(input_tokens=40, output_tokens=10, cost_usd=0.25))
     )
     await sized_bridge.flush()
     assert any(isinstance(update, UsageUpdate) for _, update in sized_client.updates)
@@ -265,6 +266,7 @@ async def test_bridge_emits_structured_file_edit(tmp_path):
     assert update.locations is not None
     assert update.locations[0].path == path
     assert update.locations[0].line == 2
+    assert update.content is not None
     content = cast(FileEditToolCallContent, update.content[0])
     assert content.path == path
     assert content.old_text == "old\n"
@@ -299,6 +301,7 @@ async def test_bridge_emits_terminal_lifecycle(tmp_path):
     assert started.kind == "execute"
     assert started.title == "$ pytest -q"
     progress = cast(ToolCallProgress, updates[1])
+    assert progress.content is not None
     content = cast(ContentToolCallContent, progress.content[0])
     assert content.content.text == "2 passed\n"
     finished = cast(ToolCallProgress, updates[2])
