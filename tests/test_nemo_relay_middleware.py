@@ -18,10 +18,16 @@ import pytest
 nemo_relay = pytest.importorskip("nemo_relay", reason="nemo_relay not installed")
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
-from nooa._llm_state import carried_replay_batch, carried_state, carry_replay_batch
+from nooa._llm_state import (
+    ReplayCarryingMessage,
+    carried_cache_boundary,
+    carried_replay_batch,
+    carried_state,
+    carry_replay_batch,
+)
 from nooa.nemo_relay_middleware import (
     install_nemo_relay,
     nemo_relay_agent_call_middleware,
@@ -139,6 +145,7 @@ class TestLLMRequestIntercepts:
             {"scope": "issuer", "payload": {"encrypted_content": "opaque"}},
             None,
         )
+        cast(ReplayCarryingMessage, messages[0]).cache_boundary_before = True
         ctx = _make_llm_ctx(messages=messages)
         seen: list[list[dict[str, Any]]] = []
 
@@ -156,6 +163,7 @@ class TestLLMRequestIntercepts:
         }
         assert carried_replay_batch(seen[0][0]) is not None
         assert carried_replay_batch(seen[0][1]) == carried_replay_batch(seen[0][0])
+        assert carried_cache_boundary(seen[0][0]) is True
 
     @pytest.mark.asyncio
     async def test_request_intercept_injects_header(self):
