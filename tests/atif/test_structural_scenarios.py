@@ -33,8 +33,6 @@ from nooa.context_blocks import ResultStatus
 from nooa.events import (
     AfterTurn,
     BeforeTurn,
-    LLMComplete,
-    LLMOutput,
     PythonOutput,
     Summary,
     SystemPrompt,
@@ -65,7 +63,6 @@ def _resp(
         content=content,
         tool_calls=tool_calls or [],
         finish_reason="tool_calls" if tool_calls else "stop",
-        assistant_message={"role": "assistant", "content": content},
         usage=usage or {"prompt_tokens": 50, "completion_tokens": 10},
     )
 
@@ -467,12 +464,14 @@ def test_multimodal_input(tmp_path: Path) -> None:
             turn_number=1,
         )
     )
-    exporter.on_llm_complete(
-        LLMComplete(
-            model_name="fake-model", prompt_tokens=10, completion_tokens=4, generation_id="gen-1"
+    exporter.on_llm_response(
+        LLMResponse(
+            model_name="fake-model",
+            usage={"prompt_tokens": 10, "completion_tokens": 4},
+            generation_id="gen-1",
+            content="A 1x1 transparent pixel.",
         )
     )
-    exporter.on_llm_output(LLMOutput(content="A 1x1 transparent pixel."))
     exporter.on_after_turn(
         AfterTurn(
             method_name="run",
@@ -516,23 +515,24 @@ def test_compaction_boundary(tmp_path: Path) -> None:
             turn_number=1,
         )
     )
-    exporter.on_llm_complete(
-        LLMComplete(
+    exporter.on_llm_response(
+        LLMResponse(
             model_name="fake-model",
-            prompt_tokens=100,
-            completion_tokens=10,
-            cost_usd=0.0001,
+            usage={
+                "prompt_tokens": 100,
+                "completion_tokens": 10,
+                "cost_usd": 0.0001,
+            },
             tool_calls=[
-                {
-                    "tool_call_id": "call_a",
-                    "function_name": "execute_python",
-                    "arguments": json.dumps({"code": "x = 1"}),
-                }
+                ToolCall(
+                    id="call_a",
+                    name="execute_python",
+                    arguments=json.dumps({"code": "x = 1"}),
+                )
             ],
             generation_id="gen-1",
         )
     )
-    exporter.on_llm_output(LLMOutput(content=""))
     exporter.on_python_output(
         PythonOutput(
             tool_call_id="call_a",
@@ -570,23 +570,24 @@ def test_compaction_boundary(tmp_path: Path) -> None:
             turn_number=2,
         )
     )
-    exporter.on_llm_complete(
-        LLMComplete(
+    exporter.on_llm_response(
+        LLMResponse(
             model_name="fake-model",
-            prompt_tokens=50,
-            completion_tokens=5,
-            cost_usd=0.00005,
+            usage={
+                "prompt_tokens": 50,
+                "completion_tokens": 5,
+                "cost_usd": 0.00005,
+            },
             tool_calls=[
-                {
-                    "tool_call_id": "call_b",
-                    "function_name": "return_result",
-                    "arguments": json.dumps({"result": 1}),
-                }
+                ToolCall(
+                    id="call_b",
+                    name="return_result",
+                    arguments=json.dumps({"result": 1}),
+                )
             ],
             generation_id="gen-2",
         )
     )
-    exporter.on_llm_output(LLMOutput(content=""))
     exporter.on_after_turn(
         AfterTurn(
             method_name="run",

@@ -21,8 +21,6 @@ from nooa.config import CodeActConfig
 from nooa.events import (
     AfterTurn,
     BeforeTurn,
-    LLMComplete,
-    LLMOutput,
     SystemPrompt,
     Task,
 )
@@ -52,7 +50,6 @@ def _resp(
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
-        assistant_message={"role": "assistant", "content": content},
         usage=usage or {"prompt_tokens": 50, "completion_tokens": 10},
     )
 
@@ -304,15 +301,14 @@ def test_multimodal_task_image_rendered_as_content_parts(tmp_path: Path) -> None
             turn_number=1,
         )
     )
-    exporter.on_llm_complete(
-        LLMComplete(
+    exporter.on_llm_response(
+        LLMResponse(
             model_name="fake-model",
-            prompt_tokens=1,
-            completion_tokens=1,
+            usage={"prompt_tokens": 1, "completion_tokens": 1},
             generation_id="gen-1",
+            content="A 1x1 transparent pixel.",
         )
     )
-    exporter.on_llm_output(LLMOutput(content="A 1x1 transparent pixel."))
     exporter.on_after_turn(
         AfterTurn(
             method_name="run",

@@ -51,7 +51,6 @@ def _resp(content: str, tool_calls: list | None = None) -> LLMResponse:
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
-        assistant_message={"role": "assistant", "content": content},
     )
 
 
@@ -1320,8 +1319,8 @@ class TestPurePythonExecuteErrors:
         assert result == 99
 
     @pytest.mark.asyncio
-    async def test_xml_format_error_removes_malformed_event(self):
-        """XMLFormatError should remove the malformed LLMOutput event."""
+    async def test_xml_format_error_retains_malformed_provider_turn(self):
+        """XML recovery appends feedback without deleting the provider turn."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
             @strategy(PurePythonStrategy(max_iterations=10, max_retries=3))
@@ -1338,20 +1337,16 @@ class TestPurePythonExecuteErrors:
         )
         agent = TestAgent(llm=fake_llm)
 
-        # Spy on event_manager.remove to verify it's called
-        removed_ids = []
-        original_remove = agent.runtime.event_manager.remove
-
-        def spy_remove(key):
-            removed_ids.append(key)
-            return original_remove(key)
-
-        with patch.object(agent.runtime.event_manager, "remove", side_effect=spy_remove):
-            result = await agent.compute()
+        result = await agent.compute()
 
         assert result == 99
-        # At least one event was removed (the malformed XML response)
-        assert len(removed_ids) >= 1
+        outputs = [
+            event for event in agent.event_manager.values() if event.event_type == "LLMResponse"
+        ]
+        assert [event.content for event in outputs] == [
+            "<tool_code><code>return 42</code></tool_code>",
+            "return 99",
+        ]
 
     @pytest.mark.asyncio
     async def test_empty_code_response_records_error(self):
@@ -1372,10 +1367,49 @@ class TestPurePythonExecuteErrors:
         agent = TestAgent(llm=fake_llm)
         result = await agent.compute()
         assert result == 42
+        outputs = [
+            event.content
+            for event in agent.event_manager.values()
+            if event.event_type == "LLMResponse"
+        ]
+        assert outputs == ["", "return 42"]
 
     @pytest.mark.asyncio
-    async def test_empty_response_removes_event(self):
-        """Empty response should call event_manager.remove() to clean up the LLMOutput."""
+    async def test_whitespace_response_is_retained_but_not_replayed(self):
+        """Whitespace stays in the journal without becoming an assistant message."""
+
+        class TestAgent(Agent, llm=_TEST_LLM):
+            @strategy(PurePythonStrategy(max_iterations=10, max_retries=3))
+            async def compute(self) -> int:
+                """Compute."""
+                ...
+
+        whitespace = "   \n"
+        fake_llm = FakeLLMClient(
+            scripted_responses=[
+                _resp(whitespace),
+                _resp("return 42"),
+            ]
+        )
+        agent = TestAgent(llm=fake_llm)
+
+        assert await agent.compute() == 42
+        outputs = [
+            event.content
+            for event in agent.event_manager.values()
+            if event.event_type == "LLMResponse"
+        ]
+        assert outputs == [whitespace, "return 42"]
+        assert not any(
+            message.get("role") == "assistant"
+            and isinstance(message.get("content"), str)
+            and not message["content"].strip()
+            for message in fake_llm.last_messages
+        )
+
+    @pytest.mark.asyncio
+    async def test_empty_response_does_not_remove_provider_turn(self):
+        """Empty recovery relies on context projection instead of mutating history."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
             @strategy(PurePythonStrategy(max_iterations=10, max_retries=3))
@@ -1395,7 +1429,6 @@ class TestPurePythonExecuteErrors:
         fake_llm = FakeLLMClient(scripted_responses=[_resp("return 42")])
         agent = TestAgent(llm=fake_llm)
 
-        # Spy on event_manager.remove to track calls
         removed_ids = []
         original_remove = agent.runtime.event_manager.remove
 
@@ -1410,7 +1443,7 @@ class TestPurePythonExecuteErrors:
             result = await agent.compute()
 
         assert result == 42
-        assert "empty_evt_id" in removed_ids
+        assert "empty_evt_id" not in removed_ids
 
     @pytest.mark.asyncio
     async def test_api_error_exhausts_retries(self):
@@ -1548,7 +1581,8 @@ class TestPurePythonRunPrefill:
         await strat._run_prefill(rt, call, builtins, session)
 
         event_types = [type(e).__name__ for e in added_events]
-        assert "LLMOutput" in event_types
+        assert "AssistantEvent" in event_types
+        assert "LLMResponse" not in event_types
         assert "PythonOutput" in event_types
         assert "Feedback" not in event_types
 

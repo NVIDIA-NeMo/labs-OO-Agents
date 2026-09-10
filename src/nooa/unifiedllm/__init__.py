@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+from nooa.llm_types import LLMResponse, LLMUsage, ToolCall
 from nooa.unifiedllm.fake import FakeLLMClient
 from nooa.unifiedllm.http_config import HttpConfig
 from nooa.unifiedllm.registry import (
@@ -19,11 +20,9 @@ from nooa.unifiedllm.retry import (
 from nooa.unifiedllm.retry_config import RetryConfig
 from nooa.unifiedllm.unifiedllm import (
     CompletionClient,
-    LLMResponse,
     ReasoningCompletionClient,
     ResponsesClient,
     Tool,
-    ToolCall,
     UnifiedLLM,
     create_tool_from_callable,
     extract_and_parse_json,
@@ -48,6 +47,7 @@ __all__ = [
     "create_tool_from_callable",
     # Response types
     "LLMResponse",
+    "LLMUsage",
     # HTTP config
     "HttpConfig",
     # Retry utilities

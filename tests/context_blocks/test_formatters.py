@@ -8,6 +8,7 @@ blocks) and returns ``list[RenderedMessage]``. ProviderFormatter.format() takes
 """
 
 import pytest
+from pydantic import ValidationError
 
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
 from nooa.context_blocks.formatter import (
@@ -24,6 +25,8 @@ from nooa.context_blocks.models import (
     Role,
     ToolCallInfo,
 )
+from nooa.events import LLMResponse
+from nooa.unifiedllm import ToolCall
 
 
 def _tool_call_block(
@@ -33,7 +36,7 @@ def _tool_call_block(
     name: str,
     arguments: dict,
     result_content: str | None = None,
-    reasoning_items: list[dict] | None = None,
+    llm_response_id: str | None = None,
 ) -> ResolvedBlock:
     """Helper: ResolvedBlock carrying a ToolCallEvent."""
     result = (
@@ -45,7 +48,7 @@ def _tool_call_block(
         tool_call_id=tool_call_id,
         name=name,
         arguments=arguments,
-        reasoning_items=reasoning_items,
+        llm_response_id=llm_response_id,
         result=result,
     )
     return ResolvedBlock(key=key, content="", role=Role.ASSISTANT, event=event)
@@ -135,6 +138,209 @@ class TestXMLBlockFormatter:
 
     def test_format_type(self):
         assert XMLBlockFormatter().format_type == "xml"
+
+    def test_groups_linked_executions_under_original_assistant_turn(self):
+        turn = LLMResponse(
+            content="I will run both.",
+            tool_calls=(
+                ToolCall(
+                    id="call_1",
+                    name="execute_python",
+                    arguments='{"code":"first()"}',
+                ),
+                ToolCall(
+                    id="call_2",
+                    name="execute_python",
+                    arguments='{"code":"second()"}',
+                ),
+            ),
+            finish_reason="tool_calls",
+        )
+        call_1 = _tool_call_block(
+            key="call_1",
+            tool_call_id="call_1",
+            name="execute_python",
+            arguments={"code": "first()"},
+            result_content="status: complete",
+            llm_response_id=turn.id,
+        )
+        call_2 = _tool_call_block(
+            key="call_2",
+            tool_call_id="call_2",
+            name="execute_python",
+            arguments={"code": "second()"},
+            result_content="status: complete",
+            llm_response_id=turn.id,
+        )
+
+        messages = XMLBlockFormatter().format(
+            [
+                # Runtime event projection carries the object on an otherwise
+                # contentless block; assistant text comes from the canonical turn.
+                ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=turn),
+                call_1,
+                ResolvedBlock(key="output_1", content="first output", role=Role.USER),
+                call_2,
+                ResolvedBlock(key="output_2", content="second output", role=Role.USER),
+            ]
+        )
+
+        assert [message.role for message in messages] == [
+            Role.SYSTEM,
+            Role.ASSISTANT,
+            Role.TOOL,
+            Role.TOOL,
+            Role.USER,
+            Role.USER,
+        ]
+        assert [call.id for call in messages[1].tool_calls] == ["call_1", "call_2"]
+        assert [call.arguments for call in messages[1].tool_calls] == [
+            '{"code":"first()"}',
+            '{"code":"second()"}',
+        ]
+        assert messages[1].content == "I will run both."
+        assert [message.tool_call_id for message in messages[2:4]] == ["call_1", "call_2"]
+
+    def test_incomplete_linked_call_batch_is_omitted(self):
+        turn = LLMResponse(
+            content="",
+            tool_calls=(
+                ToolCall(id="call_1", name="one", arguments="{}"),
+                ToolCall(id="call_2", name="two", arguments="{}"),
+            ),
+            finish_reason="tool_calls",
+        )
+        call_1 = _tool_call_block(
+            tool_call_id="call_1",
+            name="one",
+            arguments={},
+            result_content="failed",
+            llm_response_id=turn.id,
+        )
+
+        messages = XMLBlockFormatter().format(
+            [
+                ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=turn),
+                call_1,
+            ]
+        )
+
+        assert [message.role for message in messages] == [Role.SYSTEM]
+
+    def test_linked_execution_without_source_turn_is_not_rendered(self):
+        call = _tool_call_block(
+            tool_call_id="call_1",
+            name="one",
+            arguments={},
+            result_content="complete",
+            llm_response_id="filtered-response",
+        )
+
+        messages = XMLBlockFormatter().format([call])
+
+        assert [message.role for message in messages] == [Role.SYSTEM]
+
+    @pytest.mark.parametrize(
+        ("finish_reason", "arguments", "content"),
+        [
+            ("length", '{"code":"partial()"}', ""),
+            ("tool_calls", '{"code":', "partial response"),
+            ("tool_calls", "[]", "non-object arguments"),
+        ],
+    )
+    def test_incomplete_or_malformed_tool_batch_is_not_replayed(
+        self, finish_reason, arguments, content
+    ):
+        turn = LLMResponse(
+            content=content,
+            tool_calls=(
+                ToolCall(
+                    id="partial",
+                    name="execute_python",
+                    arguments=arguments,
+                ),
+            ),
+            finish_reason=finish_reason,
+        )
+
+        messages = XMLBlockFormatter().format(
+            [
+                ResolvedBlock(
+                    key="turn",
+                    content=content,
+                    role=Role.ASSISTANT,
+                    event=turn,
+                )
+            ]
+        )
+
+        assert all(not message.tool_calls for message in messages)
+        assert AnthropicProviderFormatter().format(messages) == {
+            "system": "",
+            "messages": ([{"role": "assistant", "content": content}] if content else []),
+        }
+
+    @pytest.mark.parametrize("field", ["reasoning", "llm_state"])
+    def test_replay_only_response_creates_private_carrier(self, field):
+        value = "private thought" if field == "reasoning" else {"opaque": "state"}
+        response = LLMResponse(content="", **{field: value})
+        messages = XMLBlockFormatter().format(
+            [ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=response)]
+        )
+
+        carrier = next(message for message in messages if message.role is Role.ASSISTANT)
+        assert carrier.content is None
+        assert getattr(carrier, field) == value
+
+    def test_event_type_spoof_does_not_impersonate_an_llm_response(self):
+        from nooa.events import Message
+
+        event = Message(content="ordinary message", event_type="LLMResponse")
+
+        assert XMLBlockFormatter().format_event(event) == "ordinary message"
+
+    def test_llm_response_subclass_keeps_canonical_semantics(self):
+        class CustomLLMResponse(LLMResponse):
+            pass
+
+        response = CustomLLMResponse(content="", llm_state={"opaque": "state"})
+
+        messages = XMLBlockFormatter().format(
+            [ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=response)]
+        )
+
+        carrier = next(message for message in messages if message.role is Role.ASSISTANT)
+        assert carrier.content is None
+        assert carrier.llm_state == {"opaque": "state"}
+
+    def test_linked_execution_is_omitted_when_carrier_is_rejected(self):
+        turn = LLMResponse(
+            content="",
+            tool_calls=(
+                ToolCall(
+                    id="partial",
+                    name="execute_python",
+                    arguments='{"code":"partial()"}',
+                ),
+            ),
+            finish_reason="length",
+        )
+        execution = _tool_call_block(
+            tool_call_id="partial",
+            name="execute_python",
+            arguments={"code": "completed()"},
+            result_content="status: complete",
+            llm_response_id=turn.id,
+        )
+
+        messages = XMLBlockFormatter().format(
+            [
+                ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=turn),
+                execution,
+            ]
+        )
+
+        assert [message.role for message in messages] == [Role.SYSTEM]
 
 
 class TestMarkdownBlockFormatter:
@@ -234,8 +440,8 @@ class TestOpenAIProviderFormatter:
             RenderedMessage(role=Role.SYSTEM, content="System"),
             RenderedMessage(
                 role=Role.ASSISTANT,
-                tool_call=ToolCallInfo(
-                    id="call_abc", name="get_weather", arguments={"location": "SF"}
+                tool_calls=(
+                    ToolCallInfo(id="call_abc", name="get_weather", arguments={"location": "SF"}),
                 ),
             ),
         ]
@@ -251,8 +457,8 @@ class TestOpenAIProviderFormatter:
             RenderedMessage(role=Role.SYSTEM, content="System"),
             RenderedMessage(
                 role=Role.ASSISTANT,
-                tool_call=ToolCallInfo(
-                    id="call_abc", name="get_weather", arguments={"location": "SF"}
+                tool_calls=(
+                    ToolCallInfo(id="call_abc", name="get_weather", arguments={"location": "SF"}),
                 ),
             ),
             RenderedMessage(role=Role.TOOL, content="Sunny", tool_call_id="call_abc"),
@@ -261,6 +467,31 @@ class TestOpenAIProviderFormatter:
         assert len(result) == 3
         assert result[1]["role"] == "assistant" and "tool_calls" in result[1]
         assert result[2] == {"role": "tool", "tool_call_id": "call_abc", "content": "Sunny"}
+
+    def test_tool_call_batch_preserves_order_and_raw_arguments(self):
+        messages = [
+            RenderedMessage(
+                role=Role.ASSISTANT,
+                content="Calling both",
+                tool_calls=(
+                    ToolCallInfo(id="a", name="one", arguments='{"x":1}'),
+                    ToolCallInfo(id="b", name="two", arguments='{"y":2}'),
+                ),
+            )
+        ]
+
+        result = OpenAIProviderFormatter().format(messages)
+
+        assert result[0]["content"] == "Calling both"
+        assert [call["id"] for call in result[0]["tool_calls"]] == ["a", "b"]
+        assert result[0]["tool_calls"][0]["function"]["arguments"] == '{"x":1}'
+
+    def test_removed_singular_tool_call_fails_loudly(self):
+        with pytest.raises(ValidationError, match="tool_call"):
+            RenderedMessage(
+                role=Role.ASSISTANT,
+                tool_call=ToolCallInfo(id="old", name="old", arguments={}),
+            )
 
     def test_runtime_event_skipped(self):
         messages = [
@@ -308,7 +539,7 @@ class TestAnthropicProviderFormatter:
             RenderedMessage(role=Role.SYSTEM, content="System"),
             RenderedMessage(
                 role=Role.ASSISTANT,
-                tool_call=ToolCallInfo(id="tc_1", name="search", arguments={"q": "test"}),
+                tool_calls=(ToolCallInfo(id="tc_1", name="search", arguments={"q": "test"}),),
             ),
         ]
         result = AnthropicProviderFormatter().format(messages)
@@ -321,7 +552,7 @@ class TestAnthropicProviderFormatter:
             RenderedMessage(role=Role.SYSTEM, content="System"),
             RenderedMessage(
                 role=Role.ASSISTANT,
-                tool_call=ToolCallInfo(id="tc_1", name="search", arguments={"q": "test"}),
+                tool_calls=(ToolCallInfo(id="tc_1", name="search", arguments={"q": "test"}),),
             ),
             RenderedMessage(role=Role.TOOL, content="Result", tool_call_id="tc_1"),
         ]
@@ -375,32 +606,39 @@ class TestEndToEndPipelines:
         assert "# Persona" in result["system"]
         assert result["messages"][0]["content"] == "Hello"
 
-    def test_reasoning_items_survive_tool_call_pipeline(self):
+    def test_legacy_reasoning_items_fail_closed_without_provider_gate(self):
+        """Removed opaque legacy fields are ignored and cannot be emitted."""
         reasoning_item = {
             "id": "rs_123",
             "type": "reasoning",
             "encrypted_content": "encrypted-state",
             "summary": [],
         }
-        blocks = [
-            _tool_call_block(
-                tool_call_id="call_123",
-                name="search",
-                arguments={"query": "weather"},
-                result_content="sunny",
-                reasoning_items=[reasoning_item],
-            )
-        ]
+        legacy_event = ToolCallEvent.model_validate(
+            {
+                "tool_call_id": "call_123",
+                "name": "search",
+                "arguments": {"query": "weather"},
+                "result": {"tool_call_id": "call_123", "content": "sunny"},
+                "reasoning_items": [reasoning_item],
+            }
+        )
+        assert "reasoning_items" not in type(legacy_event).model_fields
+        blocks = [ResolvedBlock(key="tc", content="", role=Role.ASSISTANT, event=legacy_event)]
 
         messages = XMLBlockFormatter().format(blocks)
         openai_input = OpenAIProviderFormatter().format(messages)
         responses_input = ResponsesProviderFormatter().format(messages)
 
         openai_tool_call = next(message for message in openai_input if "tool_calls" in message)
-        assert openai_tool_call["reasoning_items"] == [reasoning_item]
-        reasoning_index = responses_input.index(reasoning_item)
-        assert responses_input[reasoning_index + 1]["type"] == "function_call"
-        assert responses_input[reasoning_index + 2]["type"] == "function_call_output"
+        assert "reasoning_items" not in openai_tool_call
+        assert reasoning_item not in responses_input
+        function_call_index = next(
+            index
+            for index, item in enumerate(responses_input)
+            if item.get("type") == "function_call"
+        )
+        assert responses_input[function_call_index + 1]["type"] == "function_call_output"
 
 
 class TestBlockFormatterFormatEvent:

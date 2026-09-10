@@ -23,7 +23,7 @@ import logging
 import types
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -78,6 +78,8 @@ if TYPE_CHECKING:
     from nooa.strategies.current_call import CurrentCall
 
 logger = logging.getLogger(__name__)
+
+_EXECUTE_PYTHON_RECEIPT = "status: accepted"
 
 
 @dataclass(frozen=True)
@@ -219,36 +221,6 @@ class _ReturnResultSignal(ExecutionSignal):
     def __init__(self, result: dict[str, Any]):
         self.result = result
         super().__init__("return_result() called")
-
-
-def _as_comment(text: str) -> str:
-    """Render *text* as Python comment lines (one ``#`` prefix per line)."""
-    return "\n".join(f"# {line}" if line else "#" for line in text.splitlines())
-
-
-def _prepend_comment(tool_calls: list[ToolCall], text: str) -> list[ToolCall]:
-    """Return a copy of *tool_calls* with *text* prepended as a comment to the
-    first execute_python code block.  Other tool calls are left unchanged.
-    """
-    result: list[ToolCall] = []
-    prepended = False
-    preview = _as_comment(text)
-    for tc in tool_calls:
-        if not prepended and tc.name == "execute_python":
-            try:
-                args = json.loads(tc.arguments)
-                original_code = args.get("code", "")
-                args["code"] = f"{preview}\n{original_code}"
-                tc = replace(tc, arguments=json.dumps(args))
-                prepended = True
-                get_harness_metrics().content_prepended_as_comment()
-            except json.JSONDecodeError:
-                logger.debug(
-                    "[CODEACT] _prepend_comment: skipping execute_python with unparseable arguments (tool_call_id=%s)",
-                    tc.id,
-                )
-        result.append(tc)
-    return result
 
 
 @dataclass
@@ -990,14 +962,13 @@ Standard Python builtins and agent instance (`self`) are available."""
                     continue
 
                 # Output-limit responses are incomplete even when they carry
-                # partial text. Preserve non-empty text in its LLMOutput for
-                # diagnostics, but never let a text-only handler accept it as
-                # a successful result.
+                # partial text. Preserve the exact LLMResponse for diagnostics,
+                # but never let a text-only handler accept it as a successful
+                # result. Empty turns are filtered from provider projection.
                 if response.finish_reason == "length":
                     session.record_error()
                     if not response.content and not response.tool_calls:
                         get_harness_metrics().empty_response()
-                        runtime.event_manager.remove(event_id)
                     runtime.event_manager.add(
                         DebugTrace(
                             content=f"Truncated response: {_response_debug_details(response)}"
@@ -1017,7 +988,6 @@ Standard Python builtins and agent instance (`self`) are available."""
                     session.record_error()
                     if not response.content and not response.tool_calls:
                         get_harness_metrics().empty_response()
-                        runtime.event_manager.remove(event_id)
                     runtime.event_manager.add(
                         DebugTrace(content=f"Failed response: {_response_debug_details(response)}")
                     )
@@ -1026,30 +996,10 @@ Standard Python builtins and agent instance (`self`) are available."""
 
                 # ── Post-response cleanup (CodeAct) ──────────────────────
                 # Intercept point: strategy-specific response transforms.
-                # Handles text-only→synthetic, comment prepend, tool call
-                # translation. Consider making extensible in the future.
+                # Handles text-only recovery and tool-call translation.
+                # Consider making extensible in the future.
                 if response.finish_reason == "tool_calls" and response.tool_calls:
                     tool_calls = response.tool_calls
-                    assistant_message = getattr(response, "assistant_message", None)
-                    reasoning_items = (
-                        assistant_message.get("reasoning_items")
-                        if isinstance(assistant_message, dict)
-                        else None
-                    )
-                    if not isinstance(reasoning_items, list):
-                        reasoning_items = None
-                    # If the LLM also emitted message content alongside the tool
-                    # call(s), preserve it by prepending it as a comment at the
-                    # top of the first execute_python code block.
-                    if response.content:
-                        content = response.content
-                        text = (
-                            content.model_dump_json()
-                            if isinstance(content, BaseModel)
-                            else str(content)
-                        )
-                        if text.strip():
-                            tool_calls = _prepend_comment(tool_calls, text)
                     # A real tool call counts as progress: reset the consecutive
                     # text-only guard (issue 185) before executing, so a single
                     # exec mid-stream rescues the run from accidental drift.
@@ -1062,7 +1012,6 @@ Standard Python builtins and agent instance (`self`) are available."""
                         call,
                         return_type,
                         event_id or "",
-                        reasoning_items=reasoning_items,
                     )
                     if result.completed:
                         turn_state.success = True
@@ -1072,14 +1021,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     continue
 
                 # ── Text-only response (no tool call) ──────────────────────
-                _raw_content = response.content
-                _text = (
-                    _raw_content.model_dump_json()
-                    if isinstance(_raw_content, BaseModel)
-                    else str(_raw_content)
-                    if _raw_content
-                    else ""
-                )
+                _text = response.content
                 _has_text = bool(_text.strip())
 
                 if _has_text or response.finish_reason == "stop":
@@ -1099,7 +1041,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                         )
 
                     # Capture the drift faithfully for /bug reports. The original
-                    # LLMOutput remains the assistant turn; the handler may only
+                    # LLMResponse remains the assistant turn; the handler may only
                     # append recovery events after it.
                     runtime.event_manager.add(
                         TextOnlyReply(
@@ -1146,7 +1088,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                             call,
                             return_type,
                             event_id or "",
-                            preserve_llm_output=True,
+                            preserve_llm_response=True,
                         )
                         if result.completed:
                             turn_state.success = True
@@ -1175,12 +1117,12 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # Empty response - error
                 get_harness_metrics().empty_response()
                 session.record_error()
-                # Capture raw LLM response for debugging before removing the event
+                # Keep the canonical provider turn and append recovery feedback.
+                # Context projection omits empty assistant messages from the
+                # next request without mutating the event journal.
                 runtime.event_manager.add(
                     DebugTrace(content=f"Empty response: {_response_debug_details(response)}")
                 )
-                # Remove the empty assistant event - APIs reject empty content
-                runtime.event_manager.remove(event_id)
                 feedback = await self._tool_use_reminder(runtime, reason="Empty response received.")
                 runtime.event_manager.add(Error(content=feedback))
 
@@ -1265,17 +1207,16 @@ Standard Python builtins and agent instance (`self`) are available."""
         call: "CurrentCall",
         return_type: Any,
         event_id: str,
-        reasoning_items: list[dict[str, Any]] | None = None,
-        preserve_llm_output: bool = False,
+        preserve_llm_response: bool = False,
     ) -> _ToolCallsResult:
         """Process tool calls from a single LLM turn.
 
         Executes tool calls sequentially, stopping at the first error.
         Returns a _ToolCallsResult indicating whether the task completed.
 
-        ``preserve_llm_output`` is used only for tool calls synthesized by a
-        text-only response handler. Real provider tool calls replace the empty
-        LLMOutput with their ToolCallEvent representation as before.
+        ``preserve_llm_response`` distinguishes calls synthesized by a text-only
+        response handler from calls already recorded on the provider's
+        canonical LLMResponse event.
         """
         # Handle tool calls - process ALL tool calls sequentially
         # Some LLMs return multiple tool calls in one response even when
@@ -1283,19 +1224,17 @@ Standard Python builtins and agent instance (`self`) are available."""
         # cell's output available to subsequent cells via session_locals.
         session.record_iteration()
 
-        if not preserve_llm_output:
-            # Replace the empty LLMOutput created by runtime.generate() with the
-            # provider's actual ToolCallEvent representation.
-            runtime.event_manager.remove(event_id)
-
         num_tool_calls = len(tool_calls)
         if num_tool_calls > 1:
             logger.debug(f"[CODEACT] Processing {num_tool_calls} tool calls sequentially")
 
+        llm_response = runtime.event_manager.get(event_id) if not preserve_llm_response else None
+        llm_response_id = getattr(llm_response, "id", None)
+
         # Process each tool call in order, stopping at the first error.
         # If one cell fails, subsequent cells likely depend on its output
         # and would cascade into confusing errors.
-        for tool_call_index, tool_call in enumerate(tool_calls):
+        for tool_call in tool_calls:
             # Parse arguments
             try:
                 args = json.loads(tool_call.arguments)
@@ -1313,7 +1252,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     tool_call_id=tool_call.id,
                     name=tool_call.name,
                     arguments=args,
-                    reasoning_items=(reasoning_items if tool_call_index == 0 else None),
+                    llm_response_id=llm_response_id,
                     result=None,  # Will be updated after execution
                 )
             )
@@ -1502,13 +1441,18 @@ Standard Python builtins and agent instance (`self`) are available."""
     ) -> Any | None:
         """Handle execute_python tool call with deferred output pattern.
 
-        The deferred output pattern ensures tool result is nested in ToolCallEvent
-        even when nested agent calls occur during execution:
+        The deferred output pattern ensures a protocol-valid tool result is
+        nested in ToolCallEvent even when nested agent calls occur during
+        execution:
 
-        1. Update ToolCallEvent.result with "status: executing" immediately
+        1. Add a stable "status: accepted" receipt immediately
         2. Execute code (nested agent events may be added here)
-        3. Update ToolCallEvent.result status to "complete" or "error"
+        3. Record final success/error without changing the receipt text
         4. Add PythonOutput with actual output content
+
+        The receipt text must not change after a nested generation has seen it.
+        Rewriting it from "executing" to "complete" would invalidate the
+        provider's cached prompt prefix containing the nested trajectory.
 
         Returns the execution result, a tuple ("TASK_COMPLETE", result) if return_result()
         was called inline, or None if an error occurred.
@@ -1551,14 +1495,15 @@ Standard Python builtins and agent instance (`self`) are available."""
             )
             return None
 
-        # Update ToolCallEvent with executing status immediately - BEFORE code execution
-        # This ensures result is nested even if nested agents add events
+        # Install a stable protocol receipt BEFORE code execution. Nested agent
+        # generations can observe this message, so its provider-visible content
+        # must remain byte-identical after execution completes.
         runtime.event_manager.update(
             tool_call_event_id,
             result=ToolResult(
                 tool_call_id=tool_call.id,
-                content="status: executing",
-                result_status=ResultStatus.COMPLETE,  # Will update to error if needed
+                content=_EXECUTE_PYTHON_RECEIPT,
+                result_status=ResultStatus.RUNNING,
             ),
         )
 
@@ -1583,12 +1528,13 @@ Standard Python builtins and agent instance (`self`) are available."""
             )
             hm.exec_error(error_type, str(result.error)[:500], session.iteration, code[:200])
 
-        # Update ToolCallEvent with final status
+        # Preserve the already-rendered receipt and update only lifecycle status.
+        # PythonOutput below appends the actual outcome to the conversation.
         runtime.event_manager.update(
             tool_call_event_id,
             result=ToolResult(
                 tool_call_id=tool_call.id,
-                content=f"status: {final_status.value}",
+                content=_EXECUTE_PYTHON_RECEIPT,
                 result_status=final_status,
             ),
         )
@@ -1679,7 +1625,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # Emit a synthetic return_result ToolCallEvent so the final
                 # answer appears in the trajectory (otherwise the inline
                 # path leaves no trace of the value).  Mirrors PredictStrategy's
-                # _replace_with_tool_call pattern in predict.py.
+                # append-only synthetic tool-call pattern.
                 self._emit_synthetic_inline_return(runtime, validated)
                 logger.info("[CODEACT] Task completed successfully via inline return_result()")
                 return ("TASK_COMPLETE", validated)
@@ -1976,8 +1922,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         observability, we emit a synthetic ``ToolCallEvent`` with the
         captured value.
 
-        Mirrors :meth:`PredictStrategy._replace_with_tool_call` in
-        ``predict.py``. The event carries
+        Mirrors :meth:`PredictStrategy._append_tool_call`. The event carries
         ``metadata.synthetic = True`` and
         ``metadata.synthetic_type = "codeact_inline_return"`` so
         downstream consumers can distinguish framework-emitted markers
@@ -2656,13 +2601,14 @@ Standard Python builtins and agent instance (`self`) are available."""
             )
         )
 
-        # Update with executing status immediately (deferred output pattern)
+        # Keep the provider-facing receipt stable if this prefill recursively
+        # triggers a generation before it completes.
         runtime.event_manager.update(
             prefill_event_id,
             result=ToolResult(
                 tool_call_id=prefill_id,
-                content="status: executing",
-                result_status=ResultStatus.COMPLETE,  # Will update to error if needed
+                content=_EXECUTE_PYTHON_RECEIPT,
+                result_status=ResultStatus.RUNNING,
             ),
         )
 
@@ -2679,13 +2625,13 @@ Standard Python builtins and agent instance (`self`) are available."""
                 f"{list(result.captured_locals.keys())}"
             )
 
-        # Update ToolCallEvent with final status
+        # Preserve the receipt text; only observability status changes.
         final_status = ResultStatus.ERROR if result.error else ResultStatus.COMPLETE
         runtime.event_manager.update(
             prefill_event_id,
             result=ToolResult(
                 tool_call_id=prefill_id,
-                content=f"status: {final_status.value}",
+                content=_EXECUTE_PYTHON_RECEIPT,
                 result_status=final_status,
             ),
         )

@@ -190,6 +190,21 @@ class TestCompletionClientPropagation:
         assert out.finish_reason == "length"
         assert len(out.tool_calls) == 1
 
+    def test_sync_tool_call_preserves_accompanying_text(self, client):
+        tc = make_tool_call("call_1", "do_thing", "{}")
+        resp = make_mock_response(content="I will use the tool.", tool_calls=[tc])
+        with patch("litellm.completion", return_value=resp):
+            out = client.call([{"role": "user", "content": "Hi"}])
+        assert out.content == "I will use the tool."
+
+    @pytest.mark.asyncio
+    async def test_async_tool_call_preserves_accompanying_text(self, client):
+        tc = make_tool_call("call_1", "do_thing", "{}")
+        resp = make_mock_response(content="I will use the tool.", tool_calls=[tc])
+        with patch("litellm.acompletion", new_callable=AsyncMock, return_value=resp):
+            out = await client.acall([{"role": "user", "content": "Hi"}])
+        assert out.content == "I will use the tool."
+
 
 def _make_responses_api_response(status: str, reason: str | None = None):
     """Fake a litellm Responses-API response with a given status/reason."""
@@ -215,6 +230,23 @@ def _make_incomplete_responses_tool_response():
         usage=None,
         status="incomplete",
         incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+    )
+
+
+def _make_responses_tool_response(text: str):
+    return SimpleNamespace(
+        output=[
+            SimpleNamespace(type="message", content=[SimpleNamespace(text=text)]),
+            SimpleNamespace(
+                type="function_call",
+                call_id="call_1",
+                name="do_thing",
+                arguments="{}",
+            ),
+        ],
+        usage=None,
+        status="completed",
+        incomplete_details=None,
     )
 
 
@@ -264,6 +296,19 @@ class TestResponsesClientPropagation:
             out = await client.acall([{"role": "user", "content": "Hi"}])
         assert out.finish_reason == "length"
         assert len(out.tool_calls) == 1
+
+    def test_sync_tool_call_preserves_accompanying_text(self, client):
+        resp = _make_responses_tool_response("I will use the tool.")
+        with patch("litellm.responses", return_value=resp):
+            out = client.call([{"role": "user", "content": "Hi"}])
+        assert out.content == "I will use the tool."
+
+    @pytest.mark.asyncio
+    async def test_async_tool_call_preserves_accompanying_text(self, client):
+        resp = _make_responses_tool_response("I will use the tool.")
+        with patch("litellm.aresponses", new_callable=AsyncMock, return_value=resp):
+            out = await client.acall([{"role": "user", "content": "Hi"}])
+        assert out.content == "I will use the tool."
 
 
 class TestCodeActAbortOnRealLengthPath:
@@ -321,3 +366,38 @@ class TestCodeActAbortOnRealLengthPath:
         assert all(
             event.event_type != "ToolCallEvent" for event in agent_instance.event_manager.values()
         )
+
+    @pytest.mark.asyncio
+    async def test_real_client_preserves_tool_turn_without_mutating_execution(self):
+        first_response = make_mock_response(
+            content="I will calculate this.",
+            tool_calls=[make_tool_call("call_1", "execute_python", '{"code":"x = 42"}')],
+        )
+        final_response = make_mock_response(
+            tool_calls=[make_tool_call("call_2", "return_result", '{"result":"done"}')]
+        )
+        real_llm = CompletionClient(model="test-model")
+
+        class TestAgent(Agent, llm=real_llm):
+            @strategy(CodeActStrategy(config=CodeActConfig(max_retries=3, max_iterations=10)))
+            async def my_task(self) -> str:
+                """A task."""
+                ...
+
+        agent_instance = TestAgent(llm=real_llm)
+        with patch(
+            "litellm.acompletion",
+            new_callable=AsyncMock,
+            side_effect=[first_response, final_response],
+        ):
+            assert await agent_instance.my_task() == "done"
+
+        events = agent_instance.event_manager.values()
+        first_output = next(event for event in events if event.event_type == "LLMResponse")
+        execution = next(
+            event
+            for event in events
+            if event.event_type == "ToolCallEvent" and event.name == "execute_python"
+        )
+        assert first_output.content == "I will calculate this."
+        assert execution.arguments == {"code": "x = 42"}

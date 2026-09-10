@@ -25,13 +25,14 @@ import pytest
 
 from nooa.context_blocks import ResultStatus, ToolCallEvent, ToolResult
 from nooa.context_blocks.events import AssistantEvent, UserEvent
-from nooa.context_blocks.models import Role
+from nooa.context_blocks.formatter import XMLBlockFormatter
+from nooa.context_blocks.models import ResolvedBlock, Role
 from nooa.events import (
     AfterTurn,
     BeforeTurn,
     Error,
     Feedback,
-    LLMOutput,
+    LLMResponse,
     Message,
     PythonOutput,
     Reasoning,
@@ -40,6 +41,7 @@ from nooa.events import (
 )
 from nooa.runtime.event_backend import InMemoryBackend
 from nooa.storage.sqlite import SQLiteEventBackend
+from nooa.unifiedllm import ToolCall
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -117,8 +119,8 @@ _ALL_EVENTS = [
     ),
     (
         "9",
-        LLMOutput(content="result = compute()"),
-        LLMOutput,
+        LLMResponse(content="result = compute()"),
+        LLMResponse,
         Role.ASSISTANT,
     ),
     (
@@ -226,6 +228,106 @@ def test_event_roundtrip_via_all_events(backend, tag, event, expected_type, expe
         f"all_events() returned {type(retrieved).__name__}, expected {expected_type.__name__}. "
         f"event_type={event.event_type!r}"
     )
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        LLMResponse(
+            content="done",
+            tool_calls=(
+                ToolCall(
+                    id="call-state",
+                    name="execute_python",
+                    arguments='{"code":"print(1)"}',
+                ),
+            ),
+            finish_reason="tool_calls",
+            reasoning="Check the inputs before running the tool.",
+            llm_state={"opaque": {"provider": "state"}},
+            usage={
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cached_input_tokens": 75,
+            },
+            model_name="provider/model",
+            generation_id="generation-1",
+        ),
+        ToolCallEvent(
+            tool_call_id="tc-state",
+            name="execute_python",
+            arguments={"code": "print(1)"},
+            llm_response_id="assistant-turn-id",
+        ),
+    ],
+    ids=["llm-output", "tool-call"],
+)
+def test_assistant_turn_ir_survives_backend_roundtrip(backend, event):
+    """Canonical turns and execution links survive session persistence."""
+    backend.store("state", event)
+
+    restored = backend.get("state")
+
+    assert restored is not None
+    if isinstance(event, LLMResponse):
+        assert restored.tool_calls == event.tool_calls
+        assert restored.finish_reason == event.finish_reason
+        assert restored.reasoning == event.reasoning
+        assert restored.llm_state == event.llm_state
+        assert restored.usage == event.usage
+        assert restored.model_name == event.model_name
+        assert restored.generation_id == event.generation_id
+    else:
+        assert restored.llm_response_id == event.llm_response_id
+
+
+def test_linked_assistant_turn_renders_after_backend_roundtrip(backend):
+    """A persisted canonical turn and its execution retain their relationship."""
+    turn = LLMResponse(
+        content="I will run it.",
+        tool_calls=(
+            ToolCall(
+                id="call-roundtrip",
+                name="execute_python",
+                arguments='{"code":"print(1)"}',
+            ),
+        ),
+        finish_reason="tool_calls",
+    )
+    execution = ToolCallEvent(
+        tool_call_id="call-roundtrip",
+        name="execute_python",
+        arguments={"code": "print(1)"},
+        llm_response_id=turn.id,
+        result=ToolResult(tool_call_id="call-roundtrip", content="status: complete"),
+    )
+    backend.store("turn", turn)
+    backend.store("execution", execution)
+
+    restored_turn, restored_execution = backend.all_events()
+    messages = XMLBlockFormatter().format(
+        [
+            ResolvedBlock(
+                key="turn",
+                content=restored_turn.content,
+                role=Role.ASSISTANT,
+                event=restored_turn,
+            ),
+            ResolvedBlock(
+                key="execution",
+                content="",
+                role=Role.ASSISTANT,
+                event=restored_execution,
+            ),
+        ]
+    )
+
+    assistant = next(message for message in messages if message.role == Role.ASSISTANT)
+    assert assistant.content == "I will run it."
+    assert [call.id for call in assistant.tool_calls] == ["call-roundtrip"]
+    result = next(message for message in messages if message.role == Role.TOOL)
+    assert result.tool_call_id == "call-roundtrip"
+    assert result.content == "status: complete"
 
 
 def test_tool_call_event_result_preserved_after_update(backend):

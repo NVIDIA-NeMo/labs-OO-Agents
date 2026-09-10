@@ -162,11 +162,11 @@ class PredictConfig(BaseModel):
     # ``None`` = unconstrained (parameter-size guard disabled).
     max_param_chars: int | None = 200_000
     # How the Predict output is serialized back into the conversation history:
-    # - "event": The LLMOutput event stays; it replays as a plain assistant
+    # - "event": The LLMResponse event stays; it replays as a plain assistant
     #   message (raw JSON content, no wrapper).
-    # - "tool_call": Replace with a synthetic return_result() ToolCallEvent that
-    #   renders natively through the provider formatter — clearer for downstream
-    #   tool-using models that read this history.
+    # - "tool_call": Keep the LLMResponse and append a synthetic return_result()
+    #   ToolCallEvent that renders natively through the provider formatter —
+    #   clearer for downstream tool-using models that read this history.
     output_serialization: Literal["event", "tool_call"] = "event"
 
     def merge_with(self, other: "PredictConfig") -> "PredictConfig":

@@ -215,7 +215,10 @@ class ToolCallInfo(BaseModel):
 
     id: Annotated[str, Field(description="Tool call id (matches the result's tool_call_id)")]
     name: Annotated[str, Field(description="Tool name")]
-    arguments: Annotated[dict[str, Any], Field(description="Tool arguments as a plain dict")]
+    arguments: Annotated[
+        dict[str, Any] | str,
+        Field(description="Tool arguments as a plain dict or their original JSON string"),
+    ]
 
 
 class TextPart(BaseModel):
@@ -263,8 +266,8 @@ class RenderedMessage(BaseModel):
     Fields are optional and combine based on message kind:
 
     * A plain text message sets ``role`` and ``content``.
-    * An assistant tool call sets ``role=ASSISTANT`` and ``tool_call`` (and
-      leaves ``content=None``).
+    * An assistant tool-call turn sets ``role=ASSISTANT`` and the complete,
+      ordered ``tool_calls`` batch. It may also carry assistant ``content``.
     * A tool result sets ``role=TOOL``, ``tool_call_id`` to the matching call
       id, and ``content`` to the result text.
     * A multimodal message sets ``content`` to the text and ``images`` to a
@@ -278,7 +281,7 @@ class RenderedMessage(BaseModel):
     formatters continue to read ``content`` and are unaware of parts.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     role: Role = Field(description="Message role (SYSTEM / USER / ASSISTANT / TOOL)")
     content: str | None = Field(
@@ -293,12 +296,19 @@ class RenderedMessage(BaseModel):
             "messages where no blocks are involved."
         ),
     )
-    tool_call: ToolCallInfo | None = Field(
-        default=None, description="Assistant tool-call payload, if any"
+    tool_calls: tuple[ToolCallInfo, ...] = Field(
+        default_factory=tuple,
+        description="Complete ordered tool-call batch on an assistant turn",
     )
-    reasoning_items: list[dict[str, Any]] | None = Field(
+    llm_state: dict[str, Any] | None = Field(
         default=None,
-        description="Opaque provider reasoning state associated with an assistant tool call",
+        repr=False,
+        description="Opaque state carried only to the UnifiedLLM replay boundary",
+    )
+    reasoning: str | None = Field(
+        default=None,
+        repr=False,
+        description="Plain reasoning carried to UnifiedLLM for replay as assistant text",
     )
     tool_call_id: str | None = Field(
         default=None, description="Tool-call id this message is a result for"

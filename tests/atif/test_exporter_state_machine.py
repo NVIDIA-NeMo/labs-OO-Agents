@@ -22,8 +22,7 @@ from nooa.events import (
     AfterTurn,
     BeforeTurn,
     Error,
-    LLMComplete,
-    LLMOutput,
+    LLMResponse,
     Notification,
     PythonOutput,
     Reasoning,
@@ -31,6 +30,7 @@ from nooa.events import (
     SystemPrompt,
     Task,
 )
+from nooa.unifiedllm import ToolCall
 from tests.atif.normative import assert_atif_normative
 
 # Minimal system-prompt content used by synthetic tests. In a real run the
@@ -83,7 +83,7 @@ def _drive_basic_codeact_turn(
     is_final_after: bool = True,
     fire_system_prompt: bool = True,
 ) -> None:
-    """Push a complete BeforeTurn → LLMComplete → ToolCallEvent → PythonOutput → AfterTurn sequence.
+    """Push a complete BeforeTurn → LLMResponse → ToolCallEvent → PythonOutput → AfterTurn sequence.
 
     By default also fires a SystemPrompt before BeforeTurn (matching the
     real runtime order: ``_build_messages → SystemPrompt → LLM call``).
@@ -100,25 +100,26 @@ def _drive_basic_codeact_turn(
             turn_number=1,
         )
     )
-    exp.on_llm_complete(
-        LLMComplete(
+    exp.on_llm_response(
+        LLMResponse(
             model_name="fake-model",
-            prompt_tokens=100,
-            completion_tokens=20,
-            cached_tokens=10,
-            cost_usd=0.001,
+            usage={
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "cached_tokens": 10,
+                "cost_usd": 0.001,
+            },
             tool_calls=[
-                {
-                    "tool_call_id": "call_alpha",
-                    "function_name": "execute_python",
-                    "arguments": json.dumps({"code": code}),
-                }
+                ToolCall(
+                    id="call_alpha",
+                    name="execute_python",
+                    arguments=json.dumps({"code": code}),
+                )
             ],
-            reasoning_content="thinking...",
+            reasoning="thinking...",
             generation_id=generation_id,
         )
     )
-    exp.on_llm_output(LLMOutput(content=""))
     exp.on_tool_call_event(
         ToolCallEvent(
             tool_call_id="call_alpha",
@@ -195,7 +196,7 @@ class TestBasicTurn:
 
 class TestJoinabilityByConstruction:
     def test_observation_paired_with_tool_call(self, exporter: AtifExporter) -> None:
-        """The fc_*/call_* bridge is unnecessary: both come from LLMComplete + PythonOutput."""
+        """The fc_*/call_* bridge is unnecessary: both come from LLMResponse + PythonOutput."""
         exporter.on_task(Task(prompt="run"))
         _drive_basic_codeact_turn(exporter)
 
@@ -226,18 +227,20 @@ class TestReturnResultTool:
                 turn_number=1,
             )
         )
-        exporter.on_llm_complete(
-            LLMComplete(
+        exporter.on_llm_response(
+            LLMResponse(
                 model_name="fake-model",
-                prompt_tokens=50,
-                completion_tokens=5,
-                cost_usd=0.0001,
+                usage={
+                    "prompt_tokens": 50,
+                    "completion_tokens": 5,
+                    "cost_usd": 0.0001,
+                },
                 tool_calls=[
-                    {
-                        "tool_call_id": "call_ret",
-                        "function_name": "return_result",
-                        "arguments": json.dumps({"result": 42}),
-                    }
+                    ToolCall(
+                        id="call_ret",
+                        name="return_result",
+                        arguments=json.dumps({"result": 42}),
+                    )
                 ],
                 generation_id="gen-1",
             )
@@ -291,17 +294,16 @@ class TestReturnResultTool:
                 turn_number=1,
             )
         )
-        exporter.on_llm_complete(
-            LLMComplete(
+        exporter.on_llm_response(
+            LLMResponse(
                 model_name="fake-model",
-                prompt_tokens=1,
-                completion_tokens=1,
+                usage={"prompt_tokens": 1, "completion_tokens": 1},
                 tool_calls=[
-                    {
-                        "tool_call_id": "call_mut",
-                        "function_name": "return_result",
-                        "arguments": "{}",
-                    }
+                    ToolCall(
+                        id="call_mut",
+                        name="return_result",
+                        arguments="{}",
+                    )
                 ],
                 generation_id="gen-1",
             )
@@ -505,16 +507,15 @@ class TestReasoning:
         )
         # Reasoning fires inside the turn (mid execute_python).
         exporter.on_reasoning(Reasoning(content="Step A. "))
-        exporter.on_llm_complete(
-            LLMComplete(
+        exporter.on_llm_response(
+            LLMResponse(
                 model_name="fake-model",
-                prompt_tokens=1,
-                completion_tokens=1,
-                reasoning_content="Initial CoT.",
+                usage={"prompt_tokens": 1, "completion_tokens": 1},
+                reasoning="Initial CoT.",
                 generation_id="gen-1",
             )
         )
-        # Reasoning appended even though LLMComplete already set reasoning_content.
+        # Reasoning appended even though LLMResponse already set reasoning_content.
         exporter.on_reasoning(Reasoning(content="Step B."))
         exporter.on_after_turn(
             AfterTurn(
@@ -591,7 +592,7 @@ class TestSystemPrompt:
         exporter.on_task(Task(prompt="hi"))
         # New LLM call sees a different system prompt (e.g. a dynamic static
         # block mutated). The runtime fires SystemPrompt again with the new
-        # content right before LLMComplete.
+        # content right before LLMResponse.
         _seed_system_prompt(exporter, content="Drifted system prompt")
         _drive_basic_codeact_turn(exporter, fire_system_prompt=False)
 

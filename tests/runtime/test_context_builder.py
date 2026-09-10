@@ -557,12 +557,12 @@ class TestPhaseEvents:
         assert result[0].event is event
         assert result[0].content == ""  # Deferred — serialized at render time
 
-    def test_empty_llm_output_is_persisted_but_not_provider_visible(self):
-        from nooa.events import LLMOutput
+    def test_empty_llm_response_is_persisted_but_not_provider_visible(self):
+        from nooa.events import LLMResponse
         from nooa.runtime.context_builder import _phase_events
 
-        empty = LLMOutput(content="", tag="1")
-        visible = LLMOutput(content="answer", tag="2")
+        empty = LLMResponse(content="", tag="1")
+        visible = LLMResponse(content="answer", tag="2")
         events = [empty, visible]
         em = _make_event_manager(events)
 
@@ -570,6 +570,38 @@ class TestPhaseEvents:
 
         assert [block.event for block in result] == [visible]
         assert em.values() == events
+
+    def test_tool_turn_and_linked_executions_are_public_context_ir(self):
+        from nooa.events import LLMResponse
+        from nooa.runtime.context_builder import _phase_events
+        from nooa.unifiedllm import ToolCall
+
+        turn = LLMResponse(
+            content="",
+            tag="1",
+            tool_calls=(
+                ToolCall(
+                    id="call-1",
+                    name="execute_python",
+                    arguments='{"code":"print(1)"}',
+                ),
+            ),
+            finish_reason="tool_calls",
+        )
+        call = ToolCallEvent(
+            tool_call_id="call-1",
+            name="execute_python",
+            arguments={"code": "print(1)"},
+            llm_response_id=turn.id,
+            result=ToolResult(tool_call_id="call-1", content="status: complete"),
+            tag="2",
+        )
+        em = _make_event_manager([turn, call])
+
+        result = _phase_events([], em)
+
+        assert [block.event for block in result] == [turn, call]
+        assert em.values() == [turn, call]
 
     def test_current_call_query_keeps_task_event(self):
         """EventQuery.current_call() must keep the task so LLM gets system + task.

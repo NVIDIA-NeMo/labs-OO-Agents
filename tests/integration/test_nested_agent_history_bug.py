@@ -12,6 +12,8 @@ from the immediately preceding assistant message.
 """
 
 import json
+from copy import deepcopy
+from typing import Any
 
 import pytest
 
@@ -29,7 +31,6 @@ def _resp(content: str = "", tool_calls: list | None = None) -> LLMResponse:
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
-        assistant_message={"role": "assistant", "content": content},
     )
 
 
@@ -53,6 +54,18 @@ def _return_result(result, call_id: str = "call_return") -> ToolCall:
 
 # Module-level test LLM placeholder
 _TEST_LLM = FakeLLMClient()
+
+
+class _RecordingFakeLLM(FakeLLMClient):
+    """Fake client that retains each rendered provider prompt."""
+
+    def __init__(self, scripted_responses: list[LLMResponse]):
+        super().__init__(scripted_responses)
+        self.message_history: list[list[dict[str, Any]]] = []
+
+    async def acall(self, messages, tools=None, output_model=None, **kwargs):
+        self.message_history.append(deepcopy(messages))
+        return await super().acall(messages, tools, output_model, **kwargs)
 
 
 class TestNestedAgentHistoryBug:
@@ -100,7 +113,7 @@ class TestNestedAgentHistoryBug:
         # 1. outer_method turn 1: execute_python calling inner_method, then print result
         # 2. inner_method turn 1: return_result with "inner_done"
         # 3. outer_method turn 2: return_result with combined result (SHOULD FAIL due to bug)
-        fake_llm = FakeLLMClient(
+        fake_llm = _RecordingFakeLLM(
             scripted_responses=[
                 # outer_method turn 1: call inner_method and capture result
                 _resp(
@@ -136,6 +149,39 @@ class TestNestedAgentHistoryBug:
         result = await agent.outer_method()
 
         assert result == "outer_with_inner_done"
+
+        # The inner generation sees the outer execute_python call while that
+        # cell is still active. The next outer generation must retain that
+        # exact provider-visible prefix instead of rewriting its tool result
+        # from "executing" to "complete" and invalidating the prompt cache.
+        inner_prompt = fake_llm.message_history[1]
+        outer_followup_prompt = fake_llm.message_history[2]
+
+        def from_outer_call(messages):
+            index = next(
+                i
+                for i, message in enumerate(messages)
+                if message.get("role") == "assistant"
+                and any(
+                    call.get("id") == "call_outer_exec_1" for call in message.get("tool_calls", [])
+                )
+            )
+            return messages[index:]
+
+        inner_prefix = from_outer_call(inner_prompt)
+        outer_suffix = from_outer_call(outer_followup_prompt)
+        # Dynamic context is deliberately a recomputed trailing suffix, so
+        # compare only the stable history before it.
+        if inner_prefix[-1].get("content", "").startswith("<context>"):
+            inner_prefix = inner_prefix[:-1]
+        assert outer_suffix[: len(inner_prefix)] == inner_prefix
+
+        receipt = next(
+            message
+            for message in inner_prefix
+            if message.get("tool_call_id") == "call_outer_exec_1"
+        )
+        assert receipt["content"] == "status: accepted"
 
     @pytest.mark.asyncio
     async def test_single_method_no_nesting_works(self):

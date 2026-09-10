@@ -45,8 +45,10 @@ class TestResponsesProviderFormatter:
         messages = [
             RenderedMessage(
                 role=Role.ASSISTANT,
-                tool_call=ToolCallInfo(
-                    id="call_123", name="execute_python", arguments={"code": "print(1)"}
+                tool_calls=(
+                    ToolCallInfo(
+                        id="call_123", name="execute_python", arguments={"code": "print(1)"}
+                    ),
                 ),
             ),
         ]
@@ -85,7 +87,9 @@ class TestResponsesProviderFormatter:
             RenderedMessage(role=Role.USER, content="Add 2+2"),
             RenderedMessage(
                 role=Role.ASSISTANT,
-                tool_call=ToolCallInfo(id="tc_1", name="execute_python", arguments={"code": "2+2"}),
+                tool_calls=(
+                    ToolCallInfo(id="tc_1", name="execute_python", arguments={"code": "2+2"}),
+                ),
             ),
             RenderedMessage(role=Role.TOOL, content="4", tool_call_id="tc_1"),
             RenderedMessage(role=Role.USER, content="Now multiply by 3"),

@@ -17,6 +17,16 @@ from typing import Any, Literal, cast
 import litellm
 from pydantic import BaseModel, RootModel
 
+from nooa._llm_state import (
+    LLM_STATE_KEY,
+    carried_reasoning,
+    carried_replay_batch,
+    carried_state,
+    demote_chat_reasoning,
+    demote_responses_batch,
+)
+from nooa.llm_types import LLMResponse, LLMUsage, ToolCall
+
 from .http_config import HttpConfig
 from .retry import EmptyContentError, sync_retry, with_retry
 from .retry_config import RetryConfig
@@ -661,33 +671,6 @@ def create_tool_from_callable(tool_callable: Callable) -> Tool:
     )
 
 
-@dataclass
-class ToolCall:
-    """Standardized tool call representation across all LLM APIs"""
-
-    id: str
-    name: str
-    arguments: str
-
-
-@dataclass
-class LLMResponse:
-    """Standardized response from any LLM API"""
-
-    raw_response: Any
-    content: str | BaseModel
-    tool_calls: list[ToolCall]
-    finish_reason: Literal["stop", "tool_calls", "length", "error"]
-    assistant_message: dict[str, Any]
-    reasoning: str | None = None  # o1-style or DeepSeek/QwQ reasoning
-    usage: dict[str, int] | None = None  # Token usage stats
-
-    @property
-    def message(self) -> str | BaseModel | None:
-        """Backward-compatible alias for content."""
-        return self.content
-
-
 # --- Bedrock JSON schema sanitization (gl-134) ---
 # Bedrock Claude rejects schemas with certain JSON schema keywords.
 # We strip/fix these for Bedrock models and rely on Pydantic's client-side
@@ -1095,7 +1078,7 @@ _token_calibration = TokenCalibration()
 def _update_token_calibration(
     model: str,
     messages: list[dict[str, Any]],
-    usage: dict[str, int],
+    usage: LLMUsage,
     tools: list[dict[str, Any]] | None = None,
 ) -> None:
     """Update token calibration from an API response's usage data.
@@ -1114,7 +1097,7 @@ def _update_token_calibration(
       and inflated the ratio (observed ~2.7x), which then scaled every
       displayed/triggering token count up by that bogus factor.
     """
-    actual = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+    actual = usage.input_tokens
     if actual <= 0:
         return
     # Calibration is best-effort: it must NEVER raise out of the (already paid)
@@ -1540,10 +1523,10 @@ def _finish_reason_for_tool_calls(
     return "tool_calls"
 
 
-def _extract_reasoning_and_usage(raw_response: Any) -> tuple[str | None, dict[str, int] | None]:
+def _extract_reasoning_and_usage(raw_response: Any) -> tuple[str | None, LLMUsage | None]:
     """Extract reasoning and usage from raw LLM response."""
     reasoning = None
-    usage = None
+    usage: LLMUsage | None = None
 
     # Extract reasoning (o1-style or DeepSeek/QwQ)
     if hasattr(raw_response, "choices") and raw_response.choices:
@@ -1552,65 +1535,54 @@ def _extract_reasoning_and_usage(raw_response: Any) -> tuple[str | None, dict[st
 
     # Extract usage
     if hasattr(raw_response, "usage") and raw_response.usage:
-        usage_obj = raw_response.usage
-        if hasattr(usage_obj, "_asdict"):
-            usage = usage_obj._asdict()
-        elif hasattr(usage_obj, "model_dump"):
-            usage = usage_obj.model_dump()
-        elif isinstance(usage_obj, dict):
-            usage = usage_obj
-        else:
-            # Try to extract common fields
-            usage = {
-                "prompt_tokens": getattr(usage_obj, "prompt_tokens", 0),
-                "completion_tokens": getattr(usage_obj, "completion_tokens", 0),
-                "total_tokens": getattr(usage_obj, "total_tokens", 0),
-            }
+        usage = LLMUsage.from_provider(raw_response.usage)
 
     return reasoning, usage
 
 
-def _completion_assistant_message(
-    message: Any,
-    *,
-    tool_calls: list[Any] | None = None,
-) -> dict[str, Any]:
-    """Build a replayable Chat-Completions assistant message.
+def _completion_llm_state(message: Any) -> dict[str, Any] | None:
+    """Capture opaque Chat-Completions reasoning without duplicating the turn.
 
     LiteLLM 1.97 bridges GPT-5.4+ function-tool requests to the Responses API
     and returns the encrypted reasoning state as ``reasoning_items`` on the
-    chat-shaped message. That state must be replayed with the assistant tool
-    call on the next turn; dropping it makes multi-turn reasoning tool calls
-    lose their provider state.
+    chat-shaped message. Public content and tool calls already have canonical
+    fields on :class:`LLMResponse`; only the opaque provider state belongs here.
     """
-    assistant_message: dict[str, Any] = {
-        "role": "assistant",
-        "content": getattr(message, "content", None) or "",
-    }
-
-    if tool_calls:
-        assistant_message["tool_calls"] = [
-            {
-                "id": tool_call.id,
-                "type": "function",
-                "function": {
-                    "name": tool_call.function.name,
-                    "arguments": tool_call.function.arguments,
-                },
-            }
-            for tool_call in tool_calls
-        ]
-
     reasoning_items = getattr(message, "reasoning_items", None)
-    if reasoning_items:
-        assistant_message["reasoning_items"] = [
-            item.model_dump(exclude_none=True)
-            if hasattr(item, "model_dump")
-            else copy.deepcopy(item)
-            for item in reasoning_items
-        ]
+    if not reasoning_items:
+        return None
+    return {"reasoning_items": [_opaque_item(item) for item in reasoning_items]}
 
-    return assistant_message
+
+def _opaque_item(item: Any) -> Any:
+    """Detach one provider-owned item for durable storage."""
+    if hasattr(item, "model_dump"):
+        return item.model_dump(exclude_none=True)
+    return copy.deepcopy(item)
+
+
+def _item_field(item: Any, name: str) -> Any:
+    return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
+
+
+def _responses_llm_state(output: list[Any]) -> dict[str, Any] | None:
+    """Capture opaque Responses items plus lightweight ordering anchors."""
+    reasoning_items: list[Any] = []
+    order: list[dict[str, Any]] = []
+    for item in output:
+        item_type = _item_field(item, "type")
+        if item_type == "reasoning":
+            order.append({"type": "reasoning", "index": len(reasoning_items)})
+            reasoning_items.append(_opaque_item(item))
+        elif item_type == "function_call":
+            call_id = _item_field(item, "call_id")
+            if isinstance(call_id, str):
+                order.append({"type": "function_call", "call_id": call_id})
+        elif item_type == "message":
+            order.append({"type": "message"})
+    if not reasoning_items:
+        return None
+    return {"items": reasoning_items, "order": order}
 
 
 def _extract_xml_tool_calls(content: str) -> list["ToolCall"]:
@@ -1812,6 +1784,8 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
+        messages = demote_chat_reasoning(messages)
+
         # Inject cache_control at the message level for prompt caching
         cache_points = (
             self.cache_control_injection_points
@@ -1896,16 +1870,14 @@ class CompletionClient(UnifiedLLM):
 
             return LLMResponse(
                 raw_response=raw_response,
-                content="",
+                content=response_message.content or "",
                 tool_calls=tool_calls,
                 finish_reason=_finish_reason_for_tool_calls(
                     _map_completion_finish_reason(raw_response)
                 ),
-                assistant_message=_completion_assistant_message(
-                    response_message, tool_calls=raw_tool_calls
-                ),
                 reasoning=reasoning,
                 usage=usage,
+                llm_state=_completion_llm_state(response_message),
             )
 
         text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
@@ -1922,20 +1894,9 @@ class CompletionClient(UnifiedLLM):
                     finish_reason=_finish_reason_for_tool_calls(
                         _map_completion_finish_reason(raw_response)
                     ),
-                    assistant_message={
-                        "role": "assistant",
-                        "content": text_content,
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {"name": tc.name, "arguments": tc.arguments},
-                            }
-                            for tc in xml_tool_calls
-                        ],
-                    },
                     reasoning=reasoning,
                     usage=usage,
+                    llm_state=_completion_llm_state(raw_response.choices[0].message),
                 )
 
         if output_model:
@@ -1951,12 +1912,13 @@ class CompletionClient(UnifiedLLM):
 
             return LLMResponse(
                 raw_response=raw_response,
-                content=parsed_content,
+                content=text_content,
+                parsed=parsed_content,
                 tool_calls=[],
                 finish_reason=_map_completion_finish_reason(raw_response),
-                assistant_message=_completion_assistant_message(raw_response.choices[0].message),
-                reasoning=reasoning if text_content else None,
+                reasoning=reasoning,
                 usage=usage,
+                llm_state=_completion_llm_state(raw_response.choices[0].message),
             )
 
         return LLMResponse(
@@ -1964,9 +1926,9 @@ class CompletionClient(UnifiedLLM):
             content=text_content,
             tool_calls=[],
             finish_reason=_map_completion_finish_reason(raw_response),
-            assistant_message=_completion_assistant_message(raw_response.choices[0].message),
             reasoning=reasoning,
             usage=usage,
+            llm_state=_completion_llm_state(raw_response.choices[0].message),
         )
 
     async def acall(
@@ -1984,6 +1946,8 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
+        messages = demote_chat_reasoning(messages)
+
         # Inject cache_control at the message level for prompt caching
         cache_points = (
             self.cache_control_injection_points
@@ -2070,16 +2034,14 @@ class CompletionClient(UnifiedLLM):
 
             return LLMResponse(
                 raw_response=raw_response,
-                content="",
+                content=response_message.content or "",
                 tool_calls=tool_calls,
                 finish_reason=_finish_reason_for_tool_calls(
                     _map_completion_finish_reason(raw_response)
                 ),
-                assistant_message=_completion_assistant_message(
-                    response_message, tool_calls=raw_tool_calls
-                ),
                 reasoning=reasoning,
                 usage=usage,
+                llm_state=_completion_llm_state(response_message),
             )
 
         text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
@@ -2096,20 +2058,9 @@ class CompletionClient(UnifiedLLM):
                     finish_reason=_finish_reason_for_tool_calls(
                         _map_completion_finish_reason(raw_response)
                     ),
-                    assistant_message={
-                        "role": "assistant",
-                        "content": text_content,
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {"name": tc.name, "arguments": tc.arguments},
-                            }
-                            for tc in xml_tool_calls
-                        ],
-                    },
                     reasoning=reasoning,
                     usage=usage,
+                    llm_state=_completion_llm_state(raw_response.choices[0].message),
                 )
 
         if output_model:
@@ -2125,12 +2076,13 @@ class CompletionClient(UnifiedLLM):
 
             return LLMResponse(
                 raw_response=raw_response,
-                content=parsed_content,
+                content=text_content,
+                parsed=parsed_content,
                 tool_calls=[],
                 finish_reason=_map_completion_finish_reason(raw_response),
-                assistant_message=_completion_assistant_message(raw_response.choices[0].message),
-                reasoning=reasoning if text_content else None,
+                reasoning=reasoning,
                 usage=usage,
+                llm_state=_completion_llm_state(raw_response.choices[0].message),
             )
 
         return LLMResponse(
@@ -2138,9 +2090,9 @@ class CompletionClient(UnifiedLLM):
             content=text_content,
             tool_calls=[],
             finish_reason=_map_completion_finish_reason(raw_response),
-            assistant_message=_completion_assistant_message(raw_response.choices[0].message),
             reasoning=reasoning,
             usage=usage,
+            llm_state=_completion_llm_state(raw_response.choices[0].message),
         )
 
 
@@ -2197,18 +2149,8 @@ class ReasoningCompletionClient(CompletionClient):
                     else think_reasoning
                 )
 
-                return LLMResponse(
-                    raw_response=response.raw_response,
-                    content=cleaned_content,
-                    tool_calls=response.tool_calls,
-                    finish_reason=response.finish_reason,
-                    assistant_message={
-                        "role": "assistant",
-                        "content": cleaned_content,
-                    },
-                    reasoning=combined_reasoning,
-                    usage=response.usage,
-                )
+                response.content = cleaned_content
+                response.reasoning = combined_reasoning
 
         return response
 
@@ -2238,18 +2180,8 @@ class ReasoningCompletionClient(CompletionClient):
                     else think_reasoning
                 )
 
-                return LLMResponse(
-                    raw_response=response.raw_response,
-                    content=cleaned_content,
-                    tool_calls=response.tool_calls,
-                    finish_reason=response.finish_reason,
-                    assistant_message={
-                        "role": "assistant",
-                        "content": cleaned_content,
-                    },
-                    reasoning=combined_reasoning,
-                    usage=response.usage,
-                )
+                response.content = cleaned_content
+                response.reasoning = combined_reasoning
 
         return response
 
@@ -2398,14 +2330,7 @@ class ResponsesClient(UnifiedLLM):
                 else _make_call()
             )
 
-        # Extract usage if available (Responses API may have different structure)
-        usage = None
-        if hasattr(raw_response, "usage") and raw_response.usage:
-            usage_obj = raw_response.usage
-            if hasattr(usage_obj, "model_dump"):
-                usage = usage_obj.model_dump()
-            elif isinstance(usage_obj, dict):
-                usage = usage_obj
+        usage = LLMUsage.from_provider(getattr(raw_response, "usage", None))
         if usage:
             _update_token_calibration(self.model, messages, usage, tools=api_params.get("tools"))
 
@@ -2418,23 +2343,16 @@ class ResponsesClient(UnifiedLLM):
                 for tc in raw_tool_calls
             ]
 
-            assistant_messages = []
-            for item in output:
-                if hasattr(item, "model_dump"):
-                    assistant_messages.append(item.model_dump())
-                else:
-                    assistant_messages.append(item)
-
             return LLMResponse(
                 raw_response=raw_response,
-                content="",
+                content=self._extract_text_from_output(raw_response),
                 tool_calls=tool_calls,
                 finish_reason=_finish_reason_for_tool_calls(
                     _map_responses_finish_reason(raw_response)
                 ),
-                assistant_message={"_batch": assistant_messages},
                 reasoning=None,  # Responses API doesn't have reasoning
                 usage=usage,
+                llm_state=_responses_llm_state(output),
             )
 
         text_content = self._extract_text_from_output(raw_response)
@@ -2445,12 +2363,13 @@ class ResponsesClient(UnifiedLLM):
 
             return LLMResponse(
                 raw_response=raw_response,
-                content=parsed_content,
+                content=text_content,
+                parsed=parsed_content,
                 tool_calls=[],
                 finish_reason=_map_responses_finish_reason(raw_response),
-                assistant_message={"role": "assistant", "content": text_content},
                 reasoning=None,
                 usage=usage,
+                llm_state=_responses_llm_state(output),
             )
 
         return LLMResponse(
@@ -2458,9 +2377,9 @@ class ResponsesClient(UnifiedLLM):
             content=text_content,
             tool_calls=[],
             finish_reason=_map_responses_finish_reason(raw_response),
-            assistant_message={"role": "assistant", "content": text_content},
             reasoning=None,
             usage=usage,
+            llm_state=_responses_llm_state(output),
         )
 
     async def acall(
@@ -2531,14 +2450,7 @@ class ResponsesClient(UnifiedLLM):
                 else await _make_call()
             )
 
-        # Extract usage if available (Responses API may have different structure)
-        usage = None
-        if hasattr(raw_response, "usage") and raw_response.usage:
-            usage_obj = raw_response.usage
-            if hasattr(usage_obj, "model_dump"):
-                usage = usage_obj.model_dump()
-            elif isinstance(usage_obj, dict):
-                usage = usage_obj
+        usage = LLMUsage.from_provider(getattr(raw_response, "usage", None))
         if usage:
             _update_token_calibration(self.model, messages, usage, tools=api_params.get("tools"))
 
@@ -2551,23 +2463,16 @@ class ResponsesClient(UnifiedLLM):
                 for tc in raw_tool_calls
             ]
 
-            assistant_messages = []
-            for item in output:
-                if hasattr(item, "model_dump"):
-                    assistant_messages.append(item.model_dump())
-                else:
-                    assistant_messages.append(item)
-
             return LLMResponse(
                 raw_response=raw_response,
-                content="",
+                content=self._extract_text_from_output(raw_response),
                 tool_calls=tool_calls,
                 finish_reason=_finish_reason_for_tool_calls(
                     _map_responses_finish_reason(raw_response)
                 ),
-                assistant_message={"_batch": assistant_messages},
                 reasoning=None,
                 usage=usage,
+                llm_state=_responses_llm_state(output),
             )
 
         text_content = self._extract_text_from_output(raw_response)
@@ -2578,12 +2483,13 @@ class ResponsesClient(UnifiedLLM):
 
             return LLMResponse(
                 raw_response=raw_response,
-                content=parsed_content,
+                content=text_content,
+                parsed=parsed_content,
                 tool_calls=[],
                 finish_reason=_map_responses_finish_reason(raw_response),
-                assistant_message={"role": "assistant", "content": text_content},
                 reasoning=None,
                 usage=usage,
+                llm_state=_responses_llm_state(output),
             )
 
         return LLMResponse(
@@ -2591,9 +2497,9 @@ class ResponsesClient(UnifiedLLM):
             content=text_content,
             tool_calls=[],
             finish_reason=_map_responses_finish_reason(raw_response),
-            assistant_message={"role": "assistant", "content": text_content},
             reasoning=None,
             usage=usage,
+            llm_state=_responses_llm_state(output),
         )
 
     def _transform_messages(
@@ -2614,7 +2520,32 @@ class ResponsesClient(UnifiedLLM):
         instructions_parts: list[str] = []
         transformed: list[dict[str, Any]] = []
 
-        for msg in messages:
+        skip_batch_items = 0
+        for index, original in enumerate(messages):
+            if skip_batch_items:
+                skip_batch_items -= 1
+                continue
+            state = copy.deepcopy(carried_state(original))
+            reasoning = carried_reasoning(original)
+            msg = copy.deepcopy(dict(original))
+            msg.pop(LLM_STATE_KEY, None)
+
+            batch_info = carried_replay_batch(original)
+            if batch_info is not None and (state is not None or reasoning is not None):
+                batch_id, batch_size = batch_info
+                candidates = messages[index : index + batch_size]
+                if len(candidates) == batch_size and all(
+                    carried_replay_batch(item) == (batch_id, batch_size) for item in candidates
+                ):
+                    batch = [copy.deepcopy(dict(item)) for item in candidates]
+                    transformed.extend(demote_responses_batch(batch, state, reasoning))
+                    skip_batch_items = batch_size - 1
+                    continue
+                # Middleware changed the batch. Keep its public items, but do
+                # not attach private reasoning or state to different neighbors.
+                state = None
+                reasoning = None
+
             # System messages → extract to instructions
             if msg.get("role") == "system":
                 content = msg.get("content", "")
@@ -2624,7 +2555,10 @@ class ResponsesClient(UnifiedLLM):
 
             # Already in native Responses format (from ResponsesProviderFormatter)
             if "type" in msg:
-                transformed.append(msg)
+                if state is not None or reasoning is not None:
+                    transformed.extend(demote_responses_batch([msg], state, reasoning))
+                else:
+                    transformed.append(msg)
                 continue
 
             # Legacy OpenAI format: tool result messages
@@ -2662,11 +2596,12 @@ class ResponsesClient(UnifiedLLM):
             # Legacy OpenAI format: assistant messages with tool_calls
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 # Preserve assistant text that precedes tool calls (matches native formatter)
+                batch: list[dict[str, Any]] = []
                 if msg.get("content"):
-                    transformed.append({"role": "assistant", "content": msg["content"]})
+                    batch.append({"role": "assistant", "content": msg["content"]})
                 for tc in msg["tool_calls"]:
                     fn = tc.get("function", {})
-                    transformed.append(
+                    batch.append(
                         {
                             "type": "function_call",
                             "call_id": tc["id"],
@@ -2674,6 +2609,7 @@ class ResponsesClient(UnifiedLLM):
                             "arguments": fn.get("arguments", ""),
                         }
                     )
+                transformed.extend(demote_responses_batch(batch, state, reasoning))
                 continue
 
             # User/Assistant text messages → passthrough with cache_control preservation
@@ -2684,7 +2620,10 @@ class ResponsesClient(UnifiedLLM):
                 item = {"role": msg["role"], "content": content}
                 if "cache_control" in msg:
                     item["cache_control"] = msg["cache_control"]
-                transformed.append(item)
+                if (state is not None or reasoning is not None) and msg.get("role") == "assistant":
+                    transformed.extend(demote_responses_batch([item], state, reasoning))
+                else:
+                    transformed.append(item)
                 continue
 
             # Unknown format → passthrough

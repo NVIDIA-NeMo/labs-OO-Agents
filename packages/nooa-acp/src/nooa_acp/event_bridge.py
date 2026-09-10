@@ -32,7 +32,7 @@ from nooa_cli.coding import (
 
 from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
-from nooa.events import LLMComplete, PythonOutput
+from nooa.events import LLMResponse, PythonOutput
 from nooa.interactive import AgentMessage
 
 # ACP owns stdout for JSON-RPC; diagnostics belong on stderr, which is where
@@ -85,7 +85,7 @@ class ACPEventBridge:
             agent.event_manager.on("AgentMessage", self._on_agent_message),
             agent.event_manager.on("ToolCallEvent", self._on_tool_call),
             agent.event_manager.on("PythonOutput", self._on_python_output),
-            agent.event_manager.on("LLMComplete", self._on_llm_complete),
+            agent.event_manager.on("LLMResponse", self._on_llm_response),
             agent.event_manager.on("FileEdit", self._on_file_edit),
             agent.event_manager.on("TerminalCommandStarted", self._on_terminal_started),
             agent.event_manager.on("TerminalCommandOutput", self._on_terminal_output),
@@ -254,18 +254,21 @@ class ACPEventBridge:
             )
         )
 
-    def _on_llm_complete(self, event: EventBase) -> None:
-        if not isinstance(event, LLMComplete):
+    def _on_llm_response(self, event: EventBase) -> None:
+        if not isinstance(event, LLMResponse):
             return
-        self._cost_usd += event.cost_usd
+        usage = event.usage
+        if usage is None:
+            return
+        self._cost_usd += usage.cost_usd
         context_window = getattr(self.agent.llm, "context_window", None)
         if context_window is None:
             return
         self._enqueue(
             UsageUpdate(
                 session_update="usage_update",
-                used=event.prompt_tokens,
-                size=max(context_window, event.prompt_tokens),
+                used=usage.input_tokens,
+                size=max(context_window, usage.input_tokens),
                 cost=Cost(amount=self._cost_usd, currency="USD"),
             )
         )

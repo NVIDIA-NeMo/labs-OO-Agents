@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Self
 
 from nooa.context_blocks import EventBase as EventBase
+from nooa.runtime.event_manager import _validate_event_type_name
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,10 @@ class EventQuery:
     query: str | None = None
     regex: bool = False
     limit: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.type is not None:
+            _validate_event_type_name(self.type, action="query")
 
     @classmethod
     def current_call(cls, limit: int | None = None) -> Self:

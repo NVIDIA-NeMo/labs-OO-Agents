@@ -37,17 +37,6 @@ def _tool_response(name: str, args: dict):
         content="",
         tool_calls=[ToolCall(id=call_id, name=name, arguments=args_json)],
         finish_reason="tool_calls",
-        assistant_message={
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": call_id,
-                    "type": "function",
-                    "function": {"name": name, "arguments": args_json},
-                }
-            ],
-        },
         reasoning=None,
         usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
     )

@@ -39,6 +39,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
+from nooa.llm_types import LLMResponse
 from nooa.runtime.middleware import (
     MIDDLEWARE_AGENT_CALL,
     MIDDLEWARE_EXECUTE_PYTHON,
@@ -46,6 +47,59 @@ from nooa.runtime.middleware import (
 )
 
 _logger = logging.getLogger(__name__)
+
+
+def _relay_response(response: LLMResponse) -> dict[str, Any]:
+    """Project the canonical response only when NeMo Relay needs wire JSON."""
+    result: dict[str, Any] = {"finish_reason": response.finish_reason}
+    if response.content or response.tool_calls or response.reasoning:
+        message: dict[str, Any] = {"role": "assistant", "content": response.content}
+        if response.tool_calls:
+            message["tool_calls"] = [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {"name": call.name, "arguments": call.arguments},
+                }
+                for call in response.tool_calls
+            ]
+        if response.reasoning:
+            message["reasoning_content"] = response.reasoning
+        result["message"] = message
+    if response.usage is not None:
+        result["usage"] = {
+            "prompt_tokens": response.usage.input_tokens,
+            "completion_tokens": response.usage.output_tokens,
+            "total_tokens": response.usage.total_tokens,
+            "cached_tokens": response.usage.cached_input_tokens,
+            "cache_creation_input_tokens": response.usage.cache_write_input_tokens,
+            "reasoning_tokens": response.usage.reasoning_tokens,
+            "cost_usd": response.usage.cost_usd,
+        }
+    return result
+
+
+def _response_for_relay(response: Any) -> dict[str, Any]:
+    """Return observable Relay JSON without exposing canonical opaque state."""
+    # Canonical responses may retain a raw SDK object containing encrypted
+    # provider state. Always project their public fields before considering raw
+    # compatibility fallbacks.
+    if isinstance(response, LLMResponse):
+        return _relay_response(response)
+    raw = getattr(response, "raw_response", None)
+    if raw is not None and hasattr(raw, "model_dump"):
+        return raw.model_dump(mode="json")
+    if hasattr(response, "model_dump"):
+        return response.model_dump(mode="json")
+    if hasattr(response, "assistant_message"):
+        result: dict[str, Any] = {"message": response.assistant_message}
+        if response.usage:
+            result["usage"] = response.usage
+        if response.finish_reason:
+            result["finish_reason"] = response.finish_reason
+        return result
+    return {}
+
 
 if TYPE_CHECKING:
     from nooa.runtime.event_manager import EventManager
@@ -182,24 +236,7 @@ async def nemo_relay_llm_middleware(
         resp = captured_ctx.response
         if resp is None:
             return {}
-        # Prefer the raw litellm ModelResponse (Pydantic) — gives NeMo Relay the
-        # full OpenAI-style structure matching what the old hooks-based
-        # integration returned via captured_response.model_dump(mode="json").
-        raw = getattr(resp, "raw_response", None)
-        if raw is not None and hasattr(raw, "model_dump"):
-            return raw.model_dump(mode="json")
-        # Pydantic response (e.g. passed directly)
-        if hasattr(resp, "model_dump"):
-            return resp.model_dump(mode="json")  # type: ignore[union-attr]
-        # Fallback: manual serialization from unifiedllm.LLMResponse dataclass.
-        if hasattr(resp, "assistant_message"):
-            result: dict[str, Any] = {"message": resp.assistant_message}
-            if resp.usage:
-                result["usage"] = resp.usage
-            if resp.finish_reason:
-                result["finish_reason"] = resp.finish_reason
-            return result
-        return {}
+        return _response_for_relay(resp)
 
     # Note: nemo_relay.llm.execute() returns the pre-guardrail response.
     # Sanitize-response guardrails transform data for NeMo Relay internals

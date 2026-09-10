@@ -20,8 +20,6 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast, get_type_hints
 from uuid import uuid4
 
-from pydantic import BaseModel
-
 from nooa.agentdoc import FileBackedTruncatingStringIO, TruncatingStringIO
 from nooa.agentdoc.introspect import methods, variables
 from nooa.context_blocks import (
@@ -42,10 +40,9 @@ from nooa.events import (
     ExecutionSignal,
     LLMCallEnd,
     LLMCallStart,
-    LLMComplete,
-    LLMOutput,
     SystemPrompt,
 )
+from nooa.llm_types import LLMUsage
 from nooa.runtime.context_vars import (
     _current_event_format_var,
     _in_exec_middleware,
@@ -103,10 +100,11 @@ def _make_llm_metrics_bridge(hm: "HarnessMetrics") -> Callable[[str, Any], None]
     from nooa.runtime.token_usage import accumulate_tokens
 
     def _handle_token_usage(usage: Any) -> None:
-        if isinstance(usage, dict):
+        normalized = LLMUsage.from_provider(usage)
+        if normalized is not None:
             accumulate_tokens(
-                input_tokens=usage.get("prompt_tokens", 0) or 0,
-                output_tokens=usage.get("completion_tokens", 0) or 0,
+                input_tokens=normalized.input_tokens,
+                output_tokens=normalized.output_tokens,
             )
 
     _dispatch: dict[str, Callable[[Any], None]] = {
@@ -180,7 +178,7 @@ def _snapshot_llm_request(
     and returns the trailing ``<context>…</context>`` envelope from the
     same list. Called right after ``_build_messages`` so both reflect the
     exact bytes about to be sent to the LLM; the returned envelope is
-    stamped onto the matching :class:`LLMComplete`. ``record=False`` keeps
+    stamped onto the matching :class:`LLMResponse`. ``record=False`` keeps
     the snapshot out of the LLM-visible event timeline.
     """
     if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
@@ -601,7 +599,7 @@ class ActorRuntime:
 
         For callbacks on LLM output, use:
             agent.event_manager.on("Message", handler)
-            agent.event_manager.on("LLMOutput", handler)
+            agent.event_manager.on("LLMResponse", handler)
         """
         # Agent instance
         self.agent: Any = agent
@@ -876,7 +874,7 @@ class ActorRuntime:
         - System message: context blocks + strategy.strategy_prompt
         - Events: conversation events
 
-        Creates an LLMOutput event and adds it to event manager.
+        Creates an LLMResponse event and adds it to event manager.
 
         Args:
             tools: Optional list of tool definitions.
@@ -886,7 +884,7 @@ class ActorRuntime:
         Returns:
             Tuple of (LLMResponse, event_id) where:
             - LLMResponse from unifiedllm with content, reasoning, usage
-            - event_id can be used for event_manager.update() or event_manager.get()
+            - event_id identifies the canonical provider turn for inspection or linking
         """
         if self._current_method is None:
             raise RuntimeError("generate() called with no current method context")
@@ -1126,59 +1124,20 @@ class ActorRuntime:
                     raise
                 _emit_llm_end(success=True)
 
-        # Emit LLMComplete BEFORE LLMOutput so subscribers that build per-turn
-        # records (e.g. the ATIF exporter) populate metrics/tool_calls before
-        # the assistant-message content arrives. record=False keeps this off
-        # the LLM-visible event timeline (Role.RUNTIME_EVENT) but on()
-        # subscribers still receive it.
-        _model_name = getattr(llm_client, "model", "") or ""
-        usage = getattr(response, "usage", None)
-        # Normalize usage to a dict regardless of whether the provider returned
-        # a dict, a Pydantic model with attributes, or nothing at all. The
-        # token-calibration logic above already grovels through both shapes;
-        # mirror that here so LLMComplete metrics don't silently zero out.
-        _usage_raw = usage if usage is not None else getattr(response, "usage", None)
-        _usage_dict: dict[str, Any] = {}
-        if isinstance(_usage_raw, dict):
-            _usage_dict = _usage_raw
-        elif _usage_raw is not None:
-            for _key in (
-                "prompt_tokens",
-                "input_tokens",
-                "completion_tokens",
-                "output_tokens",
-                "cached_tokens",
-                "cache_read_input_tokens",
-                "reasoning_tokens",
-                "cost",
-                "cost_usd",
-            ):
-                _val = getattr(_usage_raw, _key, None)
-                if _val is not None:
-                    _usage_dict[_key] = _val
-            _prompt_details = getattr(_usage_raw, "prompt_tokens_details", None)
-            if _prompt_details is not None:
-                _usage_dict["prompt_tokens_details"] = (
-                    _prompt_details
-                    if isinstance(_prompt_details, dict)
-                    else {
-                        "cached_tokens": getattr(_prompt_details, "cached_tokens", None),
-                    }
-                )
-            _completion_details = getattr(_usage_raw, "completion_tokens_details", None)
-            if _completion_details is not None:
-                _usage_dict["completion_tokens_details"] = (
-                    _completion_details
-                    if isinstance(_completion_details, dict)
-                    else {
-                        "reasoning_tokens": getattr(_completion_details, "reasoning_tokens", None),
-                    }
-                )
-        _prompt_tokens = int(
-            _usage_dict.get("prompt_tokens") or _usage_dict.get("input_tokens") or 0
-        )
-        if _prompt_tokens > 0:
-            self._last_prompt_tokens_actual = _prompt_tokens
+        # UnifiedLLM creates the canonical response. Enrich that same object
+        # with runtime correlation data and persist it once as the assistant
+        # turn; there is no second output or completion event to synchronize.
+        if response.tag is not None:
+            raise RuntimeError(
+                "LLM middleware returned an already-recorded LLMResponse; "
+                "each call must return a fresh response object"
+            )
+        response.model_name = getattr(llm_client, "model", "") or response.model_name
+        response.generation_id = current_generation_id or ""
+        response.dynamic_context = _dynamic_context
+        usage = response.usage
+        if usage is not None and usage.input_tokens > 0:
+            self._last_prompt_tokens_actual = usage.input_tokens
             if self._last_context_stats is not None:
                 # The provider's exact prompt-token count is the single source of
                 # truth for ctx% display, summarization triggers, and archive
@@ -1186,7 +1145,7 @@ class ActorRuntime:
                 # estimate); we write the authoritative value back here.
                 stats = self._last_context_stats
                 self._last_context_stats = stats.model_copy(
-                    update={"prompt_tokens": _prompt_tokens}
+                    update={"prompt_tokens": usage.input_tokens}
                 )
                 # Recalibrate the chars→tokens ratio from this real response:
                 # tokens_per_char = prompt_tokens / total_chars. The next
@@ -1194,56 +1153,8 @@ class ActorRuntime:
                 # or the litellm tokenizer.
                 total_chars = stats.context_blocks_chars + stats.events_chars
                 if total_chars > 0:
-                    self._tokens_per_char = _prompt_tokens / total_chars
-        _completion_tokens = int(
-            _usage_dict.get("completion_tokens") or _usage_dict.get("output_tokens") or 0
-        )
-        _cached_tokens = int(
-            _usage_dict.get("cached_tokens")
-            or _usage_dict.get("cache_read_input_tokens")
-            or (_usage_dict.get("prompt_tokens_details") or {}).get("cached_tokens")
-            or 0
-        )
-        _reasoning_tokens = int(
-            (_usage_dict.get("completion_tokens_details") or {}).get("reasoning_tokens")
-            or _usage_dict.get("reasoning_tokens")
-            or 0
-        )
-        _cost_usd = float(_usage_dict.get("cost") or _usage_dict.get("cost_usd") or 0.0)
-        _tool_calls_payload = [
-            {"tool_call_id": tc.id, "function_name": tc.name, "arguments": tc.arguments}
-            for tc in (getattr(response, "tool_calls", None) or [])
-        ]
-        # _dynamic_context was captured at render time alongside the
-        # SystemPrompt snapshot (see _snapshot_llm_request), so it reflects
-        # the exact messages sent to the LLM even across context-window retry.
-        self.event_manager.add(
-            LLMComplete(
-                model_name=_model_name,
-                prompt_tokens=_prompt_tokens,
-                completion_tokens=_completion_tokens,
-                cached_tokens=_cached_tokens,
-                reasoning_tokens=_reasoning_tokens,
-                cost_usd=_cost_usd,
-                tool_calls=_tool_calls_payload,
-                reasoning_content=getattr(response, "reasoning", None) or "",
-                generation_id=current_generation_id or "",
-                dynamic_context=_dynamic_context,
-            ),
-            record=False,
-        )
-
-        # Create and record LLMOutput
-        # Serialize Pydantic models to JSON for proper event storage
-        content = response.content or ""
-        if isinstance(content, BaseModel):
-            # Pydantic model - serialize to JSON string
-            content = content.model_dump_json()
-        elif not isinstance(content, str):
-            # Other non-string types - convert to string representation
-            content = str(content)
-        event = LLMOutput(content=content)
-        event_id = self.event_manager.add(event)
+                    self._tokens_per_char = usage.input_tokens / total_chars
+        event_id = self.event_manager.add(response)
 
         return response, event_id
 

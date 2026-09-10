@@ -21,7 +21,6 @@ def _resp(value: str) -> LLMResponse:
         content=f'{{"value": "{value}"}}',
         tool_calls=[],
         finish_reason="stop",
-        assistant_message={"role": "assistant", "content": f'{{"value": "{value}"}}'},
     )
 
 

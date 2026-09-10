@@ -96,7 +96,6 @@ class TestInitialLlmMessagesNoErrors:
                     content="",
                     tool_calls=[_return_result_tool(42)],
                     finish_reason="tool_calls",
-                    assistant_message={"role": "assistant", "content": ""},
                 ),
             ]
         )

@@ -19,7 +19,7 @@ context object and *nxt* calls the rest of the chain.
 **intercept() vs on()** — both live on ``EventManager``:
 
 - ``intercept("llm_call", fn)`` wraps a live operation (can transform / block)
-- ``on("LLMOutput", fn)`` observes a recorded event (fire-and-forget, after
+- ``on("LLMResponse", fn)`` observes a recorded event (fire-and-forget, after
   the operation completes and the result is recorded)
 """
 

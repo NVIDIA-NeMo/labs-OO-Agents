@@ -16,7 +16,7 @@ from nooa import (
 from nooa.config import CodeActConfig
 from nooa.context_blocks import ToolCallEvent
 from nooa.errors import GenerationError
-from nooa.events import LLMOutput, PythonOutput, TextOnlyReply
+from nooa.events import PythonOutput, TextOnlyReply
 from nooa.runtime.event_manager import EventManager
 from nooa.runtime.harness_metrics import HarnessMetrics
 from nooa.storage import SQLiteStorageManager
@@ -25,7 +25,7 @@ from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 _TEST_LLM = FakeLLMClient()
 
 
-def _resp(content="", tool_calls=None, finish_reason=None):
+def _resp(content="", tool_calls=None, finish_reason=None, reasoning=None):
     if finish_reason is None:
         finish_reason = "tool_calls" if tool_calls else "stop"
     return LLMResponse(
@@ -33,7 +33,7 @@ def _resp(content="", tool_calls=None, finish_reason=None):
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
-        assistant_message={"role": "assistant", "content": content},
+        reasoning=reasoning,
     )
 
 
@@ -49,6 +49,10 @@ def _events(agent, event_type):
     return [event for event in agent.event_manager.values() if isinstance(event, event_type)]
 
 
+def _text_outputs(agent):
+    return [event for event in _events(agent, LLMResponse) if not event.tool_calls]
+
+
 @pytest.mark.asyncio
 async def test_default_preserves_text_adds_error_and_retries():
     class TestAgent(Agent, llm=_TEST_LLM):
@@ -59,7 +63,7 @@ async def test_default_preserves_text_adds_error_and_retries():
 
     fake_llm = FakeLLMClient(
         scripted_responses=[
-            _resp("I think the answer is ready."),
+            _resp("I think the answer is ready.", reasoning="I checked the evidence."),
             _resp(tool_calls=[_ret({"ok": True})]),
         ]
     )
@@ -67,8 +71,9 @@ async def test_default_preserves_text_adds_error_and_retries():
 
     assert await agent.my_task() == {"ok": True}
 
-    outputs = _events(agent, LLMOutput)
+    outputs = _text_outputs(agent)
     assert [event.content for event in outputs] == ["I think the answer is ready."]
+    assert outputs[0].reasoning == "I checked the evidence."
 
     diagnostics = _events(agent, TextOnlyReply)
     assert len(diagnostics) == 1
@@ -106,7 +111,7 @@ async def test_return_text_as_result_is_opt_in():
     agent = TestAgent(llm=FakeLLMClient(scripted_responses=[_resp("done")]))
 
     assert await agent.my_task() == "done"
-    assert [event.content for event in _events(agent, LLMOutput)] == ["done"]
+    assert [event.content for event in _events(agent, LLMResponse)] == ["done"]
     assert _events(agent, ToolCallEvent) == []
     diagnostic = _events(agent, TextOnlyReply)[0]
     assert diagnostic.handler == "return_text_as_result"
@@ -135,8 +140,25 @@ async def test_error_finish_reason_never_calls_text_only_handler():
         await agent.my_task()
 
     assert calls == []
-    assert [event.content for event in _events(agent, LLMOutput)] == ["partial"]
+    assert [event.content for event in _events(agent, LLMResponse)] == ["partial"]
     assert _events(agent, TextOnlyReply) == []
+
+
+@pytest.mark.asyncio
+async def test_empty_error_response_remains_durable():
+    class TestAgent(Agent, llm=_TEST_LLM):
+        @strategy(CodeActStrategy())
+        async def my_task(self) -> str:
+            """Return a string."""
+            ...
+
+    agent = TestAgent(llm=FakeLLMClient(scripted_responses=[_resp("", finish_reason="error")]))
+
+    with pytest.raises(GenerationError, match="incomplete response"):
+        await agent.my_task()
+
+    responses = _events(agent, LLMResponse)
+    assert [(event.content, event.finish_reason) for event in responses] == [("", "error")]
 
 
 @pytest.mark.asyncio
@@ -151,7 +173,7 @@ async def test_default_does_not_treat_valid_string_as_result():
     agent = TestAgent(llm=fake_llm)
 
     assert await agent.my_task() == "done"
-    assert [event.content for event in _events(agent, LLMOutput)] == ["prose"]
+    assert [event.content for event in _text_outputs(agent)] == ["prose"]
     assert any(event.event_type == "Error" for event in agent.event_manager.values())
 
 
@@ -167,7 +189,7 @@ async def test_default_preserves_empty_stop_without_replaying_empty_assistant_me
     agent = TestAgent(llm=fake_llm)
 
     assert await agent.my_task() == {"ok": True}
-    assert [event.content for event in _events(agent, LLMOutput)] == [""]
+    assert [event.content for event in _text_outputs(agent)] == [""]
     assert [event.content for event in _events(agent, TextOnlyReply)] == [""]
     assert not any(
         message.get("role") == "assistant" and not message.get("content")
@@ -196,7 +218,7 @@ async def test_callback_can_synthesize_execute_python_without_replacing_output()
     agent = TestAgent(llm=fake_llm)
 
     assert await agent.my_task() == "done"
-    assert [event.content for event in _events(agent, LLMOutput)] == ["hello"]
+    assert [event.content for event in _text_outputs(agent)] == ["hello"]
     assert [event.tool_call_id for event in _events(agent, ToolCallEvent)] == [
         "synthetic_cell",
         "c_ret",
@@ -301,9 +323,11 @@ async def test_text_only_output_survives_sqlite_resume(tmp_path):
     reopened = SQLiteStorageManager(db_path)
     try:
         resumed = EventManager(backend=reopened.event_backend).values()
-        assert [event.content for event in resumed if isinstance(event, LLMOutput)] == [
-            "I should have used a tool."
-        ]
+        assert [
+            event.content
+            for event in resumed
+            if isinstance(event, LLMResponse) and not event.tool_calls
+        ] == ["I should have used a tool."]
         diagnostics = [event for event in resumed if isinstance(event, TextOnlyReply)]
         assert len(diagnostics) == 1
         assert diagnostics[0].action == "retry"

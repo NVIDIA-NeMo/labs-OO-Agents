@@ -44,7 +44,6 @@ def _resp(
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
-        assistant_message={"role": "assistant", "content": content},
         usage=usage or {"prompt_tokens": 50, "completion_tokens": 10},
     )
 
@@ -198,7 +197,7 @@ async def test_crash_inside_scope_marks_trajectory(tmp_path: Path) -> None:
 async def test_observation_paired_end_to_end(tmp_path: Path) -> None:
     """End-to-end pin: every tool_call has its matching observation result
     (the joinability invariant). The fc_*/call_* bridge is unnecessary;
-    LLMComplete + PythonOutput route everything by canonical call_* id.
+    LLMResponse + PythonOutput route everything by canonical call_* id.
     """
     llm = FakeLLMClient(
         scripted_responses=[
@@ -275,7 +274,6 @@ async def test_canonical_call_id_used_when_both_ids_present(tmp_path: Path) -> N
             )
         ],
         finish_reason="tool_calls",
-        assistant_message={"role": "assistant", "content": ""},
         usage={"prompt_tokens": 5, "completion_tokens": 2},
     )
     llm = FakeLLMClient(scripted_responses=[response])

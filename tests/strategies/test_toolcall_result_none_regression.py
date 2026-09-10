@@ -50,7 +50,6 @@ def _resp(content: str, tool_calls: list | None = None) -> LLMResponse:
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
-        assistant_message={"role": "assistant", "content": content},
     )
 
 
@@ -225,8 +224,7 @@ class TestFormatterSafetyNet:
 
         tool_call_msg = messages[0]
         assert tool_call_msg.role == Role.ASSISTANT
-        assert tool_call_msg.tool_call is not None
-        assert tool_call_msg.tool_call.id == "tc_orphan"
+        assert [call.id for call in tool_call_msg.tool_calls] == ["tc_orphan"]
 
         result_msg = messages[1]
         assert result_msg.role == Role.TOOL
@@ -331,8 +329,7 @@ class TestEndToEndRenderedMessageIntegrity:
                 )
                 messages = _event_block_to_messages(block, wrap_content=None)
                 for msg in messages:
-                    if msg.tool_call is not None:
-                        tool_use_ids.add(msg.tool_call.id)
+                    tool_use_ids.update(call.id for call in msg.tool_calls)
                     if msg.role == Role.TOOL and msg.tool_call_id:
                         tool_result_ids.add(msg.tool_call_id)
 
@@ -479,7 +476,6 @@ class TestTranslatedToolCallPath:
                         )
                     ],
                     finish_reason="tool_calls",
-                    assistant_message={"role": "assistant", "content": ""},
                 ),
                 # Then return the result
                 _resp("", tool_calls=[_return_result(call_id="call_ret", result=3)]),
@@ -526,7 +522,6 @@ class TestTranslatedToolCallPath:
                         )
                     ],
                     finish_reason="tool_calls",
-                    assistant_message={"role": "assistant", "content": ""},
                 ),
                 # Then return valid result
                 _resp("", tool_calls=[_return_result(call_id="call_ok", result=42)]),
@@ -590,8 +585,8 @@ class TestStopToReturnResultPath:
             await agent_instance.get_number()
 
         events = agent_instance.event_manager.values()
-        llm_outputs = [e for e in events if e.event_type == "LLMOutput"]
-        assert [e.content for e in llm_outputs] == ["hello world"]
+        llm_responses = [e for e in events if e.event_type == "LLMResponse"]
+        assert [e.content for e in llm_responses] == ["hello world"]
         tool_call_events = [e for e in events if e.event_type == "ToolCallEvent"]
         assert tool_call_events == []
 
@@ -618,7 +613,6 @@ class TestStopToReturnResultPath:
                     content="",
                     tool_calls=[],
                     finish_reason="stop",
-                    assistant_message={"role": "assistant", "content": ""},
                 ),
             ]
         )
@@ -628,8 +622,8 @@ class TestStopToReturnResultPath:
         assert result is None
 
         events = agent_instance.event_manager.values()
-        llm_outputs = [e for e in events if e.event_type == "LLMOutput"]
-        assert [e.content for e in llm_outputs] == [""]
+        llm_responses = [e for e in events if e.event_type == "LLMResponse"]
+        assert [e.content for e in llm_responses] == [""]
         tool_call_events = [e for e in events if e.event_type == "ToolCallEvent"]
         assert tool_call_events == []
 
@@ -686,7 +680,7 @@ class TestFormatterFullPipeline:
         formatter = XMLBlockFormatter()
         messages = formatter.format([normal_block, none_block])
 
-        tool_use_ids = {m.tool_call.id for m in messages if m.tool_call is not None}
+        tool_use_ids = {call.id for message in messages for call in message.tool_calls}
         tool_result_ids = {
             m.tool_call_id for m in messages if m.role == Role.TOOL and m.tool_call_id
         }

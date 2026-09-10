@@ -26,7 +26,7 @@ from nooa.context_blocks.formatter import (
     FORMAT_XML,
     BlockFormatter,
     FormatType,
-    _event_block_to_messages,
+    _event_blocks_to_messages,
     _xml_system_block,
 )
 from nooa.context_blocks.models import (
@@ -114,15 +114,12 @@ class CachedBlockFormatter(BlockFormatter):
             content, parts = _concat_parts(static_blocks)
             messages.append(RenderedMessage(role=Role.SYSTEM, content=content, parts=parts))
 
-        # Event messages (wrap like XMLBlockFormatter does, except ToolCallEvents
-        # still fan out into tool_call + tool_result messages).
-        for block in message_blocks:
-            messages.extend(
-                _event_block_to_messages(
-                    block,
-                    wrap_content=_xml_message_content_shim,
-                )
+        messages.extend(
+            _event_blocks_to_messages(
+                message_blocks,
+                wrap_content=_xml_message_content_shim,
             )
+        )
 
         if dynamic_blocks:
             dynamic_rendered = [_xml_system_block(b) for b in dynamic_blocks]

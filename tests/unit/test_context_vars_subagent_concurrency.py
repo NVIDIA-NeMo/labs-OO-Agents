@@ -47,7 +47,6 @@ def _resp(content: str) -> LLMResponse:
         content=content,
         tool_calls=[],
         finish_reason="stop",
-        assistant_message={"role": "assistant", "content": content},
     )
 
 
@@ -671,7 +670,6 @@ class TestScopedBlocksIsolation:
                 content="",
                 tool_calls=[_tool_call(code)],
                 finish_reason="tool_calls",
-                assistant_message={"role": "assistant", "content": ""},
             )
 
         def _codeact_return(val) -> LLMResponse:
@@ -680,7 +678,6 @@ class TestScopedBlocksIsolation:
                 content="",
                 tool_calls=[_return(val)],
                 finish_reason="tool_calls",
-                assistant_message={"role": "assistant", "content": ""},
             )
 
         class _InnerAgent(Agent):

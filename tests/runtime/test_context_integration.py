@@ -586,7 +586,6 @@ class TestScopedContextCurrentCallFiltering:
                         )
                     ],
                     finish_reason="tool_calls",
-                    assistant_message={"role": "assistant", "content": ""},
                 )
             ]
         )
