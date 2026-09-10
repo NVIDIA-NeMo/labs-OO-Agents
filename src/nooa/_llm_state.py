@@ -79,7 +79,7 @@ def carried_replay_batch(message: Any) -> tuple[str, int] | None:
     return None
 
 
-def _merge_reasoning_text(message: dict[str, Any], reasoning: str | None) -> None:
+def demote_reasoning_text(message: dict[str, Any], reasoning: str | None) -> None:
     """Demote portable reasoning onto an assistant message without duplication."""
     if not reasoning or message.get("role") != "assistant":
         return
@@ -102,7 +102,7 @@ def demote_chat_reasoning(messages: list[dict[str, Any]]) -> list[dict[str, Any]
         reasoning = carried_reasoning(original)
         message = copy.deepcopy(dict(original))
         message.pop(LLM_STATE_KEY, None)
-        _merge_reasoning_text(message, reasoning)
+        demote_reasoning_text(message, reasoning)
         if (
             state is not None
             and not reasoning
@@ -146,5 +146,5 @@ def demote_responses_batch(
             {"role": "assistant", "content": reasoning},
             *clean[index:],
         ]
-    _merge_reasoning_text(message, reasoning)
+    demote_reasoning_text(message, reasoning)
     return clean
