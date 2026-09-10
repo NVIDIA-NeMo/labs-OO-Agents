@@ -122,12 +122,11 @@ async def test_boundary_is_inert_without_capability_opt_in() -> None:
 def test_openai_can_mark_a_system_only_stable_prefix() -> None:
     rendered = _render("state-a")
     rendered.pop(1)  # no history yet: stable instructions + volatile suffix
-    client = ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai")
-
-    transformed, instructions = client._transform_messages(rendered)
-    messages, instructions, enabled = client._prepare_cache_boundary(
-        transformed, responses=True, instructions=instructions
-    )
+    with ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai") as client:
+        transformed, instructions = client._transform_messages(rendered)
+        messages, instructions, enabled = client._prepare_cache_boundary(
+            transformed, responses=True, instructions=instructions
+        )
 
     assert enabled is True
     assert instructions is None
@@ -137,20 +136,20 @@ def test_openai_can_mark_a_system_only_stable_prefix() -> None:
 
 
 def test_openai_falls_back_to_instructions_behind_ineligible_output() -> None:
-    client = ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai")
-    messages, instructions, enabled = client._prepare_cache_boundary(
-        [
-            {
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "stable output"}],
-            },
-            ReplayCarryingMessage({}, cache_boundary_before=True),
-            {"role": "user", "content": "live state"},
-        ],
-        responses=True,
-        instructions="stable instructions",
-    )
+    with ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai") as client:
+        messages, instructions, enabled = client._prepare_cache_boundary(
+            [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "stable output"}],
+                },
+                ReplayCarryingMessage({}, cache_boundary_before=True),
+                {"role": "user", "content": "live state"},
+            ],
+            responses=True,
+            instructions="stable instructions",
+        )
 
     assert enabled is True
     assert instructions is None
@@ -266,20 +265,20 @@ async def test_anthropic_breakpoint_survives_user_message_coalescing() -> None:
 
 def test_openai_skips_assistant_output_and_marks_latest_input() -> None:
     boundary = ReplayCarryingMessage({}, cache_boundary_before=True)
-    client = ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai")
-    messages, _, enabled = client._prepare_cache_boundary(
-        [
-            {"role": "user", "content": "stable input"},
-            {
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "prior answer"}],
-            },
-            boundary,
-            {"role": "user", "content": "live state"},
-        ],
-        responses=True,
-    )
+    with ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai") as client:
+        messages, _, enabled = client._prepare_cache_boundary(
+            [
+                {"role": "user", "content": "stable input"},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "prior answer"}],
+                },
+                boundary,
+                {"role": "user", "content": "live state"},
+            ],
+            responses=True,
+        )
 
     assert enabled is True
     assert messages[0]["content"][-1]["prompt_cache_breakpoint"] == {"mode": "explicit"}
@@ -288,15 +287,15 @@ def test_openai_skips_assistant_output_and_marks_latest_input() -> None:
 
 def test_openai_can_mark_a_stable_function_result() -> None:
     boundary = ReplayCarryingMessage({}, cache_boundary_before=True)
-    client = ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai")
-    messages, _, enabled = client._prepare_cache_boundary(
-        [
-            {"type": "function_call_output", "call_id": "c1", "output": "done"},
-            boundary,
-            {"role": "user", "content": "live state"},
-        ],
-        responses=True,
-    )
+    with ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai") as client:
+        messages, _, enabled = client._prepare_cache_boundary(
+            [
+                {"type": "function_call_output", "call_id": "c1", "output": "done"},
+                boundary,
+                {"role": "user", "content": "live state"},
+            ],
+            responses=True,
+        )
 
     assert enabled is True
     assert messages[0]["output"][-1]["prompt_cache_breakpoint"] == {"mode": "explicit"}
@@ -316,32 +315,32 @@ def test_replay_expansion_stays_inside_the_stable_prefix() -> None:
             ],
         },
     }
-    client = ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai")
-    transformed, instructions = client._transform_messages(
-        [
-            {"role": "user", "content": "run it"},
-            *carry_replay_batch(
-                [
-                    {
-                        "type": "function_call",
-                        "call_id": "c1",
-                        "name": "run",
-                        "arguments": "{}",
-                    }
-                ],
-                state,
-                None,
-            ),
-            {"type": "function_call_output", "call_id": "c1", "output": "done"},
-            ReplayCarryingMessage(
-                {"role": "user", "content": "live state"}, cache_boundary_before=True
-            ),
-        ],
-        scope,
-    )
-    messages, _, enabled = client._prepare_cache_boundary(
-        transformed, responses=True, instructions=instructions
-    )
+    with ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai") as client:
+        transformed, instructions = client._transform_messages(
+            [
+                {"role": "user", "content": "run it"},
+                *carry_replay_batch(
+                    [
+                        {
+                            "type": "function_call",
+                            "call_id": "c1",
+                            "name": "run",
+                            "arguments": "{}",
+                        }
+                    ],
+                    state,
+                    None,
+                ),
+                {"type": "function_call_output", "call_id": "c1", "output": "done"},
+                ReplayCarryingMessage(
+                    {"role": "user", "content": "live state"}, cache_boundary_before=True
+                ),
+            ],
+            scope,
+        )
+        messages, _, enabled = client._prepare_cache_boundary(
+            transformed, responses=True, instructions=instructions
+        )
 
     assert enabled is True
     assert [item.get("type", item.get("role")) for item in messages] == [
@@ -356,8 +355,10 @@ def test_replay_expansion_stays_inside_the_stable_prefix() -> None:
 
 
 def test_gemini_gets_no_invented_inline_cache_field() -> None:
-    client = CompletionClient(model="gemini/gemini-2.5-pro", cache_control_injection_points=[])
-    messages, _, enabled = client._prepare_cache_boundary(_render("state-a"), responses=False)
+    with CompletionClient(
+        model="gemini/gemini-2.5-pro", cache_control_injection_points=[]
+    ) as client:
+        messages, _, enabled = client._prepare_cache_boundary(_render("state-a"), responses=False)
 
     assert enabled is False
     assert "cache_control" not in repr(messages)
