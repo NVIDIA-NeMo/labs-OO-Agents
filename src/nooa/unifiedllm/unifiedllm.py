@@ -1680,7 +1680,6 @@ class CompletionClient(UnifiedLLM):
         http_config: HttpConfig | None = None,
         # use system as default for cache_control_injection_points
         cache_control_injection_points: list[dict[str, Any]] | None = None,
-        replay_scope: str | None = None,
         **config,
     ):
         """
@@ -1705,13 +1704,10 @@ class CompletionClient(UnifiedLLM):
                 enable prompt caching (for example: {"role": "system"} or
                 {"role": "tool", "position": "last"}). Applied to all calls.
                 Note: Do NOT manually add cache_control to message content when using this.
-            replay_scope: Optional compatibility name for verified model aliases.
-                Provider, endpoint, credential/account, and API style must still match.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
         super().__init__(model, **config)
         self.retry_config = retry_config or RetryConfig()
-        self._replay_scope = replay_scope
         self._http_config = http_config or HttpConfig()
         self._http = _ClientHttp.for_completion(self.model, self.config, self._http_config)
         # Only set default if explicitly None (not if empty list is passed)
@@ -1747,7 +1743,7 @@ class CompletionClient(UnifiedLLM):
         returns empty content but has reasoning_content (common with some reasoning models).
         """
         call_config = {**self.config, **kwargs}
-        state_scope = replay_state.replay_scope(self.model, "chat", call_config, self._replay_scope)
+        state_scope = replay_state.replay_scope(self.model, "chat", call_config)
         messages = replay_state.prepare_chat_messages(messages, state_scope)
 
         # Inject cache_control at the message level for prompt caching
@@ -1915,7 +1911,7 @@ class CompletionClient(UnifiedLLM):
         returns empty content but has reasoning_content (common with some reasoning models).
         """
         call_config = {**self.config, **kwargs}
-        state_scope = replay_state.replay_scope(self.model, "chat", call_config, self._replay_scope)
+        state_scope = replay_state.replay_scope(self.model, "chat", call_config)
         messages = replay_state.prepare_chat_messages(messages, state_scope)
 
         # Inject cache_control at the message level for prompt caching
@@ -2167,7 +2163,6 @@ class ResponsesClient(UnifiedLLM):
         retry_config: RetryConfig | None = None,
         http_config: HttpConfig | None = None,
         cache_control_injection_points: list[dict[str, Any]] | None = None,
-        replay_scope: str | None = None,
         **config,
     ):
         """
@@ -2193,13 +2188,10 @@ class ResponsesClient(UnifiedLLM):
             cache_control_injection_points: Optional list of role/position rules to
                 enable prompt caching (for example: {"role": "system"} or
                 {"role": "tool", "position": "last"}). Applied to all calls.
-            replay_scope: Optional compatibility name for verified model aliases.
-                Provider, endpoint, credential/account, and API style must still match.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
         super().__init__(model, **config)
         self.retry_config = retry_config or RetryConfig()
-        self._replay_scope = replay_scope
         self._http_config = http_config or HttpConfig()
         self._http = _ClientHttp.for_responses(self.model, self.config, self._http_config)
         # Only set default if explicitly None (not if empty list is passed)
@@ -2257,9 +2249,7 @@ class ResponsesClient(UnifiedLLM):
         # on OpenAI/Azure/NIM Responses calls triggers a 400 "Unknown parameter:
         # input[N].cache_control" at the gateway.
         call_config = {**self.config, **kwargs}
-        state_scope = replay_state.replay_scope(
-            self.model, "responses", call_config, self._replay_scope
-        )
+        state_scope = replay_state.replay_scope(self.model, "responses", call_config)
         if _is_anthropic_model(self.model):
             cache_points = (
                 self.cache_control_injection_points
@@ -2389,9 +2379,7 @@ class ResponsesClient(UnifiedLLM):
         # See ResponsesClient.call for why cache_control injection is gated on
         # Anthropic models only.
         call_config = {**self.config, **kwargs}
-        state_scope = replay_state.replay_scope(
-            self.model, "responses", call_config, self._replay_scope
-        )
+        state_scope = replay_state.replay_scope(self.model, "responses", call_config)
         if _is_anthropic_model(self.model):
             cache_points = (
                 self.cache_control_injection_points

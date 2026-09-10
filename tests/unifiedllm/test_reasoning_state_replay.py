@@ -269,30 +269,6 @@ def test_responses_state_is_hidden_from_a_different_model() -> None:
         target.close()
 
 
-def test_declared_scope_groups_only_verified_model_aliases() -> None:
-    source = ResponsesClient(
-        model="openai/gpt-5.6",
-        api_key="account-a",
-        replay_scope="verified-family",
-    )
-    target = ResponsesClient(
-        model="openai/gpt-5.7",
-        api_key="account-a",
-        replay_scope="verified-family",
-    )
-    try:
-        with patch("litellm.responses", return_value=_responses(REASONING, MESSAGE)):
-            first = source.call([{"role": "user", "content": "think"}])
-        with patch("litellm.responses", return_value=_responses(MESSAGE)) as call:
-            target.call(_render_responses(first))
-
-        assert REASONING in call.call_args.kwargs["input"]
-        assert "reasoning.encrypted_content" in call.call_args.kwargs["include"]
-    finally:
-        source.close()
-        target.close()
-
-
 def test_azure_responses_state_is_captured_replayed_and_requested() -> None:
     client = ResponsesClient(
         model="azure/gpt-5.6",
@@ -315,32 +291,21 @@ def test_azure_responses_state_is_captured_replayed_and_requested() -> None:
         client.close()
 
 
-@pytest.mark.parametrize(
-    ("target_params", "target_model"),
-    [
-        (
-            {"api_key": "account-b", "api_base": "https://gateway-a.example/v1"},
-            "openai/gpt-5.6",
-        ),
-        (
-            {"api_key": "account-a", "api_base": "https://gateway-b.example/v1"},
-            "openai/gpt-5.6",
-        ),
-    ],
-    ids=["credential", "endpoint"],
-)
-def test_scope_partitions_issuer_boundaries(target_params, target_model) -> None:
+def test_scope_partitions_endpoint_issuers() -> None:
     source = replay_scope(
         "openai/gpt-5.6",
         "responses",
         {"api_key": "account-a", "api_base": "https://gateway-a.example/v1"},
     )
-    target = replay_scope(target_model, "responses", target_params)
+    target = replay_scope(
+        "openai/gpt-5.6",
+        "responses",
+        {"api_key": "account-a", "api_base": "https://gateway-b.example/v1"},
+    )
 
     assert source is not None
     assert target is not None
     assert source != target
-    assert "account-a" not in source
 
 
 def test_environment_selected_endpoint_partitions_scope(monkeypatch) -> None:
@@ -352,29 +317,22 @@ def test_environment_selected_endpoint_partitions_scope(monkeypatch) -> None:
     assert first != second
 
 
-@pytest.mark.parametrize("source", ["parameter", "environment", "litellm"])
-def test_organization_partitions_scope(monkeypatch, source: str) -> None:
-    monkeypatch.delenv("OPENAI_ORGANIZATION", raising=False)
-    monkeypatch.setattr("litellm.organization", None)
-    first_params: dict[str, str] = {"api_key": "account-a"}
-    second_params = dict(first_params)
-    if source == "parameter":
-        first_params["organization"] = "org-a"
-        second_params["organization"] = "org-b"
-        first = replay_scope("openai/gpt-5.6", "responses", first_params)
-        second = replay_scope("openai/gpt-5.6", "responses", second_params)
-    elif source == "environment":
-        monkeypatch.setenv("OPENAI_ORGANIZATION", "org-a")
-        first = replay_scope("openai/gpt-5.6", "responses", first_params)
-        monkeypatch.setenv("OPENAI_ORGANIZATION", "org-b")
-        second = replay_scope("openai/gpt-5.6", "responses", second_params)
-    else:
-        monkeypatch.setattr("litellm.organization", "org-a")
-        first = replay_scope("openai/gpt-5.6", "responses", first_params)
-        monkeypatch.setattr("litellm.organization", "org-b")
-        second = replay_scope("openai/gpt-5.6", "responses", second_params)
+def test_scope_is_stable_across_auth_rotation_and_account_metadata() -> None:
+    first = replay_scope(
+        "openai/gpt-5.6",
+        "responses",
+        {"api_key": "account-a", "organization": "org-a", "project": "project-a"},
+    )
+    second = replay_scope(
+        "openai/gpt-5.6",
+        "responses",
+        {"api_key": "account-b", "organization": "org-b", "project": "project-b"},
+    )
+    without_auth = replay_scope("openai/gpt-5.6", "responses", {})
 
-    assert first != second
+    assert first is not None
+    assert first == second == without_auth
+    assert "account-a" not in first
 
 
 def test_chat_state_is_captured_replayed_and_api_style_scoped() -> None:

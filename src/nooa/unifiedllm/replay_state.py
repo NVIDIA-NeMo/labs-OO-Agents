@@ -81,43 +81,21 @@ def _effective_endpoint(provider: str | None, configured: Any, resolved: Any) ->
     return _normalized_endpoint(endpoint or resolved)
 
 
-def _credential_fingerprint(provider: str, configured: Any, resolved: Any) -> str | None:
-    credential = configured or resolved
-    if not credential:
-        try:
-            credential = litellm.get_api_key(provider, resolved)
-        except Exception as exc:  # noqa: BLE001 - missing identity disables replay
-            logger.debug("Could not resolve opaque-state credential for %s: %s", provider, exc)
-            credential = None
-    if not credential and provider == "azure":
-        credential = (
-            os.getenv("AZURE_API_KEY")
-            or os.getenv("AZURE_OPENAI_API_KEY")
-            or os.getenv("AZURE_AD_TOKEN")
-        )
-    reveal = getattr(credential, "get_secret_value", None)
-    if callable(reveal):
-        credential = reveal()
-    if not isinstance(credential, str) or not credential:
-        return None
-    return hashlib.sha256(credential.encode()).hexdigest()
-
-
 def replay_scope(
     model: str,
     api_style: Literal["chat", "responses"],
     params: dict[str, Any],
-    declared_scope: str | None = None,
 ) -> str | None:
     """Return a non-secret compatibility key for the effective issuer route.
 
-    LiteLLM resolves routing identity. Model, endpoint, credential/account, and
-    API style are exact by default. A declared scope may group verified model
-    aliases, but never bypasses endpoint, account, provider, or API isolation.
+    LiteLLM resolves provider and model identity. Provider, API style, endpoint,
+    and exact model are intentionally the whole key. Authentication selects who
+    may call an issuer; it is not stable protocol identity and key rotation must
+    not silently disable capture or replay.
     """
     configured_endpoint = params.get("api_base") or params.get("base_url")
     try:
-        resolved_model, provider, resolved_key, resolved_endpoint = litellm.get_llm_provider(
+        resolved_model, provider, _, resolved_endpoint = litellm.get_llm_provider(
             model=model,
             custom_llm_provider=params.get("custom_llm_provider"),
             api_base=configured_endpoint,
@@ -131,37 +109,9 @@ def replay_scope(
     if provider not in {"openai", "azure"}:
         return None
 
-    credential = _credential_fingerprint(
-        provider,
-        params.get("api_key") or params.get("azure_ad_token"),
-        resolved_key,
-    )
-    if credential is None:
-        logger.debug("Opaque-state replay disabled for %r: unknown credential", model)
-        return None
-
-    organization = (
-        params.get("organization")
-        or params.get("openai_organization")
-        or getattr(litellm, "organization", None)
-        or os.getenv("OPENAI_ORGANIZATION")
-    )
-    project = (
-        params.get("project")
-        or params.get("openai_project")
-        or getattr(litellm, "project", None)
-        or os.getenv("OPENAI_PROJECT")
-    )
-    account = {
-        key: value
-        for key, value in (("organization", organization), ("project", project))
-        if isinstance(value, str) and value
-    }
     identity = {
-        "route": declared_scope or resolved_model,
+        "model": resolved_model,
         "endpoint": _effective_endpoint(provider, configured_endpoint, resolved_endpoint),
-        "credential": credential,
-        "account": account,
     }
     digest = hashlib.sha256(
         json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
