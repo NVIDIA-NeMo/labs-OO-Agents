@@ -17,6 +17,14 @@ from typing import Any, Literal, cast
 import litellm
 from pydantic import BaseModel, RootModel
 
+from nooa._llm_state import (
+    LLM_STATE_KEY,
+    carried_reasoning,
+    carried_replay_batch,
+    carried_state,
+    demote_chat_reasoning,
+    demote_responses_batch,
+)
 from nooa.llm_types import LLMResponse, LLMUsage, ToolCall
 
 from .http_config import HttpConfig
@@ -1776,6 +1784,8 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
+        messages = demote_chat_reasoning(messages)
+
         # Inject cache_control at the message level for prompt caching
         cache_points = (
             self.cache_control_injection_points
@@ -1936,6 +1946,8 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
+        messages = demote_chat_reasoning(messages)
+
         # Inject cache_control at the message level for prompt caching
         cache_points = (
             self.cache_control_injection_points
@@ -2508,7 +2520,32 @@ class ResponsesClient(UnifiedLLM):
         instructions_parts: list[str] = []
         transformed: list[dict[str, Any]] = []
 
-        for msg in messages:
+        skip_batch_items = 0
+        for index, original in enumerate(messages):
+            if skip_batch_items:
+                skip_batch_items -= 1
+                continue
+            state = copy.deepcopy(carried_state(original))
+            reasoning = carried_reasoning(original)
+            msg = copy.deepcopy(dict(original))
+            msg.pop(LLM_STATE_KEY, None)
+
+            batch_info = carried_replay_batch(original)
+            if batch_info is not None and (state is not None or reasoning is not None):
+                batch_id, batch_size = batch_info
+                candidates = messages[index : index + batch_size]
+                if len(candidates) == batch_size and all(
+                    carried_replay_batch(item) == (batch_id, batch_size) for item in candidates
+                ):
+                    batch = [copy.deepcopy(dict(item)) for item in candidates]
+                    transformed.extend(demote_responses_batch(batch, state, reasoning))
+                    skip_batch_items = batch_size - 1
+                    continue
+                # Middleware changed the batch. Keep its public items, but do
+                # not attach private reasoning or state to different neighbors.
+                state = None
+                reasoning = None
+
             # System messages → extract to instructions
             if msg.get("role") == "system":
                 content = msg.get("content", "")
@@ -2518,7 +2555,10 @@ class ResponsesClient(UnifiedLLM):
 
             # Already in native Responses format (from ResponsesProviderFormatter)
             if "type" in msg:
-                transformed.append(msg)
+                if state is not None or reasoning is not None:
+                    transformed.extend(demote_responses_batch([msg], state, reasoning))
+                else:
+                    transformed.append(msg)
                 continue
 
             # Legacy OpenAI format: tool result messages
@@ -2556,11 +2596,12 @@ class ResponsesClient(UnifiedLLM):
             # Legacy OpenAI format: assistant messages with tool_calls
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 # Preserve assistant text that precedes tool calls (matches native formatter)
+                batch: list[dict[str, Any]] = []
                 if msg.get("content"):
-                    transformed.append({"role": "assistant", "content": msg["content"]})
+                    batch.append({"role": "assistant", "content": msg["content"]})
                 for tc in msg["tool_calls"]:
                     fn = tc.get("function", {})
-                    transformed.append(
+                    batch.append(
                         {
                             "type": "function_call",
                             "call_id": tc["id"],
@@ -2568,6 +2609,7 @@ class ResponsesClient(UnifiedLLM):
                             "arguments": fn.get("arguments", ""),
                         }
                     )
+                transformed.extend(demote_responses_batch(batch, state, reasoning))
                 continue
 
             # User/Assistant text messages → passthrough with cache_control preservation
@@ -2578,7 +2620,10 @@ class ResponsesClient(UnifiedLLM):
                 item = {"role": msg["role"], "content": content}
                 if "cache_control" in msg:
                     item["cache_control"] = msg["cache_control"]
-                transformed.append(item)
+                if (state is not None or reasoning is not None) and msg.get("role") == "assistant":
+                    transformed.extend(demote_responses_batch([item], state, reasoning))
+                else:
+                    transformed.append(item)
                 continue
 
             # Unknown format → passthrough

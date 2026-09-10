@@ -300,6 +300,16 @@ class RenderedMessage(BaseModel):
         default_factory=tuple,
         description="Complete ordered tool-call batch on an assistant turn",
     )
+    llm_state: dict[str, Any] | None = Field(
+        default=None,
+        repr=False,
+        description="Opaque state carried only to the UnifiedLLM replay boundary",
+    )
+    reasoning: str | None = Field(
+        default=None,
+        repr=False,
+        description="Plain reasoning carried to UnifiedLLM for replay as assistant text",
+    )
     tool_call_id: str | None = Field(
         default=None, description="Tool-call id this message is a result for"
     )

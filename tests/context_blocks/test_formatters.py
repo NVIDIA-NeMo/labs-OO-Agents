@@ -280,20 +280,17 @@ class TestXMLBlockFormatter:
             "messages": ([{"role": "assistant", "content": content}] if content else []),
         }
 
-    @pytest.mark.parametrize(
-        "response",
-        [
-            LLMResponse(content="", reasoning="private thought"),
-            LLMResponse(content="", llm_state={"opaque": "state"}),
-        ],
-        ids=["reasoning-only", "state-only"],
-    )
-    def test_unprojected_response_fields_do_not_create_empty_assistant_messages(self, response):
+    @pytest.mark.parametrize("field", ["reasoning", "llm_state"])
+    def test_replay_only_response_creates_private_carrier(self, field):
+        value = "private thought" if field == "reasoning" else {"opaque": "state"}
+        response = LLMResponse(content="", **{field: value})
         messages = XMLBlockFormatter().format(
             [ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=response)]
         )
 
-        assert all(message.role is not Role.ASSISTANT for message in messages)
+        carrier = next(message for message in messages if message.role is Role.ASSISTANT)
+        assert carrier.content is None
+        assert getattr(carrier, field) == value
 
     def test_event_type_spoof_does_not_impersonate_an_llm_response(self):
         from nooa.events import Message
@@ -312,7 +309,9 @@ class TestXMLBlockFormatter:
             [ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=response)]
         )
 
-        assert all(message.role is not Role.ASSISTANT for message in messages)
+        carrier = next(message for message in messages if message.role is Role.ASSISTANT)
+        assert carrier.content is None
+        assert carrier.llm_state == {"opaque": "state"}
 
     def test_linked_execution_is_omitted_when_carrier_is_rejected(self):
         turn = LLMResponse(
