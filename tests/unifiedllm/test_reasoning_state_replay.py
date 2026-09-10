@@ -163,22 +163,25 @@ def test_responses_text_state_is_captured_and_exactly_replayed() -> None:
         client.close()
 
 
-def test_responses_wire_payload_is_detached_from_stored_state() -> None:
+def test_responses_replay_borrows_stored_payload_without_copying() -> None:
     client = ResponsesClient(model="openai/gpt-5.6", api_key="account-a")
     try:
         with patch("litellm.responses", return_value=_responses(REASONING, MESSAGE)):
             first = client.call([{"role": "user", "content": "think"}])
 
-        def mutate_wire_input(**kwargs):
+        observed = None
+
+        def observe_wire_input(**kwargs):
+            nonlocal observed
             reasoning = next(item for item in kwargs["input"] if item.get("type") == "reasoning")
-            reasoning["encrypted_content"] = "mutated-by-provider"
+            observed = reasoning
             return _responses(MESSAGE)
 
-        with patch("litellm.responses", side_effect=mutate_wire_input):
+        with patch("litellm.responses", side_effect=observe_wire_input):
             client.call(_render_responses(first))
 
         assert first.llm_state is not None
-        assert first.llm_state["payload"]["items"] == [REASONING]
+        assert observed is first.llm_state["payload"]["items"][0]
     finally:
         client.close()
 
@@ -398,6 +401,7 @@ def test_chat_state_is_captured_replayed_and_api_style_scoped() -> None:
             item for item in call.call_args_list[1].kwargs["messages"] if item.get("tool_calls")
         )
         assert assistant["reasoning_items"] == [REASONING]
+        assert assistant["reasoning_items"] is first.llm_state["payload"]["reasoning_items"]
 
         responses = ResponsesClient(model="openai/gpt-5.6", api_key="account-a")
         try:

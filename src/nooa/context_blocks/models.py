@@ -304,7 +304,7 @@ class RenderedMessage(BaseModel):
         default=None,
         repr=False,
         description=(
-            "Borrowed immutable opaque state carried only to the UnifiedLLM replay boundary"
+            "Borrowed immutable opaque state carried through the UnifiedLLM replay boundary"
         ),
     )
     reasoning: str | None = Field(

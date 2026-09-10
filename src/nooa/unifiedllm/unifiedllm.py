@@ -1226,7 +1226,7 @@ class UnifiedLLM(ABC):
                 value "last" restricts marking to only the last message of that role.
 
         Returns:
-            A deep copy of messages with cache_control injected at breakpoints.
+            A copy-on-write view with only breakpoint messages copied.
         """
         if not injection_points:
             return messages
@@ -1245,20 +1245,40 @@ class UnifiedLLM(ABC):
         if not roles_to_cache_all and not roles_to_cache_last:
             return messages
 
-        messages = [copy.deepcopy(msg) for msg in messages]
+        prepared = messages
+        copied: set[int] = set()
+
+        def copy_message(index: int, *, copy_last_content_block: bool = False) -> dict[str, Any]:
+            nonlocal prepared
+            if index not in copied:
+                if prepared is messages:
+                    prepared = list(messages)
+                prepared[index] = dict(messages[index])
+                copied.add(index)
+            message = prepared[index]
+            content = message.get("content")
+            if copy_last_content_block and isinstance(content, list) and content:
+                blocks = list(content)
+                if isinstance(blocks[-1], dict):
+                    blocks[-1] = dict(blocks[-1])
+                message["content"] = blocks
+            return message
 
         # Map role names to native Responses API type equivalents
         _ROLE_TO_TYPE = {"tool": "function_call_output"}
 
-        for msg in messages:
+        for index, original in enumerate(messages):
+            msg = original
             role = msg.get("role")
             if role and role in roles_to_cache_all:
+                msg = copy_message(index)
                 msg["cache_control"] = {"type": "ephemeral"}
             elif not role:
                 # Native Responses format: match by type equivalent
                 msg_type = msg.get("type")
                 for r, t in _ROLE_TO_TYPE.items():
                     if t == msg_type and r in roles_to_cache_all:
+                        msg = copy_message(index)
                         msg["cache_control"] = {"type": "ephemeral"}
                         break
 
@@ -1268,15 +1288,19 @@ class UnifiedLLM(ABC):
         for role in roles_to_cache_last:
             # Search for matching messages by role OR by equivalent native type
             native_type = _ROLE_TO_TYPE.get(role)
-            for msg in reversed(messages):
-                if msg.get("role") == role or (native_type and msg.get("type") == native_type):
+            for index in range(len(messages) - 1, -1, -1):
+                original = messages[index]
+                if original.get("role") == role or (
+                    native_type and original.get("type") == native_type
+                ):
+                    msg = copy_message(index, copy_last_content_block=anthropic)
                     if anthropic:
                         self._inject_cache_control_on_content(msg)
                     else:
                         msg["cache_control"] = {"type": "ephemeral"}
                     break
 
-        return messages
+        return prepared
 
     def count_tokens(self, text: str) -> int:
         """Count tokens using model-appropriate tokenizer.

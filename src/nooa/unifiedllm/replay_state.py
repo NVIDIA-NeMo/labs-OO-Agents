@@ -132,7 +132,9 @@ def _matching_payload(state: Any, scope: str | None, state_format: str) -> dict 
         or not isinstance(state.get("payload"), dict)
     ):
         return None
-    return cast(dict[str, Any], copy.deepcopy(state["payload"]))
+    # Event history owns this payload. Provider adapters may read and serialize
+    # it, but must not mutate caller input or require a per-request history copy.
+    return cast(dict[str, Any], state["payload"])
 
 
 def _is_state_only(state: Any, state_format: str) -> bool:

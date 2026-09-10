@@ -32,8 +32,8 @@ class ReplayCarryingMessage(dict[str, Any]):
         replay_batch_size: int = 0,
     ):
         super().__init__(message)
-        # Borrow immutable event state. The provider adapter creates the one
-        # mutable wire copy immediately before dispatch.
+        # Borrow immutable event state through to the provider adapter. The
+        # adapter owns serialization and must not mutate caller input.
         self.llm_state = llm_state
         self.reasoning = reasoning
         self.replay_batch_id = replay_batch_id
