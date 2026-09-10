@@ -123,7 +123,8 @@ class LLMResponse(EventBase):
         repr=False,
         description=(
             "Live typed return value; excluded from persistence because arbitrary Python "
-            "objects are not a durable wire format (the source JSON remains in content)"
+            "objects are not a durable wire format (the source JSON remains in content "
+            "or provider-exposed reasoning)"
         ),
     )
     tool_calls: list[ToolCall] = Field(
