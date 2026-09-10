@@ -207,9 +207,7 @@ class TestResponsesClientEndToEnd:
             with patch("litellm.responses", return_value=make_mock_responses_response()) as call:
                 client.call(
                     messages,
-                    cache_control_injection_points=[
-                        {"role": "assistant", "position": "last"}
-                    ],
+                    cache_control_injection_points=[{"role": "assistant", "position": "last"}],
                 )
 
             sent = call.call_args.kwargs["input"]

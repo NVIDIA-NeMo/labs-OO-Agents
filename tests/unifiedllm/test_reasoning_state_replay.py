@@ -237,9 +237,7 @@ def test_changed_responses_text_drops_state_and_preserves_edit() -> None:
 def test_reordered_responses_calls_drop_state_and_keep_new_order() -> None:
     client = ResponsesClient(model="openai/gpt-5.6", api_key="account-a")
     try:
-        with patch(
-            "litellm.responses", return_value=_responses(REASONING, MESSAGE, CALL, CALL_2)
-        ):
+        with patch("litellm.responses", return_value=_responses(REASONING, MESSAGE, CALL, CALL_2)):
             first = client.call([{"role": "user", "content": "run"}], tools=[TOOL])
         rendered = _render_responses(first)
         first_call = next(
@@ -410,9 +408,7 @@ def test_completion_model_override_uses_effective_replay_scope() -> None:
         cache_control_injection_points=[],
     )
     try:
-        with patch(
-            "litellm.completion", return_value=_chat_response(reasoning_items=[REASONING])
-        ):
+        with patch("litellm.completion", return_value=_chat_response(reasoning_items=[REASONING])):
             first = client.call([{"role": "user", "content": "run"}], tools=[TOOL])
 
         with patch("litellm.completion", return_value=_chat_response()) as call:
@@ -439,15 +435,13 @@ async def test_async_clients_use_effective_model_for_replay_scope() -> None:
     try:
         with patch("litellm.responses", return_value=_responses(REASONING, MESSAGE)):
             responses_first = responses.call([{"role": "user", "content": "think"}])
-        with patch(
-            "litellm.completion", return_value=_chat_response(reasoning_items=[REASONING])
-        ):
-            completion_first = completion.call(
-                [{"role": "user", "content": "run"}], tools=[TOOL]
-            )
+        with patch("litellm.completion", return_value=_chat_response(reasoning_items=[REASONING])):
+            completion_first = completion.call([{"role": "user", "content": "run"}], tools=[TOOL])
 
         with (
-            patch("litellm.aresponses", AsyncMock(return_value=_responses(MESSAGE))) as response_call,
+            patch(
+                "litellm.aresponses", AsyncMock(return_value=_responses(MESSAGE))
+            ) as response_call,
             patch("litellm.acompletion", AsyncMock(return_value=_chat_response())) as chat_call,
         ):
             await responses.acall(

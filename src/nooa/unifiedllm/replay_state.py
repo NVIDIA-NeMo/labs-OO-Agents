@@ -152,11 +152,7 @@ def _responses_message_text(item: Any) -> str:
     content = _field(item, "content", [])
     if not isinstance(content, list):
         return ""
-    texts = [
-        text
-        for block in content
-        if isinstance((text := _field(block, "text")), str)
-    ]
+    texts = [text for block in content if isinstance((text := _field(block, "text")), str)]
     return "\n".join(texts)
 
 
@@ -209,9 +205,7 @@ def _valid_responses_payload(payload: dict[str, Any]) -> bool:
         elif slot_type == "function_call":
             if set(slot) != {"type", "call_id", "name", "arguments"}:
                 return False
-            if not all(
-                isinstance(slot.get(key), str) for key in ("call_id", "name", "arguments")
-            ):
+            if not all(isinstance(slot.get(key), str) for key in ("call_id", "name", "arguments")):
                 return False
             carriers.append(slot)
         elif slot_type == "message":
