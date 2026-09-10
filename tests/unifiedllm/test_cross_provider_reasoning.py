@@ -122,13 +122,22 @@ def _render(response: LLMResponse, *, responses: bool = False) -> list[dict]:
 
 
 def test_anthropic_thinking_blocks_round_trip_exactly() -> None:
-    client = CompletionClient(model="anthropic/claude-sonnet-4", api_key="account-a")
+    source = CompletionClient(
+        model="anthropic/claude-sonnet-4",
+        api_key="account-a",
+        api_base="https://gateway-a.example/v1",
+    )
+    target = CompletionClient(
+        model="anthropic/claude-sonnet-4",
+        api_key="account-b",
+        api_base="https://gateway-b.example/v1",
+    )
     try:
         with patch(
             "litellm.completion", side_effect=[_anthropic_response(), _anthropic_response()]
         ) as completion:
-            first = client.call([{"role": "user", "content": "run"}], tools=[TOOL])
-            client.call(_render(first), tools=[TOOL])
+            first = source.call([{"role": "user", "content": "run"}], tools=[TOOL])
+            target.call(_render(first), tools=[TOOL])
 
         assert first.reasoning == "Check the inputs."
         assert first.llm_state is not None
@@ -141,7 +150,8 @@ def test_anthropic_thinking_blocks_round_trip_exactly() -> None:
         assert assistant["thinking_blocks"] == ANTHROPIC_THINKING
         assert assistant["content"] is None
     finally:
-        client.close()
+        source.close()
+        target.close()
 
 
 @pytest.mark.asyncio
@@ -157,13 +167,22 @@ async def test_async_anthropic_capture_matches_sync() -> None:
 
 
 def test_gemini_signatures_round_trip_without_becoming_public_call_ids() -> None:
-    client = CompletionClient(model="gemini/gemini-2.5-pro", api_key="account-a")
+    source = CompletionClient(
+        model="gemini/gemini-2.5-pro",
+        api_key="account-a",
+        api_base="https://gateway-a.example/v1",
+    )
+    target = CompletionClient(
+        model="gemini/gemini-2.5-pro",
+        api_key="account-b",
+        api_base="https://gateway-b.example/v1",
+    )
     try:
         with patch(
             "litellm.completion", side_effect=[_gemini_response(), _gemini_response()]
         ) as completion:
-            first = client.call([{"role": "user", "content": "run"}], tools=[TOOL])
-            client.call(_render(first), tools=[TOOL])
+            first = source.call([{"role": "user", "content": "run"}], tools=[TOOL])
+            target.call(_render(first), tools=[TOOL])
 
         assert [call.id for call in first.tool_calls] == ["call_1", "call_2"]
         assert first.llm_state is not None
@@ -183,7 +202,8 @@ def test_gemini_signatures_round_trip_without_becoming_public_call_ids() -> None
             for call in assistant["tool_calls"]
         ] == [GEMINI_SIGNATURE, GEMINI_SIGNATURE_2]
     finally:
-        client.close()
+        source.close()
+        target.close()
 
 
 @pytest.mark.parametrize("mutation", ["drop", "reorder", "duplicate"])
@@ -440,7 +460,7 @@ def test_non_openai_responses_scope_cannot_capture_or_restore_opaque_items() -> 
         ("gemini/gemini-2.5-pro", "GEMINI_API_BASE"),
     ],
 )
-def test_closed_provider_environment_endpoint_partitions_scope(
+def test_closed_provider_scope_is_stable_across_environment_endpoints(
     monkeypatch, model: str, environment: str
 ) -> None:
     monkeypatch.setenv(environment, "https://issuer-a.example/v1")
@@ -450,4 +470,4 @@ def test_closed_provider_environment_endpoint_partitions_scope(
 
     assert first is not None
     assert second is not None
-    assert first != second
+    assert first == second

@@ -71,7 +71,7 @@ def _msg_to_dict(msg: Any) -> dict:
 
 
 def _safe_msg_to_dict(msg: Any) -> dict:
-    """Normalize one provider message and remove issuer-only opaque state."""
+    """Normalize one provider message and remove provider-only opaque state."""
     scrubbed, _ = scrub_value(_msg_to_dict(msg))
     return scrubbed if isinstance(scrubbed, dict) else {}
 

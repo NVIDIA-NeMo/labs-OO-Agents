@@ -49,8 +49,8 @@ _SENSITIVE_KEYS = frozenset(
 )
 
 # Provider-owned replay state is not a user credential, but it has the same
-# telemetry rule: it may go back to its issuer and nowhere else. Provider
-# adapters add their exact wire keys here as support is introduced.
+# telemetry rule: it may go back to its matching provider and nowhere else.
+# Provider adapters add their exact wire keys here as support is introduced.
 _OPAQUE_PROVIDER_STATE_KEYS = frozenset(
     {
         "encrypted_content",
