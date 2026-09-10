@@ -572,6 +572,19 @@ async def test_summary_without_encrypted_content_is_portable_text(is_async, has_
         assert replay.call_args.kwargs["input"] == [{"role": "assistant", "content": expected}]
 
 
+@pytest.mark.parametrize("encrypted", ["", 42, False])
+def test_malformed_ciphertext_is_not_hidden_by_a_summary_only_item(encrypted) -> None:
+    scope = replay_scope("openai/gpt-5.6", "responses", {})
+    with pytest.raises(ReasoningReplayError, match="encrypted content"):
+        capture_responses_state(
+            [
+                {"type": "reasoning", "summary": []},
+                {**RESPONSES_REASONING, "encrypted_content": encrypted},
+            ],
+            scope,
+        )
+
+
 def test_responses_summary_stays_exact_on_match_and_demotes_on_model_change() -> None:
     source = ResponsesClient(model="openai/gpt-5.6", api_key="account-a")
     target = ResponsesClient(model="openai/gpt-5.7", api_key="account-a")

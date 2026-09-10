@@ -430,12 +430,24 @@ def capture_chat_state(message: Any, scope: str | None) -> dict | None:
     return _envelope(scope, _CHAT_FORMAT, payload)
 
 
-def _responses_message_text(item: Any) -> str:
+def responses_message_text(item: Any) -> str:
     content = _field(item, "content", [])
     if not isinstance(content, list):
         return ""
-    texts = [text for block in content if isinstance((text := _field(block, "text")), str)]
-    return "\n".join(texts)
+    texts = [
+        text
+        for block in content
+        if _field(block, "type") == "output_text"
+        and isinstance((text := _field(block, "text")), str)
+    ]
+    return "".join(texts)
+
+
+def responses_output_text(output: list[Any]) -> str:
+    """Match the SDK's separator-free aggregation of assistant text blocks."""
+    return "".join(
+        responses_message_text(item) for item in output if response_item_type(item) == "message"
+    )
 
 
 def _responses_call_slot(item: Any) -> dict[str, Any] | None:
@@ -460,7 +472,7 @@ def _valid_responses_payload(payload: dict[str, Any]) -> bool:
         return False
     items = payload.get("items")
     order = payload.get("order")
-    if not isinstance(items, list) or not items or not isinstance(order, list):
+    if not isinstance(items, list) or not isinstance(order, list) or not order:
         return False
     if any(
         not isinstance(item, dict)
@@ -491,7 +503,11 @@ def _valid_responses_payload(payload: dict[str, Any]) -> bool:
                 return False
             carriers.append(slot)
         elif slot_type == "message":
-            if set(slot) != {"type", "content"} or not isinstance(slot.get("content"), str):
+            if (
+                set(slot) - {"type", "content", "phase"}
+                or not isinstance(slot.get("content"), str)
+                or ("phase" in slot and slot["phase"] not in ("commentary", "final_answer"))
+            ):
                 return False
             carriers.append(slot)
         else:
@@ -501,7 +517,8 @@ def _valid_responses_payload(payload: dict[str, Any]) -> bool:
     if state_only not in (None, True):
         return False
     return (
-        sorted(indexes) == list(range(len(items)))
+        bool(items or carriers != _flatten_responses_carriers(carriers))
+        and sorted(indexes) == list(range(len(items)))
         and len({slot["call_id"] for slot in carriers if slot["type"] == "function_call"})
         == sum(slot["type"] == "function_call" for slot in carriers)
         and (state_only is True) == (not carriers)
@@ -617,6 +634,16 @@ def _restore_chat_state(message: dict[str, Any], payload: dict[str, Any]) -> boo
     return True
 
 
+def _flatten_responses_carriers(carriers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Project provider message boundaries into the canonical LLMResponse view."""
+    calls = [slot for slot in carriers if slot["type"] == "function_call"]
+    messages = [slot for slot in carriers if slot["type"] == "message"]
+    text = "".join(slot["content"] for slot in messages)
+    return (
+        [{"type": "message", "content": text}] if text or (messages and not calls) else []
+    ) + calls
+
+
 def capture_responses_state(output: list[Any], scope: str | None) -> dict | None:
     # NOOA only knows the OpenAI/Azure Responses item contract. Other providers
     # may expose a similarly shaped API through a gateway, but that is not
@@ -635,16 +662,25 @@ def capture_responses_state(output: list[Any], scope: str | None) -> dict | None
     items: list[Any] = []
     order: list[dict[str, Any]] = []
     call_ids: list[str] = []
-    message_count = 0
     malformed_call_id = False
     unknown_output_types: set[str] = set()
+    reasoning_items = [item for item in output if response_item_type(item) == "reasoning"]
+    summary_only = any(_field(item, "encrypted_content") is None for item in reasoning_items)
+    if summary_only and any(
+        _field(item, "encrypted_content") is not None for item in reasoning_items
+    ):
+        logger.warning(
+            "Responses reasoning contains items without encrypted content; replaying "
+            "portable summaries instead of an incomplete opaque reasoning sequence."
+        )
     for item in output:
         item_type = response_item_type(item)
         if item_type == "reasoning":
-            # Summaries are valid without encrypted content (for example when
-            # a gateway does not support include). They remain portable text,
-            # not malformed opaque state.
-            if _field(item, "encrypted_content") is None:
+            encrypted = _field(item, "encrypted_content")
+            if encrypted is not None and (not isinstance(encrypted, str) or not encrypted):
+                raise ReasoningReplayError("Malformed OpenAI Responses encrypted content.")
+            # A summary-only reasoning item has no opaque data to retain.
+            if summary_only:
                 continue
             order.append({"type": "reasoning", "index": len(items)})
             items.append(opaque_item(item))
@@ -656,11 +692,17 @@ def capture_responses_state(output: list[Any], scope: str | None) -> dict | None
             order.append(slot)
             call_ids.append(cast(str, slot["call_id"]))
         elif item_type == "message":
-            order.append({"type": "message", "content": _responses_message_text(item)})
-            message_count += 1
+            slot = {"type": "message", "content": responses_message_text(item)}
+            phase = _field(item, "phase")
+            if phase is not None:
+                slot["phase"] = phase
+            order.append(slot)
         else:
             unknown_output_types.add(item_type or "<missing>")
-    if not items:
+    carriers = [slot for slot in order if slot["type"] != "reasoning"]
+    # Keep provider message boundaries/phase when the canonical flat text and
+    # calls alone cannot reproduce them, even without encrypted reasoning.
+    if not items and carriers == _flatten_responses_carriers(carriers):
         return None
     if unknown_output_types:
         raise ReasoningReplayError(
@@ -671,12 +713,12 @@ def capture_responses_state(output: list[Any], scope: str | None) -> dict | None
         raise ReasoningReplayError(
             "Cannot retain Responses reasoning state beside a malformed function call id."
         )
-    if len(set(call_ids)) != len(call_ids) or message_count > 1:
+    if len(set(call_ids)) != len(call_ids):
         raise ReasoningReplayError(
-            "Cannot retain Responses reasoning state with duplicate call ids or multiple messages."
+            "Cannot retain Responses reasoning state with duplicate call ids."
         )
     payload: dict[str, Any] = {"items": items, "order": order}
-    if not call_ids and not message_count:
+    if not carriers:
         payload["state_only"] = True
     if not _valid_responses_payload(payload):
         raise ReasoningReplayError("Malformed OpenAI Responses reasoning state.")
@@ -820,56 +862,44 @@ def prepare_responses_batch(
             return demote_responses_batch(clean, state, reasoning)
         return cast(list[dict[str, Any]], items)
 
-    expected_carriers = [slot for slot in order if slot.get("type") != "reasoning"]
-    if _public_responses_carriers(clean) != expected_carriers:
+    expected_carriers = [
+        {key: value for key, value in slot.items() if key != "phase"}
+        for slot in order
+        if slot["type"] != "reasoning"
+    ]
+    public_carriers = _public_responses_carriers(clean)
+    if public_carriers not in (expected_carriers, _flatten_responses_carriers(expected_carriers)):
         logger.warning(
             "Opaque Responses reasoning state was not replayed because its public "
             "carriers changed; portable reasoning text will be replayed instead."
         )
         return demote_responses_batch(clean, state, reasoning)
 
-    calls = [item for item in clean if item.get("type") == "function_call"]
-    messages = [item for item in clean if item.get("role") == "assistant"]
-    calls_by_id = {cast(str, item["call_id"]): item for item in calls}
-    message = messages[0] if messages else None
-    emitted_calls: set[str] = set()
-    emitted_message = False
-    pending: list[dict[str, Any]] = []
+    calls = iter(item for item in clean if item.get("type") == "function_call")
+    messages = iter(item for item in clean if item.get("role") == "assistant")
+    exact_messages = public_carriers == expected_carriers
     replay: list[dict[str, Any]] = []
-    last_carrier_emitted = False
-
     for slot in order:
-        if slot.get("type") == "reasoning":
-            pending.append(cast(dict[str, Any], items[cast(int, slot["index"])]))
-            continue
-        if slot.get("type") == "function_call":
-            call_id = cast(str, slot["call_id"])
-            replay.extend(pending)
-            replay.append(calls_by_id[call_id])
-            emitted_calls.add(call_id)
-            last_carrier_emitted = True
-            pending = []
-            continue
-        if slot.get("type") == "message":
-            replay.extend(pending)
-            replay.append(cast(dict[str, Any], message))
-            emitted_message = True
-            last_carrier_emitted = True
-            pending = []
-
-    if last_carrier_emitted:
-        replay.extend(pending)
+        if slot["type"] == "reasoning":
+            replay.append(items[slot["index"]])
+        elif slot["type"] == "function_call":
+            replay.append(next(calls))
+        else:
+            message = (
+                next(messages)
+                if exact_messages
+                else {"role": "assistant", "content": slot["content"]}
+            )
+            if "phase" in slot:
+                message["phase"] = slot["phase"]
+            replay.append(message)
     replay.extend(
         item
         for item in clean
-        if not (
-            item is message
-            and emitted_message
-            or item.get("type") == "function_call"
-            and item.get("call_id") in emitted_calls
-        )
+        if item.get("role") != "assistant" and item.get("type") != "function_call"
     )
-    return replay
+    # Message-phase metadata alone must not suppress portable reasoning text.
+    return demote_responses_batch(replay, None, reasoning) if not items else replay
 
 
 def add_encrypted_reasoning_include(api_params: dict[str, Any], scope: str | None) -> None:

@@ -246,7 +246,9 @@ def _make_incomplete_responses_tool_response():
 def _make_responses_tool_response(text: str):
     return SimpleNamespace(
         output=[
-            SimpleNamespace(type="message", content=[SimpleNamespace(text=text)]),
+            SimpleNamespace(
+                type="message", content=[SimpleNamespace(type="output_text", text=text)]
+            ),
             SimpleNamespace(
                 type="function_call",
                 call_id="call_1",
