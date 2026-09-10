@@ -354,7 +354,7 @@ def _tool_call_state(tool_call: Any, scope: str | None) -> dict[str, Any] | None
     inline_candidate = None
     if isinstance(call_id, str) and _INLINE_THOUGHT_SIGNATURE_SEPARATOR in call_id:
         inline_candidate = call_id.split(_INLINE_THOUGHT_SIGNATURE_SEPARATOR, 1)[1]
-        if not inline_candidate:
+        if not inline_candidate and (_scope_provider(scope) == "gemini" or signature):
             raise ReasoningReplayError("Malformed inline tool-call thought signature.")
     if signature and inline_candidate and signature != inline_candidate:
         raise ReasoningReplayError("Conflicting thought signatures on one provider tool call.")
@@ -622,7 +622,11 @@ def capture_responses_state(output: list[Any], scope: str | None) -> dict | None
     # may expose a similarly shaped API through a gateway, but that is not
     # evidence that their opaque state is wire-compatible.
     if _scope_provider(scope) not in {"openai", "azure"}:
-        if any(response_item_type(item) == "reasoning" for item in output):
+        if any(
+            response_item_type(item) == "reasoning"
+            and _field(item, "encrypted_content") is not None
+            for item in output
+        ):
             raise ReasoningReplayError(
                 "The provider returned Responses reasoning state, but NOOA only supports "
                 "opaque Responses replay for OpenAI and Azure routes."
@@ -637,6 +641,11 @@ def capture_responses_state(output: list[Any], scope: str | None) -> dict | None
     for item in output:
         item_type = response_item_type(item)
         if item_type == "reasoning":
+            # Summaries are valid without encrypted content (for example when
+            # a gateway does not support include). They remain portable text,
+            # not malformed opaque state.
+            if _field(item, "encrypted_content") is None:
+                continue
             order.append({"type": "reasoning", "index": len(items)})
             items.append(opaque_item(item))
         elif item_type == "function_call":
