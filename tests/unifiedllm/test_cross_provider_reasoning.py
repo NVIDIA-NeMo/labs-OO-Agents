@@ -269,9 +269,7 @@ def test_incompatible_gemini_state_keeps_tool_result_ids_public() -> None:
         with patch("litellm.completion", return_value=_gemini_response()):
             first = source.call([{"role": "user", "content": "run"}], tools=[TOOL])
 
-        prepared = prepare_chat_messages(
-            _render(first), replay_scope("openai/gpt-5.6", "chat", {})
-        )
+        prepared = prepare_chat_messages(_render(first), replay_scope("openai/gpt-5.6", "chat", {}))
         assistant = next(message for message in prepared if message.get("tool_calls"))
         tool_results = [message for message in prepared if message.get("role") == "tool"]
         assert [call["id"] for call in assistant["tool_calls"]] == ["call_1", "call_2"]
@@ -342,19 +340,28 @@ def test_public_thinking_content_blocks_are_stripped(caplog: pytest.LogCaptureFi
     assert "Removed untrusted provider reasoning fields" in caplog.text
 
 
-def test_public_inline_signature_is_stripped_when_private_field_confirms_it() -> None:
+@pytest.mark.parametrize("target_model", [None, "openai/gpt-4o"])
+def test_public_inline_signature_is_stripped_when_private_field_confirms_it(
+    target_model: str | None,
+) -> None:
     raw_id = f"call_1__thought__{GEMINI_SIGNATURE}"
     messages = [
         {
             "role": "assistant",
             "content": None,
             "tool_calls": [_tool_call(raw_id, {"thought_signature": GEMINI_SIGNATURE})],
-        }
+        },
+        {"role": "tool", "tool_call_id": raw_id, "content": "complete"},
     ]
 
-    prepared = prepare_chat_messages(messages, None)
+    scope = replay_scope(target_model, "chat", {}) if target_model else None
+    prepared = prepare_chat_messages(messages, scope)
     assert prepared[0]["tool_calls"][0]["id"] == "call_1"
     assert "provider_specific_fields" not in prepared[0]["tool_calls"][0]
+    assert prepared[1]["tool_call_id"] == "call_1"
+    assert GEMINI_SIGNATURE not in json.dumps(prepared)
+    assert messages[0]["tool_calls"][0]["id"] == raw_id
+    assert messages[1]["tool_call_id"] == raw_id
 
 
 def test_direct_gemini_inline_signatures_cannot_bypass_the_envelope() -> None:
@@ -368,9 +375,7 @@ def test_direct_gemini_inline_signatures_cannot_bypass_the_envelope() -> None:
         {"role": "tool", "tool_call_id": raw_id, "content": "complete"},
     ]
 
-    prepared = prepare_chat_messages(
-        messages, replay_scope("gemini/gemini-2.5-pro", "chat", {})
-    )
+    prepared = prepare_chat_messages(messages, replay_scope("gemini/gemini-2.5-pro", "chat", {}))
     assert prepared[0]["tool_calls"][0]["id"] == "call_1"
     assert prepared[1]["tool_call_id"] == "call_1"
     assert GEMINI_SIGNATURE not in json.dumps(prepared)
@@ -394,6 +399,12 @@ def test_non_gemini_tool_call_id_with_thought_substring_is_unchanged() -> None:
         prepared = prepare_chat_messages(rendered, None)
         assistant = next(message for message in prepared if message.get("tool_calls"))
         assert assistant["tool_calls"][0]["id"] == call_id
+        paired = prepare_chat_messages(
+            [assistant, {"role": "tool", "tool_call_id": call_id, "content": "complete"}],
+            None,
+        )
+        assert paired[0]["tool_calls"][0]["id"] == call_id
+        assert paired[1]["tool_call_id"] == call_id
     finally:
         client.close()
 

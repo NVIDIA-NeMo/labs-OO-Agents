@@ -135,7 +135,8 @@ async def test_reasoning_replay_errors_bypass_strategy_retries(strategy_name: st
     with pytest.raises(ReasoningReplayError, match="malformed retained reasoning state"):
         await agent.compute(1)
     assert failing_llm.attempts == 1
-    if strategy_name == "pure_python":
+    if strategy_name in {"codeact", "pure_python"}:
+        assert len(after_turns) == 1
         assert after_turns[-1].is_final is True
         assert after_turns[-1].success is False
         assert after_turns[-1].exception_type == "ReasoningReplayError"

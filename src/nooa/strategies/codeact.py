@@ -922,6 +922,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                         **self._build_sampling_kwargs(),
                     )
                 except ReasoningReplayError:
+                    turn_state.is_final = True
                     raise
                 except BlockSyntaxError as e:
                     self._handle_block_syntax_error(e, session, runtime)

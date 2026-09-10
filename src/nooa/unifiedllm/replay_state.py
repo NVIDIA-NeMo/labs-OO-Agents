@@ -530,7 +530,8 @@ def _strip_inline_signature(value: Any) -> Any:
 
 def _strip_chat_state(
     message: dict[str, Any], source_scope: str | None, target_scope: str | None
-) -> None:
+) -> dict[str, str]:
+    public_call_ids: dict[str, str] = {}
     removed = False
     gemini_wire = "gemini" in {
         _scope_provider(source_scope),
@@ -568,6 +569,8 @@ def _strip_chat_state(
             if gemini_wire or (inline_candidate and inline_candidate == explicit_signature):
                 public_id = _strip_inline_signature(call_id)
                 removed = public_id != call_id or removed
+                if isinstance(call_id, str) and public_id != call_id:
+                    public_call_ids[call_id] = public_id
                 call["id"] = public_id
             removed = "provider_specific_fields" in call or removed
             call.pop("provider_specific_fields", None)
@@ -584,6 +587,7 @@ def _strip_chat_state(
             "Removed untrusted provider reasoning fields from a public chat message; "
             "replay opaque state through a persisted LLMResponse instead."
         )
+    return public_call_ids
 
 
 def _restore_chat_state(message: dict[str, Any], payload: dict[str, Any]) -> bool:
@@ -693,6 +697,7 @@ def responses_reasoning_text(output: list[Any]) -> str | None:
 def prepare_chat_messages(messages: list[dict[str, Any]], scope: str | None) -> list[dict]:
     """Strip private/raw state and restore only a matching Chat payload."""
     prepared: list[dict[str, Any]] = []
+    public_call_ids: dict[str, str] = {}
     private_call_ids: dict[str, str] = {}
     for original in messages:
         state = carried_state(original)
@@ -704,10 +709,12 @@ def prepare_chat_messages(messages: list[dict[str, Any]], scope: str | None) -> 
             if isinstance(state, dict) and state.get("version") == _STATE_VERSION
             else None
         )
-        _strip_chat_state(
-            message,
-            source_scope if isinstance(source_scope, str) else None,
-            scope,
+        public_call_ids.update(
+            _strip_chat_state(
+                message,
+                source_scope if isinstance(source_scope, str) else None,
+                scope,
+            )
         )
         payload = _matching_payload(state, scope, _CHAT_FORMAT)
         if payload is not None:
@@ -722,6 +729,11 @@ def prepare_chat_messages(messages: list[dict[str, Any]], scope: str | None) -> 
                 if public_id != private_id:
                     private_call_ids[public_id] = private_id
         tool_call_id = message.get("tool_call_id")
+        # Structural signature evidence on a raw assistant call also applies to
+        # its matching result, even when neither route identifies Gemini.
+        if isinstance(tool_call_id, str) and tool_call_id in public_call_ids:
+            tool_call_id = public_call_ids.pop(tool_call_id)
+            message["tool_call_id"] = tool_call_id
         if isinstance(tool_call_id, str) and tool_call_id in private_call_ids:
             message["tool_call_id"] = private_call_ids.pop(tool_call_id)
         if not restored:
