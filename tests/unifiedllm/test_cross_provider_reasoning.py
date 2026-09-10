@@ -148,6 +148,7 @@ def test_anthropic_thinking_blocks_round_trip_exactly() -> None:
             if message.get("role") == "assistant"
         )
         assert assistant["thinking_blocks"] == ANTHROPIC_THINKING
+        assert assistant["thinking_blocks"] is first.llm_state["payload"]["thinking_blocks"]
         assert assistant["content"] is None
     finally:
         source.close()
@@ -196,6 +197,10 @@ def test_gemini_signatures_round_trip_without_becoming_public_call_ids() -> None
         assert assistant["provider_specific_fields"] == {
             "thought_signatures": [GEMINI_SIGNATURE, GEMINI_SIGNATURE_2]
         }
+        assert (
+            assistant["provider_specific_fields"]["thought_signatures"]
+            is first.llm_state["payload"]["provider_specific_fields"]["thought_signatures"]
+        )
         assert [call["id"] for call in assistant["tool_calls"]] == ["call_1", "call_2"]
         assert [
             call["provider_specific_fields"]["thought_signature"]

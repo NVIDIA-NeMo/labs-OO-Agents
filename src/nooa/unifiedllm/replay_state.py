@@ -173,7 +173,7 @@ def _sanitize_chat_payload(payload: dict[str, Any], scope: str | None) -> dict[s
     for key in fields_by_provider.get(provider or "", ()):
         value = payload.get(key)
         if isinstance(value, list) and value:
-            clean[key] = opaque_item(value)
+            clean[key] = value
 
     provider_fields = (
         payload.get("provider_specific_fields")
@@ -188,7 +188,7 @@ def _sanitize_chat_payload(payload: dict[str, Any], scope: str | None) -> dict[s
         and signatures
         and all(isinstance(signature, str) and signature for signature in signatures)
     ):
-        clean["provider_specific_fields"] = {"thought_signatures": copy.deepcopy(signatures)}
+        clean["provider_specific_fields"] = {"thought_signatures": signatures}
 
     tool_state = payload.get("tool_calls") if provider in {"openai", "azure", "gemini"} else None
     if isinstance(tool_state, list):
@@ -211,7 +211,7 @@ def _sanitize_chat_payload(payload: dict[str, Any], scope: str | None) -> dict[s
         and tool_call_ids
         and all(isinstance(call_id, str) and call_id for call_id in tool_call_ids)
     ):
-        clean["tool_call_ids"] = copy.deepcopy(tool_call_ids)
+        clean["tool_call_ids"] = tool_call_ids
 
     if clean and payload.get("state_only") is True:
         clean["state_only"] = True
@@ -255,7 +255,7 @@ def capture_chat_state(message: Any, scope: str | None) -> dict | None:
 
     provider_fields = _field(message, "provider_specific_fields")
     if isinstance(provider_fields, dict):
-        payload["provider_specific_fields"] = provider_fields
+        payload["provider_specific_fields"] = opaque_item(provider_fields)
 
     raw_tool_calls = list(_field(message, "tool_calls") or [])
     tool_state = [_tool_call_state(call) for call in raw_tool_calls]
@@ -411,7 +411,7 @@ def _restore_chat_state(message: dict[str, Any], payload: dict[str, Any]) -> Non
 
     for key in ("reasoning_items", "thinking_blocks", "provider_specific_fields"):
         if key in payload:
-            message[key] = copy.deepcopy(payload[key])
+            message[key] = payload[key]
     tool_calls = message.get("tool_calls")
     tool_state = payload.get("tool_calls")
     if not isinstance(tool_calls, list) or not isinstance(tool_state, list):
@@ -423,7 +423,7 @@ def _restore_chat_state(message: dict[str, Any], payload: dict[str, Any]) -> Non
             continue
         fields = state.get("provider_specific_fields")
         if isinstance(fields, dict):
-            call["provider_specific_fields"] = copy.deepcopy(fields)
+            call["provider_specific_fields"] = fields
 
 
 def capture_responses_state(output: list[Any], scope: str | None) -> dict | None:
