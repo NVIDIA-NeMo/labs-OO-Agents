@@ -137,6 +137,7 @@ class TestLLMRequestIntercepts:
         messages = carry_replay_batch(
             [{"type": "reasoning", "summary": []}, {"type": "function_call", "id": "fc-1"}],
             {"scope": "issuer", "payload": {"encrypted_content": "opaque"}},
+            None,
         )
         ctx = _make_llm_ctx(messages=messages)
         seen: list[list[dict[str, Any]]] = []

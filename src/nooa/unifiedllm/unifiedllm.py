@@ -17,7 +17,12 @@ from typing import Any, Literal, cast
 import litellm
 from pydantic import BaseModel, RootModel
 
-from nooa._llm_state import LLM_STATE_KEY, carried_replay_batch, carried_state
+from nooa._llm_state import (
+    LLM_STATE_KEY,
+    carried_reasoning,
+    carried_replay_batch,
+    carried_state,
+)
 from nooa.llm_types import LLMResponse, LLMUsage, ToolCall
 
 from . import replay_state
@@ -2525,6 +2530,7 @@ class ResponsesClient(UnifiedLLM):
                 skip_batch_items -= 1
                 continue
             state = copy.deepcopy(carried_state(original))
+            reasoning = carried_reasoning(original)
             msg = copy.deepcopy(dict(original))
             msg.pop(LLM_STATE_KEY, None)
             # Provider state supplied outside a valid NOOA envelope is never
@@ -2532,7 +2538,7 @@ class ResponsesClient(UnifiedLLM):
             msg.pop("reasoning_items", None)
 
             batch_info = carried_replay_batch(original)
-            if batch_info is not None and state is not None:
+            if batch_info is not None and (state is not None or reasoning is not None):
                 batch_id, batch_size = batch_info
                 candidates = messages[index : index + batch_size]
                 if len(candidates) == batch_size and all(
@@ -2543,13 +2549,14 @@ class ResponsesClient(UnifiedLLM):
                         item.pop(LLM_STATE_KEY, None)
                         item.pop("reasoning_items", None)
                     transformed.extend(
-                        replay_state.prepare_responses_batch(batch, state, state_scope)
+                        replay_state.prepare_responses_batch(batch, state, state_scope, reasoning)
                     )
                     skip_batch_items = batch_size - 1
                     continue
                 # A middleware split or mutated the batch. Keep the public item,
                 # but fail closed instead of associating state with new neighbors.
                 state = None
+                reasoning = None
 
             # System messages → extract to instructions
             if msg.get("role") == "system":
@@ -2562,9 +2569,9 @@ class ResponsesClient(UnifiedLLM):
             if "type" in msg:
                 if replay_state.response_item_type(msg) == "reasoning":
                     continue
-                if state:
+                if state is not None or reasoning is not None:
                     transformed.extend(
-                        replay_state.prepare_responses_batch([msg], state, state_scope)
+                        replay_state.prepare_responses_batch([msg], state, state_scope, reasoning)
                     )
                     continue
                 transformed.append(msg)
@@ -2618,7 +2625,9 @@ class ResponsesClient(UnifiedLLM):
                             "arguments": fn.get("arguments", ""),
                         }
                     )
-                transformed.extend(replay_state.prepare_responses_batch(batch, state, state_scope))
+                transformed.extend(
+                    replay_state.prepare_responses_batch(batch, state, state_scope, reasoning)
+                )
                 continue
 
             # User/Assistant text messages → passthrough with cache_control preservation
@@ -2629,9 +2638,9 @@ class ResponsesClient(UnifiedLLM):
                 item = {"role": msg["role"], "content": content}
                 if "cache_control" in msg:
                     item["cache_control"] = msg["cache_control"]
-                if state and msg.get("role") == "assistant":
+                if (state is not None or reasoning is not None) and msg.get("role") == "assistant":
                     transformed.extend(
-                        replay_state.prepare_responses_batch([item], state, state_scope)
+                        replay_state.prepare_responses_batch([item], state, state_scope, reasoning)
                     )
                 else:
                     transformed.append(item)

@@ -11,10 +11,11 @@ from litellm.types.utils import ModelResponse
 
 from nooa._llm_state import (
     LLM_STATE_KEY,
-    StateCarryingMessage,
+    ReplayCarryingMessage,
     carried_replay_batch,
     carried_state,
 )
+from nooa.context_blocks.events import ToolCallEvent, ToolResult
 from nooa.context_blocks.formatter import (
     OpenAIProviderFormatter,
     ResponsesProviderFormatter,
@@ -99,17 +100,37 @@ def _tool(code: str) -> str:
 TOOL = Tool(name="execute_python", description="Run code", callable=_tool)
 
 
-def _render_responses(response: LLMResponse) -> list[dict]:
-    neutral = XMLBlockFormatter().format(
-        [ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=response)]
+def _response_blocks(response: LLMResponse) -> list[ResolvedBlock]:
+    blocks = [ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=response)]
+    blocks.extend(
+        ResolvedBlock(
+            key=f"execution-{call.id}",
+            content="",
+            role=Role.ASSISTANT,
+            event=ToolCallEvent(
+                tool_call_id=call.id,
+                name=call.name,
+                arguments=(
+                    json.loads(call.arguments)
+                    if isinstance(call.arguments, str)
+                    else call.arguments
+                ),
+                llm_response_id=response.id,
+                result=ToolResult(tool_call_id=call.id, content="complete"),
+            ),
+        )
+        for call in response.tool_calls
     )
+    return blocks
+
+
+def _render_responses(response: LLMResponse) -> list[dict]:
+    neutral = XMLBlockFormatter().format(_response_blocks(response))
     return ResponsesProviderFormatter().format(neutral)
 
 
 def _render_chat(response: LLMResponse) -> list[dict]:
-    neutral = XMLBlockFormatter().format(
-        [ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=response)]
-    )
+    neutral = XMLBlockFormatter().format(_response_blocks(response))
     return OpenAIProviderFormatter().format(neutral)
 
 
@@ -427,7 +448,9 @@ def test_non_openai_chat_provider_cannot_receive_reasoning_state(model: str) -> 
     }
     try:
         with patch("litellm.completion", return_value=_chat_response()) as call:
-            client.call([StateCarryingMessage({"role": "assistant", "content": "public"}, crafted)])
+            client.call(
+                [ReplayCarryingMessage({"role": "assistant", "content": "public"}, crafted)]
+            )
 
         assert call.call_args.kwargs["messages"] == [{"role": "assistant", "content": "public"}]
         assert "provider-secret" not in repr(call.call_args.kwargs)

@@ -19,7 +19,13 @@ from urllib.parse import urlsplit
 
 import litellm
 
-from nooa._llm_state import LLM_STATE_KEY, carried_state
+from nooa._llm_state import (
+    LLM_STATE_KEY,
+    carried_reasoning,
+    carried_state,
+    demote_reasoning_text,
+    demote_responses_batch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -237,20 +243,24 @@ def prepare_chat_messages(messages: list[dict[str, Any]], scope: str | None) -> 
     prepared: list[dict[str, Any]] = []
     for original in messages:
         state = copy.deepcopy(carried_state(original))
+        reasoning = carried_reasoning(original)
         message = copy.deepcopy(dict(original))
         message.pop(LLM_STATE_KEY, None)
         message.pop("reasoning_items", None)
         payload = _matching_payload(state, scope, _CHAT_FORMAT)
+        if payload and isinstance(payload.get("reasoning_items"), list):
+            message["reasoning_items"] = payload["reasoning_items"]
+        else:
+            demote_reasoning_text(message, reasoning)
         if (
             payload is None
-            and _is_state_only(state, _CHAT_FORMAT)
+            and state is not None
+            and not reasoning
             and message.get("role") == "assistant"
             and not message.get("content")
             and not message.get("tool_calls")
         ):
             continue
-        if payload and isinstance(payload.get("reasoning_items"), list):
-            message["reasoning_items"] = payload["reasoning_items"]
         prepared.append(message)
     return prepared
 
@@ -273,16 +283,17 @@ def prepare_responses_batch(
     batch: Any,
     state: Any,
     scope: str | None,
+    reasoning: str | None = None,
 ) -> list[dict[str, Any]]:
     """Restore a matching Responses payload among its public turn carriers."""
     clean = _clean_responses_batch(batch)
     payload = _matching_payload(state, scope, _RESPONSES_FORMAT)
     if payload is None:
-        return [] if _is_state_only(state, _RESPONSES_FORMAT) else clean
+        return demote_responses_batch(clean, state, reasoning)
     items = payload.get("items")
     order = payload.get("order")
     if not isinstance(items, list) or not isinstance(order, list):
-        return clean
+        return demote_responses_batch(clean, state, reasoning)
     if payload.get("state_only") is True:
         return [copy.deepcopy(item) for item in items if isinstance(item, dict)]
 
