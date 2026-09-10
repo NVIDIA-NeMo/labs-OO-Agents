@@ -330,6 +330,10 @@ class TestOutputModelReasoningFallback:
             assert isinstance(response.parsed, SentimentResponse)
             assert response.parsed.value == "positive"
             assert response.reasoning == '{"value": "positive"}'
+            restored = type(response).model_validate_json(response.model_dump_json())
+            assert restored.content == ""
+            assert restored.parsed is None
+            assert restored.reasoning == '{"value": "positive"}'
             assert mock_acompletion.call_count == 1
 
     def test_sync_output_model_falls_back_to_reasoning(self, client):

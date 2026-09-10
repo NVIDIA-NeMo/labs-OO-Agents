@@ -201,7 +201,7 @@ class TestXMLBlockFormatter:
         assert messages[1].content == "I will run both."
         assert [message.tool_call_id for message in messages[2:4]] == ["call_1", "call_2"]
 
-    def test_unexecuted_call_gets_a_matching_result(self):
+    def test_incomplete_linked_call_batch_is_omitted(self):
         turn = LLMResponse(
             content="",
             tool_calls=(
@@ -225,9 +225,20 @@ class TestXMLBlockFormatter:
             ]
         )
 
-        assert [call.id for call in messages[1].tool_calls] == ["call_1", "call_2"]
-        assert [message.tool_call_id for message in messages[2:]] == ["call_1", "call_2"]
-        assert messages[3].content == "(tool call was not executed)"
+        assert [message.role for message in messages] == [Role.SYSTEM]
+
+    def test_linked_execution_without_source_turn_is_not_rendered(self):
+        call = _tool_call_block(
+            tool_call_id="call_1",
+            name="one",
+            arguments={},
+            result_content="complete",
+            llm_response_id="filtered-response",
+        )
+
+        messages = XMLBlockFormatter().format([call])
+
+        assert [message.role for message in messages] == [Role.SYSTEM]
 
     @pytest.mark.parametrize(
         ("finish_reason", "arguments", "content"),
@@ -303,7 +314,7 @@ class TestXMLBlockFormatter:
 
         assert all(message.role is not Role.ASSISTANT for message in messages)
 
-    def test_linked_execution_falls_back_to_standalone_when_carrier_is_rejected(self):
+    def test_linked_execution_is_omitted_when_carrier_is_rejected(self):
         turn = LLMResponse(
             content="",
             tool_calls=(
@@ -330,12 +341,7 @@ class TestXMLBlockFormatter:
             ]
         )
 
-        assistant = next(message for message in messages if message.role == Role.ASSISTANT)
-        assert [call.id for call in assistant.tool_calls] == ["partial"]
-        assert assistant.tool_calls[0].arguments == {"code": "completed()"}
-        result = next(message for message in messages if message.role == Role.TOOL)
-        assert result.tool_call_id == "partial"
-        assert result.content == "status: complete"
+        assert [message.role for message in messages] == [Role.SYSTEM]
 
 
 class TestMarkdownBlockFormatter:

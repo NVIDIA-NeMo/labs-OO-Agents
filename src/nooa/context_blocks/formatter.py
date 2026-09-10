@@ -309,10 +309,11 @@ def _event_blocks_to_messages(
     assistant turns. Grouping here preserves the provider's call batch and
     prevents call/result interleaving from changing its meaning.
 
-    Legacy and synthetic ``ToolCallEvent`` objects without a visible linked
-    ``LLMResponse`` remain independently renderable.
+    Legacy and synthetic ``ToolCallEvent`` objects without a response link
+    remain independently renderable. Linked executions are only projected as
+    part of a complete canonical response/result batch.
     """
-    visible_turn_ids = {
+    replayable_turn_ids = {
         block.event.id
         for block in blocks
         if _is_llm_response(block.event) and _is_replayable_tool_call_turn(block.event)
@@ -323,7 +324,7 @@ def _event_blocks_to_messages(
         if (
             isinstance(event, ToolCallEvent)
             and event.llm_response_id is not None
-            and event.llm_response_id in visible_turn_ids
+            and event.llm_response_id in replayable_turn_ids
         ):
             executions.setdefault(event.llm_response_id, {})[event.tool_call_id] = event
 
@@ -332,6 +333,16 @@ def _event_blocks_to_messages(
         event = block.event
         if _is_llm_response(event) and _is_replayable_tool_call_turn(event):
             by_call_id = executions.get(event.id, {})
+            if any(
+                call.id not in by_call_id or by_call_id[call.id].result is None
+                for call in event.tool_calls
+            ):
+                logger.warning(
+                    "LLMResponse %s has an incomplete visible execution batch — "
+                    "omitting the assistant tool-call turn from replay.",
+                    event.id,
+                )
+                continue
             messages.append(
                 RenderedMessage(
                     role=Role.ASSISTANT,
@@ -349,30 +360,13 @@ def _event_blocks_to_messages(
                 )
             )
             for call in event.tool_calls:
-                execution = by_call_id.get(call.id)
-                if execution is not None:
-                    messages.append(_tool_result_message(execution))
-                    continue
-                logger.warning(
-                    "LLMResponse %s tool call %s has no execution event — emitting "
-                    "placeholder tool_result to preserve protocol ordering.",
-                    event.id,
-                    call.id,
-                )
-                messages.append(
-                    RenderedMessage(
-                        role=Role.TOOL,
-                        content="(tool call was not executed)",
-                        tool_call_id=call.id,
-                    )
-                )
+                messages.append(_tool_result_message(by_call_id[call.id]))
             continue
 
-        if (
-            isinstance(event, ToolCallEvent)
-            and event.llm_response_id is not None
-            and event.llm_response_id in visible_turn_ids
-        ):
+        # A linked execution is not an independent assistant turn. If its
+        # source response was filtered out (or its batch is incomplete), fail
+        # closed instead of fabricating provider history from the sidecar.
+        if isinstance(event, ToolCallEvent) and event.llm_response_id is not None:
             continue
 
         messages.extend(_event_block_to_messages(block, wrap_content=wrap_content))
