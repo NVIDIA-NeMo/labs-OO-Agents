@@ -585,6 +585,34 @@ def test_malformed_ciphertext_is_not_hidden_by_a_summary_only_item(encrypted) ->
         )
 
 
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        {**RESPONSES_MESSAGE, "content": [{"type": "refusal", "refusal": "Cannot comply."}]},
+        {
+            "type": "web_search_call",
+            "id": "ws_1",
+            "status": "completed",
+            "action": {"type": "search", "query": "reference"},
+        },
+    ],
+)
+def test_opaque_reasoning_cannot_be_retained_beside_unprojectable_output(unsupported) -> None:
+    raw = ResponsesAPIResponse.model_validate(
+        {
+            "id": "resp",
+            "created_at": 0,
+            "model": "gpt-5.6",
+            "status": "completed",
+            "output": [RESPONSES_REASONING, unsupported],
+        }
+    )
+    with ResponsesClient(model="openai/gpt-5.6", api_key="test") as client:
+        with patch("litellm.responses", return_value=raw):
+            with pytest.raises(ReasoningReplayError, match="unsupported output"):
+                client.call([{"role": "user", "content": "request"}])
+
+
 def test_responses_summary_stays_exact_on_match_and_demotes_on_model_change() -> None:
     source = ResponsesClient(model="openai/gpt-5.6", api_key="account-a")
     target = ResponsesClient(model="openai/gpt-5.7", api_key="account-a")

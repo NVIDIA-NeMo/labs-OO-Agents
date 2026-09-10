@@ -405,11 +405,14 @@ class TestCodeActAbortOnRealLengthPath:
             assert await agent_instance.my_task() == "done"
 
         events = agent_instance.event_manager.values()
-        first_output = next(event for event in events if event.event_type == "LLMResponse")
+        from nooa.context_blocks.events import ToolCallEvent
+        from nooa.unifiedllm import LLMResponse
+
+        first_output = next(event for event in events if isinstance(event, LLMResponse))
         execution = next(
             event
             for event in events
-            if event.event_type == "ToolCallEvent" and event.name == "execute_python"
+            if isinstance(event, ToolCallEvent) and event.name == "execute_python"
         )
         assert first_output.content == "I will calculate this."
         assert execution.arguments == {"code": "x = 42"}
