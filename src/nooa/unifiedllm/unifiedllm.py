@@ -1134,6 +1134,20 @@ def _update_token_calibration(
         logger.debug("token calibration skipped (estimate failed)", exc_info=True)
 
 
+def _copy_cache_marker_target(
+    message: dict[str, Any], *, copy_last_content_block: bool = False
+) -> dict[str, Any]:
+    """Shallow-copy one marker target and the content block we may mutate."""
+    copied = dict(message)
+    content = copied.get("content")
+    if copy_last_content_block and isinstance(content, list) and content:
+        blocks = list(content)
+        if isinstance(blocks[-1], dict):
+            blocks[-1] = dict(blocks[-1])
+        copied["content"] = blocks
+    return copied
+
+
 def _mark_responses_text(content: Any) -> tuple[Any, bool]:
     """Attach an OpenAI explicit breakpoint to the last input-text block."""
     marker = {"mode": "explicit"}
@@ -1146,27 +1160,29 @@ def _mark_responses_text(content: Any) -> tuple[Any, bool]:
             }
         ], True
     if isinstance(content, list):
-        updated = copy.deepcopy(content)
-        for block in reversed(updated):
+        for index in range(len(content) - 1, -1, -1):
+            block = content[index]
             if isinstance(block, dict) and block.get("type") == "input_text":
-                block["prompt_cache_breakpoint"] = marker
+                updated = list(content)
+                updated[index] = {**block, "prompt_cache_breakpoint": marker}
                 return updated, True
     return content, False
 
 
 def _mark_responses_cache_breakpoint(messages: list[dict[str, Any]], boundary: int) -> bool:
     """Mark the latest eligible Responses input block before ``boundary``."""
-    for item in reversed(messages[:boundary]):
+    for index in range(boundary - 1, -1, -1):
+        item = messages[index]
         if item.get("type") == "function_call_output":
             output, marked = _mark_responses_text(item.get("output"))
             if marked:
-                item["output"] = output
+                messages[index] = {**item, "output": output}
                 return True
         # Assistant output uses output_text, which is not an eligible input block.
         if item.get("role") in {"system", "developer", "user"}:
             content, marked = _mark_responses_text(item.get("content"))
             if marked:
-                item["content"] = content
+                messages[index] = {**item, "content": content}
                 return True
     return False
 
@@ -1334,18 +1350,11 @@ class UnifiedLLM(ABC):
             if index not in copied:
                 if prepared is messages:
                     prepared = list(messages)
-                # A shallow copy is enough here and preserves private replay
-                # metadata carried by our dict subclass. Nested content is
-                # detached below before it is changed.
-                prepared[index] = copy.copy(messages[index])
+                prepared[index] = _copy_cache_marker_target(
+                    messages[index], copy_last_content_block=copy_last_content_block
+                )
                 copied.add(index)
             message = prepared[index]
-            content = message.get("content")
-            if copy_last_content_block and isinstance(content, list) and content:
-                blocks = list(content)
-                if isinstance(blocks[-1], dict):
-                    blocks[-1] = dict(blocks[-1])
-                message["content"] = blocks
             return message
 
         # Map role names to native Responses API type equivalents
@@ -1397,16 +1406,21 @@ class UnifiedLLM(ABC):
         boundary: int | None = None
         clean: list[dict[str, Any]] = []
         for message in messages:
-            if carried_cache_boundary(message) and boundary is None:
+            starts_suffix = carried_cache_boundary(message)
+            if starts_suffix and boundary is None:
                 boundary = len(clean)
-            item = copy.deepcopy(dict(message))
-            if item:
-                clean.append(item)
+            if message:
+                # Strip the out-of-band boundary attribute from its one carrier;
+                # all other history stays borrowed.
+                clean.append(dict(message) if starts_suffix else message)
 
         if boundary is None or self.cache_breakpoint is None:
             return clean, instructions, False
         if self.cache_breakpoint == "anthropic":
             if boundary:
+                clean[boundary - 1] = _copy_cache_marker_target(
+                    clean[boundary - 1], copy_last_content_block=True
+                )
                 self._inject_cache_control_on_content(clean[boundary - 1])
             return clean, instructions, False
         if not responses:
