@@ -866,11 +866,15 @@ class SQLiteStorageManager:
             if conn is not None:
                 if lock is not None:
                     with lock:
-                        conn.commit()
-                        conn.close()
+                        try:
+                            conn.commit()
+                        finally:
+                            conn.close()
                 else:
-                    conn.commit()
-                    conn.close()
+                    try:
+                        conn.commit()
+                    finally:
+                        conn.close()
         finally:
             if self._lock_fd is not None:
                 fcntl.flock(self._lock_fd, fcntl.LOCK_UN)

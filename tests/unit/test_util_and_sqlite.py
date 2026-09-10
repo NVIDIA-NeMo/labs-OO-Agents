@@ -654,6 +654,28 @@ class TestSQLiteStorageManager:
         assert backend._insertion_counter == initial + 2
         sm.close()
 
+    def test_close_closes_the_connection_when_commit_fails(self):
+        """A raising commit() must not leak the connection.
+
+        close() sets _closed before committing, so a connection missed here can
+        never be closed by a later close() call -- it early-returns.
+        """
+        import sqlite3
+
+        from nooa.storage.sqlite import SQLiteStorageManager
+
+        sm = SQLiteStorageManager(":memory:")
+        real_conn = sm._conn
+        try:
+            fake_conn = MagicMock(spec=sqlite3.Connection)
+            fake_conn.commit.side_effect = sqlite3.OperationalError("disk I/O error")
+            sm._conn = fake_conn
+            with pytest.raises(sqlite3.OperationalError):
+                sm.close()
+            assert fake_conn.close.called
+        finally:
+            real_conn.close()
+
     def test_restore_snapshot_not_found_raises(self):
         from nooa.errors.storage import SnapshotNotFoundError
         from nooa.storage.sqlite import SQLiteStorageManager
