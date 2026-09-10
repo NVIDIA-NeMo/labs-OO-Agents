@@ -17,7 +17,7 @@ from nooa.context_blocks.models import BlockMetadata, RenderedMessage, ResolvedB
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 from nooa.unifiedllm import CompletionClient, ResponsesClient
-from nooa.unifiedllm.replay_state import prepare_chat_messages
+from nooa.unifiedllm.replay_state import capture_chat_state, prepare_chat_messages, replay_scope
 from nooa.unifiedllm.unifiedllm import _extract_usage
 
 
@@ -507,6 +507,66 @@ def test_openai_skips_assistant_output_and_marks_latest_input() -> None:
     assert enabled is True
     assert messages[0]["content"][-1]["prompt_cache_breakpoint"] == {"mode": "explicit"}
     assert "prompt_cache_breakpoint" not in messages[1]["content"][0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_tool_call", [False, True])
+async def test_anthropic_boundary_skips_assistants_without_public_content(with_tool_call) -> None:
+    bodies = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-5",
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 2, "output_tokens": 1},
+            },
+        )
+
+    client = CompletionClient(
+        model="anthropic/claude-sonnet-4-5",
+        api_key="test",
+        api_base="https://example.test",
+        cache_breakpoint="anthropic",
+        cache_control_injection_points=[],
+    )
+    assistant = {"role": "assistant", "content": None if with_tool_call else ""}
+    suffix = {"role": "user", "content": "live state"}
+    if with_tool_call:
+        assistant["tool_calls"] = [
+            {"id": "c1", "type": "function", "function": {"name": "run", "arguments": "{}"}}
+        ]
+        suffix = {"role": "tool", "tool_call_id": "c1", "content": "live result"}
+    thinking = [{"type": "thinking", "thinking": "Check the inputs.", "signature": "sig"}]
+    state = capture_chat_state(
+        {**assistant, "thinking_blocks": thinking}, replay_scope(client.model, "chat", {})
+    )
+    assert client._http is not None
+    await client._http.httpx_async.aclose()
+    transport = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    client._http.httpx_async = transport
+    client._http.async_client.client = transport
+    try:
+        await client.acall(
+            [
+                {"role": "user", "content": "stable input"},
+                ReplayCarryingMessage(assistant, llm_state=state),
+                ReplayCarryingMessage(suffix, cache_boundary_before=True),
+            ]
+        )
+    finally:
+        await client.aclose()
+
+    messages = bodies[0]["messages"]
+    assert messages[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in repr(messages[1:])
+    assert messages[1]["content"][0] == thinking[0]
 
 
 def test_openai_can_mark_a_stable_function_result() -> None:

@@ -1445,11 +1445,20 @@ class UnifiedLLM(ABC):
         if boundary is None or self.cache_breakpoint is None:
             return clean, instructions, False
         if self.cache_breakpoint == "anthropic":
-            if boundary:
-                clean[boundary - 1] = _copy_cache_marker_target(
-                    clean[boundary - 1], copy_last_content_block=True
-                )
-                self._inject_cache_control_on_content(clean[boundary - 1])
+            # LiteLLM drops message-level markers on tool-call-only turns.
+            # Thinking blocks cannot be marked directly either: use the latest
+            # eligible public content without inventing an empty text block.
+            for index in range(boundary - 1, -1, -1):
+                content = clean[index].get("content")
+                if not content or (
+                    isinstance(content, list)
+                    and isinstance(content[-1], dict)
+                    and content[-1].get("type") in {"thinking", "redacted_thinking"}
+                ):
+                    continue
+                clean[index] = _copy_cache_marker_target(clean[index], copy_last_content_block=True)
+                self._inject_cache_control_on_content(clean[index])
+                break
             return clean, instructions, False
         if not responses:
             return clean, instructions, False
