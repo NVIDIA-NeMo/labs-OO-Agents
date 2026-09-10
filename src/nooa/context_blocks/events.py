@@ -66,6 +66,7 @@ class EventStatus(StrEnum):
 class ResultStatus(StrEnum):
     """Status of a tool result."""
 
+    RUNNING = "running"
     COMPLETE = "complete"
     ERROR = "error"
 
@@ -209,9 +210,17 @@ class ToolResult(BaseModel):
     """
 
     tool_call_id: Annotated[str, Field(description="ID of the tool call this is a result for")]
-    content: Annotated[str, Field(description="Result content from the tool")]
+    content: Annotated[
+        str,
+        Field(
+            description=(
+                "Provider-visible result text; immutable after an LLM generation observes it"
+            )
+        ),
+    ]
     result_status: ResultStatus = Field(
-        default=ResultStatus.COMPLETE, description="Execution status"
+        default=ResultStatus.COMPLETE,
+        description="Execution lifecycle status; not part of provider-visible result content",
     )
 
 

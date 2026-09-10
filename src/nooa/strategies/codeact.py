@@ -79,6 +79,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_EXECUTE_PYTHON_RECEIPT = "status: accepted"
+
 
 @dataclass(frozen=True)
 class TextOnlyResponseContext:
@@ -1439,13 +1441,18 @@ Standard Python builtins and agent instance (`self`) are available."""
     ) -> Any | None:
         """Handle execute_python tool call with deferred output pattern.
 
-        The deferred output pattern ensures tool result is nested in ToolCallEvent
-        even when nested agent calls occur during execution:
+        The deferred output pattern ensures a protocol-valid tool result is
+        nested in ToolCallEvent even when nested agent calls occur during
+        execution:
 
-        1. Update ToolCallEvent.result with "status: executing" immediately
+        1. Add a stable "status: accepted" receipt immediately
         2. Execute code (nested agent events may be added here)
-        3. Update ToolCallEvent.result status to "complete" or "error"
+        3. Record final success/error without changing the receipt text
         4. Add PythonOutput with actual output content
+
+        The receipt text must not change after a nested generation has seen it.
+        Rewriting it from "executing" to "complete" would invalidate the
+        provider's cached prompt prefix containing the nested trajectory.
 
         Returns the execution result, a tuple ("TASK_COMPLETE", result) if return_result()
         was called inline, or None if an error occurred.
@@ -1488,14 +1495,15 @@ Standard Python builtins and agent instance (`self`) are available."""
             )
             return None
 
-        # Update ToolCallEvent with executing status immediately - BEFORE code execution
-        # This ensures result is nested even if nested agents add events
+        # Install a stable protocol receipt BEFORE code execution. Nested agent
+        # generations can observe this message, so its provider-visible content
+        # must remain byte-identical after execution completes.
         runtime.event_manager.update(
             tool_call_event_id,
             result=ToolResult(
                 tool_call_id=tool_call.id,
-                content="status: executing",
-                result_status=ResultStatus.COMPLETE,  # Will update to error if needed
+                content=_EXECUTE_PYTHON_RECEIPT,
+                result_status=ResultStatus.RUNNING,
             ),
         )
 
@@ -1520,12 +1528,13 @@ Standard Python builtins and agent instance (`self`) are available."""
             )
             hm.exec_error(error_type, str(result.error)[:500], session.iteration, code[:200])
 
-        # Update ToolCallEvent with final status
+        # Preserve the already-rendered receipt and update only lifecycle status.
+        # PythonOutput below appends the actual outcome to the conversation.
         runtime.event_manager.update(
             tool_call_event_id,
             result=ToolResult(
                 tool_call_id=tool_call.id,
-                content=f"status: {final_status.value}",
+                content=_EXECUTE_PYTHON_RECEIPT,
                 result_status=final_status,
             ),
         )
@@ -2592,13 +2601,14 @@ Standard Python builtins and agent instance (`self`) are available."""
             )
         )
 
-        # Update with executing status immediately (deferred output pattern)
+        # Keep the provider-facing receipt stable if this prefill recursively
+        # triggers a generation before it completes.
         runtime.event_manager.update(
             prefill_event_id,
             result=ToolResult(
                 tool_call_id=prefill_id,
-                content="status: executing",
-                result_status=ResultStatus.COMPLETE,  # Will update to error if needed
+                content=_EXECUTE_PYTHON_RECEIPT,
+                result_status=ResultStatus.RUNNING,
             ),
         )
 
@@ -2615,13 +2625,13 @@ Standard Python builtins and agent instance (`self`) are available."""
                 f"{list(result.captured_locals.keys())}"
             )
 
-        # Update ToolCallEvent with final status
+        # Preserve the receipt text; only observability status changes.
         final_status = ResultStatus.ERROR if result.error else ResultStatus.COMPLETE
         runtime.event_manager.update(
             prefill_event_id,
             result=ToolResult(
                 tool_call_id=prefill_id,
-                content=f"status: {final_status.value}",
+                content=_EXECUTE_PYTHON_RECEIPT,
                 result_status=final_status,
             ),
         )
