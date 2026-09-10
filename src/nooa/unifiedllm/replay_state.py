@@ -1,17 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Issuer-scoped capture and replay of opaque OpenAI reasoning state.
+"""Compatibility-scoped capture and replay of opaque OpenAI reasoning state.
 
 The event IR treats provider state as an opaque dictionary. This module is the
 only code that opens its NOOA envelope or places the payload on provider wire
-messages. Unknown issuers and compatibility mismatches fail closed.
+messages. Unknown providers and compatibility mismatches fail closed.
 """
 
 from __future__ import annotations
 
 import copy
 import hashlib
-import json
 import logging
 import os
 from typing import Any, Literal, cast
@@ -86,22 +85,22 @@ def replay_scope(
     api_style: Literal["chat", "responses"],
     params: dict[str, Any],
 ) -> str | None:
-    """Return a non-secret compatibility key for the effective issuer route.
+    """Return a non-secret compatibility key for an opaque provider payload.
 
-    LiteLLM resolves provider and model identity. Provider, API style, endpoint,
-    and exact model are intentionally the whole key. Authentication selects who
-    may call an issuer; it is not stable protocol identity and key rotation must
-    not silently disable capture or replay.
+    LiteLLM resolves provider and model identity. Provider, API style, and exact
+    model are intentionally the whole key. Transport routes and authentication
+    do not change the provider wire format, so gateway or credential changes
+    must not silently disable capture or replay.
     """
     configured_endpoint = params.get("api_base") or params.get("base_url")
     try:
-        resolved_model, provider, _, resolved_endpoint = litellm.get_llm_provider(
+        resolved_model, provider, _, _ = litellm.get_llm_provider(
             model=model,
             custom_llm_provider=params.get("custom_llm_provider"),
             api_base=configured_endpoint,
         )
     except Exception as exc:  # noqa: BLE001 - unknown routes fail closed
-        logger.debug("Could not resolve opaque-state issuer for %r: %s", model, exc)
+        logger.debug("Could not resolve opaque-state provider for %r: %s", model, exc)
         return None
     # This PR understands only OpenAI's encrypted reasoning wire formats.
     # Other providers may use similarly named fields with different replay
@@ -109,13 +108,7 @@ def replay_scope(
     if provider not in {"openai", "azure"}:
         return None
 
-    identity = {
-        "model": resolved_model,
-        "endpoint": _effective_endpoint(provider, configured_endpoint, resolved_endpoint),
-    }
-    digest = hashlib.sha256(
-        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    digest = hashlib.sha256(resolved_model.encode()).hexdigest()
     return f"{api_style}:{provider}:sha256:{digest}"
 
 

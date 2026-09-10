@@ -291,7 +291,30 @@ def test_azure_responses_state_is_captured_replayed_and_requested() -> None:
         client.close()
 
 
-def test_scope_partitions_endpoint_issuers() -> None:
+def test_responses_state_replays_across_gateways() -> None:
+    source_client = ResponsesClient(
+        model="openai/gpt-5.6",
+        api_key="account-a",
+        api_base="https://gateway-a.example/v1",
+    )
+    target_client = ResponsesClient(
+        model="openai/gpt-5.6",
+        api_key="account-b",
+        api_base="https://gateway-b.example/v1",
+    )
+    try:
+        with patch("litellm.responses", return_value=_responses(REASONING, MESSAGE)):
+            first = source_client.call([{"role": "user", "content": "think"}])
+        with patch("litellm.responses", return_value=_responses(MESSAGE)) as target_call:
+            target_client.call(_render_responses(first))
+
+        assert REASONING in target_call.call_args.kwargs["input"]
+    finally:
+        source_client.close()
+        target_client.close()
+
+
+def test_scope_is_stable_across_explicit_endpoints() -> None:
     source = replay_scope(
         "openai/gpt-5.6",
         "responses",
@@ -305,16 +328,16 @@ def test_scope_partitions_endpoint_issuers() -> None:
 
     assert source is not None
     assert target is not None
-    assert source != target
+    assert source == target
 
 
-def test_environment_selected_endpoint_partitions_scope(monkeypatch) -> None:
+def test_scope_is_stable_across_environment_selected_endpoints(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway-a.example/v1")
     first = replay_scope("openai/gpt-5.6", "responses", {"api_key": "account-a"})
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway-b.example/v1")
     second = replay_scope("openai/gpt-5.6", "responses", {"api_key": "account-a"})
 
-    assert first != second
+    assert first == second
 
 
 def test_scope_is_stable_across_auth_rotation_and_account_metadata() -> None:
