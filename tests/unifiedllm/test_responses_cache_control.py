@@ -191,6 +191,34 @@ class TestResponsesClientEndToEnd:
 
     ANTHROPIC_MODEL = "anthropic/claude-haiku-4-5"
 
+    def test_assistant_cache_copy_preserves_portable_reasoning(self):
+        """Copy-on-write cache marking must retain private replay metadata."""
+        client = ResponsesClient(model=self.ANTHROPIC_MODEL)
+        messages = ResponsesProviderFormatter().format(
+            [
+                RenderedMessage(
+                    role=Role.ASSISTANT,
+                    content="public answer",
+                    reasoning="portable reasoning text",
+                )
+            ]
+        )
+        try:
+            with patch("litellm.responses", return_value=make_mock_responses_response()) as call:
+                client.call(
+                    messages,
+                    cache_control_injection_points=[
+                        {"role": "assistant", "position": "last"}
+                    ],
+                )
+
+            sent = call.call_args.kwargs["input"]
+            assert sent[0] == {"role": "assistant", "content": "portable reasoning text"}
+            assert sent[1]["content"][0]["text"] == "public answer"
+            assert sent[1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+        finally:
+            client.close()
+
     @pytest.mark.asyncio
     async def test_acall_injects_cache_control(self):
         """acall() injects cache_control on messages before calling litellm."""

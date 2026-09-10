@@ -103,14 +103,14 @@ class TestResponsesClientSyncRetry:
 
     def test_reasoning_state_retains_interleaving_without_copying_public_calls(self):
         """The canonical state has enough anchors for exact ordered replay."""
-        reasoning_1 = {"type": "reasoning", "encrypted": "one"}
+        reasoning_1 = {"type": "reasoning", "encrypted_content": "one"}
         call_1 = {
             "type": "function_call",
             "call_id": "call-1",
             "name": "one",
             "arguments": "{}",
         }
-        reasoning_2 = {"type": "reasoning", "encrypted": "two"}
+        reasoning_2 = {"type": "reasoning", "encrypted_content": "two"}
         call_2 = {
             "type": "function_call",
             "call_id": "call-2",
@@ -131,14 +131,24 @@ class TestResponsesClientSyncRetry:
         assert response.llm_state is not None
         assert response.llm_state["payload"] == {
             "items": [
-                {"type": "reasoning", "encrypted": "one"},
-                {"type": "reasoning", "encrypted": "two"},
+                {"type": "reasoning", "encrypted_content": "one"},
+                {"type": "reasoning", "encrypted_content": "two"},
             ],
             "order": [
                 {"type": "reasoning", "index": 0},
-                {"type": "function_call", "call_id": "call-1"},
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "one",
+                    "arguments": "{}",
+                },
                 {"type": "reasoning", "index": 1},
-                {"type": "function_call", "call_id": "call-2"},
+                {
+                    "type": "function_call",
+                    "call_id": "call-2",
+                    "name": "two",
+                    "arguments": "{}",
+                },
             ],
         }
 

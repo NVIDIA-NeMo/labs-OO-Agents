@@ -24,7 +24,7 @@ from nooa.context_blocks.formatter import (
 from nooa.context_blocks.models import ResolvedBlock, Role
 from nooa.runtime.middleware import LLMCallContext
 from nooa.unifiedllm import CompletionClient, LLMResponse, ResponsesClient, Tool
-from nooa.unifiedllm.replay_state import replay_scope
+from nooa.unifiedllm.replay_state import prepare_responses_batch, replay_scope
 
 REASONING = {
     "id": "rs_1",
@@ -215,6 +215,97 @@ def test_responses_multi_call_state_preserves_provider_order() -> None:
         client.close()
 
 
+def test_changed_responses_text_drops_state_and_preserves_edit() -> None:
+    client = ResponsesClient(model="openai/gpt-5.6", api_key="account-a")
+    try:
+        with patch("litellm.responses", return_value=_responses(REASONING, MESSAGE)):
+            first = client.call([{"role": "user", "content": "think"}])
+        rendered = _render_responses(first)
+        assistant = next(item for item in rendered if carried_state(item) is not None)
+        assistant["content"] = "replacement text"
+
+        with patch("litellm.responses", return_value=_responses(MESSAGE)) as call:
+            client.call(rendered)
+
+        replay = call.call_args.kwargs["input"]
+        assert REASONING not in replay
+        assert {"role": "assistant", "content": "replacement text"} in replay
+    finally:
+        client.close()
+
+
+def test_reordered_responses_calls_drop_state_and_keep_new_order() -> None:
+    client = ResponsesClient(model="openai/gpt-5.6", api_key="account-a")
+    try:
+        with patch(
+            "litellm.responses", return_value=_responses(REASONING, MESSAGE, CALL, CALL_2)
+        ):
+            first = client.call([{"role": "user", "content": "run"}], tools=[TOOL])
+        rendered = _render_responses(first)
+        first_call = next(
+            index for index, item in enumerate(rendered) if item.get("call_id") == "call_1"
+        )
+        second_call = next(
+            index for index, item in enumerate(rendered) if item.get("call_id") == "call_2"
+        )
+        rendered[first_call], rendered[second_call] = rendered[second_call], rendered[first_call]
+
+        with patch("litellm.responses", return_value=_responses(MESSAGE)) as call:
+            client.call(rendered, tools=[TOOL])
+
+        replay = call.call_args.kwargs["input"]
+        assert REASONING not in replay
+        assert [item.get("call_id") for item in replay if item.get("type") == "function_call"] == [
+            "call_2",
+            "call_1",
+        ]
+    finally:
+        client.close()
+
+
+def test_reasoning_only_carrier_edit_drops_state_but_keeps_text() -> None:
+    client = ResponsesClient(model="openai/gpt-5.6", api_key="account-a")
+    try:
+        with patch("litellm.responses", return_value=_responses(REASONING)):
+            first = client.call([{"role": "user", "content": "think"}])
+        rendered = _render_responses(first)
+        assistant = next(item for item in rendered if carried_state(item) is not None)
+        assistant["content"] = "do not discard me"
+
+        with patch("litellm.responses", return_value=_responses(MESSAGE)) as call:
+            client.call(rendered)
+
+        assert call.call_args.kwargs["input"] == [
+            {"role": "assistant", "content": "do not discard me"}
+        ]
+    finally:
+        client.close()
+
+
+def test_malformed_matching_responses_payload_is_not_forwarded(caplog) -> None:
+    scope = replay_scope("openai/gpt-5.6", "responses", {})
+    state = {
+        "version": 1,
+        "scope": scope,
+        "format": "openai-responses",
+        "payload": {
+            "items": [{"type": "reasoning"}],
+            "order": [
+                {"type": "reasoning", "index": 0},
+                {"type": "message", "content": "public"},
+            ],
+        },
+    }
+
+    assert prepare_responses_batch(
+        [{"role": "assistant", "content": "public"}],
+        state,
+        scope,
+        "portable reasoning",
+    ) == [{"role": "assistant", "content": "portable reasoning\n\npublic"}]
+    assert "is malformed" in caplog.text
+
+
 def test_split_responses_replay_batch_keeps_public_call_but_drops_state() -> None:
     """Middleware may edit public items, but cannot reattach state to new neighbors."""
     client = ResponsesClient(model="openai/gpt-5.6", api_key="account-a")
@@ -290,6 +381,91 @@ def test_responses_state_is_hidden_from_a_different_model() -> None:
     finally:
         source.close()
         target.close()
+
+
+def test_responses_model_override_uses_effective_replay_scope() -> None:
+    client = ResponsesClient(model="openai/gpt-5.6", api_key="account-a")
+    try:
+        with patch("litellm.responses", return_value=_responses(REASONING, MESSAGE)):
+            first = client.call([{"role": "user", "content": "think"}])
+
+        with patch("litellm.responses", return_value=_responses(MESSAGE)) as call:
+            client.call(
+                _render_responses(first),
+                model="anthropic/claude-sonnet-4-5",
+                cache_control_injection_points=[],
+            )
+
+        assert call.call_args.kwargs["model"] == "anthropic/claude-sonnet-4-5"
+        assert REASONING not in call.call_args.kwargs["input"]
+        assert "include" not in call.call_args.kwargs
+    finally:
+        client.close()
+
+
+def test_completion_model_override_uses_effective_replay_scope() -> None:
+    client = CompletionClient(
+        model="openai/gpt-5.6",
+        api_key="account-a",
+        cache_control_injection_points=[],
+    )
+    try:
+        with patch(
+            "litellm.completion", return_value=_chat_response(reasoning_items=[REASONING])
+        ):
+            first = client.call([{"role": "user", "content": "run"}], tools=[TOOL])
+
+        with patch("litellm.completion", return_value=_chat_response()) as call:
+            client.call(
+                _render_chat(first),
+                tools=[TOOL],
+                model="anthropic/claude-sonnet-4-5",
+            )
+
+        assert call.call_args.kwargs["model"] == "anthropic/claude-sonnet-4-5"
+        assert "provider-secret" not in repr(call.call_args.kwargs["messages"])
+    finally:
+        client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_clients_use_effective_model_for_replay_scope() -> None:
+    responses = ResponsesClient(model="openai/gpt-5.6", api_key="account-a")
+    completion = CompletionClient(
+        model="openai/gpt-5.6",
+        api_key="account-a",
+        cache_control_injection_points=[],
+    )
+    try:
+        with patch("litellm.responses", return_value=_responses(REASONING, MESSAGE)):
+            responses_first = responses.call([{"role": "user", "content": "think"}])
+        with patch(
+            "litellm.completion", return_value=_chat_response(reasoning_items=[REASONING])
+        ):
+            completion_first = completion.call(
+                [{"role": "user", "content": "run"}], tools=[TOOL]
+            )
+
+        with (
+            patch("litellm.aresponses", AsyncMock(return_value=_responses(MESSAGE))) as response_call,
+            patch("litellm.acompletion", AsyncMock(return_value=_chat_response())) as chat_call,
+        ):
+            await responses.acall(
+                _render_responses(responses_first),
+                model="anthropic/claude-sonnet-4-5",
+                cache_control_injection_points=[],
+            )
+            await completion.acall(
+                _render_chat(completion_first),
+                tools=[TOOL],
+                model="anthropic/claude-sonnet-4-5",
+            )
+
+        assert REASONING not in response_call.call_args.kwargs["input"]
+        assert "provider-secret" not in repr(chat_call.call_args.kwargs["messages"])
+    finally:
+        await responses.aclose()
+        await completion.aclose()
 
 
 def test_azure_responses_state_is_captured_replayed_and_requested() -> None:

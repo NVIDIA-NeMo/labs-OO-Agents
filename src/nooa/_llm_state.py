@@ -96,27 +96,6 @@ def demote_reasoning_text(message: dict[str, Any], reasoning: str | None) -> Non
         message["content"] = reasoning
 
 
-def demote_chat_reasoning(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Build public Chat messages, withholding opaque state by default."""
-    prepared: list[dict[str, Any]] = []
-    for original in messages:
-        state = carried_state(original)
-        reasoning = carried_reasoning(original)
-        message = copy.deepcopy(dict(original))
-        message.pop(LLM_STATE_KEY, None)
-        demote_reasoning_text(message, reasoning)
-        if (
-            state is not None
-            and not reasoning
-            and message.get("role") == "assistant"
-            and not message.get("content")
-            and not message.get("tool_calls")
-        ):
-            continue
-        prepared.append(message)
-    return prepared
-
-
 def demote_responses_batch(
     batch: list[dict[str, Any]],
     llm_state: dict[str, Any] | None,

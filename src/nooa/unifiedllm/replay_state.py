@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import logging
 import os
 from typing import Any, Literal, cast
@@ -137,16 +138,6 @@ def _matching_payload(state: Any, scope: str | None, state_format: str) -> dict 
     return cast(dict[str, Any], state["payload"])
 
 
-def _is_state_only(state: Any, state_format: str) -> bool:
-    return (
-        isinstance(state, dict)
-        and state.get("version") == _STATE_VERSION
-        and state.get("format") == state_format
-        and isinstance(state.get("payload"), dict)
-        and state["payload"].get("state_only") is True
-    )
-
-
 def capture_chat_state(message: Any, scope: str | None) -> dict | None:
     items = _field(message, "reasoning_items")
     if not isinstance(items, list) or not items:
@@ -155,6 +146,104 @@ def capture_chat_state(message: Any, scope: str | None) -> dict | None:
     if not _field(message, "content") and not _field(message, "tool_calls"):
         payload["state_only"] = True
     return _envelope(scope, _CHAT_FORMAT, payload)
+
+
+def _responses_message_text(item: Any) -> str:
+    content = _field(item, "content", [])
+    if not isinstance(content, list):
+        return ""
+    texts = [
+        text
+        for block in content
+        if isinstance((text := _field(block, "text")), str)
+    ]
+    return "\n".join(texts)
+
+
+def _responses_call_slot(item: Any) -> dict[str, Any] | None:
+    call_id = _field(item, "call_id")
+    name = _field(item, "name") or ""
+    arguments = _field(item, "arguments") or ""
+    if isinstance(arguments, dict):
+        arguments = json.dumps(arguments)
+    if not all(isinstance(value, str) for value in (call_id, name, arguments)):
+        return None
+    return {
+        "type": "function_call",
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments,
+    }
+
+
+def _valid_responses_payload(payload: dict[str, Any]) -> bool:
+    """Validate NOOA-owned structure while leaving encrypted item contents opaque."""
+    if set(payload) - {"items", "order", "state_only"}:
+        return False
+    items = payload.get("items")
+    order = payload.get("order")
+    if not isinstance(items, list) or not items or not isinstance(order, list):
+        return False
+    if any(
+        not isinstance(item, dict)
+        or response_item_type(item) != "reasoning"
+        or not isinstance(item.get("encrypted_content"), str)
+        or not item["encrypted_content"]
+        for item in items
+    ):
+        return False
+
+    indexes: list[int] = []
+    carriers: list[dict[str, Any]] = []
+    for slot in order:
+        if not isinstance(slot, dict):
+            return False
+        slot_type = slot.get("type")
+        if slot_type == "reasoning":
+            if set(slot) != {"type", "index"}:
+                return False
+            index = slot.get("index")
+            if not isinstance(index, int) or not 0 <= index < len(items):
+                return False
+            indexes.append(index)
+        elif slot_type == "function_call":
+            if set(slot) != {"type", "call_id", "name", "arguments"}:
+                return False
+            if not all(
+                isinstance(slot.get(key), str) for key in ("call_id", "name", "arguments")
+            ):
+                return False
+            carriers.append(slot)
+        elif slot_type == "message":
+            if set(slot) != {"type", "content"} or not isinstance(slot.get("content"), str):
+                return False
+            carriers.append(slot)
+        else:
+            return False
+
+    state_only = payload.get("state_only")
+    if state_only not in (None, True):
+        return False
+    return (
+        sorted(indexes) == list(range(len(items)))
+        and len({slot["call_id"] for slot in carriers if slot["type"] == "function_call"})
+        == sum(slot["type"] == "function_call" for slot in carriers)
+        and (state_only is True) == (not carriers)
+    )
+
+
+def _public_responses_carriers(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    carriers: list[dict[str, Any]] = []
+    for item in items:
+        if response_item_type(item) == "function_call":
+            slot = _responses_call_slot(item)
+            if slot is not None:
+                carriers.append(slot)
+        elif item.get("role") == "assistant":
+            content = item.get("content", "")
+            if isinstance(content, str):
+                carriers.append({"type": "message", "content": content})
+    return carriers
 
 
 def capture_responses_state(output: list[Any], scope: str | None) -> dict | None:
@@ -167,18 +256,21 @@ def capture_responses_state(output: list[Any], scope: str | None) -> dict | None
             order.append({"type": "reasoning", "index": len(items)})
             items.append(opaque_item(item))
         elif item_type == "function_call":
-            call_id = _field(item, "call_id")
-            if isinstance(call_id, str):
-                order.append({"type": "function_call", "call_id": call_id})
+            slot = _responses_call_slot(item)
+            if slot is not None:
+                order.append(slot)
                 has_public_carrier = True
         elif item_type == "message":
-            order.append({"type": "message"})
+            order.append({"type": "message", "content": _responses_message_text(item)})
             has_public_carrier = True
     if not items:
         return None
     payload: dict[str, Any] = {"items": items, "order": order}
     if not has_public_carrier:
         payload["state_only"] = True
+    if not _valid_responses_payload(payload):
+        logger.warning("Discarding malformed OpenAI Responses reasoning state.")
+        return None
     return _envelope(scope, _RESPONSES_FORMAT, payload)
 
 
@@ -236,10 +328,30 @@ def prepare_responses_batch(
         return demote_responses_batch(clean, state, reasoning)
     items = payload.get("items")
     order = payload.get("order")
-    if not isinstance(items, list) or not isinstance(order, list):
+    if not _valid_responses_payload(payload):
+        logger.warning(
+            "Opaque Responses reasoning state is malformed; portable reasoning text "
+            "will be replayed instead."
+        )
         return demote_responses_batch(clean, state, reasoning)
+    assert isinstance(items, list)
+    assert isinstance(order, list)
     if payload.get("state_only") is True:
-        return [item for item in items if isinstance(item, dict)]
+        if clean != [{"role": "assistant", "content": ""}]:
+            logger.warning(
+                "Opaque Responses reasoning state was not replayed because its empty "
+                "public carrier changed."
+            )
+            return demote_responses_batch(clean, state, reasoning)
+        return cast(list[dict[str, Any]], items)
+
+    expected_carriers = [slot for slot in order if slot.get("type") != "reasoning"]
+    if _public_responses_carriers(clean) != expected_carriers:
+        logger.warning(
+            "Opaque Responses reasoning state was not replayed because its public "
+            "carriers changed; portable reasoning text will be replayed instead."
+        )
+        return demote_responses_batch(clean, state, reasoning)
 
     calls = {
         item.get("call_id"): item

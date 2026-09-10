@@ -1147,6 +1147,13 @@ class UnifiedLLM(ABC):
         # concrete subclasses; guarded here so base helpers stay safe.
         self._http: _ClientHttp | None = None
 
+    def _effective_model(self, call_config: dict[str, Any]) -> str:
+        """Return the model this individual request will actually dispatch."""
+        model = call_config.get("model", self.model)
+        if not isinstance(model, str) or not model:
+            raise ValueError("model must be a non-empty string")
+        return model
+
     def close(self) -> None:
         """Release this client's sync HTTP resources (its own httpx clients)."""
         if self._http is not None:
@@ -1194,7 +1201,11 @@ class UnifiedLLM(ABC):
             msg["cache_control"] = {"type": "ephemeral"}
 
     def _inject_cache_control(
-        self, messages: list[dict[str, Any]], injection_points: list[dict[str, Any]]
+        self,
+        messages: list[dict[str, Any]],
+        injection_points: list[dict[str, Any]],
+        *,
+        model: str | None = None,
     ) -> list[dict[str, Any]]:
         """Add cache_control to designated messages for prompt caching.
 
@@ -1253,7 +1264,10 @@ class UnifiedLLM(ABC):
             if index not in copied:
                 if prepared is messages:
                     prepared = list(messages)
-                prepared[index] = dict(messages[index])
+                # A shallow copy is enough here and preserves private replay
+                # metadata carried by our dict subclass. Nested content is
+                # detached below before it is changed.
+                prepared[index] = copy.copy(messages[index])
                 copied.add(index)
             message = prepared[index]
             content = message.get("content")
@@ -1284,7 +1298,7 @@ class UnifiedLLM(ABC):
 
         # Anthropic needs cache_control on a content block (parts form); other providers
         # reject a content list on non-user roles, so mark at the message level instead.
-        anthropic = _is_anthropic_model(self.model)
+        anthropic = _is_anthropic_model(model or self.model)
         for role in roles_to_cache_last:
             # Search for matching messages by role OR by equivalent native type
             native_type = _ROLE_TO_TYPE.get(role)
@@ -1767,7 +1781,8 @@ class CompletionClient(UnifiedLLM):
         returns empty content but has reasoning_content (common with some reasoning models).
         """
         call_config = {**self.config, **kwargs}
-        state_scope = replay_state.replay_scope(self.model, "chat", call_config)
+        effective_model = self._effective_model(call_config)
+        state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
         messages = replay_state.prepare_chat_messages(messages, state_scope)
 
         # Inject cache_control at the message level for prompt caching
@@ -1776,7 +1791,9 @@ class CompletionClient(UnifiedLLM):
             if cache_control_injection_points is None
             else cache_control_injection_points
         )
-        prepared_messages = self._inject_cache_control(messages, cache_points)
+        prepared_messages = self._inject_cache_control(
+            messages, cache_points, model=effective_model
+        )
 
         api_params = {
             "model": self.model,
@@ -1791,13 +1808,13 @@ class CompletionClient(UnifiedLLM):
 
         if output_model is not None:
             api_params["response_format"] = _maybe_sanitize_response_format(
-                self.model, output_model
+                effective_model, output_model
             )
 
         # Bedrock/Anthropic reject messages with tool_call blocks when tools= is absent.
         if (
             "tools" not in api_params
-            and _needs_dummy_tool(self.model)
+            and _needs_dummy_tool(effective_model)
             and _messages_have_tool_calls(prepared_messages)
         ):
             api_params["tools"] = [_DUMMY_TOOL_SCHEMA]
@@ -1827,7 +1844,7 @@ class CompletionClient(UnifiedLLM):
             return raw_response
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
-        with _track_llm_call(model=self.model, endpoint=self.config.get("api_base")):
+        with _track_llm_call(model=effective_model, endpoint=self.config.get("api_base")):
             raw_response = (
                 sync_retry(_make_call, config=self.retry_config)
                 if self.retry_config
@@ -1838,7 +1855,7 @@ class CompletionClient(UnifiedLLM):
         if usage:
             _record_llm_metric("token_usage", usage)
             _update_token_calibration(
-                self.model, prepared_messages, usage, tools=api_params.get("tools")
+                effective_model, prepared_messages, usage, tools=api_params.get("tools")
             )
         raw_tool_calls = cast(
             list[Any] | None,
@@ -1935,7 +1952,8 @@ class CompletionClient(UnifiedLLM):
         returns empty content but has reasoning_content (common with some reasoning models).
         """
         call_config = {**self.config, **kwargs}
-        state_scope = replay_state.replay_scope(self.model, "chat", call_config)
+        effective_model = self._effective_model(call_config)
+        state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
         messages = replay_state.prepare_chat_messages(messages, state_scope)
 
         # Inject cache_control at the message level for prompt caching
@@ -1944,7 +1962,9 @@ class CompletionClient(UnifiedLLM):
             if cache_control_injection_points is None
             else cache_control_injection_points
         )
-        prepared_messages = self._inject_cache_control(messages, cache_points)
+        prepared_messages = self._inject_cache_control(
+            messages, cache_points, model=effective_model
+        )
 
         api_params = {
             "model": self.model,
@@ -1959,13 +1979,13 @@ class CompletionClient(UnifiedLLM):
 
         if output_model is not None:
             api_params["response_format"] = _maybe_sanitize_response_format(
-                self.model, output_model
+                effective_model, output_model
             )
 
         # Bedrock/Anthropic reject messages with tool_call blocks when tools= is absent.
         if (
             "tools" not in api_params
-            and _needs_dummy_tool(self.model)
+            and _needs_dummy_tool(effective_model)
             and _messages_have_tool_calls(prepared_messages)
         ):
             api_params["tools"] = [_DUMMY_TOOL_SCHEMA]
@@ -1995,7 +2015,7 @@ class CompletionClient(UnifiedLLM):
             return raw_response
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
-        with _track_llm_call(model=self.model, endpoint=self.config.get("api_base")):
+        with _track_llm_call(model=effective_model, endpoint=self.config.get("api_base")):
             raw_response = (
                 await with_retry(_make_call, config=self.retry_config)
                 if self.retry_config
@@ -2006,7 +2026,7 @@ class CompletionClient(UnifiedLLM):
         if usage:
             _record_llm_metric("token_usage", usage)
             _update_token_calibration(
-                self.model, prepared_messages, usage, tools=api_params.get("tools")
+                effective_model, prepared_messages, usage, tools=api_params.get("tools")
             )
         raw_tool_calls = cast(
             list[Any] | None,
@@ -2273,14 +2293,17 @@ class ResponsesClient(UnifiedLLM):
         # on OpenAI/Azure/NIM Responses calls triggers a 400 "Unknown parameter:
         # input[N].cache_control" at the gateway.
         call_config = {**self.config, **kwargs}
-        state_scope = replay_state.replay_scope(self.model, "responses", call_config)
-        if _is_anthropic_model(self.model):
+        effective_model = self._effective_model(call_config)
+        state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
+        if _is_anthropic_model(effective_model):
             cache_points = (
                 self.cache_control_injection_points
                 if cache_control_injection_points is None
                 else cache_control_injection_points
             )
-            prepared_messages = self._inject_cache_control(messages, cache_points)
+            prepared_messages = self._inject_cache_control(
+                messages, cache_points, model=effective_model
+            )
         else:
             prepared_messages = messages
         input_messages, instructions = self._transform_messages(prepared_messages, state_scope)
@@ -2321,7 +2344,7 @@ class ResponsesClient(UnifiedLLM):
             return cast("litellm.ResponsesAPIResponse", litellm.responses(**api_params))
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
-        with _track_llm_call(model=self.model, endpoint=self.config.get("api_base")):
+        with _track_llm_call(model=effective_model, endpoint=self.config.get("api_base")):
             raw_response = (
                 sync_retry(_make_call, config=self.retry_config)
                 if self.retry_config
@@ -2330,7 +2353,9 @@ class ResponsesClient(UnifiedLLM):
 
         usage = LLMUsage.from_provider(getattr(raw_response, "usage", None))
         if usage:
-            _update_token_calibration(self.model, messages, usage, tools=api_params.get("tools"))
+            _update_token_calibration(
+                effective_model, messages, usage, tools=api_params.get("tools")
+            )
 
         output: list[Any] = raw_response.output  # type: ignore[assignment]
         raw_tool_calls = [
@@ -2403,14 +2428,17 @@ class ResponsesClient(UnifiedLLM):
         # See ResponsesClient.call for why cache_control injection is gated on
         # Anthropic models only.
         call_config = {**self.config, **kwargs}
-        state_scope = replay_state.replay_scope(self.model, "responses", call_config)
-        if _is_anthropic_model(self.model):
+        effective_model = self._effective_model(call_config)
+        state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
+        if _is_anthropic_model(effective_model):
             cache_points = (
                 self.cache_control_injection_points
                 if cache_control_injection_points is None
                 else cache_control_injection_points
             )
-            prepared_messages = self._inject_cache_control(messages, cache_points)
+            prepared_messages = self._inject_cache_control(
+                messages, cache_points, model=effective_model
+            )
         else:
             prepared_messages = messages
         input_messages, instructions = self._transform_messages(prepared_messages, state_scope)
@@ -2451,7 +2479,7 @@ class ResponsesClient(UnifiedLLM):
             return cast("litellm.ResponsesAPIResponse", await litellm.aresponses(**api_params))
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
-        with _track_llm_call(model=self.model, endpoint=self.config.get("api_base")):
+        with _track_llm_call(model=effective_model, endpoint=self.config.get("api_base")):
             raw_response = (
                 await with_retry(_make_call, config=self.retry_config)
                 if self.retry_config
@@ -2460,7 +2488,9 @@ class ResponsesClient(UnifiedLLM):
 
         usage = LLMUsage.from_provider(getattr(raw_response, "usage", None))
         if usage:
-            _update_token_calibration(self.model, messages, usage, tools=api_params.get("tools"))
+            _update_token_calibration(
+                effective_model, messages, usage, tools=api_params.get("tools")
+            )
 
         output: list[Any] = raw_response.output  # type: ignore[assignment]
         raw_tool_calls = [
