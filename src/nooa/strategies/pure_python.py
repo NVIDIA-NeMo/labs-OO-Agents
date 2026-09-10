@@ -308,7 +308,9 @@ class PurePythonStrategy(CompositeStrategy):
                 generate_event_id: str | None = None
                 try:
                     code, generate_event_id = await self._generate_code(runtime, session)
-                except ReasoningReplayError:
+                except ReasoningReplayError as e:
+                    turn_final = True
+                    turn_exception = type(e).__name__
                     raise
                 except _HTTPX_TIMEOUT_EXCEPTIONS as e:
                     # Catch httpx timeout exceptions and preserve them

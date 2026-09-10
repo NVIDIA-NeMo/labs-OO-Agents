@@ -209,6 +209,57 @@ def _scope_provider(scope: str | None) -> str | None:
     return parts[1]
 
 
+def _chat_public_carrier(message: Any, scope: str | None) -> dict[str, Any] | None:
+    """Project the public assistant data to which opaque Chat state is bound."""
+    if _field(message, "role") != "assistant":
+        return None
+    raw_calls = _field(message, "tool_calls")
+    if raw_calls is None:
+        raw_calls = []
+    if not isinstance(raw_calls, list):
+        return None
+
+    calls: list[dict[str, str]] = []
+    for call in raw_calls:
+        function = _field(call, "function")
+        call_id = _field(call, "id")
+        name = _field(function, "name")
+        arguments = _field(function, "arguments")
+        if isinstance(arguments, dict):
+            arguments = json.dumps(arguments)
+        if not all(isinstance(value, str) for value in (call_id, name, arguments)):
+            return None
+        calls.append(
+            {
+                "id": public_tool_call_id(call, scope),
+                "name": name,
+                "arguments": arguments,
+            }
+        )
+
+    content = _field(message, "content")
+    if content is not None and not isinstance(content, str):
+        return None
+    # The canonical formatter uses None for an empty assistant tool-call turn
+    # and an empty string for an assistant turn with no public carrier.
+    content = (content or None) if calls else (content or "")
+    return {"content": content, "tool_calls": calls}
+
+
+def _valid_chat_carrier(value: Any) -> bool:
+    if not isinstance(value, dict) or set(value) != {"content", "tool_calls"}:
+        return False
+    if value.get("content") is not None and not isinstance(value.get("content"), str):
+        return False
+    calls = value.get("tool_calls")
+    return isinstance(calls, list) and all(
+        isinstance(call, dict)
+        and set(call) == {"id", "name", "arguments"}
+        and all(isinstance(call.get(key), str) for key in ("id", "name", "arguments"))
+        for call in calls
+    )
+
+
 def _sanitize_chat_payload(payload: dict[str, Any], scope: str | None) -> dict[str, Any]:
     """Validate the small provider-specific envelope owned by NOOA."""
     provider = _scope_provider(scope)
@@ -245,34 +296,37 @@ def _sanitize_chat_payload(payload: dict[str, Any], scope: str | None) -> dict[s
         for item in tool_state:
             fields = item.get("provider_specific_fields") if isinstance(item, dict) else None
             signature = fields.get("thought_signature") if isinstance(fields, dict) else None
-            calls.append(
-                {"provider_specific_fields": {"thought_signature": signature}}
-                if isinstance(signature, str) and signature
-                else None
+            inline_signature = (
+                item.get("inline_thought_signature") if isinstance(item, dict) else None
             )
+            call: dict[str, Any] = {}
+            if isinstance(signature, str) and signature:
+                call["provider_specific_fields"] = {"thought_signature": signature}
+            if isinstance(inline_signature, str) and inline_signature:
+                call["inline_thought_signature"] = inline_signature
+            if signature and inline_signature and signature != inline_signature:
+                raise ReasoningReplayError("Conflicting stored tool-call thought signatures.")
+            calls.append(call or None)
         if any(item is not None for item in calls):
             clean["tool_calls"] = calls
 
-    tool_call_ids = payload.get("tool_call_ids")
-    if (
-        clean
-        and isinstance(tool_call_ids, list)
-        and tool_call_ids
-        and all(isinstance(call_id, str) and call_id for call_id in tool_call_ids)
-        and len(set(tool_call_ids)) == len(tool_call_ids)
-    ):
-        clean["tool_call_ids"] = tool_call_ids
-
-    if clean and payload.get("state_only") is True:
+    has_state = bool(clean)
+    carrier = payload.get("carrier")
+    if has_state and _valid_chat_carrier(carrier):
+        clean["carrier"] = carrier
+    if has_state and payload.get("state_only") is True:
         clean["state_only"] = True
     if (
-        not clean
+        not has_state
         or clean != payload
         or (
             "tool_calls" in clean
-            and len(clean["tool_calls"]) != len(clean.get("tool_call_ids", ()))
+            and len(clean["tool_calls"]) != len(clean.get("carrier", {}).get("tool_calls", ()))
         )
-        or (clean.get("state_only") is True and ("tool_calls" in clean or "tool_call_ids" in clean))
+        or (
+            clean.get("state_only") is True
+            and ("tool_calls" in clean or clean.get("carrier") != {"content": "", "tool_calls": []})
+        )
     ):
         raise ReasoningReplayError(
             f"Opaque chat reasoning state is malformed or unsupported for provider {provider!r}."
@@ -280,7 +334,7 @@ def _sanitize_chat_payload(payload: dict[str, Any], scope: str | None) -> dict[s
     return clean
 
 
-def _tool_call_state(tool_call: Any) -> dict[str, Any] | None:
+def _tool_call_state(tool_call: Any, scope: str | None) -> dict[str, Any] | None:
     dumped = opaque_item(tool_call)
     if not isinstance(dumped, dict):
         raise ReasoningReplayError("Malformed provider tool call: expected a mapping.")
@@ -297,17 +351,26 @@ def _tool_call_state(tool_call: Any) -> dict[str, Any] | None:
     ):
         raise ReasoningReplayError("Malformed tool-call thought_signature.")
     call_id = dumped.get("id")
-    inline_signature = None
+    inline_candidate = None
     if isinstance(call_id, str) and _INLINE_THOUGHT_SIGNATURE_SEPARATOR in call_id:
-        inline_signature = call_id.split(_INLINE_THOUGHT_SIGNATURE_SEPARATOR, 1)[1]
-        if not inline_signature:
+        inline_candidate = call_id.split(_INLINE_THOUGHT_SIGNATURE_SEPARATOR, 1)[1]
+        if not inline_candidate:
             raise ReasoningReplayError("Malformed inline tool-call thought signature.")
-    if signature and inline_signature and signature != inline_signature:
+    if signature and inline_candidate and signature != inline_candidate:
         raise ReasoningReplayError("Conflicting thought signatures on one provider tool call.")
-    signature = signature or inline_signature
-    if signature is None:
+    inline_signature = (
+        inline_candidate
+        if _scope_provider(scope) == "gemini" or signature == inline_candidate
+        else None
+    )
+    if signature is None and inline_signature is None:
         return None
-    return {"provider_specific_fields": {"thought_signature": signature}}
+    state: dict[str, Any] = {}
+    if signature is not None:
+        state["provider_specific_fields"] = {"thought_signature": signature}
+    if inline_signature is not None:
+        state["inline_thought_signature"] = inline_signature
+    return state
 
 
 def public_tool_call_id(value: Any, scope: str | None) -> str:
@@ -315,7 +378,8 @@ def public_tool_call_id(value: Any, scope: str | None) -> str:
     call_id = _field(value, "id", "")
     if not isinstance(call_id, str) or not call_id:
         raise ReasoningReplayError("Malformed provider tool call: expected a non-empty id.")
-    if _scope_provider(scope) != "gemini":
+    state = _tool_call_state(value, scope)
+    if state is None or "inline_thought_signature" not in state:
         return call_id
     return call_id.split(_INLINE_THOUGHT_SIGNATURE_SEPARATOR, 1)[0]
 
@@ -346,26 +410,23 @@ def capture_chat_state(message: Any, scope: str | None) -> dict | None:
     if raw_tool_calls_value is not None and not isinstance(raw_tool_calls_value, list):
         raise ReasoningReplayError("Malformed tool_calls in provider response.")
     raw_tool_calls = raw_tool_calls_value or []
-    tool_state = [_tool_call_state(call) for call in raw_tool_calls]
+    tool_state = [_tool_call_state(call, scope) for call in raw_tool_calls]
     if any(item is not None for item in tool_state):
         payload["tool_calls"] = tool_state
 
-    if payload and raw_tool_calls:
-        tool_call_ids = [public_tool_call_id(call, scope) for call in raw_tool_calls]
-        if len(set(tool_call_ids)) != len(tool_call_ids):
-            raise ReasoningReplayError(
-                "Cannot retain opaque reasoning state for duplicate provider tool-call ids."
-            )
-        payload["tool_call_ids"] = tool_call_ids
-
     if not payload:
         return None
-    payload = _sanitize_chat_payload(payload, scope)
+    carrier = _chat_public_carrier(message, scope)
+    if carrier is None or len({call["id"] for call in carrier["tool_calls"]}) != len(
+        carrier["tool_calls"]
+    ):
+        raise ReasoningReplayError(
+            "Cannot retain opaque reasoning state for a malformed public assistant carrier."
+        )
+    payload["carrier"] = carrier
     if not _field(message, "content") and not _field(message, "tool_calls"):
         payload["state_only"] = True
-    if not _valid_chat_payload(payload):
-        logger.warning("Discarding malformed OpenAI Chat reasoning state.")
-        return None
+    payload = _sanitize_chat_payload(payload, scope)
     return _envelope(scope, _CHAT_FORMAT, payload)
 
 
@@ -467,26 +528,57 @@ def _strip_inline_signature(value: Any) -> Any:
     return value
 
 
-def _strip_chat_state(message: dict[str, Any], *, strip_inline_signatures: bool) -> None:
+def _strip_chat_state(
+    message: dict[str, Any], source_scope: str | None, target_scope: str | None
+) -> None:
     removed = False
+    gemini_wire = "gemini" in {
+        _scope_provider(source_scope),
+        _scope_provider(target_scope),
+    }
     for key in ("reasoning_items", "thinking_blocks", "provider_specific_fields"):
         removed = key in message or removed
         message.pop(key, None)
+    content = message.get("content")
+    if isinstance(content, list):
+        public_blocks = [
+            block
+            for block in content
+            if not (
+                isinstance(block, dict) and block.get("type") in {"thinking", "redacted_thinking"}
+            )
+        ]
+        removed = len(public_blocks) != len(content) or removed
+        message["content"] = public_blocks
     tool_calls = message.get("tool_calls")
     if isinstance(tool_calls, list):
         for call in tool_calls:
             if not isinstance(call, dict):
                 continue
-            if strip_inline_signatures:
-                call["id"] = _strip_inline_signature(call.get("id"))
+            call_id = call.get("id")
+            fields = call.get("provider_specific_fields")
+            explicit_signature = (
+                fields.get("thought_signature") if isinstance(fields, dict) else None
+            )
+            inline_candidate = (
+                call_id.split(_INLINE_THOUGHT_SIGNATURE_SEPARATOR, 1)[1]
+                if isinstance(call_id, str) and _INLINE_THOUGHT_SIGNATURE_SEPARATOR in call_id
+                else None
+            )
+            if gemini_wire or (inline_candidate and inline_candidate == explicit_signature):
+                public_id = _strip_inline_signature(call_id)
+                removed = public_id != call_id or removed
+                call["id"] = public_id
             removed = "provider_specific_fields" in call or removed
             call.pop("provider_specific_fields", None)
             function = call.get("function")
             if isinstance(function, dict):
                 removed = "provider_specific_fields" in function or removed
                 function.pop("provider_specific_fields", None)
-    if strip_inline_signatures and "tool_call_id" in message:
-        message["tool_call_id"] = _strip_inline_signature(message["tool_call_id"])
+    if gemini_wire and "tool_call_id" in message:
+        public_id = _strip_inline_signature(message["tool_call_id"])
+        removed = public_id != message["tool_call_id"] or removed
+        message["tool_call_id"] = public_id
     if removed:
         logger.warning(
             "Removed untrusted provider reasoning fields from a public chat message; "
@@ -495,30 +587,10 @@ def _strip_chat_state(message: dict[str, Any], *, strip_inline_signatures: bool)
 
 
 def _restore_chat_state(message: dict[str, Any], payload: dict[str, Any]) -> bool:
-    if payload.get("state_only") is True and message != {"role": "assistant", "content": ""}:
+    if _chat_public_carrier(message, None) != payload.get("carrier"):
         logger.warning(
-            "Opaque reasoning state was not replayed because its empty public carrier "
+            "Opaque reasoning state was not replayed because its public assistant carrier "
             "changed; portable reasoning text will be replayed instead."
-        )
-        return False
-
-    expected_call_ids = payload.get("tool_call_ids")
-    if expected_call_ids is not None:
-        tool_calls = message.get("tool_calls")
-        if (
-            not isinstance(tool_calls, list)
-            or [call.get("id") if isinstance(call, dict) else None for call in tool_calls]
-            != expected_call_ids
-        ):
-            logger.warning(
-                "Opaque reasoning state was not replayed because the public tool-call "
-                "sequence changed; portable reasoning text will be replayed instead."
-            )
-            return False
-    elif message.get("tool_calls"):
-        logger.warning(
-            "Opaque reasoning state was not replayed because tool calls were added to its "
-            "public carrier; portable reasoning text will be replayed instead."
         )
         return False
 
@@ -532,9 +604,12 @@ def _restore_chat_state(message: dict[str, Any], payload: dict[str, Any]) -> boo
     # The payload validator and identity check above guarantee equal lists.
     for call, state in zip(cast(list[Any], tool_calls), cast(list[Any], tool_state), strict=True):
         if state is not None:
-            cast(dict[str, Any], call)["provider_specific_fields"] = cast(dict[str, Any], state)[
-                "provider_specific_fields"
-            ]
+            call = cast(dict[str, Any], call)
+            state = cast(dict[str, Any], state)
+            if "provider_specific_fields" in state:
+                call["provider_specific_fields"] = state["provider_specific_fields"]
+            if inline_signature := state.get("inline_thought_signature"):
+                call["id"] = f"{call['id']}{_INLINE_THOUGHT_SIGNATURE_SEPARATOR}{inline_signature}"
     return True
 
 
@@ -618,6 +693,7 @@ def responses_reasoning_text(output: list[Any]) -> str | None:
 def prepare_chat_messages(messages: list[dict[str, Any]], scope: str | None) -> list[dict]:
     """Strip private/raw state and restore only a matching Chat payload."""
     prepared: list[dict[str, Any]] = []
+    private_call_ids: dict[str, str] = {}
     for original in messages:
         state = carried_state(original)
         reasoning = carried_reasoning(original)
@@ -630,14 +706,24 @@ def prepare_chat_messages(messages: list[dict[str, Any]], scope: str | None) -> 
         )
         _strip_chat_state(
             message,
-            strip_inline_signatures=(
-                isinstance(source_scope, str) and _scope_provider(source_scope) == "gemini"
-            ),
+            source_scope if isinstance(source_scope, str) else None,
+            scope,
         )
         payload = _matching_payload(state, scope, _CHAT_FORMAT)
         if payload is not None:
             payload = _sanitize_chat_payload(payload, scope)
         restored = payload is not None and _restore_chat_state(message, payload)
+        if restored:
+            public_calls = cast(dict[str, Any], payload)["carrier"]["tool_calls"]
+            private_calls = message.get("tool_calls") or []
+            for public_call, private_call in zip(public_calls, private_calls, strict=True):
+                public_id = public_call["id"]
+                private_id = private_call["id"]
+                if public_id != private_id:
+                    private_call_ids[public_id] = private_id
+        tool_call_id = message.get("tool_call_id")
+        if isinstance(tool_call_id, str) and tool_call_id in private_call_ids:
+            message["tool_call_id"] = private_call_ids.pop(tool_call_id)
         if not restored:
             demote_reasoning_text(message, reasoning)
         if (

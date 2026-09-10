@@ -379,7 +379,7 @@ def test_responses_envelope_cannot_replay_a_non_reasoning_item_as_state() -> Non
         },
     }
 
-    with pytest.raises(ReasoningReplayError, match="Malformed Responses reasoning item"):
+    with pytest.raises(ReasoningReplayError, match="Malformed OpenAI Responses"):
         prepare_responses_batch([CALL], state, scope)
 
     with pytest.raises(ReasoningReplayError, match="unsupported output type.*future_public"):

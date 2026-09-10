@@ -190,7 +190,10 @@ def test_gemini_signatures_round_trip_without_becoming_public_call_ids() -> None
         assert [call.id for call in first.tool_calls] == ["call_1", "call_2"]
         assert first.llm_state is not None
         assert "discard-me" not in json.dumps(first.llm_state)
-        assert first.llm_state["payload"]["tool_call_ids"] == ["call_1", "call_2"]
+        assert [call["id"] for call in first.llm_state["payload"]["carrier"]["tool_calls"]] == [
+            "call_1",
+            "call_2",
+        ]
         assistant = next(
             message
             for message in completion.call_args_list[1].kwargs["messages"]
@@ -203,7 +206,10 @@ def test_gemini_signatures_round_trip_without_becoming_public_call_ids() -> None
             assistant["provider_specific_fields"]["thought_signatures"]
             is first.llm_state["payload"]["provider_specific_fields"]["thought_signatures"]
         )
-        assert [call["id"] for call in assistant["tool_calls"]] == ["call_1", "call_2"]
+        assert [call["id"] for call in assistant["tool_calls"]] == [
+            f"call_1__thought__{GEMINI_SIGNATURE}",
+            f"call_2__thought__{GEMINI_SIGNATURE_2}",
+        ]
         assert [
             call["provider_specific_fields"]["thought_signature"]
             for call in assistant["tool_calls"]
@@ -213,7 +219,72 @@ def test_gemini_signatures_round_trip_without_becoming_public_call_ids() -> None
         target.close()
 
 
-@pytest.mark.parametrize("mutation", ["drop", "reorder", "duplicate"])
+def test_gateway_routed_gemini_keeps_inline_signatures_private() -> None:
+    client = CompletionClient(
+        model="openai/gcp/google/gemini-3.1-pro-preview",
+        api_base="https://inference-api.example/v1",
+    )
+    try:
+        with patch(
+            "litellm.completion", side_effect=[_gemini_response(), _gemini_response()]
+        ) as completion:
+            first = client.call([{"role": "user", "content": "run"}], tools=[TOOL])
+            client.call(_render(first), tools=[TOOL])
+
+        assert [call.id for call in first.tool_calls] == ["call_1", "call_2"]
+        assert first.llm_state is not None
+        tool_state = first.llm_state["payload"]["tool_calls"]
+        assert [call["inline_thought_signature"] for call in tool_state] == [
+            GEMINI_SIGNATURE,
+            GEMINI_SIGNATURE_2,
+        ]
+        assistant = next(
+            message
+            for message in completion.call_args_list[1].kwargs["messages"]
+            if message.get("role") == "assistant"
+        )
+        assert [call["id"] for call in assistant["tool_calls"]] == [
+            f"call_1__thought__{GEMINI_SIGNATURE}",
+            f"call_2__thought__{GEMINI_SIGNATURE_2}",
+        ]
+        tool_results = [
+            message
+            for message in completion.call_args_list[1].kwargs["messages"]
+            if message.get("role") == "tool"
+        ]
+        assert [message["tool_call_id"] for message in tool_results] == [
+            f"call_1__thought__{GEMINI_SIGNATURE}",
+            f"call_2__thought__{GEMINI_SIGNATURE_2}",
+        ]
+    finally:
+        client.close()
+
+
+def test_incompatible_gemini_state_keeps_tool_result_ids_public() -> None:
+    source = CompletionClient(
+        model="openai/gcp/google/gemini-3.1-pro-preview",
+        api_base="https://inference-api.example/v1",
+    )
+    try:
+        with patch("litellm.completion", return_value=_gemini_response()):
+            first = source.call([{"role": "user", "content": "run"}], tools=[TOOL])
+
+        prepared = prepare_chat_messages(
+            _render(first), replay_scope("openai/gpt-5.6", "chat", {})
+        )
+        assistant = next(message for message in prepared if message.get("tool_calls"))
+        tool_results = [message for message in prepared if message.get("role") == "tool"]
+        assert [call["id"] for call in assistant["tool_calls"]] == ["call_1", "call_2"]
+        assert [message["tool_call_id"] for message in tool_results] == [
+            "call_1",
+            "call_2",
+        ]
+        assert "__thought__" not in json.dumps(prepared)
+    finally:
+        source.close()
+
+
+@pytest.mark.parametrize("mutation", ["drop", "reorder", "duplicate", "text", "name", "arguments"])
 def test_gemini_tool_state_warns_and_demotes_when_public_calls_change(
     mutation: str, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -229,19 +300,80 @@ def test_gemini_tool_state_warns_and_demotes_when_public_calls_change(
             assistant["tool_calls"].pop()
         elif mutation == "reorder":
             assistant["tool_calls"].reverse()
-        else:
+        elif mutation == "duplicate":
             assistant["tool_calls"][1]["id"] = assistant["tool_calls"][0]["id"]
+        elif mutation == "text":
+            assistant["content"] = "replacement"
+        elif mutation == "name":
+            assistant["tool_calls"][0]["function"]["name"] = "replacement"
+        else:
+            assistant["tool_calls"][0]["function"]["arguments"] = '{"code":"changed"}'
 
         prepared = prepare_chat_messages(rendered, first.llm_state["scope"])
         replayed = next(message for message in prepared if message.get("tool_calls"))
         assert "provider_specific_fields" not in replayed
         assert all("provider_specific_fields" not in call for call in replayed["tool_calls"])
-        assert replayed["content"] == "Inspect the value."
+        assert replayed["content"].startswith("Inspect the value.")
+        if mutation == "text":
+            assert replayed["content"].endswith("replacement")
         assert GEMINI_SIGNATURE not in json.dumps(prepared)
         assert GEMINI_SIGNATURE_2 not in json.dumps(prepared)
-        assert "public tool-call sequence changed" in caplog.text
+        assert "public assistant carrier changed" in caplog.text
     finally:
         client.close()
+
+
+def test_public_thinking_content_blocks_are_stripped(caplog: pytest.LogCaptureFixture) -> None:
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "private", "signature": "secret-a"},
+                {"type": "text", "text": "public"},
+                {"type": "redacted_thinking", "data": "secret-b"},
+            ],
+        }
+    ]
+
+    prepared = prepare_chat_messages(messages, None)
+    assert prepared == [{"role": "assistant", "content": [{"type": "text", "text": "public"}]}]
+    assert "secret-a" not in repr(prepared)
+    assert "secret-b" not in repr(prepared)
+    assert "Removed untrusted provider reasoning fields" in caplog.text
+
+
+def test_public_inline_signature_is_stripped_when_private_field_confirms_it() -> None:
+    raw_id = f"call_1__thought__{GEMINI_SIGNATURE}"
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [_tool_call(raw_id, {"thought_signature": GEMINI_SIGNATURE})],
+        }
+    ]
+
+    prepared = prepare_chat_messages(messages, None)
+    assert prepared[0]["tool_calls"][0]["id"] == "call_1"
+    assert "provider_specific_fields" not in prepared[0]["tool_calls"][0]
+
+
+def test_direct_gemini_inline_signatures_cannot_bypass_the_envelope() -> None:
+    raw_id = f"call_1__thought__{GEMINI_SIGNATURE}"
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [_tool_call(raw_id)],
+        },
+        {"role": "tool", "tool_call_id": raw_id, "content": "complete"},
+    ]
+
+    prepared = prepare_chat_messages(
+        messages, replay_scope("gemini/gemini-2.5-pro", "chat", {})
+    )
+    assert prepared[0]["tool_calls"][0]["id"] == "call_1"
+    assert prepared[1]["tool_call_id"] == "call_1"
+    assert GEMINI_SIGNATURE not in json.dumps(prepared)
 
 
 def test_non_gemini_tool_call_id_with_thought_substring_is_unchanged() -> None:
@@ -254,6 +386,7 @@ def test_non_gemini_tool_call_id_with_thought_substring_is_unchanged() -> None:
         with patch("litellm.completion", return_value=response):
             first = client.call([{"role": "user", "content": "run"}], tools=[TOOL])
         assert first.tool_calls[0].id == call_id
+        assert first.llm_state is None
 
         rendered = _render(first)
         assistant = next(message for message in rendered if message.get("tool_calls"))
@@ -479,7 +612,11 @@ def test_state_only_carrier_mutation_warns_and_preserves_public_content(
         "version": 1,
         "scope": chat_scope,
         "format": "litellm-chat",
-        "payload": {"reasoning_items": [{"opaque": "chat-secret"}], "state_only": True},
+        "payload": {
+            "reasoning_items": [{"opaque": "chat-secret"}],
+            "carrier": {"content": "", "tool_calls": []},
+            "state_only": True,
+        },
     }
     chat_carrier = ReplayCarryingMessage(
         {"role": "assistant", "content": "middleware text"},
@@ -507,7 +644,8 @@ def test_state_only_carrier_mutation_warns_and_preserves_public_content(
         responses_scope,
         "portable reasoning",
     ) == [{"role": "assistant", "content": "portable reasoning\n\nmiddleware text"}]
-    assert caplog.text.count("empty public carrier changed") == 2
+    assert "public assistant carrier changed" in caplog.text
+    assert "empty public carrier changed" in caplog.text
 
 
 def test_legacy_state_warns_while_malformed_current_state_fails(
