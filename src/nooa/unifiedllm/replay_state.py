@@ -58,6 +58,21 @@ def response_item_type(item: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def unsupported_responses_parts(output: list[Any]) -> list[str]:
+    """Identify turn parts the canonical response cannot currently project."""
+    unsupported: list[str] = []
+    for item in output:
+        item_type = response_item_type(item)
+        if item_type not in {"reasoning", "function_call", "message"}:
+            unsupported.append(str(item_type))
+        elif item_type == "message":
+            for block in _field(item, "content", []) or []:
+                block_type = response_item_type(block)
+                if block_type != "output_text":
+                    unsupported.append(f"message.{block_type}")
+    return unsupported
+
+
 def opaque_item(item: Any) -> Any:
     """Detach one provider-owned item for durable storage."""
     # Inspect the type: permissive mocks/proxies synthesize arbitrary instance
@@ -520,7 +535,7 @@ def _valid_responses_payload(payload: dict[str, Any]) -> bool:
         return False
     return (
         bool(items or carriers != _flatten_responses_carriers(carriers))
-        and sorted(indexes) == list(range(len(items)))
+        and indexes == list(range(len(items)))
         and len({slot["call_id"] for slot in carriers if slot["type"] == "function_call"})
         == sum(slot["type"] == "function_call" for slot in carriers)
         and (state_only is True) == (not carriers)
@@ -665,7 +680,6 @@ def capture_responses_state(output: list[Any], scope: str | None) -> dict | None
     order: list[dict[str, Any]] = []
     call_ids: list[str] = []
     malformed_call_id = False
-    unknown_output_types: set[str] = set()
     reasoning_items = [item for item in output if response_item_type(item) == "reasoning"]
     summary_only = any(_field(item, "encrypted_content") is None for item in reasoning_items)
     if summary_only and any(
@@ -699,17 +713,16 @@ def capture_responses_state(output: list[Any], scope: str | None) -> dict | None
             if phase is not None:
                 slot["phase"] = phase
             order.append(slot)
-        else:
-            unknown_output_types.add(item_type or "<missing>")
     carriers = [slot for slot in order if slot["type"] != "reasoning"]
     # Keep provider message boundaries/phase when the canonical flat text and
     # calls alone cannot reproduce them, even without encrypted reasoning.
     if not items and carriers == _flatten_responses_carriers(carriers):
         return None
-    if unknown_output_types:
+    unsupported = unsupported_responses_parts(output)
+    if unsupported:
         raise ReasoningReplayError(
-            "Cannot retain Responses reasoning state beside unsupported output type(s): "
-            + ", ".join(sorted(unknown_output_types))
+            "Cannot retain Responses state beside unsupported output type(s) or content blocks: "
+            + ", ".join(unsupported)
         )
     if malformed_call_id:
         raise ReasoningReplayError(

@@ -5,21 +5,32 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from litellm.types.llms.openai import ResponsesAPIResponse
 
 from nooa.context_blocks.formatter import ResponsesProviderFormatter
 from nooa.context_blocks.models import RenderedMessage, Role, ToolCallInfo
 from nooa.unifiedllm import ResponsesClient
 
 
-def make_mock_responses_response(content: str = "ok"):
-    """Create a minimal litellm.ResponsesAPIResponse for testing."""
-    from unittest.mock import MagicMock
-
-    resp = MagicMock()
-    resp.output = [MagicMock(type="message", content=[MagicMock(type="output_text", text=content)])]
-    resp.output_text = content
-    resp.usage = None
-    return resp
+def make_mock_responses_response(content: str = "ok") -> ResponsesAPIResponse:
+    """Use the SDK shape so optional fields are absent, not auto-created mocks."""
+    return ResponsesAPIResponse.model_validate(
+        {
+            "id": "resp_test",
+            "created_at": 0,
+            "model": "test-model",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg_test",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": content, "annotations": []}],
+                }
+            ],
+        }
+    )
 
 
 class TestResponsesClientCacheControlDefaults:
