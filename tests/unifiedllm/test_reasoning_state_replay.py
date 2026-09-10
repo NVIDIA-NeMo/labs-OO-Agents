@@ -3,10 +3,13 @@
 """Issuer-gated capture and replay of opaque OpenAI reasoning state."""
 
 import json
+import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
+from litellm.types.llms.openai import ResponsesAPIResponse
 from litellm.types.utils import ModelResponse
 
 from nooa._llm_state import (
@@ -23,12 +26,14 @@ from nooa.context_blocks.formatter import (
 )
 from nooa.context_blocks.models import ResolvedBlock, Role
 from nooa.runtime.middleware import LLMCallContext
+from nooa.storage.sqlite import SQLiteEventBackend, _ensure_schema
 from nooa.unifiedllm import CompletionClient, LLMResponse, ResponsesClient, Tool
 from nooa.unifiedllm.replay_state import (
     prepare_chat_messages,
     prepare_responses_batch,
     replay_scope,
 )
+from nooa.unifiedllm.unifiedllm import _ClientHttp
 
 REASONING = {
     "id": "rs_1",
@@ -171,6 +176,164 @@ def test_responses_text_state_is_captured_and_exactly_replayed() -> None:
         assert LLM_STATE_KEY not in repr(replay)
     finally:
         client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize("shape", ["text_blocks", "phases", "phase_only", "trailing_message"])
+@pytest.mark.parametrize("persistence", ["json", "sqlite"])
+async def test_real_responses_message_structure_survives_json_resume(
+    monkeypatch, is_async: bool, shape: str, persistence: str
+) -> None:
+    """Use real LiteLLM/SDK parsing and serialization, including its output_text property."""
+    phased_message = {**MESSAGE, "id": "msg_final", "phase": "final_answer"}
+    if shape == "text_blocks":
+        output = [
+            REASONING,
+            {
+                **MESSAGE,
+                "content": [
+                    {"type": "output_text", "text": "first", "annotations": []},
+                    {"type": "output_text", "text": "second", "annotations": []},
+                ],
+            },
+        ]
+        expected = [REASONING, {"role": "assistant", "content": "firstsecond"}]
+    elif shape == "phases":
+        output = [
+            REASONING,
+            {
+                **MESSAGE,
+                "id": "msg_commentary",
+                "phase": "commentary",
+                "content": [{"type": "output_text", "text": "Checking.", "annotations": []}],
+            },
+            REASONING_2,
+            phased_message,
+        ]
+        expected = [
+            REASONING,
+            {"role": "assistant", "content": "Checking.", "phase": "commentary"},
+            REASONING_2,
+            {"role": "assistant", "content": "done", "phase": "final_answer"},
+        ]
+    elif shape == "phase_only":
+        output = [phased_message]
+        expected = [{"role": "assistant", "content": "done", "phase": "final_answer"}]
+    else:
+        output = [CALL, MESSAGE]
+        expected = [
+            {key: value for key, value in CALL.items() if key not in {"id", "status"}},
+            {"role": "assistant", "content": "done"},
+            {"type": "function_call_output", "call_id": "call_1", "output": "complete"},
+        ]
+
+    raw = ResponsesAPIResponse.model_validate(
+        {
+            "id": "resp_test",
+            "created_at": 0,
+            "model": "gpt-5.6",
+            "status": "completed",
+            "output": output,
+        }
+    )
+    bodies: list[dict] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=raw.model_dump(mode="json"))
+
+    transport = httpx.MockTransport(respond)
+    monkeypatch.setattr(
+        _ClientHttp, "_httpx_hardening", staticmethod(lambda: {"transport": transport})
+    )
+    client = ResponsesClient(
+        model="openai/gpt-5.6", api_key="test", api_base="https://gateway.example/v1"
+    )
+    try:
+        prompt = [{"role": "user", "content": "think"}]
+        first = await client.acall(prompt) if is_async else client.call(prompt)
+        assert first.content == raw.output_text
+        # The fallback for providers without output_text must use identical text.
+        assert client._extract_text_from_output(_responses(*output)) == raw.output_text
+        if persistence == "json":
+            resumed = LLMResponse.model_validate_json(first.model_dump_json())
+        else:
+            connection = sqlite3.connect(":memory:")
+            try:
+                _ensure_schema(connection)
+                backend = SQLiteEventBackend(connection)
+                backend.store("response", first)
+                resumed = backend.get("response")
+                assert isinstance(resumed, LLMResponse)
+            finally:
+                connection.close()
+        assert resumed.raw_response is None
+        assert resumed.llm_state is not None
+        rendered = _render_responses(resumed)
+        if is_async:
+            await client.acall(rendered)
+        else:
+            client.call(rendered)
+        assert bodies[1]["input"] == expected
+
+        # A public text edit must still invalidate the saved message structure.
+        resumed.content = "edited answer"
+        if is_async:
+            await client.acall(_render_responses(resumed))
+        else:
+            client.call(_render_responses(resumed))
+        assert bodies[2]["input"][0] == {"role": "assistant", "content": "edited answer"}
+        assert "encrypted_content" not in json.dumps(bodies[2]["input"])
+        assert "phase" not in json.dumps(bodies[2]["input"])
+    finally:
+        await client.aclose()
+
+
+def test_direct_multimessage_batch_replays_all_reasoning_in_order() -> None:
+    from nooa.unifiedllm.replay_state import capture_responses_state
+
+    scope = replay_scope("openai/gpt-5.6", "responses", {})
+    second_message = {
+        **MESSAGE,
+        "id": "msg_second",
+        "content": [{"type": "output_text", "text": "second", "annotations": []}],
+    }
+    state = capture_responses_state([REASONING, MESSAGE, REASONING_2, second_message], scope)
+    message = {"role": "assistant", "content": "done"}
+    second = {"role": "assistant", "content": "second"}
+
+    assert prepare_responses_batch([message, second], state, scope) == [
+        REASONING,
+        message,
+        REASONING_2,
+        second,
+    ]
+
+
+def test_empty_and_summary_only_outputs_do_not_capture_structural_state() -> None:
+    from nooa.unifiedllm.replay_state import capture_responses_state
+
+    scope = replay_scope("openai/gpt-5.6", "responses", {})
+    summary_only = {"type": "reasoning", "summary": [{"type": "summary_text", "text": "why"}]}
+    assert capture_responses_state([], scope) is None
+    assert capture_responses_state([summary_only], scope) is None
+
+
+def test_mixed_summary_only_reasoning_never_replays_a_partial_opaque_sequence(caplog) -> None:
+    from nooa.unifiedllm.replay_state import capture_responses_state
+
+    scope = replay_scope("openai/gpt-5.6", "responses", {})
+    summary_only = {"type": "reasoning", "summary": [{"type": "summary_text", "text": "why"}]}
+    state = capture_responses_state(
+        [REASONING, summary_only, {**MESSAGE, "phase": "final_answer"}], scope
+    )
+    assert state is not None
+    assert state["payload"]["items"] == []
+    assert "incomplete opaque reasoning sequence" in caplog.text
+    assert prepare_responses_batch(
+        [{"role": "assistant", "content": "done"}], state, scope, "why"
+    ) == [{"role": "assistant", "content": "why\n\ndone", "phase": "final_answer"}]
 
 
 def test_responses_replay_borrows_stored_payload_without_copying() -> None:
