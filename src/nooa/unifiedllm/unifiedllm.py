@@ -5,6 +5,7 @@ import copy
 import inspect
 import json
 import logging
+import math
 import re
 import warnings
 from abc import ABC, abstractmethod
@@ -1717,21 +1718,37 @@ def _finish_reason_for_tool_calls(
     return "tool_calls"
 
 
+def _extract_usage(raw_response: Any) -> LLMUsage | None:
+    """Normalize provider usage plus LiteLLM's per-response cost metadata."""
+    usage = LLMUsage.from_provider(getattr(raw_response, "usage", None))
+    if usage is None:
+        return None
+
+    hidden = getattr(raw_response, "_hidden_params", None)
+    response_cost = hidden.get("response_cost") if isinstance(hidden, Mapping) else None
+    if response_cost is None:
+        return usage
+    if (
+        isinstance(response_cost, bool)
+        or not isinstance(response_cost, (int, float))
+        or not math.isfinite(response_cost)
+        or response_cost < 0
+    ):
+        logger.warning("Ignoring malformed LiteLLM response_cost metadata: %r", response_cost)
+        return usage
+    return usage.model_copy(update={"cost_usd": float(response_cost)})
+
+
 def _extract_reasoning_and_usage(raw_response: Any) -> tuple[str | None, LLMUsage | None]:
-    """Extract reasoning and usage from raw LLM response."""
+    """Extract reasoning and normalized usage from a raw LLM response."""
     reasoning = None
-    usage: LLMUsage | None = None
 
     # Extract reasoning (o1-style or DeepSeek/QwQ)
     if hasattr(raw_response, "choices") and raw_response.choices:
         msg = raw_response.choices[0].message
         reasoning = getattr(msg, "reasoning", None) or getattr(msg, "reasoning_content", None)
 
-    # Extract usage
-    if hasattr(raw_response, "usage") and raw_response.usage:
-        usage = LLMUsage.from_provider(raw_response.usage)
-
-    return reasoning, usage
+    return reasoning, _extract_usage(raw_response)
 
 
 def _item_field(item: Any, name: str) -> Any:
@@ -2547,7 +2564,7 @@ class ResponsesClient(UnifiedLLM):
                 else _make_call()
             )
 
-        usage = LLMUsage.from_provider(getattr(raw_response, "usage", None))
+        usage = _extract_usage(raw_response)
         if usage:
             _update_token_calibration(
                 effective_model, messages, usage, tools=api_params.get("tools")
@@ -2687,7 +2704,7 @@ class ResponsesClient(UnifiedLLM):
                 else await _make_call()
             )
 
-        usage = LLMUsage.from_provider(getattr(raw_response, "usage", None))
+        usage = _extract_usage(raw_response)
         if usage:
             _update_token_calibration(
                 effective_model, messages, usage, tools=api_params.get("tools")

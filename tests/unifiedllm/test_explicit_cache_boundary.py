@@ -17,6 +17,7 @@ from nooa.context_blocks.models import BlockMetadata, RenderedMessage, ResolvedB
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 from nooa.unifiedllm import CompletionClient, ResponsesClient
+from nooa.unifiedllm.unifiedllm import _extract_usage
 
 
 def _render(dynamic: str) -> list[dict]:
@@ -294,14 +295,14 @@ async def test_openai_fields_reach_the_serialized_http_body() -> None:
                 "store": False,
                 "tools": [],
                 "usage": {
-                    "input_tokens": 100,
+                    "input_tokens": 1000,
                     "input_tokens_details": {
-                        "cached_tokens": 50,
-                        "cache_write_tokens": 25,
+                        "cached_tokens": 500,
+                        "cache_write_tokens": 250,
                     },
-                    "output_tokens": 1,
+                    "output_tokens": 100,
                     "output_tokens_details": {"reasoning_tokens": 0},
-                    "total_tokens": 101,
+                    "total_tokens": 1100,
                 },
             },
         )
@@ -326,8 +327,28 @@ async def test_openai_fields_reach_the_serialized_http_body() -> None:
     assert bodies[0]["input"][-2]["content"][-1]["prompt_cache_breakpoint"] == {"mode": "explicit"}
     assert "cache_boundary" not in repr(bodies[0])
     assert response.usage is not None
-    assert response.usage.cached_input_tokens == 50
-    assert response.usage.cache_write_input_tokens == 25
+    assert response.usage.cached_input_tokens == 500
+    assert response.usage.cache_write_input_tokens == 250
+    hidden_cost = response.raw_response._hidden_params["response_cost"]
+    assert isinstance(hidden_cost, (int, float)) and hidden_cost > 0
+    assert response.usage.cost_usd == hidden_cost
+
+
+@pytest.mark.parametrize("bad_cost", [True, "unknown", float("nan"), -1.0])
+def test_malformed_litellm_response_cost_warns_without_losing_usage(
+    bad_cost: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    raw_response = SimpleNamespace(
+        usage={"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+        _hidden_params={"response_cost": bad_cost},
+    )
+
+    usage = _extract_usage(raw_response)
+
+    assert usage is not None
+    assert usage.input_tokens == 10
+    assert usage.cost_usd == 0.0
+    assert "Ignoring malformed LiteLLM response_cost metadata" in caplog.text
 
 
 @pytest.mark.asyncio
