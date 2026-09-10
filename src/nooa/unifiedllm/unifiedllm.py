@@ -8,7 +8,7 @@ import logging
 import re
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -1137,8 +1137,8 @@ def _update_token_calibration(
 def _copy_cache_marker_target(
     message: dict[str, Any], *, copy_last_content_block: bool = False
 ) -> dict[str, Any]:
-    """Shallow-copy one marker target and the content block we may mutate."""
-    copied = dict(message)
+    """Copy one marker target without discarding private replay metadata."""
+    copied = copy.copy(message)
     content = copied.get("content")
     if copy_last_content_block and isinstance(content, list) and content:
         blocks = list(content)
@@ -1189,12 +1189,20 @@ def _mark_responses_cache_breakpoint(messages: list[dict[str, Any]], boundary: i
 
 def _enable_openai_explicit_cache(api_params: dict[str, Any]) -> None:
     """Set the Responses cache mode through LiteLLM's SDK escape hatch."""
-    extra_body = copy.deepcopy(api_params.get("extra_body"))
-    if not isinstance(extra_body, dict):
+    configured_extra_body = api_params.get("extra_body")
+    if configured_extra_body is None:
         extra_body = {}
+    elif isinstance(configured_extra_body, Mapping):
+        extra_body = copy.deepcopy(dict(configured_extra_body))
+    else:
+        raise ValueError("extra_body must be a mapping")
     options = extra_body.get("prompt_cache_options")
-    if not isinstance(options, dict):
+    if options is None:
         options = {}
+    elif isinstance(options, Mapping):
+        options = copy.deepcopy(dict(options))
+    else:
+        raise ValueError("extra_body.prompt_cache_options must be a mapping")
     options["mode"] = "explicit"
     extra_body["prompt_cache_options"] = options
     api_params["extra_body"] = extra_body
@@ -1224,6 +1232,14 @@ class UnifiedLLM(ABC):
             raise ValueError("model must be a non-empty string")
         return model
 
+    def _validate_cache_breakpoint_model(self, effective_model: str) -> None:
+        """Reject applying a model-declared cache mapping to a call override."""
+        if self.cache_breakpoint is not None and effective_model != self.model:
+            raise ValueError(
+                "cache_breakpoint is declared for the client model and cannot be used "
+                "with a per-call model override"
+            )
+
     @staticmethod
     def _validate_request_config(name: str, call_config: dict[str, Any]) -> None:
         """Keep provider payloads and routing on their validated top-level paths."""
@@ -1233,7 +1249,9 @@ class UnifiedLLM(ABC):
                 "the messages argument"
             )
         extra_body = call_config.get("extra_body")
-        if isinstance(extra_body, dict) and (reserved := {name, "model"} & set(extra_body)):
+        if extra_body is not None and not isinstance(extra_body, Mapping):
+            raise ValueError("extra_body must be a mapping")
+        if isinstance(extra_body, Mapping) and (reserved := {name, "model"} & set(extra_body)):
             fields = ", ".join(repr(field) for field in sorted(reserved))
             raise ValueError(
                 f"extra_body may not override reserved field(s) {fields}; pass model at "
@@ -1407,12 +1425,21 @@ class UnifiedLLM(ABC):
         clean: list[dict[str, Any]] = []
         for message in messages:
             starts_suffix = carried_cache_boundary(message)
-            if starts_suffix and boundary is None:
+            if starts_suffix and boundary is not None:
+                raise ValueError("Rendered history contains more than one cache boundary")
+            if starts_suffix:
                 boundary = len(clean)
-            if message:
-                # Strip the out-of-band boundary attribute from its one carrier;
-                # all other history stays borrowed.
-                clean.append(dict(message) if starts_suffix else message)
+            if starts_suffix:
+                if not message:
+                    continue
+                # Consume only the private boundary flag. Other private replay
+                # metadata remains attached until its owning adapter consumes it.
+                item = copy.copy(message)
+                if isinstance(item, ReplayCarryingMessage):
+                    item.cache_boundary_before = False
+                clean.append(item)
+            else:
+                clean.append(message)
 
         if boundary is None or self.cache_breakpoint is None:
             return clean, instructions, False
@@ -1932,6 +1959,7 @@ class CompletionClient(UnifiedLLM):
         call_config = {**self.config, **kwargs}
         self._validate_request_config("messages", call_config)
         effective_model = self._effective_model(call_config)
+        self._validate_cache_breakpoint_model(effective_model)
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
         messages = replay_state.prepare_chat_messages(messages, state_scope)
 
@@ -1944,9 +1972,7 @@ class CompletionClient(UnifiedLLM):
         prepared_messages = self._inject_cache_control(
             messages, cache_points, model=effective_model
         )
-        prepared_messages, _, _ = self._prepare_cache_boundary(
-            prepared_messages, responses=False
-        )
+        prepared_messages, _, _ = self._prepare_cache_boundary(prepared_messages, responses=False)
 
         api_params = {
             "model": self.model,
@@ -2110,6 +2136,7 @@ class CompletionClient(UnifiedLLM):
         call_config = {**self.config, **kwargs}
         self._validate_request_config("messages", call_config)
         effective_model = self._effective_model(call_config)
+        self._validate_cache_breakpoint_model(effective_model)
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
         messages = replay_state.prepare_chat_messages(messages, state_scope)
 
@@ -2122,9 +2149,7 @@ class CompletionClient(UnifiedLLM):
         prepared_messages = self._inject_cache_control(
             messages, cache_points, model=effective_model
         )
-        prepared_messages, _, _ = self._prepare_cache_boundary(
-            prepared_messages, responses=False
-        )
+        prepared_messages, _, _ = self._prepare_cache_boundary(prepared_messages, responses=False)
 
         api_params = {
             "model": self.model,
@@ -2462,6 +2487,7 @@ class ResponsesClient(UnifiedLLM):
         call_config = {**self.config, **kwargs}
         self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
+        self._validate_cache_breakpoint_model(effective_model)
         state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
         if _is_anthropic_model(effective_model):
             cache_points = (
@@ -2601,6 +2627,7 @@ class ResponsesClient(UnifiedLLM):
         call_config = {**self.config, **kwargs}
         self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
+        self._validate_cache_breakpoint_model(effective_model)
         state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
         if _is_anthropic_model(effective_model):
             cache_points = (

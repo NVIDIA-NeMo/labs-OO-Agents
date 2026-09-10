@@ -303,6 +303,7 @@ class RenderedMessage(BaseModel):
     llm_state: SkipValidation[dict[str, Any] | None] = Field(
         default=None,
         repr=False,
+        exclude=True,
         description=(
             "Borrowed immutable opaque state carried through the UnifiedLLM replay boundary"
         ),
@@ -310,10 +311,12 @@ class RenderedMessage(BaseModel):
     reasoning: str | None = Field(
         default=None,
         repr=False,
+        exclude=True,
         description="Plain reasoning carried to UnifiedLLM for replay as assistant text",
     )
     cache_boundary_before: bool = Field(
         default=False,
+        exclude=True,
         description="The provider-cacheable prefix ends before this message",
     )
     tool_call_id: str | None = Field(

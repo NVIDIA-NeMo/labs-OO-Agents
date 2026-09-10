@@ -81,7 +81,14 @@ class LLMUsage(BaseModel):
                 or 0
             ),
             cache_write_input_tokens=int(
-                first(value, "cache_write_input_tokens", "cache_creation_input_tokens") or 0
+                first(value, "cache_write_input_tokens", "cache_creation_input_tokens")
+                or first(
+                    prompt_details,
+                    "cache_write_tokens",
+                    "cache_write_input_tokens",
+                    "cache_creation_input_tokens",
+                )
+                or 0
             ),
             reasoning_tokens=int(
                 first(value, "reasoning_tokens")

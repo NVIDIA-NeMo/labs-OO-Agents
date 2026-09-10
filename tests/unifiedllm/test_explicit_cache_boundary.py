@@ -13,7 +13,7 @@ import pytest
 from nooa._llm_state import ReplayCarryingMessage, carried_cache_boundary, carry_replay_batch
 from nooa.context_blocks.events import UserEvent
 from nooa.context_blocks.formatter import OpenAIProviderFormatter
-from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
+from nooa.context_blocks.models import BlockMetadata, RenderedMessage, ResolvedBlock, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 from nooa.unifiedllm import CompletionClient, ResponsesClient
@@ -74,6 +74,22 @@ def test_cached_renderer_marks_only_the_dynamic_suffix_outside_json() -> None:
     assert "cache_boundary" not in json.dumps(messages)
 
 
+def test_rendered_message_serialization_excludes_private_transport_fields() -> None:
+    message = RenderedMessage(
+        role=Role.ASSISTANT,
+        content="public",
+        llm_state={"encrypted_content": "opaque"},
+        reasoning="private reasoning",
+        cache_boundary_before=True,
+    )
+
+    dumped = message.model_dump()
+    assert "llm_state" not in dumped
+    assert "reasoning" not in dumped
+    assert "cache_boundary_before" not in dumped
+    assert "opaque" not in message.model_dump_json()
+
+
 def test_cache_mapping_must_match_the_client_api_style() -> None:
     with pytest.raises(ValueError, match="CompletionClient.*'anthropic'"):
         CompletionClient(model="openai/gpt-5.6", cache_breakpoint="openai")  # type: ignore[arg-type]
@@ -82,6 +98,100 @@ def test_cache_mapping_must_match_the_client_api_style() -> None:
             model="anthropic/claude-sonnet-4",
             cache_breakpoint="anthropic",  # type: ignore[arg-type]
         )
+
+
+def test_cache_marker_copy_preserves_private_replay_metadata() -> None:
+    state = {"version": 1, "scope": "chat:anthropic:test"}
+    original = ReplayCarryingMessage(
+        {"role": "system", "content": "stable"},
+        llm_state=state,
+        reasoning="private reasoning",
+        replay_batch_id="batch",
+        replay_batch_size=1,
+    )
+    with CompletionClient(model="anthropic/claude-sonnet-4-5") as client:
+        prepared = client._inject_cache_control(
+            [original], [{"role": "system"}], model=client.model
+        )
+
+    assert isinstance(prepared[0], ReplayCarryingMessage)
+    assert prepared[0].llm_state is state
+    assert prepared[0].reasoning == "private reasoning"
+    assert prepared[0].replay_batch_id == "batch"
+    assert prepared[0].replay_batch_size == 1
+    assert "cache_control" not in original
+
+
+def test_boundary_consumption_preserves_ordinary_empty_messages_and_private_state() -> None:
+    state = {"version": 1, "scope": "responses:openai:test"}
+    boundary = ReplayCarryingMessage(
+        {"role": "user", "content": "live state"},
+        llm_state=state,
+        reasoning="private reasoning",
+        cache_boundary_before=True,
+    )
+    with ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai") as client:
+        messages, _, enabled = client._prepare_cache_boundary([{}, boundary], responses=True)
+
+    assert enabled is True
+    assert messages[0] == {}
+    assert isinstance(messages[1], ReplayCarryingMessage)
+    assert messages[1].llm_state is state
+    assert messages[1].reasoning == "private reasoning"
+    assert not carried_cache_boundary(messages[1])
+
+
+def test_multiple_cache_boundaries_fail_loudly() -> None:
+    messages: list[dict] = [
+        ReplayCarryingMessage({"role": "user", "content": "one"}, cache_boundary_before=True),
+        ReplayCarryingMessage({"role": "user", "content": "two"}, cache_boundary_before=True),
+    ]
+    with ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai") as client:
+        with pytest.raises(ValueError, match="more than one cache boundary"):
+            client._prepare_cache_boundary(messages, responses=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_style", ["chat", "responses"])
+async def test_cache_mapping_rejects_per_call_model_overrides(api_style: str) -> None:
+    if api_style == "chat":
+        client = CompletionClient(model="anthropic/claude-sonnet-4-5", cache_breakpoint="anthropic")
+        target = "litellm.acompletion"
+    else:
+        client = ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai")
+        target = "litellm.aresponses"
+
+    try:
+        with patch(target, new_callable=AsyncMock) as request:
+            with pytest.raises(ValueError, match="per-call model override"):
+                await client.acall(_render("state-a"), model="openai/a-different-model")
+        request.assert_not_awaited()
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra_body", "message"),
+    [
+        ([], "extra_body must be a mapping"),
+        (
+            {"prompt_cache_options": "explicit"},
+            "extra_body.prompt_cache_options must be a mapping",
+        ),
+    ],
+)
+async def test_openai_cache_config_rejects_malformed_mappings(
+    extra_body: object, message: str
+) -> None:
+    client = ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai")
+    try:
+        with patch("litellm.aresponses", new_callable=AsyncMock) as request:
+            with pytest.raises(ValueError, match=message):
+                await client.acall(_render("state-a"), extra_body=extra_body)
+        request.assert_not_awaited()
+    finally:
+        await client.aclose()
 
 
 @pytest.mark.asyncio
@@ -98,7 +208,7 @@ async def test_openai_marks_the_stable_prefix_before_dynamic_context() -> None:
         assert first["input"][:-1] == second["input"][:-1]
         assert first["input"][-1] != second["input"][-1]
         assert first["input"][-2]["content"][-1]["prompt_cache_breakpoint"] == {"mode": "explicit"}
-        assert "prompt_cache_breakpoint" not in first["input"][-1]["content"]
+        assert "prompt_cache_breakpoint" not in repr(first["input"][-1]["content"])
     finally:
         await client.aclose()
 
@@ -184,11 +294,14 @@ async def test_openai_fields_reach_the_serialized_http_body() -> None:
                 "store": False,
                 "tools": [],
                 "usage": {
-                    "input_tokens": 2,
-                    "input_tokens_details": {"cached_tokens": 0},
+                    "input_tokens": 100,
+                    "input_tokens_details": {
+                        "cached_tokens": 50,
+                        "cache_write_tokens": 25,
+                    },
                     "output_tokens": 1,
                     "output_tokens_details": {"reasoning_tokens": 0},
-                    "total_tokens": 3,
+                    "total_tokens": 101,
                 },
             },
         )
@@ -205,13 +318,16 @@ async def test_openai_fields_reach_the_serialized_http_body() -> None:
     client._http.httpx_async = transport
     client._http.async_client.client = transport
     try:
-        await client.acall(_render("state-a"))
+        response = await client.acall(_render("state-a"))
     finally:
         await client.aclose()
 
     assert bodies[0]["prompt_cache_options"] == {"mode": "explicit"}
     assert bodies[0]["input"][-2]["content"][-1]["prompt_cache_breakpoint"] == {"mode": "explicit"}
     assert "cache_boundary" not in repr(bodies[0])
+    assert response.usage is not None
+    assert response.usage.cached_input_tokens == 50
+    assert response.usage.cache_write_input_tokens == 25
 
 
 @pytest.mark.asyncio
@@ -311,7 +427,12 @@ def test_replay_expansion_stays_inside_the_stable_prefix() -> None:
             "items": [{"type": "reasoning", "encrypted_content": "opaque"}],
             "order": [
                 {"type": "reasoning", "index": 0},
-                {"type": "function_call", "call_id": "c1"},
+                {
+                    "type": "function_call",
+                    "call_id": "c1",
+                    "name": "run",
+                    "arguments": "{}",
+                },
             ],
         },
     }
