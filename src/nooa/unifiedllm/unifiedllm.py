@@ -1154,12 +1154,20 @@ class UnifiedLLM(ABC):
             raise ValueError("model must be a non-empty string")
         return model
 
-    def _reject_payload_override(self, name: str, kwargs: dict[str, Any]) -> None:
-        """Keep provider payloads on the validated messages path."""
-        if name in self.config or name in kwargs:
+    @staticmethod
+    def _validate_request_config(name: str, call_config: dict[str, Any]) -> None:
+        """Keep provider payloads and routing on their validated top-level paths."""
+        if name in call_config:
             raise ValueError(
                 f"{name!r} is managed by UnifiedLLM; pass conversation data through "
                 "the messages argument"
+            )
+        extra_body = call_config.get("extra_body")
+        if isinstance(extra_body, dict) and (reserved := {name, "model"} & set(extra_body)):
+            fields = ", ".join(repr(field) for field in sorted(reserved))
+            raise ValueError(
+                f"extra_body may not override reserved field(s) {fields}; pass model at "
+                "the top level and conversation data through the messages argument"
             )
 
     def close(self) -> None:
@@ -1788,8 +1796,8 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
-        self._reject_payload_override("messages", kwargs)
         call_config = {**self.config, **kwargs}
+        self._validate_request_config("messages", call_config)
         effective_model = self._effective_model(call_config)
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
         messages = replay_state.prepare_chat_messages(messages, state_scope)
@@ -1960,8 +1968,8 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
-        self._reject_payload_override("messages", kwargs)
         call_config = {**self.config, **kwargs}
+        self._validate_request_config("messages", call_config)
         effective_model = self._effective_model(call_config)
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
         messages = replay_state.prepare_chat_messages(messages, state_scope)
@@ -2302,8 +2310,8 @@ class ResponsesClient(UnifiedLLM):
         # OpenAIGPTConfig.remove_cache_control_flag strip — so leaving the marker
         # on OpenAI/Azure/NIM Responses calls triggers a 400 "Unknown parameter:
         # input[N].cache_control" at the gateway.
-        self._reject_payload_override("input", kwargs)
         call_config = {**self.config, **kwargs}
+        self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
         state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
         if _is_anthropic_model(effective_model):
@@ -2340,9 +2348,6 @@ class ResponsesClient(UnifiedLLM):
 
         if output_model is not None:
             api_params.update(_responses_output_params(output_model))
-
-        if reasoning := self.config.get("reasoning"):
-            api_params["reasoning"] = reasoning
 
         replay_state.add_encrypted_reasoning_include(api_params, state_scope)
 
@@ -2438,8 +2443,8 @@ class ResponsesClient(UnifiedLLM):
         """
         # See ResponsesClient.call for why cache_control injection is gated on
         # Anthropic models only.
-        self._reject_payload_override("input", kwargs)
         call_config = {**self.config, **kwargs}
+        self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
         state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
         if _is_anthropic_model(effective_model):
@@ -2476,9 +2481,6 @@ class ResponsesClient(UnifiedLLM):
 
         if output_model is not None:
             api_params.update(_responses_output_params(output_model))
-
-        if reasoning := self.config.get("reasoning"):
-            api_params["reasoning"] = reasoning
 
         replay_state.add_encrypted_reasoning_include(api_params, state_scope)
 

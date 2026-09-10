@@ -640,6 +640,30 @@ def test_constructor_payload_config_cannot_bypass_replay_gate(client_type, paylo
         client.close()
 
 
+@pytest.mark.parametrize(
+    ("client_type", "payload_name", "nested_field"),
+    [
+        (CompletionClient, "messages", "messages"),
+        (CompletionClient, "messages", "model"),
+        (ResponsesClient, "input", "input"),
+        (ResponsesClient, "input", "model"),
+    ],
+)
+def test_extra_body_cannot_override_validated_payload_or_model(
+    client_type, payload_name, nested_field
+) -> None:
+    client = client_type(
+        model="openai/gpt-5.6",
+        api_key="account-a",
+        extra_body={nested_field: [REASONING]},
+    )
+    try:
+        with pytest.raises(ValueError, match="extra_body may not override reserved field"):
+            client.call([{"role": "user", "content": "continue"}])
+    finally:
+        client.close()
+
+
 @pytest.mark.asyncio
 async def test_async_responses_input_kwarg_cannot_bypass_replay_gate() -> None:
     client = ResponsesClient(model="openai/gpt-5.6", api_key="account-a")
@@ -649,6 +673,31 @@ async def test_async_responses_input_kwarg_cannot_bypass_replay_gate() -> None:
                 [{"role": "user", "content": "continue"}],
                 input=[REASONING],
             )
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_responses_reasoning_uses_per_call_override() -> None:
+    client = ResponsesClient(
+        model="openai/gpt-5.6",
+        api_key="account-a",
+        reasoning={"effort": "high"},
+    )
+    try:
+        with patch("litellm.responses", return_value=_responses(MESSAGE)) as sync_call:
+            client.call(
+                [{"role": "user", "content": "continue"}],
+                reasoning={"effort": "low"},
+            )
+        with patch("litellm.aresponses", AsyncMock(return_value=_responses(MESSAGE))) as async_call:
+            await client.acall(
+                [{"role": "user", "content": "continue"}],
+                reasoning=None,
+            )
+
+        assert sync_call.call_args.kwargs["reasoning"] == {"effort": "low"}
+        assert async_call.call_args.kwargs["reasoning"] is None
     finally:
         await client.aclose()
 
