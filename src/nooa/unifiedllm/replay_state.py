@@ -67,17 +67,16 @@ def _normalized_endpoint(value: Any) -> str:
     return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}{query}"
 
 
-def _effective_endpoint(provider: str | None, configured: Any, resolved: Any) -> str:
-    endpoint = configured or getattr(litellm, "api_base", None)
-    if not endpoint and provider == "openai":
-        endpoint = (
-            os.getenv("OPENAI_BASE_URL")
-            or os.getenv("OPENAI_API_BASE")
-            or "https://api.openai.com/v1"
-        )
-    elif not endpoint and provider == "azure":
-        endpoint = os.getenv("AZURE_API_BASE")
-    return _normalized_endpoint(endpoint or resolved)
+def _uses_native_openai_endpoint(api_params: dict[str, Any]) -> bool:
+    endpoint = (
+        api_params.get("api_base")
+        or api_params.get("base_url")
+        or getattr(litellm, "api_base", None)
+        or os.getenv("OPENAI_BASE_URL")
+        or os.getenv("OPENAI_API_BASE")
+        or "https://api.openai.com/v1"
+    )
+    return _normalized_endpoint(endpoint) == "https://api.openai.com/v1"
 
 
 def replay_scope(
@@ -310,11 +309,9 @@ def add_encrypted_reasoning_include(api_params: dict[str, Any], scope: str | Non
         return
     if scope and scope.startswith("responses:azure:"):
         include.append(_ENCRYPTED_REASONING_INCLUDE)
-    elif scope and scope.startswith("responses:openai:"):
-        endpoint = _effective_endpoint(
-            "openai", api_params.get("api_base") or api_params.get("base_url"), None
-        )
-        if endpoint == "https://api.openai.com/v1":
-            include.append(_ENCRYPTED_REASONING_INCLUDE)
+    elif (
+        scope and scope.startswith("responses:openai:") and _uses_native_openai_endpoint(api_params)
+    ):
+        include.append(_ENCRYPTED_REASONING_INCLUDE)
     if include:
         api_params["include"] = include
