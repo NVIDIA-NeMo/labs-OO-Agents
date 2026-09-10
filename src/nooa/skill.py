@@ -208,7 +208,7 @@ def _parse_skill_md(path: Path) -> tuple[str, str, str]:
 
     props = _read_skill_properties(path)
     description = props.description or path.name
-    _, body = _parse_frontmatter(skill_md.read_text())
+    _, body = _parse_frontmatter(skill_md.read_text(encoding="utf-8"))
     return skill_id, description, body.strip()
 
 
