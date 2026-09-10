@@ -168,6 +168,7 @@ for providers, model settings, editing, and diagnostic stages.
 You can also construct clients directly using
 [LiteLLM-supported model names](https://docs.litellm.ai/), with your endpoint
 and credentials. See [Model configuration](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/model-configuration.md).
+For Oracle Cloud Infrastructure Generative AI, see [OCI Generative AI](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/oci-generative-ai.md).
 
 ### 2. Your first agent
 

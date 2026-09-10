@@ -19,11 +19,45 @@ from nooa.unifiedllm.registry import get_llm_client
 # Load environment variables
 load_dotenv(override=True)
 
+
+def _oci_signer_from_profile(profile: str) -> Any:
+    """Build an OCI SDK request signer from an ``~/.oci/config`` profile.
+
+    Supports API-key profiles and the session-token profiles that
+    ``oci session authenticate`` writes. litellm signs OCI Generative AI
+    requests with the returned object when it is passed as ``oci_signer``.
+    """
+    try:
+        import oci
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "OCI_CLI_PROFILE is set but the OCI Python SDK is not installed. "
+            "Install it with `uv pip install oci`, or set OCI_USER, OCI_TENANCY, "
+            "OCI_FINGERPRINT, and OCI_KEY_FILE instead."
+        ) from exc
+
+    config = oci.config.from_file(profile_name=profile)
+    if "security_token_file" in config:
+        with open(os.path.expanduser(config["security_token_file"])) as f:
+            token = f.read().strip()
+        private_key = oci.signer.load_private_key_from_file(config["key_file"])
+        return oci.auth.signers.SecurityTokenSigner(token, private_key)
+    return oci.signer.Signer(
+        tenancy=config["tenancy"],
+        user=config["user"],
+        fingerprint=config["fingerprint"],
+        private_key_file_location=config["key_file"],
+        pass_phrase=config.get("pass_phrase"),
+    )
+
+
 # The examples run against any litellm-supported provider. By default they pick
 # whichever credential you have set (see the README's "API Keys"):
 #   * NVIDIA_API_KEY           -> NVIDIA build.nvidia.com NIM (public), served at
 #                                 integrate.api.nvidia.com (litellm `nvidia_nim/`)
 #   * OPENAI_API_KEY           -> OpenAI (public)
+#   * OCI_COMPARTMENT_ID       -> Oracle Cloud Infrastructure Generative AI
+#                                 (litellm `oci/`; see docs/oci-generative-ai.md)
 #   * NVIDIA_INFERENCE_API_KEY -> NVIDIA internal inference gateway
 #                                 (inference-api.nvidia.com; NVIDIA employees)
 # To use a specific model, set MODEL to any litellm name and provide its key,
@@ -35,6 +69,25 @@ if os.getenv("NVIDIA_API_KEY"):
     # pass NVIDIA_API_KEY (the build.nvidia.com convention) explicitly.
     MODEL = "nvidia_nim/nvidia/nemotron-3-super-120b-a12b"
     llm = get_llm_client(MODEL, api_key=os.environ["NVIDIA_API_KEY"])
+elif os.getenv("OCI_COMPARTMENT_ID"):
+    # Oracle Cloud Infrastructure (OCI) Generative AI. litellm routes `oci/*` to
+    # inference.generativeai.<OCI_REGION>.oci.oraclecloud.com and reads API-key
+    # credentials from OCI_USER, OCI_FINGERPRINT, OCI_TENANCY, and OCI_KEY_FILE
+    # (or OCI_KEY), or from the ~/.oci/config profile named by OCI_CLI_PROFILE.
+    # OCI_MODEL picks another catalog model; OCI_ENDPOINT_ID targets a dedicated
+    # endpoint such as an imported NVIDIA Nemotron model. See docs/oci-generative-ai.md.
+    MODEL = os.getenv("OCI_MODEL", "oci/meta.llama-3.3-70b-instruct")
+    _oci_kwargs: dict[str, Any] = {"oci_compartment_id": os.environ["OCI_COMPARTMENT_ID"]}
+    if os.getenv("OCI_REGION"):
+        _oci_kwargs["oci_region"] = os.environ["OCI_REGION"]
+    if os.getenv("OCI_ENDPOINT_ID"):
+        _oci_kwargs["oci_serving_mode"] = "DEDICATED"
+        _oci_kwargs["oci_endpoint_id"] = os.environ["OCI_ENDPOINT_ID"]
+    if os.getenv("OCI_CLI_PROFILE"):
+        # Reuse an ~/.oci/config profile (API key or `oci session authenticate`
+        # token) instead of OCI_* credential variables. Needs the `oci` SDK.
+        _oci_kwargs["oci_signer"] = _oci_signer_from_profile(os.environ["OCI_CLI_PROFILE"])
+    llm = get_llm_client(MODEL, **_oci_kwargs)
 elif os.getenv("OPENAI_API_KEY"):
     MODEL = "gpt-5-mini"
     llm = get_llm_client(MODEL)

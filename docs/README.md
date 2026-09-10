@@ -79,6 +79,7 @@ First [connect a model](model-connect.md). Then:
 | [Model configuration](model-configuration.md) | What do model settings mean, and how do I find the effective configuration? |
 | [Media inputs](media.md) | How do I attach images, audio, video, or PDFs, and authorize them on a route? |
 | [Local models](local-models.md) | How do I run NOOA with local models? |
+| [OCI Generative AI](oci-generative-ai.md) | How do I run NOOA on Oracle Cloud Infrastructure Generative AI, including imported Nemotron models? |
 | [Orchestration](concepts/orchestration.md) | How do I make a workflow deterministic without turning it into one giant prompt? |
 | [Multi-agent systems](concepts/multi-agent-systems.md) | When should I use another agent, and what state does it share? |
 | [LLM admission control](concepts/llm-admission-control.md) | How can one process or application bound concurrent outbound LLM calls? |
