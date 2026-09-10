@@ -11,8 +11,11 @@ import pytest
 pytest.importorskip("mcp")
 
 from datetime import timedelta  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
 from typing import Literal  # noqa: E402
 from unittest.mock import AsyncMock, MagicMock, patch  # noqa: E402
+
+from mcp.types import Tool as MCPRemoteTool  # noqa: E402
 
 from nooa.mcp import client as client_module  # noqa: E402
 from nooa.mcp import oauth  # noqa: E402
@@ -23,7 +26,13 @@ from nooa.mcp.client import (  # noqa: E402
     MCPStreamableHTTPClient,
     create_mcp_client,
 )
-from nooa.mcp.tool import MCPManager, MCPTool, MCPToolSpec, _make_dynamic_class  # noqa: E402
+from nooa.mcp.tool import (  # noqa: E402
+    MCPManager,
+    MCPTool,
+    MCPToolSpec,
+    _make_dynamic_class,
+    _tool_input_schema,
+)
 
 
 # Fixtures
@@ -475,21 +484,22 @@ def test_create_mcp_client_forwards_tool_call_timeout(kwargs: dict[str, str]):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provides_session_id", [False, True])
 async def test_streamable_http_connect_context_manager(
     streamable_http_client: MCPStreamableHTTPClient,
     mock_client_session: AsyncMock,
+    provides_session_id: bool,
 ):
-    """connect_to_server() is a proper async context manager for streamable-http."""
+    """MCP 1.x and 2.x stream tuples both establish a usable session."""
     mock_read = MagicMock()
     mock_write = MagicMock()
     mock_get_session_id = MagicMock(return_value="session-123")
+    transport_streams = (mock_read, mock_write, mock_get_session_id)
+    if not provides_session_id:
+        transport_streams = transport_streams[:2]
 
     with patch("nooa.mcp.client.streamable_http_client") as mock_http:
-        mock_http.return_value.__aenter__.return_value = (
-            mock_read,
-            mock_write,
-            mock_get_session_id,
-        )
+        mock_http.return_value.__aenter__.return_value = transport_streams
 
         with patch("nooa.mcp.client.ClientSession") as mock_session_class:
             mock_session_class.return_value.__aenter__.return_value = mock_client_session
@@ -501,7 +511,8 @@ async def test_streamable_http_connect_context_manager(
                 assert session is not None
                 mock_client_session.initialize.assert_awaited_once()
                 # During connection, mcp_session_id should be available
-                assert streamable_http_client.mcp_session_id == "session-123"
+                expected_session_id = "session-123" if provides_session_id else None
+                assert streamable_http_client.mcp_session_id == expected_session_id
 
             # After connection, mcp_session_id should be cleared
             assert streamable_http_client.mcp_session_id is None
@@ -815,18 +826,28 @@ def test_create_from_server_keeps_and_copies_nested_inline_config(monkeypatch):
     assert canary not in repr(transport_args)
 
 
+@pytest.mark.parametrize("attribute", ["inputSchema", "input_schema"])
+def test_tool_input_schema_supports_mcp_sdk_field_names(attribute: str):
+    """MCP 1.x and 2.x expose the input schema under different field names."""
+    schema = {"type": "object", "properties": {}}
+    remote_tool = SimpleNamespace(**{attribute: schema})
+
+    assert _tool_input_schema(remote_tool) is schema
+
+
 @pytest.mark.asyncio
-async def test_create_stdio_server_builds_tool_without_blocking_wrapper():
+async def test_create_stdio_server_builds_tool_from_real_sdk_model():
     session = AsyncMock()
     schema = {
         "type": "object",
         "properties": {"query": {"type": "string"}},
         "required": ["query"],
     }
-    remote_tool = MagicMock()
-    remote_tool.name = "lookup"
-    remote_tool.description = "Look up a value"
-    remote_tool.inputSchema = schema
+    remote_tool = MCPRemoteTool(
+        name="lookup",
+        description="Look up a value",
+        inputSchema=schema,
+    )
     session.list_tools.return_value.tools = [remote_tool]
     client = MagicMock()
 

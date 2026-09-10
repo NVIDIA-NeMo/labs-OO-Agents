@@ -314,12 +314,10 @@ class MCPStreamableHTTPClient(MCPBaseClient):
         try:
             async with (
                 http_client,
-                streamable_http_client(url=self._url, http_client=http_client) as (
-                    read,
-                    write,
-                    get_session_id,
-                ),
+                streamable_http_client(url=self._url, http_client=http_client) as transport_streams,
             ):
+                read, write = transport_streams[:2]
+                get_session_id = transport_streams[2] if len(transport_streams) > 2 else None
                 # Store the session ID callback for later retrieval
                 self._get_mcp_session_id = get_session_id
                 async with ClientSession(
