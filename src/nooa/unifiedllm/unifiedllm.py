@@ -1781,6 +1781,19 @@ class CompletionClient(UnifiedLLM):
             },
         }
 
+    def _completion_http_client(self, call_config: dict[str, Any], *, is_async: bool) -> Any:
+        """Reuse the owned transport only while its constructor routing still applies."""
+        routing_fields = ("api_base", "base_url", "api_key", "custom_llm_provider")
+        if self._effective_model(call_config) != self.model or any(
+            call_config.get(key) != self.config.get(key) for key in routing_fields
+        ):
+            # LiteLLM uses a supplied OpenAI SDK client's bound URL/key, ignoring
+            # the corresponding call parameters. Let it build the correct client
+            # for overrides; these calls use LiteLLM's default HTTP pool settings.
+            return None
+        assert self._http is not None
+        return self._http.async_client if is_async else self._http.sync_client
+
     def call(
         self,
         messages: list[dict[str, Any]],
@@ -1844,10 +1857,9 @@ class CompletionClient(UnifiedLLM):
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
-        http_client = self._http
-        assert http_client is not None
-        if http_client.sync_client is not None:
-            api_params.setdefault("client", http_client.sync_client)
+        http_client = self._completion_http_client(call_config, is_async=False)
+        if http_client is not None:
+            api_params.setdefault("client", http_client)
 
         def _make_call():
             raw_response = _collect_sync(litellm.completion(**api_params))
@@ -2016,10 +2028,9 @@ class CompletionClient(UnifiedLLM):
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
-        http_client = self._http
-        assert http_client is not None
-        if http_client.async_client is not None:
-            api_params.setdefault("client", http_client.async_client)
+        http_client = self._completion_http_client(call_config, is_async=True)
+        if http_client is not None:
+            api_params.setdefault("client", http_client)
 
         async def _make_call():
             raw_response = await _collect_async(await _litellm_acompletion(api_params))

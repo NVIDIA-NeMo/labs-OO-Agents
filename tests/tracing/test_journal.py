@@ -11,6 +11,7 @@ ContextVar (populated by the nooa actor) and posts:
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -210,6 +211,21 @@ def test_safe_msg_to_dict_redacts_json_encoded_opaque_state():
     safe = _safe_msg_to_dict(message)
 
     assert "opaque-openai-state" not in safe["content"]
+
+
+@pytest.mark.parametrize("json_encoded", [False, True])
+def test_safe_msg_to_dict_redacts_private_replay_envelope(json_encoded):
+    from nooa._llm_state import LLM_STATE_KEY
+
+    message = {LLM_STATE_KEY: {"payload": {"future_provider_blob": "opaque-state"}}}
+    original = {"content": json.dumps(message)} if json_encoded else message
+
+    safe = _safe_msg_to_dict(original)
+
+    decoded = json.loads(safe["content"]) if json_encoded else safe
+    assert decoded[LLM_STATE_KEY] == "[REDACTED]"
+    assert "opaque-state" not in repr(safe)
+    assert message[LLM_STATE_KEY]["payload"]["future_provider_blob"] == "opaque-state"
 
 
 class TestSentBlocksBounding:
