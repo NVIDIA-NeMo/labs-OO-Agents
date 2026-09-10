@@ -8,6 +8,7 @@ from typing import Any, Literal, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from litellm.types.llms.openai import ResponsesAPIResponse
 from litellm.types.utils import Choices, Message, ModelResponse
 
 from nooa._llm_state import ReplayCarryingMessage
@@ -381,8 +382,8 @@ def test_direct_gemini_inline_signatures_cannot_bypass_the_envelope() -> None:
     assert GEMINI_SIGNATURE not in json.dumps(prepared)
 
 
-def test_non_gemini_tool_call_id_with_thought_substring_is_unchanged() -> None:
-    call_id = "call_business__thought__phase"
+@pytest.mark.parametrize("call_id", ["call_business__thought__phase", "call_business__thought__"])
+def test_non_gemini_tool_call_id_with_thought_substring_is_unchanged(call_id: str) -> None:
     response = _chat_response(
         Message(role="assistant", content=None, tool_calls=[_tool_call(call_id)])
     )
@@ -534,6 +535,54 @@ RESPONSES_MESSAGE = {
     "status": "completed",
     "content": [{"type": "output_text", "text": "Answer.", "annotations": []}],
 }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize("has_answer", [False, True])
+async def test_summary_without_encrypted_content_is_portable_text(is_async, has_answer) -> None:
+    summary = {
+        key: value for key, value in RESPONSES_REASONING.items() if key != "encrypted_content"
+    }
+    raw = ResponsesAPIResponse(
+        id="resp",
+        created_at=0,
+        model="gpt-5.6",
+        status="completed",
+        output=[summary, RESPONSES_MESSAGE] if has_answer else [summary],
+    )
+    async with ResponsesClient(
+        model="openai/gpt-5.6", api_key="test", api_base="https://gateway.example/v1"
+    ) as client:
+        target = "litellm.aresponses" if is_async else "litellm.responses"
+        with patch(target, return_value=raw) as request:
+            messages = [{"role": "user", "content": "think"}]
+            first = await client.acall(messages) if is_async else client.call(messages)
+        assert request.call_args.kwargs.get("include") is None
+        assert first.reasoning == "Check the evidence."
+        assert first.llm_state is None
+        restored = LLMResponse.model_validate_json(first.model_dump_json())
+        with patch(target, return_value=raw) as replay:
+            rendered = _render(restored, responses=True)
+            if is_async:
+                await client.acall(rendered)
+            else:
+                client.call(rendered)
+        expected = "Check the evidence." + ("\n\nAnswer." if has_answer else "")
+        assert replay.call_args.kwargs["input"] == [{"role": "assistant", "content": expected}]
+
+
+@pytest.mark.parametrize("encrypted", ["", 42, False])
+def test_malformed_ciphertext_is_not_hidden_by_a_summary_only_item(encrypted) -> None:
+    scope = replay_scope("openai/gpt-5.6", "responses", {})
+    with pytest.raises(ReasoningReplayError, match="encrypted content"):
+        capture_responses_state(
+            [
+                {"type": "reasoning", "summary": []},
+                {**RESPONSES_REASONING, "encrypted_content": encrypted},
+            ],
+            scope,
+        )
 
 
 def test_responses_summary_stays_exact_on_match_and_demotes_on_model_change() -> None:

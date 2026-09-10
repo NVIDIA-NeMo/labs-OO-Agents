@@ -2946,12 +2946,5 @@ class ResponsesClient(UnifiedLLM):
         if hasattr(response, "output_text") and response.output_text:
             return response.output_text
         if hasattr(response, "output"):
-            for item in response.output:
-                if replay_state.response_item_type(item) == "message":
-                    texts = []
-                    for content_item in _item_field(item, "content") or []:
-                        text = _item_field(content_item, "text")
-                        if isinstance(text, str):
-                            texts.append(text)
-                    return "\n".join(texts)
+            return replay_state.responses_output_text(response.output)
         return ""
