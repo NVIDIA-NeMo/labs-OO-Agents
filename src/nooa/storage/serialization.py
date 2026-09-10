@@ -154,6 +154,10 @@ def _serialize(value: Any, allowlist: set[str]) -> Any:
             serialized = _serialize(getattr(value, field_name), allowlist)
             if serialized is not SKIP:
                 data[field_name] = serialized
+        for field_name, extra in (value.model_extra or {}).items():
+            serialized = _serialize(extra, allowlist)
+            if serialized is not SKIP:
+                data[field_name] = serialized
         return {"__type__": _PYDANTIC, "__class__": fqn, "data": data}
 
     # 6. Dataclasses
@@ -235,6 +239,8 @@ def _deserialize_envelope(blob: dict[str, Any], allowlist: set[str]) -> Any:
         # Deserialize nested envelopes first (e.g. dataclass/snapshotable
         # fields), then let Pydantic validate the reconstructed objects.
         deserialized_data = {k: _deserialize(v, allowlist) for k, v in data.items()}
+        if cls.model_config.get("extra") == "allow":
+            return cls.model_validate(deserialized_data)
         # Filter to known fields for lenient restoration (handles extra="forbid"
         # models that would reject extra fields from schema drift).
         known_fields = set(cls.model_fields)
