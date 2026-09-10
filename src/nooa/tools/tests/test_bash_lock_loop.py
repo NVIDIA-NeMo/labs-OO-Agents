@@ -99,25 +99,30 @@ class TestLockLoopMismatch:
         await bash_session.run("echo start")
         original_lock = bash_session._lock
 
-        # Simulate a loop change by setting _started_on_loop to a different object
-        bash_session._started_on_loop = object()
+        # Simulate a loop change by setting _lock_loop to a different object
+        bash_session._lock_loop = object()
         bash_session._ensure_lock_on_current_loop()
         assert bash_session._lock is not original_lock
+        assert bash_session._lock_loop is asyncio.get_running_loop()
 
     def test_run_after_close_on_new_loop(self, bash_session):
-        """Lock is fresh after close(), so a new loop works without error."""
+        """close() preserves the lock until the next loop adopts a fresh one."""
 
         async def start_and_close(session):
             await session.run("echo first")
+            original_lock = session._lock
             await session.close()
+            assert session._lock is original_lock
+            return original_lock
 
         async def run_after_close(session):
             stdout, _, code = await session.run("echo second")
             return stdout.strip(), code
 
         # Start and close on loop A
-        asyncio.run(start_and_close(bash_session))
+        original_lock = asyncio.run(start_and_close(bash_session))
 
-        # Use on loop B — would fail without lock reset in close()
+        # Use on loop B — the public operation replaces the old loop's lock
         result = asyncio.run(run_after_close(bash_session))
         assert result == ("second", 0)
+        assert bash_session._lock is not original_lock
