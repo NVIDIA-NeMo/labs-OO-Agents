@@ -24,7 +24,11 @@ from nooa.context_blocks.formatter import (
 from nooa.context_blocks.models import ResolvedBlock, Role
 from nooa.runtime.middleware import LLMCallContext
 from nooa.unifiedllm import CompletionClient, LLMResponse, ResponsesClient, Tool
-from nooa.unifiedllm.replay_state import prepare_responses_batch, replay_scope
+from nooa.unifiedllm.replay_state import (
+    prepare_chat_messages,
+    prepare_responses_batch,
+    replay_scope,
+)
 
 REASONING = {
     "id": "rs_1",
@@ -67,7 +71,22 @@ def _responses(*items: dict) -> SimpleNamespace:
     return SimpleNamespace(output=list(items), output_text="", status="completed", usage=None)
 
 
-def _chat_response(*, reasoning_items: list[dict] | None = None) -> ModelResponse:
+def _chat_tool_call(call_id: str = "call_1", code: str = "print(1)") -> dict:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": "execute_python",
+            "arguments": json.dumps({"code": code}, separators=(",", ":")),
+        },
+    }
+
+
+def _chat_response(
+    *,
+    reasoning_items: list[dict] | None = None,
+    tool_calls: list[dict] | None = None,
+) -> ModelResponse:
     return ModelResponse(
         model="gpt-5.6",
         choices=[
@@ -76,16 +95,7 @@ def _chat_response(*, reasoning_items: list[dict] | None = None) -> ModelRespons
                 "message": {
                     "role": "assistant",
                     "content": "",
-                    "tool_calls": [
-                        {
-                            "id": "call_1",
-                            "type": "function",
-                            "function": {
-                                "name": "execute_python",
-                                "arguments": '{"code":"print(1)"}',
-                            },
-                        }
-                    ],
+                    "tool_calls": [_chat_tool_call()] if tool_calls is None else tool_calls,
                     "reasoning_items": reasoning_items,
                 },
             }
@@ -567,6 +577,16 @@ def test_chat_state_is_captured_replayed_and_api_style_scoped() -> None:
 
         assert first.llm_state is not None
         assert first.llm_state["format"] == "litellm-chat"
+        assert first.llm_state["payload"]["carrier"] == {
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "name": "execute_python",
+                    "arguments": '{"code":"print(1)"}',
+                }
+            ],
+        }
         assistant = next(
             item for item in call.call_args_list[1].kwargs["messages"] if item.get("tool_calls")
         )
@@ -580,6 +600,106 @@ def test_chat_state_is_captured_replayed_and_api_style_scoped() -> None:
             assert REASONING not in target_call.call_args.kwargs["input"]
         finally:
             responses.close()
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize(
+    "mutation", ["text", "id", "name", "arguments", "drop", "reorder", "duplicate"]
+)
+def test_chat_state_is_not_replayed_after_public_carrier_changes(
+    mutation: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    client = CompletionClient(
+        model="openai/gpt-5.6",
+        api_key="account-a",
+        cache_control_injection_points=[],
+    )
+    try:
+        response = _chat_response(
+            reasoning_items=[REASONING],
+            tool_calls=[_chat_tool_call(), _chat_tool_call("call_2", "print(2)")],
+        )
+        with patch("litellm.completion", return_value=response):
+            first = client.call([{"role": "user", "content": "run"}], tools=[TOOL])
+
+        assert first.llm_state is not None
+        rendered = _render_chat(first)
+        assistant = next(message for message in rendered if message.get("tool_calls"))
+        if mutation == "text":
+            assistant["content"] = "replacement"
+        elif mutation == "id":
+            assistant["tool_calls"][0]["id"] = "replacement"
+        elif mutation == "name":
+            assistant["tool_calls"][0]["function"]["name"] = "replacement"
+        elif mutation == "arguments":
+            assistant["tool_calls"][0]["function"]["arguments"] = '{"code":"changed"}'
+        elif mutation == "drop":
+            assistant["tool_calls"].pop()
+        elif mutation == "reorder":
+            assistant["tool_calls"].reverse()
+        else:
+            assistant["tool_calls"][1]["id"] = assistant["tool_calls"][0]["id"]
+
+        prepared = prepare_chat_messages(rendered, first.llm_state["scope"])
+        replayed = next(message for message in prepared if message.get("role") == "assistant")
+        assert "reasoning_items" not in replayed
+        assert "provider-secret" not in repr(prepared)
+        assert "public assistant carrier changed" in caplog.text
+    finally:
+        client.close()
+
+
+def test_malformed_chat_carrier_fails_closed(caplog: pytest.LogCaptureFixture) -> None:
+    client = CompletionClient(
+        model="openai/gpt-5.6",
+        api_key="account-a",
+        cache_control_injection_points=[],
+    )
+    try:
+        with patch("litellm.completion", return_value=_chat_response(reasoning_items=[REASONING])):
+            first = client.call([{"role": "user", "content": "run"}], tools=[TOOL])
+
+        assert first.llm_state is not None
+        rendered = _render_chat(first)
+        state = json.loads(json.dumps(first.llm_state))
+        del state["payload"]["carrier"]
+        carrier = next(message for message in rendered if carried_state(message) is not None)
+        assert isinstance(carrier, ReplayCarryingMessage)
+        carrier.llm_state = state
+        prepared = prepare_chat_messages(rendered, first.llm_state["scope"])
+
+        assert "provider-secret" not in repr(prepared)
+        assert "Opaque Chat reasoning state is malformed" in caplog.text
+    finally:
+        client.close()
+
+
+def test_chat_state_only_carrier_is_bound_to_its_empty_turn() -> None:
+    client = CompletionClient(
+        model="openai/gpt-5.6",
+        api_key="account-a",
+        cache_control_injection_points=[],
+    )
+    try:
+        with patch(
+            "litellm.completion",
+            return_value=_chat_response(reasoning_items=[REASONING], tool_calls=[]),
+        ):
+            first = client.call([{"role": "user", "content": "think"}])
+
+        assert first.llm_state is not None
+        assert first.llm_state["payload"]["carrier"] == {"content": "", "tool_calls": []}
+        assert first.llm_state["payload"]["state_only"] is True
+        rendered = _render_chat(first)
+        exact = prepare_chat_messages(rendered, first.llm_state["scope"])
+        assert any(message.get("reasoning_items") == [REASONING] for message in exact)
+
+        carrier = next(message for message in rendered if carried_state(message) is not None)
+        carrier["content"] = "preserve this edit"
+        edited = prepare_chat_messages(rendered, first.llm_state["scope"])
+        assert "provider-secret" not in repr(edited)
+        assert any(message.get("content") == "preserve this edit" for message in edited)
     finally:
         client.close()
 

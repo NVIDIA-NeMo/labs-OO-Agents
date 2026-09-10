@@ -138,13 +138,78 @@ def _matching_payload(state: Any, scope: str | None, state_format: str) -> dict 
     return cast(dict[str, Any], state["payload"])
 
 
+def _chat_public_carrier(message: Any) -> dict[str, Any] | None:
+    """Project the public assistant data to which opaque Chat state is bound."""
+    if _field(message, "role") != "assistant":
+        return None
+    raw_calls = _field(message, "tool_calls")
+    if raw_calls is None:
+        raw_calls = []
+    if not isinstance(raw_calls, list):
+        return None
+
+    calls: list[dict[str, str]] = []
+    for call in raw_calls:
+        function = _field(call, "function")
+        call_id = _field(call, "id")
+        name = _field(function, "name")
+        arguments = _field(function, "arguments")
+        if isinstance(arguments, dict):
+            arguments = json.dumps(arguments)
+        if not all(isinstance(value, str) for value in (call_id, name, arguments)):
+            return None
+        calls.append({"id": call_id, "name": name, "arguments": arguments})
+
+    content = _field(message, "content")
+    if content is not None and not isinstance(content, str):
+        return None
+    content = (content or None) if calls else (content or "")
+    return {"content": content, "tool_calls": calls}
+
+
+def _valid_chat_payload(payload: dict[str, Any]) -> bool:
+    if set(payload) - {"reasoning_items", "carrier", "state_only"}:
+        return False
+    items = payload.get("reasoning_items")
+    carrier = payload.get("carrier")
+    if not isinstance(items, list) or not items or not isinstance(carrier, dict):
+        return False
+    if set(carrier) != {"content", "tool_calls"}:
+        return False
+    if carrier.get("content") is not None and not isinstance(carrier.get("content"), str):
+        return False
+    calls = carrier.get("tool_calls")
+    if not isinstance(calls, list) or not all(
+        isinstance(call, dict)
+        and set(call) == {"id", "name", "arguments"}
+        and all(isinstance(call.get(key), str) for key in ("id", "name", "arguments"))
+        for call in calls
+    ):
+        return False
+    if len({call["id"] for call in calls}) != len(calls):
+        return False
+    if "state_only" in payload and payload["state_only"] is not True:
+        return False
+    return (payload.get("state_only") is True) == (carrier == {"content": "", "tool_calls": []})
+
+
 def capture_chat_state(message: Any, scope: str | None) -> dict | None:
     items = _field(message, "reasoning_items")
     if not isinstance(items, list) or not items:
         return None
-    payload: dict[str, Any] = {"reasoning_items": [opaque_item(item) for item in items]}
+    carrier = _chat_public_carrier(message)
+    if carrier is None:
+        logger.warning("Discarding OpenAI Chat reasoning state with a malformed carrier.")
+        return None
+    payload: dict[str, Any] = {
+        "reasoning_items": [opaque_item(item) for item in items],
+        "carrier": carrier,
+    }
     if not _field(message, "content") and not _field(message, "tool_calls"):
         payload["state_only"] = True
+    if not _valid_chat_payload(payload):
+        logger.warning("Discarding malformed OpenAI Chat reasoning state.")
+        return None
     return _envelope(scope, _CHAT_FORMAT, payload)
 
 
@@ -278,12 +343,24 @@ def prepare_chat_messages(messages: list[dict[str, Any]], scope: str | None) -> 
         message.pop(LLM_STATE_KEY, None)
         message.pop("reasoning_items", None)
         payload = _matching_payload(state, scope, _CHAT_FORMAT)
-        if payload and isinstance(payload.get("reasoning_items"), list):
+        restored = False
+        if payload is not None and not _valid_chat_payload(payload):
+            logger.warning(
+                "Opaque Chat reasoning state is malformed; portable reasoning text "
+                "will be replayed instead."
+            )
+        elif payload is not None and _chat_public_carrier(message) != payload["carrier"]:
+            logger.warning(
+                "Opaque Chat reasoning state was not replayed because its public assistant "
+                "carrier changed; portable reasoning text will be replayed instead."
+            )
+        elif payload is not None:
             message["reasoning_items"] = payload["reasoning_items"]
-        else:
+            restored = True
+        if not restored:
             demote_reasoning_text(message, reasoning)
         if (
-            payload is None
+            not restored
             and state is not None
             and not reasoning
             and message.get("role") == "assistant"
