@@ -17,6 +17,7 @@ from nooa.context_blocks.models import BlockMetadata, RenderedMessage, ResolvedB
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 from nooa.unifiedllm import CompletionClient, ResponsesClient
+from nooa.unifiedllm.replay_state import prepare_chat_messages
 from nooa.unifiedllm.unifiedllm import _extract_usage
 
 
@@ -121,6 +122,92 @@ def test_cache_marker_copy_preserves_private_replay_metadata() -> None:
     assert prepared[0].replay_batch_id == "batch"
     assert prepared[0].replay_batch_size == 1
     assert "cache_control" not in original
+
+
+def test_overlapping_cache_injection_does_not_mutate_original_content() -> None:
+    original = {
+        "role": "tool",
+        "content": [{"type": "text", "text": "first"}, {"type": "text", "text": "last"}],
+    }
+    before = json.dumps(original)
+    with CompletionClient(model="anthropic/claude-sonnet-4-5") as client:
+        prepared = client._inject_cache_control(
+            [original], [{"role": "tool"}, {"role": "tool", "position": "last"}]
+        )
+
+    assert json.dumps(original) == before
+    assert prepared[0]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert prepared[0]["content"][0] is original["content"][0]
+
+
+def test_dropped_opaque_assistant_preserves_its_cache_boundary() -> None:
+    messages = [
+        {"role": "user", "content": "stable"},
+        ReplayCarryingMessage(
+            {"role": "assistant", "content": ""},
+            llm_state={
+                "version": 1,
+                "scope": "chat:anthropic:test",
+                "format": "litellm-chat",
+                "payload": {
+                    "thinking_blocks": [
+                        {"type": "thinking", "thinking": "private", "signature": "sig"}
+                    ],
+                    "carrier": {"content": "", "tool_calls": []},
+                    "state_only": True,
+                },
+            },
+            cache_boundary_before=True,
+        ),
+        {"role": "user", "content": "live state"},
+    ]
+    prepared = prepare_chat_messages(messages, None)
+    with CompletionClient(
+        model="anthropic/claude-sonnet-4-5", cache_breakpoint="anthropic"
+    ) as client:
+        wire, _, _ = client._prepare_cache_boundary(prepared, responses=False)
+
+    assert wire == [
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "stable", "cache_control": {"type": "ephemeral"}}],
+        },
+        {"role": "user", "content": "live state"},
+    ]
+
+
+@pytest.mark.parametrize("static_prefix", [False, True])
+def test_dynamic_system_messages_remain_after_the_cache_boundary(static_prefix: bool) -> None:
+    prefix = [{"role": "system", "content": "stable instructions"}] if static_prefix else []
+    with ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai") as client:
+        transformed, instructions = client._transform_messages(
+            [
+                *prefix,
+                ReplayCarryingMessage(
+                    {"role": "system", "content": "live state"}, cache_boundary_before=True
+                ),
+                {"role": "system", "content": "more live state"},
+            ]
+        )
+        assert instructions == ("stable instructions" if static_prefix else None)
+        wire, instructions, enabled = client._prepare_cache_boundary(
+            transformed, responses=True, instructions=instructions
+        )
+
+    assert enabled is True
+    assert instructions is None
+    assert wire[-2:] == [
+        {"role": "system", "content": "live state"},
+        {"role": "system", "content": "more live state"},
+    ]
+    if static_prefix:
+        assert wire[0]["content"][0] == {
+            "type": "input_text",
+            "text": "stable instructions",
+            "prompt_cache_breakpoint": {"mode": "explicit"},
+        }
+    else:
+        assert "prompt_cache_breakpoint" not in repr(wire)
 
 
 def test_boundary_consumption_preserves_ordinary_empty_messages_and_private_state() -> None:

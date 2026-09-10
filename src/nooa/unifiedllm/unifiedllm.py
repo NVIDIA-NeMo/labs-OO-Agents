@@ -1366,11 +1366,11 @@ class UnifiedLLM(ABC):
 
         def copy_message(index: int, *, copy_last_content_block: bool = False) -> dict[str, Any]:
             nonlocal prepared
-            if index not in copied:
+            if index not in copied or copy_last_content_block:
                 if prepared is messages:
                     prepared = list(messages)
                 prepared[index] = _copy_cache_marker_target(
-                    messages[index], copy_last_content_block=copy_last_content_block
+                    prepared[index], copy_last_content_block=copy_last_content_block
                 )
                 copied.add(index)
             message = prepared[index]
@@ -2775,15 +2775,17 @@ class ResponsesClient(UnifiedLLM):
         Handles two input formats:
         1. Native Responses format (from ResponsesProviderFormatter): messages contain
            "type": "function_call" / "function_call_output" items alongside role-based messages.
-           System messages have {"role": "system", ...} and are extracted to instructions.
+           System messages before the dynamic-context boundary are extracted to
+           instructions; system messages in the suffix stay in input order.
         2. Legacy OpenAI Chat format: messages use {"role": "tool", "tool_call_id": ...} and
            {"role": "assistant", "tool_calls": [...]}. These are converted to native format.
 
         Returns (input_messages, instructions) where instructions is the concatenated
-        system message content (or None if no system messages).
+        stable system message content (or None if no stable system messages).
         """
         instructions_parts: list[str] = []
         transformed: list[dict[str, Any]] = []
+        in_dynamic_suffix = False
 
         skip_batch_items = 0
         for index, original in enumerate(messages):
@@ -2791,6 +2793,7 @@ class ResponsesClient(UnifiedLLM):
                 skip_batch_items -= 1
                 continue
             if carried_cache_boundary(original):
+                in_dynamic_suffix = True
                 # Keep the boundary anchored before this logical message even
                 # when replay expands its carrier into several Responses items.
                 transformed.append(ReplayCarryingMessage({}, cache_boundary_before=True))
@@ -2831,8 +2834,9 @@ class ResponsesClient(UnifiedLLM):
                 )
                 msg.pop("reasoning_items")
 
-            # System messages → extract to instructions
-            if msg.get("role") == "system":
+            # Only stable system messages belong in the leading instructions;
+            # lifting live state out of the suffix would invalidate that prefix.
+            if msg.get("role") == "system" and not in_dynamic_suffix:
                 content = msg.get("content", "")
                 if content:
                     instructions_parts.append(content)

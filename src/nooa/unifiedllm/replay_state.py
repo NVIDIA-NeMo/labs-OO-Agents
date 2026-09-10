@@ -749,6 +749,8 @@ def prepare_chat_messages(messages: list[dict[str, Any]], scope: str | None) -> 
             and not message.get("content")
             and not message.get("tool_calls")
         ):
+            if cache_boundary:
+                prepared.append(ReplayCarryingMessage({}, cache_boundary_before=True))
             continue
         prepared.append(
             ReplayCarryingMessage(message, cache_boundary_before=True)
