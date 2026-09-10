@@ -150,7 +150,7 @@ def test_responses_text_state_is_captured_and_exactly_replayed() -> None:
                 for message in middleware_context.messages
                 if carried_state(message) is not None
             )
-            assert carried_state(carrier) == first.llm_state
+            assert carried_state(carrier) is first.llm_state
             client.call(middleware_context.messages + [{"role": "user", "content": "continue"}])
 
         assert first.llm_state is not None
@@ -159,6 +159,26 @@ def test_responses_text_state_is_captured_and_exactly_replayed() -> None:
         replay = call.call_args_list[1].kwargs["input"]
         assert replay[:2] == [REASONING, {"role": "assistant", "content": "done"}]
         assert LLM_STATE_KEY not in repr(replay)
+    finally:
+        client.close()
+
+
+def test_responses_wire_payload_is_detached_from_stored_state() -> None:
+    client = ResponsesClient(model="openai/gpt-5.6", api_key="account-a")
+    try:
+        with patch("litellm.responses", return_value=_responses(REASONING, MESSAGE)):
+            first = client.call([{"role": "user", "content": "think"}])
+
+        def mutate_wire_input(**kwargs):
+            reasoning = next(item for item in kwargs["input"] if item.get("type") == "reasoning")
+            reasoning["encrypted_content"] = "mutated-by-provider"
+            return _responses(MESSAGE)
+
+        with patch("litellm.responses", side_effect=mutate_wire_input):
+            client.call(_render_responses(first))
+
+        assert first.llm_state is not None
+        assert first.llm_state["payload"]["items"] == [REASONING]
     finally:
         client.close()
 

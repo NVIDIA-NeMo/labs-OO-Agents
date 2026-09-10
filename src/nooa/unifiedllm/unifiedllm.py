@@ -2517,13 +2517,8 @@ class ResponsesClient(UnifiedLLM):
             if skip_batch_items:
                 skip_batch_items -= 1
                 continue
-            state = copy.deepcopy(carried_state(original))
+            state = carried_state(original)
             reasoning = carried_reasoning(original)
-            msg = copy.deepcopy(dict(original))
-            msg.pop(LLM_STATE_KEY, None)
-            # Provider state supplied outside a valid NOOA envelope is never
-            # accepted, even if a caller constructs wire dictionaries directly.
-            msg.pop("reasoning_items", None)
 
             batch_info = carried_replay_batch(original)
             if batch_info is not None and (state is not None or reasoning is not None):
@@ -2532,12 +2527,10 @@ class ResponsesClient(UnifiedLLM):
                 if len(candidates) == batch_size and all(
                     carried_replay_batch(item) == (batch_id, batch_size) for item in candidates
                 ):
-                    batch = [copy.deepcopy(dict(item)) for item in candidates]
-                    for item in batch:
-                        item.pop(LLM_STATE_KEY, None)
-                        item.pop("reasoning_items", None)
                     transformed.extend(
-                        replay_state.prepare_responses_batch(batch, state, state_scope, reasoning)
+                        replay_state.prepare_responses_batch(
+                            candidates, state, state_scope, reasoning
+                        )
                     )
                     skip_batch_items = batch_size - 1
                     continue
@@ -2545,6 +2538,12 @@ class ResponsesClient(UnifiedLLM):
                 # but fail closed instead of associating state with new neighbors.
                 state = None
                 reasoning = None
+
+            msg = copy.deepcopy(dict(original))
+            msg.pop(LLM_STATE_KEY, None)
+            # Provider state supplied outside a valid NOOA envelope is never
+            # accepted, even if a caller constructs wire dictionaries directly.
+            msg.pop("reasoning_items", None)
 
             # System messages → extract to instructions
             if msg.get("role") == "system":

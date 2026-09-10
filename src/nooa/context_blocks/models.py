@@ -13,7 +13,7 @@ Role: Re-exported from roles.py for backward compatibility.
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SkipValidation
 
 # Import EventBase here (not forward ref) — possible because events.py imports
 # Role from roles.py, breaking the circular dependency.
@@ -300,10 +300,12 @@ class RenderedMessage(BaseModel):
         default_factory=tuple,
         description="Complete ordered tool-call batch on an assistant turn",
     )
-    llm_state: dict[str, Any] | None = Field(
+    llm_state: SkipValidation[dict[str, Any] | None] = Field(
         default=None,
         repr=False,
-        description="Opaque state carried only to the UnifiedLLM replay boundary",
+        description=(
+            "Borrowed immutable opaque state carried only to the UnifiedLLM replay boundary"
+        ),
     )
     reasoning: str | None = Field(
         default=None,

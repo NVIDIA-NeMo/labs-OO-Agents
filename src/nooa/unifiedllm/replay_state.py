@@ -118,7 +118,7 @@ def _envelope(scope: str | None, state_format: str, payload: dict[str, Any]) -> 
         "version": _STATE_VERSION,
         "scope": scope,
         "format": state_format,
-        "payload": copy.deepcopy(payload),
+        "payload": payload,
     }
 
 
@@ -184,7 +184,7 @@ def prepare_chat_messages(messages: list[dict[str, Any]], scope: str | None) -> 
     """Strip private/raw state and restore only a matching Chat payload."""
     prepared: list[dict[str, Any]] = []
     for original in messages:
-        state = copy.deepcopy(carried_state(original))
+        state = carried_state(original)
         reasoning = carried_reasoning(original)
         message = copy.deepcopy(dict(original))
         message.pop(LLM_STATE_KEY, None)
@@ -237,7 +237,7 @@ def prepare_responses_batch(
     if not isinstance(items, list) or not isinstance(order, list):
         return demote_responses_batch(clean, state, reasoning)
     if payload.get("state_only") is True:
-        return [copy.deepcopy(item) for item in items if isinstance(item, dict)]
+        return [item for item in items if isinstance(item, dict)]
 
     calls = {
         item.get("call_id"): item
@@ -259,14 +259,14 @@ def prepare_responses_batch(
             if isinstance(index, int) and 0 <= index < len(items):
                 item = items[index]
                 if isinstance(item, dict):
-                    pending.append(copy.deepcopy(item))
+                    pending.append(item)
             continue
         if slot.get("type") == "function_call":
             call_id = slot.get("call_id")
             carrier = calls.get(call_id) if isinstance(call_id, str) else None
             if carrier is not None and isinstance(call_id, str):
                 replay.extend(pending)
-                replay.append(copy.deepcopy(carrier))
+                replay.append(carrier)
                 emitted_calls.add(call_id)
                 last_carrier_emitted = True
             else:
@@ -276,7 +276,7 @@ def prepare_responses_batch(
         if slot.get("type") == "message":
             if message is not None and not emitted_message:
                 replay.extend(pending)
-                replay.append(copy.deepcopy(message))
+                replay.append(message)
                 emitted_message = True
                 last_carrier_emitted = True
             else:
@@ -286,7 +286,7 @@ def prepare_responses_batch(
     if last_carrier_emitted:
         replay.extend(pending)
     replay.extend(
-        copy.deepcopy(item)
+        item
         for item in clean
         if not (
             item is message
