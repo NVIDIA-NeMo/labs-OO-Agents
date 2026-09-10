@@ -20,6 +20,8 @@ from nooa.context_blocks.formatter import (
 from nooa.context_blocks.models import ResolvedBlock, Role
 from nooa.unifiedllm import CompletionClient, LLMResponse, ResponsesClient, Tool
 from nooa.unifiedllm.replay_state import (
+    ReasoningReplayError,
+    capture_chat_state,
     capture_responses_state,
     prepare_chat_messages,
     prepare_responses_batch,
@@ -212,7 +214,9 @@ def test_gemini_signatures_round_trip_without_becoming_public_call_ids() -> None
 
 
 @pytest.mark.parametrize("mutation", ["drop", "reorder", "duplicate"])
-def test_gemini_tool_state_fails_closed_when_public_calls_change(mutation: str) -> None:
+def test_gemini_tool_state_warns_and_demotes_when_public_calls_change(
+    mutation: str, caplog: pytest.LogCaptureFixture
+) -> None:
     client = CompletionClient(model="gemini/gemini-2.5-pro", api_key="account-a")
     try:
         with patch("litellm.completion", return_value=_gemini_response()):
@@ -232,8 +236,10 @@ def test_gemini_tool_state_fails_closed_when_public_calls_change(mutation: str) 
         replayed = next(message for message in prepared if message.get("tool_calls"))
         assert "provider_specific_fields" not in replayed
         assert all("provider_specific_fields" not in call for call in replayed["tool_calls"])
+        assert replayed["content"] == "Inspect the value."
         assert GEMINI_SIGNATURE not in json.dumps(prepared)
         assert GEMINI_SIGNATURE_2 not in json.dumps(prepared)
+        assert "public tool-call sequence changed" in caplog.text
     finally:
         client.close()
 
@@ -259,7 +265,59 @@ def test_non_gemini_tool_call_id_with_thought_substring_is_unchanged() -> None:
         client.close()
 
 
-def test_cross_provider_replay_hides_opaque_state_but_keeps_reasoning_text() -> None:
+def test_missing_thought_signature_is_normal_but_malformed_signature_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    scope = replay_scope("gemini/gemini-2.5-pro", "chat", {})
+    assert (
+        capture_chat_state(
+            Message(role="assistant", content=None, tool_calls=[_tool_call()]), scope
+        )
+        is None
+    )
+    assert not caplog.text
+
+    malformed = Message(
+        role="assistant",
+        content=None,
+        tool_calls=[_tool_call("call_1", {"thought_signature": 42})],
+    )
+    with pytest.raises(ReasoningReplayError, match="thought_signature"):
+        capture_chat_state(malformed, scope)
+
+    with pytest.raises(ReasoningReplayError, match="expected a mapping"):
+        capture_chat_state({"tool_calls": ["not-a-tool-call"]}, scope)
+
+
+def test_unknown_provider_state_warns_but_unknown_envelope_state_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    scope = replay_scope("gemini/gemini-2.5-pro", "chat", {})
+    assert (
+        capture_chat_state(
+            {"provider_specific_fields": {"future_reasoning_state": "opaque"}}, scope
+        )
+        is None
+    )
+    assert "retention may need updating" in caplog.text
+
+    state = {
+        "version": 1,
+        "scope": scope,
+        "format": "litellm-chat",
+        "payload": {
+            "thinking_blocks": [{"type": "thinking", "signature": "opaque"}],
+            "future_reasoning_state": "opaque",
+        },
+    }
+    carrier = ReplayCarryingMessage({"role": "assistant", "content": "answer"}, state)
+    with pytest.raises(ReasoningReplayError, match="malformed or unsupported"):
+        prepare_chat_messages([carrier], scope)
+
+
+def test_cross_provider_replay_warns_hides_opaque_state_and_keeps_reasoning_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     source = CompletionClient(model="gemini/gemini-2.5-pro", api_key="account-a")
     target = CompletionClient(model="anthropic/claude-sonnet-4", api_key="account-a")
     try:
@@ -277,6 +335,7 @@ def test_cross_provider_replay_hides_opaque_state_but_keeps_reasoning_text() -> 
         assert [call["id"] for call in assistant["tool_calls"]] == ["call_1", "call_2"]
         assert GEMINI_SIGNATURE not in json.dumps(replayed)
         assert GEMINI_SIGNATURE_2 not in json.dumps(replayed)
+        assert "is incompatible with" in caplog.text
     finally:
         source.close()
         target.close()
@@ -412,6 +471,68 @@ def test_state_only_turn_drops_empty_carrier_across_api_styles() -> None:
     )
 
 
+def test_state_only_carrier_mutation_warns_and_preserves_public_content(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    chat_scope = "chat:openai:sha256:model"
+    chat_state = {
+        "version": 1,
+        "scope": chat_scope,
+        "format": "litellm-chat",
+        "payload": {"reasoning_items": [{"opaque": "chat-secret"}], "state_only": True},
+    }
+    chat_carrier = ReplayCarryingMessage(
+        {"role": "assistant", "content": "middleware text"},
+        chat_state,
+        "portable reasoning",
+    )
+    assert prepare_chat_messages([chat_carrier], chat_scope) == [
+        {"role": "assistant", "content": "portable reasoning\n\nmiddleware text"}
+    ]
+
+    responses_scope = "responses:openai:sha256:model"
+    responses_state = {
+        "version": 1,
+        "scope": responses_scope,
+        "format": "openai-responses",
+        "payload": {
+            "items": [RESPONSES_REASONING],
+            "order": [{"type": "reasoning", "index": 0}],
+            "state_only": True,
+        },
+    }
+    assert prepare_responses_batch(
+        [{"role": "assistant", "content": "middleware text"}],
+        responses_state,
+        responses_scope,
+        "portable reasoning",
+    ) == [{"role": "assistant", "content": "portable reasoning\n\nmiddleware text"}]
+    assert caplog.text.count("empty public carrier changed") == 2
+
+
+def test_legacy_state_warns_while_malformed_current_state_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    legacy = ReplayCarryingMessage(
+        {"role": "assistant", "content": "answer"},
+        {"reasoning_items": [{"opaque": "legacy"}]},
+        "portable reasoning",
+    )
+    assert prepare_chat_messages([legacy], None)[0]["content"] == ("portable reasoning\n\nanswer")
+    assert "unsupported or legacy version" in caplog.text
+
+    scope = "chat:openai:sha256:model"
+    malformed_states = [
+        {"version": 1, "scope": scope, "format": "litellm-chat", "payload": []},
+        {"version": 1, "scope": scope, "format": "typo", "payload": {}},
+        {"version": 1, "scope": scope, "format": "litellm-chat", "payload": {}, "extra": 1},
+    ]
+    for state in malformed_states:
+        malformed = ReplayCarryingMessage({"role": "assistant", "content": "answer"}, state)
+        with pytest.raises(ReasoningReplayError, match="Malformed version-1"):
+            prepare_chat_messages([malformed], scope)
+
+
 def test_responses_demotion_keeps_native_output_content_valid() -> None:
     native_message = {
         "type": "message",
@@ -440,9 +561,10 @@ def test_unverified_closed_provider_routes_have_no_opaque_replay_scope(
     assert replay_scope(model, api_style, {"api_key": "account-a"}) is None
 
 
-def test_non_openai_responses_scope_cannot_capture_or_restore_opaque_items() -> None:
+def test_non_openai_responses_scope_rejects_capture_and_restore() -> None:
     fabricated_scope = "responses:anthropic:sha256:untrusted"
-    assert capture_responses_state([RESPONSES_REASONING], fabricated_scope) is None
+    with pytest.raises(ReasoningReplayError, match="only supports.*OpenAI and Azure"):
+        capture_responses_state([RESPONSES_REASONING], fabricated_scope)
 
     state = {
         "version": 1,
@@ -450,12 +572,8 @@ def test_non_openai_responses_scope_cannot_capture_or_restore_opaque_items() -> 
         "format": "openai-responses",
         "payload": {"items": [RESPONSES_REASONING], "order": []},
     }
-    assert prepare_responses_batch(
-        [RESPONSES_MESSAGE], state, fabricated_scope, "Check the evidence."
-    ) == [
-        {"role": "assistant", "content": "Check the evidence."},
-        RESPONSES_MESSAGE,
-    ]
+    with pytest.raises(ReasoningReplayError, match="only supported for OpenAI and Azure"):
+        prepare_responses_batch([RESPONSES_MESSAGE], state, fabricated_scope, "Check the evidence.")
 
 
 @pytest.mark.parametrize(

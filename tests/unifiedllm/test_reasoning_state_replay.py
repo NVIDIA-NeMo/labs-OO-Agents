@@ -25,9 +25,11 @@ from nooa.context_blocks.models import ResolvedBlock, Role
 from nooa.runtime.middleware import LLMCallContext
 from nooa.unifiedllm import CompletionClient, LLMResponse, ResponsesClient, Tool
 from nooa.unifiedllm.replay_state import (
-    prepare_chat_messages,
+    ReasoningReplayError,
+    capture_responses_state,
     prepare_responses_batch,
     replay_scope,
+    responses_reasoning_text,
 )
 
 REASONING = {
@@ -290,7 +292,7 @@ def test_reasoning_only_carrier_edit_drops_state_but_keeps_text() -> None:
         client.close()
 
 
-def test_malformed_matching_responses_payload_is_not_forwarded(caplog) -> None:
+def test_malformed_matching_responses_payload_raises() -> None:
     scope = replay_scope("openai/gpt-5.6", "responses", {})
     state = {
         "version": 1,
@@ -305,20 +307,26 @@ def test_malformed_matching_responses_payload_is_not_forwarded(caplog) -> None:
         },
     }
 
-    assert prepare_responses_batch(
-        [{"role": "assistant", "content": "public"}],
-        state,
-        scope,
-        "portable reasoning",
-    ) == [{"role": "assistant", "content": "portable reasoning\n\npublic"}]
-    assert "is malformed" in caplog.text
+    with pytest.raises(ReasoningReplayError, match="Malformed OpenAI Responses"):
+        prepare_responses_batch(
+            [{"role": "assistant", "content": "public"}],
+            state,
+            scope,
+            "portable reasoning",
+        )
 
 
-def test_split_responses_replay_batch_keeps_public_call_but_drops_state() -> None:
+def test_split_responses_replay_batch_warns_and_demotes_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Middleware may edit public items, but cannot reattach state to new neighbors."""
     client = ResponsesClient(model="openai/gpt-5.6", api_key="account-a")
+    reasoning = {
+        **REASONING,
+        "summary": [{"type": "summary_text", "text": "Check the evidence."}],
+    }
     try:
-        with patch("litellm.responses", return_value=_responses(REASONING, CALL, CALL_2)):
+        with patch("litellm.responses", return_value=_responses(reasoning, CALL, CALL_2)):
             first = client.call([{"role": "user", "content": "run"}], tools=[TOOL])
         rendered = [item for item in _render_responses(first) if carried_replay_batch(item)]
         assert len(rendered) == 2
@@ -327,11 +335,58 @@ def test_split_responses_replay_batch_keeps_public_call_but_drops_state() -> Non
             client.call(rendered[:1], tools=[TOOL])
 
         replay = call.call_args.kwargs["input"]
-        assert [item.get("call_id") for item in replay] == ["call_1"]
-        assert REASONING not in replay
+        assert [item.get("call_id") for item in replay if item.get("type") == "function_call"] == [
+            "call_1"
+        ]
+        assert replay[0] == {"role": "assistant", "content": "Check the evidence."}
+        assert reasoning not in replay
         assert "provider-secret" not in repr(replay)
+        assert "middleware split its public carrier batch" in caplog.text
     finally:
         client.close()
+
+
+def test_changed_responses_carrier_warns_and_demotes_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    scope = replay_scope("openai/gpt-5.6", "responses", {})
+    reasoning = {
+        **REASONING,
+        "summary": [{"type": "summary_text", "text": "Check the evidence."}],
+    }
+    state = capture_responses_state([reasoning, CALL], scope)
+    changed_call = {**CALL, "call_id": "changed"}
+
+    assert prepare_responses_batch([changed_call], state, scope, "Check the evidence.") == [
+        {"role": "assistant", "content": "Check the evidence."},
+        changed_call,
+    ]
+    assert "public carriers changed" in caplog.text
+
+
+def test_responses_envelope_cannot_replay_a_non_reasoning_item_as_state() -> None:
+    scope = replay_scope("openai/gpt-5.6", "responses", {})
+    state = {
+        "version": 1,
+        "scope": scope,
+        "format": "openai-responses",
+        "payload": {
+            "items": [CALL],
+            "order": [
+                {"type": "reasoning", "index": 0},
+                {"type": "function_call", "call_id": "call_1"},
+            ],
+        },
+    }
+
+    with pytest.raises(ReasoningReplayError, match="Malformed Responses reasoning item"):
+        prepare_responses_batch([CALL], state, scope)
+
+    with pytest.raises(ReasoningReplayError, match="unsupported output type.*future_public"):
+        capture_responses_state([REASONING, {"type": "future_public"}], scope)
+
+    with pytest.raises(ReasoningReplayError, match="Malformed Responses reasoning summary"):
+        responses_reasoning_text([{**REASONING, "summary": ""}])
 
 
 def test_reasoning_only_response_replays_without_empty_assistant_message() -> None:
@@ -604,122 +659,27 @@ def test_chat_state_is_captured_replayed_and_api_style_scoped() -> None:
         client.close()
 
 
-@pytest.mark.parametrize(
-    "mutation", ["text", "id", "name", "arguments", "drop", "reorder", "duplicate"]
-)
-def test_chat_state_is_not_replayed_after_public_carrier_changes(
-    mutation: str, caplog: pytest.LogCaptureFixture
+def test_unresolved_route_fails_when_provider_returns_opaque_state(
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    client = CompletionClient(
-        model="openai/gpt-5.6",
-        api_key="account-a",
-        cache_control_injection_points=[],
-    )
-    try:
-        response = _chat_response(
-            reasoning_items=[REASONING],
-            tool_calls=[_chat_tool_call(), _chat_tool_call("call_2", "print(2)")],
-        )
-        with patch("litellm.completion", return_value=response):
-            first = client.call([{"role": "user", "content": "run"}], tools=[TOOL])
-
-        assert first.llm_state is not None
-        rendered = _render_chat(first)
-        assistant = next(message for message in rendered if message.get("tool_calls"))
-        if mutation == "text":
-            assistant["content"] = "replacement"
-        elif mutation == "id":
-            assistant["tool_calls"][0]["id"] = "replacement"
-        elif mutation == "name":
-            assistant["tool_calls"][0]["function"]["name"] = "replacement"
-        elif mutation == "arguments":
-            assistant["tool_calls"][0]["function"]["arguments"] = '{"code":"changed"}'
-        elif mutation == "drop":
-            assistant["tool_calls"].pop()
-        elif mutation == "reorder":
-            assistant["tool_calls"].reverse()
-        else:
-            assistant["tool_calls"][1]["id"] = assistant["tool_calls"][0]["id"]
-
-        prepared = prepare_chat_messages(rendered, first.llm_state["scope"])
-        replayed = next(message for message in prepared if message.get("role") == "assistant")
-        assert "reasoning_items" not in replayed
-        assert "provider-secret" not in repr(prepared)
-        assert "public assistant carrier changed" in caplog.text
-    finally:
-        client.close()
-
-
-def test_malformed_chat_carrier_fails_closed(caplog: pytest.LogCaptureFixture) -> None:
-    client = CompletionClient(
-        model="openai/gpt-5.6",
-        api_key="account-a",
-        cache_control_injection_points=[],
-    )
-    try:
-        with patch("litellm.completion", return_value=_chat_response(reasoning_items=[REASONING])):
-            first = client.call([{"role": "user", "content": "run"}], tools=[TOOL])
-
-        assert first.llm_state is not None
-        rendered = _render_chat(first)
-        state = json.loads(json.dumps(first.llm_state))
-        del state["payload"]["carrier"]
-        carrier = next(message for message in rendered if carried_state(message) is not None)
-        assert isinstance(carrier, ReplayCarryingMessage)
-        carrier.llm_state = state
-        prepared = prepare_chat_messages(rendered, first.llm_state["scope"])
-
-        assert "provider-secret" not in repr(prepared)
-        assert "Opaque Chat reasoning state is malformed" in caplog.text
-    finally:
-        client.close()
-
-
-def test_chat_state_only_carrier_is_bound_to_its_empty_turn() -> None:
-    client = CompletionClient(
-        model="openai/gpt-5.6",
-        api_key="account-a",
-        cache_control_injection_points=[],
-    )
-    try:
-        with patch(
-            "litellm.completion",
-            return_value=_chat_response(reasoning_items=[REASONING], tool_calls=[]),
-        ):
-            first = client.call([{"role": "user", "content": "think"}])
-
-        assert first.llm_state is not None
-        assert first.llm_state["payload"]["carrier"] == {"content": "", "tool_calls": []}
-        assert first.llm_state["payload"]["state_only"] is True
-        rendered = _render_chat(first)
-        exact = prepare_chat_messages(rendered, first.llm_state["scope"])
-        assert any(message.get("reasoning_items") == [REASONING] for message in exact)
-
-        carrier = next(message for message in rendered if carried_state(message) is not None)
-        carrier["content"] = "preserve this edit"
-        edited = prepare_chat_messages(rendered, first.llm_state["scope"])
-        assert "provider-secret" not in repr(edited)
-        assert any(message.get("content") == "preserve this edit" for message in edited)
-    finally:
-        client.close()
-
-
-def test_unresolved_route_drops_state_at_capture() -> None:
     client = ResponsesClient(model="unknown-route", api_key="account-a")
     try:
         with (
             patch("litellm.get_llm_provider", side_effect=ValueError("unknown")),
             patch("litellm.responses", return_value=_responses(REASONING, MESSAGE)) as call,
         ):
-            response = client.call([{"role": "user", "content": "think"}])
+            with pytest.raises(ReasoningReplayError, match="only supports.*OpenAI and Azure"):
+                client.call([{"role": "user", "content": "think"}])
 
-        assert response.llm_state is None
         assert "include" not in call.call_args.kwargs
+        assert "could not resolve model 'unknown-route'" in caplog.text
     finally:
         client.close()
 
 
-def test_direct_reasoning_items_cannot_bypass_envelope_gate() -> None:
+def test_direct_reasoning_items_warn_and_cannot_bypass_envelope_gate(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     client = ResponsesClient(model="openai/gpt-5.6", api_key="account-a")
     try:
         with patch("litellm.responses", return_value=_responses(MESSAGE)) as call:
@@ -727,6 +687,7 @@ def test_direct_reasoning_items_cannot_bypass_envelope_gate() -> None:
 
         assert REASONING not in call.call_args.kwargs["input"]
         assert "provider-secret" not in repr(call.call_args.kwargs["input"])
+        assert "untrusted reasoning item" in caplog.text
     finally:
         client.close()
 
@@ -823,7 +784,7 @@ async def test_responses_reasoning_uses_per_call_override() -> None:
 
 
 @pytest.mark.parametrize("model", ["anthropic/claude-sonnet-4-5", "gemini/gemini-2.5-pro"])
-def test_non_openai_chat_provider_cannot_receive_openai_reasoning_state(model: str) -> None:
+def test_current_envelope_with_wrong_provider_payload_fails(model: str) -> None:
     scope = replay_scope(model, "chat", {"api_key": "account-a"})
     assert scope is not None
     client = CompletionClient(model=model, api_key="account-a")
@@ -834,13 +795,14 @@ def test_non_openai_chat_provider_cannot_receive_openai_reasoning_state(model: s
         "payload": {"reasoning_items": [REASONING]},
     }
     try:
-        with patch("litellm.completion", return_value=_chat_response()) as call:
+        with (
+            patch("litellm.completion", return_value=_chat_response()) as call,
+            pytest.raises(ReasoningReplayError, match="malformed or unsupported"),
+        ):
             client.call(
                 [ReplayCarryingMessage({"role": "assistant", "content": "public"}, crafted)]
             )
-
-        assert call.call_args.kwargs["messages"] == [{"role": "assistant", "content": "public"}]
-        assert "provider-secret" not in repr(call.call_args.kwargs)
+        call.assert_not_called()
     finally:
         client.close()
 

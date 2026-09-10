@@ -2623,14 +2623,23 @@ class ResponsesClient(UnifiedLLM):
                     continue
                 # A middleware split or mutated the batch. Keep the public item,
                 # but fail closed instead of associating state with new neighbors.
+                logger.warning(
+                    "Opaque Responses reasoning state was not replayed because middleware "
+                    "split its public carrier batch; portable reasoning text will be "
+                    "replayed on the surviving carrier when available."
+                )
                 state = None
-                reasoning = None
 
             msg = copy.deepcopy(dict(original))
             msg.pop(LLM_STATE_KEY, None)
             # Provider state supplied outside a valid NOOA envelope is never
             # accepted, even if a caller constructs wire dictionaries directly.
-            msg.pop("reasoning_items", None)
+            if "reasoning_items" in msg:
+                logger.warning(
+                    "Removed untrusted reasoning_items from public Responses input; replay "
+                    "opaque state through a persisted LLMResponse instead."
+                )
+                msg.pop("reasoning_items")
 
             # System messages → extract to instructions
             if msg.get("role") == "system":
@@ -2642,6 +2651,10 @@ class ResponsesClient(UnifiedLLM):
             # Already in native Responses format (from ResponsesProviderFormatter)
             if "type" in msg:
                 if replay_state.response_item_type(msg) == "reasoning":
+                    logger.warning(
+                        "Removed an untrusted reasoning item from public Responses input; "
+                        "replay opaque state through a persisted LLMResponse instead."
+                    )
                     continue
                 if state is not None or reasoning is not None:
                     transformed.extend(

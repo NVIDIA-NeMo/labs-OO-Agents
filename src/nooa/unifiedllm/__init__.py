@@ -11,6 +11,7 @@ from nooa.unifiedllm.registry import (
     reload_registry,
     resolve_api_key_from_config,
 )
+from nooa.unifiedllm.replay_state import ReasoningReplayError
 from nooa.unifiedllm.retry import (
     EmptyContentError,
     RetryingWrapper,
@@ -48,6 +49,7 @@ __all__ = [
     # Response types
     "LLMResponse",
     "LLMUsage",
+    "ReasoningReplayError",
     # HTTP config
     "HttpConfig",
     # Retry utilities

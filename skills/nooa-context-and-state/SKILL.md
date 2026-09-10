@@ -89,6 +89,8 @@ Event history is what fills the LLM's conversation window. Key model-visible eve
 
 `LLMResponse.reasoning` is provider-exposed text and remains useful across model switches, where UnifiedLLM replays it as ordinary assistant text. `LLMResponse.llm_state` is opaque provider state; it is persisted for resume but is replayed only through a matching provider/API/model gate.
 
+An intentional model/API mismatch logs a warning and falls back to the portable text. A malformed current-version envelope or provider signature raises `ReasoningReplayError`; do not catch it and silently continue, because it signals archive corruption or an unsupported provider contract change.
+
 ```python
 # Query (AND semantics; chronological; limit keeps most recent)
 recent = agent.events.query(limit=20)
