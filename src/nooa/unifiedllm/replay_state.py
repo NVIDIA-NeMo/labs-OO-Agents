@@ -44,6 +44,21 @@ def response_item_type(item: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def unsupported_responses_parts(output: list[Any]) -> list[str]:
+    """Identify turn parts the canonical response cannot currently project."""
+    unsupported: list[str] = []
+    for item in output:
+        item_type = response_item_type(item)
+        if item_type not in {"reasoning", "function_call", "message"}:
+            unsupported.append(str(item_type))
+        elif item_type == "message":
+            for block in _field(item, "content", []) or []:
+                block_type = response_item_type(block)
+                if block_type != "output_text":
+                    unsupported.append(f"message.{block_type}")
+    return unsupported
+
+
 def opaque_item(item: Any) -> Any:
     """Detach one provider-owned item for durable storage."""
     # Inspect the type: permissive mocks/proxies synthesize arbitrary instance
@@ -301,7 +316,7 @@ def _valid_responses_payload(payload: dict[str, Any]) -> bool:
         return False
     return (
         bool(items or carriers != _flatten_responses_carriers(carriers))
-        and sorted(indexes) == list(range(len(items)))
+        and indexes == list(range(len(items)))
         and len({slot["call_id"] for slot in carriers if slot["type"] == "function_call"})
         == sum(slot["type"] == "function_call" for slot in carriers)
         and (state_only is True) == (not carriers)
@@ -333,6 +348,14 @@ def _flatten_responses_carriers(carriers: list[dict[str, Any]]) -> list[dict[str
 
 
 def capture_responses_state(output: list[Any], scope: str | None) -> dict | None:
+    unsupported = unsupported_responses_parts(output)
+    if unsupported:
+        logger.warning(
+            "Cannot retain OpenAI Responses state: unsupported turn parts %s would "
+            "be omitted during replay.",
+            unsupported,
+        )
+        return None
     items: list[Any] = []
     order: list[dict[str, Any]] = []
     has_public_carrier = False

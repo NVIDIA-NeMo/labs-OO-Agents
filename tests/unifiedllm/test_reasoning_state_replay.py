@@ -320,6 +320,51 @@ def test_empty_and_summary_only_outputs_do_not_capture_structural_state() -> Non
     assert capture_responses_state([summary_only], scope) is None
 
 
+@pytest.mark.parametrize("part", ["refusal", "web_search_call"])
+def test_valid_unprojectable_sdk_turn_does_not_retain_partial_state(part, caplog) -> None:
+    from openai.types.responses import (
+        ResponseFunctionWebSearch,
+        ResponseOutputMessage,
+        ResponseReasoningItem,
+    )
+
+    from nooa.unifiedllm.replay_state import capture_responses_state
+
+    reasoning = ResponseReasoningItem.model_validate(REASONING)
+    if part == "refusal":
+        unsupported = ResponseOutputMessage.model_validate(
+            {**MESSAGE, "content": [{"type": "refusal", "refusal": "Not permitted."}]}
+        )
+    else:
+        unsupported = ResponseFunctionWebSearch.model_validate(
+            {
+                "id": "ws_1",
+                "type": "web_search_call",
+                "status": "completed",
+                "action": {"type": "search", "query": "weather"},
+            }
+        )
+    scope = replay_scope("openai/gpt-5.6", "responses", {})
+    assert capture_responses_state([reasoning, unsupported], scope) is None
+    assert "unsupported turn parts" in caplog.text
+    assert part in caplog.text
+    assert "provider-secret" not in caplog.text
+    assert "Not permitted." not in caplog.text
+
+
+def test_permuted_reasoning_indexes_are_not_replayed(caplog) -> None:
+    from nooa.unifiedllm.replay_state import capture_responses_state
+
+    scope = replay_scope("openai/gpt-5.6", "responses", {})
+    state = capture_responses_state([REASONING, REASONING_2, MESSAGE], scope)
+    assert state is not None
+    state["payload"]["order"][0]["index"] = 1
+    state["payload"]["order"][1]["index"] = 0
+    public = [{"role": "assistant", "content": "done"}]
+    assert prepare_responses_batch(public, state, scope) == public
+    assert "is malformed" in caplog.text
+
+
 def test_mixed_summary_only_reasoning_never_replays_a_partial_opaque_sequence(caplog) -> None:
     from nooa.unifiedllm.replay_state import capture_responses_state
 
