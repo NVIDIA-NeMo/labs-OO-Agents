@@ -1154,6 +1154,14 @@ class UnifiedLLM(ABC):
             raise ValueError("model must be a non-empty string")
         return model
 
+    def _reject_payload_override(self, name: str, kwargs: dict[str, Any]) -> None:
+        """Keep provider payloads on the validated messages path."""
+        if name in self.config or name in kwargs:
+            raise ValueError(
+                f"{name!r} is managed by UnifiedLLM; pass conversation data through "
+                "the messages argument"
+            )
+
     def close(self) -> None:
         """Release this client's sync HTTP resources (its own httpx clients)."""
         if self._http is not None:
@@ -1780,6 +1788,7 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
+        self._reject_payload_override("messages", kwargs)
         call_config = {**self.config, **kwargs}
         effective_model = self._effective_model(call_config)
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
@@ -1797,9 +1806,9 @@ class CompletionClient(UnifiedLLM):
 
         api_params = {
             "model": self.model,
-            "messages": prepared_messages,
             **self.config,
             **kwargs,
+            "messages": prepared_messages,
         }
 
         if tools:
@@ -1951,6 +1960,7 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
+        self._reject_payload_override("messages", kwargs)
         call_config = {**self.config, **kwargs}
         effective_model = self._effective_model(call_config)
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
@@ -1968,9 +1978,9 @@ class CompletionClient(UnifiedLLM):
 
         api_params = {
             "model": self.model,
-            "messages": prepared_messages,
             **self.config,
             **kwargs,
+            "messages": prepared_messages,
         }
 
         if tools:
@@ -2292,6 +2302,7 @@ class ResponsesClient(UnifiedLLM):
         # OpenAIGPTConfig.remove_cache_control_flag strip — so leaving the marker
         # on OpenAI/Azure/NIM Responses calls triggers a 400 "Unknown parameter:
         # input[N].cache_control" at the gateway.
+        self._reject_payload_override("input", kwargs)
         call_config = {**self.config, **kwargs}
         effective_model = self._effective_model(call_config)
         state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
@@ -2310,10 +2321,10 @@ class ResponsesClient(UnifiedLLM):
 
         api_params = {
             "model": self.model,
-            "input": input_messages,
             "truncation": "disabled",
             **self.config,
             **kwargs,
+            "input": input_messages,
         }
 
         if instructions:
@@ -2427,6 +2438,7 @@ class ResponsesClient(UnifiedLLM):
         """
         # See ResponsesClient.call for why cache_control injection is gated on
         # Anthropic models only.
+        self._reject_payload_override("input", kwargs)
         call_config = {**self.config, **kwargs}
         effective_model = self._effective_model(call_config)
         state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
@@ -2445,10 +2457,10 @@ class ResponsesClient(UnifiedLLM):
 
         api_params = {
             "model": self.model,
-            "input": input_messages,
             "truncation": "disabled",
             **self.config,
             **kwargs,
+            "input": input_messages,
         }
 
         if instructions:

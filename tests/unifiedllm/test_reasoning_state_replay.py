@@ -611,6 +611,48 @@ def test_direct_reasoning_items_cannot_bypass_envelope_gate() -> None:
         client.close()
 
 
+def test_responses_input_kwarg_cannot_bypass_replay_gate() -> None:
+    client = ResponsesClient(model="openai/gpt-5.6", api_key="account-a")
+    try:
+        with pytest.raises(ValueError, match="'input' is managed by UnifiedLLM"):
+            client.call(
+                [{"role": "user", "content": "continue"}],
+                input=[REASONING],
+            )
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize(
+    ("client_type", "payload_name"),
+    [(CompletionClient, "messages"), (ResponsesClient, "input")],
+)
+def test_constructor_payload_config_cannot_bypass_replay_gate(client_type, payload_name) -> None:
+    client = client_type(
+        model="openai/gpt-5.6",
+        api_key="account-a",
+        **{payload_name: [REASONING]},
+    )
+    try:
+        with pytest.raises(ValueError, match=f"'{payload_name}' is managed by UnifiedLLM"):
+            client.call([{"role": "user", "content": "continue"}])
+    finally:
+        client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_responses_input_kwarg_cannot_bypass_replay_gate() -> None:
+    client = ResponsesClient(model="openai/gpt-5.6", api_key="account-a")
+    try:
+        with pytest.raises(ValueError, match="'input' is managed by UnifiedLLM"):
+            await client.acall(
+                [{"role": "user", "content": "continue"}],
+                input=[REASONING],
+            )
+    finally:
+        await client.aclose()
+
+
 @pytest.mark.parametrize("model", ["anthropic/claude-sonnet-4-5", "gemini/gemini-2.5-pro"])
 def test_non_openai_chat_provider_cannot_receive_reasoning_state(model: str) -> None:
     assert replay_scope(model, "chat", {"api_key": "account-a"}) is None
