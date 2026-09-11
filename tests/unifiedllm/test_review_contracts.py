@@ -44,7 +44,12 @@ def test_successful_chat_call_can_return_summary_without_encrypted_content(model
                 "message": {
                     "role": "assistant",
                     "content": "answer",
-                    "reasoning_items": [{"type": "reasoning", "summary": "readable"}],
+                    "reasoning_items": [
+                        {
+                            "type": "reasoning",
+                            "summary": [{"type": "summary_text", "text": "readable"}],
+                        }
+                    ],
                 }
             }
         ]
