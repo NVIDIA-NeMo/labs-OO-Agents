@@ -11,7 +11,7 @@ policies would make their interactions harder to test.
 
 ## Configuration
 
-- `cache_breakpoint="auto"` is the default. Recognized Anthropic routes get a
+- `cache_breakpoint="auto"` is the CompletionClient default. Recognized Anthropic routes get a
   native `cache_control` breakpoint. Other routes use provider-default caching.
 - `cache_breakpoint="anthropic"` explicitly selects the Anthropic Chat mapping,
   including gateway aliases that cannot be recognized automatically.
@@ -19,7 +19,8 @@ policies would make their interactions harder to test.
   breakpoints. Use it only on routes supporting those wire fields; it is not
   inferred from a model name.
 - `cache_breakpoint=None` disables NOOA-generated cache markers, not the
-  provider's implicit cache.
+  provider's implicit cache. This is the ResponsesClient default; that client
+  accepts only `None` or `"openai"`, not the Anthropic Chat mapping.
 
 Registry YAML accepts the same setting. Explicit mappings are tied to the client
 model: use a new client when switching models. The automatic mapping is resolved
@@ -38,6 +39,9 @@ Anthropic marks the latest eligible content block before the boundary, never a
 thinking or redacted-thinking block. OpenAI Responses marks the latest eligible
 input-text block or function result and enables explicit mode. If necessary,
 stable Responses instructions become an input-text block to carry that marker.
+If no eligible stable block exists, OpenAI explicit mode remains enabled with
+no breakpoint: the request does not cache anything. This deliberately avoids
+cache writes for a wholly dynamic prompt rather than reverting to implicit caching.
 Gemini receives no invented inline marker: this change uses its implicit cache,
 not a separately managed explicit cached-content resource.
 

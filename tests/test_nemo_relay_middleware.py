@@ -143,14 +143,24 @@ class TestLLMRequestIntercepts:
         messages = [first, turn]
         ctx = _make_llm_ctx(messages=messages)
         seen: list[list[dict[str, Any]]] = []
+        intercepted = []
+
+        def inspect_request(name, request, annotated):
+            intercepted.append(request.content["messages"])
+            return nemo_relay.LLMRequestInterceptOutcome(request, annotated)
 
         async def nxt(c):
             seen.append(c.messages)
             c.response = FakeLLMResponse()
             return c
 
-        await nemo_relay_llm_middleware(ctx, nxt)
+        nemo_relay.intercepts.register_llm_request("roundtrip-spy", 1, False, inspect_request)
+        try:
+            await nemo_relay_llm_middleware(ctx, nxt)
+        finally:
+            nemo_relay.intercepts.deregister_llm_request("roundtrip-spy")
 
+        assert intercepted == [[first, dict(turn)]]
         assert len(seen[0]) == len(messages)
         assert seen[0] == messages
         assert seen[0][1] is turn

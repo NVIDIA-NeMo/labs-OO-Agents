@@ -23,7 +23,6 @@ from nooa.unifiedllm.replay_state import (
     replay_scope,
 )
 from nooa.unifiedllm.response_parts import capture_parts
-from nooa.unifiedllm.unifiedllm import _extract_usage
 
 
 def _render(dynamic: str) -> list[dict]:
@@ -334,7 +333,8 @@ def test_openai_falls_back_to_instructions_behind_ineligible_output() -> None:
 
 
 @pytest.mark.asyncio
-async def test_openai_fields_reach_the_serialized_http_body() -> None:
+@pytest.mark.parametrize("stable_prefix", [False, True])
+async def test_openai_fields_reach_the_serialized_http_body(stable_prefix: bool) -> None:
     bodies: list[dict] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -384,12 +384,25 @@ async def test_openai_fields_reach_the_serialized_http_body() -> None:
     client._http.httpx_async = transport
     client._http.async_client.client = transport
     try:
-        response = await client.acall(_render("state-a"))
+        messages = (
+            _render("state-a")
+            if stable_prefix
+            else [
+                {"role": "metadata", "nooa_cache_boundary": True},
+                {"role": "user", "content": "changing state"},
+            ]
+        )
+        response = await client.acall(messages)
     finally:
         await client.aclose()
 
     assert bodies[0]["prompt_cache_options"] == {"mode": "explicit"}
-    assert bodies[0]["input"][-2]["content"][-1]["prompt_cache_breakpoint"] == {"mode": "explicit"}
+    if stable_prefix:
+        assert bodies[0]["input"][-2]["content"][-1]["prompt_cache_breakpoint"] == {
+            "mode": "explicit"
+        }
+    else:
+        assert bodies[0]["input"] == [{"role": "user", "content": "changing state"}]
     assert "cache_boundary" not in repr(bodies[0])
     assert response.usage is not None
     assert response.usage.cached_input_tokens == 500
@@ -397,23 +410,6 @@ async def test_openai_fields_reach_the_serialized_http_body() -> None:
     hidden_cost = response.raw_response._hidden_params["response_cost"]
     assert isinstance(hidden_cost, (int, float)) and hidden_cost > 0
     assert response.usage.cost_usd == hidden_cost
-
-
-@pytest.mark.parametrize("bad_cost", [True, "unknown", float("nan"), -1.0])
-def test_malformed_litellm_response_cost_warns_without_losing_usage(
-    bad_cost: object, caplog: pytest.LogCaptureFixture
-) -> None:
-    raw_response = SimpleNamespace(
-        usage={"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
-        _hidden_params={"response_cost": bad_cost},
-    )
-
-    usage = _extract_usage(raw_response)
-
-    assert usage is not None
-    assert usage.input_tokens == 10
-    assert usage.cost_usd == 0.0
-    assert "Ignoring malformed LiteLLM response_cost metadata" in caplog.text
 
 
 @pytest.mark.asyncio

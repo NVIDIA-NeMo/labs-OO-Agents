@@ -532,8 +532,7 @@ async def test_cache_helpers_and_calibration_receive_projected_dicts(monkeypatch
         assert len(calibrated) == 1
         assert calibrated[0] is sent[0]
         assert all(isinstance(message, dict) for message in sent[0])
-        assert sent[0][-1]["content"][0]["type"] == "input_text"
-        assert sent[0][-1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+        assert sent[0][-1] == {"role": "user", "content": "go"}
     finally:
         await client.aclose()
 

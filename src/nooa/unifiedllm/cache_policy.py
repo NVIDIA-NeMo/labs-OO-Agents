@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """One stable-prefix boundary policy, applied after provider projection."""
 
+import logging
 from collections.abc import Mapping
 from typing import Any, Literal
+
+logger = logging.getLogger(__name__)
 
 
 def reject_legacy_cache_config(config: Mapping[str, Any]) -> None:
@@ -69,7 +72,7 @@ def enable_openai_explicit_cache(api_params: dict[str, Any]) -> None:
     api_params["extra_body"] = extra
 
 
-def _mark_anthropic(message: dict[str, Any], *, responses: bool) -> dict[str, Any] | None:
+def _mark_anthropic(message: dict[str, Any]) -> dict[str, Any] | None:
     content = message.get("content")
     marker = {"type": "ephemeral"}
     if isinstance(content, str) and content:
@@ -77,7 +80,7 @@ def _mark_anthropic(message: dict[str, Any], *, responses: bool) -> dict[str, An
             **message,
             "content": [
                 {
-                    "type": "input_text" if responses else "text",
+                    "type": "text",
                     "text": content,
                     "cache_control": marker,
                 }
@@ -88,8 +91,6 @@ def _mark_anthropic(message: dict[str, Any], *, responses: bool) -> dict[str, An
             block = content[i]
             if isinstance(block, dict) and block.get("type") in {
                 "text",
-                "input_text",
-                "output_text",
                 "tool_result",
                 "image",
             }:
@@ -137,14 +138,10 @@ def apply_cache_policy(
                 break
             boundary += 1
     if mapping == "anthropic":
-        # Responses normally lifts stable system text into instructions. Put it
-        # back into an eligible block only when this bridge needs a cache marker.
-        if instructions:
-            clean.insert(0, {"role": "system", "content": instructions})
-            instructions = None
-            boundary += 1
+        if responses:
+            raise ValueError("The Anthropic cache mapping requires CompletionClient")
         for i in range(boundary - 1, -1, -1):
-            marked = _mark_anthropic(clean[i], responses=responses)
+            marked = _mark_anthropic(clean[i])
             if marked is not None:
                 clean[i] = marked
                 break
@@ -153,9 +150,15 @@ def apply_cache_policy(
         raise ValueError("The OpenAI explicit cache mapping requires ResponsesClient")
     marked = _mark_responses_cache_breakpoint(clean, boundary)
     if not marked and instructions:
-        content, _ = _mark_responses_text(instructions)
+        content, marked = _mark_responses_text(instructions)
         clean.insert(0, {"role": "system", "content": content})
         instructions = None
+    if not marked:
+        logger.warning(
+            "OpenAI explicit cache policy found no eligible stable block; this request "
+            "will not use prompt caching. Add stable instructions or place "
+            "nooa_cache_boundary after reusable input text to enable cache writes."
+        )
     # No eligible stable text: explicit mode deliberately avoids caching a
     # changing suffix. Never invent an empty text block just to host a marker.
     return clean, instructions, True

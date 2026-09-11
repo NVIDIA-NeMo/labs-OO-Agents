@@ -33,17 +33,14 @@ async def test_legacy_cache_setting_fails_before_async_dispatch(client_type):
             await client.acall([], cache_control_injection_points=[])
 
 
-@pytest.mark.parametrize("client_type", [CompletionClient, ResponsesClient])
-def test_direct_anthropic_default_marks_only_leading_instructions(client_type):
+def test_direct_anthropic_default_marks_only_leading_instructions():
     original = [
         {"role": "system", "content": "stable"},
         {"role": "user", "content": "changing"},
         {"role": "system", "content": "also changing"},
     ]
-    with client_type("anthropic/claude-sonnet-4-5") as client:
-        wire, _, _ = client._prepare_cache_boundary(
-            original, responses=client_type is ResponsesClient
-        )
+    with CompletionClient("anthropic/claude-sonnet-4-5") as client:
+        wire, _, _ = client._prepare_cache_boundary(original, responses=False)
     assert wire[0]["content"][-1]["cache_control"] == {"type": "ephemeral"}
     assert wire[1] is original[1]
     assert wire[2] is original[2]
@@ -71,13 +68,27 @@ def test_boundary_copies_only_the_marker_target_containers():
 
 
 @pytest.mark.parametrize("mapping", [None, "anthropic", "openai"])
-def test_no_stable_prefix_never_marks_dynamic_content(mapping):
+def test_no_stable_prefix_never_marks_dynamic_content(mapping, caplog):
     messages = [
         {"role": "metadata", "nooa_cache_boundary": True},
         {"role": "system", "content": "live"},
     ]
-    wire, _, _ = apply_cache_policy(messages, mapping, responses=True)
+    wire, _, explicit = apply_cache_policy(messages, mapping, responses=mapping != "anthropic")
     assert wire == [{"role": "system", "content": "live"}]
+    # An explicit policy must not fall back to implicit writes on dynamic input.
+    assert explicit is (mapping == "openai")
+    assert ("no eligible stable block" in caplog.text) is (mapping == "openai")
+
+
+@pytest.mark.parametrize("mapping", ["auto", "anthropic"])
+def test_responses_rejects_chat_cache_mappings(mapping):
+    with pytest.raises(ValueError, match="must be 'openai' or None"):
+        ResponsesClient("anthropic/claude-sonnet-4-5", cache_breakpoint=mapping)
+
+
+def test_anthropic_policy_rejects_responses_wire_format():
+    with pytest.raises(ValueError, match="requires CompletionClient"):
+        apply_cache_policy([], "anthropic", responses=True)
 
 
 @pytest.mark.parametrize("mapping", [None, "anthropic", "openai"])

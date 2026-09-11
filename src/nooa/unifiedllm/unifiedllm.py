@@ -2003,7 +2003,7 @@ class ResponsesClient(UnifiedLLM):
         model: str,
         retry_config: RetryConfig | None = None,
         http_config: HttpConfig | None = None,
-        cache_breakpoint: Literal["auto", "openai"] | None = "auto",
+        cache_breakpoint: Literal["openai"] | None = None,
         **config,
     ):
         """
@@ -2029,12 +2029,14 @@ class ResponsesClient(UnifiedLLM):
             cache_breakpoint: Set to ``"openai"`` to map the cached renderer's
                 stable-prefix boundary to a Responses explicit breakpoint.
                 Opt in only on a route supporting the explicit wire fields.
-                Default ``"auto"`` marks Anthropic bridge instructions and leaves
-                other routes' caching implicit. ``None`` disables NOOA markers.
+                Default ``None`` leaves provider-default caching unchanged.
+                Anthropic cache mapping is supported by CompletionClient only.
+                With ``"openai"`` and no eligible stable block, warns and keeps
+                explicit mode without a breakpoint, avoiding all cache writes.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
-        if cache_breakpoint not in {None, "auto", "openai"}:
-            raise ValueError("ResponsesClient cache_breakpoint must be 'auto', 'openai', or None")
+        if cache_breakpoint not in {None, "openai"}:
+            raise ValueError("ResponsesClient cache_breakpoint must be 'openai' or None")
         super().__init__(model, **config)
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint
