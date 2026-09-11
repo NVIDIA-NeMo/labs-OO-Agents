@@ -6,6 +6,11 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Add Oracle Cloud Infrastructure Generative AI as a documented provider: the
+  quickstart selector picks `oci/` models when `OCI_COMPARTMENT_ID` is set, signs
+  with an `~/.oci/config` profile via `OCI_CLI_PROFILE` or with `OCI_*` API-key
+  variables, and takes `OCI_MODEL` and `OCI_ENDPOINT_ID` overrides for imported models; new
+  `docs/oci-generative-ai.md` and `examples/quickstart/16_oci_generative_ai.py`.
 - Breaking: custom CodeAct error formatters must implement
   `format(error, code=None, *, line_offset=0, max_error=None, tail_chars=None)`.
   Reduced legacy signatures are no longer supported.

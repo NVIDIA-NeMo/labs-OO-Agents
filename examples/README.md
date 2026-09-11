@@ -45,6 +45,7 @@ features. Each file is standalone and includes its exact run command.
 | 13 | [`13_multimodal.py`](quickstart/13_multimodal.py) | Image inputs with CodeAct and Predict | A vision-capable model |
 | 14 | [`14_atif_trajectory.py`](quickstart/14_atif_trajectory.py) | Exporting ATIF trajectories for evals and downstream tooling | — |
 | 15 | [`15_nemo_relay.py`](quickstart/15_nemo_relay.py) | NeMo Relay intercepts, guardrails, events, and nested generation | `uv sync --extra nemo-relay` |
+| 16 | [`16_oci_generative_ai.py`](quickstart/16_oci_generative_ai.py) | OCI Generative AI as the provider through the quickstart selector: profile or API-key auth, dedicated endpoints | OCI credentials; see [OCI Generative AI](../docs/oci-generative-ai.md) |
 
 If you are new to NOOA, run examples 1–6 in order. After that, choose by the
 capability you need rather than treating the remaining files as required steps.

@@ -66,6 +66,7 @@ directory. For code you can run immediately, use the
 | [Tools and visibility](concepts/tools-and-visibility.md) | How does generated code discover and call capabilities? |
 | [Prompts and context](concepts/prompts-and-context.md) | Where should instructions, inputs, and cross-call information live? |
 | [Local models](local-models.md) | How do I run NOOA with local models? |
+| [OCI Generative AI](oci-generative-ai.md) | How do I run NOOA on Oracle Cloud Infrastructure Generative AI, including imported Nemotron models? |
 | [Orchestration](concepts/orchestration.md) | How do I make a workflow deterministic without turning it into one giant prompt? |
 | [Multi-agent systems](concepts/multi-agent-systems.md) | When should I use another agent, and what state does it share? |
 | [Tracing](concepts/tracing.md) | How do I inspect the complete Python and LLM call tree? |
