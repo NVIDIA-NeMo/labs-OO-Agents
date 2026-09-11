@@ -77,8 +77,22 @@ hits, so this is not a controlled cold-cache comparison.
 
 OpenAI's `prompt_cache_breakpoint` and `prompt_cache_options` fields were verified
 on that live route, not inferred from the installed SDK schema. Support on
-other routes is not established. These are prototype results; a final extracted
-branch run must be recorded separately.
+other routes is not established.
+
+The extracted branch was rerun at `f6940e58` on 2026-09-11: all three cases passed
+in 51.03 seconds, using nine requests, 84,460 input tokens and 2,465 output tokens
+with retries disabled. SQLite events, native state and the stable HTTP prefix
+were equal after reopen; the trailing live context changed.
+
+| Model | Resumed input tokens | Cached input tokens |
+|---|---:|---:|
+| GPT-5.6 Sol | 6,162 | 6,138 |
+| Claude Sonnet 5 | 10,854 | 10,824 |
+| Gemini 3.1 Pro Preview | 24,667 | 20,350 |
+
+The warm requests reported zero cache-read tokens in this run. Gemini's implicit
+cache reused a smaller portion of the prefix than the earlier prototype run;
+exact replay does not control how much a provider chooses to cache.
 
 Offline tests:
 
