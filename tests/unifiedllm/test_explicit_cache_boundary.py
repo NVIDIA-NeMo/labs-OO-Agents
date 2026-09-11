@@ -105,6 +105,32 @@ def test_boundary_is_readonly_and_public_projection_is_detached():
     assert boundary["role"] == "metadata"
 
 
+def test_boundary_has_the_same_sdk_and_mapping_surface_as_its_public_dict():
+    from collections.abc import Mapping
+
+    import litellm
+    from pydantic import ValidationError
+
+    boundary = CacheBoundary()
+    public = {"role": "metadata", "nooa_cache_boundary": True}
+    assert isinstance(boundary, Mapping)
+    assert dict(boundary) == boundary.model_dump() == public
+    assert json.loads(boundary.model_dump_json()) == public
+    assert list(boundary.items()) == list(public.items())
+    assert list(boundary.values()) == list(public.values())
+    assert "content" not in boundary
+    with pytest.raises(KeyError):
+        boundary["content"]
+    with pytest.raises(ValidationError, match="frozen"):
+        boundary.role = "user"
+
+    suffix = {"role": "user", "content": "hello"}
+    model = "anthropic/claude-3-5-sonnet-20240620"
+    assert litellm.token_counter(model=model, messages=[boundary, suffix]) == litellm.token_counter(
+        model=model, messages=[public, suffix]
+    )
+
+
 @pytest.mark.parametrize("asynchronous", [False, True])
 async def test_fake_client_consumes_boundaries_like_provider_clients(asynchronous):
     from nooa.unifiedllm import FakeLLMClient

@@ -6,9 +6,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
 from functools import cached_property
-from types import MappingProxyType
 from typing import Annotated, Any, ClassVar, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
@@ -19,32 +17,41 @@ from nooa.context_blocks.events import EventBase
 from nooa.context_blocks.roles import Role
 
 
-@dataclass(frozen=True)
-class CacheBoundary(Mapping[str, Any]):
+class CacheBoundary(BaseModel):
     """End the stable prefix in a UnifiedLLM message list.
 
     Renderers and middleware pass this object through unchanged. UnifiedLLM
     consumes it after projecting assistant turns, so provider-specific expansion
     cannot move the boundary. It is never sent to a model. The read-only mapping
     is its public JSON view for integrations such as NeMo Relay, not a second
-    input format: direct callers should pass CacheBoundary().
+    input format: direct callers should pass CacheBoundary(). Like LLMResponse,
+    it is a Pydantic model so SDK utilities can read it without special handling.
     """
 
-    _public: ClassVar[Mapping[str, Any]] = MappingProxyType(
-        {"role": "metadata", "nooa_cache_boundary": True}
-    )
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    role: Literal["metadata"] = "metadata"
+    nooa_cache_boundary: Literal[True] = True
 
     def __getitem__(self, key: str) -> Any:
-        return self._public[key]
+        if key not in type(self).model_fields:
+            raise KeyError(key)
+        return getattr(self, key)
 
     def __iter__(self):
-        return iter(self._public)
+        return iter(type(self).model_fields)
 
     def __len__(self) -> int:
-        return len(self._public)
+        return len(type(self).model_fields)
+
+    get = Mapping.get
+    keys = Mapping.keys
+    items = Mapping.items
+    values = Mapping.values
+    __contains__ = Mapping.__contains__
 
     def public_message(self) -> dict[str, Any]:
-        return dict(self._public)
+        return self.model_dump()
 
     def render_message(self, content, tool_calls, *, reasoning):
         return self
@@ -501,3 +508,4 @@ class LLMResponse(EventBase):
 # Register the public read-only protocol without replacing Pydantic's durable
 # model serializer. dict(response) is portable; model_dump() is an archive.
 Mapping.register(LLMResponse)
+Mapping.register(CacheBoundary)

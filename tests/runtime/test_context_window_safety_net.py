@@ -97,9 +97,7 @@ class TestStructuredPayloadSafetyNet:
         stats = agent.runtime._last_context_stats
         assert stats is not None
         # Structured count is well under the window — nothing to prune.
-        # Tokenizers consume prepared provider messages, not framework metadata.
-        await llm.acall(messages)
-        structured = litellm.token_counter(model=agent._llm.model, messages=llm.last_messages)
+        structured = litellm.token_counter(model=agent._llm.model, messages=messages)
         assert structured < int(agent._llm.context_window * 0.70)
 
     @pytest.mark.asyncio
