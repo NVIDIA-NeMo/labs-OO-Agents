@@ -102,15 +102,20 @@ def render_context(
     that method without re-rendering the rest of the context under that config.
     """
     from nooa.context_view import Block, CacheBoundary
+    from nooa.llm_types import LLMResponse
 
     resolved: list[ResolvedBlock] = []
     segments: list[tuple[list[ResolvedBlock], bool]] = []
     segment: list[ResolvedBlock] = []
+    segment_index = 0
+    response_segments: dict[str, int] = {}
+    linked_execution_segments: list[tuple[str, str, int]] = []
     for item in blocks:
         if isinstance(item, CacheBoundary):
             if segment:
                 segments.append((segment, True))
                 segment = []
+            segment_index += 1
             continue
         if isinstance(item, ResolvedBlock):
             block = item
@@ -135,6 +140,13 @@ def render_context(
                 f"Expected Block, EventBase, or CacheBoundary, got {type(item).__name__}"
             )
 
+        if isinstance(block.event, LLMResponse):
+            response_segments[block.event.id] = segment_index
+        elif isinstance(block.event, ToolCallEvent) and block.event.llm_response_id is not None:
+            linked_execution_segments.append(
+                (block.event.tool_call_id, block.event.llm_response_id, segment_index)
+            )
+
         if isinstance(block.event, ToolCallEvent) and block.event.result is None:
             raise UnsupportedContextLayout(
                 f"ToolCallEvent {block.event.tool_call_id!r} has no result"
@@ -153,6 +165,14 @@ def render_context(
 
     if segment:
         segments.append((segment, False))
+
+    for tool_call_id, response_id, execution_segment in linked_execution_segments:
+        response_segment = response_segments.get(response_id)
+        if response_segment is not None and response_segment != execution_segment:
+            raise UnsupportedContextLayout(
+                f"CacheBoundary splits tool execution {tool_call_id!r} from its "
+                "canonical LLMResponse"
+            )
 
     context_blocks = [block for block in resolved if block.event is None]
     event_blocks = [block for block in resolved if block.event is not None]

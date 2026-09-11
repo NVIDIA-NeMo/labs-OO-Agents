@@ -2959,7 +2959,7 @@ class ActorRuntime:
                 else self.agent._truncation.context_block_format
             )
 
-        event_query = base_call.event_query or (
+        event_query = (
             self.agent.event_manager.get_event_query()
             or _scoped_events_var.get()
             or getattr(base_method, "_strategy_events", None)
@@ -2981,7 +2981,7 @@ class ActorRuntime:
             _context_token_counter=count_tokens or base_call.context_token_counter,
             _method=method,
             _decorator_context=decorator_context,
-            _scoped_context=base_call.scoped_context or _scoped_blocks_var.get(),
+            _scoped_context=_scoped_blocks_var.get(),
             _context_call_id=base_call._context_call_id or self._agent_call_id or base_call.id,
         )
 

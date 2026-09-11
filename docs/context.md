@@ -34,7 +34,7 @@ class ContextView[Owner](Protocol):
 
 The runtime assembles the selected view for every LLM request and collects it into a `tuple[ContextItem, ...]`; membership and order then remain fixed through rendering. No additional assembled-context type is needed.
 
-`CurrentCall` is the immutable invocation snapshot. In addition to method inputs and the resolved strategy and event query, context views may read the resolved `model`, `provider`, `context_window`, and `context_budget`. Internal formatting and token-counting data support the helpers. It contains no LLM client or credentials.
+`CurrentCall` is the immutable per-request view of an invocation. Its invocation identity and method inputs stay stable; mutable manager and scoped selections are captured again for each request. Views may read the resolved strategy, event query, `model`, `provider`, `context_window`, and `context_budget`. Internal formatting and token-counting data support the helpers. It contains no LLM client or credentials.
 
 ## Resolution
 
@@ -121,6 +121,8 @@ class DefaultAgentView(ContextView[Agent]):
         for skill in agent.active_skills():
             default = DefaultSkillView()
             view = resolve_context_view(skill, default=default)
+            if view is default and skill.context_block is disabled, protected, or overridden:
+                continue
             contribution = await collect_context(view, skill, call)
             if view is default:
                 blocks = replace_by_key(blocks, contribution)
@@ -172,7 +174,7 @@ class DefaultSkillView(ContextView[Skill]):
             )
 ```
 
-A skill view produces only that skill's ordered contribution; the agent view decides whether and where to include it. Native views normally read `skill` state directly. The fallback `DefaultSkillView` preserves the legacy `context_block` binding to `call.agent`; its block joins the keyed default pipeline, while custom contributions are inserted intact without implicit merging or manager policy.
+A skill view produces only that skill's ordered contribution; the agent view decides whether and where to include it. Native views normally read `skill` state directly. The fallback preserves the legacy `context_block` expression and agent binding as prompt projection, without registering it in `self.context`; explicit manager declarations win. Custom contributions are inserted intact without manager policy.
 
 Registry skills participate when active; directly attached public skills are active by default. Hidden and inactive skills contribute nothing. `DefaultSkillView` emits only explicitly declared context; it never dumps skill documentation. The default agent view places custom skill contributions before visible events; a custom agent view may place volatile skill state after the cache boundary.
 
@@ -194,11 +196,11 @@ resolve view
 - The selected agent view owns content, membership, materialization, filtering, global order, adaptation, and budget policy.
 - A nested view owns the content and local order of its contribution.
 - Source-specific helpers translate existing state APIs; they do not choose global placement.
-- The renderer expands content items in place, emits no boundary text, and preserves exact boundary positions through message coalescing. A boundary after an event remains after its complete expansion.
+- The renderer expands items in place and emits no boundary text. A canonical assistant tool-call turn and its linked results form one atomic replay group; a boundary cannot split it.
 - The provider formatter preserves neutral cache positions while adapting message shape. UnifiedLLM maps only view-emitted boundaries to provider annotations, or ignores unsupported caching; legacy role-based injection does not apply.
 - The selected agent view owns cache placement. The default adds at most one boundary after visible history and before trailing context; custom views receive none implicitly.
 - Bounded serialization is formatting; recovery for missing data or other invented content belongs to event production or view policy.
-- Downstream stages preserve semantics or raise `UnsupportedContextLayout`; they never reorder, omit, resolve, evict, repair, or add context.
+- Downstream stages preserve view order, except for declared atomic replay groups, or raise `UnsupportedContextLayout`; they do not resolve, evict, repair, or invent content.
 - A view omission is prompt policy, not an access-control boundary; tools and generated code may expose data available through other APIs.
 
 ## Migration
@@ -216,7 +218,7 @@ These are the default application's context APIs, not requirements of `ContextVi
 - resolved model and budget data on `CurrentCall`, including method and call overrides;
 - inactive and hidden skills contribute nothing;
 - existing manager, scoped override, event, dynamic-cache, and snapshot behavior is preserved;
-- `Skill.context_block` preserves agent-scoped expression behavior;
+- `Skill.context_block` preserves agent-scoped prompt projection without implicit manager storage;
 - the agent view controls exact skill and event placement;
 - custom views may ignore all managers and skills;
 - custom views can adapt before applying their own budget;
@@ -225,7 +227,7 @@ These are the default application's context APIs, not requirements of `ContextVi
 - an external custom view ignores a sentinel `context_manager` and completes Predict and CodeAct calls;
 - an independent context API affects a CodeAct result only after its view selects and emits state;
 - active summaries remain selectable while archived, metadata, and empty-output events do not leak into prompts;
-- event expansion preserves position;
+- event expansion preserves position, with canonical tool replay kept atomic;
 - cache boundaries preserve their exact position through complete event expansion, emit no content, cost no tokens, and map correctly or become a no-op, including with empty history or no trailing context;
 - a custom view with no cache boundary receives no implicit marker;
 - overrides preserve placement and support `None` deletion;

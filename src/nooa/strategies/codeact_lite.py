@@ -23,7 +23,12 @@ from nooa.context_blocks import (
     RenderedMessage,
     ResolvedBlock,
 )
-from nooa.context_blocks.formatter import XMLBlockFormatter, _event_blocks_to_messages
+from nooa.context_blocks.exceptions import UnsupportedContextLayout
+from nooa.context_blocks.formatter import (
+    XMLBlockFormatter,
+    _event_blocks_to_messages,
+    _xml_system_block,
+)
 from nooa.context_blocks.models import Role
 from nooa.context_blocks.scoped import ScopedContext
 from nooa.context_blocks.utils import truncating_pformat
@@ -140,6 +145,8 @@ class PlainCodeActBlockFormatter(XMLBlockFormatter):  # type: ignore[misc]  # un
         return plain_event_content(event, event_format=event_format or self._event_format)
 
     def _content_for_block(self, block: ResolvedBlock) -> str:
+        if block.event is None:
+            return _xml_system_block(block)
         if block.content:
             return block.content
         if block.event is not None:
@@ -147,6 +154,16 @@ class PlainCodeActBlockFormatter(XMLBlockFormatter):  # type: ignore[misc]  # un
         return ""
 
     def format(self, blocks: list[ResolvedBlock]) -> list[RenderedMessage]:
+        saw_event = False
+        for block in blocks:
+            if block.event is not None:
+                saw_event = True
+            elif saw_event:
+                raise UnsupportedContextLayout(
+                    "CodeActLite cannot merge execution output across context "
+                    "inserted inside event history"
+                )
+
         # System blocks: reuse XML wrapping from the base class by calling it on
         # the SYSTEM-role blocks only. That gives us a list with a single
         # RenderedMessage(SYSTEM, xml_content) — we keep that and replace the
@@ -168,22 +185,27 @@ class PlainCodeActBlockFormatter(XMLBlockFormatter):  # type: ignore[misc]  # un
                 python_outputs[block.event.tool_call_id] = block
 
         event_messages = _event_blocks_to_messages(
-            [
-                block
-                for block in message_blocks
-                if block.role != Role.RUNTIME_EVENT and not isinstance(block.event, PythonOutput)
-            ],
+            [block for block in message_blocks if not isinstance(block.event, PythonOutput)],
             wrap_content=self._content_for_block,
         )
+        merged_output_ids: set[str] = set()
         for message in event_messages:
-            py_out_block = (
-                python_outputs.get(message.tool_call_id) if message.tool_call_id else None
-            )
-            if py_out_block is not None:
+            tool_call_id = message.tool_call_id
+            if tool_call_id is not None and (py_out_block := python_outputs.get(tool_call_id)):
+                merged_output_ids.add(tool_call_id)
                 message = message.model_copy(
                     update={"content": self._content_for_block(py_out_block)}
                 )
             messages.append(message)
+
+        for block in message_blocks:
+            if (
+                isinstance(block.event, PythonOutput)
+                and block.event.tool_call_id not in merged_output_ids
+            ):
+                messages.append(
+                    RenderedMessage(role=block.role, content=self._content_for_block(block))
+                )
 
         return messages
 

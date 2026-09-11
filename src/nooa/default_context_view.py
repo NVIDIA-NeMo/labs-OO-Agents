@@ -333,6 +333,13 @@ class DefaultAgentView(ContextView["Agent"]):
         for skill in owner.active_skills():
             default_skill_view = DefaultSkillView()
             view = resolve_context_view(skill, default=default_skill_view)
+            if view is default_skill_view:
+                declaration = skill.context_block
+                if declaration is None:
+                    continue
+                key, _ = declaration
+                if key in disabled or manager.is_protected(key) or key in declaration_keys:
+                    continue
             contribution = await collect_context(view, skill, call)
             if view is default_skill_view:
                 default_blocks = tuple(

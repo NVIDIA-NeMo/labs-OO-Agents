@@ -297,6 +297,7 @@ class Agent(metaclass=AgentMeta):
         from nooa.skill import Skill
 
         values = tuple(self.__instance_values__().values())
+        visible_ids = {id(value) for value in values}
         managed_ids = {
             id(skill)
             for value in values
@@ -315,7 +316,7 @@ class Agent(metaclass=AgentMeta):
             active = getattr(value, "active_skills", None)
             if callable(active):
                 for nested in cast("tuple[Skill, ...]", active()):
-                    if id(nested) not in seen:
+                    if id(nested) in visible_ids and id(nested) not in seen:
                         seen.add(id(nested))
                         skills.append(nested)
         return tuple(skills)

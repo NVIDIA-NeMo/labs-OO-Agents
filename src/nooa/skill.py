@@ -5,6 +5,7 @@
 import inspect
 import re
 import shlex
+from abc import ABCMeta
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -16,7 +17,7 @@ from nooa.agentdoc import hidden
 _MISSING = object()
 
 
-class SkillMeta(type):
+class SkillMeta(ABCMeta):
     """Consume instance context views without constraining subclass constructors."""
 
     def __call__(cls, *args: Any, context_view: Any = _MISSING, **kwargs: Any):

@@ -33,7 +33,7 @@ from nooa.context_blocks import (
     render_context,
 )
 from nooa.context_blocks.events import UserEvent
-from nooa.events import DebugTrace, LLMOutput, Task
+from nooa.events import DebugTrace, LLMResponse, Task
 from nooa.strategies.current_call import CurrentCall
 
 
@@ -251,6 +251,29 @@ async def test_registry_skill_contributes_only_while_active():
     assert "registered" not in [getattr(item, "key", None) for item in inactive_again]
 
 
+async def test_hidden_active_registry_skill_contributes_nothing():
+    from unittest.mock import patch
+
+    from nooa.skill_registry import SkillRegistry
+
+    class RegisteredSkill(Skill):
+        context_block = ("registered", "'active'")
+
+    class Example(Agent, llm=object()):
+        def __init__(self):
+            super().__init__()
+            with patch("nooa.skill_registry.entry_points", return_value=[]):
+                self.skills = SkillRegistry(self)
+            self.skills.register("test.registered", RegisteredSkill())
+            self.skills.activate(["test.registered"])
+            spec(self, "registered", hidden=True)
+
+        async def run(self): ...
+
+    items = await Example().runtime._prepare_context(Example.run)
+    assert "registered" not in [getattr(item, "key", None) for item in items]
+
+
 async def test_legacy_skill_block_is_materialized_by_default_skill_view():
     class DeclaredSkill(Skill):
         context_block = ("skill_state", "self.value")
@@ -274,10 +297,18 @@ async def test_legacy_skill_block_is_materialized_by_default_skill_view():
 
 async def test_disabled_key_suppresses_default_skill_shorthand():
     class DeclaredSkill(Skill):
-        context_block = ("skill_state", "'visible'")
+        context_block = ("skill_state", "self.read_skill_state()")
 
     class Example(Agent, llm=object()):
         skill = DeclaredSkill()
+
+        def __init__(self):
+            super().__init__()
+            self.reads = 0
+
+        def read_skill_state(self):
+            self.reads += 1
+            return "visible"
 
         async def run(self): ...
 
@@ -285,6 +316,54 @@ async def test_disabled_key_suppresses_default_skill_shorthand():
     agent.context["skill_state"] = None
     items = await agent.runtime._prepare_context(Example.run)
     assert "skill_state" not in [getattr(item, "key", None) for item in items]
+    assert agent.reads == 0
+
+
+async def test_protected_key_suppresses_skill_fallback_without_evaluation():
+    class DeclaredSkill(Skill):
+        context_block = ("state", "self.read_skill_state()")
+
+    class Example(Agent, llm=object()):
+        skill = DeclaredSkill()
+
+        def __init__(self):
+            super().__init__()
+            self.reads = 0
+
+        def read_skill_state(self):
+            self.reads += 1
+            return "skill state"
+
+        async def run(self): ...
+
+    agent = Example()
+    items = await agent.runtime._prepare_context(Example.run)
+    assert len([item for item in items if getattr(item, "key", None) == "state"]) == 1
+    assert agent.reads == 0
+
+
+async def test_manager_declaration_wins_without_evaluating_skill_fallback():
+    class DeclaredSkill(Skill):
+        context_block = ("skill_state", "self.read_skill_state()")
+
+    class Example(Agent, llm=object()):
+        skill = DeclaredSkill()
+
+        def __init__(self):
+            super().__init__(context={"skill_state": "explicit"})
+            self.reads = 0
+
+        def read_skill_state(self):
+            self.reads += 1
+            return "fallback"
+
+        async def run(self): ...
+
+    agent = Example()
+    items = await agent.runtime._prepare_context(Example.run)
+    block = next(item for item in items if getattr(item, "key", None) == "skill_state")
+    assert block.content == "explicit"
+    assert agent.reads == 0
 
 
 async def test_default_view_partitions_and_evicts_manager_blocks():
@@ -350,8 +429,8 @@ async def test_empty_llm_output_is_persisted_but_not_provider_visible():
         async def run(self): ...
 
     agent = Example()
-    empty = LLMOutput(content="", tag="empty")
-    visible = LLMOutput(content="answer", tag="visible")
+    empty = LLMResponse(content="", tag="empty")
+    visible = LLMResponse(content="answer", tag="visible")
     agent.event_manager.add(empty)
     agent.event_manager.add(visible)
 
@@ -371,8 +450,8 @@ def test_event_helper_uses_active_history_and_filters_non_model_events():
     agent.event_manager.add(Task(prompt="archived two"))
     summary_tag = agent.events.collapse("1", "2", "active summary")
     metadata = DebugTrace(content="diagnostic")
-    empty = LLMOutput(content="")
-    visible = LLMOutput(content="answer")
+    empty = LLMResponse(content="")
+    visible = LLMResponse(content="answer")
     agent.event_manager.add(metadata)
     agent.event_manager.add(empty)
     agent.event_manager.add(visible)
@@ -508,7 +587,7 @@ def test_event_expansion_preserves_position():
 
 
 def test_provider_preserves_or_rejects_layout():
-    from nooa.context_blocks import AnthropicProviderFormatter
+    from nooa.context_blocks import AnthropicProviderFormatter, ResponsesProviderFormatter
 
     items = (
         Block(key="first", content="first", role=Role.USER),
@@ -526,6 +605,12 @@ def test_provider_preserves_or_rejects_layout():
             items,
             block_formatter=XMLBlockFormatter(),
             provider_formatter=AnthropicProviderFormatter(),
+        )
+    with pytest.raises(UnsupportedContextLayout):
+        render_context(
+            items,
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=ResponsesProviderFormatter(),
         )
 
 
@@ -618,6 +703,71 @@ async def test_current_call_exposes_call_overridden_model_and_budget():
         300,
         17,
     )
+
+
+async def test_prepare_context_refreshes_mutable_manager_event_query():
+    from nooa.runtime.actor import _current_call_var, _current_context_view_var
+    from nooa.runtime.event_query import EventQuery
+
+    captured: list[CurrentCall] = []
+
+    class CaptureView:
+        async def assemble(self, owner, call):
+            captured.append(call)
+            yield Block(key="capture", content="capture")
+
+    class Example(Agent, llm=object()):
+        async def run(self) -> str: ...
+
+    agent = Example()
+    stale = EventQuery(query="stale")
+    current = EventQuery(query="current")
+    base = CurrentCall(id="1", method_name="run", decorator="plan", event_query=stale)
+    agent.event_manager.set_event_query(current)
+    call_token = _current_call_var.set(base)
+    view_token = _current_context_view_var.set(CaptureView())
+    try:
+        await agent.runtime._prepare_context(Example.run)
+    finally:
+        _current_context_view_var.reset(view_token)
+        _current_call_var.reset(call_token)
+    assert captured[-1].event_query is current
+
+
+async def test_prepare_context_refreshes_mutable_scoped_state():
+    from nooa.context_blocks import ScopedContext
+    from nooa.runtime.actor import _current_call_var, _current_context_view_var
+    from nooa.runtime.event_query import EventQuery
+
+    captured: list[CurrentCall] = []
+
+    class CaptureView:
+        async def assemble(self, owner, call):
+            captured.append(call)
+            yield Block(key="capture", content="capture")
+
+    class Example(Agent, llm=object()):
+        async def run(self) -> str: ...
+
+    agent = Example()
+    base = CurrentCall(
+        id="1",
+        method_name="run",
+        decorator="plan",
+        event_query=EventQuery(query="stale"),
+        _scoped_context={"stale": "stale"},
+    )
+    current_query = EventQuery(query="current")
+    call_token = _current_call_var.set(base)
+    view_token = _current_context_view_var.set(CaptureView())
+    try:
+        with ScopedContext(context={"current": "current"}, events=current_query):
+            await agent.runtime._prepare_context(Example.run)
+    finally:
+        _current_context_view_var.reset(view_token)
+        _current_call_var.reset(call_token)
+    assert captured[-1].event_query is current_query
+    assert captured[-1].scoped_context == {"current": "current"}
 
 
 def test_default_view_has_no_runtime_assembly_dependency():

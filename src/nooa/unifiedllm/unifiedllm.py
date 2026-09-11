@@ -1262,9 +1262,7 @@ class UnifiedLLM(ABC):
                             if defer_tool_call_boundary:
                                 msg["cache_control"] = {"type": "ephemeral"}
                             else:
-                                msg["tool_calls"][-1]["cache_control"] = {
-                                    "type": "ephemeral"
-                                }
+                                msg["tool_calls"][-1]["cache_control"] = {"type": "ephemeral"}
                         else:
                             self._inject_cache_control_on_content(msg)
                     else:

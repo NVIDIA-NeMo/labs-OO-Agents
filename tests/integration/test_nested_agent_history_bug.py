@@ -170,11 +170,22 @@ class TestNestedAgentHistoryBug:
 
         inner_prefix = from_outer_call(inner_prompt)
         outer_suffix = from_outer_call(outer_followup_prompt)
-        # Dynamic context is deliberately a recomputed trailing suffix, so
-        # compare only the stable history before it.
-        if inner_prefix[-1].get("content", "").startswith("<context>"):
-            inner_prefix = inner_prefix[:-1]
-        assert outer_suffix[: len(inner_prefix)] == inner_prefix
+        # Dynamic context is deliberately a recomputed trailing suffix. The
+        # explicit boundary identifies the stable history before it.
+        boundary = next(
+            i for i, message in enumerate(inner_prefix) if message.get("_nooa_cache_boundary")
+        )
+        inner_prefix = inner_prefix[: boundary + 1]
+
+        def without_cache_markers(messages):
+            return [
+                {key: value for key, value in message.items() if key != "_nooa_cache_boundary"}
+                for message in messages
+            ]
+
+        assert without_cache_markers(outer_suffix[: len(inner_prefix)]) == without_cache_markers(
+            inner_prefix
+        )
 
         receipt = next(
             message

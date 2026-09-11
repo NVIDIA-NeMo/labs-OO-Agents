@@ -419,9 +419,10 @@ class TestL4ContextBlockEviction:
     def test_boundary_block_just_under_then_second_pushes_over(self):
         """One block fits just under the budget; adding a second pushes
         total over the limit and triggers eviction of the newest block."""
-        # Budget = 100 tokens. Static system prompt ~1 token.
-        # Block A = 380 chars = 95 tokens → fits (1 + 95 = 96 ≤ 100)
-        # Block B = 40 chars = 10 tokens → total 106 > 100 → B gets evicted
+        # Budget = 110 tokens. Static system prompt ~1 token.
+        # Block A = 380 chars = 95 tokens → fits (1 + 95 = 96 ≤ 110)
+        # Block B = 100 chars = 25 tokens → total 121 > 110. Its replacement
+        # notice still leaves A below the limit.
         blocks = [
             ResolvedBlock(
                 key="system_prompt",
@@ -437,17 +438,17 @@ class TestL4ContextBlockEviction:
             ),
             ResolvedBlock(
                 key="block_b",
-                content="b" * 40,  # 10 tokens, pushes total over 100
+                content="b" * 100,
                 role=Role.SYSTEM,
                 metadata=BlockMetadata(),
             ),
         ]
-        result = _render_default_budget(blocks, 100)
+        result = _render_default_budget(blocks, 110)
         output_str = str(result.output)
         # Block A (oldest non-static) should survive
         assert "a" * 380 in output_str, "Block A should survive — it was added first"
         # Block B (newest non-static) should be evicted
-        assert "b" * 40 not in output_str, "Block B should be evicted — it's newest"
+        assert "b" * 100 not in output_str, "Block B should be evicted — it's newest"
         assert result.stats.context_blocks_dropped == 1
         assert "EVICTED" in output_str
 

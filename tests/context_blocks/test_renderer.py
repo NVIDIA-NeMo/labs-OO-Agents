@@ -25,6 +25,8 @@ from nooa.context_blocks.models import (
     Role,
 )
 from nooa.context_blocks.renderer import render_context
+from nooa.events import LLMResponse
+from nooa.unifiedllm import ToolCall
 
 
 class TestRenderContextBasic:
@@ -125,6 +127,44 @@ class TestRenderContextBasic:
         ]
         assert result[1][CACHE_BOUNDARY_MESSAGE_KEY] is True
         assert "2" in result[2]["content"]
+
+    def test_plain_formatter_rejects_context_inside_event_history(self):
+        from nooa.strategies.codeact_lite import PlainCodeActBlockFormatter
+
+        with pytest.raises(UnsupportedContextLayout, match="inserted inside event history"):
+            render_context(
+                [
+                    ToolCallEvent(
+                        tool_call_id="tc_1",
+                        name="run",
+                        arguments={},
+                        result=ToolResult(tool_call_id="tc_1", content="ok"),
+                    ),
+                    Block(key="interleaved", content="unsafe"),
+                ],
+                block_formatter=PlainCodeActBlockFormatter(),
+                provider_formatter=OpenAIProviderFormatter(),
+            )
+
+    def test_boundary_cannot_split_canonical_tool_replay(self):
+        response = LLMResponse(
+            content="",
+            tool_calls=(ToolCall(id="tc_1", name="run", arguments="{}"),),
+            finish_reason="tool_calls",
+        )
+        execution = ToolCallEvent(
+            tool_call_id="tc_1",
+            name="run",
+            arguments={},
+            llm_response_id=response.id,
+            result=ToolResult(tool_call_id="tc_1", content="ok"),
+        )
+        with pytest.raises(UnsupportedContextLayout, match="splits tool execution"):
+            render_context(
+                [response, CacheBoundary(), execution],
+                block_formatter=XMLBlockFormatter(),
+                provider_formatter=OpenAIProviderFormatter(),
+            )
 
     def test_incomplete_tool_event_is_rejected(self):
         event = ToolCallEvent(

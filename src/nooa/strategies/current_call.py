@@ -11,10 +11,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, get_type_hints
 from uuid import uuid4
 
+from nooa.config.truncation_config import FormatConfig
 from nooa.ellipsis_detection import get_pre_ellipsis_code
 
 if TYPE_CHECKING:
-    from nooa.config.truncation_config import FormatConfig, TruncationConfig
+    from nooa.config.truncation_config import TruncationConfig
 
 
 @dataclass(frozen=True)
