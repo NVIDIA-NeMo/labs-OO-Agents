@@ -1,10 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for Anthropic prompt caching support in CompletionClient.
-
-Tests the cache_control injection and the litellm patch that prevents
-cache_control from being stripped for Anthropic models.
-"""
+"""Tests for explicit cache-boundary transport in CompletionClient."""
 
 from unittest.mock import AsyncMock, patch
 
@@ -12,100 +8,34 @@ import litellm
 import pytest
 
 from nooa.context_blocks.models import CACHE_BOUNDARY_MESSAGE_KEY
-from nooa.unifiedllm import CompletionClient
+from nooa.unifiedllm import CompletionClient, FakeLLMClient
 
 
 def make_mock_response(content: str = "ok") -> litellm.ModelResponse:
-    """Create a minimal litellm.ModelResponse for testing."""
     msg = litellm.Message(content=content, role="assistant")
     choice = litellm.Choices(message=msg, index=0, finish_reason="stop")
     return litellm.ModelResponse(choices=[choice], model="test-model")
 
 
-# ---------------------------------------------------------------------------
-# _inject_cache_control
-# ---------------------------------------------------------------------------
-
-
-class TestInjectCacheControl:
-    """Tests for CompletionClient._inject_cache_control."""
-
+class TestApplyCacheBoundaries:
     @pytest.fixture
     def client(self):
         return CompletionClient(model="test-model")
 
-    def test_adds_cache_control_to_system_messages(self, client):
-        """cache_control is added to messages matching the target role."""
-        messages = [
-            {"role": "system", "content": "You are helpful."},
-            {"role": "user", "content": "Hi"},
-        ]
-        injection_points = [{"location": "message", "role": "system"}]
+    def test_no_boundary_returns_original_messages(self, client):
+        messages = [{"role": "system", "content": "System"}]
 
-        result = client._inject_cache_control(messages, injection_points)
-
-        assert result[0]["cache_control"] == {"type": "ephemeral"}
-        assert "cache_control" not in result[1]
-
-    def test_does_not_mutate_original(self, client):
-        """Original message list must not be modified."""
-        messages = [
-            {"role": "system", "content": "You are helpful."},
-            {"role": "user", "content": "Hi"},
-        ]
-        injection_points = [{"location": "message", "role": "system"}]
-
-        result = client._inject_cache_control(messages, injection_points)
-
+        assert client._apply_cache_boundaries(messages) is messages
         assert "cache_control" not in messages[0]
-        assert "cache_control" in result[0]
 
-    def test_multiple_roles(self, client):
-        """Can target multiple roles at once."""
-        messages = [
-            {"role": "system", "content": "System prompt"},
-            {"role": "user", "content": "Hi"},
-            {"role": "assistant", "content": "Hello"},
-            {"role": "user", "content": "Bye"},
-        ]
-        injection_points = [
-            {"location": "message", "role": "system"},
-            {"location": "message", "role": "user"},
-        ]
-
-        result = client._inject_cache_control(messages, injection_points)
-
-        assert "cache_control" in result[0]  # system
-        assert "cache_control" in result[1]  # user
-        assert "cache_control" not in result[2]  # assistant
-        assert "cache_control" in result[3]  # user
-
-    def test_empty_injection_points(self, client):
-        """Empty injection_points returns messages unchanged."""
-        messages = [{"role": "system", "content": "Hi"}]
-        result = client._inject_cache_control(messages, [])
-        assert result is messages  # same object, no copy needed
-
-    def test_no_matching_role(self, client):
-        """No-op when no messages match the target role."""
-        messages = [{"role": "user", "content": "Hi"}]
-        injection_points = [{"location": "message", "role": "system"}]
-
-        result = client._inject_cache_control(messages, injection_points)
-
-        assert "cache_control" not in result[0]
-
-    def test_explicit_boundary_is_exact_and_overrides_role_rules(self, client):
+    def test_maps_only_explicit_boundary_without_mutating_input(self, client):
         messages = [
             {"role": "system", "content": "System"},
-            {
-                "role": "user",
-                "content": "First",
-                CACHE_BOUNDARY_MESSAGE_KEY: True,
-            },
+            {"role": "user", "content": "First", CACHE_BOUNDARY_MESSAGE_KEY: True},
             {"role": "user", "content": "Second"},
         ]
-        result = client._inject_cache_control(messages, [{"role": "system"}])
+
+        result = client._apply_cache_boundaries(messages)
 
         assert "cache_control" not in result[0]
         assert result[1]["cache_control"] == {"type": "ephemeral"}
@@ -113,13 +43,55 @@ class TestInjectCacheControl:
         assert all(CACHE_BOUNDARY_MESSAGE_KEY not in message for message in result)
         assert CACHE_BOUNDARY_MESSAGE_KEY in messages[1]
 
-    def test_unsupported_explicit_boundary_is_consumed(self, client):
+    def test_false_boundary_marker_is_removed(self, client):
+        messages = [{"role": "system", "content": "System", CACHE_BOUNDARY_MESSAGE_KEY: False}]
+
+        assert client._apply_cache_boundaries(messages) == [{"role": "system", "content": "System"}]
+
+    def test_unsupported_boundary_is_removed(self, client):
         messages = [{"role": "user", "content": "Hi", CACHE_BOUNDARY_MESSAGE_KEY: True}]
-        result = client._inject_cache_control(messages, [], explicit_supported=False)
-        assert result == [{"role": "user", "content": "Hi"}]
+
+        assert client._apply_cache_boundaries(messages, supported=False) == [
+            {"role": "user", "content": "Hi"}
+        ]
+
+    def test_provider_native_cache_control_is_preserved(self, client):
+        native = {"type": "provider-specific", "ttl": "1h"}
+        messages = [
+            {
+                "role": "user",
+                "content": "Hi",
+                "cache_control": native,
+                CACHE_BOUNDARY_MESSAGE_KEY: True,
+            }
+        ]
+
+        result = client._apply_cache_boundaries(messages)
+
+        assert result == [{"role": "user", "content": "Hi", "cache_control": native}]
+
+    @pytest.mark.asyncio
+    async def test_fake_strips_boundary_without_changing_content(self):
+        client = FakeLLMClient()
+        messages = [{"role": "user", "content": "Hi", CACHE_BOUNDARY_MESSAGE_KEY: True}]
+
+        await client.acall(messages)
+
+        assert client.last_messages == [{"role": "user", "content": "Hi"}]
+        assert CACHE_BOUNDARY_MESSAGE_KEY in messages[0]
+
+    def test_anthropic_boundary_marks_last_content_block(self):
+        client = CompletionClient(model="anthropic/claude-haiku-4-5")
+        messages = [{"role": "user", "content": "Hi", CACHE_BOUNDARY_MESSAGE_KEY: True}]
+
+        result = client._apply_cache_boundaries(messages)
+
+        assert result[0]["content"] == [
+            {"type": "text", "text": "Hi", "cache_control": {"type": "ephemeral"}}
+        ]
 
     @pytest.mark.parametrize("content", ["working", None])
-    def test_completion_anthropic_tool_call_boundary_follows_tool_use(self, content):
+    def test_anthropic_tool_call_boundary_follows_tool_use(self, content):
         from litellm.llms.anthropic.chat.transformation import AnthropicConfig
 
         client = CompletionClient(model="anthropic/claude-haiku-4-5")
@@ -139,7 +111,8 @@ class TestInjectCacheControl:
             },
             {"role": "tool", "tool_call_id": "tc1", "content": "done"},
         ]
-        result = client._inject_cache_control(messages, [])
+
+        result = client._apply_cache_boundaries(messages)
         transformed = AnthropicConfig().transform_request(
             model="claude-haiku-4-5",
             messages=result,
@@ -151,410 +124,84 @@ class TestInjectCacheControl:
         assistant_blocks = transformed["messages"][1]["content"]
         assert assistant_blocks[-1]["type"] == "tool_use"
         assert assistant_blocks[-1]["cache_control"] == {"type": "ephemeral"}
-        if content:
-            assert "cache_control" not in assistant_blocks[0]
-        assert CACHE_BOUNDARY_MESSAGE_KEY in messages[1]
-
-    def test_false_internal_marker_is_removed_without_suppressing_legacy_rules(self, client):
-        messages = [{"role": "system", "content": "System", CACHE_BOUNDARY_MESSAGE_KEY: False}]
-        result = client._inject_cache_control(messages, [{"role": "system"}])
-        assert result == [
-            {
-                "role": "system",
-                "content": "System",
-                "cache_control": {"type": "ephemeral"},
-            }
-        ]
 
 
-# ---------------------------------------------------------------------------
-# Default cache_control_injection_points
-# ---------------------------------------------------------------------------
+class TestRemovedImplicitCacheRules:
+    def test_constructor_rejects_legacy_option(self):
+        with pytest.raises(TypeError, match="cache_control_injection_points was removed"):
+            CompletionClient(model="test-model", cache_control_injection_points=[])
 
-
-class TestDefaultCacheControlInjectionPoints:
-    """Tests for default cache control configuration."""
-
-    def test_default_targets_system_and_last_tool(self):
-        """Default injection points target system role + last tool."""
+    def test_call_rejects_legacy_option(self):
         client = CompletionClient(model="test-model")
-        assert client.cache_control_injection_points == [
-            {"role": "system"},
-            {"role": "tool", "position": "last"},
-        ]
+        with pytest.raises(TypeError, match="cache_control_injection_points was removed"):
+            client.call([], cache_control_injection_points=[])
 
-    def test_custom_injection_points(self):
-        """Custom injection points override the default."""
-        custom = [{"location": "message", "role": "user"}]
-        client = CompletionClient(model="test-model", cache_control_injection_points=custom)
-        assert client.cache_control_injection_points == custom
-
-    def test_empty_list_disables(self):
-        """Passing an empty list disables cache control injection."""
-        client = CompletionClient(model="test-model", cache_control_injection_points=[])
-        assert client.cache_control_injection_points == []
-
-
-# ---------------------------------------------------------------------------
-# litellm patch preserves cache_control for Anthropic models
-# ---------------------------------------------------------------------------
+    @pytest.mark.asyncio
+    async def test_acall_rejects_legacy_option(self):
+        client = CompletionClient(model="test-model")
+        with pytest.raises(TypeError, match="cache_control_injection_points was removed"):
+            await client.acall([], cache_control_injection_points=[])
 
 
 class TestCacheControlPreservePatch:
-    """Tests for the monkey-patch that prevents litellm from stripping cache_control."""
-
     def test_patch_preserves_for_anthropic(self):
-        """cache_control survives for Anthropic model names."""
         from litellm.llms.openai.chat.gpt_transformation import OpenAIGPTConfig
 
-        config = OpenAIGPTConfig()
-        messages = [
-            {"role": "system", "content": "Hi", "cache_control": {"type": "ephemeral"}},
-            {"role": "user", "content": "Hello"},
-        ]
-
-        result_messages, _ = config.remove_cache_control_flag_from_messages_and_tools(
+        messages = [{"role": "system", "content": "Hi", "cache_control": {"type": "ephemeral"}}]
+        result, _ = OpenAIGPTConfig().remove_cache_control_flag_from_messages_and_tools(
             model="openai/aws/anthropic/bedrock-claude-sonnet-4-5-v1",
             messages=messages,
         )
 
-        # cache_control should be preserved
-        assert result_messages[0].get("cache_control") == {"type": "ephemeral"}
+        assert result[0]["cache_control"] == {"type": "ephemeral"}
 
     def test_patch_strips_for_non_anthropic(self):
-        """cache_control is still stripped for non-Anthropic models."""
         from litellm.llms.openai.chat.gpt_transformation import OpenAIGPTConfig
 
-        config = OpenAIGPTConfig()
-        messages = [
-            {"role": "system", "content": "Hi", "cache_control": {"type": "ephemeral"}},
-            {"role": "user", "content": "Hello"},
-        ]
-
-        result_messages, _ = config.remove_cache_control_flag_from_messages_and_tools(
+        messages = [{"role": "system", "content": "Hi", "cache_control": {"type": "ephemeral"}}]
+        result, _ = OpenAIGPTConfig().remove_cache_control_flag_from_messages_and_tools(
             model="openai/gpt-4o",
             messages=messages,
         )
 
-        # cache_control should be stripped for non-Anthropic
-        assert "cache_control" not in result_messages[0]
+        assert "cache_control" not in result[0]
 
 
-# ---------------------------------------------------------------------------
-# End-to-end: cache_control reaches litellm.completion
-# ---------------------------------------------------------------------------
-
-
-class TestCacheControlEndToEnd:
-    """Verify cache_control is present in the messages passed to litellm."""
-
+class TestCacheBoundaryEndToEnd:
     @pytest.mark.asyncio
-    async def test_acall_passes_cache_control(self):
-        """acall() should inject cache_control before calling litellm."""
-        client = CompletionClient(model="openai/aws/anthropic/bedrock-claude-sonnet-4-5-v1")
-        mock_response = make_mock_response()
+    async def test_acall_without_boundary_adds_no_cache_control(self):
+        client = CompletionClient(model="test-model")
 
         with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
-            mock_acompletion.return_value = mock_response
+            mock_acompletion.return_value = make_mock_response()
+            await client.acall([{"role": "system", "content": "System"}])
 
-            await client.acall(
-                [
-                    {"role": "system", "content": "You are helpful."},
-                    {"role": "user", "content": "Hi"},
-                ]
-            )
-
-            call_kwargs = mock_acompletion.call_args[1]
-            sent_messages = call_kwargs["messages"]
-
-            # System message should have cache_control
-            assert sent_messages[0].get("cache_control") == {"type": "ephemeral"}
-            # User message should not
-            assert "cache_control" not in sent_messages[1]
+        sent = mock_acompletion.call_args.kwargs["messages"]
+        assert sent == [{"role": "system", "content": "System"}]
 
     @pytest.mark.asyncio
-    async def test_acall_maps_only_explicit_boundary_when_present(self):
+    async def test_acall_maps_boundary_before_litellm(self):
         client = CompletionClient(model="test-model")
-        mock_response = make_mock_response()
         messages = [
             {"role": "system", "content": "System"},
-            {
-                "role": "user",
-                "content": "Boundary",
-                CACHE_BOUNDARY_MESSAGE_KEY: True,
-            },
-            {"role": "tool", "content": "Result", "tool_call_id": "tc"},
+            {"role": "user", "content": "Boundary", CACHE_BOUNDARY_MESSAGE_KEY: True},
         ]
 
         with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
-            mock_acompletion.return_value = mock_response
+            mock_acompletion.return_value = make_mock_response()
             await client.acall(messages)
 
         sent = mock_acompletion.call_args.kwargs["messages"]
         assert "cache_control" not in sent[0]
         assert sent[1]["cache_control"] == {"type": "ephemeral"}
-        assert "cache_control" not in sent[2]
-        assert CACHE_BOUNDARY_MESSAGE_KEY in messages[1]
 
-    @pytest.mark.asyncio
-    async def test_acall_no_injection_points_skips(self):
-        """No cache_control when injection_points is empty."""
-        client = CompletionClient(
-            model="openai/aws/anthropic/bedrock-claude-sonnet-4-5-v1",
-            cache_control_injection_points=[],
-        )
-        mock_response = make_mock_response()
-
-        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
-            mock_acompletion.return_value = mock_response
-
-            await client.acall(
-                [
-                    {"role": "system", "content": "You are helpful."},
-                    {"role": "user", "content": "Hi"},
-                ]
-            )
-
-            call_kwargs = mock_acompletion.call_args[1]
-            sent_messages = call_kwargs["messages"]
-
-            assert "cache_control" not in sent_messages[0]
-
-    def test_sync_call_passes_cache_control(self):
-        """Sync call() should also inject cache_control."""
-        client = CompletionClient(model="openai/aws/anthropic/bedrock-claude-sonnet-4-5-v1")
-        mock_response = make_mock_response()
+    def test_call_maps_boundary_before_litellm(self):
+        client = CompletionClient(model="test-model")
+        messages = [{"role": "system", "content": "System", CACHE_BOUNDARY_MESSAGE_KEY: True}]
 
         with patch("litellm.completion") as mock_completion:
-            mock_completion.return_value = mock_response
+            mock_completion.return_value = make_mock_response()
+            client.call(messages)
 
-            client.call(
-                [
-                    {"role": "system", "content": "You are helpful."},
-                    {"role": "user", "content": "Hi"},
-                ]
-            )
-
-            call_kwargs = mock_completion.call_args[1]
-            sent_messages = call_kwargs["messages"]
-
-            assert sent_messages[0].get("cache_control") == {"type": "ephemeral"}
-            assert "cache_control" not in sent_messages[1]
-
-
-# ---------------------------------------------------------------------------
-# Position-based cache_control injection
-# ---------------------------------------------------------------------------
-
-
-class TestPositionBasedInjection:
-    """Tests for position-based cache_control injection (position='last')."""
-
-    @pytest.fixture
-    def client(self):
-        # Anthropic model: the parts form is used only for Anthropic; non-Anthropic
-        # marks at the message level (see test_anthropic_detection.py).
-        return CompletionClient(
-            model="anthropic/claude-sonnet-4-5", cache_control_injection_points=[]
-        )
-
-    def test_last_assistant_marked(self, client):
-        """position='last' marks only the last message of the specified role (content-block level)."""
-        messages = [
-            {"role": "system", "content": "System prompt"},
-            {"role": "user", "content": "Turn 1"},
-            {"role": "assistant", "content": "Response 1"},
-            {"role": "user", "content": "Turn 2"},
-            {"role": "assistant", "content": "Response 2"},
-            {"role": "user", "content": "Turn 3"},
-        ]
-        injection_points = [{"role": "assistant", "position": "last"}]
-
-        result = client._inject_cache_control(messages, injection_points)
-
-        # Only the last assistant message should have cache_control on content block
-        assert "cache_control" not in result[0]  # system
-        assert "cache_control" not in result[1]  # user
-        assert "cache_control" not in result[2]  # assistant (not last) - unchanged
-        assert "cache_control" not in result[3]  # user
-        # Last assistant: content converted to array with cache_control on the block
-        assert result[4]["content"] == [
-            {"type": "text", "text": "Response 2", "cache_control": {"type": "ephemeral"}}
-        ]
-        assert "cache_control" not in result[5]  # user (current turn)
-
-    def test_combined_role_and_position(self, client):
-        """Role-based and position-based injection work together."""
-        messages = [
-            {"role": "system", "content": "System prompt"},
-            {"role": "user", "content": "Turn 1"},
-            {"role": "assistant", "content": "Response 1"},
-            {"role": "user", "content": "Turn 2"},
-            {"role": "assistant", "content": "Response 2"},
-            {"role": "user", "content": "Turn 3"},
-        ]
-        injection_points = [
-            {"role": "system"},
-            {"role": "assistant", "position": "last"},
-        ]
-
-        result = client._inject_cache_control(messages, injection_points)
-
-        assert result[0]["cache_control"] == {
-            "type": "ephemeral"
-        }  # system (role-based, message-level)
-        assert "cache_control" not in result[1]  # user
-        assert "cache_control" not in result[2]  # assistant (not last)
-        assert "cache_control" not in result[3]  # user
-        # Last assistant: content-block-level injection
-        assert result[4]["content"] == [
-            {"type": "text", "text": "Response 2", "cache_control": {"type": "ephemeral"}}
-        ]
-        assert "cache_control" not in result[5]  # user
-
-    def test_no_message_of_role_is_noop(self, client):
-        """position='last' is a no-op if no messages of that role exist."""
-        messages = [
-            {"role": "system", "content": "System prompt"},
-            {"role": "user", "content": "First message"},
-        ]
-        injection_points = [{"role": "assistant", "position": "last"}]
-
-        result = client._inject_cache_control(messages, injection_points)
-
-        assert "cache_control" not in result[0]
-        assert "cache_control" not in result[1]
-
-    def test_single_assistant_message(self, client):
-        """Works with only one assistant message."""
-        messages = [
-            {"role": "system", "content": "System"},
-            {"role": "user", "content": "Hi"},
-            {"role": "assistant", "content": "Hello"},
-            {"role": "user", "content": "Bye"},
-        ]
-        injection_points = [{"role": "assistant", "position": "last"}]
-
-        result = client._inject_cache_control(messages, injection_points)
-
-        # Content-block-level injection on the assistant message
-        assert result[2]["content"] == [
-            {"type": "text", "text": "Hello", "cache_control": {"type": "ephemeral"}}
-        ]
-        assert "cache_control" not in result[0]
-        assert "cache_control" not in result[1]
-        assert "cache_control" not in result[3]
-
-    def test_does_not_mutate_original(self, client):
-        """Position-based injection does not mutate the original messages."""
-        messages = [
-            {"role": "system", "content": "System"},
-            {"role": "user", "content": "Hi"},
-            {"role": "assistant", "content": "Hello"},
-        ]
-        injection_points = [{"role": "assistant", "position": "last"}]
-
-        client._inject_cache_control(messages, injection_points)
-
-        # Original message should be unchanged (content still a string, no cache_control)
-        assert messages[2]["content"] == "Hello"
-        assert "cache_control" not in messages[2]
-
-    def test_does_not_mutate_original_list_content(self, client):
-        """Position-based injection does not mutate existing content blocks."""
-        messages = [
-            {"role": "tool", "content": [{"type": "text", "text": "tool output"}]},
-        ]
-        injection_points = [{"role": "tool", "position": "last"}]
-
-        result = client._inject_cache_control(messages, injection_points)
-
-        assert messages[0]["content"] == [{"type": "text", "text": "tool output"}]
-        assert result[0]["content"] == [
-            {"type": "text", "text": "tool output", "cache_control": {"type": "ephemeral"}}
-        ]
-
-    def test_last_user_position(self, client):
-        """position='last' works for user role too."""
-        messages = [
-            {"role": "system", "content": "System"},
-            {"role": "user", "content": "Turn 1"},
-            {"role": "assistant", "content": "Response 1"},
-            {"role": "user", "content": "Turn 2"},
-        ]
-        injection_points = [{"role": "user", "position": "last"}]
-
-        result = client._inject_cache_control(messages, injection_points)
-
-        assert "cache_control" not in result[1]  # first user - unchanged
-        # Last user: content-block-level injection
-        assert result[3]["content"] == [
-            {"type": "text", "text": "Turn 2", "cache_control": {"type": "ephemeral"}}
-        ]
-
-
-class TestDefaultIncludesPositionBased:
-    """Verify the updated default includes position-based assistant caching."""
-
-    def test_default_has_system_and_last_tool(self):
-        """Default injection points mark system AND last tool."""
-        client = CompletionClient(model="test-model")
-        assert {"role": "system"} in client.cache_control_injection_points
-        assert {"role": "tool", "position": "last"} in client.cache_control_injection_points
-
-    @pytest.mark.asyncio
-    async def test_default_caches_system_and_last_tool(self):
-        """End-to-end: default config marks system + last tool (CodeAct-style)."""
-        client = CompletionClient(model="openai/aws/anthropic/bedrock-claude-sonnet-4-5-v1")
-        mock_response = make_mock_response()
-
-        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
-            mock_acompletion.return_value = mock_response
-
-            await client.acall(
-                [
-                    {"role": "system", "content": "You are helpful."},
-                    {"role": "user", "content": "Do something"},
-                    {
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "id": "tc1",
-                                "type": "function",
-                                "function": {"name": "run", "arguments": "{}"},
-                            }
-                        ],
-                    },
-                    {"role": "tool", "content": "first result", "tool_call_id": "tc1"},
-                    {
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "id": "tc2",
-                                "type": "function",
-                                "function": {"name": "run", "arguments": "{}"},
-                            }
-                        ],
-                    },
-                    {"role": "tool", "content": "final result", "tool_call_id": "tc2"},
-                    {"role": "user", "content": "Current turn"},
-                ],
-                tools=[],
-            )
-
-            sent_messages = mock_acompletion.call_args[1]["messages"]
-
-            # System should be marked at message level
-            assert sent_messages[0].get("cache_control") == {"type": "ephemeral"}
-            # Last tool (index 5) should have content-block-level cache_control
-            assert sent_messages[5]["content"] == [
-                {"type": "text", "text": "final result", "cache_control": {"type": "ephemeral"}}
-            ]
-            # Earlier tool (index 3) should NOT be marked
-            assert sent_messages[3]["content"] == "first result"
-            assert "cache_control" not in sent_messages[3]
-            # Assistant messages should NOT be marked
-            assert "cache_control" not in sent_messages[2]
-            assert "cache_control" not in sent_messages[4]
+        sent = mock_completion.call_args.kwargs["messages"]
+        assert sent[0]["cache_control"] == {"type": "ephemeral"}

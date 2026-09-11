@@ -1007,7 +1007,6 @@ class ActorRuntime:
                 params: dict[str, Any] = {
                     **kwargs,
                     "tools": tools,
-                    "cache_control_injection_points": [],
                 }
                 if output_model is not None:
                     params["output_model"] = output_model
@@ -1031,7 +1030,6 @@ class ActorRuntime:
                     )
                     om = ctx.params.get("output_model", None)
                     call_params = {k: v for k, v in ctx.params.items() if k != "output_model"}
-                    call_params["cache_control_injection_points"] = []
                     _mw_strategy = _current_strategy_var.get()
                     _mw_strategy_tag = (
                         type(_mw_strategy).__name__ if _mw_strategy is not None else "default"
@@ -1121,7 +1119,6 @@ class ActorRuntime:
                 #     keeping shared-prefix caching (system prompt + strategy
                 #     prompt + execution_context + agent doc all match).
                 _kwargs = dict(kwargs)
-                _kwargs["cache_control_injection_points"] = []
                 _current_strategy = _current_strategy_var.get()
                 _strategy_tag = (
                     type(_current_strategy).__name__ if _current_strategy is not None else "default"
@@ -2919,7 +2916,7 @@ class ActorRuntime:
         """Collect the selected view into one immutable context tuple."""
         from dataclasses import replace
 
-        from nooa.context_view import collect_context, resolve_context_view
+        from nooa.context_view import collect_context_items, resolve_context_view
         from nooa.default_context_view import DefaultAgentView
         from nooa.strategies.current_call import CurrentCall
 
@@ -2990,7 +2987,7 @@ class ActorRuntime:
         view = _current_context_view_var.get()
         if view is None:
             view = resolve_context_view(self.agent, default=DefaultAgentView())
-        return await collect_context(view, self.agent, call)
+        return await collect_context_items(view, self.agent, call)
 
     async def _build_messages(
         self,

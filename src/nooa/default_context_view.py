@@ -14,7 +14,7 @@ from nooa.context_view import (
     ContextItem,
     ContextView,
     apply_context_budget,
-    collect_context,
+    collect_context_items,
     context_text,
     evaluate_context_expression,
     resolve_context_view,
@@ -71,7 +71,7 @@ async def _resolve_value(
     return context_text(resolved, call=call)
 
 
-async def stored_context_blocks(
+async def materialize_manager_blocks(
     manager: Any,
     agent: "Agent",
     call: "CurrentCall",
@@ -195,7 +195,7 @@ async def agent_state_block(agent: "Agent", call: "CurrentCall") -> Block | None
     )
 
 
-async def apply_context_overrides(
+async def apply_block_overrides(
     blocks: Sequence[Block],
     overrides: Mapping[str, Any] | None,
     *,
@@ -299,10 +299,15 @@ def visible_events(agent: "Agent", call: "CurrentCall") -> tuple[EventBase, ...]
 class DefaultAgentView(ContextView["Agent"]):
     """Readable reference implementation of NOOA's default context policy."""
 
-    async def assemble(self, owner: "Agent", call: "CurrentCall") -> AsyncIterator[ContextItem]:
+    async def _materialize_agent_blocks(
+        self,
+        owner: "Agent",
+        call: "CurrentCall",
+        *,
+        disabled: set[str],
+        declaration_keys: frozenset[str],
+    ) -> tuple[Block, ...]:
         manager = owner.context_manager
-        disabled = manager.disabled()
-        declaration_keys = {key for key, _ in manager.declarations()}
         default_builders = (
             ("system_prompt", system_prompt_block),
             ("self", agent_interface_block),
@@ -313,7 +318,7 @@ class DefaultAgentView(ContextView["Agent"]):
             if key in disabled:
                 continue
             if key in declaration_keys:
-                overrides = await stored_context_blocks(
+                overrides = await materialize_manager_blocks(
                     manager, owner, call, include=frozenset({key})
                 )
                 block = overrides[0] if overrides else None
@@ -327,8 +332,19 @@ class DefaultAgentView(ContextView["Agent"]):
                 blocks_list.append(block)
 
         blocks: tuple[Block, ...] = tuple(blocks_list)
-        blocks += await stored_context_blocks(manager, owner, call, exclude=_FRAMEWORK_KEYS)
+        blocks += await materialize_manager_blocks(manager, owner, call, exclude=_FRAMEWORK_KEYS)
+        return blocks
 
+    async def _compose_skill_views(
+        self,
+        owner: "Agent",
+        call: "CurrentCall",
+        blocks: tuple[Block, ...],
+        *,
+        disabled: set[str],
+        declaration_keys: frozenset[str],
+    ) -> tuple[tuple[Block, ...], tuple[ContextItem, ...]]:
+        manager = owner.context_manager
         custom_skill_items: list[ContextItem] = []
         for skill in owner.active_skills():
             default_skill_view = DefaultSkillView()
@@ -340,7 +356,7 @@ class DefaultAgentView(ContextView["Agent"]):
                 key, _ = declaration
                 if key in disabled or manager.is_protected(key) or key in declaration_keys:
                     continue
-            contribution = await collect_context(view, skill, call)
+            contribution = await collect_context_items(view, skill, call)
             if view is default_skill_view:
                 default_blocks = tuple(
                     item
@@ -352,11 +368,20 @@ class DefaultAgentView(ContextView["Agent"]):
                 blocks = replace_blocks_by_key(blocks, default_blocks)
             else:
                 custom_skill_items.extend(contribution)
+        return blocks, tuple(custom_skill_items)
 
+    async def _apply_override_layers(
+        self,
+        owner: "Agent",
+        call: "CurrentCall",
+        blocks: tuple[Block, ...],
+        *,
+        disabled: set[str],
+    ) -> tuple[Block, ...]:
         strategy = call.strategy
         if strategy is not None:
             get_overrides = getattr(strategy, "get_block_overrides", None)
-            blocks = await apply_context_overrides(
+            blocks = await apply_block_overrides(
                 blocks,
                 get_overrides() if get_overrides is not None else None,
                 agent=owner,
@@ -366,7 +391,7 @@ class DefaultAgentView(ContextView["Agent"]):
                 disabled=disabled,
             )
 
-        blocks = await apply_context_overrides(
+        blocks = await apply_block_overrides(
             blocks,
             call.decorator_context,
             agent=owner,
@@ -374,7 +399,7 @@ class DefaultAgentView(ContextView["Agent"]):
             static_expr=lambda key: f'@strategy.context["{key}"]',
             disabled=disabled,
         )
-        blocks = await apply_context_overrides(
+        blocks = await apply_block_overrides(
             blocks,
             call.scoped_context,
             agent=owner,
@@ -382,6 +407,34 @@ class DefaultAgentView(ContextView["Agent"]):
             static_expr=lambda key: f'self.context["{key}"]',
             disabled=disabled,
         )
+        return blocks
+
+    async def assemble(self, owner: "Agent", call: "CurrentCall") -> AsyncIterator[ContextItem]:
+        manager = owner.context_manager
+        disabled = manager.disabled()
+        declaration_keys = frozenset(key for key, _ in manager.declarations())
+
+        blocks = await self._materialize_agent_blocks(
+            owner,
+            call,
+            disabled=disabled,
+            declaration_keys=declaration_keys,
+        )
+        blocks, custom_skill_items = await self._compose_skill_views(
+            owner,
+            call,
+            blocks,
+            disabled=disabled,
+            declaration_keys=declaration_keys,
+        )
+        blocks = await self._apply_override_layers(
+            owner,
+            call,
+            blocks,
+            disabled=disabled,
+        )
+
+        strategy = call.strategy
         get_order = getattr(strategy, "get_block_order", None) if strategy is not None else None
         blocks = order_blocks(blocks, get_order() if get_order is not None else None)
         prefix, trailing = partition_blocks(blocks)
@@ -426,11 +479,11 @@ __all__ = [
     "DefaultSkillView",
     "agent_interface_block",
     "agent_state_block",
-    "apply_context_overrides",
+    "apply_block_overrides",
     "order_blocks",
     "partition_blocks",
     "replace_blocks_by_key",
-    "stored_context_blocks",
+    "materialize_manager_blocks",
     "system_prompt_block",
     "visible_events",
 ]

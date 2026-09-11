@@ -1082,7 +1082,7 @@ class TestContextBuilderNoneValue:
     """cm[key] = None suppresses the block (disabled_keys mechanism)."""
 
     async def test_none_value_suppresses_block(self):
-        from nooa.default_context_view import stored_context_blocks
+        from nooa.default_context_view import materialize_manager_blocks
         from nooa.runtime.context_manager import ContextManager
         from nooa.strategies.current_call import CurrentCall
 
@@ -1090,7 +1090,7 @@ class TestContextBuilderNoneValue:
         cm["my_key"] = "visible"
         cm["my_key"] = None  # suppress via new unified semantics
 
-        blocks = await stored_context_blocks(
+        blocks = await materialize_manager_blocks(
             cm,
             object(),
             CurrentCall(id="1", method_name="run", decorator="plan"),
@@ -1389,7 +1389,7 @@ class TestDefaultContextViewNoneContent:
 
     async def test_resolve_fn_none_produces_string_none(self):
         from nooa import Agent, DynamicContext
-        from nooa.default_context_view import apply_context_overrides
+        from nooa.default_context_view import apply_block_overrides
         from nooa.strategies.current_call import CurrentCall
 
         class Example(Agent, llm=object()):
@@ -1397,7 +1397,7 @@ class TestDefaultContextViewNoneContent:
 
         agent = Example()
         call = CurrentCall(id="1", method_name="run", decorator="plan", agent=agent)
-        result = await apply_context_overrides(
+        result = await apply_block_overrides(
             (),
             {"my_key": DynamicContext("None")},
             agent=agent,
@@ -1409,7 +1409,7 @@ class TestDefaultContextViewNoneContent:
 
     async def test_protected_block_static_meta(self):
         """Protected static block gets expr=f'self.context["{key}"]' meta and user_block=False."""
-        from nooa.default_context_view import stored_context_blocks
+        from nooa.default_context_view import materialize_manager_blocks
         from nooa.runtime.context_manager import ContextManager
         from nooa.strategies.current_call import CurrentCall
 
@@ -1417,7 +1417,7 @@ class TestDefaultContextViewNoneContent:
         cm = ContextManager()
         cm.set_static_protected("my_key", "static value")
 
-        result = await stored_context_blocks(
+        result = await materialize_manager_blocks(
             cm,
             object(),
             CurrentCall(id="1", method_name="run", decorator="plan"),

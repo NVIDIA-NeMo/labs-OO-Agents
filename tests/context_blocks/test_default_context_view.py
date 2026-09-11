@@ -6,15 +6,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from nooa import Agent, Context, DefaultAgentView, DynamicContext, collect_context
+from nooa import Agent, Context, DefaultAgentView, DynamicContext, collect_context_items
 from nooa.context_blocks import Role
 from nooa.context_blocks.exceptions import DynamicNotResolvedError
 from nooa.default_context_view import (
     agent_interface_block,
     agent_state_block,
-    apply_context_overrides,
+    apply_block_overrides,
+    materialize_manager_blocks,
     order_blocks,
-    stored_context_blocks,
     system_prompt_block,
     visible_events,
 )
@@ -66,7 +66,7 @@ async def test_named_helpers_make_framework_sources_explicit():
     system = await system_prompt_block(agent, call)
     interface = await agent_interface_block(agent, call)
     state = await agent_state_block(agent, call)
-    stored = await stored_context_blocks(
+    stored = await materialize_manager_blocks(
         agent.context_manager,
         agent,
         call,
@@ -104,7 +104,7 @@ async def test_default_materialization_preserves_protected_named_reads():
     with pytest.raises(DynamicNotResolvedError):
         agent.context_manager["system_prompt"]
 
-    items = await collect_context(DefaultAgentView(), agent, _call(agent))
+    items = await collect_context_items(DefaultAgentView(), agent, _call(agent))
     by_key = {item.key: item for item in items if hasattr(item, "key")}
     assert agent.context_manager["system_prompt"] == by_key["system_prompt"].content
     assert agent.context_manager["self"] == by_key["self"].content
@@ -130,7 +130,7 @@ async def test_unregistered_framework_defaults_are_not_built():
         active_skills=lambda: (),
         events=SimpleNamespace(keys=lambda: [], get=lambda key: None),
     )
-    assert await collect_context(DefaultAgentView(), owner, _call(ExampleAgent())) == ()
+    assert await collect_context_items(DefaultAgentView(), owner, _call(ExampleAgent())) == ()
 
 
 async def test_unprotected_framework_declaration_is_still_materialized():
@@ -143,7 +143,7 @@ async def test_unprotected_framework_declaration_is_still_materialized():
         active_skills=lambda: (),
         events=SimpleNamespace(keys=lambda: [], get=lambda key: None),
     )
-    items = await collect_context(DefaultAgentView(), owner, _call(ExampleAgent()))
+    items = await collect_context_items(DefaultAgentView(), owner, _call(ExampleAgent()))
     assert next(
         item for item in items if getattr(item, "key", None) == "system_prompt"
     ).content == ("standalone override")
@@ -168,7 +168,7 @@ async def test_unselected_system_prompt_is_not_evaluated(policy):
     else:
         agent.context_manager.apply_override("system_prompt", Context("replacement", prefix=True))
 
-    items = await collect_context(DefaultAgentView(), agent, _call(agent))
+    items = await collect_context_items(DefaultAgentView(), agent, _call(agent))
     prompts = [item.content for item in items if getattr(item, "key", None) == "system_prompt"]
     assert prompts == ([] if policy == "disabled" else ["replacement"])
     assert agent.calls == 0
@@ -187,12 +187,12 @@ async def test_framework_sources_publish_named_reads_in_source_order_each_turn()
         async def run(self): ...
 
     agent = DependentAgent()
-    first = await collect_context(DefaultAgentView(), agent, _call(agent))
+    first = await collect_context_items(DefaultAgentView(), agent, _call(agent))
     first_by_key = {item.key: item for item in first if hasattr(item, "key")}
     assert first_by_key["state"].content == "prompt-one"
 
     agent.version = "two"
-    second = await collect_context(DefaultAgentView(), agent, _call(agent))
+    second = await collect_context_items(DefaultAgentView(), agent, _call(agent))
     second_by_key = {item.key: item for item in second if hasattr(item, "key")}
     assert second_by_key["state"].content == "prompt-two"
 
@@ -204,7 +204,7 @@ async def test_malformed_system_prompt_is_materialized_as_an_error():
         async def run(self): ...
 
     agent = MalformedAgent()
-    items = await collect_context(DefaultAgentView(), agent, _call(agent))
+    items = await collect_context_items(DefaultAgentView(), agent, _call(agent))
     prompt = next(item for item in items if getattr(item, "key", None) == "system_prompt")
     assert prompt.content.startswith("ValueError:")
 
@@ -235,7 +235,7 @@ async def test_default_source_precedence_and_removal_are_visible_policy():
         scoped={"shared": "scoped", "removed": None},
     )
 
-    blocks = await collect_context(DefaultAgentView(), agent, call)
+    blocks = await collect_context_items(DefaultAgentView(), agent, call)
     by_key = {block.key: block for block in blocks if hasattr(block, "key")}
     assert by_key["shared"].content == "scoped"
     assert "removed" not in by_key
@@ -251,7 +251,7 @@ async def test_disabled_key_suppresses_every_source():
         scoped={"shared": "scoped"},
     )
 
-    blocks = await collect_context(DefaultAgentView(), agent, call)
+    blocks = await collect_context_items(DefaultAgentView(), agent, call)
     assert "shared" not in {block.key for block in blocks if hasattr(block, "key")}
 
 
@@ -266,7 +266,7 @@ async def test_each_override_source_shares_dynamic_error_and_none_semantics(sour
         scoped=overrides if source == "scoped" else None,
     )
 
-    blocks = await collect_context(DefaultAgentView(), agent, call)
+    blocks = await collect_context_items(DefaultAgentView(), agent, call)
     by_key = {block.key: block for block in blocks if hasattr(block, "key")}
     assert by_key["broken"].content == "ZeroDivisionError: division by zero"
     assert "removed" not in by_key
@@ -277,7 +277,7 @@ async def test_override_placement_inherits_or_uses_explicit_policy():
     call = _call(agent)
     fixed = await system_prompt_block(agent, call)
 
-    blocks = await apply_context_overrides(
+    blocks = await apply_block_overrides(
         (fixed,),
         {
             "system_prompt": DynamicContext("'replacement'"),
@@ -301,15 +301,15 @@ async def test_dynamic_manager_value_updates_public_cache():
     agent = ExampleAgent(context={"live": DynamicContext("self.value")})
     call = _call(agent)
 
-    await collect_context(DefaultAgentView(), agent, call)
+    await collect_context_items(DefaultAgentView(), agent, call)
     assert agent.context_manager["live"] == "dynamic value"
-    blocks = await stored_context_blocks(agent.context_manager, agent, call)
+    blocks = await materialize_manager_blocks(agent.context_manager, agent, call)
     assert next(block for block in blocks if block.key == "live").metadata.source_dynamic
 
 
 async def test_strategy_order_lists_keys_first_and_keeps_remainder_stable():
     agent = ExampleAgent(context={"a": "a", "b": "b", "c": "c"})
-    blocks = await stored_context_blocks(agent.context_manager, agent, _call(agent))
+    blocks = await materialize_manager_blocks(agent.context_manager, agent, _call(agent))
 
     ordered = order_blocks(blocks, ["c", "a"])
     keys = [block.key for block in ordered]

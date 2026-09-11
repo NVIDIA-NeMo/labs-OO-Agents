@@ -16,7 +16,7 @@ from nooa import (
     DynamicContext,
     Skill,
     apply_context_budget,
-    collect_context,
+    collect_context_items,
     context_text,
     evaluate_context_expression,
     resolve_context_view,
@@ -48,7 +48,7 @@ class NamedView:
 
 async def test_assembly_is_stable_and_immutable():
     call = CurrentCall(id="1", method_name="run", decorator="plan")
-    result = await collect_context(NamedView("one"), object(), call)
+    result = await collect_context_items(NamedView("one"), object(), call)
     assert isinstance(result, tuple)
     assert [item.key for item in result] == ["one"]
     with pytest.raises(ValidationError):
@@ -62,7 +62,7 @@ async def test_collection_accepts_structural_cache_boundary():
             yield CacheBoundary()
 
     call = CurrentCall(id="1", method_name="run", decorator="plan")
-    assert await collect_context(BoundaryView(), object(), call) == (
+    assert await collect_context_items(BoundaryView(), object(), call) == (
         Block(key="one", content="one"),
         CacheBoundary(),
     )
@@ -75,7 +75,7 @@ async def test_collection_rejects_unknown_item_type():
 
     call = CurrentCall(id="1", method_name="run", decorator="plan")
     with pytest.raises(TypeError, match="Block, EventBase, or CacheBoundary"):
-        await collect_context(InvalidView(), object(), call)
+        await collect_context_items(InvalidView(), object(), call)
 
 
 def test_context_text_uses_call_format():
@@ -415,7 +415,7 @@ async def test_default_view_partitions_and_evicts_manager_blocks():
         context_budget=0,
         _context_token_counter=len,
     )
-    items = await collect_context(DefaultAgentView(), agent, call)
+    items = await collect_context_items(DefaultAgentView(), agent, call)
     tail = next(block for block in items if getattr(block, "key", None) == "tail")
     assert tail.role == Role.USER
     assert tail.metadata is not None
@@ -520,65 +520,6 @@ async def test_custom_view_without_boundary_gets_no_implicit_boundary():
 
     items = await Example().runtime._prepare_context(Example.run)
     assert not any(isinstance(item, CacheBoundary) for item in items)
-
-
-async def test_actor_disables_legacy_role_based_cache_injection():
-    from nooa.errors import GenerationError
-    from nooa.unifiedllm import FakeLLMClient
-
-    class StopCall(Exception):
-        pass
-
-    class RecordingClient(FakeLLMClient):
-        options: dict[str, Any]
-
-        async def acall(self, messages, tools=None, output_model=None, **kwargs):
-            self.options = kwargs
-            raise StopCall
-
-    client = RecordingClient()
-
-    class Example(Agent, llm=client, context_view=NamedView("only")):
-        async def run(self) -> str: ...
-
-    with pytest.raises(GenerationError):
-        await Example().run()
-    assert client.options["cache_control_injection_points"] == []
-
-
-async def test_actor_disables_legacy_cache_injection_through_middleware():
-    from nooa.errors import GenerationError
-    from nooa.unifiedllm import FakeLLMClient
-
-    class RecordingClient(FakeLLMClient):
-        options: list[dict[str, Any]]
-
-        def __init__(self):
-            super().__init__()
-            self.options = []
-
-        async def acall(self, messages, tools=None, output_model=None, **kwargs):
-            self.options.append(kwargs)
-            raise RuntimeError("stop")
-
-    client = RecordingClient()
-
-    class Example(Agent, llm=client, context_view=NamedView("only")):
-        async def run(self) -> str: ...
-
-    agent = Example()
-    observed: list[list[dict[str, Any]]] = []
-
-    async def middleware(ctx, next_call):
-        observed.append(ctx.params["cache_control_injection_points"])
-        ctx.params.pop("cache_control_injection_points")
-        return await next_call(ctx)
-
-    agent.event_manager.intercept("llm_call", middleware)
-    with pytest.raises(GenerationError):
-        await agent.run()
-    assert observed and all(value == [] for value in observed)
-    assert all(value["cache_control_injection_points"] == [] for value in client.options)
 
 
 async def test_agent_view_controls_exact_skill_placement():

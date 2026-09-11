@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for cache_control injection in ResponsesClient."""
+"""Tests for explicit cache-boundary transport in ResponsesClient."""
 
 from copy import deepcopy
 from unittest.mock import AsyncMock, patch
@@ -22,27 +22,6 @@ def make_mock_responses_response(content: str = "ok"):
     return resp
 
 
-class TestResponsesClientCacheControlDefaults:
-    """ResponsesClient should have cache_control_injection_points by default."""
-
-    def test_default_has_system_and_last_tool(self):
-        """ResponsesClient gets the default injection points from UnifiedLLM."""
-        client = ResponsesClient(model="test-model")
-        assert {"role": "system"} in client.cache_control_injection_points
-        assert {"role": "tool", "position": "last"} in client.cache_control_injection_points
-
-    def test_inject_cache_control_on_system(self):
-        """_inject_cache_control marks system messages."""
-        client = ResponsesClient(model="test-model")
-        messages = [
-            {"role": "system", "content": "You are helpful."},
-            {"role": "user", "content": "Hi"},
-        ]
-        result = client._inject_cache_control(messages, [{"role": "system"}])
-        assert result[0]["cache_control"] == {"type": "ephemeral"}
-        assert "cache_control" not in result[1]
-
-
 class TestResponsesClientCacheControlInjection:
     """Tests that cache_control is injected and preserved through _transform_messages."""
 
@@ -53,10 +32,14 @@ class TestResponsesClientCacheControlInjection:
     def test_system_cache_control_not_in_output(self, client):
         """System messages are extracted to instructions; cache_control on system is harmless."""
         messages = [
-            {"role": "system", "content": "System prompt"},
+            {
+                "role": "system",
+                "content": "System prompt",
+                CACHE_BOUNDARY_MESSAGE_KEY: True,
+            },
             {"role": "user", "content": "Hi"},
         ]
-        prepared = client._inject_cache_control(messages, [{"role": "system"}])
+        prepared = client._apply_cache_boundaries(messages)
         input_msgs, instructions = client._transform_messages(prepared)
         # System extracted to instructions
         assert instructions == "System prompt"
@@ -80,11 +63,15 @@ class TestResponsesClientCacheControlInjection:
                     }
                 ],
             },
-            {"role": "tool", "content": "result 1", "tool_call_id": "tc1"},
+            {
+                "role": "tool",
+                "content": "result 1",
+                "tool_call_id": "tc1",
+                CACHE_BOUNDARY_MESSAGE_KEY: True,
+            },
             {"role": "user", "content": "What next?"},
         ]
-        # Inject cache_control on last tool
-        prepared = client._inject_cache_control(messages, [{"role": "tool", "position": "last"}])
+        prepared = client._apply_cache_boundaries(messages)
         input_msgs, _ = client._transform_messages(prepared)
 
         # Find the function_call_output item
@@ -100,11 +87,15 @@ class TestResponsesClientCacheControlInjection:
             {"role": "system", "content": "System"},
             {"role": "user", "content": "Do something"},
             {"type": "function_call", "call_id": "tc1", "name": "run", "arguments": "{}"},
-            {"type": "function_call_output", "call_id": "tc1", "output": "result"},
+            {
+                "type": "function_call_output",
+                "call_id": "tc1",
+                "output": "result",
+                CACHE_BOUNDARY_MESSAGE_KEY: True,
+            },
             {"role": "user", "content": "Next"},
         ]
-        # The injection should find function_call_output as equivalent to "tool"
-        prepared = client._inject_cache_control(messages, [{"role": "tool", "position": "last"}])
+        prepared = client._apply_cache_boundaries(messages)
         # The function_call_output item should have cache_control
         fco = [m for m in prepared if m.get("type") == "function_call_output"]
         assert len(fco) == 1
@@ -114,9 +105,9 @@ class TestResponsesClientCacheControlInjection:
         """cache_control on user messages is preserved in native format."""
         messages = [
             {"role": "system", "content": "System"},
-            {"role": "user", "content": "Hello"},
+            {"role": "user", "content": "Hello", CACHE_BOUNDARY_MESSAGE_KEY: True},
         ]
-        prepared = client._inject_cache_control(messages, [{"role": "user"}])
+        prepared = client._apply_cache_boundaries(messages)
         input_msgs, _ = client._transform_messages(prepared)
         user_msgs = [m for m in input_msgs if m.get("role") == "user"]
         assert user_msgs[0].get("cache_control") == {"type": "ephemeral"}
@@ -151,10 +142,9 @@ class TestResponsesClientCacheControlInjection:
 
 
 class TestToolOutputNotCorrupted:
-    """Ensure tool message output stays a string after position-based injection."""
+    """Ensure tool message output stays a string after boundary translation."""
 
-    def test_tool_output_remains_string_after_position_injection(self):
-        """When last-tool injection converts content to blocks, output must stay a string."""
+    def test_tool_output_remains_string_after_boundary(self):
         client = ResponsesClient(model="test-model")
         messages = [
             {"role": "system", "content": "System"},
@@ -170,11 +160,15 @@ class TestToolOutputNotCorrupted:
                     }
                 ],
             },
-            {"role": "tool", "content": "tool output text", "tool_call_id": "tc1"},
+            {
+                "role": "tool",
+                "content": "tool output text",
+                "tool_call_id": "tc1",
+                CACHE_BOUNDARY_MESSAGE_KEY: True,
+            },
             {"role": "user", "content": "Next"},
         ]
-        # Position-based injection converts tool content to list of blocks
-        prepared = client._inject_cache_control(messages, [{"role": "tool", "position": "last"}])
+        prepared = client._apply_cache_boundaries(messages)
         input_msgs, _ = client._transform_messages(prepared)
 
         fco = [m for m in input_msgs if m.get("type") == "function_call_output"]
@@ -221,7 +215,12 @@ class TestResponsesClientEndToEnd:
                             }
                         ],
                     },
-                    {"role": "tool", "content": "tool output", "tool_call_id": "tc1"},
+                    {
+                        "role": "tool",
+                        "content": "tool output",
+                        "tool_call_id": "tc1",
+                        CACHE_BOUNDARY_MESSAGE_KEY: True,
+                    },
                     {"role": "user", "content": "Current turn"},
                 ],
             )
@@ -236,10 +235,8 @@ class TestResponsesClientEndToEnd:
             assert fco_items[0].get("cache_control") == {"type": "ephemeral"}
 
     @pytest.mark.asyncio
-    async def test_acall_no_injection_when_empty(self):
-        """No cache_control when injection_points is empty."""
+    async def test_acall_without_boundary_has_no_cache_control(self):
         client = ResponsesClient(model=self.ANTHROPIC_MODEL)
-        client.cache_control_injection_points = []
         mock_response = make_mock_responses_response()
 
         with patch("litellm.aresponses", new_callable=AsyncMock) as mock_aresponses:
@@ -259,30 +256,13 @@ class TestResponsesClientEndToEnd:
                 assert "cache_control" not in item
 
     @pytest.mark.asyncio
-    async def test_acall_custom_injection_points(self):
-        """Custom injection points override defaults."""
+    async def test_acall_rejects_legacy_option(self):
         client = ResponsesClient(model=self.ANTHROPIC_MODEL)
-        mock_response = make_mock_responses_response()
-
-        with patch("litellm.aresponses", new_callable=AsyncMock) as mock_aresponses:
-            mock_aresponses.return_value = mock_response
-
+        with pytest.raises(TypeError, match="cache_control_injection_points was removed"):
             await client.acall(
-                [
-                    {"role": "system", "content": "System"},
-                    {"role": "user", "content": "Hello"},
-                    {"role": "assistant", "content": "Hi"},
-                    {"role": "user", "content": "Bye"},
-                ],
+                [{"role": "user", "content": "Hello"}],
                 cache_control_injection_points=[{"role": "user", "position": "last"}],
             )
-
-            call_kwargs = mock_aresponses.call_args[1]
-            input_items = call_kwargs["input"]
-            # Last user message should have content-block-level cache_control
-            last_user = [m for m in input_items if m.get("role") == "user"][-1]
-            assert isinstance(last_user["content"], list)
-            assert last_user["content"][0]["cache_control"] == {"type": "ephemeral"}
 
     @pytest.mark.asyncio
     async def test_explicit_boundary_maps_to_exact_native_item(self):
@@ -309,7 +289,7 @@ class TestResponsesClientEndToEnd:
         assert CACHE_BOUNDARY_MESSAGE_KEY in messages[1]
 
     @pytest.mark.asyncio
-    async def test_legacy_tool_call_boundary_follows_complete_expansion(self):
+    async def test_tool_call_boundary_follows_complete_expansion(self):
         client = ResponsesClient(model=self.ANTHROPIC_MODEL)
         mock_response = make_mock_responses_response()
         messages = [
@@ -380,7 +360,7 @@ def _make_non_anthropic_messages() -> list[dict]:
     """Fresh message payload for each non-Anthropic regression test.
 
     A factory (rather than a shared class-level constant) so that even if a
-    future change to _transform_messages or _inject_cache_control starts
+    future change to _transform_messages or _apply_cache_boundaries starts
     mutating the input list, parametrized cases stay independent.
     """
     return [

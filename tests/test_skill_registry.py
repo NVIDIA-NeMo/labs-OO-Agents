@@ -181,7 +181,7 @@ class TestActivation:
 
 
 # ---------------------------------------------------------------------------
-# Tests: Context Block Registration
+# Tests: Context Block Selection
 # ---------------------------------------------------------------------------
 
 
@@ -222,7 +222,7 @@ def registry_ctx(agent_ctx):
         return SkillRegistry(agent_ctx)
 
 
-class TestContextBlockRegistration:
+class TestContextBlockSelection:
     def test_activate_selects_skill_without_mutating_context_manager(self, registry_ctx, agent_ctx):
         skill = SkillWithContextBlock()
         registry_ctx.register("nemo.my_skill", skill)
@@ -249,7 +249,6 @@ class TestContextBlockRegistration:
         assert "my_status" not in cm
         assert registry_ctx.active_skills() == (skill,)
 
-        # Deactivate should remove it
         registry_ctx.deactivate(["nemo.my_skill"])
         assert "my_status" not in cm
         assert registry_ctx.active_skills() == ()
@@ -267,11 +266,9 @@ class TestContextBlockRegistration:
         # Protected block should still be present
         assert "my_status" in cm
 
-    def test_context_block_with_mocked_skill_is_ignored(self, registry_ctx, agent_ctx):
-        """MagicMock skills (from test patches) should not crash context block registration."""
+    def test_context_block_with_mocked_skill_does_not_mutate_manager(self, registry_ctx, agent_ctx):
         mock_skill = MagicMock()
         registry_ctx.register("nemo.mocked", mock_skill)
-        # Should not raise — MagicMock.context_block is a Mock, not a tuple
         registry_ctx.activate(["nemo.mocked"])
 
         cm = agent_ctx.context_manager
@@ -279,7 +276,7 @@ class TestContextBlockRegistration:
         assert non_protected == []
 
     @pytest.mark.asyncio
-    async def test_aclose_removes_registry_context_block(self, registry_ctx, agent_ctx):
+    async def test_aclose_does_not_mutate_context_manager(self, registry_ctx, agent_ctx):
         assert "skills" not in agent_ctx.context_manager
 
         await registry_ctx.aclose()
@@ -291,7 +288,6 @@ class TestContextBlockRegistration:
         with patch("nooa.skill_registry.entry_points", return_value=[]):
             reg = SkillRegistry(agent_ctx)
         agent_ctx.skills = reg
-        # Manually trigger context block registration for the registry itself
         reg._attr_map["nemo.skills"] = "skills"
         reg._loaded.add("nemo.skills")
         reg.activate(["nemo.skills"])

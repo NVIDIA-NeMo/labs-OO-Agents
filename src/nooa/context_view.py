@@ -49,7 +49,7 @@ class ContextView[Owner](Protocol):
 
 
 def resolve_context_view(owner: Any, *, default: ContextView[Any]) -> ContextView[Any]:
-    """Resolve instance, then class, then default view."""
+    """Resolve through ``owner.__context_view__()``, otherwise use ``default``."""
     resolver = getattr(owner, "__context_view__", None)
     if resolver is None:
         return default
@@ -77,7 +77,7 @@ def select_context_events(events: Any, *, call: "CurrentCall") -> tuple[EventBas
     )
 
 
-async def collect_context[Owner](
+async def collect_context_items[Owner](
     view: ContextView[Owner], owner: Owner, call: "CurrentCall"
 ) -> tuple[ContextItem, ...]:
     """Collect and validate a view into one immutable snapshot."""
@@ -178,7 +178,7 @@ __all__ = [
     "ContextItem",
     "ContextView",
     "apply_context_budget",
-    "collect_context",
+    "collect_context_items",
     "context_text",
     "evaluate_context_expression",
     "resolve_context_view",

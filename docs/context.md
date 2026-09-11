@@ -75,13 +75,13 @@ Small optional helpers each do one job:
 
 ```python
 context_text(value, *, call) -> str
-async collect_context(view, owner, call) -> tuple[ContextItem, ...]
+async collect_context_items(view, owner, call) -> tuple[ContextItem, ...]
 apply_context_budget(items, *, call, evictable) -> tuple[ContextItem, ...]
 async evaluate_context_expression(expression, *, owner, call) -> object
 select_context_events(events, *, call) -> tuple[EventBase, ...]
 ```
 
-`context_text` formats one value; `collect_context` validates and retains yielded order; expression evaluation binds `self` to `owner`; event selection reads active events, applies the resolved query with stable `call.invocation_id`, and excludes non-model events; budgeting follows the caller's eviction order and counts blocks only, so it is not a full rendered-request limit. A source helper may retrieve, evaluate, or format one source. It does not select other sources or decide global precedence, placement, or order.
+`context_text` formats one value; `collect_context_items` validates and retains yielded order; expression evaluation binds `self` to `owner`; event selection reads active events, applies the resolved query with stable `call.invocation_id`, and excludes non-model events; budgeting follows the caller's eviction order and counts blocks only, so it is not a full rendered-request limit. A source helper may retrieve, evaluate, or format one source. It does not select other sources or decide global precedence, placement, or order.
 
 Iterative views must explicitly include the task, model outputs, and execution feedback they need. Strategies produce these as typed events; rendering injects none. `self.events.query()` searches stored history, including archived events, so it is an inspection API rather than prompt selection. `call.invocation_id` stays stable while a strategy may change `call.id`. Tool schemas and execution policy remain strategy-owned.
 
@@ -93,57 +93,18 @@ Iterative views must explicitly include the task, model outputs, and execution f
 class DefaultAgentView(ContextView[Agent]):
     async def assemble(self, agent, call):
         disabled = agent.context_manager.disabled()
-        declarations = dict(agent.context_manager.declarations())
-        blocks = []
-        for key, build in (
-            ("system_prompt", system_prompt_block),
-            ("self", agent_interface_block),
-            ("state", agent_state_block),
-        ):
-            if key in disabled:
-                continue
-            if key in declarations:
-                block = (await stored_context_blocks(
-                    agent.context_manager, agent, call, include={key}
-                ))[0]
-            elif agent.context_manager.is_protected(key):
-                block = await build(agent, call)
-                agent.context_manager.update_resolved({key: block.content})
-            else:
-                continue
-            blocks.append(block)
-
-        blocks += await stored_context_blocks(
-            agent.context_manager, agent, call, exclude={"system_prompt", "self", "state"}
+        declared = frozenset(key for key, _ in agent.context_manager.declarations())
+        blocks = await self._materialize_agent_blocks(
+            agent, call, disabled=disabled, declaration_keys=declared
         )
-
-        custom_skills = []
-        for skill in agent.active_skills():
-            default = DefaultSkillView()
-            view = resolve_context_view(skill, default=default)
-            if view is default and skill.context_block is disabled, protected, or overridden:
-                continue
-            contribution = await collect_context(view, skill, call)
-            if view is default:
-                blocks = replace_by_key(blocks, contribution)
-            else:
-                custom_skills.extend(contribution)
-
-        # Later sources replace in place, append new keys, and remove None values.
-        for overrides, static_keys in (
-            (call.strategy.get_block_overrides(), call.strategy.get_static_block_keys()),
-            (call.decorator_context, None),
-            (call.scoped_context, None),
-        ):
-            blocks = await apply_context_overrides(
-                blocks, overrides, agent=agent, call=call, static_keys=static_keys
-            )
-
-        blocks = remove_disabled(blocks, agent.context_manager.disabled())
+        blocks, skill_items = await self._compose_skill_views(
+            agent, call, blocks, disabled=disabled, declaration_keys=declared
+        )
+        blocks = await self._apply_override_layers(agent, call, blocks, disabled=disabled)
         blocks = order_blocks(blocks, call.strategy.get_block_order())
         prefix, trailing = partition_blocks(blocks)
 
-        items = [*prefix, *custom_skills, *visible_events(agent, call)]
+        items = [*prefix, *skill_items, *visible_events(agent, call)]
         if items:
             items.append(CacheBoundary())
         items.extend(trailing)
@@ -152,7 +113,7 @@ class DefaultAgentView(ContextView[Agent]):
             yield item
 ```
 
-`apply_context_overrides` exposes replacement, deletion, inherited placement, and explicit prefix hints. Changing or removing a source is a local edit to `assemble()`.
+The three private phase methods contain source-specific detail. `assemble()` keeps global order, event placement, cache placement, and budgeting visible. `apply_block_overrides` preserves replacement, deletion, inherited placement, and explicit prefix hints.
 
 The three built-in helpers derive content directly from the agent. Protected-key registration selects which defaults apply; disable state and stored overrides are checked before evaluation. The manager stores those controls, user declarations, and the last materialized values for compatible named reads, but does not create defaults.
 
@@ -197,8 +158,9 @@ resolve view
 - A nested view owns the content and local order of its contribution.
 - Source-specific helpers translate existing state APIs; they do not choose global placement.
 - The renderer expands items in place and emits no boundary text. A canonical assistant tool-call turn and its linked results form one atomic replay group; a boundary cannot split it.
-- The provider formatter preserves neutral cache positions while adapting message shape. UnifiedLLM maps only view-emitted boundaries to provider annotations, or ignores unsupported caching; legacy role-based injection does not apply.
+- The provider formatter preserves neutral cache positions while adapting message shape. UnifiedLLM maps only view-emitted boundaries to provider annotations, or removes them when unsupported. Without a boundary, NOOA emits no explicit `cache_control` annotation.
 - The selected agent view owns cache placement. The default adds at most one boundary after visible history and before trailing context; custom views receive none implicitly.
+- Provider-managed automatic caching and transport-routing hints such as `prompt_cache_key` are independent of explicit cache breakpoints.
 - Bounded serialization is formatting; recovery for missing data or other invented content belongs to event production or view policy.
 - Downstream stages preserve view order, except for declared atomic replay groups, or raise `UnsupportedContextLayout`; they do not resolve, evict, repair, or invent content.
 - A view omission is prompt policy, not an access-control boundary; tools and generated code may expose data available through other APIs.
@@ -209,27 +171,6 @@ Keep `agent.context`, context managers, event creation, strategy/scoped override
 
 These are the default application's context APIs, not requirements of `ContextView`. A custom view may use an independent state API. Native iterative strategies still use NOOA events unless replaced together with the strategy.
 
+Legacy implicit policy is removed: `cache_control_injection_points` raises `TypeError`; `CachedBlockFormatter` no longer chooses placement; and `render_context(context_limit=...)` reports the limit but leaves eviction to the view.
+
 `DefaultAgentView` and its helpers use only public agent, call, manager, strategy, and event interfaces. `ActorRuntime` only creates `CurrentCall`, resolves and collects the view, renders it, and calls the LLM.
-
-## Required tests
-
-- immutable, stable assembly order;
-- agent and skill precedence;
-- resolved model and budget data on `CurrentCall`, including method and call overrides;
-- inactive and hidden skills contribute nothing;
-- existing manager, scoped override, event, dynamic-cache, and snapshot behavior is preserved;
-- `Skill.context_block` preserves agent-scoped prompt projection without implicit manager storage;
-- the agent view controls exact skill and event placement;
-- custom views may ignore all managers and skills;
-- custom views can adapt before applying their own budget;
-- `DefaultAgentView` uses public helpers, not private runtime assembly;
-- the standalone default module imports no `nooa.runtime.*`;
-- an external custom view ignores a sentinel `context_manager` and completes Predict and CodeAct calls;
-- an independent context API affects a CodeAct result only after its view selects and emits state;
-- active summaries remain selectable while archived, metadata, and empty-output events do not leak into prompts;
-- event expansion preserves position, with canonical tool replay kept atomic;
-- cache boundaries preserve their exact position through complete event expansion, emit no content, cost no tokens, and map correctly or become a no-op, including with empty history or no trailing context;
-- a custom view with no cache boundary receives no implicit marker;
-- overrides preserve placement and support `None` deletion;
-- renderers preserve order or reject the layout;
-- existing Predict, CodeAct, tool, skill, context, capability, and quickstart behavior remains covered.

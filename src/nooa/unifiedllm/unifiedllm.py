@@ -1138,13 +1138,10 @@ class UnifiedLLM(ABC):
     _registry_config: dict[str, Any] | None
 
     def __init__(self, model: str, **config):
+        self._reject_legacy_cache_control_option(config)
         self.model = model
         self.config = config
         self._registry_config = None
-        # Cache control injection — shared by CompletionClient and ResponsesClient
-        self.cache_control_injection_points: list[dict[str, Any]] = (
-            DEFAULT_CACHE_CONTROL_INJECTION_POINTS
-        )
         # Per-client HTTP transport (httpx clients + litellm wrappers). Set by
         # concrete subclasses; guarded here so base helpers stay safe.
         self._http: _ClientHttp | None = None
@@ -1172,7 +1169,15 @@ class UnifiedLLM(ABC):
         await self.aclose()
 
     @staticmethod
-    def _inject_cache_control_on_content(msg: dict) -> None:
+    def _reject_legacy_cache_control_option(options: dict[str, Any]) -> None:
+        if "cache_control_injection_points" in options:
+            raise TypeError(
+                "cache_control_injection_points was removed; emit CacheBoundary from a "
+                "ContextView, or add provider-native cache_control to raw messages"
+            )
+
+    @staticmethod
+    def _mark_cache_boundary_on_content(msg: dict) -> None:
         """Add cache_control to the last content block of a message.
 
         Anthropic's API requires cache_control on content blocks (not message level)
@@ -1183,7 +1188,7 @@ class UnifiedLLM(ABC):
         """
         content = msg.get("content")
         if content is None:
-            msg["cache_control"] = {"type": "ephemeral"}
+            msg.setdefault("cache_control", {"type": "ephemeral"})
         elif isinstance(content, str):
             msg["content"] = [
                 {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
@@ -1191,128 +1196,42 @@ class UnifiedLLM(ABC):
         elif isinstance(content, list) and len(content) > 0:
             last_block = content[-1]
             if isinstance(last_block, dict):
-                last_block["cache_control"] = {"type": "ephemeral"}
+                last_block.setdefault("cache_control", {"type": "ephemeral"})
         else:
-            msg["cache_control"] = {"type": "ephemeral"}
+            msg.setdefault("cache_control", {"type": "ephemeral"})
 
-    def _inject_cache_control(
+    def _apply_cache_boundaries(
         self,
         messages: list[dict[str, Any]],
-        injection_points: list[dict[str, Any]],
         *,
-        explicit_supported: bool = True,
-        ignored_explicit_roles: frozenset[str] = frozenset(),
+        supported: bool = True,
+        ignored_roles: frozenset[str] = frozenset(),
         defer_tool_call_boundary: bool = False,
     ) -> list[dict[str, Any]]:
-        """Add cache_control to designated messages for prompt caching.
-
-        Adds cache_control at the message level (sibling of role/content), which
-        is the format expected by NVIDIA's OpenAI-compatible gateway endpoints.
-        This format also survives OpenAI SDK validation since the SDK only strips
-        extra fields from content blocks, not from messages themselves.
-
-        View-emitted ``CacheBoundary`` markers take precedence over configured
-        rules. They are mapped at their exact message when supported and removed
-        without changing content otherwise. Without an explicit marker, two
-        compatibility modes remain for direct UnifiedLLM callers:
-
-        1. **Role-based** (existing): marks ALL messages of a given role.
-           ``{"role": "system"}``
-
-        2. **Position-based** (new): marks only the last message of a given role.
-           ``{"role": "assistant", "position": "last"}``
-
-        Anthropic supports up to 4 cache breakpoints. Using both modes together
-        caches both the stable system prompt and the conversation history prefix::
-
-            [
-                {"role": "system"},                        # breakpoint 1
-                {"role": "tool", "position": "last"},      # breakpoint 2
-            ]
-
-        Args:
-            messages: The message list to process.
-            injection_points: List of dicts specifying where to add cache_control.
-                Each dict must have a "role" key. Optional "position" key with
-                value "last" restricts marking to only the last message of that role.
-
-        Returns:
-            A deep copy of messages with cache_control injected at breakpoints.
-        """
-        has_explicit_markers = any(CACHE_BOUNDARY_MESSAGE_KEY in msg for msg in messages)
-        has_explicit_boundaries = any(bool(msg.get(CACHE_BOUNDARY_MESSAGE_KEY)) for msg in messages)
-        if not injection_points and not has_explicit_markers:
+        """Translate view-emitted cache boundaries, or strip them if unsupported."""
+        if not any(CACHE_BOUNDARY_MESSAGE_KEY in msg for msg in messages):
             return messages
 
-        messages = [copy.deepcopy(msg) for msg in messages]
-
-        explicit_targets: list[dict[str, Any]] = []
-        for msg in messages:
-            if msg.pop(CACHE_BOUNDARY_MESSAGE_KEY, False):
-                explicit_targets.append(msg)
-
-        if has_explicit_boundaries:
-            if explicit_supported:
-                anthropic = _is_anthropic_model(self.model)
-                for msg in explicit_targets:
-                    if msg.get("role") in ignored_explicit_roles:
-                        continue
-                    if anthropic and msg.get("role") != "system":
-                        if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                            if defer_tool_call_boundary:
-                                msg["cache_control"] = {"type": "ephemeral"}
-                            else:
-                                msg["tool_calls"][-1]["cache_control"] = {"type": "ephemeral"}
-                        else:
-                            self._inject_cache_control_on_content(msg)
-                    else:
-                        msg["cache_control"] = {"type": "ephemeral"}
-            return messages
-
-        roles_to_cache_all: set[str] = set()
-        roles_to_cache_last: set[str] = set()
-        for p in injection_points:
-            role = p.get("role")
-            if not role:
-                continue
-            if p.get("position") == "last":
-                roles_to_cache_last.add(role)
-            else:
-                roles_to_cache_all.add(role)
-
-        if not roles_to_cache_all and not roles_to_cache_last:
-            return messages
-
-        # Map role names to native Responses API type equivalents
-        _ROLE_TO_TYPE = {"tool": "function_call_output"}
-
-        for msg in messages:
-            role = msg.get("role")
-            if role and role in roles_to_cache_all:
-                msg["cache_control"] = {"type": "ephemeral"}
-            elif not role:
-                # Native Responses format: match by type equivalent
-                msg_type = msg.get("type")
-                for r, t in _ROLE_TO_TYPE.items():
-                    if t == msg_type and r in roles_to_cache_all:
-                        msg["cache_control"] = {"type": "ephemeral"}
-                        break
-
-        # Anthropic needs cache_control on a content block (parts form); other providers
-        # reject a content list on non-user roles, so mark at the message level instead.
+        result = [copy.deepcopy(msg) for msg in messages]
         anthropic = _is_anthropic_model(self.model)
-        for role in roles_to_cache_last:
-            # Search for matching messages by role OR by equivalent native type
-            native_type = _ROLE_TO_TYPE.get(role)
-            for msg in reversed(messages):
-                if msg.get("role") == role or (native_type and msg.get("type") == native_type):
-                    if anthropic:
-                        self._inject_cache_control_on_content(msg)
-                    else:
-                        msg["cache_control"] = {"type": "ephemeral"}
-                    break
-
-        return messages
+        for msg in result:
+            boundary = bool(msg.pop(CACHE_BOUNDARY_MESSAGE_KEY, False))
+            if (
+                not boundary
+                or not supported
+                or msg.get("role") in ignored_roles
+                or "cache_control" in msg
+            ):
+                continue
+            if anthropic and msg.get("role") != "system":
+                if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                    target = msg if defer_tool_call_boundary else msg["tool_calls"][-1]
+                    target.setdefault("cache_control", {"type": "ephemeral"})
+                else:
+                    self._mark_cache_boundary_on_content(msg)
+            else:
+                msg["cache_control"] = {"type": "ephemeral"}
+        return result
 
     def count_tokens(self, text: str) -> int:
         """Count tokens using model-appropriate tokenizer.
@@ -1707,12 +1626,6 @@ def _extract_think_tags(content: str) -> tuple[str, str | None]:
     return content, None
 
 
-DEFAULT_CACHE_CONTROL_INJECTION_POINTS = [
-    {"role": "system"},
-    {"role": "tool", "position": "last"},
-]
-
-
 # ============================================================================
 # PATCH: Prevent litellm from stripping cache_control for Anthropic models
 # ============================================================================
@@ -1755,8 +1668,6 @@ class CompletionClient(UnifiedLLM):
         model: str,
         retry_config: RetryConfig | None = None,
         http_config: HttpConfig | None = None,
-        # use system as default for cache_control_injection_points
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
         **config,
     ):
         """
@@ -1777,21 +1688,12 @@ class CompletionClient(UnifiedLLM):
                          passes it to litellm per call. No global state and no
                          monkey-patching of httpx — two clients with different
                          http_configs are fully independent.
-            cache_control_injection_points: Optional list of role/position rules to
-                enable prompt caching (for example: {"role": "system"} or
-                {"role": "tool", "position": "last"}). Applied to all calls.
-                Note: Do NOT manually add cache_control to message content when using this.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
         super().__init__(model, **config)
         self.retry_config = retry_config or RetryConfig()
         self._http_config = http_config or HttpConfig()
         self._http = _ClientHttp.for_completion(self.model, self.config, self._http_config)
-        # Only set default if explicitly None (not if empty list is passed)
-        if cache_control_injection_points is not None:
-            self.cache_control_injection_points = cache_control_injection_points
-        else:
-            self.cache_control_injection_points = DEFAULT_CACHE_CONTROL_INJECTION_POINTS
 
     def _convert_tool_to_schema(self, tool: Tool) -> dict[str, Any]:
         """Convert Tool object to Completion API schema format"""
@@ -1809,7 +1711,6 @@ class CompletionClient(UnifiedLLM):
         messages: list[dict[str, Any]],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """
@@ -1819,15 +1720,9 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
+        self._reject_legacy_cache_control_option(kwargs)
         messages = demote_chat_reasoning(messages)
-
-        # Inject cache_control at the message level for prompt caching
-        cache_points = (
-            self.cache_control_injection_points
-            if cache_control_injection_points is None
-            else cache_control_injection_points
-        )
-        prepared_messages = self._inject_cache_control(messages, cache_points)
+        prepared_messages = self._apply_cache_boundaries(messages)
 
         api_params = {
             "model": self.model,
@@ -1971,7 +1866,6 @@ class CompletionClient(UnifiedLLM):
         messages: list[dict[str, Any]],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """
@@ -1981,15 +1875,9 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
+        self._reject_legacy_cache_control_option(kwargs)
         messages = demote_chat_reasoning(messages)
-
-        # Inject cache_control at the message level for prompt caching
-        cache_points = (
-            self.cache_control_injection_points
-            if cache_control_injection_points is None
-            else cache_control_injection_points
-        )
-        prepared_messages = self._inject_cache_control(messages, cache_points)
+        prepared_messages = self._apply_cache_boundaries(messages)
 
         api_params = {
             "model": self.model,
@@ -2163,13 +2051,10 @@ class ReasoningCompletionClient(CompletionClient):
         messages: list[dict[str, Any]],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """Call with <think> tag extraction."""
-        response = super().call(
-            messages, tools, output_model, cache_control_injection_points, **kwargs
-        )
+        response = super().call(messages, tools, output_model, **kwargs)
 
         # Extract think tags from content
         if isinstance(response.content, str) and response.content:
@@ -2194,13 +2079,10 @@ class ReasoningCompletionClient(CompletionClient):
         messages: list[dict[str, Any]],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """Async call with <think> tag extraction."""
-        response = await super().acall(
-            messages, tools, output_model, cache_control_injection_points, **kwargs
-        )
+        response = await super().acall(messages, tools, output_model, **kwargs)
 
         # Extract think tags from content
         if isinstance(response.content, str) and response.content:
@@ -2227,16 +2109,13 @@ class ResponsesClient(UnifiedLLM):
         model: str,
         retry_config: RetryConfig | None = None,
         http_config: HttpConfig | None = None,
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
         **config,
     ):
         """
         Initialize ResponsesClient.
 
-        Mirrors CompletionClient so the Responses API path gets the same retry,
-        HTTP, and cache-control behaviour. Accepting these as named parameters
-        also keeps them out of ``self.config`` — otherwise they would leak into
-        ``litellm.responses()`` as bogus API params.
+        Mirrors CompletionClient so the Responses API path gets the same retry
+        and HTTP behaviour.
 
         Args:
             model: The model identifier (e.g., "openai/gpt-5.3-codex").
@@ -2250,20 +2129,12 @@ class ResponsesClient(UnifiedLLM):
                          settings. Applied only to THIS client's requests (its
                          own httpx client is passed to litellm per call). No
                          global state and no monkey-patching of httpx.
-            cache_control_injection_points: Optional list of role/position rules to
-                enable prompt caching (for example: {"role": "system"} or
-                {"role": "tool", "position": "last"}). Applied to all calls.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
         super().__init__(model, **config)
         self.retry_config = retry_config or RetryConfig()
         self._http_config = http_config or HttpConfig()
         self._http = _ClientHttp.for_responses(self.model, self.config, self._http_config)
-        # Only set default if explicitly None (not if empty list is passed)
-        if cache_control_injection_points is not None:
-            self.cache_control_injection_points = cache_control_injection_points
-        else:
-            self.cache_control_injection_points = DEFAULT_CACHE_CONTROL_INJECTION_POINTS
 
     def _convert_tool_to_schema(self, tool: Tool) -> dict[str, Any]:
         """Convert Tool object to Responses API schema format."""
@@ -2299,7 +2170,6 @@ class ResponsesClient(UnifiedLLM):
         messages: list[dict[str, Any]],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """
@@ -2308,23 +2178,18 @@ class ResponsesClient(UnifiedLLM):
         Handles both native Responses format (from ResponsesProviderFormatter) and
         legacy OpenAI Chat format. System messages are extracted to the `instructions` param.
         """
+        self._reject_legacy_cache_control_option(kwargs)
         # Responses only supports cache_control for Anthropic-served models.
         # Explicit system boundaries cannot survive extraction into instructions,
         # so they are consumed as unsupported no-ops.
         if _is_anthropic_model(self.model):
-            cache_points = (
-                self.cache_control_injection_points
-                if cache_control_injection_points is None
-                else cache_control_injection_points
-            )
-            prepared_messages = self._inject_cache_control(
+            prepared_messages = self._apply_cache_boundaries(
                 messages,
-                cache_points,
-                ignored_explicit_roles=frozenset({"system"}),
+                ignored_roles=frozenset({"system"}),
                 defer_tool_call_boundary=True,
             )
         else:
-            prepared_messages = self._inject_cache_control(messages, [], explicit_supported=False)
+            prepared_messages = self._apply_cache_boundaries(messages, supported=False)
         input_messages, instructions = self._transform_messages(prepared_messages)
 
         api_params = {
@@ -2425,7 +2290,6 @@ class ResponsesClient(UnifiedLLM):
         messages: list[dict[str, Any]],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """
@@ -2434,21 +2298,16 @@ class ResponsesClient(UnifiedLLM):
         Handles both native Responses format (from ResponsesProviderFormatter) and
         legacy OpenAI Chat format. System messages are extracted to the `instructions` param.
         """
+        self._reject_legacy_cache_control_option(kwargs)
         # See ResponsesClient.call for provider/layout handling.
         if _is_anthropic_model(self.model):
-            cache_points = (
-                self.cache_control_injection_points
-                if cache_control_injection_points is None
-                else cache_control_injection_points
-            )
-            prepared_messages = self._inject_cache_control(
+            prepared_messages = self._apply_cache_boundaries(
                 messages,
-                cache_points,
-                ignored_explicit_roles=frozenset({"system"}),
+                ignored_roles=frozenset({"system"}),
                 defer_tool_call_boundary=True,
             )
         else:
-            prepared_messages = self._inject_cache_control(messages, [], explicit_supported=False)
+            prepared_messages = self._apply_cache_boundaries(messages, supported=False)
         input_messages, instructions = self._transform_messages(prepared_messages)
 
         api_params = {
