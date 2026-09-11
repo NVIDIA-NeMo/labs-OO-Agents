@@ -29,7 +29,7 @@ from nooa._llm_state import (
 
 logger = logging.getLogger(__name__)
 
-_STATE_VERSION = 1
+_STATE_VERSION = 2
 _CHAT_FORMAT = "litellm-chat"
 _RESPONSES_FORMAT = "openai-responses"
 _ENCRYPTED_REASONING_INCLUDE = "reasoning.encrypted_content"
@@ -139,6 +139,13 @@ def _envelope(scope: str | None, state_format: str, payload: dict[str, Any]) -> 
 
 
 def _matching_payload(state: Any, scope: str | None, state_format: str) -> dict | None:
+    if isinstance(state, dict) and state.get("version") != _STATE_VERSION:
+        logger.warning(
+            "Ignoring opaque reasoning state with unsupported or legacy version %r; "
+            "portable reasoning text will be replayed instead.",
+            state.get("version"),
+        )
+        return None
     if (
         scope is None
         or not isinstance(state, dict)
@@ -153,8 +160,33 @@ def _matching_payload(state: Any, scope: str | None, state_format: str) -> dict 
     return cast(dict[str, Any], state["payload"])
 
 
-def _chat_public_carrier(message: Any) -> dict[str, Any] | None:
-    """Project the public assistant data to which opaque Chat state is bound."""
+def _fingerprint(value: Any) -> str:
+    """Hash validation-only public data without retaining a second copy of it."""
+    digest = hashlib.sha256()
+    for chunk in json.JSONEncoder(sort_keys=True, separators=(",", ":")).iterencode(value):
+        digest.update(chunk.encode())
+    return digest.hexdigest()
+
+
+def _valid_fingerprint(value: Any) -> bool:
+    return (
+        isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+    )
+
+
+def _valid_reasoning_items(items: Any) -> bool:
+    """Validate the OpenAI wire container, not the encrypted contents."""
+    return isinstance(items, list) and all(
+        isinstance(item, dict)
+        and response_item_type(item) == "reasoning"
+        and isinstance(item.get("encrypted_content"), str)
+        and bool(item["encrypted_content"])
+        for item in items
+    )
+
+
+def _chat_public_carrier(message: Any) -> str | None:
+    """Fingerprint the public assistant data to which opaque Chat state is bound."""
     if _field(message, "role") != "assistant":
         return None
     raw_calls = _field(message, "tool_calls")
@@ -175,11 +207,14 @@ def _chat_public_carrier(message: Any) -> dict[str, Any] | None:
             return None
         calls.append({"id": call_id, "name": name, "arguments": arguments})
 
+    if len({call["id"] for call in calls}) != len(calls):
+        return None
+
     content = _field(message, "content")
     if content is not None and not isinstance(content, str):
         return None
     content = (content or None) if calls else (content or "")
-    return {"content": content, "tool_calls": calls}
+    return _fingerprint({"content": content, "tool_calls": calls})
 
 
 def _valid_chat_payload(payload: dict[str, Any]) -> bool:
@@ -187,25 +222,13 @@ def _valid_chat_payload(payload: dict[str, Any]) -> bool:
         return False
     items = payload.get("reasoning_items")
     carrier = payload.get("carrier")
-    if not isinstance(items, list) or not items or not isinstance(carrier, dict):
-        return False
-    if set(carrier) != {"content", "tool_calls"}:
-        return False
-    if carrier.get("content") is not None and not isinstance(carrier.get("content"), str):
-        return False
-    calls = carrier.get("tool_calls")
-    if not isinstance(calls, list) or not all(
-        isinstance(call, dict)
-        and set(call) == {"id", "name", "arguments"}
-        and all(isinstance(call.get(key), str) for key in ("id", "name", "arguments"))
-        for call in calls
-    ):
-        return False
-    if len({call["id"] for call in calls}) != len(calls):
+    if not items or not _valid_reasoning_items(items) or not _valid_fingerprint(carrier):
         return False
     if "state_only" in payload and payload["state_only"] is not True:
         return False
-    return (payload.get("state_only") is True) == (carrier == {"content": "", "tool_calls": []})
+    return (payload.get("state_only") is True) == (
+        carrier == _fingerprint({"content": "", "tool_calls": []})
+    )
 
 
 def capture_chat_state(message: Any, scope: str | None) -> dict | None:
@@ -249,6 +272,8 @@ def responses_output_text(output: list[Any]) -> str:
 
 
 def _responses_call_slot(item: Any) -> dict[str, Any] | None:
+    # Calls replay from LLMResponse; arguments here only detect edits. Message
+    # slots still retain text to reconstruct provider boundaries and phases.
     call_id = _field(item, "call_id")
     name = _field(item, "name") or ""
     arguments = _field(item, "arguments") or ""
@@ -260,7 +285,7 @@ def _responses_call_slot(item: Any) -> dict[str, Any] | None:
         "type": "function_call",
         "call_id": call_id,
         "name": name,
-        "arguments": arguments,
+        "arguments_sha256": _fingerprint(arguments),
     }
 
 
@@ -272,13 +297,7 @@ def _valid_responses_payload(payload: dict[str, Any]) -> bool:
     order = payload.get("order")
     if not isinstance(items, list) or not isinstance(order, list) or not order:
         return False
-    if any(
-        not isinstance(item, dict)
-        or response_item_type(item) != "reasoning"
-        or not isinstance(item.get("encrypted_content"), str)
-        or not item["encrypted_content"]
-        for item in items
-    ):
+    if not _valid_reasoning_items(items):
         return False
 
     indexes: list[int] = []
@@ -295,9 +314,11 @@ def _valid_responses_payload(payload: dict[str, Any]) -> bool:
                 return False
             indexes.append(index)
         elif slot_type == "function_call":
-            if set(slot) != {"type", "call_id", "name", "arguments"}:
+            if set(slot) != {"type", "call_id", "name", "arguments_sha256"}:
                 return False
-            if not all(isinstance(slot.get(key), str) for key in ("call_id", "name", "arguments")):
+            if not all(isinstance(slot.get(key), str) for key in ("call_id", "name")):
+                return False
+            if not _valid_fingerprint(slot.get("arguments_sha256")):
                 return False
             carriers.append(slot)
         elif slot_type == "message":

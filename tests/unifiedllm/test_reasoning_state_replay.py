@@ -501,7 +501,7 @@ def test_reasoning_only_carrier_edit_drops_state_but_keeps_text() -> None:
 def test_malformed_matching_responses_payload_is_not_forwarded(caplog) -> None:
     scope = replay_scope("openai/gpt-5.6", "responses", {})
     state = {
-        "version": 1,
+        "version": 2,
         "scope": scope,
         "format": "openai-responses",
         "payload": {
@@ -785,16 +785,8 @@ def test_chat_state_is_captured_replayed_and_api_style_scoped() -> None:
 
         assert first.llm_state is not None
         assert first.llm_state["format"] == "litellm-chat"
-        assert first.llm_state["payload"]["carrier"] == {
-            "content": None,
-            "tool_calls": [
-                {
-                    "id": "call_1",
-                    "name": "execute_python",
-                    "arguments": '{"code":"print(1)"}',
-                }
-            ],
-        }
+        assert len(first.llm_state["payload"]["carrier"]) == 64
+        assert "print(1)" not in json.dumps(first.llm_state)
         assistant = next(
             item for item in call.call_args_list[1].kwargs["messages"] if item.get("tool_calls")
         )
@@ -897,7 +889,7 @@ def test_chat_state_only_carrier_is_bound_to_its_empty_turn() -> None:
             first = client.call([{"role": "user", "content": "think"}])
 
         assert first.llm_state is not None
-        assert first.llm_state["payload"]["carrier"] == {"content": "", "tool_calls": []}
+        assert len(first.llm_state["payload"]["carrier"]) == 64
         assert first.llm_state["payload"]["state_only"] is True
         rendered = _render_chat(first)
         exact = prepare_chat_messages(rendered, first.llm_state["scope"])
@@ -1035,7 +1027,7 @@ def test_non_openai_chat_provider_cannot_receive_reasoning_state(model: str) -> 
     assert replay_scope(model, "chat", {"api_key": "account-a"}) is None
     client = CompletionClient(model=model, api_key="account-a")
     crafted = {
-        "version": 1,
+        "version": 2,
         "scope": f"chat:{model.split('/', 1)[0]}:crafted",
         "format": "litellm-chat",
         "payload": {"reasoning_items": [REASONING]},
