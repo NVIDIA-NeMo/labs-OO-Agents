@@ -277,7 +277,11 @@ async def test_reasoning_and_prompt_cache_survive_sqlite_resume(family, tmp_path
         "native replay string missing on wire"
     )
     assert seed.parts == saved_response.parts, "request construction mutated the archive"
-    assert warm.finish_reason == resumed.finish_reason == "stop"
+    # Cache reuse does not make sampling deterministic. Either a final answer
+    # or another valid tool turn is successful; truncation/errors are not.
+    for response in (warm, resumed):
+        assert response.finish_reason in {"stop", "tool_calls"}
+        assert bool(response.tool_calls) is (response.finish_reason == "tool_calls")
     assert resumed.usage is not None
     print(
         json.dumps(
