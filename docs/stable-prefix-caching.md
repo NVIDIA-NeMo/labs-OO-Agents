@@ -82,31 +82,31 @@ role or position.
 
 ## Evidence and limits
 
-The earlier dictionary/lookup prototype used NVIDIA Inference Hub on 2026-09-11;
-these results predate the object-in-list rebase and are not a fresh test of it. After SQLite
-resume and a changed trailing context block, reported cache hits were
-6,136/6,160 input tokens for GPT-5.6 Sol, 10,775/10,805 for Claude Sonnet 5, and
-24,491/24,677 for Gemini 3.1 Pro Preview. Gemini's warm request already had cache
-hits, so this is not a controlled cold-cache comparison.
+The object-in-list stack was tested through NVIDIA Inference Hub on 2026-09-11,
+with production code frozen at `e527f9ce`. All three providers have passing live
+checks. SQLite events, native state and the stable HTTP prefix were equal after
+reopen with a fresh client; the trailing live context changed.
 
-OpenAI's `prompt_cache_breakpoint` and `prompt_cache_options` fields were verified
-on that live route, not inferred from the installed SDK schema. Support on
-other routes is not established.
+| Model | Passing test revision | Resumed input tokens | Cached input tokens |
+|---|---|---:|---:|
+| GPT-5.6 Sol | `fef83178` | 6,120 | 6,096 |
+| Claude Sonnet 5 | `fef83178` | 10,858 | 10,828 |
+| Gemini 3.1 Pro Preview | `808ddbfe` | 24,667 | 20,350 |
 
-The extracted branch was rerun at `f6940e58` on 2026-09-11: all three cases passed
-in 51.03 seconds, using nine requests, 84,460 input tokens and 2,465 output tokens
-with retries disabled. SQLite events, native state and the stable HTTP prefix
-were equal after reopen; the trailing live context changed.
+The warm requests reported zero cache-read tokens. OpenAI's
+`prompt_cache_breakpoint` and `prompt_cache_options` fields were verified on the
+serialized HTTP request and accepted by this live route, not inferred from the
+installed SDK schema. Support on other routes is not established. Gemini used
+implicit caching; exact replay does not control how much a provider caches.
 
-| Model | Resumed input tokens | Cached input tokens |
-|---|---:|---:|
-| GPT-5.6 Sol | 6,162 | 6,138 |
-| Claude Sonnet 5 | 10,854 | 10,824 |
-| Gemini 3.1 Pro Preview | 24,667 | 20,350 |
-
-The warm requests reported zero cache-read tokens in this run. Gemini's implicit
-cache reused a smaller portion of the prefix than the earlier prototype run;
-exact replay does not control how much a provider chooses to cache.
+Two test assumptions were corrected during validation: compare durable public
+projections rather than transient SDK response objects after SQLite reopen,
+and accept either a final answer or a valid tool continuation after cache reuse.
+The latter does not guarantee identical sampled output. Gemini initially passed
+the state/wire checks but selected another tool call; its isolated rerun passed
+all assertions after the test correction. No production changes were needed.
+Including these attempts, the round used 14 requests, 140,307 input tokens and
+5,856 output tokens, with retries disabled.
 
 Offline tests:
 
