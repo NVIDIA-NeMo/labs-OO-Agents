@@ -2630,7 +2630,10 @@ class ResponsesClient(UnifiedLLM):
                 )
                 state = None
 
-            msg = copy.deepcopy(dict(original))
+            # Project without copying nested data yet. Replay preparation owns
+            # detachment for state-bearing turns; passthrough branches detach
+            # below, so each public payload is copied only once.
+            msg = dict(original)
             msg.pop(LLM_STATE_KEY, None)
             # Provider state supplied outside a valid NOOA envelope is never
             # accepted, even if a caller constructs wire dictionaries directly.
@@ -2661,7 +2664,7 @@ class ResponsesClient(UnifiedLLM):
                         replay_state.prepare_responses_batch([msg], state, state_scope, reasoning)
                     )
                     continue
-                transformed.append(msg)
+                transformed.append(copy.deepcopy(msg))
                 continue
 
             # Legacy OpenAI format: tool result messages
@@ -2693,7 +2696,7 @@ class ResponsesClient(UnifiedLLM):
                         if isinstance(block, dict) and "cache_control" in block:
                             item["cache_control"] = block["cache_control"]
                             break
-                transformed.append(item)
+                transformed.append(copy.deepcopy(item))
                 continue
 
             # Legacy OpenAI format: assistant messages with tool_calls
@@ -2730,11 +2733,11 @@ class ResponsesClient(UnifiedLLM):
                         replay_state.prepare_responses_batch([item], state, state_scope, reasoning)
                     )
                 else:
-                    transformed.append(item)
+                    transformed.append(copy.deepcopy(item))
                 continue
 
             # Unknown format → passthrough
-            transformed.append(msg)
+            transformed.append(copy.deepcopy(msg))
 
         instructions = "\n\n".join(instructions_parts) if instructions_parts else None
         return transformed, instructions

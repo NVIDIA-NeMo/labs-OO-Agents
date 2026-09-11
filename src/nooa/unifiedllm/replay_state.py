@@ -766,8 +766,15 @@ def prepare_chat_messages(messages: list[dict[str, Any]], scope: str | None) -> 
     for original in messages:
         state = carried_state(original)
         reasoning = carried_reasoning(original)
-        message = copy.deepcopy(dict(original))
+        message = dict(original)
         message.pop(LLM_STATE_KEY, None)
+        if "reasoning_items" in message:
+            logger.warning(
+                "Removed untrusted provider reasoning fields from a public chat message; "
+                "replay opaque state through a persisted LLMResponse instead."
+            )
+            message.pop("reasoning_items")
+        message = copy.deepcopy(message)
         source_scope = (
             state.get("scope")
             if isinstance(state, dict) and state.get("version") == _STATE_VERSION
@@ -828,7 +835,9 @@ def _clean_responses_batch(batch: Any) -> list[dict[str, Any]]:
                 "opaque state through a persisted LLMResponse instead."
             )
             continue
-        item = copy.deepcopy(original)
+        # Strip private sidecars and rejected wire state before detaching public
+        # content. Opaque state is borrowed separately after compatibility checks.
+        item = dict(original)
         item.pop(LLM_STATE_KEY, None)
         if "reasoning_items" in item:
             logger.warning(
@@ -836,7 +845,7 @@ def _clean_responses_batch(batch: Any) -> list[dict[str, Any]]:
                 "opaque state through a persisted LLMResponse instead."
             )
             item.pop("reasoning_items")
-        clean.append(item)
+        clean.append(copy.deepcopy(item))
     return clean
 
 
