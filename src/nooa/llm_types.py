@@ -6,11 +6,12 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping
+from functools import cached_property
 from typing import Annotated, Any, ClassVar, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
-from nooa._immutable_json import NativeJSON
+from nooa._immutable_json import NativeJSON, freeze, json_containers
 from nooa.context_blocks.events import EventBase
 from nooa.context_blocks.roles import Role
 
@@ -343,44 +344,51 @@ class LLMResponse(EventBase):
         public.update(self.public_message())
         return public
 
-    def render_message(self, content=None, tool_calls=None, **public_fields):
+    def render_message(self, content, tool_calls, *, reasoning):
         """Preserve the turn unless rendering changed its public parts."""
-        if content is None and tool_calls is None and not public_fields:
-            return self
-        calls = self.tool_calls if tool_calls is None else tool_calls
-        reasoning = public_fields.get("reasoning", self.reasoning)
         if (
             reasoning == self.reasoning
             and content == self.content
-            and tuple((call.id, call.name, call.arguments) for call in calls)
+            and tuple((call.id, call.name, call.arguments) for call in tool_calls)
             == tuple((call.id, call.name, call.arguments) for call in self.tool_calls)
         ):
             return self
-        return assistant_message(content, tool_calls=calls, reasoning=reasoning)
+        return assistant_message(content, tool_calls=tool_calls, reasoning=reasoning)
+
+    @property
+    def is_replay_turn(self) -> bool:
+        return True
+
+    @cached_property
+    def _public_projection(self):
+        """Cache immutable public values, never mutable caller-owned containers."""
+        return freeze(
+            assistant_message(self.content, tool_calls=self.tool_calls, reasoning=self.reasoning)
+        )
 
     def __getitem__(self, key: str) -> Any:
-        return self.public_message()[key]
+        return json_containers(self._public_projection[key])
 
     def __iter__(self):
-        return iter(self.public_message())
+        return iter(self._public_projection)
 
     def __len__(self) -> int:
-        return len(self.public_message())
+        return len(self._public_projection)
 
     def get(self, key: str, default: Any = None) -> Any:
-        return self.public_message().get(key, default)
+        return self[key] if key in self._public_projection else default
 
     def keys(self):
-        return self.public_message().keys()
+        return self._public_projection.keys()
 
     def items(self):
-        return self.public_message().items()
+        return Mapping.items(self)
 
     def values(self):
-        return self.public_message().values()
+        return Mapping.values(self)
 
     def __contains__(self, key: object) -> bool:
-        return key in self.public_message()
+        return key in self._public_projection
 
     def __setitem__(self, key, value):
         raise TypeError(
@@ -428,7 +436,10 @@ class LLMResponse(EventBase):
                 "raw_response": None,
                 "parsed": None,
             }
-        return super().model_copy(update=update, deep=deep)
+        result = super().model_copy(update=update, deep=deep)
+        if update and "parts" in update:
+            result.__dict__.pop("_public_projection", None)
+        return result
 
     def replace_text(self, text: str) -> LLMResponse:
         """Replace flattened visible text, retaining portable calls/reasoning."""
@@ -438,7 +449,7 @@ class LLMResponse(EventBase):
 
     def public_message(self) -> dict[str, Any]:
         """On-demand, non-replay projection for relay, tracing, and token counting."""
-        return assistant_message(self.content, tool_calls=self.tool_calls, reasoning=self.reasoning)
+        return json_containers(self._public_projection)
 
     @property
     def replay_content(self) -> str:

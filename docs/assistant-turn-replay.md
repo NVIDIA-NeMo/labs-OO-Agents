@@ -13,9 +13,10 @@ and grouping that the provider returned. Reconstructing it later requires extra
 bookkeeping. Signed thinking, encrypted reasoning, and thought signatures also
 must not be attached to edited public content or sent to an incompatible model.
 
-The ordered response remains the authority. Wire messages are generated at
+The ordered response is the stored record. Wire messages are generated at
 dispatch, using native extensions only for a response object whose destination
-scope matches. Replacing the response with a dictionary discards native state. This preserves supported provider message order,
+scope matches. Replacing the response with a dictionary discards native state.
+This preserves supported provider message order,
 boundaries, and fields rather than reconstructing them from separate carriers.
 Stable replay is necessary for prompt-cache reuse; it does not guarantee a cache
 hit or select a provider cache policy.
@@ -40,13 +41,19 @@ its JSON round trip; that cost is local to the integration, not every dispatch.
   Nested projected containers are detached; changing them alone does not edit
   the response.
 - Middleware can replace any list element with an ordinary dictionary. That
-  replacement is portable and has no native authority. Assignment into the
+  replacement is sent without native state. Assignment into the
   response raises a helpful error explaining this edit contract.
 - The renderer retains the original object when text and calls are unchanged;
   truncation or omitted calls produce a portable dictionary instead.
 - The relay receives only public JSON. Unchanged entries at the same index regain
   their original response objects on return. Insertions/deletions conservatively
   demote shifted entries; they never associate native state by fuzzy matching.
+- Repeated mapping reads share one cached immutable public view. Returned
+  dictionaries get their own mutable containers; edits cannot alter that cache.
+  Copies with changed parts start with an empty cache.
+- The standalone Anthropic formatter exports portable Anthropic-shaped JSON
+  (`tool_use`/`tool_result`), without framework cache markers or native state.
+  UnifiedLLM clients handle native replay using the standard message history.
 
 For direct callers:
 
@@ -77,7 +84,9 @@ OpenAI encrypted reasoning, Anthropic signed/redacted thinking, and Gemini
 signatures stay with their owning parts. Plain reasoning is retained as readable
 text and can be sent to another model without the source's native extensions.
 Unknown capture routes warn and keep portable text while dropping opaque state.
-Malformed recognized state raises; it is not silently treated as a successful
+Raw provider fields in input dictionaries raise with instructions to pass an
+`LLMResponse` instead; both clients enforce that rule. Malformed recognized
+state raises; it is not silently treated as a successful
 capture. Empty public tool IDs are accepted where no retained native state needs
 binding; nonempty duplicate IDs and ambiguous native bindings raise.
 
@@ -98,8 +107,9 @@ nested `ToolResult`, but the originating `LLMResponse` is a separate event.
 Splitting that linked batch is not rejected or automatically expanded today.
 The formatter omits incomplete batches: missing results warn; results whose
 source turn is absent are omitted. Independent user-role `PythonOutput` events
-are unaffected by this pairing rule. Protocol-safe omission is not atomic
-collapse. Changing that policy is a separate decision.
+are unaffected by this pairing rule. Omitting a split batch from a request does
+not archive both halves together. Changing collapse's range selection remains
+a separate decision.
 
 ## Observability
 
@@ -117,7 +127,7 @@ absence of reasoning, and a zero cost estimate does not prove free inference.
    and project them at the provider boundary. Provider-specific fields stay here
    rather than spreading into strategy and UI code.
 3. `unifiedllm/replay_state.py`: resolves scope and validates provider variations.
-   It grants no authority to opaque fields supplied in ordinary wire dictionaries.
+   It rejects opaque fields supplied in ordinary wire dictionaries.
 4. `unifiedllm/unifiedllm.py`: projects response objects for the effective model.
    All clients, including the reasoning wrapper and fake, accept the same history
    shape. Runtime lookup building and per-dispatch public equality are deleted.
@@ -133,7 +143,7 @@ absence of reasoning, and a zero cost estimate does not prove free inference.
    tracing. Identity assertions detect accidental conversion to dictionaries;
    replacement tests verify that edits discard native state.
 
-Live evidence from the preceding prototype included all three closed providers
+Prototype evidence (before the object-in-list interface): live tests included all three closed providers
 with SQLite resume and changing trailing context; all six directed opaque-state
 exclusion checks; and real Nemotron, Qwen, and DeepSeek reasoning transferred to
 OpenAI, Anthropic, and Gemini. Those runs used 30 requests, 95,055 input tokens,

@@ -129,7 +129,7 @@ async def test_collapse_keeps_only_complete_active_native_turns(
     method_token = _current_method_var.set(type(agent).respond)
     try:
         await agent.runtime.generate()
-        assert agent.events[summary_tag].render_message() is None
+        assert not agent.events[summary_tag].is_replay_turn
         # Collapse archives, rather than destroys, the original record.
         assert "native-secret-1" in agent.events[first_tag].model_dump_json()
     finally:

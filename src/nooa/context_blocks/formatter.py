@@ -114,7 +114,7 @@ class BlockFormatter(ABC):
         No OOM-safety cap is applied here — that belongs to L2 (stdout/stderr
         capture).
         """
-        if event.render_message() is not None:
+        if event.is_replay_turn:
             return event.replay_content
         if getattr(event, "_role", None) is Role.ASSISTANT:
             content = getattr(event, "content", None)
@@ -236,7 +236,7 @@ def _event_block_to_messages(
     """
     from nooa.context_blocks.models import BlockPart
 
-    if block.event is not None and block.event.render_message() is not None:
+    if block.event is not None and block.event.is_replay_turn:
         event = block.event
         if event.is_empty:
             return []
@@ -303,9 +303,7 @@ def _event_blocks_to_messages(
     replayable_turn_ids = {
         block.event.id
         for block in blocks
-        if block.event is not None
-        and block.event.render_message() is not None
-        and block.event.replay_tool_calls
+        if block.event is not None and block.event.is_replay_turn and block.event.replay_tool_calls
     }
     executions: dict[str, dict[str, ToolCallEvent]] = {}
     for block in blocks:
@@ -320,7 +318,7 @@ def _event_blocks_to_messages(
     messages: list[RenderedMessage] = []
     for block in blocks:
         event = block.event
-        if event is not None and event.render_message() is not None and event.replay_tool_calls:
+        if event is not None and event.is_replay_turn and event.replay_tool_calls:
             by_call_id = executions.get(event.id, {})
             if any(
                 call.id not in by_call_id or by_call_id[call.id].result is None
@@ -575,7 +573,7 @@ class OpenAIProviderFormatter(ProviderFormatter):
 
 
 class AnthropicProviderFormatter(ProviderFormatter):
-    """Emit Anthropic-native messages (``{"system": str, "messages": list[dict]}``)."""
+    """Export portable Anthropic-native messages, without private replay or cache metadata."""
 
     def format(self, messages: list[RenderedMessage]) -> dict:
         system_parts: list[str] = []
@@ -586,14 +584,14 @@ class AnthropicProviderFormatter(ProviderFormatter):
                     system_parts.append(msg.content)
                 continue
 
-            start = len(out)
-            if msg.replay_message is not None:
-                out.append(
-                    msg.replay_message.render_message(
-                        msg.content, msg.tool_calls, reasoning=msg.reasoning
-                    )
+            if msg.role is Role.ASSISTANT and msg.reasoning:
+                msg = msg.model_copy(
+                    update={
+                        "content": msg.reasoning + ("\n\n" + msg.content if msg.content else ""),
+                        "reasoning": None,
+                    }
                 )
-            elif msg.tool_calls:
+            if msg.tool_calls:
                 content: list[dict[str, Any]] = []
                 if msg.content:
                     content.append({"type": "text", "text": msg.content})
@@ -644,7 +642,6 @@ class AnthropicProviderFormatter(ProviderFormatter):
                         msg.reasoning,
                     )
                 )
-            _carry_cache_boundary(out, start, msg)
 
         return {"system": "\n\n".join(system_parts), "messages": out}
 

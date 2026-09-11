@@ -192,4 +192,4 @@ def test_signed_reasoning_only_turn_survives():
     turn = LLMResponse(parts=capture_chat_parts(source, scope), replay_scope=scope)
     projected = prepare_chat_messages([turn], scope)
     assert projected[0]["thinking_blocks"] == source["thinking_blocks"]
-    assert projected[0]["content"] is None
+    assert projected[0]["content"] == ""

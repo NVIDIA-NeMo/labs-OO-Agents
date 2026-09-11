@@ -7,9 +7,9 @@ from typing import Any
 
 import pytest
 
-from nooa._llm_state import LLM_STATE_KEY
 from nooa.llm_types import AssistantReasoning, AssistantText, LLMResponse, ToolCall
 from nooa.unifiedllm import ResponsesClient
+from nooa.unifiedllm._message_utils import LLM_STATE_KEY
 from nooa.unifiedllm.chat_parts import project_chat_turn
 from nooa.unifiedllm.replay_state import ReasoningReplayError, prepare_chat_messages
 from nooa.unifiedllm.response_parts import project_turn
@@ -72,13 +72,8 @@ def test_rejected_raw_state_is_not_copied(api, key):
                 else client._transform_messages([message])[0]
             )
 
-        if (api == "chat" and key == LLM_STATE_KEY) or (
-            api == "responses" and key == "reasoning_items"
-        ):
-            with pytest.raises(ReasoningReplayError):
-                prepare()
-        else:
-            assert prepare() == [{"role": "assistant", "content": "hello"}]
+        with pytest.raises(ReasoningReplayError):
+            prepare()
     assert key in message
 
 

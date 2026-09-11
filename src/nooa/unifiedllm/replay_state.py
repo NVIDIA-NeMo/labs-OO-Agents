@@ -1,10 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Compatibility-scoped capture and replay of closed-provider reasoning state.
+"""Resolve provider scope, validate wire input, and prepare Chat messages.
 
-The event IR treats provider state as an opaque dictionary. This module is the
-compatibility and validation boundary shared by the native part adapters. Expected incompatibility warns and demotes portable text; malformed
-current state raises instead of silently hiding a framework or provider change.
+Native part adapters own capture and projection. Incompatible turns replay
+portable text; malformed current state raises rather than silently hiding errors.
 """
 
 from __future__ import annotations
@@ -18,12 +17,12 @@ from urllib.parse import urlsplit
 
 import litellm
 
-from nooa._llm_state import (
+from nooa.llm_types import LLMResponse
+from nooa.unifiedllm._message_utils import (
     LLM_STATE_KEY,
     carried_cache_boundary,
     demote_reasoning_text,
 )
-from nooa.llm_types import LLMResponse
 
 logger = logging.getLogger(__name__)
 
@@ -219,78 +218,34 @@ def responses_output_text(output: list[Any]) -> str:
     )
 
 
-def _strip_inline_signature(value: Any) -> Any:
-    if isinstance(value, str) and _INLINE_THOUGHT_SIGNATURE_SEPARATOR in value:
-        return value.split(_INLINE_THOUGHT_SIGNATURE_SEPARATOR, 1)[0]
-    return value
-
-
-def _strip_chat_state(
-    message: dict[str, Any], source_scope: str | None, target_scope: str | None
-) -> dict[str, str]:
-    public_call_ids: dict[str, str] = {}
-    removed = False
-    gemini_wire = "gemini" in {
-        _scope_provider(source_scope),
-        _scope_provider(target_scope),
-    }
-    for key in ("reasoning_items", "thinking_blocks", "provider_specific_fields"):
-        removed = key in message or removed
-        message.pop(key, None)
+def reject_native_message(message: dict[str, Any], scope: str | None) -> None:
+    """Raw dictionaries are portable input, not a provider-state replay API."""
+    private_keys = {LLM_STATE_KEY, "reasoning_items", "thinking_blocks", "provider_specific_fields"}
+    nodes = [message]
     content = message.get("content")
     if isinstance(content, list):
-        public_blocks = [
-            block
-            for block in content
-            if not (
-                isinstance(block, dict) and block.get("type") in {"thinking", "redacted_thinking"}
+        nodes.extend(block for block in content if isinstance(block, dict))
+    for call in message.get("tool_calls") or []:
+        nodes.append(call)
+        nodes.append(call.get("function", {}))
+    for node in nodes:
+        if private_keys.intersection(node) or node.get("type") in {
+            "reasoning",
+            "thinking",
+            "redacted_thinking",
+        }:
+            raise ReasoningReplayError(
+                "Opaque provider fields require a canonical LLMResponse, not a wire dict."
             )
-        ]
-        removed = len(public_blocks) != len(content) or removed
-        message["content"] = public_blocks
-    tool_calls = message.get("tool_calls")
-    if isinstance(tool_calls, list):
-        # Detach the containers we edit, not their potentially large native
-        # leaves. Rejected state is removed before any public-input deep copy.
-        tool_calls = [dict(call) if isinstance(call, dict) else call for call in tool_calls]
-        message["tool_calls"] = tool_calls
-        for call in tool_calls:
-            if not isinstance(call, dict):
-                continue
-            call_id = call.get("id")
-            fields = call.get("provider_specific_fields")
-            explicit_signature = (
-                fields.get("thought_signature") if isinstance(fields, dict) else None
+    if _scope_provider(scope) == "gemini":
+        ids = [message.get("tool_call_id")]
+        ids.extend(call.get("id") for call in message.get("tool_calls") or [])
+        if any(
+            isinstance(value, str) and _INLINE_THOUGHT_SIGNATURE_SEPARATOR in value for value in ids
+        ):
+            raise ReasoningReplayError(
+                "Inline thought signatures require an LLMResponse, not a wire dict."
             )
-            inline_candidate = (
-                call_id.split(_INLINE_THOUGHT_SIGNATURE_SEPARATOR, 1)[1]
-                if isinstance(call_id, str) and _INLINE_THOUGHT_SIGNATURE_SEPARATOR in call_id
-                else None
-            )
-            if gemini_wire or (inline_candidate and inline_candidate == explicit_signature):
-                public_id = _strip_inline_signature(call_id)
-                removed = public_id != call_id or removed
-                if isinstance(call_id, str) and public_id != call_id:
-                    public_call_ids[call_id] = public_id
-                call["id"] = public_id
-            removed = "provider_specific_fields" in call or removed
-            call.pop("provider_specific_fields", None)
-            function = call.get("function")
-            if isinstance(function, dict):
-                function = dict(function)
-                call["function"] = function
-                removed = "provider_specific_fields" in function or removed
-                function.pop("provider_specific_fields", None)
-    if gemini_wire and "tool_call_id" in message:
-        public_id = _strip_inline_signature(message["tool_call_id"])
-        removed = public_id != message["tool_call_id"] or removed
-        message["tool_call_id"] = public_id
-    if removed:
-        logger.warning(
-            "Removed untrusted provider reasoning fields from a public chat message; "
-            "replay opaque state through a persisted LLMResponse instead."
-        )
-    return public_call_ids
 
 
 def responses_reasoning_text(output: list[Any]) -> str | None:
@@ -320,7 +275,6 @@ def prepare_chat_messages(
     from .chat_parts import project_chat_turn
 
     prepared: list[dict[str, Any]] = []
-    public_call_ids: dict[str, str] = {}
     private_call_ids: dict[str, str] = {}
     for original in messages:
         if isinstance(original, LLMResponse):
@@ -339,16 +293,11 @@ def prepare_chat_messages(
         boundary = carried_cache_boundary(original)
         message = dict(original)
         message.pop("nooa_cache_boundary", None)
-        if message.pop(LLM_STATE_KEY, None) is not None:
-            raise ReasoningReplayError(
-                "Opaque wire sidecars are removed; pass an LLMResponse turn."
-            )
-        public_call_ids.update(_strip_chat_state(message, None, scope))
+        reject_native_message(message, scope)
         message = copy.deepcopy(message)
         demote_reasoning_text(message, message.pop("reasoning_content", None))
         call_id = message.get("tool_call_id")
         if isinstance(call_id, str):
-            call_id = public_call_ids.get(call_id, call_id)
             message["tool_call_id"] = private_call_ids.get(call_id, call_id)
         prepared.append({**message, "nooa_cache_boundary": True} if boundary else message)
     return prepared

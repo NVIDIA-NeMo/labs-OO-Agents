@@ -215,7 +215,7 @@ def test_safe_msg_to_dict_redacts_json_encoded_opaque_state():
 
 @pytest.mark.parametrize("json_encoded", [False, True])
 def test_safe_msg_to_dict_redacts_private_replay_envelope(json_encoded):
-    from nooa._llm_state import LLM_STATE_KEY
+    from nooa.unifiedllm._message_utils import LLM_STATE_KEY
 
     message = {LLM_STATE_KEY: {"payload": {"future_provider_blob": "opaque-state"}}}
     original = {"content": json.dumps(message)} if json_encoded else message

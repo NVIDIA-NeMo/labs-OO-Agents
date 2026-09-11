@@ -104,9 +104,14 @@ class EventBase(BaseModel):
         """Public fields for search/debug export; consumers need not know their layout."""
         return self.model_dump()
 
-    def render_message(self, content=None, tool_calls=None, **public_fields):
+    def render_message(self, content, tool_calls, *, reasoning):
         """Optional ready-to-replay message; generic events use normal formatting."""
         return None
+
+    @property
+    def is_replay_turn(self) -> bool:
+        """Whether the event supplies a complete model turn for replay."""
+        return False
 
     @property
     def replay_tool_calls(self) -> tuple:

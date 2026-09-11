@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Small provider-neutral helpers for public message dictionaries."""
+"""Provider-neutral dictionary helpers used only at the UnifiedLLM boundary."""
 
 from __future__ import annotations
 

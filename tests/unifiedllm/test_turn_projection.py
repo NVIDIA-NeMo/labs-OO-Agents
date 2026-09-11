@@ -417,7 +417,7 @@ def test_unknown_route_cannot_capture_encrypted_state():
 
 
 def test_boundary_beside_turn_preserves_reference_and_state():
-    from nooa._llm_state import carried_cache_boundary
+    from nooa.unifiedllm._message_utils import carried_cache_boundary
 
     original = turn()
     rendered = ResponsesProviderFormatter().format(

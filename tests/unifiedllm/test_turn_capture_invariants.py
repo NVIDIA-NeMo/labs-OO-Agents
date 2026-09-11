@@ -23,7 +23,7 @@ INVALID_ITEMS = [
 ]
 
 
-@pytest.mark.parametrize("invalid", INVALID_ITEMS)
+@pytest.mark.parametrize("invalid", INVALID_ITEMS[:-1])
 def test_chat_capture_rejects_malformed_reasoning_items(invalid, caplog):
     with pytest.raises(ReasoningReplayError) as error:
         capture_chat_parts(

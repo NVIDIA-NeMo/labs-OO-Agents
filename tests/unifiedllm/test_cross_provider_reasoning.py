@@ -124,7 +124,7 @@ def _render(response: LLMResponse, *, responses: bool = False) -> list[dict]:
     return formatter.format(neutral)
 
 
-def test_public_thinking_content_blocks_are_stripped(caplog: pytest.LogCaptureFixture) -> None:
+def test_public_thinking_content_blocks_require_a_response(caplog: pytest.LogCaptureFixture) -> None:
     messages = [
         {
             "role": "assistant",
@@ -136,15 +136,13 @@ def test_public_thinking_content_blocks_are_stripped(caplog: pytest.LogCaptureFi
         }
     ]
 
-    prepared = prepare_chat_messages(messages, None)
-    assert prepared == [{"role": "assistant", "content": [{"type": "text", "text": "public"}]}]
-    assert "secret-a" not in repr(prepared)
-    assert "secret-b" not in repr(prepared)
-    assert "Removed untrusted provider reasoning fields" in caplog.text
+    with pytest.raises(ReasoningReplayError, match="LLMResponse") as error:
+        prepare_chat_messages(messages, None)
+    assert "secret-a" not in str(error.value) + caplog.text
 
 
 @pytest.mark.parametrize("target_model", [None, "openai/gpt-4o"])
-def test_public_inline_signature_is_stripped_when_private_field_confirms_it(
+def test_public_inline_signature_requires_a_response(
     target_model: str | None,
 ) -> None:
     raw_id = f"call_1__thought__{GEMINI_SIGNATURE}"
@@ -158,13 +156,9 @@ def test_public_inline_signature_is_stripped_when_private_field_confirms_it(
     ]
 
     scope = replay_scope(target_model, "chat", {}) if target_model else None
-    prepared = prepare_chat_messages(messages, scope)
-    assert prepared[0]["tool_calls"][0]["id"] == "call_1"
-    assert "provider_specific_fields" not in prepared[0]["tool_calls"][0]
-    assert prepared[1]["tool_call_id"] == "call_1"
-    assert GEMINI_SIGNATURE not in json.dumps(prepared)
+    with pytest.raises(ReasoningReplayError, match="LLMResponse"):
+        prepare_chat_messages(messages, scope)
     assert messages[0]["tool_calls"][0]["id"] == raw_id
-    assert messages[1]["tool_call_id"] == raw_id
 
 
 def test_direct_gemini_inline_signatures_cannot_bypass_the_envelope() -> None:
@@ -178,10 +172,8 @@ def test_direct_gemini_inline_signatures_cannot_bypass_the_envelope() -> None:
         {"role": "tool", "tool_call_id": raw_id, "content": "complete"},
     ]
 
-    prepared = prepare_chat_messages(messages, replay_scope("gemini/gemini-2.5-pro", "chat", {}))
-    assert prepared[0]["tool_calls"][0]["id"] == "call_1"
-    assert prepared[1]["tool_call_id"] == "call_1"
-    assert GEMINI_SIGNATURE not in json.dumps(prepared)
+    with pytest.raises(ReasoningReplayError, match="LLMResponse"):
+        prepare_chat_messages(messages, replay_scope("gemini/gemini-2.5-pro", "chat", {}))
 
 
 def test_missing_thought_signature_is_normal_but_malformed_signature_fails(

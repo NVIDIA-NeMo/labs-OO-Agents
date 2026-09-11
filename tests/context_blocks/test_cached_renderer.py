@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the cached renderer (static-prefix / events / dynamic-suffix)."""
 
-from nooa._llm_state import LLM_STATE_KEY
 from nooa.context_blocks.events import (
     AssistantEvent,
     ToolCallEvent,
@@ -17,6 +16,7 @@ from nooa.context_blocks.models import BlockMetadata, DynamicContext, ResolvedBl
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 from nooa.events import LLMResponse
+from nooa.unifiedllm._message_utils import LLM_STATE_KEY
 
 
 def _static_block(key: str, content: str, expr: str | None = None) -> ResolvedBlock:
@@ -325,7 +325,7 @@ class TestCachedRendererEndToEndAnthropic:
         assert isinstance(result, dict)
         assert "system" in result and "messages" in result
         assert "<sys>" in result["system"]
-        assert len(result["messages"]) == 2
-        assert result["messages"][0] == {"nooa_cache_boundary": True}
+        assert len(result["messages"]) == 1
+        assert "nooa_cache_boundary" not in str(result)
         assert result["messages"][-1]["role"] == "user"
         assert "<context>" in result["messages"][-1]["content"]

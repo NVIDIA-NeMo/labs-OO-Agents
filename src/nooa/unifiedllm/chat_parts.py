@@ -27,6 +27,7 @@ from .response_parts import _capture_summary, _require_encrypted_reasoning, _res
 def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, ...]:
     provider = _scope_provider(scope)
     parts: list[AssistantPart] = []
+    portable_only = False
     for field in ("thinking_blocks", "reasoning_items"):
         blocks = _field(message, field)
         if blocks is None:
@@ -62,8 +63,16 @@ def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, 
                 else:
                     raise ReasoningReplayError(f"Unsupported thinking block {kind!r}.")
             else:
-                _require_encrypted_reasoning(native)
+                if kind != "reasoning":
+                    raise ReasoningReplayError(f"Unsupported reasoning item {kind!r}.")
+                if native.get("encrypted_content") is not None:
+                    _require_encrypted_reasoning(native)
+                else:
+                    portable_only = True
                 text = _capture_summary(native)
+                if native.get("encrypted_content") is None:
+                    parts.append(AssistantReasoning(text=text))
+                    continue
             parts.append(AssistantReasoning(text=text, native={field: native}))
 
     reasoning = _field(message, "reasoning") or _field(message, "reasoning_content")
@@ -96,8 +105,6 @@ def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, 
     content = _field(message, "content")
     if content is not None and not isinstance(content, str):
         raise ReasoningReplayError("Chat assistant content must be a string or null.")
-    if content is None and scope is not None:
-        native_text["content_is_null"] = True
     parts.append(AssistantText(text=content or "", native=native_text or None))
 
     calls = _field(message, "tool_calls")
@@ -127,6 +134,10 @@ def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, 
                 native=native,
             )
         )
+    if portable_only:
+        if any(part.native for part in parts):
+            logger.warning("Incomplete native reasoning sequence; replaying the turn portably.")
+        return tuple(part.model_copy(update={"native": None}) for part in parts)
     if scope is None and any(part.native for part in parts):
         logger.warning(
             "Unknown provider route: dropping opaque reasoning state; keeping readable text."
@@ -165,8 +176,6 @@ def project_chat_turn(turn: LLMResponse, scope: str | None) -> tuple[dict, dict[
                 }
             )
         elif isinstance(part, AssistantText):
-            if native.pop("content_is_null", False):
-                message["content"] = None
             message.update(native)
             if part.text:
                 text.append(part.text)
@@ -188,4 +197,6 @@ def project_chat_turn(turn: LLMResponse, scope: str | None) -> tuple[dict, dict[
             text.append(part.text)
     if text:
         message["content"] = "\n\n".join(text)
+    elif message.get("tool_calls"):
+        message["content"] = None
     return message, call_ids

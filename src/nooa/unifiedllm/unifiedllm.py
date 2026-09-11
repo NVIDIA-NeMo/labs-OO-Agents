@@ -18,11 +18,10 @@ from typing import Any, Literal, cast
 import litellm
 from pydantic import BaseModel, RootModel
 
-from nooa._llm_state import (
-    LLM_STATE_KEY,
+from nooa.llm_types import AssistantReasoning, AssistantText, LLMResponse, LLMUsage, ToolCall
+from nooa.unifiedllm._message_utils import (
     carried_cache_boundary,
 )
-from nooa.llm_types import AssistantReasoning, AssistantText, LLMResponse, LLMUsage, ToolCall
 
 from . import replay_state, response_parts
 from .http_config import HttpConfig
@@ -2445,11 +2444,7 @@ class ResponsesClient(UnifiedLLM):
             msg = dict(original)
             if msg.pop("nooa_cache_boundary", False) and not msg:
                 continue
-            msg.pop(LLM_STATE_KEY, None)
-            if "reasoning_items" in msg or msg.get("type") == "reasoning":
-                raise replay_state.ReasoningReplayError(
-                    "Opaque Responses input requires a canonical LLMResponse, not a wire dict."
-                )
+            replay_state.reject_native_message(msg, state_scope)
             if msg.get("role") == "system" and not in_dynamic_suffix:
                 if msg.get("content"):
                     instructions.append(msg["content"])
@@ -2474,14 +2469,9 @@ class ResponsesClient(UnifiedLLM):
                 msg.get("tool_calls") or msg.get("reasoning_content")
             ):
                 # Public direct-call input has no native replay authority.
-                turn = LLMResponse(
-                    content=msg.get("content"),
-                    reasoning=msg.get("reasoning_content"),
-                    tool_calls=[
-                        ToolCall(id=call["id"], **call["function"])
-                        for call in msg.get("tool_calls", [])
-                    ],
-                )
+                from .chat_parts import capture_chat_parts
+
+                turn = LLMResponse(parts=capture_chat_parts(msg, None))
                 transformed.extend(response_parts.project_turn(turn, None))
             else:
                 item = copy.deepcopy(msg)
