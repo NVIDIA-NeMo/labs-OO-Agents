@@ -2,8 +2,10 @@
 
 NOOA uses LiteLLM model strings through `get_llm_client()`, and LiteLLM routes
 `oci/<model>` to [Oracle Cloud Infrastructure (OCI) Generative AI](https://docs.oracle.com/en-us/iaas/Content/generative-ai/home.htm).
-Any model in the OCI Generative AI catalog, and any model you import into a
-dedicated endpoint, can drive a NOOA agent without changing agent code.
+Any chat or text-generation model in the OCI Generative AI catalog, and any such
+model you import into a dedicated endpoint, can drive a NOOA agent without
+changing agent code. NOOA calls LiteLLM's completion interface, so the catalog's
+embedding models are not used here.
 
 ```python
 from nooa.unifiedllm.registry import get_llm_client
@@ -50,9 +52,10 @@ config = oci.config.from_file(profile_name="DEFAULT")
 if "security_token_file" in config:
     with open(os.path.expanduser(config["security_token_file"])) as f:
         token = f.read().strip()
-    signer = oci.auth.signers.SecurityTokenSigner(
-        token, oci.signer.load_private_key_from_file(config["key_file"])
+    private_key = oci.signer.load_private_key_from_file(
+        config["key_file"], pass_phrase=config.get("pass_phrase")
     )
+    signer = oci.auth.signers.SecurityTokenSigner(token, private_key)
 else:
     signer = oci.signer.Signer(
         tenancy=config["tenancy"],
@@ -103,13 +106,21 @@ cluster behind an endpoint. Point LiteLLM at the endpoint:
 
 ```python
 llm = get_llm_client(
-    "oci/my-imported-nemotron",          # any name; the endpoint decides the model
+    "oci/meta.llama-3.3-70b-instruct",   # vendor prefix selects the request format; see below
     oci_serving_mode="DEDICATED",
     oci_endpoint_id="ocid1.generativeaiendpoint.oc1..example",
     oci_region="us-chicago-1",
     oci_compartment_id="ocid1.compartment.oc1..example",
 )
 ```
+
+With `oci_serving_mode="DEDICATED"` and an explicit `oci_endpoint_id`, the
+endpoint decides which weights serve the request, but LiteLLM still uses the
+model string's vendor prefix to choose the OCI request format and parameter
+mapping: `cohere.*` selects the Cohere format, anything else the generic format.
+Nemotron and other Llama-style imports use the generic format, so pass a
+`meta.*` identifier such as the one above; for an imported Cohere model pass a
+`cohere.*` identifier.
 
 **Self-hosted on OKE.** Serve Nemotron with vLLM on Oracle Container Engine for
 Kubernetes and use LiteLLM's `hosted_vllm/` route, exactly as in
@@ -139,8 +150,9 @@ The quickstart examples pick a provider from your environment. When
 | `OCI_CLI_PROFILE` | Signs requests with that `~/.oci/config` profile (API key or session token); needs `uv pip install oci` |
 | `OCI_USER`, `OCI_TENANCY`, `OCI_FINGERPRINT`, `OCI_KEY_FILE` | API-key credentials read by LiteLLM when no profile is given |
 
-With these variables set, every quickstart in `examples/quickstart/` runs on OCI
-Generative AI unchanged.
+With these variables set, and `NVIDIA_API_KEY` unset, every quickstart in
+`examples/quickstart/` runs on OCI Generative AI unchanged. `NVIDIA_API_KEY`
+takes precedence over OCI in the selector.
 
 ## Aliases
 

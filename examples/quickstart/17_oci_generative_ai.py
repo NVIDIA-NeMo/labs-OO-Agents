@@ -5,7 +5,8 @@
 
 NOOA is model-agnostic through litellm, which routes ``oci/<model>`` to OCI
 Generative AI. The quickstart model selector picks OCI when OCI_COMPARTMENT_ID is
-set, so every quickstart in this directory runs on OCI with the same variables:
+set and NVIDIA_API_KEY is unset, so every quickstart in this directory runs on OCI
+with the same variables:
 
   export OCI_COMPARTMENT_ID=ocid1.compartment.oc1..example
   export OCI_REGION=us-chicago-1                 # a region with the service
