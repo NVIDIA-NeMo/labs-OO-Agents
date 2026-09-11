@@ -9,10 +9,12 @@ from threading import Thread
 import httpx
 import pytest
 
-from nooa.unifiedllm.http_logging import _redact_opaque_state, enable_http_request_logging
+from nooa.unifiedllm.http_logging import enable_http_request_logging
 
 
-def test_opaque_reasoning_state_is_redacted_from_http_debug_payloads() -> None:
+def test_opaque_reasoning_state_is_redacted_from_http_debug_payloads(
+    tmp_path, secret_header_server
+) -> None:
     payload = {
         "input": [
             {"encrypted_content": "provider-secret"},
@@ -20,7 +22,12 @@ def test_opaque_reasoning_state_is_redacted_from_http_debug_payloads() -> None:
         ]
     }
 
-    redacted = _redact_opaque_state(payload)
+    disable = enable_http_request_logging(output_dir=tmp_path, verbose=False)
+    try:
+        httpx.post(f"http://127.0.0.1:{secret_header_server.server_port}/llm", json=payload)
+    finally:
+        disable()
+    redacted = json.loads(next(tmp_path.glob("request_*.json")).read_text())
 
     assert redacted["input"] == [
         {"encrypted_content": "[REDACTED]"},

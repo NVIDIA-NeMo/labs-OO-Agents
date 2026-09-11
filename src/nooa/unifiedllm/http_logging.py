@@ -5,22 +5,7 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 
-from nooa._llm_state import LLM_STATE_KEY
 from nooa.tracing._secret_scrubber import REDACTED, _is_sensitive_key, scrub_value
-
-
-def _redact_opaque_state(value):
-    """Remove replay envelopes and encrypted reasoning from debug logs."""
-    if isinstance(value, dict):
-        return {
-            key: REDACTED
-            if key in {LLM_STATE_KEY, "encrypted_content"}
-            else _redact_opaque_state(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_opaque_state(item) for item in value]
-    return value
 
 
 def enable_http_request_logging(
@@ -122,7 +107,7 @@ def enable_http_request_logging(
             # in an OAuth authorization-code exchange.
             if "code" in scrubbed:
                 scrubbed["code"] = REDACTED
-        return _redact_opaque_state(scrubbed)
+        return scrubbed
 
     def _write_jsonl_entry(entry: dict):
         """Append a JSON entry to the JSONL error file."""

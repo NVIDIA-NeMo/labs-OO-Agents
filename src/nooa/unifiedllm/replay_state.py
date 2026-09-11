@@ -408,9 +408,10 @@ def prepare_chat_messages(messages: list[dict[str, Any]], scope: str | None) -> 
     for original in messages:
         state = carried_state(original)
         reasoning = carried_reasoning(original)
-        message = copy.deepcopy(dict(original))
+        message = dict(original)
         message.pop(LLM_STATE_KEY, None)
         message.pop("reasoning_items", None)
+        message = copy.deepcopy(message)
         payload = _matching_payload(state, scope, _CHAT_FORMAT)
         restored = False
         if payload is not None and not _valid_chat_payload(payload):
@@ -448,10 +449,12 @@ def _clean_responses_batch(batch: Any) -> list[dict[str, Any]]:
     for original in batch:
         if not isinstance(original, dict) or response_item_type(original) == "reasoning":
             continue
-        item = copy.deepcopy(original)
+        # Strip private sidecars and rejected wire state before detaching public
+        # content. Opaque state is borrowed separately after compatibility checks.
+        item = dict(original)
         item.pop(LLM_STATE_KEY, None)
         item.pop("reasoning_items", None)
-        clean.append(item)
+        clean.append(copy.deepcopy(item))
     return clean
 
 
