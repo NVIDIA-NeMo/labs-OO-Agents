@@ -113,7 +113,7 @@ class ACPEventBridge:
     def _on_tool_call(self, event: EventBase) -> None:
         if (
             not isinstance(event, ToolCallEvent)
-            or event.name != "execute_python"
+            or event.name not in {"execute_python", "python_cell"}
             or event.metadata.get("prefill") is True
             # codeact manufactures an execute_python call to carry a prose-only
             # reply. Nothing ran, so showing it as a Python card would present

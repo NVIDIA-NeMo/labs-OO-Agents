@@ -51,8 +51,12 @@ from nooa_cli.coding import (
     CodingAgent,
     CodingSlashCommand,
     CodingSlashCommandRegistry,
-    load_coding_skills_dirs,
 )
+from nooa_cli.coding.factory import create_session_agent
+from nooa_cli.interactive.local_turn_policy import LocalTurnPolicy
+from nooa_cli.interactive.memory import configure_tui_memory
+from nooa_cli.interactive.options import SessionOptions, configure_session_skills
+from nooa_cli.interactive.session_paths import session_directory
 from nooa_cli.sessions import (
     InvalidSessionIdError,
     SessionHandle,
@@ -62,7 +66,9 @@ from nooa_cli.sessions import (
 
 from nooa.errors import GenerationError
 from nooa.mcp import MCPManager, MCPTool
+from nooa.sessions import SessionResumed
 from nooa.slash_dispatch import CoercionError
+from nooa.storage.sqlite import SessionAlreadyActiveError
 from nooa.unifiedllm import UnifiedLLM
 from nooa_acp._runtime import (
     SessionBusyError,
@@ -92,6 +98,8 @@ class _ACPSession:
     cancel_complete: asyncio.Event = field(default_factory=asyncio.Event)
     notification_tasks: set[asyncio.Task[None]] = field(default_factory=set)
     commands_sent_on_prompt: bool = False
+    restored: bool = False
+    policy: LocalTurnPolicy | None = None
 
     def __post_init__(self) -> None:
         self.cancel_complete.set()
@@ -102,6 +110,18 @@ class _ACPSession:
         if self.notification_tasks:
             await asyncio.gather(*self.notification_tasks, return_exceptions=True)
         self.notification_tasks.clear()
+        try:
+            try:
+                if self.policy is not None:
+                    await self.policy.shutdown()
+            finally:
+                await self.dispatcher.runtime.cancel_work()
+                self.handle.storage.save_snapshot(self.agent)
+        finally:
+            await self._close_resources()
+
+    async def _close_resources(self) -> None:
+        """Release every resource even if a checkpoint or earlier close fails."""
         try:
             await self.bridge.close()
         finally:
@@ -115,8 +135,14 @@ class _ACPSession:
 
 
 class CodingACPAdapter:
-    def __init__(self, llm_factory: Callable[[], UnifiedLLM]) -> None:
+    def __init__(
+        self,
+        llm_factory: Callable[[], UnifiedLLM],
+        *,
+        options_factory: Callable[[Path], SessionOptions] | None = None,
+    ) -> None:
         self._llm_factory = llm_factory
+        self._options_factory = options_factory or SessionOptions.load
         self._client: Client | None = None
         self._sessions: SessionRuntimePool[_ACPSession] = SessionRuntimePool()
 
@@ -168,11 +194,13 @@ class CodingACPAdapter:
     ) -> NewSessionResponse:
         del kwargs
         root = self._validate_workspace(cwd, additional_directories)
+        options = self._options_factory(root)
         llm = self._llm_factory()
         try:
             handle = self._store(root).create(
                 model=llm.model,
-                agent="CodingAgent",
+                agent=options.agent_spec
+                or ("TUIAgent" if options.legacy_agent else "ExperimentalTUIAgent"),
                 working_directory=str(root),
                 origin="acp",
                 check_same_thread=False,
@@ -181,7 +209,9 @@ class CodingACPAdapter:
             await llm.aclose()
             raise
         try:
-            runtime = await self._create_runtime(handle, root, mcp_servers, llm=llm)
+            runtime = await self._create_runtime(
+                handle, root, mcp_servers, llm=llm, options=options
+            )
         except BaseException:
             handle.close()
             self._store(root).delete(handle.id)
@@ -203,9 +233,15 @@ class CodingACPAdapter:
             handle = self._store(root).open(session_id, check_same_thread=False)
         except (InvalidSessionIdError, SessionNotFoundError):
             raise RequestError.resource_not_found(session_id) from None
+        except SessionAlreadyActiveError as exc:
+            raise RequestError.invalid_request(
+                {"sessionId": session_id, "reason": str(exc)}
+            ) from None
         runtime: SessionRuntime[_ACPSession] | None = None
         try:
-            runtime = await self._create_runtime(handle, root, mcp_servers, available=False)
+            runtime = await self._create_runtime(
+                handle, root, mcp_servers, available=False, restore=True
+            )
             # After the replay, never during it: replay writes straight to the
             # client while the bridge pump drains bootstrap updates, so every
             # await here would otherwise let a commands update or an MCP warning
@@ -268,7 +304,6 @@ class CodingACPAdapter:
         try:
             async with runtime.turn():
                 session = runtime.value
-                session.handle.record_user_message(text)
                 session.cancel_complete.clear()
                 try:
                     if not session.commands_sent_on_prompt:
@@ -280,6 +315,7 @@ class CodingACPAdapter:
                     if slash is None:
                         result = await session.dispatcher.submit(text)
                     else:
+                        session.handle.record_user_message(text)
                         name, raw_args = slash
                         try:
                             submission = await session.dispatcher.invoke_slash(
@@ -373,6 +409,9 @@ class CodingACPAdapter:
         session = runtime.value
         async with session.cancel_lock:
             try:
+                if session.policy is not None:
+                    session.policy.invalidate_keep_going()
+                    await session.policy.interrupt_reflection()
                 if await session.dispatcher.cancel():
                     await session.bridge.fail_open_tools("Cancelled by user.", title="Cancelled")
                     await session.bridge.flush()
@@ -387,6 +426,8 @@ class CodingACPAdapter:
         *,
         llm: UnifiedLLM | None = None,
         available: bool = True,
+        options: SessionOptions | None = None,
+        restore: bool = False,
     ) -> SessionRuntime[_ACPSession]:
         llm = llm or self._llm_factory()
         if self._client is None:
@@ -394,20 +435,27 @@ class CodingACPAdapter:
             raise RequestError.internal_error({"reason": "ACP client is not connected"})
         agent: CodingAgent | None = None
         commands: CodingSlashCommandRegistry | None = None
+        dispatcher: InteractiveSessionDispatcher | None = None
+        bridge: ACPEventBridge | None = None
         value: _ACPSession | None = None
         try:
+            options = options or self._options_factory(root)
             mcp, mcp_warnings = await self._create_mcp_tools(mcp_servers)
-            agent = CodingAgent(
-                llm=llm,
-                cwd=root,
-                storage=handle.storage,
-                # Same anchoring as the session store above: one ACP process
-                # serves many workspaces, so project-local paths follow the
-                # session's workspace rather than the process.
-                libs_dir=root / ".nooa" / "libs",
-                skills_dirs=load_coding_skills_dirs(root),
-            )
-            registration_warnings: list[str] = []
+            agent = create_session_agent(llm=llm, storage=handle.storage, options=options)
+            restored = handle.storage.restore_latest_snapshot(agent) if restore else False
+            agent._session_manager = handle
+            registration_warnings = configure_session_skills(agent, options)
+            try:
+                configure_tui_memory(
+                    agent, options.policy_config(), agent_db=handle.path, session_id=handle.id
+                )
+            except Exception as exc:
+                registration_warnings.append(f"Could not enable memory: {exc}")
+            for name in dict.fromkeys(options.mcp_auto_connect):
+                try:
+                    await agent.mcp.connect([name])
+                except Exception as exc:
+                    registration_warnings.append(f"MCP server {name!r} was not connected: {exc}")
             for name, tool in mcp.items():
                 registry_name = f"mcp.{name}"
                 try:
@@ -421,7 +469,32 @@ class CodingACPAdapter:
                     # instead of failing session/new with an opaque error.
                     registration_warnings.append(f"MCP server {name!r} was not registered: {exc}")
             dispatcher = InteractiveSessionDispatcher(agent)
+            dispatcher.runtime.set_user_message_accepted_callback(handle.record_user_message)
             bridge = ACPEventBridge(agent, self._client, handle.id)
+
+            async def emit_status(status: Any) -> None:
+                # Policy diagnostics are not the agent's answer. Report audit
+                # decisions explicitly; ACP stop reasons represent normal ends.
+                if str(status.kind) == "KEEP_GOING":
+                    bridge.publish(update_agent_message(text_block(status.explanation)))
+
+            policy = LocalTurnPolicy(
+                agent,
+                dispatcher.runtime,
+                options.policy_config(),
+                emit_output=emit_status,
+                invalidate=lambda: None,
+            )
+
+            async def checkpoint(current: Any, result: Any) -> None:
+                await policy.after_handle(current, result)
+                handle.storage.save_snapshot(current)
+
+            dispatcher.runtime.set_dispatch_hooks(
+                on_before_handle=policy.before_handle,
+                on_after_handle=checkpoint,
+                on_notification=policy.on_notification,
+            )
             commands = CodingSlashCommandRegistry(agent)
             value = _ACPSession(
                 handle,
@@ -430,6 +503,8 @@ class CodingACPAdapter:
                 bridge,
                 commands,
                 startup_warnings=(*mcp_warnings, *registration_warnings),
+                restored=restored,
+                policy=policy,
             )
             commands.set_on_change(
                 lambda available: bridge.publish(_available_commands_update(available)),
@@ -445,9 +520,18 @@ class CodingACPAdapter:
             if value is not None:
                 await value.close()
             elif agent is not None:
-                if commands is not None:
-                    commands.close()
-                await agent.close()
+                try:
+                    if bridge is not None:
+                        await bridge.close()
+                finally:
+                    try:
+                        if commands is not None:
+                            commands.close()
+                    finally:
+                        if dispatcher is not None:
+                            await dispatcher.close()
+                        else:
+                            await agent.close()
             else:
                 await llm.aclose()
             raise
@@ -510,6 +594,9 @@ class CodingACPAdapter:
 
         async def _publish() -> None:
             await asyncio.sleep(0)
+            session.agent.event_manager.add(
+                SessionResumed(session_id=session.handle.id, restored=session.restored)
+            )
             session.bridge.publish_best_effort(
                 _available_commands_update(session.commands.commands())
             )
@@ -518,7 +605,7 @@ class CodingACPAdapter:
                 session.bridge.publish_best_effort(
                     update_agent_message(
                         text_block(
-                            "NOOA started without one or more MCP servers. The session is still "
+                            "NOOA started with configuration warnings. The session is still "
                             f"usable.\n\n{details}"
                         )
                     )
@@ -567,7 +654,7 @@ class CodingACPAdapter:
 
     @staticmethod
     def _store(root: Path) -> SessionStore:
-        return SessionStore(root / ".nooa" / "sessions")
+        return SessionStore(session_directory(root))
 
     @staticmethod
     def _prompt_text(prompt: list[Any]) -> str:
@@ -606,8 +693,12 @@ class CodingACPAdapter:
         await self._sessions.close()
 
 
-async def serve(llm_factory: Callable[[], UnifiedLLM]) -> None:
-    adapter = CodingACPAdapter(llm_factory)
+async def serve(
+    llm_factory: Callable[[], UnifiedLLM],
+    *,
+    options_factory: Callable[[Path], SessionOptions] | None = None,
+) -> None:
+    adapter = CodingACPAdapter(llm_factory, options_factory=options_factory)
     try:
         # session/close is registered by the router as unstable. initialize()
         # advertises the close capability, so without this flag the agent

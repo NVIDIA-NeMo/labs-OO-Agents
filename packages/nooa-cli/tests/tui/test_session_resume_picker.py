@@ -21,14 +21,7 @@ from .resume_picker_snapshot import render_resume_picker
 
 
 def test_semantic_preview_selection_removes_user_and_agent_chrome() -> None:
-    rendered_selection = (
-        "▔▔▔▔▔▔▔▔\n"
-        " ❯ hello world   \n"
-        "   continued   \n"
-        "▁▁▁▁▁▁▁▁\n"
-        "OO:\n"
-        "answer text"
-    )
+    rendered_selection = "▔▔▔▔▔▔▔▔\n ❯ hello world   \n   continued   \n▁▁▁▁▁▁▁▁\nOO:\nanswer text"
 
     assert _semantic_preview_selection(rendered_selection) == (
         "hello world\ncontinued\nanswer text"
@@ -159,15 +152,11 @@ async def test_resume_list_fills_its_pane_on_tall_terminals(monkeypatch) -> None
     monkeypatch.setattr(
         sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: sessions)
     )
-    monkeypatch.setattr(
-        sm.SessionManager, "is_active", classmethod(lambda cls, value: False)
-    )
+    monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
     monkeypatch.setattr(
         sm.SessionManager,
         "load_turns",
-        classmethod(
-            lambda cls, value, limit=12: [SimpleNamespace(role="agent", content="x")]
-        ),
+        classmethod(lambda cls, value, limit=12: [SimpleNamespace(role="agent", content="x")]),
     )
 
     from .tui_app_harness import MutableRecordingOutput, TUIHarness
@@ -312,9 +301,7 @@ def test_tab_cycles_only_list_and_preview() -> None:
 def test_resume_picker_shows_copy_status_in_its_footer() -> None:
     app = MagicMock()
     app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
-    picker = ResumePicker(
-        [row("1", "one")], app, selection_status=lambda: "Copied 12 characters"
-    )
+    picker = ResumePicker([row("1", "one")], app, selection_status=lambda: "Copied 12 characters")
 
     assert picker._help_text() == "Copied 12 characters"
 
@@ -503,9 +490,7 @@ def test_query_terms_deduplicate_for_match_counts() -> None:
 
 def test_row_highlights_every_occurrence_of_each_term() -> None:
     """A term appearing twice in the best field highlights both positions."""
-    model = ResumePickerModel(
-        [row("1", "beta first and beta second")]
-    )
+    model = ResumePickerModel([row("1", "beta first and beta second")])
     model.set_query("beta")
 
     match = model.matches[0]
@@ -548,9 +533,7 @@ def test_row_shows_snippet_when_match_is_clipped_or_in_conversation() -> None:
             row(
                 "clipped",
                 "Clipped preview",
-                turns=(
-                    ResumePickerTurn("agent", "a" * 90 + " needle hidden past the clip"),
-                ),
+                turns=(ResumePickerTurn("agent", "a" * 90 + " needle hidden past the clip"),),
             ),
             row(
                 "conversation",
@@ -565,8 +548,7 @@ def test_row_shows_snippet_when_match_is_clipped_or_in_conversation() -> None:
     model.set_query("needle")
 
     fragments = {
-        match.row.id: _row_fragments(match, selected=False, width=120)[0]
-        for match in model.matches
+        match.row.id: _row_fragments(match, selected=False, width=120)[0] for match in model.matches
     }
     joined = {rid: "".join(text for _style, text in frags) for rid, frags in fragments.items()}
 
@@ -932,12 +914,14 @@ async def test_real_prompt_toolkit_preview_drag_survives_redraw_between_packets(
             screen = harness.app._app.renderer.last_rendered_screen
             if screen is None:
                 return None
-            found = None
+            found = []
             for row_index, line in screen.data_buffer.items():
                 chars = "".join(line[column].char for column in sorted(line))
                 if "alpha beta gamma" in chars:
-                    found = row_index
-            return found
+                    found.append(row_index)
+            # A ready model may not have been painted yet. The list's copy
+            # alone is not evidence that the conversation pane is on screen.
+            return found[-1] if len(found) >= 2 else None
 
         await harness.wait_for(lambda: rendered_message_row() is not None, timeout=5.0)
         # SGR coordinates are one-based. Send each packet separately so the
@@ -1209,21 +1193,25 @@ async def test_full_application_selection_marker_moves_down_the_visible_list(mon
         opened = asyncio.create_task(harness.app.open_session_resume_dialog())
         await harness.wait_for(lambda: harness.app._resume_picker is not None)
 
-        def marker_row() -> int:
+        def marker_row() -> int | None:
             screen = harness.app._app.renderer.last_rendered_screen
             return next(
-                y
-                for y in range(24)
-                if "❯" in "".join(screen.data_buffer[y][x].char for x in range(80))
-                and "✓" in "".join(screen.data_buffer[y][x].char for x in range(80))
+                (
+                    y
+                    for y in range(24)
+                    if "❯" in "".join(screen.data_buffer[y][x].char for x in range(80))
+                    and "✓" in "".join(screen.data_buffer[y][x].char for x in range(80))
+                ),
+                None,
             )
 
         await harness.wait_for(lambda: harness.app._app.renderer.last_rendered_screen is not None)
         await harness.wait_for(lambda: harness.app._resume_picker.active_control == "list")
+        await harness.wait_for(lambda: marker_row() is not None)
         before = marker_row()
         await harness.press("down")
         await harness.wait_for(lambda: harness.app._resume_picker.model.selected == 1)
-        await harness.wait_for(lambda: marker_row() > before)
+        await harness.wait_for(lambda: (current := marker_row()) is not None and current > before)
         assert marker_row() == before + 1
         assert harness.app._resume_picker.model.list_offset == 0
         await harness.press("escape")
@@ -1319,7 +1307,6 @@ async def test_full_application_screen_keeps_picker_help_visible(
             assert any("Terminal too small" in line for line in visible)
         await harness.press("escape")
         assert await asyncio.wait_for(opened, 1) is None
-
 
 
 # ---------------------------------------------------------------------------
@@ -1548,7 +1535,6 @@ def test_cancelled_chunked_build_returns_none_at_chunk_boundary(monkeypatch) -> 
     assert len(seen) == 2, f"build did not stop at a chunk boundary: {seen}"
 
 
-
 def test_progressive_preview_reveals_newest_chunk_first_without_scrolling(monkeypatch) -> None:
     """Older chunks prepend above a stable visible tail."""
     import asyncio
@@ -1568,15 +1554,10 @@ def test_progressive_preview_reveals_newest_chunk_first_without_scrolling(monkey
         def on_chunk(transcript) -> None:
             seen_text.append(transcript.text)
             seen_visible.append(
-                "".join(
-                    text
-                    for _style, text in transcript.formatted_text(width=40, height=4)
-                )
+                "".join(text for _style, text in transcript.formatted_text(width=40, height=4))
             )
 
-        transcript = await picker._build_preview_progressively(
-            selected, 40, 4, on_chunk=on_chunk
-        )
+        transcript = await picker._build_preview_progressively(selected, 40, 4, on_chunk=on_chunk)
         assert transcript is not None
 
     asyncio.run(run())
@@ -1585,7 +1566,6 @@ def test_progressive_preview_reveals_newest_chunk_first_without_scrolling(monkey
     assert "turn 0" not in seen_text[0]
     assert seen_text[-1].index("turn 0") < seen_text[-1].index("turn 4")
     assert seen_visible == [seen_visible[0]] * len(seen_visible)
-
 
 
 def test_rapid_a_b_a_keeps_new_preview_task_tracked(monkeypatch) -> None:
@@ -1619,6 +1599,7 @@ def test_rapid_a_b_a_keeps_new_preview_task_tracked(monkeypatch) -> None:
         await asyncio.gather(old_a, new_a, return_exceptions=True)
 
     asyncio.run(run())
+
 
 @pytest.mark.asyncio
 async def test_preview_workers_are_serialized_and_close_drains_them(monkeypatch) -> None:

@@ -25,7 +25,15 @@ if TYPE_CHECKING:
     default=None,
     help="Override the configured NOOA LLM client type.",
 )
-def command(model: str, client_type: str | None) -> None:
+@click.option(
+    "--agent", "agent_spec", help="Shared coding agent class (module:Class or file.py:Class)."
+)
+@click.option(
+    "--legacy-agent", is_flag=True, help="Use the legacy multi-tool agent, as in nooa tui."
+)
+def command(
+    model: str, client_type: str | None, agent_spec: str | None, legacy_agent: bool
+) -> None:
     """Serve the NOOA coding agent over ACP on standard input/output."""
     from nooa.secrets import load_secrets_into_env
     from nooa.unifiedllm import get_llm_client
@@ -38,7 +46,19 @@ def command(model: str, client_type: str | None) -> None:
         overrides = {"api_key": nvidia_api_key} if nvidia_api_key else {}
         return get_llm_client(model, client_type=client_type, **overrides)
 
-    asyncio.run(serve(llm_factory))
+    if agent_spec or legacy_agent:
+        from nooa_cli.interactive.options import SessionOptions
+
+        asyncio.run(
+            serve(
+                llm_factory,
+                options_factory=lambda root: SessionOptions.load(
+                    root, agent_spec=agent_spec, legacy_agent=legacy_agent
+                ),
+            )
+        )
+    else:
+        asyncio.run(serve(llm_factory))
 
 
 def main() -> None:

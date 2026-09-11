@@ -267,6 +267,12 @@ class LocalAgentRunner:
         self._shutdown_error: BaseException | None = None
         self._stop_task: asyncio.Task[None] | None = None
         self._resources_shutdown = False
+        # Foreground request completion is separate from the persistent dispatch
+        # task. ACP/headless await this; native controls keep using admission.
+        self._foreground: ConcurrentFuture[Any] | None = None
+        self._foreground_channel: str | None = None
+        self._foreground_payload: Any = None
+        self._foreground_started = False
         self._lifecycle_lock = threading.RLock()
         self._callback_lock = threading.RLock()
         self._previous_user_on_get = getattr(self._user_messages, "_on_get", None)
@@ -478,11 +484,17 @@ class LocalAgentRunner:
             before = tuple(self._user_messages.snapshot())
             tail = self._user_messages.pop_last()
             if isinstance(tail, str):
-                self._user_messages.put(f"{tail}\n{text}")
+                admitted = f"{tail}\n{text}"
+                self._user_messages.put(admitted)
             else:
                 if tail is not None:
                     self._user_messages.put(tail)
                 self._user_messages.put(text)
+                admitted = text
+            if self._foreground_channel == "user_messages" and (
+                self._foreground_payload is text or self._foreground_payload is tail
+            ):
+                self._foreground_payload = admitted
             pending_inputs = tuple(
                 item for item in self._user_messages.snapshot() if isinstance(item, str)
             )
@@ -508,6 +520,7 @@ class LocalAgentRunner:
     def ensure_dispatcher(self, *, start_with_race: bool = False) -> None:
         if (
             self._lifecycle_state != "active"
+            or self._suspend_restart
             or (self._task is not None and not self._task.done())
             or self._cancel_requested
         ):
@@ -528,6 +541,70 @@ class LocalAgentRunner:
             self._task = asyncio.wrap_future(self._source_future)
         self._task.add_done_callback(self._on_done)
         self._changed()
+
+    async def submit_and_wait(self, text: str) -> Any:
+        """Admit a prompt and await its terminal result without stopping the session.
+
+        A WAIT result keeps the foreground request open. Background notifications
+        continue to be dispatched after a terminal result, just as in the native
+        host. At most one foreground waiter may be admitted at a time.
+        """
+        return await self._submit_and_wait("user_messages", text, lambda: self.submit(text))
+
+    async def submit_slash_and_wait(self, result: Any) -> Any:
+        """Feed a command result to the same engine used for user prompts."""
+        return await self._submit_and_wait(
+            "slash_commands", result, lambda: self.submit_slash_result(result)
+        )
+
+    async def _submit_and_wait(self, channel: str, payload: Any, admit: Callable[[], bool]) -> Any:
+        completion: ConcurrentFuture[Any] = ConcurrentFuture()
+        with self._lifecycle_lock:
+            if self._lifecycle_state != "active":
+                raise RuntimeError("local agent runner is not active")
+            if self._foreground is not None:
+                raise RuntimeError("A prompt is already running")
+            self._foreground = completion
+            self._foreground_channel = channel
+            self._foreground_payload = payload
+            self._foreground_started = False
+        try:
+            if not admit():
+                raise RuntimeError("Agent did not accept the input")
+            return await asyncio.shield(asyncio.wrap_future(completion))
+        except asyncio.CancelledError:
+            await self.cancel_work()
+            raise
+        finally:
+            with self._lifecycle_lock:
+                if self._foreground is completion:
+                    self._foreground = None
+                    self._foreground_channel = None
+                    self._foreground_payload = None
+                    self._foreground_started = False
+
+    def _finish_foreground(self, result: Any = None, *, error: BaseException | None = None) -> None:
+        """Settle an outstanding request on either the worker or host loop."""
+        with self._lifecycle_lock:
+            completion = self._foreground
+            if completion is None or completion.done():
+                return
+            if error is not None:
+                completion.set_exception(error)
+            else:
+                completion.set_result(result)
+
+    async def cancel_work(self) -> None:
+        """Cancel dispatch and producers, flushing admitted work before reuse."""
+        with self._lifecycle_lock:
+            self._suspend_restart += 1
+        try:
+            await self.cancel_turn(force=True, notify=False)
+            await self.shutdown_queue_manager(flush=True)
+            self._finish_foreground()
+        finally:
+            with self._lifecycle_lock:
+                self._suspend_restart -= 1
 
     async def _wait_for_input(self, awaitable: Any) -> Any:
         """Mark the dispatcher idle only while it is blocked for new input."""
@@ -555,6 +632,12 @@ class LocalAgentRunner:
             item = await self._wait_for_input(self._user_messages.get())
             notification = self._drain(qm, [("user_messages", item)])
         while True:
+            with self._lifecycle_lock:
+                if self._foreground_channel == "slash_commands" and any(
+                    value is self._foreground_payload
+                    for value in notification.get("slash_commands", ())
+                ):
+                    self._foreground_started = True
             if self._on_notification is not None:
                 self._on_notification(notification)
             with self._lifecycle_lock:
@@ -585,6 +668,9 @@ class LocalAgentRunner:
                 value = self._on_stop_reason(result.kind, explanation)
                 if value is not None:
                     await value
+            with self._lifecycle_lock:
+                if self._foreground_started and str(result.kind) != "WAIT":
+                    self._finish_foreground(result)
             running_work = getattr(qm, "running_work_handles", None)
             running = running_work() if running_work is not None else qm.running_handles()
             if running:
@@ -649,7 +735,12 @@ class LocalAgentRunner:
             except asyncio.CancelledError:
                 error = None
             if error is not None:
+                self._finish_foreground(error=error)
                 self._present(f"Agent error: {error}\n")
+            else:
+                self._finish_foreground()
+        else:
+            self._finish_foreground(error=asyncio.CancelledError())
         self._changed()
         if self._suspend_restart or self._lifecycle_state != "active":
             return
@@ -706,6 +797,8 @@ class LocalAgentRunner:
                 or not self._bound
             ):
                 return
+            if self._foreground_channel == "user_messages" and text is self._foreground_payload:
+                self._foreground_started = True
             pending = list(self._pending_user_messages)
             try:
                 pending.remove(text)
@@ -725,7 +818,11 @@ class LocalAgentRunner:
         channel = getattr(self._agent, "_slash_commands_in", None)
         if channel is None:
             return False
-        channel.put(result)
+        with self._lifecycle_lock:
+            if self._lifecycle_state != "active":
+                return False
+            channel.put(result)
+            self._marshal_to_ui_owner(lambda: self.ensure_dispatcher(start_with_race=True))
         return True
 
     def seed_and_swap(self, agent: Any, prompt: str) -> Awaitable[None]:
@@ -1244,6 +1341,7 @@ class LocalAgentRunner:
             self._lifecycle_state = "closing"
             self._binding_generation += 1
             self._closed = True
+            self._finish_foreground()
         with self._callback_lock:
             self._restore_callbacks()
         self._close_state()

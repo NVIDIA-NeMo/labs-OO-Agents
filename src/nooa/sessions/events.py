@@ -4,7 +4,7 @@
 
 from typing import Annotated, ClassVar
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 
 from nooa.context_blocks import EventBase, Metadata
 from nooa.context_blocks.roles import Role
@@ -15,10 +15,15 @@ class SessionStarted(Metadata):
 
     _role: ClassVar[Role] = Role.METADATA
 
-    host: str = ""
+    host: str = Field(default="", validation_alias=AliasChoices("host", "origin"))
     model: str = ""
     agent: str = ""
     working_directory: str = ""
+
+    @property
+    def origin(self) -> str:
+        """Compatibility spelling used by early ACP session metadata."""
+        return self.host
 
 
 class SessionTitleUpdated(Metadata):
