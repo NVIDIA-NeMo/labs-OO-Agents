@@ -18,7 +18,6 @@ from nooa.context_blocks.formatter import (
 )
 from nooa.context_blocks.models import (
     BlockMetadata,
-    CacheBoundary,
     RenderedMessage,
     ResolvedBlock,
     Role,
@@ -26,7 +25,7 @@ from nooa.context_blocks.models import (
 from nooa.context_blocks.renderer import RenderResult, render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 from nooa.llm_types import AssistantReasoning, LLMResponse
-from nooa.unifiedllm import CompletionClient, ResponsesClient
+from nooa.unifiedllm import CacheBoundary, CompletionClient, ResponsesClient
 from nooa.unifiedllm.chat_parts import capture_chat_parts
 from nooa.unifiedllm.replay_state import (
     prepare_chat_messages,
@@ -85,13 +84,38 @@ def _responses_output() -> SimpleNamespace:
     )
 
 
-def test_cached_renderer_marks_only_the_dynamic_suffix_in_public_json() -> None:
+def test_cached_renderer_passes_a_typed_boundary_with_a_public_json_view() -> None:
     messages = _render("state-a")
 
-    assert messages[-2] == {"role": "metadata", "nooa_cache_boundary": True}
+    assert messages[-2] == CacheBoundary()
     assert "nooa_cache_boundary" not in messages[-1]
     assert "state-a" in messages[-1]["content"]
-    assert json.loads(json.dumps(messages))[-2] == {"role": "metadata", "nooa_cache_boundary": True}
+    assert json.loads(json.dumps([dict(m) for m in messages]))[-2] == dict(messages[-2])
+
+
+def test_boundary_is_readonly_and_public_projection_is_detached():
+    boundary = CacheBoundary()
+    assert boundary["role"] == "metadata"
+    assert boundary.get("content") is None
+    assert len(boundary) == 2
+    with pytest.raises(TypeError):
+        boundary["role"] = "user"
+    public = boundary.public_message()
+    public["role"] = "user"
+    assert boundary["role"] == "metadata"
+
+
+def test_edited_relay_boundary_is_not_reinterpreted_as_cache_policy():
+    from nooa.nemo_relay_middleware import _reconcile_messages
+
+    boundary = CacheBoundary()
+    public = boundary.public_message()
+    public["nooa_cache_boundary"] = False
+    messages = _reconcile_messages([boundary], [public])
+    assert messages[0] is public
+    with ResponsesClient("openai/gpt-5.6") as client:
+        with pytest.raises(ValueError, match="Pass CacheBoundary"):
+            client._transform_messages(messages)
 
 
 def test_renderer_emits_a_standalone_boundary_before_provider_formatting():
@@ -103,7 +127,8 @@ def test_renderer_emits_a_standalone_boundary_before_provider_formatting():
         Role.USER,
     ]
     boundary = result.messages[-2]
-    assert isinstance(boundary, CacheBoundary)
+    assert isinstance(boundary.replay_message, CacheBoundary)
+    assert result.output[-2] is boundary.replay_message
     assert boundary.content is None
     assert type(result.messages[-1]) is RenderedMessage
     assert "state-a" in result.messages[-1].content
@@ -115,8 +140,9 @@ def test_renderer_emits_a_standalone_boundary_before_provider_formatting():
 @pytest.mark.parametrize("formatter", [OpenAIProviderFormatter, ResponsesProviderFormatter])
 def test_boundary_formats_without_a_following_message(formatter):
     boundary = CacheBoundary()
-    assert formatter().format([boundary]) == [{"role": "metadata", "nooa_cache_boundary": True}]
-    assert AnthropicProviderFormatter().format([boundary]) == {"system": "", "messages": []}
+    block = RenderedMessage(role=Role.METADATA, replay_message=boundary)
+    assert formatter().format([block])[0] is boundary
+    assert AnthropicProviderFormatter().format([block]) == {"system": "", "messages": []}
 
 
 def test_boundary_beside_readonly_response_preserves_identity_and_native_parts():
@@ -125,7 +151,7 @@ def test_boundary_beside_readonly_response_preserves_identity_and_native_parts()
     turn = LLMResponse(parts=capture_parts(items, scope), replay_scope=scope)
     messages = OpenAIProviderFormatter().format(
         [
-            CacheBoundary(),
+            RenderedMessage(role=Role.METADATA, replay_message=CacheBoundary()),
             RenderedMessage(
                 role=Role.ASSISTANT,
                 content=turn.content,
@@ -134,7 +160,7 @@ def test_boundary_beside_readonly_response_preserves_identity_and_native_parts()
             ),
         ]
     )
-    assert messages[0] == {"role": "metadata", "nooa_cache_boundary": True}
+    assert messages[0] == CacheBoundary()
     assert messages[1] is turn
     with ResponsesClient("openai/gpt-5.6", cache_breakpoint="openai") as client:
         projected, instructions = client._transform_messages(messages, scope)
@@ -172,7 +198,7 @@ def test_cache_mapping_must_match_the_client_api_style() -> None:
 def test_dropped_opaque_assistant_preserves_its_cache_boundary() -> None:
     messages = [
         {"role": "user", "content": "stable"},
-        {"role": "metadata", "nooa_cache_boundary": True},
+        CacheBoundary(),
         LLMResponse(
             parts=(
                 AssistantReasoning(
@@ -205,7 +231,7 @@ def test_dynamic_system_messages_remain_after_the_cache_boundary(static_prefix: 
         transformed, instructions = client._transform_messages(
             [
                 *prefix,
-                {"role": "metadata", "nooa_cache_boundary": True},
+                CacheBoundary(),
                 {"role": "system", "content": "live state"},
                 {"role": "system", "content": "more live state"},
             ]
@@ -232,7 +258,7 @@ def test_dynamic_system_messages_remain_after_the_cache_boundary(static_prefix: 
 
 
 def test_boundary_consumption_preserves_ordinary_empty_messages_and_private_state() -> None:
-    boundary = {"role": "metadata", "nooa_cache_boundary": True}
+    boundary = CacheBoundary()
     with ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai") as client:
         messages, _, enabled = client._prepare_cache_boundary(
             [{}, boundary, {"role": "user", "content": "live state"}], responses=True
@@ -246,8 +272,8 @@ def test_boundary_consumption_preserves_ordinary_empty_messages_and_private_stat
 
 def test_multiple_cache_boundaries_fail_loudly() -> None:
     messages: list[dict] = [
-        {"role": "metadata", "nooa_cache_boundary": True},
-        {"role": "metadata", "nooa_cache_boundary": True},
+        CacheBoundary(),
+        CacheBoundary(),
     ]
     with ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai") as client:
         with pytest.raises(ValueError, match="more than one cache boundary"):
@@ -357,7 +383,7 @@ def test_openai_falls_back_to_instructions_behind_ineligible_output() -> None:
                     "role": "assistant",
                     "content": [{"type": "output_text", "text": "stable output"}],
                 },
-                {"role": "metadata", "nooa_cache_boundary": True},
+                CacheBoundary(),
                 {"role": "user", "content": "live state"},
             ],
             responses=True,
@@ -426,7 +452,7 @@ async def test_openai_fields_reach_the_serialized_http_body(stable_prefix: bool)
             _render("state-a")
             if stable_prefix
             else [
-                {"role": "metadata", "nooa_cache_boundary": True},
+                CacheBoundary(),
                 {"role": "user", "content": "changing state"},
             ]
         )
@@ -500,7 +526,7 @@ async def test_anthropic_breakpoint_survives_user_message_coalescing() -> None:
 
 
 def test_openai_skips_assistant_output_and_marks_latest_input() -> None:
-    boundary = {"role": "metadata", "nooa_cache_boundary": True}
+    boundary = CacheBoundary()
     with ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai") as client:
         messages, _, enabled = client._prepare_cache_boundary(
             [
@@ -570,7 +596,7 @@ async def test_anthropic_boundary_skips_assistants_without_public_content(with_t
             [
                 {"role": "user", "content": "stable input"},
                 turn,
-                {"role": "metadata", "nooa_cache_boundary": True},
+                CacheBoundary(),
                 suffix,
             ]
         )
@@ -584,7 +610,7 @@ async def test_anthropic_boundary_skips_assistants_without_public_content(with_t
 
 
 def test_openai_can_mark_a_stable_function_result() -> None:
-    boundary = {"role": "metadata", "nooa_cache_boundary": True}
+    boundary = CacheBoundary()
     with ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai") as client:
         messages, _, enabled = client._prepare_cache_boundary(
             [
@@ -612,7 +638,7 @@ def test_replay_expansion_stays_inside_the_stable_prefix() -> None:
                 {"role": "user", "content": "run it"},
                 turn,
                 {"type": "function_call_output", "call_id": "c1", "output": "done"},
-                {"role": "metadata", "nooa_cache_boundary": True},
+                CacheBoundary(),
                 {"role": "user", "content": "live state"},
             ],
             scope,

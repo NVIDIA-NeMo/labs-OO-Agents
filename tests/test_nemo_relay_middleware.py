@@ -37,6 +37,7 @@ from nooa.runtime.middleware import (
     ExecutePythonContext,
     LLMCallContext,
 )
+from nooa.unifiedllm import CacheBoundary
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -129,7 +130,7 @@ class TestLLMRequestIntercepts:
         "first",
         [
             {"role": "user", "content": "Start"},
-            {"role": "metadata", "nooa_cache_boundary": True},
+            CacheBoundary(),
         ],
     )
     async def test_noop_relay_roundtrip_preserves_response_identity(self, first):
@@ -160,7 +161,10 @@ class TestLLMRequestIntercepts:
         finally:
             nemo_relay.intercepts.deregister_llm_request("roundtrip-spy")
 
-        assert intercepted == [[first, dict(turn)]]
+        assert intercepted == [[dict(first), dict(turn)]]
+        if isinstance(first, CacheBoundary):
+            assert ctx.messages[0] is first
+            assert seen[0][0] is first
         assert len(seen[0]) == len(messages)
         assert seen[0] == messages
         assert seen[0][1] is turn

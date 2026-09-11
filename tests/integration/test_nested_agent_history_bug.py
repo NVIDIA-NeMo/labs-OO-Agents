@@ -20,7 +20,7 @@ import pytest
 from nooa import Agent, strategy
 from nooa.config import CodeActConfig
 from nooa.strategies.codeact import CodeActStrategy
-from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
+from nooa.unifiedllm import CacheBoundary, FakeLLMClient, LLMResponse, ToolCall
 
 
 def _resp(content: str = "", tool_calls: list | None = None) -> LLMResponse:
@@ -174,7 +174,7 @@ class TestNestedAgentHistoryBug:
         # compare only the stable history before it.
         assert inner_prefix[-1]["role"] == "user"
         assert inner_prefix[-1]["content"].startswith("<context>")
-        assert inner_prefix[-2] == {"role": "metadata", "nooa_cache_boundary": True}
+        assert inner_prefix[-2] == CacheBoundary()
         inner_prefix = inner_prefix[:-2]
         assert outer_suffix[: len(inner_prefix)] == inner_prefix
 

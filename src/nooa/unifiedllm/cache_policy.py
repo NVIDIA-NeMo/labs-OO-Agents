@@ -6,6 +6,8 @@ import logging
 from collections.abc import Mapping
 from typing import Any, Literal
 
+from nooa.llm_types import CacheBoundary
+
 logger = logging.getLogger(__name__)
 
 
@@ -17,7 +19,7 @@ def reject_legacy_cache_config(config: Mapping[str, Any]) -> None:
         raise ValueError(
             "cache_control_injection_points was removed. Use cache_breakpoint="
             "'auto', 'anthropic', 'openai' (Responses only), or None; place "
-            "{'role': 'metadata', 'nooa_cache_boundary': True} before dynamic context."
+            "CacheBoundary() before dynamic context."
         )
 
 
@@ -100,19 +102,17 @@ def _mark_anthropic(message: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def validate_cache_boundary(message: Mapping[str, Any]) -> None:
-    """Reject malformed markers before projection can discard their fields."""
-    if message["nooa_cache_boundary"] is not True:
-        raise ValueError("nooa_cache_boundary must be true")
-    if message.get("role") != "metadata" or set(message) != {"role", "nooa_cache_boundary"}:
+def reject_boundary_dict(message: Mapping[str, Any]) -> None:
+    """JSON projections are not cache-policy inputs; use the typed boundary."""
+    if "nooa_cache_boundary" in message:
         raise ValueError(
-            "Use a separate {'role': 'metadata', 'nooa_cache_boundary': True} "
-            "element before dynamic context, not a marker on a model message."
+            "Pass CacheBoundary() from nooa.unifiedllm before dynamic context, "
+            "not a nooa_cache_boundary dictionary."
         )
 
 
 def apply_cache_policy(
-    messages: list[dict[str, Any]],
+    messages: list[dict[str, Any] | CacheBoundary],
     mapping: Literal["anthropic", "openai"] | None,
     *,
     responses: bool,
@@ -122,12 +122,12 @@ def apply_cache_policy(
     clean = []
     boundary = None
     for message in messages:
-        if "nooa_cache_boundary" in message:
-            validate_cache_boundary(message)
+        if isinstance(message, CacheBoundary):
             if boundary is not None:
                 raise ValueError("Rendered history contains more than one cache boundary")
             boundary = len(clean)
             continue
+        reject_boundary_dict(message)
         clean.append(message)
     if mapping is None:
         return clean, instructions, False
@@ -157,7 +157,7 @@ def apply_cache_policy(
         logger.warning(
             "OpenAI explicit cache policy found no eligible stable block; this request "
             "will not use prompt caching. Add stable instructions or place "
-            "nooa_cache_boundary after reusable input text to enable cache writes."
+            "CacheBoundary() after reusable input text to enable cache writes."
         )
     # No eligible stable text: explicit mode deliberately avoids caching a
     # changing suffix. Never invent an empty text block just to host a marker.

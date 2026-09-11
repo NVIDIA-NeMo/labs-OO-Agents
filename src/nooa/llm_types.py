@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from functools import cached_property
+from types import MappingProxyType
 from typing import Annotated, Any, ClassVar, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
@@ -15,6 +17,37 @@ from nooa._immutable_json import NativeJSON, freeze, json_containers
 from nooa.agentdoc import spec
 from nooa.context_blocks.events import EventBase
 from nooa.context_blocks.roles import Role
+
+
+@dataclass(frozen=True)
+class CacheBoundary(Mapping[str, Any]):
+    """End the stable prefix in a UnifiedLLM message list.
+
+    Renderers and middleware pass this object through unchanged. UnifiedLLM
+    consumes it after projecting assistant turns, so provider-specific expansion
+    cannot move the boundary. It is never sent to a model. The read-only mapping
+    is its public JSON view for integrations such as NeMo Relay, not a second
+    input format: direct callers should pass CacheBoundary().
+    """
+
+    _public: ClassVar[Mapping[str, Any]] = MappingProxyType(
+        {"role": "metadata", "nooa_cache_boundary": True}
+    )
+
+    def __getitem__(self, key: str) -> Any:
+        return self._public[key]
+
+    def __iter__(self):
+        return iter(self._public)
+
+    def __len__(self) -> int:
+        return len(self._public)
+
+    def public_message(self) -> dict[str, Any]:
+        return dict(self._public)
+
+    def render_message(self, content, tool_calls, *, reasoning):
+        return self
 
 
 class _PublicToolCall(Protocol):

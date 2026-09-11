@@ -32,7 +32,6 @@ if TYPE_CHECKING:
 from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ToolCallEvent
 from nooa.context_blocks.models import (
-    CacheBoundary,
     RenderedMessage,
     ResolvedBlock,
     Role,
@@ -543,9 +542,6 @@ class OpenAIProviderFormatter(ProviderFormatter):
     def format(self, messages: list[RenderedMessage]) -> list[dict]:
         out: list[dict] = []
         for msg in messages:
-            if isinstance(msg, CacheBoundary):
-                out.append({"role": "metadata", "nooa_cache_boundary": True})
-                continue
             if msg.replay_message is not None:
                 out.append(
                     msg.replay_message.render_message(

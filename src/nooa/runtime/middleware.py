@@ -34,7 +34,7 @@ from pydantic import BaseModel, ConfigDict
 from nooa.agent import Agent
 from nooa.events import ExecutionResult
 from nooa.runtime.actor import ActorRuntime
-from nooa.unifiedllm import LLMResponse
+from nooa.unifiedllm import CacheBoundary, LLMResponse
 
 # Sentinel indicating that ``AgentCallContext.result`` has not been set yet.
 # Distinguishes "middleware never ran the inner handler" from "method returned None".
@@ -132,7 +132,7 @@ class LLMCallContext(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    messages: list[dict[str, Any] | LLMResponse]
+    messages: list[dict[str, Any] | LLMResponse | CacheBoundary]
     params: dict[str, Any] = {}
     agent: Agent | None = None
     runtime: ActorRuntime | None = None

@@ -32,7 +32,6 @@ from nooa.context_blocks.formatter import (
 )
 from nooa.context_blocks.models import (
     BlockPart,
-    CacheBoundary,
     MessagePart,
     RenderedMessage,
     ResolvedBlock,
@@ -84,8 +83,8 @@ class CachedBlockFormatter(BlockFormatter):
     content-address each block individually.
 
     A standalone CacheBoundary separates history from live context. Its position
-    is decided here; the provider formatter only translates that block, without
-    reading flags on adjacent messages or deciding where to insert a boundary.
+    is decided here; the provider formatter passes the object through unchanged.
+    Only UnifiedLLM interprets it when preparing the provider request.
     """
 
     @property
@@ -145,7 +144,9 @@ class CachedBlockFormatter(BlockFormatter):
             # mutate the bytes of a historical event message whenever a later
             # turn becomes the new trailing event, breaking provider prompt
             # caching for the entire event tail (issue #208).
-            messages.append(CacheBoundary())
+            from nooa.llm_types import CacheBoundary
+
+            messages.append(RenderedMessage(role=Role.METADATA, replay_message=CacheBoundary()))
             messages.append(
                 RenderedMessage(
                     role=Role.USER,

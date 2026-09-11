@@ -18,12 +18,19 @@ from typing import Any, Literal, cast
 import litellm
 from pydantic import BaseModel, RootModel
 
-from nooa.llm_types import AssistantReasoning, AssistantText, LLMResponse, LLMUsage, ToolCall
+from nooa.llm_types import (
+    AssistantReasoning,
+    AssistantText,
+    CacheBoundary,
+    LLMResponse,
+    LLMUsage,
+    ToolCall,
+)
 from nooa.unifiedllm.cache_policy import (
     apply_cache_policy,
     enable_openai_explicit_cache,
+    reject_boundary_dict,
     reject_legacy_cache_config,
-    validate_cache_boundary,
 )
 
 from . import replay_state, response_parts
@@ -997,7 +1004,7 @@ def _needs_dummy_tool(model: str) -> bool:
     return model_lower.startswith(("anthropic/", "anthropic."))
 
 
-def _messages_have_tool_calls(messages: list[dict[str, Any] | LLMResponse]) -> bool:
+def _messages_have_tool_calls(messages: list[dict[str, Any] | LLMResponse | CacheBoundary]) -> bool:
     """Return True if any message contains tool_call blocks."""
     for msg in messages:
         if msg.get("role") == "assistant":
@@ -1078,7 +1085,7 @@ _token_calibration = TokenCalibration()
 
 def _update_token_calibration(
     model: str,
-    messages: list[dict[str, Any] | LLMResponse],
+    messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
     usage: LLMUsage,
     tools: list[dict[str, Any]] | None = None,
 ) -> None:
@@ -1311,7 +1318,7 @@ class UnifiedLLM(ABC):
     @abstractmethod
     def call(
         self,
-        messages: list[dict[str, Any] | LLMResponse],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs,
@@ -1336,7 +1343,7 @@ class UnifiedLLM(ABC):
     @abstractmethod
     async def acall(
         self,
-        messages: list[dict[str, Any] | LLMResponse],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs,
@@ -1733,7 +1740,7 @@ class CompletionClient(UnifiedLLM):
 
     def call(
         self,
-        messages: list[dict[str, Any] | LLMResponse],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs,
@@ -1822,7 +1829,7 @@ class CompletionClient(UnifiedLLM):
 
     async def acall(
         self,
-        messages: list[dict[str, Any] | LLMResponse],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs,
@@ -1939,7 +1946,7 @@ class ReasoningCompletionClient(CompletionClient):
 
     def call(
         self,
-        messages: list[dict[str, Any] | LLMResponse],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs,
@@ -1972,7 +1979,7 @@ class ReasoningCompletionClient(CompletionClient):
 
     async def acall(
         self,
-        messages: list[dict[str, Any] | LLMResponse],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs,
@@ -2081,7 +2088,7 @@ class ResponsesClient(UnifiedLLM):
 
     def call(
         self,
-        messages: list[dict[str, Any] | LLMResponse],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs,
@@ -2153,7 +2160,7 @@ class ResponsesClient(UnifiedLLM):
 
     async def acall(
         self,
-        messages: list[dict[str, Any] | LLMResponse],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs,
@@ -2249,12 +2256,12 @@ class ResponsesClient(UnifiedLLM):
 
     def _transform_messages(
         self,
-        messages: list[dict[str, Any] | LLMResponse],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         state_scope: str | None = None,
-    ) -> tuple[list[dict[str, Any]], str | None]:
+    ) -> tuple[list[dict[str, Any] | CacheBoundary], str | None]:
         """Expand turns at dispatch; only leading system messages become instructions."""
         instructions: list[str] = []
-        transformed: list[dict[str, Any]] = []
+        transformed: list[dict[str, Any] | CacheBoundary] = []
         leading_system = True
         for original in messages:
             if not isinstance(original, Mapping):
@@ -2264,9 +2271,11 @@ class ResponsesClient(UnifiedLLM):
             if isinstance(original, LLMResponse):
                 transformed.extend(response_parts.project_turn(original, state_scope))
                 continue
+            if isinstance(original, CacheBoundary):
+                transformed.append(original)
+                continue
             msg = dict(original)
-            if "nooa_cache_boundary" in msg:
-                validate_cache_boundary(msg)
+            reject_boundary_dict(msg)
             replay_state.reject_native_message(msg, state_scope)
             if isinstance(msg.get("content"), list) and any(
                 not isinstance(block, dict) for block in msg["content"]

@@ -316,17 +316,6 @@ class RenderedMessage(BaseModel):
     )
 
 
-class CacheBoundary(RenderedMessage):
-    """Standalone block marking the end of the stable rendered prefix.
-
-    The renderer places this block; the provider formatter translates it to
-    UnifiedLLM metadata. It is not content for the model and does not attach
-    cache policy to the following message.
-    """
-
-    role: Literal[Role.METADATA] = Role.METADATA
-
-
 class ContextWindowStats(BaseModel):
     """Context window utilization snapshot.
 

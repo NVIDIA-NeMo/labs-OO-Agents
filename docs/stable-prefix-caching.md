@@ -26,13 +26,24 @@ Registry YAML accepts the same setting. Explicit mappings are tied to the client
 model: use a new client when switching models. The automatic mapping is resolved
 against the effective per-call model.
 
-The cached renderer inserts a standalone `CacheBoundary()` block immediately
-before live context. The formatter translates it to
-`{"role": "metadata", "nooa_cache_boundary": true}`. Direct UnifiedLLM callers
-may insert that dictionary themselves. Its role identifies it as framework metadata, not content
-for the model; do not add the key to a user or assistant message. Without a marker, the policy marks only
-leading system/developer instructions. It never assumes arbitrary history is
-stable. The metadata key does not reach the provider.
+`CacheBoundary` belongs to the UnifiedLLM interface, alongside `LLMResponse`.
+The cached renderer inserts it immediately before live context; the formatter
+and middleware pass the same object through unchanged. Direct callers use it
+in their message list too:
+
+```python
+from nooa.unifiedllm import CacheBoundary
+
+messages = [*history, CacheBoundary(), {"role": "user", "content": live_state}]
+response = await client.acall(messages)
+```
+
+Only UnifiedLLM interprets and removes the boundary before sending the request.
+NeMo Relay projects it to public metadata JSON at its serialization boundary,
+then restores the original object if that entry is unchanged. A raw dictionary
+with `nooa_cache_boundary` is rejected with instructions to use `CacheBoundary()`;
+there is only one accepted boundary type. Without a boundary, the policy marks
+only leading system/developer instructions, not arbitrary history.
 
 ## Provider mapping
 
@@ -60,7 +71,7 @@ still matter. Changing effort or tools may invalidate an otherwise stable prefix
 ## Migration
 
 `cache_control_injection_points` has been removed. Constructor and per-call use
-raise a message naming `cache_breakpoint` and `nooa_cache_boundary` as replacements.
+raise a message naming `cache_breakpoint` and `CacheBoundary()` as replacements.
 Use `cache_breakpoint=None` instead of an empty injection list. To cache completed
 history, place a boundary after that history rather than selecting a message by
 role or position.
@@ -74,9 +85,10 @@ the framework setting must never become a provider request field.
 1. `unifiedllm/cache_policy.py` owns the single policy. It consumes the boundary
    and changes only the final marker target's containers; unrelated messages
    and large strings are shared.
-   The cached renderer inserts a standalone `CacheBoundary` block before live
-   context. The public formatter translates that block to the metadata-role
-   sibling; ordinary messages carry no cache flag and are not edited.
+   `CacheBoundary` is a small, immutable UnifiedLLM input type. The cached renderer
+   places it before live context using the same pass-through path as assistant
+   responses. The formatter does not translate it or know what it means;
+   ordinary messages carry no cache flag and are not edited.
 2. Both clients apply the policy after provider projection. This keeps boundary
    placement correct when one stored assistant turn expands into several wire
    items, and keeps providers' fields out of renderers and middleware.

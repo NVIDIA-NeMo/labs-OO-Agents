@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel
 
+from nooa.llm_types import CacheBoundary
 from nooa.unifiedllm.unifiedllm import LLMResponse, LLMUsage, Tool, ToolCall, UnifiedLLM
 
 from .replay_state import prepare_chat_messages
@@ -55,7 +56,7 @@ class FakeLLMClient(UnifiedLLM):
         self._response_queue = deque(responses)
         self._lock = asyncio.Lock()
         self.call_count = 0
-        self.last_messages: list[dict[str, Any] | LLMResponse] = []
+        self.last_messages: list[dict[str, Any] | LLMResponse | CacheBoundary] = []
         self.last_tools: list[Tool] | None = None
         self._context_window = 128_000
 
@@ -70,7 +71,7 @@ class FakeLLMClient(UnifiedLLM):
 
     async def acall(
         self,
-        messages: list[dict[str, Any] | LLMResponse],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
@@ -103,7 +104,7 @@ class FakeLLMClient(UnifiedLLM):
 
     def call(
         self,
-        messages: list[dict[str, Any] | LLMResponse],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,

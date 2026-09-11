@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 import litellm
 import pytest
 
-from nooa.unifiedllm import CompletionClient, ResponsesClient
+from nooa.unifiedllm import CacheBoundary, CompletionClient, ResponsesClient
 from nooa.unifiedllm.cache_policy import apply_cache_policy
 
 
@@ -18,7 +18,7 @@ def test_legacy_cache_setting_fails_with_migration_help(client_type, nested):
     config = {"cache_control_injection_points": []}
     if nested:
         config = {"extra_body": config}
-    with pytest.raises(ValueError, match="removed.*cache_breakpoint=.*nooa_cache_boundary"):
+    with pytest.raises(ValueError, match="removed.*cache_breakpoint=.*CacheBoundary"):
         client_type("openai/gpt-5.6", **config)
     with client_type("openai/gpt-5.6") as client:
         with pytest.raises(ValueError, match="removed.*cache_breakpoint"):
@@ -77,12 +77,12 @@ def test_boundary_copies_only_the_marker_target_containers():
             "role": "tool",
             "content": [{"type": "text", "text": "one"}, {"type": "text", "text": "two"}],
         },
-        {"role": "metadata", "nooa_cache_boundary": True},
+        CacheBoundary(),
         {"role": "user", "content": "live"},
     ]
-    before = json.dumps(original)
+    before = json.dumps([dict(m) for m in original])
     wire, _, _ = apply_cache_policy(original, "anthropic", responses=False)
-    assert json.dumps(original) == before
+    assert json.dumps([dict(m) for m in original]) == before
     assert wire[0] is original[0]
     assert wire[1] is not original[1]
     assert wire[1]["content"][0] is original[1]["content"][0]
@@ -93,7 +93,7 @@ def test_boundary_copies_only_the_marker_target_containers():
 @pytest.mark.parametrize("mapping", [None, "anthropic", "openai"])
 def test_no_stable_prefix_never_marks_dynamic_content(mapping, caplog):
     messages = [
-        {"role": "metadata", "nooa_cache_boundary": True},
+        CacheBoundary(),
         {"role": "system", "content": "live"},
     ]
     wire, _, explicit = apply_cache_policy(messages, mapping, responses=mapping != "anthropic")
@@ -115,9 +115,9 @@ def test_anthropic_policy_rejects_responses_wire_format():
 
 
 @pytest.mark.parametrize("mapping", [None, "anthropic", "openai"])
-@pytest.mark.parametrize("invalid", [False, "true", 1, None])
-def test_invalid_boundary_is_not_silently_ignored(mapping, invalid):
-    with pytest.raises(ValueError, match="must be true"):
+@pytest.mark.parametrize("invalid", [True, False, "true", 1, None])
+def test_dictionary_boundaries_are_rejected(mapping, invalid):
+    with pytest.raises(ValueError, match="Pass CacheBoundary"):
         apply_cache_policy(
             [{"role": "metadata", "nooa_cache_boundary": invalid}], mapping, responses=True
         )
@@ -131,8 +131,8 @@ def test_invalid_boundary_is_not_silently_ignored(mapping, invalid):
         {"role": "metadata", "content": "must not disappear", "nooa_cache_boundary": True},
     ],
 )
-def test_boundary_must_be_a_separate_metadata_element(message):
-    with pytest.raises(ValueError, match="Use a separate.*metadata"):
+def test_dictionary_marker_cannot_be_attached_to_a_model_message(message):
+    with pytest.raises(ValueError, match="Pass CacheBoundary"):
         apply_cache_policy([message], None, responses=True)
 
 
@@ -152,7 +152,7 @@ def test_boundary_must_be_a_separate_metadata_element(message):
 )
 def test_projection_does_not_silently_drop_misplaced_boundaries(client_type, message):
     with client_type("openai/gpt-5.6", api_key="test") as client:
-        with pytest.raises(ValueError, match="Use a separate.*metadata"):
+        with pytest.raises(ValueError, match="Pass CacheBoundary"):
             client.call([{**message, "nooa_cache_boundary": True}])
 
 
