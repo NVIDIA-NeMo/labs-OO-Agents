@@ -268,6 +268,25 @@ def test_renderer_drops_incomplete_calls_as_a_state_stripping_edit():
     assert original.tool_calls
 
 
+def test_rendered_reasoning_edit_discards_native_authority():
+    original = turn()
+    message = render(original).messages[1]
+    edited = message.model_copy(update={"reasoning": "different reasoning"})
+    projected = ResponsesProviderFormatter().format([edited])[0]
+    assert type(projected) is dict
+    assert projected["reasoning_content"] == "different reasoning"
+    assert original.reasoning != "different reasoning"
+    assert "opaque-one" not in json.dumps(projected)
+
+
+def test_nested_public_tool_edits_do_not_mutate_the_response():
+    original = turn()
+    public = dict(original)
+    public["tool_calls"][0]["function"]["arguments"] = "{}"
+    assert original.tool_calls[0].arguments != "{}"
+    assert project_turn(original, SCOPE) == output_items()
+
+
 def test_dispatch_maps_ordinary_images_without_changing_caller_input():
     client = ResponsesClient("openai/gpt-5.6", api_key="test")
     try:

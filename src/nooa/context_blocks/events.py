@@ -104,7 +104,7 @@ class EventBase(BaseModel):
         """Public fields for search/debug export; consumers need not know their layout."""
         return self.model_dump()
 
-    def render_message(self, content=None, tool_calls=None):
+    def render_message(self, content=None, tool_calls=None, **public_fields):
         """Optional ready-to-replay message; generic events use normal formatting."""
         return None
 

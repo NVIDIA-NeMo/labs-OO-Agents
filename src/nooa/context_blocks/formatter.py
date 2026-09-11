@@ -538,7 +538,11 @@ class OpenAIProviderFormatter(ProviderFormatter):
         for msg in messages:
             start = len(out)
             if msg.replay_message is not None:
-                out.append(msg.replay_message.render_message(msg.content, msg.tool_calls))
+                out.append(
+                    msg.replay_message.render_message(
+                        msg.content, msg.tool_calls, reasoning=msg.reasoning
+                    )
+                )
             elif msg.tool_calls:
                 out.append(
                     assistant_message(
@@ -584,7 +588,11 @@ class AnthropicProviderFormatter(ProviderFormatter):
 
             start = len(out)
             if msg.replay_message is not None:
-                out.append(msg.replay_message.render_message(msg.content, msg.tool_calls))
+                out.append(
+                    msg.replay_message.render_message(
+                        msg.content, msg.tool_calls, reasoning=msg.reasoning
+                    )
+                )
             elif msg.tool_calls:
                 content: list[dict[str, Any]] = []
                 if msg.content:

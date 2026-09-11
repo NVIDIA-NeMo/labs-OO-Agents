@@ -343,16 +343,20 @@ class LLMResponse(EventBase):
         public.update(self.public_message())
         return public
 
-    def render_message(self, content=None, tool_calls=None):
+    def render_message(self, content=None, tool_calls=None, **public_fields):
         """Preserve the turn unless rendering changed its public parts."""
-        if content is None and tool_calls is None:
+        if content is None and tool_calls is None and not public_fields:
             return self
         calls = self.tool_calls if tool_calls is None else tool_calls
-        if content == self.content and tuple(
-            (call.id, call.name, call.arguments) for call in calls
-        ) == tuple((call.id, call.name, call.arguments) for call in self.tool_calls):
+        reasoning = public_fields.get("reasoning", self.reasoning)
+        if (
+            reasoning == self.reasoning
+            and content == self.content
+            and tuple((call.id, call.name, call.arguments) for call in calls)
+            == tuple((call.id, call.name, call.arguments) for call in self.tool_calls)
+        ):
             return self
-        return assistant_message(content, tool_calls=calls, reasoning=self.reasoning)
+        return assistant_message(content, tool_calls=calls, reasoning=reasoning)
 
     def __getitem__(self, key: str) -> Any:
         return self.public_message()[key]
