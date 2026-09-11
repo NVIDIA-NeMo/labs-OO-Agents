@@ -144,7 +144,6 @@ class CachedBlockFormatter(BlockFormatter):
                     role=Role.USER,
                     content=suffix,
                     parts=envelope_parts,
-                    cache_boundary_before=True,
                 )
             )
 

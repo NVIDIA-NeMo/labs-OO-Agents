@@ -133,7 +133,7 @@ class TestLLMRequestIntercepts:
             parts=(AssistantReasoning(native={"encrypted_content": "opaque"}),),
             replay_scope="responses:openai:test",
         )
-        messages = [{"nooa_cache_boundary": True}, turn]
+        messages = [{"role": "user", "content": "Start"}, turn]
         ctx = _make_llm_ctx(messages=messages)
         seen: list[list[dict[str, Any]]] = []
 

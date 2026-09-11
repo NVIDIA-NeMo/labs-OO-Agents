@@ -416,23 +416,32 @@ def test_unknown_route_cannot_capture_encrypted_state():
     assert LLMResponse(parts=parts).reasoning == "think first\nthen think"
 
 
-def test_boundary_beside_turn_preserves_reference_and_state():
-    from nooa.unifiedllm._message_utils import carried_cache_boundary
-
+@pytest.mark.parametrize("first_conversation", ["turn", "user", "developer", "tool"])
+def test_only_leading_system_messages_become_instructions(first_conversation):
     original = turn()
-    rendered = ResponsesProviderFormatter().format(
-        [
-            render(original).messages[1].model_copy(update={"cache_boundary_before": True}),
-        ]
+    message = (
+        original
+        if first_conversation == "turn"
+        else {"role": first_conversation, "content": "Start"}
     )
-    assert len(rendered) == 2
-    assert rendered[0] == {"nooa_cache_boundary": True}
-    assert rendered[1] == original
+    if first_conversation == "tool":
+        message["tool_call_id"] = "c"
     client = ResponsesClient("openai/gpt-5.6", api_key="test")
     try:
-        wire, _ = client._transform_messages(rendered, SCOPE)
-        assert carried_cache_boundary(wire[0])
-        assert wire[1:] == output_items()
+        for live in ("Live one", "Live two"):
+            wire, instructions = client._transform_messages(
+                [
+                    {"role": "system", "content": "First"},
+                    {"role": "system", "content": "Second"},
+                    message,
+                    {"role": "system", "content": live},
+                ],
+                SCOPE,
+            )
+            assert instructions == "First\n\nSecond"
+            assert wire[-1] == {"role": "system", "content": live}
+            if first_conversation == "turn":
+                assert wire[:-1] == output_items()
     finally:
         client.close()
 
@@ -547,7 +556,11 @@ def test_list_content_text_mapping_respects_role():
     "message",
     [
         {"type": "reasoning", "encrypted_content": "untrusted"},
-        {"role": "assistant", "content": "public", "reasoning_items": []},
+        {
+            "role": "assistant",
+            "content": "public",
+            "reasoning_items": [{"type": "reasoning", "encrypted_content": "untrusted"}],
+        },
     ],
 )
 def test_raw_reasoning_wire_input_requires_explicit_migration(message):

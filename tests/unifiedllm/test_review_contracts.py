@@ -14,6 +14,42 @@ from nooa.context_blocks.models import RenderedMessage, Role, ToolCallInfo
 from nooa.llm_types import AssistantText, LLMResponse, ToolCall, assistant_message
 from nooa.unifiedllm import CompletionClient, ResponsesClient
 from nooa.unifiedllm.chat_parts import capture_chat_parts, project_chat_turn
+from nooa.unifiedllm.replay_state import prepare_chat_messages
+
+
+@pytest.mark.parametrize("api_style", ["chat", "responses"])
+@pytest.mark.parametrize(
+    ("location", "empty"),
+    [
+        ("message", None),
+        ("call", None),
+        ("thinking", None),
+        ("message", {}),
+        ("call", {}),
+        ("thinking", []),
+    ],
+)
+def test_empty_sdk_provider_fields_are_portable(api_style, location, empty):
+    message = {
+        "role": "assistant",
+        "content": "answer",
+        "tool_calls": [
+            {"id": "c", "type": "function", "function": {"name": "run", "arguments": "{}"}}
+        ],
+    }
+    if location == "thinking":
+        message["thinking_blocks"] = empty
+    elif location == "call":
+        message["tool_calls"][0]["provider_specific_fields"] = empty
+    else:
+        message["provider_specific_fields"] = empty
+    if api_style == "chat":
+        assert prepare_chat_messages([message], None)[0] == message
+    else:
+        with ResponsesClient("openai/gpt-5.6", api_key="test") as client:
+            wire, _ = client._transform_messages([message])
+        assert wire[0]["content"] == "answer"
+        assert wire[1]["call_id"] == "c"
 
 
 @pytest.mark.parametrize("scope", ["chat:openai:model", None])
@@ -106,7 +142,6 @@ def test_anthropic_export_is_native_public_shape_without_framework_markers():
                 reasoning="why",
                 tool_calls=(ToolCallInfo(id="c", name="run", arguments='{"x":1}'),),
                 replay_message=turn,
-                cache_boundary_before=True,
             )
         ]
     )

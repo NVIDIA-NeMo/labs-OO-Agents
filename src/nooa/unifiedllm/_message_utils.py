@@ -22,8 +22,3 @@ def demote_reasoning_text(message: dict[str, Any], reasoning: str | None) -> Non
         message["content"] = [{"type": "text", "text": reasoning}, *content]
     elif content is None:
         message["content"] = reasoning
-
-
-def carried_cache_boundary(message: Any) -> bool:
-    """Return whether the volatile suffix begins at this rendered message."""
-    return isinstance(message, dict) and message.get("nooa_cache_boundary") is True

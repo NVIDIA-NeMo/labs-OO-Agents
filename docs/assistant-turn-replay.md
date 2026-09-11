@@ -84,8 +84,9 @@ OpenAI encrypted reasoning, Anthropic signed/redacted thinking, and Gemini
 signatures stay with their owning parts. Plain reasoning is retained as readable
 text and can be sent to another model without the source's native extensions.
 Unknown capture routes warn and keep portable text while dropping opaque state.
-Raw provider fields in input dictionaries raise with instructions to pass an
-`LLMResponse` instead; both clients enforce that rule. Malformed recognized
+Nonempty provider fields in input dictionaries raise with instructions to pass
+an `LLMResponse` instead; both clients enforce that rule. Null or empty optional
+fields from SDK message dumps carry no state and are accepted. Malformed recognized
 state raises; it is not silently treated as a successful
 capture. Empty public tool IDs are accepted where no retained native state needs
 binding; nonempty duplicate IDs and ambiguous native bindings raise.
@@ -133,8 +134,9 @@ absence of reasoning, and a zero cost estimate does not prove free inference.
    shape. Runtime lookup building and per-dispatch public equality are deleted.
 5. Renderer/formatter/runtime: preserve the response object through a generic
    event hook, with existing public text/tool views for display and budgeting.
-   The live-context boundary prevents Responses from moving trailing system
-   context into leading instructions. Provider cache mapping is not added here.
+   Responses lifts only leading system messages into `instructions`: moving a
+   later system message there would reorder the conversation. This needs no
+   cache marker. Cache-boundary metadata and policy belong to the follow-up PR.
 6. Storage and event hooks: serialization, searchable fields, and empty-event
    handling are owned by the event type. Generic consumers do not branch on the
    response representation. Archives preserve replay state; public export does not.

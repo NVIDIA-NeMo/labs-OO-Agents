@@ -136,7 +136,6 @@ async def test_mocked_dispatch_after_sqlite_resume_with_dynamic_suffix(
                     {"role": "system", "content": "Stable instructions"},
                     restored,
                     {"role": "tool", "tool_call_id": "call_1", "content": "Completed"},
-                    {"nooa_cache_boundary": True},
                     {"role": "user", "content": suffix},
                 ]
             )

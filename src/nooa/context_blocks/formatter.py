@@ -520,21 +520,12 @@ def _with_reasoning(message: dict[str, Any], reasoning: str | None) -> dict[str,
     return message
 
 
-def _carry_cache_boundary(
-    output: list[dict[str, Any]], start: int, message: RenderedMessage
-) -> None:
-    """Keep boundaries beside logical messages, never wrapped around a turn."""
-    if message.cache_boundary_before and len(output) > start:
-        output.insert(start, {"nooa_cache_boundary": True})
-
-
 class OpenAIProviderFormatter(ProviderFormatter):
     """Emit OpenAI-compatible messages (``list[dict]``)."""
 
     def format(self, messages: list[RenderedMessage]) -> list[dict]:
         out: list[dict] = []
         for msg in messages:
-            start = len(out)
             if msg.replay_message is not None:
                 out.append(
                     msg.replay_message.render_message(
@@ -568,7 +559,6 @@ class OpenAIProviderFormatter(ProviderFormatter):
                         msg.reasoning,
                     )
                 )
-            _carry_cache_boundary(out, start, msg)
         return out
 
 

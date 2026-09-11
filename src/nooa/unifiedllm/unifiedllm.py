@@ -19,9 +19,6 @@ import litellm
 from pydantic import BaseModel, RootModel
 
 from nooa.llm_types import AssistantReasoning, AssistantText, LLMResponse, LLMUsage, ToolCall
-from nooa.unifiedllm._message_utils import (
-    carried_cache_boundary,
-)
 
 from . import replay_state, response_parts
 from .http_config import HttpConfig
@@ -1339,25 +1336,6 @@ class UnifiedLLM(ABC):
 
         return prepared
 
-    @staticmethod
-    def _strip_cache_boundary(messages: list[dict[str, Any] | LLMResponse]) -> list[dict[str, Any]]:
-        """Consume renderer metadata without changing provider cache policy."""
-        clean = []
-        seen = False
-        for message in messages:
-            if carried_cache_boundary(message):
-                if seen:
-                    raise ValueError("Rendered history contains more than one cache boundary")
-                seen = True
-                item = {
-                    key: value for key, value in message.items() if key != "nooa_cache_boundary"
-                }
-                if item:
-                    clean.append(item)
-            else:
-                clean.append(message)
-        return clean
-
     def count_tokens(self, text: str) -> int:
         """Count tokens using model-appropriate tokenizer.
 
@@ -1907,7 +1885,6 @@ class CompletionClient(UnifiedLLM):
         prepared_messages = self._inject_cache_control(
             messages, cache_points, model=effective_model
         )
-        prepared_messages = self._strip_cache_boundary(prepared_messages)
 
         api_params = {
             "model": self.model,
@@ -2002,7 +1979,6 @@ class CompletionClient(UnifiedLLM):
         prepared_messages = self._inject_cache_control(
             messages, cache_points, model=effective_model
         )
-        prepared_messages = self._strip_cache_boundary(prepared_messages)
 
         api_params = {
             "model": self.model,
@@ -2406,7 +2382,7 @@ class ResponsesClient(UnifiedLLM):
                         block["type"] = (
                             "output_text" if message.get("role") == "assistant" else "input_text"
                         )
-        return self._strip_cache_boundary(input_messages), instructions
+        return input_messages, instructions
 
     def _response_from_output(self, raw_response, scope, usage, output_model):
         parts = response_parts.capture_parts(raw_response.output, scope)
@@ -2430,22 +2406,19 @@ class ResponsesClient(UnifiedLLM):
         messages: list[dict[str, Any] | LLMResponse],
         state_scope: str | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
-        """Expand canonical turns only at dispatch, retaining the live suffix."""
+        """Expand turns at dispatch; only leading system messages become instructions."""
         instructions: list[str] = []
         transformed: list[dict[str, Any]] = []
-        in_dynamic_suffix = False
+        leading_system = True
         for original in messages:
-            if carried_cache_boundary(original):
-                in_dynamic_suffix = True
-                transformed.append({"nooa_cache_boundary": True})
+            # Moving a later system message to instructions would reorder history.
+            leading_system = leading_system and original.get("role") == "system"
             if isinstance(original, LLMResponse):
                 transformed.extend(response_parts.project_turn(original, state_scope))
                 continue
             msg = dict(original)
-            if msg.pop("nooa_cache_boundary", False) and not msg:
-                continue
             replay_state.reject_native_message(msg, state_scope)
-            if msg.get("role") == "system" and not in_dynamic_suffix:
+            if leading_system:
                 if msg.get("content"):
                     instructions.append(msg["content"])
             elif msg.get("role") == "tool":

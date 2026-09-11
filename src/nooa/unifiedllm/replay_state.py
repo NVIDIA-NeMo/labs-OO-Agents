@@ -20,7 +20,6 @@ import litellm
 from nooa.llm_types import LLMResponse
 from nooa.unifiedllm._message_utils import (
     LLM_STATE_KEY,
-    carried_cache_boundary,
     demote_reasoning_text,
 )
 
@@ -229,7 +228,9 @@ def reject_native_message(message: dict[str, Any], scope: str | None) -> None:
         nodes.append(call)
         nodes.append(call.get("function", {}))
     for node in nodes:
-        if private_keys.intersection(node) or node.get("type") in {
+        # SDK dumps include optional provider fields with null/empty values;
+        # those carry no native state and are valid portable input.
+        if any(node.get(key) for key in private_keys) or node.get("type") in {
             "reasoning",
             "thinking",
             "redacted_thinking",
@@ -290,16 +291,14 @@ def prepare_chat_messages(
             ):
                 prepared.append(message)
             continue
-        boundary = carried_cache_boundary(original)
         message = dict(original)
-        message.pop("nooa_cache_boundary", None)
         reject_native_message(message, scope)
         message = copy.deepcopy(message)
         demote_reasoning_text(message, message.pop("reasoning_content", None))
         call_id = message.get("tool_call_id")
         if isinstance(call_id, str):
             message["tool_call_id"] = private_call_ids.get(call_id, call_id)
-        prepared.append({**message, "nooa_cache_boundary": True} if boundary else message)
+        prepared.append(message)
     return prepared
 
 

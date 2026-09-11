@@ -110,8 +110,7 @@ class TestCachedRendererEndToEndOpenAI:
             block_formatter=CachedBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
-        assert len(result) == 3
-        assert result[1] == {"nooa_cache_boundary": True}
+        assert len(result) == 2
         assert result[0]["role"] == "system"
         assert "<sys>" in result[0]["content"]
         assert result[-1]["role"] == "user"
@@ -141,7 +140,7 @@ class TestCachedRendererEndToEndOpenAI:
             block_formatter=CachedBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
-        roles = [m["role"] for m in result if "role" in m]
+        roles = [m["role"] for m in result]
         assert roles == ["system", "user", "user"]
         # The user-event message is preserved verbatim — no context envelope.
         event_content = result[1]["content"]
@@ -294,7 +293,7 @@ class TestCachedRendererEndToEndOpenAI:
             block_formatter=CachedBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
-        roles = [m["role"] for m in result if "role" in m]
+        roles = [m["role"] for m in result]
         assert roles == ["system", "assistant", "user"]
         assert "<context>" in result[-1]["content"]
 
