@@ -164,18 +164,25 @@ def _query_captures(query: ts.Query, root_node: ts.Node) -> list[tuple[ts.Node, 
     return _normalize_captures(ts.QueryCursor(query).captures(root_node))
 
 
-def ts_extract_symbols(path: Path, lang: str, max_symbols: int = 200) -> list[str] | None:
+def ts_extract_symbols(
+    path: Path, lang: str, max_symbols: int = 200, source: bytes | None = None
+) -> list[str] | None:
     """Extract symbol definitions using tree-sitter AST parsing.
 
     Returns a list of formatted symbol lines, or None if tree-sitter
     is not available for this language (caller should fall back to regex).
+
+    ``source`` lets callers supply already-read file bytes (e.g. content
+    fetched through a sandbox session); when omitted the file is read from
+    the host filesystem.
     """
     parser = _get_parser(lang)
     if parser is None:
         return None
 
     try:
-        source = path.read_bytes()
+        if source is None:
+            source = path.read_bytes()
         tree = parser.parse(source)
     except (OSError, Exception) as e:
         logger.debug(f"tree-sitter parse failed for {path}: {e}")
