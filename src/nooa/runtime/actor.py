@@ -2552,15 +2552,17 @@ class ActorRuntime:
         """Execute a method that needs LLM generation."""
         base_method = getattr(method, "__func__", method)
         try:
-            has_user_llm_param = "llm" in inspect.signature(method).parameters
+            user_params = inspect.signature(method).parameters
         except (TypeError, ValueError):
-            has_user_llm_param = False
+            user_params = {}
 
         # Extract framework parameters (don't pass to generated method)
         call_strategy = kwargs.pop("_strategy", None)
-        call_llm = kwargs.pop("llm", _MISSING) if not has_user_llm_param else _MISSING
+        call_llm = kwargs.pop("llm", _MISSING) if "llm" not in user_params else _MISSING
         call_session_locals = kwargs.pop("_session_locals", None)
-        call_context_view = kwargs.pop("context_view", _MISSING)
+        call_context_view = (
+            kwargs.pop("context_view", _MISSING) if "context_view" not in user_params else _MISSING
+        )
 
         # Get strategy with priority: call-level > decorator > default
         decorator_strategy = getattr(base_method, "_plan_strategy", None)

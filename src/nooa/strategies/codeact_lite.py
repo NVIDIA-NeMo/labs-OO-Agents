@@ -26,7 +26,7 @@ from nooa.context_blocks import (
 from nooa.context_blocks.exceptions import UnsupportedContextLayout
 from nooa.context_blocks.formatter import (
     XMLBlockFormatter,
-    _event_blocks_to_messages,
+    _event_block_projections,
     _xml_system_block,
 )
 from nooa.context_blocks.models import Role
@@ -155,6 +155,7 @@ class PlainCodeActBlockFormatter(XMLBlockFormatter):  # type: ignore[misc]  # un
 
     def format(self, blocks: list[ResolvedBlock]) -> list[RenderedMessage]:
         saw_event = False
+        saw_non_system = False
         for block in blocks:
             if block.event is not None:
                 saw_event = True
@@ -163,6 +164,13 @@ class PlainCodeActBlockFormatter(XMLBlockFormatter):  # type: ignore[misc]  # un
                     "CodeActLite cannot merge execution output across context "
                     "inserted inside event history"
                 )
+            if block.role == Role.SYSTEM:
+                if saw_non_system:
+                    raise UnsupportedContextLayout(
+                        "CodeActLite cannot move a system block ahead of earlier context"
+                    )
+            else:
+                saw_non_system = True
 
         # System blocks: reuse XML wrapping from the base class by calling it on
         # the SYSTEM-role blocks only. That gives us a list with a single
@@ -184,28 +192,29 @@ class PlainCodeActBlockFormatter(XMLBlockFormatter):  # type: ignore[misc]  # un
             if isinstance(block.event, PythonOutput):
                 python_outputs[block.event.tool_call_id] = block
 
-        event_messages = _event_blocks_to_messages(
-            [block for block in message_blocks if not isinstance(block.event, PythonOutput)],
+        projections = _event_block_projections(
+            message_blocks,
             wrap_content=self._content_for_block,
         )
-        merged_output_ids: set[str] = set()
-        for message in event_messages:
-            tool_call_id = message.tool_call_id
-            if tool_call_id is not None and (py_out_block := python_outputs.get(tool_call_id)):
-                merged_output_ids.add(tool_call_id)
-                message = message.model_copy(
-                    update={"content": self._content_for_block(py_out_block)}
-                )
-            messages.append(message)
-
-        for block in message_blocks:
+        merged_output_ids = {
+            message.tool_call_id
+            for projection in projections
+            for message in projection
+            if message.tool_call_id in python_outputs
+        }
+        for block, projection in zip(message_blocks, projections, strict=True):
             if (
                 isinstance(block.event, PythonOutput)
-                and block.event.tool_call_id not in merged_output_ids
+                and block.event.tool_call_id in merged_output_ids
             ):
-                messages.append(
-                    RenderedMessage(role=block.role, content=self._content_for_block(block))
-                )
+                continue
+            for message in projection:
+                tool_call_id = message.tool_call_id
+                if tool_call_id is not None and (output := python_outputs.get(tool_call_id)):
+                    message = message.model_copy(
+                        update={"content": self._content_for_block(output)}
+                    )
+                messages.append(message)
 
         return messages
 

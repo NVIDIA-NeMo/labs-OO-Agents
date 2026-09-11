@@ -146,6 +146,39 @@ class TestRenderContextBasic:
                 provider_formatter=OpenAIProviderFormatter(),
             )
 
+    def test_plain_formatter_preserves_unmatched_python_output_position(self):
+        from nooa.events import PythonOutput, ResultStatus, Task
+        from nooa.strategies.codeact_lite import PlainCodeActBlockFormatter
+
+        output = PythonOutput(
+            tool_call_id="unmatched",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="earlier",
+        )
+        result = render_context(
+            [output, Task(prompt="later")],
+            block_formatter=PlainCodeActBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+
+        assert [message["role"] for message in result] == ["user", "user"]
+        assert "earlier" in result[0]["content"]
+        assert "later" in result[1]["content"]
+
+    def test_plain_formatter_rejects_system_block_after_user_block(self):
+        from nooa.strategies.codeact_lite import PlainCodeActBlockFormatter
+
+        with pytest.raises(UnsupportedContextLayout, match="system block"):
+            render_context(
+                [
+                    Block(key="user", content="first", role=Role.USER),
+                    Block(key="system", content="late", role=Role.SYSTEM),
+                ],
+                block_formatter=PlainCodeActBlockFormatter(),
+                provider_formatter=OpenAIProviderFormatter(),
+            )
+
     def test_boundary_cannot_split_canonical_tool_replay(self):
         response = LLMResponse(
             content="",

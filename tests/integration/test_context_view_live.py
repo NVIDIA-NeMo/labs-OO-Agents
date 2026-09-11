@@ -142,7 +142,7 @@ async def test_default_views_end_to_end_on_nemotron_super_v3(monkeypatch):
         DefaultInventoryAgent.decide, call_args=(inventory,)
     )
     keys = [getattr(item, "key", "event") for item in assembled]
-    assert keys.index("inventory_policy") < keys.index("inventory_state")
+    assert keys.index("inventory_state") < keys.index("inventory_policy")
     assert next(
         item for item in assembled if getattr(item, "key", None) == "inventory_state"
     ).content == ("{'apple': 3, 'orange': 0}")

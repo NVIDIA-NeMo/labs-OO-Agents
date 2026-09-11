@@ -154,15 +154,17 @@ def create_agent_method_wrapper(
             if hasattr(self, "runtime"):
                 _fw_kwargs = {
                     _name: kwargs.pop(_name)
-                    for _name in ("_session_locals", "_strategy", "context_view")
+                    for _name in ("_session_locals", "_strategy")
                     if _name in kwargs
                 }
                 try:
-                    _has_user_llm_param = "llm" in inspect.signature(original_func).parameters
+                    _user_params = inspect.signature(original_func).parameters
                 except (TypeError, ValueError):
-                    _has_user_llm_param = False
-                if not _has_user_llm_param and "llm" in kwargs:
+                    _user_params = {}
+                if "llm" not in _user_params and "llm" in kwargs:
                     _fw_kwargs["llm"] = kwargs.pop("llm")
+                if "context_view" not in _user_params and "context_view" in kwargs:
+                    _fw_kwargs["context_view"] = kwargs.pop("context_view")
             try:
                 ArgumentValidator().validate(original_func, args, kwargs, _tc)
             finally:

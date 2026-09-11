@@ -117,6 +117,40 @@ def test_agent_resolution_call_method_instance_class():
     assert Undecorated().runtime._select_context_view(Undecorated.run).name == "class"
 
 
+async def test_context_view_named_method_parameter_is_not_consumed():
+    from nooa.strategies import PredictStrategy
+    from nooa.unifiedllm import FakeLLMClient
+
+    client = FakeLLMClient.simple_message('"ordinary input"')
+
+    class Example(Agent, llm=client):
+        @strategy(PredictStrategy())
+        async def run(self, context_view: str) -> str:
+            """Return the input unchanged."""
+            ...
+
+    assert await Example().run(context_view="ordinary input") == "ordinary input"
+    assert "ordinary input" in str(client.last_messages)
+
+
+async def test_call_context_view_override_survives_argument_validation():
+    from nooa.strategies import PredictStrategy
+    from nooa.unifiedllm import FakeLLMClient
+
+    client = FakeLLMClient.simple_message('"ok"')
+
+    class Example(Agent, llm=client, context_view=NamedView("class")):
+        @strategy(PredictStrategy())
+        async def run(self) -> str:
+            """Return ok."""
+            ...
+
+    assert await Example().run(context_view=NamedView("call")) == "ok"
+    rendered = str(client.last_messages)
+    assert "<call>" in rendered
+    assert "<class>" not in rendered
+
+
 def test_agent_instance_replaces_class_view():
     class Example(Agent, llm=object(), context_view=NamedView("class")):
         pass
