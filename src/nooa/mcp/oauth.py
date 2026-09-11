@@ -796,6 +796,8 @@ def _load_cached_token(server_url: str) -> OAuthToken | None:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
         return None
+    if not isinstance(data, dict):
+        return None
     entry = data.get(server_url)
     if not isinstance(entry, dict) or "access_token" not in entry:
         return None
