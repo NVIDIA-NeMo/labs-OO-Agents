@@ -105,6 +105,22 @@ def test_boundary_is_readonly_and_public_projection_is_detached():
     assert boundary["role"] == "metadata"
 
 
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_fake_client_consumes_boundaries_like_provider_clients(asynchronous):
+    from nooa.unifiedllm import FakeLLMClient
+
+    client = FakeLLMClient()
+    message = {"role": "user", "content": "live"}
+    history = [CacheBoundary(), message]
+    if asynchronous:
+        await client.acall(history)
+    else:
+        client.call(history)
+    assert client.last_messages == [message]
+    assert json.loads(json.dumps(client.last_messages)) == [message]
+    assert isinstance(history[0], CacheBoundary)
+
+
 def test_edited_relay_boundary_is_not_reinterpreted_as_cache_policy():
     from nooa.nemo_relay_middleware import _reconcile_messages
 
