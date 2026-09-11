@@ -17,6 +17,7 @@ from nooa.unifiedllm.replay_state import ReasoningReplayError, prepare_chat_mess
 from nooa.unifiedllm.response_parts import project_turn
 
 MODELS = ["anthropic/claude-sonnet-4", "gemini/gemini-2.5-pro", "openai/gateway-gemini"]
+DEEPSEEK_MODEL = "openai/deepseek-ai/DeepSeek-V4-Flash-0731"
 
 
 def message(model):
@@ -182,6 +183,34 @@ def test_reasoning_only_turn_replays_and_plain_reasoning_crosses_models():
         assert prepare_chat_messages([turn], replay_scope(model, "chat", {})) == [
             {"role": "assistant", "content": "Portable thinking"}
         ]
+
+
+def test_deepseek_reasoning_content_roundtrips_only_to_the_same_model():
+    scope = replay_scope(DEEPSEEK_MODEL, "chat", {"api_base": "http://localhost:8000/v1"})
+    assert scope is not None and scope.startswith("chat:deepseek:")
+    source = {
+        "role": "assistant",
+        "content": None,
+        "reasoning_content": "Use the account lookup tool.",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": '{"id":"123"}'},
+            }
+        ],
+    }
+    turn = LLMResponse(parts=capture_chat_parts(source, scope), replay_scope=scope)
+    restored = LLMResponse.model_validate_json(turn.model_dump_json())
+
+    assert prepare_chat_messages([restored], scope) == [source]
+    assert prepare_chat_messages([restored], replay_scope("openai/gpt-5.6-terra", "chat", {})) == [
+        {
+            "role": "assistant",
+            "content": "Use the account lookup tool.",
+            "tool_calls": source["tool_calls"],
+        }
+    ]
 
 
 def test_signed_reasoning_only_turn_survives():

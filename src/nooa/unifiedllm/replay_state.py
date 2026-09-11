@@ -35,6 +35,15 @@ _SUPPORTED_PROVIDERS = {
 }
 
 
+def _uses_deepseek_reasoning_content(model: str, resolved_model: str) -> bool:
+    prefix, separator, routed_model = model.lower().partition("/")
+    return bool(
+        separator
+        and prefix in {"openai", "azure"}
+        and any("deepseek" in value.lower() for value in (routed_model, resolved_model))
+    )
+
+
 class ReasoningReplayError(RuntimeError):
     """Opaque reasoning state is present but violates NOOA's replay contract."""
 
@@ -136,7 +145,14 @@ def replay_scope(
             exc,
         )
         return None
-    if provider not in _SUPPORTED_PROVIDERS or (
+    deepseek_compat = (
+        api_style == "chat"
+        and provider in {"openai", "azure"}
+        and _uses_deepseek_reasoning_content(model, resolved_model)
+    )
+    if deepseek_compat:
+        provider = "deepseek"
+    if (provider not in _SUPPORTED_PROVIDERS and not deepseek_compat) or (
         api_style == "responses" and provider not in {"openai", "azure"}
     ):
         return None

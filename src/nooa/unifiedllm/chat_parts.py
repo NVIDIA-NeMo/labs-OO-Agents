@@ -84,7 +84,8 @@ def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, 
         "".join(part.text for part in parts),
         "\n".join(part.text for part in parts if part.text),
     }:
-        parts.append(AssistantReasoning(text=reasoning))
+        native = {"reasoning_content": True} if provider == "deepseek" else None
+        parts.append(AssistantReasoning(text=reasoning, native=native))
 
     fields = _field(message, "provider_specific_fields")
     native_text: dict[str, Any] = {}
@@ -190,6 +191,11 @@ def project_chat_turn(turn: LLMResponse, scope: str | None) -> tuple[dict, dict[
                     )
                 _require_encrypted_reasoning(block)
                 _restore_summary(block, part.text)
+            elif field == "reasoning_content":
+                if provider != "deepseek" or block is not True:
+                    raise ReasoningReplayError("Unsupported native reasoning_content field.")
+                message[field] = part.text
+                continue
             elif field != "thinking_blocks":
                 raise ReasoningReplayError("Unknown native Chat reasoning field.")
             message.setdefault(field, []).append(block)
