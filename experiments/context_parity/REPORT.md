@@ -1,7 +1,7 @@
 # Context parity result
 
 Tested 2026-09-11 against `origin/main` at `f1c2587b` and the context-view
-implementation at `5eff5ddb`.
+implementation at `a814d9d2`.
 
 ## Result
 
@@ -32,14 +32,16 @@ NVIDIA internal inference was tested with `openai/openai/openai/gpt-5.6-terra` a
   unused manager context did not leak into either request.
 - Quickstart 02 structured Predict output and quickstart 03 CodeAct tool execution
   passed. Assistant/tool IDs paired correctly.
-- Four sessions contain 31 spans, five LLM calls, four code-execution spans, and no
+- Four sessions contain 32 spans, five LLM calls, five code-execution spans, and no
   error spans or recorded exceptions.
 
-Local traces are under `tmp/terra-context-e2e-final-v4/{journal,otlp}`.
+Local traces are under `tmp/terra-context-e2e-final-v5/{journal,otlp}`.
 
 ## Local verification
 
-- `7220 passed, 7 skipped, 238 deselected, 3 xfailed` for the release-equivalent
+- `7223 passed, 7 skipped, 238 deselected, 3 xfailed` for the release-equivalent
   suite (`not integration and not stress`).
-- Context, replay, middleware, and parity-focused suites passed (340 tests).
+- Context, replay, middleware, and parity-focused suites passed; the final focused
+  formatter/view run passed 259 tests.
 - Ruff, formatting, SPDX validation, and Pyright passed.
+- GPT-6 Astra approved the corrected worktree after 403 independent targeted tests.
