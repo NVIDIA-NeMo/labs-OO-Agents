@@ -248,15 +248,17 @@ def scrub_value(value: Any) -> tuple[Any, int]:
     """
     if isinstance(value, str):
         # OpenInference records LLM inputs as JSON string span attributes.
-        # Parse only valid JSON and serialize it again only if the recursive
-        # walk found additional keyed state to redact.
+        # Only parse objects/arrays. Matching the prefix avoids allocating a
+        # stripped copy of a potentially large tool output just to inspect it.
+        if not re.match(r"\s*[\[{]", value):
+            return scrub_string(value)
         try:
             decoded = json.loads(value)
         except (json.JSONDecodeError, TypeError):
             return scrub_string(value)
         decoded, json_count = scrub_value(decoded)
         if json_count:
-            return json.dumps(decoded, separators=(",", ":")), json_count
+            return json.dumps(decoded, separators=(",", ":"), ensure_ascii=False), json_count
         return value, 0
     if isinstance(value, dict):
         scrubbed_mapping: dict[Any, Any] = {}
