@@ -9,6 +9,7 @@ Fixes:
    defined in OpenInference semantic conventions).
 3. Missing reasoning_content capture for reasoning models (DeepSeek, o1, Nemotron, etc.)
 4. Extract <think> tags from content for models that embed reasoning (Nemotron, QwQ)
+5. Preserve Responses reasoning summaries when journal mode strips message attributes
 
 Bug: https://github.com/Arize-ai/openinference/issues (to be filed)
 Affected version: openinference-instrumentation-litellm v0.1.28+
@@ -251,6 +252,22 @@ def _patched_get_attributes_from_message_param(
         yield (MessageAttributes.MESSAGE_TOOL_CALL_ID, tool_call_id)
 
 
+def _patched_get_attributes_from_response_output(result: Any) -> dict[str, Any]:
+    """Keep readable Responses summaries on the same OTLP field as Chat reasoning."""
+    from openinference.instrumentation.litellm._responses_attributes import (
+        _get_attributes_from_response_output,
+    )
+
+    from nooa.unifiedllm.replay_state import responses_reasoning_text
+
+    attributes = _get_attributes_from_response_output(result)
+    if reasoning := responses_reasoning_text(result.output):
+        # Message attributes may be stripped in journal mode. This field remains
+        # on the span and contains only visible text, never encrypted state.
+        attributes["llm.reasoning_content"] = reasoning
+    return attributes
+
+
 def apply_litellm_patch() -> None:
     """Apply monkey patches to fix litellm instrumentation bugs.
 
@@ -258,6 +275,7 @@ def apply_litellm_patch() -> None:
     1. _set_output_message_value - fixes null/empty content handling, adds
        reasoning_content, and stamps llm.cost.* (not emitted by the instrumentor)
     2. _get_attributes_from_message_param - adds missing tool_call.id capture
+    3. _get_attributes_from_response_output - keeps Responses summaries on OTLP
 
     It also enables ``litellm.return_response_headers`` so the gateway's
     ``x-litellm-response-cost`` headers are retained on the response for cost
@@ -278,6 +296,8 @@ def apply_litellm_patch() -> None:
 
         # Patch 1: Fix null/empty content handling
         litellm._set_output_message_value = _patched_set_output_message_value
+        # This imported private helper is the Responses instrumentor's patch point.
+        litellm._get_attributes_from_response_output = _patched_get_attributes_from_response_output  # pyright: ignore[reportPrivateImportUsage]
 
         # Patch 2: Fix missing tool_call.id
         # Store the original function so our patch can call it

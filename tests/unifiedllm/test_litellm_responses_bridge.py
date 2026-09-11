@@ -95,7 +95,11 @@ async def test_default_reasoning_tool_call_uses_responses_bridge(model: str) -> 
 
         responses.assert_called_once()
         assert result.finish_reason == "tool_calls"
-        assert result.llm_state == {"reasoning_items": [REASONING_ITEM]}
+        from nooa.unifiedllm.chat_parts import project_chat_turn
+
+        assert result.replay_scope.startswith("chat:openai:")
+        projected, _ = project_chat_turn(result, result.replay_scope)
+        assert projected["reasoning_items"] == [REASONING_ITEM]
     finally:
         await client.aclose()
 

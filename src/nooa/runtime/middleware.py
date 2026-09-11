@@ -120,7 +120,8 @@ class LLMCallContext(BaseModel):
     """Context for ``llm_call`` middleware.
 
     Attributes:
-        messages: The prompt messages list (mutable — middleware may edit).
+        messages: Public message dictionaries. Edits are allowed; UnifiedLLM
+                  replays private state only for unchanged referenced messages.
         params: Extra keyword arguments forwarded to ``acall()``
                 (tools, output_model, etc.).  Middleware may add / remove keys.
         agent: The agent instance that owns the runtime.

@@ -53,19 +53,7 @@ def _relay_response(response: LLMResponse) -> dict[str, Any]:
     """Project the canonical response only when NeMo Relay needs wire JSON."""
     result: dict[str, Any] = {"finish_reason": response.finish_reason}
     if response.content or response.tool_calls or response.reasoning:
-        message: dict[str, Any] = {"role": "assistant", "content": response.content}
-        if response.tool_calls:
-            message["tool_calls"] = [
-                {
-                    "id": call.id,
-                    "type": "function",
-                    "function": {"name": call.name, "arguments": call.arguments},
-                }
-                for call in response.tool_calls
-            ]
-        if response.reasoning:
-            message["reasoning_content"] = response.reasoning
-        result["message"] = message
+        result["message"] = response.public_message()
     if response.usage is not None:
         result["usage"] = {
             "prompt_tokens": response.usage.input_tokens,
@@ -77,28 +65,6 @@ def _relay_response(response: LLMResponse) -> dict[str, Any]:
             "cost_usd": response.usage.cost_usd,
         }
     return result
-
-
-def _response_for_relay(response: Any) -> dict[str, Any]:
-    """Return observable Relay JSON without exposing canonical opaque state."""
-    # Canonical responses may retain a raw SDK object containing encrypted
-    # provider state. Always project their public fields before considering raw
-    # compatibility fallbacks.
-    if isinstance(response, LLMResponse):
-        return _relay_response(response)
-    raw = getattr(response, "raw_response", None)
-    if raw is not None and hasattr(raw, "model_dump"):
-        return raw.model_dump(mode="json")
-    if hasattr(response, "model_dump"):
-        return response.model_dump(mode="json")
-    if hasattr(response, "assistant_message"):
-        result: dict[str, Any] = {"message": response.assistant_message}
-        if response.usage:
-            result["usage"] = response.usage
-        if response.finish_reason:
-            result["finish_reason"] = response.finish_reason
-        return result
-    return {}
 
 
 if TYPE_CHECKING:
@@ -236,7 +202,7 @@ async def nemo_relay_llm_middleware(
         resp = captured_ctx.response
         if resp is None:
             return {}
-        return _response_for_relay(resp)
+        return _relay_response(resp)
 
     # Note: nemo_relay.llm.execute() returns the pre-guardrail response.
     # Sanitize-response guardrails transform data for NeMo Relay internals

@@ -36,6 +36,7 @@ from litellm.integrations.custom_logger import CustomLogger
 from opentelemetry import trace as otel_trace
 
 from nooa.tracing._journal_builder import _encode_image
+from nooa.tracing._secret_scrubber import scrub_value
 from nooa.tracing._session import get_session
 
 log = logging.getLogger(__name__)
@@ -67,6 +68,12 @@ def _msg_to_dict(msg: Any) -> dict:
         return dict(msg)
     except TypeError:
         return {"raw": str(msg)}
+
+
+def _safe_msg_to_dict(msg: Any) -> dict:
+    """Normalize one provider message and remove provider-only opaque state."""
+    scrubbed, _ = scrub_value(_msg_to_dict(msg))
+    return scrubbed if isinstance(scrubbed, dict) else {}
 
 
 def _extract_output_msgs(response_obj: Any) -> list[dict]:
@@ -546,7 +553,7 @@ class MessageJournalCallback(CustomLogger):
             # No sideband — publish the raw messages as the skeleton
             # with no block refs. The viewer just uses their content
             # as-is, matching what the wire shows.
-            input_skeleton = [_msg_to_dict(m) for m in messages]
+            input_skeleton = [_safe_msg_to_dict(m) for m in messages]
 
         span_id = self._current_span_id()
         with self._lock:
@@ -578,7 +585,9 @@ class MessageJournalCallback(CustomLogger):
         # small and re-uses any hash that overlaps with messages the
         # agent will echo back on subsequent turns.
         output_blocks: dict[str, str] = {}
-        output_messages = [_skeleton_dict_message(m, output_blocks) for m in raw_output]
+        output_messages = [
+            _skeleton_dict_message(_safe_msg_to_dict(m), output_blocks) for m in raw_output
+        ]
         if output_blocks:
             self._send_new_blocks(session_id, output_blocks)
 

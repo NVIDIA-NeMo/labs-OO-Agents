@@ -23,13 +23,10 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, TypeGuard
-
-from nooa._llm_state import ReplayCarryingMessage, carry_replay_batch
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import FormatConfig
-    from nooa.llm_types import LLMResponse
 
 from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ToolCallEvent
@@ -39,15 +36,9 @@ from nooa.context_blocks.models import (
     Role,
     ToolCallInfo,
 )
+from nooa.llm_types import assistant_message
 
 logger = logging.getLogger(__name__)
-
-
-def _is_llm_response(event: EventBase | None) -> TypeGuard["LLMResponse"]:
-    """Recognize canonical turns without a module-initialization cycle."""
-    from nooa.llm_types import LLMResponse
-
-    return isinstance(event, LLMResponse)
 
 
 class FormatType(StrEnum):
@@ -123,7 +114,7 @@ class BlockFormatter(ABC):
         No OOM-safety cap is applied here — that belongs to L2 (stdout/stderr
         capture).
         """
-        if _is_llm_response(event):
+        if event.render_reference() is not None:
             return event.replay_content
         if getattr(event, "_role", None) is Role.ASSISTANT:
             content = getattr(event, "content", None)
@@ -228,20 +219,6 @@ def _tool_result_message(event: ToolCallEvent) -> RenderedMessage:
     )
 
 
-def _is_replayable_tool_call_turn(event: Any) -> bool:
-    """Return whether a captured turn is safe to project as provider tool calls."""
-    if event.finish_reason != "tool_calls" or not event.tool_calls:
-        return False
-    for call in event.tool_calls:
-        try:
-            arguments = json.loads(call.arguments)
-        except json.JSONDecodeError:
-            return False
-        if not isinstance(arguments, dict):
-            return False
-    return True
-
-
 def _event_block_to_messages(
     block: ResolvedBlock,
     *,
@@ -259,20 +236,20 @@ def _event_block_to_messages(
     """
     from nooa.context_blocks.models import BlockPart
 
-    if _is_llm_response(block.event) and not _is_replayable_tool_call_turn(block.event):
-        # Replay metadata gets an internal carrier even when the public turn has
-        # no text. UnifiedLLM drops opaque state and demotes plain reasoning.
-        if block.event.llm_state or block.event.reasoning:
-            return [
-                RenderedMessage(
-                    role=Role.ASSISTANT,
-                    content=block.event.replay_content or None,
-                    llm_state=block.event.llm_state,
-                    reasoning=block.event.reasoning,
-                )
-            ]
-        if not block.event.replay_content:
+    if block.event is not None and block.event.render_reference() is not None:
+        event = block.event
+        if event.is_empty:
             return []
+        # Incomplete calls are omitted from this public projection. UnifiedLLM
+        # detects that edit against the stored event and drops native state.
+        return [
+            RenderedMessage(
+                role=Role.ASSISTANT,
+                content=block.content,
+                reasoning=event.reasoning,
+                render_reference=event.render_reference(),
+            )
+        ]
 
     if isinstance(block.event, ToolCallEvent):
         event = block.event
@@ -326,7 +303,9 @@ def _event_blocks_to_messages(
     replayable_turn_ids = {
         block.event.id
         for block in blocks
-        if _is_llm_response(block.event) and _is_replayable_tool_call_turn(block.event)
+        if block.event is not None
+        and block.event.render_reference() is not None
+        and block.event.replay_tool_calls
     }
     executions: dict[str, dict[str, ToolCallEvent]] = {}
     for block in blocks:
@@ -341,11 +320,11 @@ def _event_blocks_to_messages(
     messages: list[RenderedMessage] = []
     for block in blocks:
         event = block.event
-        if _is_llm_response(event) and _is_replayable_tool_call_turn(event):
+        if event is not None and event.render_reference() is not None and event.replay_tool_calls:
             by_call_id = executions.get(event.id, {})
             if any(
                 call.id not in by_call_id or by_call_id[call.id].result is None
-                for call in event.tool_calls
+                for call in event.replay_tool_calls
             ):
                 logger.warning(
                     "LLMResponse %s has an incomplete visible execution batch — "
@@ -356,22 +335,16 @@ def _event_blocks_to_messages(
             messages.append(
                 RenderedMessage(
                     role=Role.ASSISTANT,
-                    # Event projection stores the raw object on a contentless
-                    # block; the canonical provider text lives on LLMResponse.
-                    content=event.replay_content or None,
-                    tool_calls=tuple(
-                        ToolCallInfo(
-                            id=call.id,
-                            name=call.name,
-                            arguments=call.arguments,
-                        )
-                        for call in event.tool_calls
-                    ),
-                    llm_state=event.llm_state,
+                    content=block.content,
                     reasoning=event.reasoning,
+                    tool_calls=tuple(
+                        ToolCallInfo(id=call.id, name=call.name, arguments=call.arguments)
+                        for call in event.replay_tool_calls
+                    ),
+                    render_reference=event.render_reference(),
                 )
             )
-            for call in event.tool_calls:
+            for call in event.replay_tool_calls:
                 messages.append(_tool_result_message(by_call_id[call.id]))
             continue
 
@@ -529,11 +502,6 @@ def _append_openai_image_message(out: list[dict], msg: RenderedMessage) -> None:
     out.append({"role": msg.role.value, "content": content_parts})
 
 
-def _arguments_json(arguments: dict[str, Any] | str) -> str:
-    """Return provider-standard JSON text without rewriting captured arguments."""
-    return json.dumps(arguments) if isinstance(arguments, dict) else arguments
-
-
 def _arguments_object(arguments: dict[str, Any] | str) -> dict[str, Any]:
     """Return Anthropic's object-shaped tool input with a useful failure."""
     if isinstance(arguments, dict):
@@ -547,13 +515,19 @@ def _arguments_object(arguments: dict[str, Any] | str) -> dict[str, Any]:
     return parsed
 
 
-def _with_replay_data(
-    message: dict[str, Any],
-    state: dict[str, Any] | None,
-    reasoning: str | None,
-) -> dict[str, Any]:
-    """Carry replay metadata outside the provider-visible mapping."""
-    return ReplayCarryingMessage(message, state, reasoning) if state or reasoning else message
+def _with_reasoning(message: dict[str, Any], reasoning: str | None) -> dict[str, Any]:
+    """Portable reasoning on synthetic messages needs no native-state carrier."""
+    if reasoning:
+        message["reasoning_content"] = reasoning
+    return message
+
+
+def _carry_cache_boundary(
+    output: list[dict[str, Any]], start: int, message: RenderedMessage
+) -> None:
+    """Keep boundaries beside logical messages, never wrapped around a turn."""
+    if message.cache_boundary_before and len(output) > start:
+        output.insert(start, {"nooa_cache_boundary": True})
 
 
 class OpenAIProviderFormatter(ProviderFormatter):
@@ -562,23 +536,13 @@ class OpenAIProviderFormatter(ProviderFormatter):
     def format(self, messages: list[RenderedMessage]) -> list[dict]:
         out: list[dict] = []
         for msg in messages:
+            start = len(out)
             if msg.tool_calls:
-                assistant_message = {
-                    "role": "assistant",
-                    "content": msg.content,
-                    "tool_calls": [
-                        {
-                            "id": call.id,
-                            "type": "function",
-                            "function": {
-                                "name": call.name,
-                                "arguments": _arguments_json(call.arguments),
-                            },
-                        }
-                        for call in msg.tool_calls
-                    ],
-                }
-                out.append(_with_replay_data(assistant_message, msg.llm_state, msg.reasoning))
+                out.append(
+                    assistant_message(
+                        msg.content, tool_calls=msg.tool_calls, reasoning=msg.reasoning
+                    )
+                )
             elif msg.tool_call_id is not None:
                 out.append(
                     {
@@ -589,16 +553,20 @@ class OpenAIProviderFormatter(ProviderFormatter):
                 )
             elif msg.images:
                 _append_openai_image_message(out, msg)
+            elif msg.role is Role.ASSISTANT:
+                out.append(assistant_message(msg.content, reasoning=msg.reasoning))
             else:
                 if msg.role in (Role.RUNTIME_EVENT, Role.METADATA):
                     continue
                 out.append(
-                    _with_replay_data(
+                    _with_reasoning(
                         {"role": msg.role.value, "content": msg.content or ""},
-                        msg.llm_state,
                         msg.reasoning,
                     )
                 )
+            if msg.render_reference is not None:
+                out[start]["nooa_turn"] = msg.render_reference
+            _carry_cache_boundary(out, start, msg)
         return out
 
 
@@ -614,6 +582,7 @@ class AnthropicProviderFormatter(ProviderFormatter):
                     system_parts.append(msg.content)
                 continue
 
+            start = len(out)
             if msg.tool_calls:
                 content: list[dict[str, Any]] = []
                 if msg.content:
@@ -628,12 +597,11 @@ class AnthropicProviderFormatter(ProviderFormatter):
                     for call in msg.tool_calls
                 )
                 out.append(
-                    _with_replay_data(
+                    _with_reasoning(
                         {
                             "role": "assistant",
                             "content": content,
                         },
-                        msg.llm_state,
                         msg.reasoning,
                     )
                 )
@@ -661,98 +629,17 @@ class AnthropicProviderFormatter(ProviderFormatter):
                     continue
                 role = msg.role if msg.role in (Role.USER, Role.ASSISTANT) else Role.USER
                 out.append(
-                    _with_replay_data(
+                    _with_reasoning(
                         {"role": role.value, "content": msg.content or ""},
-                        msg.llm_state,
                         msg.reasoning,
                     )
                 )
+            if msg.render_reference is not None:
+                out[start]["nooa_turn"] = msg.render_reference
+            _carry_cache_boundary(out, start, msg)
 
         return {"system": "\n\n".join(system_parts), "messages": out}
 
 
-class ResponsesProviderFormatter(ProviderFormatter):
-    """Emit OpenAI Responses API native format (``list[dict]``).
-
-    The Responses API uses a different wire format from Chat Completions:
-    - Tool calls → ``{"type": "function_call", "call_id": ..., "name": ..., "arguments": ...}``
-    - Tool results → ``{"type": "function_call_output", "call_id": ..., "output": ...}``
-    - User/Assistant messages → ``{"role": "user"|"assistant", "content": ...}``
-    - System messages → kept as ``{"role": "system", ...}`` in the list so that
-      downstream budget-clamping can identify and protect them. The LLM client
-      extracts them into the ``instructions`` API parameter at call time.
-    """
-
-    def format(self, messages: list[RenderedMessage]) -> list[dict]:
-        out: list[dict] = []
-        for msg in messages:
-            if msg.role == Role.SYSTEM:
-                out.append({"role": "system", "content": msg.content or ""})
-                continue
-
-            if msg.tool_calls:
-                # Preserve assistant text that precedes the tool call
-                batch: list[dict[str, Any]] = []
-                if msg.content and msg.role == Role.ASSISTANT:
-                    batch.append({"role": "assistant", "content": msg.content})
-                for call in msg.tool_calls:
-                    batch.append(
-                        {
-                            "type": "function_call",
-                            "call_id": call.id,
-                            "name": call.name,
-                            "arguments": _arguments_json(call.arguments),
-                        }
-                    )
-                if msg.llm_state or msg.reasoning:
-                    out.extend(carry_replay_batch(batch, msg.llm_state, msg.reasoning))
-                else:
-                    out.extend(batch)
-            elif msg.tool_call_id is not None:
-                out.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": msg.tool_call_id,
-                        "output": msg.content or "",
-                    }
-                )
-            elif msg.images:
-                role = msg.role if msg.role in (Role.USER, Role.ASSISTANT) else Role.USER
-                content_parts: list[dict] = []
-                if msg.content:
-                    content_parts.append({"type": "input_text", "text": msg.content})
-                for img in msg.images:
-                    if img.get("type") == "image_url":
-                        # Responses API requires input_image, and its image_url must
-                        # be the URL STRING (not the Chat-Completions {"url": ...}
-                        # object) — otherwise the API rejects it with
-                        # "expected an image URL, but got an object instead".
-                        iu = img["image_url"]
-                        if isinstance(iu, dict):
-                            url = iu.get("url")
-                            if not url:
-                                # Fail fast: an empty image_url only yields an opaque
-                                # "invalid URL" from the API, hiding the real problem.
-                                raise ValueError(
-                                    "image_url dict has no 'url'; cannot build a "
-                                    f"Responses input_image block: {iu!r}"
-                                )
-                            part = {"type": "input_image", "image_url": url}
-                            if iu.get("detail"):
-                                part["detail"] = iu["detail"]
-                        else:
-                            part = {"type": "input_image", "image_url": iu}
-                        content_parts.append(part)
-                    else:
-                        content_parts.append(img)
-                out.append({"role": role.value, "content": content_parts})
-            else:
-                if msg.role in (Role.RUNTIME_EVENT, Role.METADATA):
-                    continue
-                role = msg.role if msg.role in (Role.USER, Role.ASSISTANT) else Role.USER
-                message = {"role": role.value, "content": msg.content or ""}
-                if (msg.llm_state or msg.reasoning) and role == Role.ASSISTANT:
-                    out.extend(carry_replay_batch([message], msg.llm_state, msg.reasoning))
-                else:
-                    out.append(message)
-        return out
+class ResponsesProviderFormatter(OpenAIProviderFormatter):
+    """Emit public message dicts; ResponsesClient resolves references at dispatch."""

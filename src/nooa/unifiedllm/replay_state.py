@@ -1,0 +1,373 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Compatibility-scoped capture and replay of closed-provider reasoning state.
+
+The event IR treats provider state as an opaque dictionary. This module is the
+compatibility and validation boundary shared by the native part adapters. Expected incompatibility warns and demotes portable text; malformed
+current state raises instead of silently hiding a framework or provider change.
+"""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import logging
+import os
+from typing import Any, Literal
+from urllib.parse import urlsplit
+
+import litellm
+
+from nooa._llm_state import (
+    LLM_STATE_KEY,
+    carried_cache_boundary,
+    demote_reasoning_text,
+)
+from nooa.llm_types import LLMResponse
+
+logger = logging.getLogger(__name__)
+
+_ENCRYPTED_REASONING_INCLUDE = "reasoning.encrypted_content"
+_INLINE_THOUGHT_SIGNATURE_SEPARATOR = "__thought__"
+_SUPPORTED_PROVIDERS = {
+    "openai",
+    "azure",
+    "anthropic",
+    "gemini",
+}
+
+
+class ReasoningReplayError(RuntimeError):
+    """Opaque reasoning state is present but violates NOOA's replay contract."""
+
+
+def _field(value: Any, key: str, default: Any = None) -> Any:
+    return value.get(key, default) if isinstance(value, dict) else getattr(value, key, default)
+
+
+def response_item_type(item: Any) -> str | None:
+    value = _field(item, "type")
+    return value if isinstance(value, str) else None
+
+
+def unsupported_responses_parts(output: list[Any]) -> list[str]:
+    """Identify turn parts the canonical response cannot currently project."""
+    unsupported: list[str] = []
+    for item in output:
+        item_type = response_item_type(item)
+        if item_type not in {"reasoning", "function_call", "message"}:
+            unsupported.append(str(item_type))
+        elif item_type == "message":
+            for block in _field(item, "content", []) or []:
+                block_type = response_item_type(block)
+                if block_type != "output_text":
+                    unsupported.append(f"message.{block_type}")
+    return unsupported
+
+
+def opaque_item(item: Any) -> Any:
+    """Detach one provider-owned item for durable storage."""
+    # Inspect the type: permissive mocks/proxies synthesize arbitrary instance
+    # attributes and can otherwise recurse forever here.
+    if callable(getattr(type(item), "model_dump", None)):
+        return opaque_item(item.model_dump(exclude_none=True))
+    if isinstance(item, dict):
+        return {key: opaque_item(value) for key, value in item.items()}
+    if isinstance(item, (list, tuple)):
+        return [opaque_item(value) for value in item]
+    return copy.deepcopy(item)
+
+
+def _warn_unknown_fields(fields: dict[str, Any], known: set[str], location: str) -> None:
+    unknown = sorted(key for key, value in fields.items() if key not in known and value is not None)
+    if unknown:
+        logger.warning(
+            "Ignoring unrecognized provider field(s) %s on %s; opaque reasoning retention "
+            "may need updating.",
+            ", ".join(unknown),
+            location,
+        )
+
+
+def _normalized_endpoint(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        return "default"
+    parsed = urlsplit(value)
+    if not parsed.scheme or not parsed.netloc:
+        return value.rstrip("/")
+    path = parsed.path.rstrip("/")
+    query = f"?{parsed.query}" if parsed.query else ""
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}{query}"
+
+
+def _uses_native_openai_endpoint(api_params: dict[str, Any]) -> bool:
+    endpoint = (
+        api_params.get("api_base")
+        or api_params.get("base_url")
+        or getattr(litellm, "api_base", None)
+        or os.getenv("OPENAI_BASE_URL")
+        or os.getenv("OPENAI_API_BASE")
+        or "https://api.openai.com/v1"
+    )
+    return _normalized_endpoint(endpoint) == "https://api.openai.com/v1"
+
+
+def replay_scope(
+    model: str,
+    api_style: Literal["chat", "responses"],
+    params: dict[str, Any],
+) -> str | None:
+    """Return a non-secret compatibility key for an opaque provider payload.
+
+    LiteLLM resolves provider and model identity. Provider, API style, and exact
+    model are intentionally the whole key. Transport routes and authentication
+    do not change the provider wire format, so gateway or credential changes
+    must not silently disable capture or replay.
+    """
+    configured_endpoint = params.get("api_base") or params.get("base_url")
+    try:
+        resolved_model, provider, _, _ = litellm.get_llm_provider(
+            model=model,
+            custom_llm_provider=params.get("custom_llm_provider"),
+            api_base=configured_endpoint,
+        )
+    except Exception as exc:  # noqa: BLE001 - model routing is third-party input
+        logger.warning(
+            "Opaque reasoning replay is disabled because LiteLLM could not resolve model %r: %s",
+            model,
+            exc,
+        )
+        return None
+    if provider not in _SUPPORTED_PROVIDERS or (
+        api_style == "responses" and provider not in {"openai", "azure"}
+    ):
+        return None
+
+    digest = hashlib.sha256(resolved_model.encode()).hexdigest()
+    return f"{api_style}:{provider}:sha256:{digest}"
+
+
+def _scope_provider(scope: str | None) -> str | None:
+    if scope is None:
+        return None
+    if not isinstance(scope, str):
+        raise ReasoningReplayError("Malformed opaque reasoning scope: expected a string.")
+    parts = scope.split(":", 2)
+    if len(parts) != 3 or not all(parts):
+        raise ReasoningReplayError(
+            f"Malformed opaque reasoning scope {scope!r}: expected api:provider:identity."
+        )
+    return parts[1]
+
+
+def _tool_call_state(tool_call: Any, scope: str | None) -> dict[str, Any] | None:
+    dumped = opaque_item(tool_call)
+    if not isinstance(dumped, dict):
+        raise ReasoningReplayError("Malformed provider tool call: expected a mapping.")
+    fields = dumped.get("provider_specific_fields")
+    if fields is not None and not isinstance(fields, dict):
+        raise ReasoningReplayError("Malformed tool-call provider_specific_fields.")
+    if fields:
+        _warn_unknown_fields(fields, {"thought_signature"}, "a provider tool call")
+    signature = fields.get("thought_signature") if fields else None
+    if (
+        fields
+        and "thought_signature" in fields
+        and (not isinstance(signature, str) or not signature)
+    ):
+        raise ReasoningReplayError("Malformed tool-call thought_signature.")
+    call_id = dumped.get("id")
+    inline_candidate = None
+    if isinstance(call_id, str) and _INLINE_THOUGHT_SIGNATURE_SEPARATOR in call_id:
+        inline_candidate = call_id.split(_INLINE_THOUGHT_SIGNATURE_SEPARATOR, 1)[1]
+        if not inline_candidate and (_scope_provider(scope) == "gemini" or signature):
+            raise ReasoningReplayError("Malformed inline tool-call thought signature.")
+    if signature and inline_candidate and signature != inline_candidate:
+        raise ReasoningReplayError("Conflicting thought signatures on one provider tool call.")
+    inline_signature = (
+        inline_candidate
+        if _scope_provider(scope) == "gemini" or signature == inline_candidate
+        else None
+    )
+    if signature is None and inline_signature is None:
+        return None
+    state: dict[str, Any] = {}
+    if signature is not None:
+        state["provider_specific_fields"] = {"thought_signature": signature}
+    if inline_signature is not None:
+        state["inline_thought_signature"] = inline_signature
+    return state
+
+
+def responses_message_text(item: Any) -> str:
+    content = _field(item, "content", [])
+    if not isinstance(content, list):
+        return ""
+    texts = [
+        text
+        for block in content
+        if _field(block, "type") == "output_text"
+        and isinstance((text := _field(block, "text")), str)
+    ]
+    return "".join(texts)
+
+
+def responses_output_text(output: list[Any]) -> str:
+    """Match the SDK's separator-free aggregation of assistant text blocks."""
+    return "".join(
+        responses_message_text(item) for item in output if response_item_type(item) == "message"
+    )
+
+
+def _strip_inline_signature(value: Any) -> Any:
+    if isinstance(value, str) and _INLINE_THOUGHT_SIGNATURE_SEPARATOR in value:
+        return value.split(_INLINE_THOUGHT_SIGNATURE_SEPARATOR, 1)[0]
+    return value
+
+
+def _strip_chat_state(
+    message: dict[str, Any], source_scope: str | None, target_scope: str | None
+) -> dict[str, str]:
+    public_call_ids: dict[str, str] = {}
+    removed = False
+    gemini_wire = "gemini" in {
+        _scope_provider(source_scope),
+        _scope_provider(target_scope),
+    }
+    for key in ("reasoning_items", "thinking_blocks", "provider_specific_fields"):
+        removed = key in message or removed
+        message.pop(key, None)
+    content = message.get("content")
+    if isinstance(content, list):
+        public_blocks = [
+            block
+            for block in content
+            if not (
+                isinstance(block, dict) and block.get("type") in {"thinking", "redacted_thinking"}
+            )
+        ]
+        removed = len(public_blocks) != len(content) or removed
+        message["content"] = public_blocks
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        # Detach the containers we edit, not their potentially large native
+        # leaves. Rejected state is removed before any public-input deep copy.
+        tool_calls = [dict(call) if isinstance(call, dict) else call for call in tool_calls]
+        message["tool_calls"] = tool_calls
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            call_id = call.get("id")
+            fields = call.get("provider_specific_fields")
+            explicit_signature = (
+                fields.get("thought_signature") if isinstance(fields, dict) else None
+            )
+            inline_candidate = (
+                call_id.split(_INLINE_THOUGHT_SIGNATURE_SEPARATOR, 1)[1]
+                if isinstance(call_id, str) and _INLINE_THOUGHT_SIGNATURE_SEPARATOR in call_id
+                else None
+            )
+            if gemini_wire or (inline_candidate and inline_candidate == explicit_signature):
+                public_id = _strip_inline_signature(call_id)
+                removed = public_id != call_id or removed
+                if isinstance(call_id, str) and public_id != call_id:
+                    public_call_ids[call_id] = public_id
+                call["id"] = public_id
+            removed = "provider_specific_fields" in call or removed
+            call.pop("provider_specific_fields", None)
+            function = call.get("function")
+            if isinstance(function, dict):
+                function = dict(function)
+                call["function"] = function
+                removed = "provider_specific_fields" in function or removed
+                function.pop("provider_specific_fields", None)
+    if gemini_wire and "tool_call_id" in message:
+        public_id = _strip_inline_signature(message["tool_call_id"])
+        removed = public_id != message["tool_call_id"] or removed
+        message["tool_call_id"] = public_id
+    if removed:
+        logger.warning(
+            "Removed untrusted provider reasoning fields from a public chat message; "
+            "replay opaque state through a persisted LLMResponse instead."
+        )
+    return public_call_ids
+
+
+def responses_reasoning_text(output: list[Any]) -> str | None:
+    """Return provider-visible Responses reasoning summaries as plain text."""
+    texts: list[str] = []
+    for item in output:
+        if response_item_type(item) != "reasoning":
+            continue
+        summary_items = _field(item, "summary")
+        if summary_items is None:
+            summary_items = []
+        elif not isinstance(summary_items, list):
+            raise ReasoningReplayError("Malformed Responses reasoning summary.")
+        for summary in summary_items:
+            text = _field(summary, "text")
+            if not isinstance(text, str):
+                raise ReasoningReplayError("Malformed Responses reasoning summary text.")
+            if text:
+                texts.append(text)
+    return "\n".join(texts) or None
+
+
+def prepare_chat_messages(
+    messages: list[LLMResponse | dict[str, Any]], scope: str | None
+) -> list[dict]:
+    """Project canonical turns; raw dictionaries never carry trusted native state."""
+    from .chat_parts import project_chat_turn
+
+    prepared: list[dict[str, Any]] = []
+    public_call_ids: dict[str, str] = {}
+    private_call_ids: dict[str, str] = {}
+    for original in messages:
+        if isinstance(original, LLMResponse):
+            message, ids = project_chat_turn(original, scope)
+            private_call_ids.update(ids)
+            if (
+                message.get("content")
+                or message.get("tool_calls")
+                or any(
+                    key in message
+                    for key in ("thinking_blocks", "reasoning_items", "provider_specific_fields")
+                )
+            ):
+                prepared.append(message)
+            continue
+        boundary = carried_cache_boundary(original)
+        message = dict(original)
+        message.pop("nooa_cache_boundary", None)
+        if message.pop(LLM_STATE_KEY, None) is not None:
+            raise ReasoningReplayError(
+                "Opaque wire sidecars are removed; pass an LLMResponse turn."
+            )
+        public_call_ids.update(_strip_chat_state(message, None, scope))
+        message = copy.deepcopy(message)
+        demote_reasoning_text(message, message.pop("reasoning_content", None))
+        call_id = message.get("tool_call_id")
+        if isinstance(call_id, str):
+            call_id = public_call_ids.get(call_id, call_id)
+            message["tool_call_id"] = private_call_ids.get(call_id, call_id)
+        prepared.append({**message, "nooa_cache_boundary": True} if boundary else message)
+    return prepared
+
+
+def add_encrypted_reasoning_include(api_params: dict[str, Any], scope: str | None) -> None:
+    """Request OpenAI encrypted reasoning only on endpoints known to support it."""
+    configured = api_params.get("include")
+    include = list(configured) if isinstance(configured, (list, tuple, set)) else []
+    if configured is not None and not isinstance(configured, (list, tuple, set)):
+        include.append(configured)
+    if _ENCRYPTED_REASONING_INCLUDE in include:
+        api_params["include"] = include
+        return
+    if scope and scope.startswith("responses:azure:"):
+        include.append(_ENCRYPTED_REASONING_INCLUDE)
+    elif (
+        scope and scope.startswith("responses:openai:") and _uses_native_openai_endpoint(api_params)
+    ):
+        include.append(_ENCRYPTED_REASONING_INCLUDE)
+    if include:
+        api_params["include"] = include

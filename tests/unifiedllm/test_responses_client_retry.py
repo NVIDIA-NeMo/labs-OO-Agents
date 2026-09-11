@@ -18,7 +18,13 @@ from nooa.unifiedllm import ResponsesClient, RetryConfig
 def make_mock_responses_response(content: str = "ok"):
     """Create a minimal litellm.ResponsesAPIResponse-like object for testing."""
     resp = MagicMock()
-    resp.output = [MagicMock(type="message", content=[MagicMock(type="output_text", text=content)])]
+    resp.output = [
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": content}],
+        }
+    ]
     resp.output_text = content
     resp.usage = None
     return resp
@@ -103,37 +109,46 @@ class TestResponsesClientSyncRetry:
 
     def test_reasoning_state_retains_interleaving_without_copying_public_calls(self):
         """The canonical state has enough anchors for exact ordered replay."""
-        reasoning_1 = MagicMock(type="reasoning")
-        reasoning_1.model_dump.return_value = {"type": "reasoning", "encrypted": "one"}
-        call_1 = MagicMock(type="function_call", call_id="call-1", arguments="{}")
-        call_1.name = "one"
-        reasoning_2 = MagicMock(type="reasoning")
-        reasoning_2.model_dump.return_value = {"type": "reasoning", "encrypted": "two"}
-        call_2 = MagicMock(type="function_call", call_id="call-2", arguments="{}")
-        call_2.name = "two"
+        reasoning_1 = {"type": "reasoning", "encrypted_content": "one"}
+        call_1 = {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "one",
+            "arguments": "{}",
+        }
+        reasoning_2 = {"type": "reasoning", "encrypted_content": "two"}
+        call_2 = {
+            "type": "function_call",
+            "call_id": "call-2",
+            "name": "two",
+            "arguments": "{}",
+        }
         raw_response = MagicMock(
             output=[reasoning_1, call_1, reasoning_2, call_2],
             output_text="",
             usage=None,
         )
-        client = ResponsesClient(model="test-model", retry_config=NO_RETRY)
+        client = ResponsesClient(model="openai/gpt-5.6", api_key="test", retry_config=NO_RETRY)
 
         with patch("litellm.responses", return_value=raw_response):
             response = client.call(messages=[{"role": "user", "content": "hi"}])
 
         assert [call.id for call in response.tool_calls] == ["call-1", "call-2"]
-        assert response.llm_state == {
-            "items": [
-                {"type": "reasoning", "encrypted": "one"},
-                {"type": "reasoning", "encrypted": "two"},
-            ],
-            "order": [
-                {"type": "reasoning", "index": 0},
-                {"type": "function_call", "call_id": "call-1"},
-                {"type": "reasoning", "index": 1},
-                {"type": "function_call", "call_id": "call-2"},
-            ],
-        }
+        from nooa.unifiedllm.response_parts import project_turn
+
+        assert project_turn(response, response.replay_scope) == [
+            reasoning_1,
+            call_1,
+            reasoning_2,
+            call_2,
+        ]
+        assert [part.kind for part in response.parts] == [
+            "reasoning",
+            "tool_call",
+            "reasoning",
+            "tool_call",
+        ]
+        client.close()
 
 
 class TestResponsesClientAsyncRetry:

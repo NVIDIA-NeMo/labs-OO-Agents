@@ -91,6 +91,28 @@ class EventBase(BaseModel):
 
     _role: ClassVar[Role] = Role.USER
 
+    @property
+    def is_empty(self) -> bool:
+        """Whether this event has nothing to contribute to model context.
+
+        Events are meaningful by default, including events without text fields.
+        Specialized durable records may distinguish observability from replay.
+        """
+        return False
+
+    def searchable_fields(self) -> dict[str, Any]:
+        """Public fields for search/debug export; consumers need not know their layout."""
+        return self.model_dump()
+
+    def render_reference(self) -> str | None:
+        """Optional identity for resolving an unchanged public message at dispatch."""
+        return None
+
+    @property
+    def replay_tool_calls(self) -> tuple:
+        """Completed assistant calls represented by this event, if any."""
+        return ()
+
     # Discriminator field - excluded from repr.
     # Default is "" (empty); model_post_init fills it with cls.__name__ if unset.
     event_type: str = Field(default="", repr=False, description="Event type discriminator")

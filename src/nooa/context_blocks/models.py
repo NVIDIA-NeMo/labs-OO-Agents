@@ -283,6 +283,8 @@ class RenderedMessage(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    render_reference: str | None = Field(default=None, exclude=True)
+
     role: Role = Field(description="Message role (SYSTEM / USER / ASSISTANT / TOOL)")
     content: str | None = Field(
         default=None, description="Text content, pre-serialized by the BlockFormatter"
@@ -300,15 +302,16 @@ class RenderedMessage(BaseModel):
         default_factory=tuple,
         description="Complete ordered tool-call batch on an assistant turn",
     )
-    llm_state: dict[str, Any] | None = Field(
-        default=None,
-        repr=False,
-        description="Opaque state carried only to the UnifiedLLM replay boundary",
-    )
     reasoning: str | None = Field(
         default=None,
         repr=False,
+        exclude=True,
         description="Plain reasoning carried to UnifiedLLM for replay as assistant text",
+    )
+    cache_boundary_before: bool = Field(
+        default=False,
+        exclude=True,
+        description="The provider-cacheable prefix ends before this message",
     )
     tool_call_id: str | None = Field(
         default=None, description="Tool-call id this message is a result for"

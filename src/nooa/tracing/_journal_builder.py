@@ -66,6 +66,8 @@ def build_journal_payload(messages: list[Any]) -> JournalPayload:
             continue
 
         entry: dict[str, Any] = {"role": role_s}
+        if reasoning := getattr(msg, "reasoning", None):
+            entry["reasoning_content"] = reasoning
 
         if msg.parts:
             parts_repr: list[dict[str, Any]] = []

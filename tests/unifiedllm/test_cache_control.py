@@ -59,6 +59,21 @@ class TestInjectCacheControl:
         assert "cache_control" not in messages[0]
         assert "cache_control" in result[0]
 
+    def test_copies_only_messages_that_receive_a_breakpoint(self, client):
+        """Stable history is borrowed instead of cloned on every request."""
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "assistant", "content": "Prior answer"},
+            {"role": "user", "content": "Continue"},
+        ]
+
+        result = client._inject_cache_control(messages, [{"role": "system"}])
+
+        assert result is not messages
+        assert result[0] is not messages[0]
+        assert result[1] is messages[1]
+        assert result[2] is messages[2]
+
     def test_multiple_roles(self, client):
         """Can target multiple roles at once."""
         messages = [
@@ -93,6 +108,7 @@ class TestInjectCacheControl:
         result = client._inject_cache_control(messages, injection_points)
 
         assert "cache_control" not in result[0]
+        assert result is messages
 
 
 # ---------------------------------------------------------------------------
