@@ -503,7 +503,7 @@ def test_reasoning_only_carrier_edit_drops_state_but_keeps_text() -> None:
 def test_malformed_matching_responses_payload_raises() -> None:
     scope = replay_scope("openai/gpt-5.6", "responses", {})
     state = {
-        "version": 1,
+        "version": 2,
         "scope": scope,
         "format": "openai-responses",
         "payload": {
@@ -575,7 +575,7 @@ def test_changed_responses_carrier_warns_and_demotes_text(
 def test_responses_envelope_cannot_replay_a_non_reasoning_item_as_state() -> None:
     scope = replay_scope("openai/gpt-5.6", "responses", {})
     state = {
-        "version": 1,
+        "version": 2,
         "scope": scope,
         "format": "openai-responses",
         "payload": {
@@ -840,16 +840,8 @@ def test_chat_state_is_captured_replayed_and_api_style_scoped() -> None:
 
         assert first.llm_state is not None
         assert first.llm_state["format"] == "litellm-chat"
-        assert first.llm_state["payload"]["carrier"] == {
-            "content": None,
-            "tool_calls": [
-                {
-                    "id": "call_1",
-                    "name": "execute_python",
-                    "arguments": '{"code":"print(1)"}',
-                }
-            ],
-        }
+        assert len(first.llm_state["payload"]["carrier"]) == 64
+        assert "print(1)" not in json.dumps(first.llm_state)
         assistant = next(
             item for item in call.call_args_list[1].kwargs["messages"] if item.get("tool_calls")
         )
@@ -997,7 +989,7 @@ def test_current_envelope_with_wrong_provider_payload_fails(model: str) -> None:
     assert scope is not None
     client = CompletionClient(model=model, api_key="account-a")
     crafted = {
-        "version": 1,
+        "version": 2,
         "scope": scope,
         "format": "litellm-chat",
         "payload": {"reasoning_items": [REASONING]},

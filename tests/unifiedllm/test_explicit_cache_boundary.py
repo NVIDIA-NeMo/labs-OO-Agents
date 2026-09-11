@@ -17,7 +17,12 @@ from nooa.context_blocks.models import BlockMetadata, RenderedMessage, ResolvedB
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 from nooa.unifiedllm import CompletionClient, ResponsesClient
-from nooa.unifiedllm.replay_state import capture_chat_state, prepare_chat_messages, replay_scope
+from nooa.unifiedllm.replay_state import (
+    capture_chat_state,
+    capture_responses_state,
+    prepare_chat_messages,
+    replay_scope,
+)
 from nooa.unifiedllm.unifiedllm import _extract_usage
 
 
@@ -587,39 +592,16 @@ def test_openai_can_mark_a_stable_function_result() -> None:
 
 def test_replay_expansion_stays_inside_the_stable_prefix() -> None:
     scope = "responses:openai:sha256:test"
-    state = {
-        "version": 1,
-        "scope": scope,
-        "format": "openai-responses",
-        "payload": {
-            "items": [{"type": "reasoning", "encrypted_content": "opaque"}],
-            "order": [
-                {"type": "reasoning", "index": 0},
-                {
-                    "type": "function_call",
-                    "call_id": "c1",
-                    "name": "run",
-                    "arguments": "{}",
-                },
-            ],
-        },
-    }
+    call = {"type": "function_call", "call_id": "c1", "name": "run", "arguments": "{}"}
+    state = capture_responses_state(
+        [{"type": "reasoning", "encrypted_content": "opaque"}, call], scope
+    )
+    assert state is not None
     with ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai") as client:
         transformed, instructions = client._transform_messages(
             [
                 {"role": "user", "content": "run it"},
-                *carry_replay_batch(
-                    [
-                        {
-                            "type": "function_call",
-                            "call_id": "c1",
-                            "name": "run",
-                            "arguments": "{}",
-                        }
-                    ],
-                    state,
-                    None,
-                ),
+                *carry_replay_batch([call], state, None),
                 {"type": "function_call_output", "call_id": "c1", "output": "done"},
                 ReplayCarryingMessage(
                     {"role": "user", "content": "live state"}, cache_boundary_before=True

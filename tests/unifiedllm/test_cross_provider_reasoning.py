@@ -191,10 +191,7 @@ def test_gemini_signatures_round_trip_without_becoming_public_call_ids() -> None
         assert [call.id for call in first.tool_calls] == ["call_1", "call_2"]
         assert first.llm_state is not None
         assert "discard-me" not in json.dumps(first.llm_state)
-        assert [call["id"] for call in first.llm_state["payload"]["carrier"]["tool_calls"]] == [
-            "call_1",
-            "call_2",
-        ]
+        assert len(first.llm_state["payload"]["carrier"]) == 64
         assistant = next(
             message
             for message in completion.call_args_list[1].kwargs["messages"]
@@ -322,6 +319,21 @@ def test_gemini_tool_state_warns_and_demotes_when_public_calls_change(
         client.close()
 
 
+@pytest.mark.parametrize("change", ["drop", "append"])
+def test_gemini_stored_signature_count_must_match_fingerprinted_turn(change: str) -> None:
+    with CompletionClient(model="gemini/gemini-2.5-pro", api_key="test") as client:
+        with patch("litellm.completion", return_value=_gemini_response()):
+            response = client.call([{"role": "user", "content": "run"}], tools=[TOOL])
+        assert response.llm_state is not None
+        signatures = response.llm_state["payload"]["tool_calls"]
+        if change == "drop":
+            signatures.pop()
+        else:
+            signatures.append(None)
+        with pytest.raises(ReasoningReplayError, match="signatures do not match"):
+            prepare_chat_messages(_render(response), response.llm_state["scope"])
+
+
 def test_public_thinking_content_blocks_are_stripped(caplog: pytest.LogCaptureFixture) -> None:
     messages = [
         {
@@ -447,7 +459,7 @@ def test_unknown_provider_state_warns_but_unknown_envelope_state_fails(
     assert "retention may need updating" in caplog.text
 
     state = {
-        "version": 1,
+        "version": 2,
         "scope": scope,
         "format": "litellm-chat",
         "payload": {
@@ -668,7 +680,7 @@ def test_reasoning_only_responses_turn_demotes_without_an_empty_message() -> Non
 
 def test_state_only_turn_drops_empty_carrier_across_api_styles() -> None:
     responses_state = {
-        "version": 1,
+        "version": 2,
         "scope": "responses:openai:sha256:source",
         "format": "openai-responses",
         "payload": {"items": [RESPONSES_REASONING], "order": [], "state_only": True},
@@ -677,7 +689,7 @@ def test_state_only_turn_drops_empty_carrier_across_api_styles() -> None:
     assert prepare_chat_messages([chat_carrier], "chat:openai:sha256:target") == []
 
     chat_state = {
-        "version": 1,
+        "version": 2,
         "scope": "chat:openai:sha256:source",
         "format": "litellm-chat",
         "payload": {"reasoning_items": [{"type": "reasoning"}], "state_only": True},
@@ -696,16 +708,10 @@ def test_state_only_carrier_mutation_warns_and_preserves_public_content(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     chat_scope = "chat:openai:sha256:model"
-    chat_state = {
-        "version": 1,
-        "scope": chat_scope,
-        "format": "litellm-chat",
-        "payload": {
-            "reasoning_items": [{"opaque": "chat-secret"}],
-            "carrier": {"content": "", "tool_calls": []},
-            "state_only": True,
-        },
-    }
+    chat_state = capture_chat_state(
+        {"role": "assistant", "content": "", "reasoning_items": [RESPONSES_REASONING]},
+        chat_scope,
+    )
     chat_carrier = ReplayCarryingMessage(
         {"role": "assistant", "content": "middleware text"},
         chat_state,
@@ -717,7 +723,7 @@ def test_state_only_carrier_mutation_warns_and_preserves_public_content(
 
     responses_scope = "responses:openai:sha256:model"
     responses_state = {
-        "version": 1,
+        "version": 2,
         "scope": responses_scope,
         "format": "openai-responses",
         "payload": {
@@ -749,13 +755,13 @@ def test_legacy_state_warns_while_malformed_current_state_fails(
 
     scope = "chat:openai:sha256:model"
     malformed_states = [
-        {"version": 1, "scope": scope, "format": "litellm-chat", "payload": []},
-        {"version": 1, "scope": scope, "format": "typo", "payload": {}},
-        {"version": 1, "scope": scope, "format": "litellm-chat", "payload": {}, "extra": 1},
+        {"version": 2, "scope": scope, "format": "litellm-chat", "payload": []},
+        {"version": 2, "scope": scope, "format": "typo", "payload": {}},
+        {"version": 2, "scope": scope, "format": "litellm-chat", "payload": {}, "extra": 1},
     ]
     for state in malformed_states:
         malformed = ReplayCarryingMessage({"role": "assistant", "content": "answer"}, state)
-        with pytest.raises(ReasoningReplayError, match="Malformed version-1"):
+        with pytest.raises(ReasoningReplayError, match="Malformed version-2"):
             prepare_chat_messages([malformed], scope)
 
 
@@ -793,7 +799,7 @@ def test_non_openai_responses_scope_rejects_capture_and_restore() -> None:
         capture_responses_state([RESPONSES_REASONING], fabricated_scope)
 
     state = {
-        "version": 1,
+        "version": 2,
         "scope": fabricated_scope,
         "format": "openai-responses",
         "payload": {"items": [RESPONSES_REASONING], "order": []},
