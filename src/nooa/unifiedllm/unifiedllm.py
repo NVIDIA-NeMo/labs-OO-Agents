@@ -23,6 +23,7 @@ from nooa.unifiedllm.cache_policy import (
     apply_cache_policy,
     enable_openai_explicit_cache,
     reject_legacy_cache_config,
+    validate_cache_boundary,
 )
 
 from . import replay_state, response_parts
@@ -1690,7 +1691,9 @@ class CompletionClient(UnifiedLLM):
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
         if cache_breakpoint not in {None, "auto", "anthropic"}:
-            raise ValueError("CompletionClient supports only the 'anthropic' cache mapping")
+            raise ValueError(
+                "CompletionClient cache_breakpoint must be 'auto', 'anthropic', or None"
+            )
         super().__init__(model, **config)
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint
@@ -1742,7 +1745,7 @@ class CompletionClient(UnifiedLLM):
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
         messages = replay_state.prepare_chat_messages(messages, state_scope)
 
-        # Inject cache_control at the message level for prompt caching
+        # Choose the stable-prefix breakpoint on projected provider messages.
         prepared_messages, _, _ = self._prepare_cache_boundary(
             messages, responses=False, model=effective_model
         )
@@ -1831,7 +1834,7 @@ class CompletionClient(UnifiedLLM):
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
         messages = replay_state.prepare_chat_messages(messages, state_scope)
 
-        # Inject cache_control at the message level for prompt caching
+        # Choose the stable-prefix breakpoint on projected provider messages.
         prepared_messages, _, _ = self._prepare_cache_boundary(
             messages, responses=False, model=effective_model
         )
@@ -2031,7 +2034,7 @@ class ResponsesClient(UnifiedLLM):
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
         if cache_breakpoint not in {None, "auto", "openai"}:
-            raise ValueError("ResponsesClient supports only the 'openai' cache mapping")
+            raise ValueError("ResponsesClient cache_breakpoint must be 'auto', 'openai', or None")
         super().__init__(model, **config)
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint
@@ -2080,11 +2083,6 @@ class ResponsesClient(UnifiedLLM):
         Accepts public message dictionaries and LLMResponse objects. Stored turns
         are projected here; only leading system messages become `instructions`.
         """
-        # Inject cache_control only for Anthropic-served models. litellm.responses
-        # passes input[] through verbatim — no equivalent of the Chat Completions
-        # OpenAIGPTConfig.remove_cache_control_flag strip — so leaving the marker
-        # on OpenAI/Azure/NIM Responses calls triggers a 400 "Unknown parameter:
-        # input[N].cache_control" at the gateway.
         call_config = {**self.config, **kwargs}
         self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
@@ -2157,8 +2155,6 @@ class ResponsesClient(UnifiedLLM):
         Accepts public message dictionaries and LLMResponse objects. Stored turns
         are projected here; only leading system messages become `instructions`.
         """
-        # See ResponsesClient.call for why cache_control injection is gated on
-        # Anthropic models only.
         call_config = {**self.config, **kwargs}
         self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
@@ -2260,6 +2256,8 @@ class ResponsesClient(UnifiedLLM):
                 transformed.extend(response_parts.project_turn(original, state_scope))
                 continue
             msg = dict(original)
+            if "nooa_cache_boundary" in msg:
+                validate_cache_boundary(msg)
             replay_state.reject_native_message(msg, state_scope)
             if isinstance(msg.get("content"), list) and any(
                 not isinstance(block, dict) for block in msg["content"]

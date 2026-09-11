@@ -542,6 +542,8 @@ class OpenAIProviderFormatter(ProviderFormatter):
     def format(self, messages: list[RenderedMessage]) -> list[dict]:
         out: list[dict] = []
         for msg in messages:
+            if msg.cache_boundary_before:
+                out.append({"role": "metadata", "nooa_cache_boundary": True})
             if msg.replay_message is not None:
                 out.append(
                     msg.replay_message.render_message(

@@ -25,9 +25,10 @@ Registry YAML accepts the same setting. Explicit mappings are tied to the client
 model: use a new client when switching models. The automatic mapping is resolved
 against the effective per-call model.
 
-The cached renderer inserts `{"nooa_cache_boundary": true}` immediately before
-live context. Direct UnifiedLLM callers may insert the same dictionary, or add
-the key to their first dynamic message. Without a marker, the policy marks only
+The cached renderer inserts `{"role": "metadata", "nooa_cache_boundary": true}`
+immediately before live context. Direct UnifiedLLM callers may insert the same
+standalone dictionary. Its role identifies it as framework metadata, not content
+for the model; do not add the key to a user or assistant message. Without a marker, the policy marks only
 leading system/developer instructions. It never assumes arbitrary history is
 stable. The metadata key does not reach the provider.
 
@@ -39,6 +40,12 @@ input-text block or function result and enables explicit mode. If necessary,
 stable Responses instructions become an input-text block to carry that marker.
 Gemini receives no invented inline marker: this change uses its implicit cache,
 not a separately managed explicit cached-content resource.
+
+These mappings follow the [OpenAI prompt-caching guide](https://developers.openai.com/api/docs/guides/prompt-caching),
+[Anthropic's content-block breakpoints](https://platform.claude.com/docs/en/build-with-claude/prompt-caching),
+and [Gemini's implicit versus explicit caching](https://ai.google.dev/gemini-api/docs/caching).
+OpenAI documents explicit mode and content-block breakpoints for GPT-5.6 and later;
+gateway support must still be checked independently.
 
 A boundary makes the stable prefix eligible for reuse; it does not guarantee a
 hit. Provider thresholds, expiry, routing, model configuration and earlier edits
@@ -57,6 +64,8 @@ role or position.
 1. `unifiedllm/cache_policy.py` owns the single policy. It consumes the boundary
    and changes only the final marker target's containers; unrelated messages
    and large strings are shared.
+   The cached renderer flags the first live message; the public formatter inserts
+   the metadata-role sibling without editing the adjacent response object.
 2. Both clients apply the policy after provider projection. This keeps boundary
    placement correct when one stored assistant turn expands into several wire
    items, and keeps providers' fields out of renderers and middleware.
@@ -69,7 +78,8 @@ role or position.
 
 ## Evidence and limits
 
-The validated prototype used NVIDIA Inference Hub on 2026-09-11. After SQLite
+The earlier dictionary/lookup prototype used NVIDIA Inference Hub on 2026-09-11;
+these results predate the object-in-list rebase and are not a fresh test of it. After SQLite
 resume and a changed trailing context block, reported cache hits were
 6,136/6,160 input tokens for GPT-5.6 Sol, 10,775/10,805 for Claude Sonnet 5, and
 24,491/24,677 for Gemini 3.1 Pro Preview. Gemini's warm request already had cache

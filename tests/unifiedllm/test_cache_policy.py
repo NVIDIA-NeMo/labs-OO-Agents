@@ -57,7 +57,7 @@ def test_boundary_copies_only_the_marker_target_containers():
             "role": "tool",
             "content": [{"type": "text", "text": "one"}, {"type": "text", "text": "two"}],
         },
-        {"nooa_cache_boundary": True},
+        {"role": "metadata", "nooa_cache_boundary": True},
         {"role": "user", "content": "live"},
     ]
     before = json.dumps(original)
@@ -72,7 +72,10 @@ def test_boundary_copies_only_the_marker_target_containers():
 
 @pytest.mark.parametrize("mapping", [None, "anthropic", "openai"])
 def test_no_stable_prefix_never_marks_dynamic_content(mapping):
-    messages = [{"nooa_cache_boundary": True}, {"role": "system", "content": "live"}]
+    messages = [
+        {"role": "metadata", "nooa_cache_boundary": True},
+        {"role": "system", "content": "live"},
+    ]
     wire, _, _ = apply_cache_policy(messages, mapping, responses=True)
     assert wire == [{"role": "system", "content": "live"}]
 
@@ -81,7 +84,42 @@ def test_no_stable_prefix_never_marks_dynamic_content(mapping):
 @pytest.mark.parametrize("invalid", [False, "true", 1, None])
 def test_invalid_boundary_is_not_silently_ignored(mapping, invalid):
     with pytest.raises(ValueError, match="must be true"):
-        apply_cache_policy([{"nooa_cache_boundary": invalid}], mapping, responses=True)
+        apply_cache_policy(
+            [{"role": "metadata", "nooa_cache_boundary": invalid}], mapping, responses=True
+        )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"nooa_cache_boundary": True},
+        {"role": "user", "content": "must not disappear", "nooa_cache_boundary": True},
+        {"role": "metadata", "content": "must not disappear", "nooa_cache_boundary": True},
+    ],
+)
+def test_boundary_must_be_a_separate_metadata_element(message):
+    with pytest.raises(ValueError, match="Use a separate.*metadata"):
+        apply_cache_policy([message], None, responses=True)
+
+
+@pytest.mark.parametrize("client_type", [CompletionClient, ResponsesClient])
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "system", "content": "live"},
+        {"role": "tool", "tool_call_id": "c", "content": "live"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "c", "function": {"name": "run", "arguments": "{}"}},
+            ],
+        },
+    ],
+)
+def test_projection_does_not_silently_drop_misplaced_boundaries(client_type, message):
+    with client_type("openai/gpt-5.6", api_key="test") as client:
+        with pytest.raises(ValueError, match="Use a separate.*metadata"):
+            client.call([{**message, "nooa_cache_boundary": True}])
 
 
 @pytest.mark.asyncio

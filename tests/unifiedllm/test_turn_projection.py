@@ -525,7 +525,7 @@ async def test_cache_helpers_and_calibration_receive_projected_dicts(monkeypatch
         messages = [
             LLMResponse(content="previous"),
             {"role": "user", "content": "go"},
-            {"nooa_cache_boundary": True},
+            {"role": "metadata", "nooa_cache_boundary": True},
         ]
         result = await client.acall(messages) if is_async else client.call(messages)
         assert result.content == "done"

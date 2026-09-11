@@ -110,7 +110,8 @@ class TestCachedRendererEndToEndOpenAI:
             block_formatter=CachedBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
-        assert len(result) == 2
+        assert len(result) == 3
+        assert result[1] == {"role": "metadata", "nooa_cache_boundary": True}
         assert result[0]["role"] == "system"
         assert "<sys>" in result[0]["content"]
         assert result[-1]["role"] == "user"
@@ -142,7 +143,7 @@ class TestCachedRendererEndToEndOpenAI:
             provider_formatter=OpenAIProviderFormatter(),
         ).output
         roles = [m["role"] for m in result]
-        assert roles == ["system", "user", "user"]
+        assert roles == ["system", "user", "metadata", "user"]
         # The user-event message is preserved verbatim — no context envelope.
         event_content = result[1]["content"]
         assert "<context>" not in event_content
@@ -295,7 +296,7 @@ class TestCachedRendererEndToEndOpenAI:
             provider_formatter=OpenAIProviderFormatter(),
         ).output
         roles = [m["role"] for m in result]
-        assert roles == ["system", "assistant", "user"]
+        assert roles == ["system", "assistant", "metadata", "user"]
         assert "<context>" in result[-1]["content"]
 
     def test_no_volatile_no_trailing_message(self):

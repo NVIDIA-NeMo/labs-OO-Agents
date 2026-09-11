@@ -14,7 +14,7 @@ def reject_legacy_cache_config(config: Mapping[str, Any]) -> None:
         raise ValueError(
             "cache_control_injection_points was removed. Use cache_breakpoint="
             "'auto', 'anthropic', 'openai' (Responses only), or None; place "
-            "{'nooa_cache_boundary': True} before dynamic context."
+            "{'role': 'metadata', 'nooa_cache_boundary': True} before dynamic context."
         )
 
 
@@ -99,6 +99,17 @@ def _mark_anthropic(message: dict[str, Any], *, responses: bool) -> dict[str, An
     return None
 
 
+def validate_cache_boundary(message: Mapping[str, Any]) -> None:
+    """Reject malformed markers before projection can discard their fields."""
+    if message["nooa_cache_boundary"] is not True:
+        raise ValueError("nooa_cache_boundary must be true")
+    if message.get("role") != "metadata" or set(message) != {"role", "nooa_cache_boundary"}:
+        raise ValueError(
+            "Use a separate {'role': 'metadata', 'nooa_cache_boundary': True} "
+            "element before dynamic context, not a marker on a model message."
+        )
+
+
 def apply_cache_policy(
     messages: list[dict[str, Any]],
     mapping: Literal["anthropic", "openai"] | None,
@@ -111,14 +122,11 @@ def apply_cache_policy(
     boundary = None
     for message in messages:
         if "nooa_cache_boundary" in message:
-            if message["nooa_cache_boundary"] is not True:
-                raise ValueError("nooa_cache_boundary must be true")
+            validate_cache_boundary(message)
             if boundary is not None:
                 raise ValueError("Rendered history contains more than one cache boundary")
             boundary = len(clean)
-            message = {key: value for key, value in message.items() if key != "nooa_cache_boundary"}
-            if not message:
-                continue
+            continue
         clean.append(message)
     if mapping is None:
         return clean, instructions, False

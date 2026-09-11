@@ -60,10 +60,6 @@ def _execute_python(code: str) -> str:
 TOOL = Tool(name="execute_python", description="Evaluate Python code", callable=_execute_python)
 
 
-def _turns(events):
-    return {event.id: event for event in events if event.render_reference() is not None}
-
-
 def _secrets(response):
     """Extract only native replay strings, without printing their contents."""
     keys = {
@@ -197,9 +193,7 @@ async def test_reasoning_and_prompt_cache_survive_sqlite_resume(family, tmp_path
         )
     ]
     async with _client(family) as client:
-        seed = await client.acall(
-            _render(family, events, instructions, "phase=seed"), tools=[TOOL], turns=_turns(events)
-        )
+        seed = await client.acall(_render(family, events, instructions, "phase=seed"), tools=[TOOL])
         _report_usage(family, "seed", seed)
         assert _secrets(seed), (
             f"provider did not return opaque state: finish={seed.finish_reason}, "
@@ -227,7 +221,7 @@ async def test_reasoning_and_prompt_cache_survive_sqlite_resume(family, tmp_path
             f"Record {i}: amber birch cedar dune elm fern grove hill." for i in range(rows)
         )
         warm_messages = _render(family, events, instructions, "phase=warm")
-        warm = await client.acall(warm_messages, tools=[TOOL], turns=_turns(events))
+        warm = await client.acall(warm_messages, tools=[TOOL])
         _report_usage(family, "warm", warm)
 
     database = tmp_path / "session.db"
@@ -250,7 +244,7 @@ async def test_reasoning_and_prompt_cache_survive_sqlite_resume(family, tmp_path
     assert warm_messages[:-1] == replay_messages[:-1]
     assert warm_messages[-1] != replay_messages[-1]
     async with _client(family) as client:
-        resumed = await client.acall(replay_messages, tools=[TOOL], turns=_turns(restored))
+        resumed = await client.acall(replay_messages, tools=[TOOL])
         _report_usage(family, "resumed", resumed)
 
     assert len(requests) == 3, "unexpected retries or uncaptured provider requests"
@@ -356,7 +350,7 @@ async def _check_provider_switch(source, target, database, monkeypatch, *, requi
         "phase=model-switched",
     )
     async with _client(target) as client:
-        result = await client.acall(messages, tools=[TOOL], turns=_turns(events))
+        result = await client.acall(messages, tools=[TOOL])
     assert len(requests) == 1
     _report_usage(f"{source}->{target}", "switched_after_resume", result)
     assert result.finish_reason == "stop"
