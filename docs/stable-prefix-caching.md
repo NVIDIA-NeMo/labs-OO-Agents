@@ -40,8 +40,9 @@ thinking or redacted-thinking block. OpenAI Responses marks the latest eligible
 input-text block or function result and enables explicit mode. If necessary,
 stable Responses instructions become an input-text block to carry that marker.
 If no eligible stable block exists, OpenAI explicit mode remains enabled with
-no breakpoint: the request does not cache anything. This deliberately avoids
-cache writes for a wholly dynamic prompt rather than reverting to implicit caching.
+no breakpoint and logs a warning: the request does not cache anything. This can
+happen with wholly dynamic input or stable history containing only unmarkable
+output blocks. It deliberately avoids implicit writes beyond the chosen boundary.
 Gemini receives no invented inline marker: this change uses its implicit cache,
 not a separately managed explicit cached-content resource.
 
@@ -62,6 +63,10 @@ raise a message naming `cache_breakpoint` and `nooa_cache_boundary` as replaceme
 Use `cache_breakpoint=None` instead of an empty injection list. To cache completed
 history, place a boundary after that history rather than selecting a message by
 role or position.
+
+`cache_breakpoint` belongs on the client constructor. Passing it through
+`call`/`acall` or `extra_body` raises a configuration error before dispatch;
+the framework setting must never become a provider request field.
 
 ## Code walkthrough: what changed and why
 

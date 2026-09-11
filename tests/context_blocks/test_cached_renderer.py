@@ -270,7 +270,10 @@ class TestCachedRendererEndToEndOpenAI:
             provider_formatter=OpenAIProviderFormatter(),
         ).output
 
-        assert first[:-1] == second[: len(first) - 1]
+        # The last two entries are the boundary metadata and changing live state;
+        # compare every history message before them, including the latest user.
+        assert first[-2] == {"role": "metadata", "nooa_cache_boundary": True}
+        assert first[:-2] == second[: len(first) - 2]
         assert first[-1] != second[-1]
         assert second[2] is turn
         assert "native" not in json.dumps([dict(message) for message in second])

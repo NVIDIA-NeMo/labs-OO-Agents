@@ -33,6 +33,29 @@ async def test_legacy_cache_setting_fails_before_async_dispatch(client_type):
             await client.acall([], cache_control_injection_points=[])
 
 
+@pytest.mark.parametrize("client_type", [CompletionClient, ResponsesClient])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_cache_setting_is_constructor_only(client_type, nested, asynchronous):
+    config = {"cache_breakpoint": None}
+    if nested:
+        config = {"extra_body": config}
+    with (
+        patch("litellm.completion") as chat,
+        patch("litellm.acompletion") as achat,
+        patch("litellm.responses") as responses,
+        patch("litellm.aresponses") as aresponses,
+    ):
+        async with client_type("openai/gpt-5.6") as client:
+            with pytest.raises(ValueError, match="cache_breakpoint.*client constructor"):
+                if asynchronous:
+                    await client.acall([], **config)
+                else:
+                    client.call([], **config)
+        for transport in (chat, achat, responses, aresponses):
+            transport.assert_not_called()
+
+
 def test_direct_anthropic_default_marks_only_leading_instructions():
     original = [
         {"role": "system", "content": "stable"},

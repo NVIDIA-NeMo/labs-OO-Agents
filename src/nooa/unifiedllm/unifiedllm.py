@@ -1175,6 +1175,13 @@ class UnifiedLLM(ABC):
         extra_body = call_config.get("extra_body")
         if extra_body is not None and not isinstance(extra_body, Mapping):
             raise ValueError("extra_body must be a mapping")
+        if "cache_breakpoint" in call_config or (
+            isinstance(extra_body, Mapping) and "cache_breakpoint" in extra_body
+        ):
+            raise ValueError(
+                "cache_breakpoint is a client setting; pass it to the client constructor, "
+                "not call/acall or extra_body"
+            )
         if isinstance(extra_body, Mapping) and (reserved := {name, "model"} & set(extra_body)):
             fields = ", ".join(repr(field) for field in sorted(reserved))
             raise ValueError(
