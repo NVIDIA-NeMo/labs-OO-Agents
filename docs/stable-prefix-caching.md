@@ -26,9 +26,10 @@ Registry YAML accepts the same setting. Explicit mappings are tied to the client
 model: use a new client when switching models. The automatic mapping is resolved
 against the effective per-call model.
 
-The cached renderer inserts `{"role": "metadata", "nooa_cache_boundary": true}`
-immediately before live context. Direct UnifiedLLM callers may insert the same
-standalone dictionary. Its role identifies it as framework metadata, not content
+The cached renderer inserts a standalone `CacheBoundary()` block immediately
+before live context. The formatter translates it to
+`{"role": "metadata", "nooa_cache_boundary": true}`. Direct UnifiedLLM callers
+may insert that dictionary themselves. Its role identifies it as framework metadata, not content
 for the model; do not add the key to a user or assistant message. Without a marker, the policy marks only
 leading system/developer instructions. It never assumes arbitrary history is
 stable. The metadata key does not reach the provider.
@@ -73,8 +74,9 @@ the framework setting must never become a provider request field.
 1. `unifiedllm/cache_policy.py` owns the single policy. It consumes the boundary
    and changes only the final marker target's containers; unrelated messages
    and large strings are shared.
-   The cached renderer flags the first live message; the public formatter inserts
-   the metadata-role sibling without editing the adjacent response object.
+   The cached renderer inserts a standalone `CacheBoundary` block before live
+   context. The public formatter translates that block to the metadata-role
+   sibling; ordinary messages carry no cache flag and are not edited.
 2. Both clients apply the policy after provider projection. This keeps boundary
    placement correct when one stored assistant turn expands into several wire
    items, and keeps providers' fields out of renderers and middleware.

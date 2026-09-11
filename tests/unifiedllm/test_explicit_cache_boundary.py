@@ -11,9 +11,19 @@ import litellm
 import pytest
 
 from nooa.context_blocks.events import UserEvent
-from nooa.context_blocks.formatter import OpenAIProviderFormatter
-from nooa.context_blocks.models import BlockMetadata, RenderedMessage, ResolvedBlock, Role
-from nooa.context_blocks.renderer import render_context
+from nooa.context_blocks.formatter import (
+    AnthropicProviderFormatter,
+    OpenAIProviderFormatter,
+    ResponsesProviderFormatter,
+)
+from nooa.context_blocks.models import (
+    BlockMetadata,
+    CacheBoundary,
+    RenderedMessage,
+    ResolvedBlock,
+    Role,
+)
+from nooa.context_blocks.renderer import RenderResult, render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 from nooa.llm_types import AssistantReasoning, LLMResponse
 from nooa.unifiedllm import CompletionClient, ResponsesClient
@@ -25,7 +35,7 @@ from nooa.unifiedllm.replay_state import (
 from nooa.unifiedllm.response_parts import capture_parts
 
 
-def _render(dynamic: str) -> list[dict]:
+def _render_result(dynamic: str) -> RenderResult:
     event = UserEvent(content="solve this", tag="1")
     blocks = [
         ResolvedBlock(
@@ -52,7 +62,11 @@ def _render(dynamic: str) -> list[dict]:
         blocks,
         block_formatter=CachedBlockFormatter(),
         provider_formatter=OpenAIProviderFormatter(),
-    ).output
+    )
+
+
+def _render(dynamic: str) -> list[dict]:
+    return _render_result(dynamic).output
 
 
 def _responses_output() -> SimpleNamespace:
@@ -80,19 +94,44 @@ def test_cached_renderer_marks_only_the_dynamic_suffix_in_public_json() -> None:
     assert json.loads(json.dumps(messages))[-2] == {"role": "metadata", "nooa_cache_boundary": True}
 
 
+def test_renderer_emits_a_standalone_boundary_before_provider_formatting():
+    result = _render_result("state-a")
+    assert [message.role for message in result.messages] == [
+        Role.SYSTEM,
+        Role.USER,
+        Role.METADATA,
+        Role.USER,
+    ]
+    boundary = result.messages[-2]
+    assert isinstance(boundary, CacheBoundary)
+    assert boundary.content is None
+    assert type(result.messages[-1]) is RenderedMessage
+    assert "state-a" in result.messages[-1].content
+    assert "cache_boundary_before" not in RenderedMessage.model_fields
+    # Changing live state changes neither the boundary nor the history before it.
+    assert result.messages[:-1] == _render_result("state-b").messages[:-1]
+
+
+@pytest.mark.parametrize("formatter", [OpenAIProviderFormatter, ResponsesProviderFormatter])
+def test_boundary_formats_without_a_following_message(formatter):
+    boundary = CacheBoundary()
+    assert formatter().format([boundary]) == [{"role": "metadata", "nooa_cache_boundary": True}]
+    assert AnthropicProviderFormatter().format([boundary]) == {"system": "", "messages": []}
+
+
 def test_boundary_beside_readonly_response_preserves_identity_and_native_parts():
     scope = "responses:openai:test"
     items = [{"type": "reasoning", "encrypted_content": "opaque"}]
     turn = LLMResponse(parts=capture_parts(items, scope), replay_scope=scope)
     messages = OpenAIProviderFormatter().format(
         [
+            CacheBoundary(),
             RenderedMessage(
                 role=Role.ASSISTANT,
                 content=turn.content,
                 reasoning=turn.reasoning,
                 replay_message=turn,
-                cache_boundary_before=True,
-            )
+            ),
         ]
     )
     assert messages[0] == {"role": "metadata", "nooa_cache_boundary": True}
@@ -111,7 +150,6 @@ def test_rendered_message_serialization_excludes_private_transport_fields() -> N
         content="public",
         replay_message=LLMResponse(parts=()),
         reasoning="private reasoning",
-        cache_boundary_before=True,
     )
 
     dumped = message.model_dump()

@@ -41,6 +41,7 @@ from nooa.context_blocks.formatter import (
 )
 from nooa.context_blocks.models import (
     BlockMetadata,
+    CacheBoundary,
     Context,
     ContextWindowStats,
     DynamicContext,
@@ -66,6 +67,7 @@ __all__ = [
     "BlockMetadata",
     "ContextWindowStats",
     "RenderedMessage",
+    "CacheBoundary",
     "ToolCallInfo",
     # Renderer
     "render_context",

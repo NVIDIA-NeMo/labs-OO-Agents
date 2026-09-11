@@ -14,7 +14,13 @@ from nooa.context_blocks.formatter import (
     AnthropicProviderFormatter,
     OpenAIProviderFormatter,
 )
-from nooa.context_blocks.models import BlockMetadata, DynamicContext, ResolvedBlock, Role
+from nooa.context_blocks.models import (
+    BlockMetadata,
+    CacheBoundary,
+    DynamicContext,
+    ResolvedBlock,
+    Role,
+)
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 from nooa.events import LLMResponse
@@ -83,10 +89,11 @@ class TestCachedBlockFormatterPartition:
                 _dynamic_block("state", "T"),
             ]
         )
-        assert len(messages) == 2
+        assert len(messages) == 3
         sys_msg = messages[0]
         assert sys_msg.content.index("<sys>") < sys_msg.content.index("<self_doc>")
-        user_msg = messages[1]
+        assert isinstance(messages[1], CacheBoundary)
+        user_msg = messages[2]
         assert user_msg.content.index("<plan>") < user_msg.content.index("<state>")
 
 
