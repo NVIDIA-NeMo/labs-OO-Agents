@@ -1,22 +1,21 @@
 # Context parity result
 
-Tested 2026-09-09 against the rebased pre-boundary branch commit
-`8c2fee9cb8bd5c297081f0b3594209221d97b973` and current `origin/main`
-`ee61c9012f2e4135eabba1e5db80c8e991a88184`.
+Tested 2026-09-11 against `origin/main` at `f1c2587b` and the context-view
+implementation at `5eff5ddb`.
 
 ## Result
 
-**PASS.** Each comparison covered six deterministic scenarios, seven LLM requests,
-and 33 messages. After documented transport and legacy-rendering normalization,
-there was no content, role, order, tool-contract, or output-schema difference.
-Against the pre-boundary commit, both arms contained 25,629 serialized message
-characters.
+**PASS.** Six deterministic scenarios produced seven LLM requests and 33 messages.
+After the documented transport and legacy-envelope normalization, there was no
+content, role, order, tool-contract, or output-schema difference. The baseline and
+candidate contained 25,817 and 25,682 serialized message characters respectively;
+the raw difference is fully covered by those normalizations.
 
 Reproduce against the checked-out implementation with:
 
 ```bash
 uv run python experiments/context_parity/run.py \
-  --baseline 8c2fee9cb8bd5c297081f0b3594209221d97b973 --candidate HEAD
+  --baseline origin/main --candidate HEAD
 ```
 
 Artifacts are generated under
@@ -24,29 +23,23 @@ Artifacts are generated under
 
 ## Live verification
 
-NVIDIA internal inference was tested with
-`openai/openai/openai/gpt-5.6-terra` at
+NVIDIA internal inference was tested with `openai/openai/openai/gpt-5.6-terra` at
 `https://inference-api.nvidia.com/v1/`:
 
-- Default view: static, skill, history, current task, dynamic state, and strategy
-  context had the expected content and roles. The cache annotation landed exactly
-  after the current task; the internal marker was absent from the API request.
-- Custom view: manager context and implicit cache annotations were absent.
+- The default view rendered the intended system, API, event, state, skill, and
+  strategy blocks. The internal cache-boundary marker was absent at the provider.
+- A custom research context API and view progressively exposed selected research;
+  unused manager context did not leak into either request.
 - Quickstart 02 structured Predict output and quickstart 03 CodeAct tool execution
-  passed; assistant/tool IDs paired correctly.
-- The four final trace sessions contain 29 spans, five LLM calls, three code-execution
-  spans, and no error spans or recorded exceptions.
+  passed. Assistant/tool IDs paired correctly.
+- Four sessions contain 31 spans, five LLM calls, four code-execution spans, and no
+  error spans or recorded exceptions.
 
-Local traces are under `tmp/terra-context-e2e/{journal,otlp}`. Final sessions are
-`terra-context-boundary-{default-v4,custom-v4,quickstart-02-v4,quickstart-03-v4}`.
+Local traces are under `tmp/terra-context-e2e-final-v4/{journal,otlp}`.
 
 ## Local verification
 
-- 250 context-block tests, 362 UnifiedLLM tests, 93 related runtime/parity tests, and two
-  loopback HTTP tests passed.
-- Ruff checks, formatting, SPDX validation, and focused Pyright checks passed.
-- GPT-6 Astra independently approved the implementation and post-rebase port after
-  focused runs of 122 and 83 tests.
-- The repository-wide run reaches an existing asyncio default-executor teardown
-  hang, reproduced in unchanged LiteLLM bridge/context tests; affected focused
-  suites complete normally.
+- `7220 passed, 7 skipped, 238 deselected, 3 xfailed` for the release-equivalent
+  suite (`not integration and not stress`).
+- Context, replay, middleware, and parity-focused suites passed (340 tests).
+- Ruff, formatting, SPDX validation, and Pyright passed.
