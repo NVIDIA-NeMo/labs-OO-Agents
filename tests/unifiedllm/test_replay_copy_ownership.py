@@ -9,9 +9,8 @@ import pytest
 
 from nooa.llm_types import AssistantReasoning, AssistantText, LLMResponse, ToolCall
 from nooa.unifiedllm import ResponsesClient
-from nooa.unifiedllm.replay_state import LLM_STATE_KEY
 from nooa.unifiedllm.chat_parts import project_chat_turn
-from nooa.unifiedllm.replay_state import ReasoningReplayError, prepare_chat_messages
+from nooa.unifiedllm.replay_state import LLM_STATE_KEY, ReasoningReplayError, prepare_chat_messages
 from nooa.unifiedllm.response_parts import project_turn
 
 SCOPE = "responses:openai:sha256:test"
