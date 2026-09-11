@@ -241,7 +241,11 @@ async def test_reasoning_and_prompt_cache_survive_sqlite_resume(family, tmp_path
     assert saved_response.replay_scope == seed.replay_scope
     assert saved_response.usage == seed.usage
     replay_messages = _render(family, restored, instructions, "phase=resumed")
-    assert warm_messages[:-1] == replay_messages[:-1]
+    # Archive loading intentionally omits transient SDK responses and parsed
+    # objects. Compare the public messages here; parts/native are checked above.
+    assert [dict(message) for message in warm_messages[:-1]] == [
+        dict(message) for message in replay_messages[:-1]
+    ]
     assert warm_messages[-1] != replay_messages[-1]
     async with _client(family) as client:
         resumed = await client.acall(replay_messages, tools=[TOOL])
