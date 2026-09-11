@@ -9,6 +9,7 @@ from nooa.llm_types import (
     ToolCall,
     assistant_message,
 )
+from nooa.unifiedllm.errors import EmptyContentError, ReasoningReplayError
 from nooa.unifiedllm.fake import FakeLLMClient
 from nooa.unifiedllm.http_config import HttpConfig
 from nooa.unifiedllm.registry import (
@@ -19,9 +20,7 @@ from nooa.unifiedllm.registry import (
     reload_registry,
     resolve_api_key_from_config,
 )
-from nooa.unifiedllm.replay_state import ReasoningReplayError
 from nooa.unifiedllm.retry import (
-    EmptyContentError,
     RetryingWrapper,
     sync_retry,
     with_retry,

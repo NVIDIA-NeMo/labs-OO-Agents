@@ -43,6 +43,10 @@ its JSON round trip; that cost is local to the integration, not every dispatch.
 - Middleware can replace any list element with an ordinary dictionary. That
   replacement is sent without native state. Assignment into the
   response raises a helpful error explaining this edit contract.
+- In Chat input, an explicit `reasoning_content` field on a raw dictionary is
+  preserved, not automatically folded into `content`. Portable reasoning
+  projection applies to retained `LLMResponse` objects. API-shape translation
+  and rejection of raw opaque fields still apply at the transport boundary.
 - The renderer retains the original object when text and calls are unchanged;
   truncation or omitted calls produce a portable dictionary instead.
 - The relay receives only public JSON. Unchanged entries at the same index regain
@@ -132,8 +136,11 @@ absence of reasoning, and a zero cost estimate does not prove free inference.
 4. `unifiedllm/unifiedllm.py`: projects response objects for the effective model.
    All clients, including the reasoning wrapper and fake, accept the same history
    shape. Runtime lookup building and per-dispatch public equality are deleted.
-5. Renderer/formatter/runtime: preserve the response object through a generic
-   event hook, with existing public text/tool views for display and budgeting.
+5. Renderer/formatter/runtime: the formatter recognizes the public LLMResponse
+   event type and preserves its response object, with existing public text/tool
+   views for display and budgeting. EventBase owns generic event identity and
+   search/emptiness behavior, not assistant-specific replay hooks. Only the
+   UnifiedLLM adapters interpret native provider state.
    Responses lifts only leading system messages into `instructions`: moving a
    later system message there would reorder the conversation. This needs no
    cache marker. Cache-boundary metadata and policy belong to the follow-up PR.

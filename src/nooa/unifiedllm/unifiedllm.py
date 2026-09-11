@@ -21,8 +21,9 @@ from pydantic import BaseModel, RootModel
 from nooa.llm_types import AssistantReasoning, AssistantText, LLMResponse, LLMUsage, ToolCall
 
 from . import replay_state, response_parts
+from .errors import EmptyContentError
 from .http_config import HttpConfig
-from .retry import EmptyContentError, sync_retry, with_retry
+from .retry import sync_retry, with_retry
 from .retry_config import RetryConfig
 
 logger = logging.getLogger(__name__)
@@ -2436,6 +2437,8 @@ class ResponsesClient(UnifiedLLM):
                     "output": content,
                 }
                 if cache_control:
+                    # This is caller-owned mutable metadata, not retained native
+                    # state. Keep request mutations isolated from future sends.
                     item["cache_control"] = copy.deepcopy(cache_control)
                 transformed.append(item)
             elif msg.get("role") == "assistant" and (
@@ -2447,6 +2450,11 @@ class ResponsesClient(UnifiedLLM):
                 turn = LLMResponse(parts=capture_chat_parts(msg, None))
                 transformed.extend(response_parts.project_turn(turn, None))
             else:
+                # Raw dictionaries are mutable caller input. We rewrite nested
+                # block types here and the SDK may mutate them again; detach the
+                # containers once. deepcopy shares immutable strings (including
+                # encoded images). LLMResponse took the projection path above,
+                # so this does not copy its retained reasoning blobs.
                 item = copy.deepcopy(msg)
                 if isinstance(item.get("content"), list):
                     for block in item["content"]:

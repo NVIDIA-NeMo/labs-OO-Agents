@@ -25,6 +25,22 @@ from .response_parts import _capture_summary, _require_encrypted_reasoning, _res
 
 
 def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, ...]:
+    """Capture one normalized Chat response as the durable assistant-turn record.
+
+    Strategies and renderers consume public text and tool-call views; they must
+    not reconstruct signed thinking or know the gateway's extension fields.
+    Capture therefore stores reasoning, answer text, and calls as ordered parts,
+    with each signature or encrypted item attached to its owning part. Chat's
+    normalized response already groups these fields; we preserve that ordering,
+    not an interleaving the transport has discarded. Readable reasoning is kept
+    once even when LiteLLM exposes it both as a block and reasoning_content.
+
+    Public fields are moved out of detached native containers before the parts
+    freeze them. Unknown routes and incomplete native sequences keep portable
+    text but lose native state together; malformed supported shapes raise rather
+    than turning a successful-looking capture into silently incomplete replay.
+    The LLMResponse stores the compatibility scope once for the whole turn.
+    """
     provider = _scope_provider(scope)
     parts: list[AssistantPart] = []
     portable_only = False
@@ -151,6 +167,19 @@ def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, 
 
 
 def project_chat_turn(turn: LLMResponse, scope: str | None) -> tuple[dict, dict[str, str]]:
+    """Build request-owned Chat fields from an immutable assistant turn.
+
+    Projection is the only outbound layer that interprets native part data.
+    Matching non-null scopes restore provider fields beside their original
+    public text/calls; incompatible scopes omit native state and render readable
+    reasoning as ordinary assistant text. This portable fallback belongs to a
+    retained LLMResponse, not arbitrary dictionaries supplied by a caller.
+
+    Native containers are allocated for the request while immutable string
+    leaves remain shared with the archive. The returned id map reconnects Gemini
+    tool results to ids containing restored signatures; callers never need to
+    know how those ids encode private state. No stored part is mutated.
+    """
     compatible = scope is not None and turn.replay_scope == scope
     provider = _scope_provider(scope)
     if turn.replay_scope and not compatible:

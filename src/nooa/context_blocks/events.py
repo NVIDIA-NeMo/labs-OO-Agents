@@ -75,7 +75,11 @@ class ResultStatus(StrEnum):
 
 
 class EventBase(BaseModel):
-    """Base class for all events.
+    """Durable record with identity, lifecycle, and public searchable fields.
+
+    Events are the public conversation IR, not provider messages. The formatter
+    decides how each public event type contributes to model context; specialized
+    assistant replay operations belong to LLMResponse, not every event.
 
     Subclasses define:
     - event_type: Auto-derived from class name (repr=False), or explicit override
@@ -103,20 +107,6 @@ class EventBase(BaseModel):
     def searchable_fields(self) -> dict[str, Any]:
         """Public fields for search/debug export; consumers need not know their layout."""
         return self.model_dump()
-
-    def render_message(self, content, tool_calls, *, reasoning):
-        """Optional ready-to-replay message; generic events use normal formatting."""
-        return None
-
-    @property
-    def is_replay_turn(self) -> bool:
-        """Whether the event supplies a complete model turn for replay."""
-        return False
-
-    @property
-    def replay_tool_calls(self) -> tuple:
-        """Completed assistant calls represented by this event, if any."""
-        return ()
 
     # Discriminator field - excluded from repr.
     # Default is "" (empty); model_post_init fills it with cls.__name__ if unset.

@@ -16,7 +16,7 @@ from nooa.context_blocks.models import BlockMetadata, DynamicContext, ResolvedBl
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 from nooa.events import LLMResponse
-from nooa.unifiedllm._message_utils import LLM_STATE_KEY
+from nooa.unifiedllm.replay_state import LLM_STATE_KEY
 
 
 def _static_block(key: str, content: str, expr: str | None = None) -> ResolvedBlock:
@@ -268,7 +268,7 @@ class TestCachedRendererEndToEndOpenAI:
             provider_formatter=OpenAIProviderFormatter(),
         ).output
 
-        assert first[:-2] == second[: len(first) - 2]
+        assert first[:-1] == second[: len(first) - 1]
         assert first[-1] != second[-1]
         assert all(LLM_STATE_KEY not in message for message in second if isinstance(message, dict))
         assert second[2] == turn

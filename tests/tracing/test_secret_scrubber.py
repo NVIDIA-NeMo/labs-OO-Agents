@@ -24,6 +24,28 @@ def _reset_stats():
     stats.reset()
 
 
+@pytest.mark.parametrize("shape", ["json", "mapping", "cycle", "decoded_recursion"])
+def test_excessive_nesting_redacts_the_entire_value(shape):
+    if shape == "json":
+        value = "[" * 2000 + '{"encrypted_content":"private"}' + "]" * 2000
+    elif shape == "cycle":
+        value = {}
+        value["cycle"] = value
+    elif shape == "decoded_recursion":
+        # Parsing succeeds; the recursive scrub worker fails instead.
+        value = {"encrypted_content": "private"}
+        for _ in range(2000):
+            value = [value]
+        with patch("nooa.tracing._secret_scrubber.json.loads", return_value=value):
+            assert scrub_value("[0]") == (REDACTED, 1)
+        return
+    else:
+        value = {"encrypted_content": "private"}
+        for _ in range(2000):
+            value = {"nested": value}
+    assert scrub_value(value) == (REDACTED, 1)
+
+
 class TestScrubString:
     def test_aws_access_key(self):
         """AWS access key IDs are redacted."""

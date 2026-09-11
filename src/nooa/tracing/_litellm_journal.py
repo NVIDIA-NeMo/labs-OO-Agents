@@ -66,8 +66,11 @@ def _msg_to_dict(msg: Any) -> dict:
         return msg.model_dump(exclude_unset=True)
     try:
         return dict(msg)
-    except TypeError:
-        return {"raw": str(msg)}
+    except (TypeError, ValueError):
+        # repr/str may embed encrypted reasoning or credentials that structured
+        # scrubbing cannot recognize. Unsupported objects are observable by type
+        # only; never stringify their contents as a fallback.
+        return {"unsupported_type": type(msg).__name__}
 
 
 def _safe_msg_to_dict(msg: Any) -> dict:
@@ -90,12 +93,7 @@ def _extract_output_msgs(response_obj: Any) -> list[dict]:
         # Responses API: response has .output (list of output items)
         elif hasattr(response_obj, "output") and response_obj.output:
             for item in response_obj.output:
-                if hasattr(item, "model_dump"):
-                    msgs.append(item.model_dump())
-                elif isinstance(item, dict):
-                    msgs.append(item)
-                else:
-                    msgs.append({"type": getattr(item, "type", "unknown"), "repr": repr(item)})
+                msgs.append(_msg_to_dict(item))
     except Exception as exc:
         log.debug("Failed to extract output messages: %s", exc)
     return msgs

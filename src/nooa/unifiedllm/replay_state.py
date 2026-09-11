@@ -18,12 +18,10 @@ from urllib.parse import urlsplit
 import litellm
 
 from nooa.llm_types import LLMResponse
-from nooa.unifiedllm._message_utils import (
-    LLM_STATE_KEY,
-    demote_reasoning_text,
-)
+from nooa.unifiedllm.errors import ReasoningReplayError
 
 logger = logging.getLogger(__name__)
+LLM_STATE_KEY = "_nooa_llm_state"
 
 _ENCRYPTED_REASONING_INCLUDE = "reasoning.encrypted_content"
 _INLINE_THOUGHT_SIGNATURE_SEPARATOR = "__thought__"
@@ -33,10 +31,6 @@ _SUPPORTED_PROVIDERS = {
     "anthropic",
     "gemini",
 }
-
-
-class ReasoningReplayError(RuntimeError):
-    """Opaque reasoning state is present but violates NOOA's replay contract."""
 
 
 def _field(value: Any, key: str, default: Any = None) -> Any:
@@ -56,7 +50,10 @@ def unsupported_responses_parts(output: list[Any]) -> list[str]:
         if item_type not in {"reasoning", "function_call", "message"}:
             unsupported.append(str(item_type))
         elif item_type == "message":
-            for block in _field(item, "content", []) or []:
+            content = _field(item, "content")
+            if not isinstance(content, list):
+                raise ReasoningReplayError("Responses message content must be a list of blocks.")
+            for block in content:
                 block_type = response_item_type(block)
                 if block_type != "output_text":
                     unsupported.append(f"message.{block_type}")
@@ -224,9 +221,19 @@ def reject_native_message(message: dict[str, Any], scope: str | None) -> None:
     content = message.get("content")
     if isinstance(content, list):
         nodes.extend(block for block in content if isinstance(block, dict))
-    for call in message.get("tool_calls") or []:
+    calls = message.get("tool_calls")
+    if calls is None:
+        calls = []
+    if not isinstance(calls, list):
+        raise ReasoningReplayError("Malformed tool_calls: expected a list.")
+    for call in calls:
+        if not isinstance(call, dict):
+            raise ReasoningReplayError("Malformed tool_calls entry: expected a mapping.")
         nodes.append(call)
-        nodes.append(call.get("function", {}))
+        function = call.get("function")
+        if not isinstance(function, dict):
+            raise ReasoningReplayError("Malformed tool call function: expected a mapping.")
+        nodes.append(function)
     for node in nodes:
         # SDK dumps include optional provider fields with null/empty values;
         # those carry no native state and are valid portable input.
@@ -240,7 +247,7 @@ def reject_native_message(message: dict[str, Any], scope: str | None) -> None:
             )
     if _scope_provider(scope) == "gemini":
         ids = [message.get("tool_call_id")]
-        ids.extend(call.get("id") for call in message.get("tool_calls") or [])
+        ids.extend(call.get("id") for call in calls)
         if any(
             isinstance(value, str) and _INLINE_THOUGHT_SIGNATURE_SEPARATOR in value for value in ids
         ):
@@ -272,7 +279,13 @@ def responses_reasoning_text(output: list[Any]) -> str | None:
 def prepare_chat_messages(
     messages: list[LLMResponse | dict[str, Any]], scope: str | None
 ) -> list[dict]:
-    """Project canonical turns; raw dictionaries never carry trusted native state."""
+    """Project canonical turns; retain explicit fields in caller-written dictionaries.
+
+    Portable reasoning demotion belongs to LLMResponse projection. A raw
+    reasoning_content field is a caller's explicit wire setting, not a request
+    to fold that text into content. Raw dictionaries still cannot carry opaque
+    state, and request containers are detached before the SDK can mutate them.
+    """
     from .chat_parts import project_chat_turn
 
     prepared: list[dict[str, Any]] = []
@@ -294,7 +307,6 @@ def prepare_chat_messages(
         message = dict(original)
         reject_native_message(message, scope)
         message = copy.deepcopy(message)
-        demote_reasoning_text(message, message.pop("reasoning_content", None))
         call_id = message.get("tool_call_id")
         if isinstance(call_id, str):
             message["tool_call_id"] = private_call_ids.get(call_id, call_id)

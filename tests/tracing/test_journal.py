@@ -23,8 +23,32 @@ from nooa.tracing._context_sideband import (
 )
 from nooa.tracing._litellm_journal import (
     MessageJournalCallback,
+    _extract_output_msgs,
     _safe_msg_to_dict,
 )
+
+
+def test_unsupported_provider_object_never_uses_string_fallback():
+    class OpaqueObject:
+        encrypted_content = "private"
+
+        def __str__(self):
+            raise AssertionError("must not stringify provider objects")
+
+        def __repr__(self):
+            raise AssertionError("must not repr provider objects")
+
+    value = OpaqueObject()
+    expected = {"unsupported_type": "OpaqueObject"}
+    assert _safe_msg_to_dict(value) == expected
+    for response in (
+        SimpleNamespace(output=[value]),
+        SimpleNamespace(choices=[SimpleNamespace(message=value)]),
+    ):
+        assert _extract_output_msgs(response) == [expected]
+    assert "private" not in json.dumps(
+        _safe_msg_to_dict(SimpleNamespace(encrypted_content="private"))
+    )
 
 
 def _posts():
@@ -215,7 +239,7 @@ def test_safe_msg_to_dict_redacts_json_encoded_opaque_state():
 
 @pytest.mark.parametrize("json_encoded", [False, True])
 def test_safe_msg_to_dict_redacts_private_replay_envelope(json_encoded):
-    from nooa.unifiedllm._message_utils import LLM_STATE_KEY
+    from nooa.unifiedllm.replay_state import LLM_STATE_KEY
 
     message = {LLM_STATE_KEY: {"payload": {"future_provider_blob": "opaque-state"}}}
     original = {"content": json.dumps(message)} if json_encoded else message

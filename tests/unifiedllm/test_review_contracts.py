@@ -3,10 +3,12 @@
 """Provider variation and public projection contracts from the full core review."""
 
 import json
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 from litellm import ModelResponse
+from pydantic import BaseModel
 
 from nooa.context_blocks.events import EventBase
 from nooa.context_blocks.formatter import AnthropicProviderFormatter
@@ -14,7 +16,9 @@ from nooa.context_blocks.models import RenderedMessage, Role, ToolCallInfo
 from nooa.llm_types import AssistantText, LLMResponse, ToolCall, assistant_message
 from nooa.unifiedllm import CompletionClient, ResponsesClient
 from nooa.unifiedllm.chat_parts import capture_chat_parts, project_chat_turn
+from nooa.unifiedllm.errors import ReasoningReplayError
 from nooa.unifiedllm.replay_state import prepare_chat_messages
+from nooa.unifiedllm.response_parts import capture_parts
 
 
 @pytest.mark.parametrize("api_style", ["chat", "responses"])
@@ -179,6 +183,68 @@ def test_extra_function_metadata_does_not_break_public_responses_input():
     assert wire == [{"type": "function_call", "call_id": "c", "name": "run", "arguments": "{}"}]
 
 
-def test_replay_turn_probe_is_explicit():
-    assert not EventBase().is_replay_turn
-    assert LLMResponse().is_replay_turn
+def test_generic_events_do_not_expose_assistant_replay_hooks():
+    for name in ("is_replay_turn", "replay_tool_calls", "render_message", "replay_content"):
+        assert not hasattr(EventBase(), name)
+
+
+@pytest.mark.parametrize("calls", [[None], ["bad"], [42], {}, "bad", [{"function": None}], [{}]])
+@pytest.mark.parametrize("client_type", [CompletionClient, ResponsesClient])
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.asyncio
+async def test_malformed_raw_calls_fail_before_transport(calls, client_type, is_async):
+    with client_type("openai/gpt-5.6", api_key="test") as client:
+        with patch("litellm.completion") as chat, patch("litellm.responses") as responses:
+            with patch("litellm.acompletion") as achat, patch("litellm.aresponses") as aresponses:
+                with pytest.raises(ReasoningReplayError, match="Malformed tool"):
+                    messages = [{"role": "assistant", "tool_calls": calls}]
+                    if is_async:
+                        await client.acall(messages)
+                    else:
+                        client.call(messages)
+                for request in (chat, responses, achat, aresponses):
+                    request.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"type": "message"},
+        {"type": "message", "content": None},
+        {"type": "message", "content": 42},
+        {"type": "message", "content": "bad"},
+        {"type": "message", "content": [{"type": "output_text"}]},
+        {"type": "message", "content": [{"type": "output_text", "text": None}]},
+        {"type": "message", "content": [{"type": "output_text", "text": 42}]},
+        {"type": "function_call", "call_id": "c", "arguments": "{}"},
+        {"type": "function_call", "call_id": "c", "name": "run"},
+        {"type": "function_call", "call_id": "c", "name": None, "arguments": "{}"},
+        {"type": "function_call", "call_id": "c", "name": "run", "arguments": {}},
+    ],
+)
+@pytest.mark.parametrize("sdk_dump", [False, True])
+def test_malformed_responses_fields_raise_contract_error(item, sdk_dump):
+    if sdk_dump:
+
+        class SDKItem(BaseModel):
+            type: str
+            content: Any = None
+            call_id: Any = None
+            name: Any = None
+            arguments: Any = None
+
+        item = SDKItem(**item)
+    with pytest.raises(ReasoningReplayError):
+        capture_parts([item], "responses:openai:model")
+
+
+def test_explicit_raw_reasoning_field_is_not_rewritten():
+    message = {"role": "assistant", "content": "answer", "reasoning_content": "caller reasoning"}
+    prepared = prepare_chat_messages([message], "chat:openai:model")
+    assert prepared == [message]
+    assert prepared[0] is not message
+    # Captured responses retain the separate automatic portable-replay policy.
+    turn = LLMResponse(parts=capture_chat_parts(message, None))
+    assert prepare_chat_messages([turn], None) == [
+        {"role": "assistant", "content": "caller reasoning\n\nanswer"}
+    ]

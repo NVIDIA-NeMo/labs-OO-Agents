@@ -36,7 +36,9 @@ def _capture_text(blocks: list[dict], separator: str) -> str:
     """Move text into the public part; retain only block metadata and lengths."""
     texts = []
     for block in blocks:
-        text = block.pop("text")
+        if not isinstance(block, dict):
+            raise ReasoningReplayError("Responses text blocks must be mappings.")
+        text = block.pop("text", None)
         if not isinstance(text, str):
             raise ReasoningReplayError("Responses text must be a string.")
         texts.append(text)
@@ -72,6 +74,21 @@ def _restore_text(blocks: list[dict], text: str, separator: str) -> None:
 
 
 def capture_parts(output: list[Any], scope: str | None) -> tuple[AssistantPart, ...]:
+    """Capture Responses output order without flattening away replay information.
+
+    One assistant turn can contain multiple reasoning items, text messages and
+    function calls. The ordered parts are authoritative: public text/arguments
+    live once, and native fields retain message boundaries, phase, signatures
+    and text-block lengths needed to reconstruct the original items. Consumers
+    see the derived public views, not provider-specific reconstruction details.
+
+    opaque_item detaches mutable provider containers; frozen native data then
+    survives storage and repeated requests without copying its string payloads.
+    Unrecognized routes retain portable parts only. A summary-only reasoning
+    item makes the entire turn portable, since mixing a rewritten public turn
+    with retained native state would violate replay consistency. Missing or
+    malformed supported fields raise the terminal ReasoningReplayError.
+    """
     unsupported = unsupported_responses_parts(output)
     if unsupported:
         raise ReasoningReplayError("Unsupported Responses output parts: " + ", ".join(unsupported))
@@ -83,7 +100,10 @@ def capture_parts(output: list[Any], scope: str | None) -> tuple[AssistantPart, 
         native = opaque_item(item)
         kind = native["type"]
         if kind == "message":
-            text = _capture_text(native["content"], "")
+            content = native.get("content")
+            if not isinstance(content, list):
+                raise ReasoningReplayError("Responses message content must be a list of blocks.")
+            text = _capture_text(content, "")
             part = AssistantText(text=text)
         elif kind == "function_call":
             call_id = native.pop("call_id", None)
@@ -92,7 +112,13 @@ def capture_parts(output: list[Any], scope: str | None) -> tuple[AssistantPart, 
                     "Responses tool call ids must be strings; nonempty ids must be unique."
                 )
             ids.add(call_id)
-            part = ToolCall(id=call_id, name=native.pop("name"), arguments=native.pop("arguments"))
+            name = native.pop("name", None)
+            arguments = native.pop("arguments", None)
+            if not isinstance(name, str) or not isinstance(arguments, str):
+                raise ReasoningReplayError(
+                    "Responses tool call name and arguments must be strings."
+                )
+            part = ToolCall(id=call_id, name=name, arguments=arguments)
         else:
             encrypted = native.get("encrypted_content")
             if encrypted is not None:
@@ -124,7 +150,19 @@ def capture_parts(output: list[Any], scope: str | None) -> tuple[AssistantPart, 
 
 
 def project_turn(turn: LLMResponse, scope: str | None) -> list[dict[str, Any]]:
-    """Only this final adapter opens native extensions; public edits need no hash."""
+    """Reconstruct ordered Responses wire items, gated by the turn's replay scope.
+
+    Compatible native parts restore the original item boundaries and metadata,
+    filling public text and arguments back into their original positions. This
+    preserves the history prefix needed for cache reuse; it does not itself
+    select cache breakpoints or guarantee a hit. Incompatible/edited turns keep
+    portable text and calls, never the old provider's opaque state.
+
+    Only this adapter opens native data. It allocates request-owned containers
+    and shares immutable string leaves; projecting a turn cannot mutate its
+    archive. Edits already discard native state at the LLMResponse boundary,
+    so projection needs no content fingerprint or reconstructed order ledger.
+    """
     compatible = scope is not None and turn.replay_scope == scope
     if compatible and _scope_provider(scope) not in {"openai", "azure"}:
         raise ReasoningReplayError("Native Responses replay only supports OpenAI and Azure.")

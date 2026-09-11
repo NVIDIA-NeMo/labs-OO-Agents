@@ -246,7 +246,19 @@ def scrub_value(value: Any) -> tuple[Any, int]:
     keys are always replaced, including short or provider-specific secrets.
     Returns ``(scrubbed_value, redaction_count)`` where the count is the
     number of secrets redacted within this value.
+
+    Recursive/cyclic structures are redacted in full. Returning the original
+    value after a recursion failure would bypass opaque-state scrubbing.
     """
+    try:
+        return _scrub_value(value)
+    except RecursionError:
+        stats.record("excessive_nesting")
+        return REDACTED, 1
+
+
+def _scrub_value(value: Any) -> tuple[Any, int]:
+    """Recursive worker; only the public entry catches recursion failures."""
     if isinstance(value, str):
         # OpenInference records LLM inputs as JSON string span attributes.
         # Only parse objects/arrays. Matching the prefix avoids allocating a
@@ -257,7 +269,7 @@ def scrub_value(value: Any) -> tuple[Any, int]:
             decoded = json.loads(value)
         except (json.JSONDecodeError, TypeError):
             return scrub_string(value)
-        decoded, json_count = scrub_value(decoded)
+        decoded, json_count = _scrub_value(decoded)
         if json_count:
             return json.dumps(decoded, separators=(",", ":"), ensure_ascii=False), json_count
         return value, 0
@@ -277,14 +289,14 @@ def scrub_value(value: Any) -> tuple[Any, int]:
                 stats.record(reason)
                 count += 1
             else:
-                scrubbed_mapping[key], n = scrub_value(item)
+                scrubbed_mapping[key], n = _scrub_value(item)
                 count += n
         return scrubbed_mapping, count
     if isinstance(value, (list, tuple)):
         new_items = []
         count = 0
         for v in value:
-            new_v, n = scrub_value(v)
+            new_v, n = _scrub_value(v)
             new_items.append(new_v)
             count += n
         return type(value)(new_items), count

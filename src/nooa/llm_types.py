@@ -355,10 +355,6 @@ class LLMResponse(EventBase):
             return self
         return assistant_message(content, tool_calls=tool_calls, reasoning=reasoning)
 
-    @property
-    def is_replay_turn(self) -> bool:
-        return True
-
     @cached_property
     def _public_projection(self):
         """Cache immutable public values, never mutable caller-owned containers."""

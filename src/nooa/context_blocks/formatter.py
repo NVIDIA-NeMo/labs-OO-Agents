@@ -23,10 +23,11 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import FormatConfig
+    from nooa.llm_types import LLMResponse
 
 from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ToolCallEvent
@@ -39,6 +40,18 @@ from nooa.context_blocks.models import (
 from nooa.llm_types import assistant_message
 
 logger = logging.getLogger(__name__)
+
+
+def _is_llm_response(event: EventBase | None) -> TypeGuard["LLMResponse"]:
+    """Recognize the public assistant IR without exposing its provider internals.
+
+    The formatter owns event-to-message semantics. Keeping this dispatch here
+    avoids assistant-specific hooks on every EventBase subclass. The lazy import
+    avoids the cycle through LLMResponse's EventBase definition.
+    """
+    from nooa.llm_types import LLMResponse
+
+    return isinstance(event, LLMResponse)
 
 
 class FormatType(StrEnum):
@@ -114,7 +127,7 @@ class BlockFormatter(ABC):
         No OOM-safety cap is applied here — that belongs to L2 (stdout/stderr
         capture).
         """
-        if event.is_replay_turn:
+        if _is_llm_response(event):
             return event.replay_content
         if getattr(event, "_role", None) is Role.ASSISTANT:
             content = getattr(event, "content", None)
@@ -236,7 +249,7 @@ def _event_block_to_messages(
     """
     from nooa.context_blocks.models import BlockPart
 
-    if block.event is not None and block.event.is_replay_turn:
+    if _is_llm_response(block.event):
         event = block.event
         if event.is_empty:
             return []
@@ -303,7 +316,7 @@ def _event_blocks_to_messages(
     replayable_turn_ids = {
         block.event.id
         for block in blocks
-        if block.event is not None and block.event.is_replay_turn and block.event.replay_tool_calls
+        if _is_llm_response(block.event) and block.event.replay_tool_calls
     }
     executions: dict[str, dict[str, ToolCallEvent]] = {}
     for block in blocks:
@@ -318,7 +331,7 @@ def _event_blocks_to_messages(
     messages: list[RenderedMessage] = []
     for block in blocks:
         event = block.event
-        if event is not None and event.is_replay_turn and event.replay_tool_calls:
+        if _is_llm_response(event) and event.replay_tool_calls:
             by_call_id = executions.get(event.id, {})
             if any(
                 call.id not in by_call_id or by_call_id[call.id].result is None
