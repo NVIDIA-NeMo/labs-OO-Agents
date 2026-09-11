@@ -3,6 +3,7 @@
 """Tests for secret scrubbing in telemetry."""
 
 import json
+from unittest.mock import patch
 
 import pytest
 
@@ -176,6 +177,41 @@ class TestScrubString:
 
 
 class TestScrubValue:
+    @pytest.mark.parametrize("as_array", [False, True])
+    def test_json_redaction_preserves_literal_unicode(self, as_array):
+        payload = {"api_key": "synthetic-secret", "text": "héllo 世界"}
+        attribute = " \n" + json.dumps([payload] if as_array else payload, ensure_ascii=False)
+
+        result, count = scrub_value(attribute)
+
+        assert "héllo 世界" in result
+        assert "synthetic-secret" not in result
+        expected = {"api_key": REDACTED, "text": "héllo 世界"}
+        assert json.loads(result) == ([expected] if as_array else expected)
+        assert count == 1
+
+    @pytest.mark.parametrize("text", ["ordinary code output", " \n héllo 世界", "", "42"])
+    def test_plain_text_never_attempts_json_parsing(self, text):
+        with patch("nooa.tracing._secret_scrubber.json.loads") as parse:
+            assert scrub_value(text) == (text, 0)
+        parse.assert_not_called()
+
+    def test_plain_text_still_redacts_without_json_parsing(self):
+        with patch("nooa.tracing._secret_scrubber.json.loads") as parse:
+            result, count = scrub_value("api_key=synthetic-secret")
+        parse.assert_not_called()
+        assert result == f"api_key={REDACTED}"
+        assert count == 1
+
+    def test_invalid_json_falls_back_to_text_scrubbing(self):
+        result, count = scrub_value("[progress] api_key=synthetic-secret")
+        assert result == f"[progress] api_key={REDACTED}"
+        assert count == 1
+
+    def test_clean_json_keeps_original_formatting(self):
+        attribute = ' \n{ "text": "héllo 世界" }\n'
+        assert scrub_value(attribute) == (attribute, 0)
+
     def test_string(self):
         """A string value is scrubbed and its redaction count returned."""
         result, count = scrub_value("key=AKIAIOSFODNN7EXAMPLE")
