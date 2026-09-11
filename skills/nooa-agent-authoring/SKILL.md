@@ -63,6 +63,15 @@ To load a specific file instead of discovery, pass its `Path` to `reload_registr
 
 Keys come from `.env` (library use) or `~/.config/nooa/secrets.yaml`.
 
+**Caching:** the cached renderer places a boundary before live context; UnifiedLLM
+maps it at dispatch. `cache_breakpoint="auto"` (default) marks recognized Anthropic
+routes and leaves other providers' caches implicit. A supported OpenAI Responses
+route can opt into `cache_breakpoint="openai"`; `None` disables NOOA markers.
+Without a rendered boundary, direct callers cache only leading instructions.
+`cache_control_injection_points` is removed; see
+[stable-prefix caching](../../docs/stable-prefix-caching.md) for migration and
+direct-call examples.
+
 **Resolution cascade** for which LLM a method uses — first match wins:
 
 1. `await agent.method(..., llm=special_llm)` — call override

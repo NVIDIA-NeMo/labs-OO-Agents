@@ -522,11 +522,12 @@ async def test_cache_helpers_and_calibration_receive_projected_dicts(monkeypatch
     )
     client = ResponsesClient("anthropic/claude-sonnet-4-5", api_key="test")
     try:
-        messages = [LLMResponse(content="previous"), {"role": "user", "content": "go"}]
-        params = {"cache_control_injection_points": [{"role": "user", "position": "last"}]}
-        result = (
-            await client.acall(messages, **params) if is_async else client.call(messages, **params)
-        )
+        messages = [
+            LLMResponse(content="previous"),
+            {"role": "user", "content": "go"},
+            {"nooa_cache_boundary": True},
+        ]
+        result = await client.acall(messages) if is_async else client.call(messages)
         assert result.content == "done"
         assert len(calibrated) == 1
         assert calibrated[0] is sent[0]

@@ -19,6 +19,11 @@ import litellm
 from pydantic import BaseModel, RootModel
 
 from nooa.llm_types import AssistantReasoning, AssistantText, LLMResponse, LLMUsage, ToolCall
+from nooa.unifiedllm.cache_policy import (
+    apply_cache_policy,
+    enable_openai_explicit_cache,
+    reject_legacy_cache_config,
+)
 
 from . import replay_state, response_parts
 from .errors import EmptyContentError
@@ -1128,31 +1133,16 @@ def _update_token_calibration(
         logger.debug("token calibration skipped (estimate failed)", exc_info=True)
 
 
-def _copy_cache_marker_target(
-    message: dict[str, Any], *, copy_last_content_block: bool = False
-) -> dict[str, Any]:
-    """Copy one marker target without discarding private replay metadata."""
-    copied = copy.copy(message)
-    content = copied.get("content")
-    if copy_last_content_block and isinstance(content, list) and content:
-        blocks = list(content)
-        if isinstance(blocks[-1], dict):
-            blocks[-1] = dict(blocks[-1])
-        copied["content"] = blocks
-    return copied
-
-
 class UnifiedLLM(ABC):
     _registry_config: dict[str, Any] | None
+    cache_breakpoint: Literal["auto", "openai", "anthropic"] | None
 
     def __init__(self, model: str, **config):
+        reject_legacy_cache_config(config)
         self.model = model
         self.config = config
         self._registry_config = None
-        # Cache control injection — shared by CompletionClient and ResponsesClient
-        self.cache_control_injection_points: list[dict[str, Any]] = (
-            DEFAULT_CACHE_CONTROL_INJECTION_POINTS
-        )
+        self.cache_breakpoint = None
         # Per-client HTTP transport (httpx clients + litellm wrappers). Set by
         # concrete subclasses; guarded here so base helpers stay safe.
         self._http: _ClientHttp | None = None
@@ -1164,9 +1154,18 @@ class UnifiedLLM(ABC):
             raise ValueError("model must be a non-empty string")
         return model
 
+    def _validate_cache_breakpoint_model(self, effective_model: str) -> None:
+        """Reject applying a model-declared cache mapping to a call override."""
+        if self.cache_breakpoint not in {None, "auto"} and effective_model != self.model:
+            raise ValueError(
+                "cache_breakpoint is declared for the client model and cannot be used "
+                "with a per-call model override"
+            )
+
     @staticmethod
     def _validate_request_config(name: str, call_config: dict[str, Any]) -> None:
         """Keep provider payloads and routing on their validated top-level paths."""
+        reject_legacy_cache_config(call_config)
         if name in call_config:
             raise ValueError(
                 f"{name!r} is managed by UnifiedLLM; pass conversation data through "
@@ -1204,138 +1203,11 @@ class UnifiedLLM(ABC):
     async def __aexit__(self, *exc_info):
         await self.aclose()
 
-    @staticmethod
-    def _inject_cache_control_on_content(msg: dict) -> None:
-        """Add cache_control to the last content block of a message.
-
-        Anthropic's API requires cache_control on content blocks (not message level)
-        for non-system messages.  When content is a plain string, converts it to
-        the array-of-blocks format so cache_control can be attached.
-
-        Mutates ``msg`` in place.
-        """
-        content = msg.get("content")
-        if content is None:
-            msg["cache_control"] = {"type": "ephemeral"}
-        elif isinstance(content, str):
-            msg["content"] = [
-                {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
-            ]
-        elif isinstance(content, list) and len(content) > 0:
-            last_block = content[-1]
-            if isinstance(last_block, dict):
-                last_block["cache_control"] = {"type": "ephemeral"}
-        else:
-            msg["cache_control"] = {"type": "ephemeral"}
-
-    def _inject_cache_control(
-        self,
-        messages: list[dict[str, Any] | LLMResponse],
-        injection_points: list[dict[str, Any]],
-        *,
-        model: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Add cache_control to designated messages for prompt caching.
-
-        Adds cache_control at the message level (sibling of role/content), which
-        is the format expected by NVIDIA's OpenAI-compatible gateway endpoints.
-        This format also survives OpenAI SDK validation since the SDK only strips
-        extra fields from content blocks, not from messages themselves.
-
-        Supports two injection modes:
-
-        1. **Role-based** (existing): marks ALL messages of a given role.
-           ``{"role": "system"}``
-
-        2. **Position-based** (new): marks only the last message of a given role.
-           ``{"role": "assistant", "position": "last"}``
-
-        Anthropic supports up to 4 cache breakpoints. Using both modes together
-        caches both the stable system prompt and the conversation history prefix::
-
-            [
-                {"role": "system"},                        # breakpoint 1
-                {"role": "tool", "position": "last"},      # breakpoint 2
-            ]
-
-        Args:
-            messages: The message list to process.
-            injection_points: List of dicts specifying where to add cache_control.
-                Each dict must have a "role" key. Optional "position" key with
-                value "last" restricts marking to only the last message of that role.
-
-        Returns:
-            A copy-on-write view with only breakpoint messages copied.
-        """
-        if not injection_points:
-            return messages
-
-        roles_to_cache_all: set[str] = set()
-        roles_to_cache_last: set[str] = set()
-        for p in injection_points:
-            role = p.get("role")
-            if not role:
-                continue
-            if p.get("position") == "last":
-                roles_to_cache_last.add(role)
-            else:
-                roles_to_cache_all.add(role)
-
-        if not roles_to_cache_all and not roles_to_cache_last:
-            return messages
-
-        prepared = messages
-        copied: set[int] = set()
-
-        def copy_message(index: int, *, copy_last_content_block: bool = False) -> dict[str, Any]:
-            nonlocal prepared
-            if index not in copied or copy_last_content_block:
-                if prepared is messages:
-                    prepared = list(messages)
-                prepared[index] = _copy_cache_marker_target(
-                    prepared[index], copy_last_content_block=copy_last_content_block
-                )
-                copied.add(index)
-            message = prepared[index]
-            return message
-
-        # Map role names to native Responses API type equivalents
-        _ROLE_TO_TYPE = {"tool": "function_call_output"}
-
-        for index, original in enumerate(messages):
-            msg = original
-            role = msg.get("role")
-            if role and role in roles_to_cache_all:
-                msg = copy_message(index)
-                msg["cache_control"] = {"type": "ephemeral"}
-            elif not role:
-                # Native Responses format: match by type equivalent
-                msg_type = msg.get("type")
-                for r, t in _ROLE_TO_TYPE.items():
-                    if t == msg_type and r in roles_to_cache_all:
-                        msg = copy_message(index)
-                        msg["cache_control"] = {"type": "ephemeral"}
-                        break
-
-        # Anthropic needs cache_control on a content block (parts form); other providers
-        # reject a content list on non-user roles, so mark at the message level instead.
-        anthropic = _is_anthropic_model(model or self.model)
-        for role in roles_to_cache_last:
-            # Search for matching messages by role OR by equivalent native type
-            native_type = _ROLE_TO_TYPE.get(role)
-            for index in range(len(messages) - 1, -1, -1):
-                original = messages[index]
-                if original.get("role") == role or (
-                    native_type and original.get("type") == native_type
-                ):
-                    msg = copy_message(index, copy_last_content_block=anthropic)
-                    if anthropic:
-                        self._inject_cache_control_on_content(msg)
-                    else:
-                        msg["cache_control"] = {"type": "ephemeral"}
-                    break
-
-        return prepared
+    def _prepare_cache_boundary(self, messages, *, responses, model=None, instructions=None):
+        mapping = self.cache_breakpoint
+        if mapping == "auto":
+            mapping = "anthropic" if _is_anthropic_model(model or self.model) else None
+        return apply_cache_policy(messages, mapping, responses=responses, instructions=instructions)
 
     def count_tokens(self, text: str) -> int:
         """Count tokens using model-appropriate tokenizer.
@@ -1707,12 +1579,6 @@ def _extract_think_tags(content: str) -> tuple[str, str | None]:
     return content, None
 
 
-DEFAULT_CACHE_CONTROL_INJECTION_POINTS = [
-    {"role": "system"},
-    {"role": "tool", "position": "last"},
-]
-
-
 # ============================================================================
 # PATCH: Prevent litellm from stripping cache_control for Anthropic models
 # ============================================================================
@@ -1794,8 +1660,7 @@ class CompletionClient(UnifiedLLM):
         model: str,
         retry_config: RetryConfig | None = None,
         http_config: HttpConfig | None = None,
-        # use system as default for cache_control_injection_points
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
+        cache_breakpoint: Literal["auto", "anthropic"] | None = "auto",
         **config,
     ):
         """
@@ -1816,21 +1681,21 @@ class CompletionClient(UnifiedLLM):
                          passes it to litellm per call. No global state and no
                          monkey-patching of httpx — two clients with different
                          http_configs are fully independent.
-            cache_control_injection_points: Optional list of role/position rules to
-                enable prompt caching (for example: {"role": "system"} or
-                {"role": "tool", "position": "last"}). Applied to all calls.
-                Note: Do NOT manually add cache_control to message content when using this.
+            cache_breakpoint: Set to ``"anthropic"`` to map the cached
+                renderer's stable-prefix boundary to native ``cache_control``.
+                Default ``"auto"`` enables this for recognized Anthropic routes;
+                other routes use provider-default caching. ``None`` disables
+                NOOA markers. Without a boundary, only leading instructions
+                are marked.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
+        if cache_breakpoint not in {None, "auto", "anthropic"}:
+            raise ValueError("CompletionClient supports only the 'anthropic' cache mapping")
         super().__init__(model, **config)
         self.retry_config = retry_config or RetryConfig()
+        self.cache_breakpoint = cache_breakpoint
         self._http_config = http_config or HttpConfig()
         self._http = _ClientHttp.for_completion(self.model, self.config, self._http_config)
-        # Only set default if explicitly None (not if empty list is passed)
-        if cache_control_injection_points is not None:
-            self.cache_control_injection_points = cache_control_injection_points
-        else:
-            self.cache_control_injection_points = DEFAULT_CACHE_CONTROL_INJECTION_POINTS
 
     def _convert_tool_to_schema(self, tool: Tool) -> dict[str, Any]:
         """Convert Tool object to Completion API schema format"""
@@ -1861,7 +1726,6 @@ class CompletionClient(UnifiedLLM):
         messages: list[dict[str, Any] | LLMResponse],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """
@@ -1874,17 +1738,13 @@ class CompletionClient(UnifiedLLM):
         call_config = {**self.config, **kwargs}
         self._validate_request_config("messages", call_config)
         effective_model = self._effective_model(call_config)
+        self._validate_cache_breakpoint_model(effective_model)
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
         messages = replay_state.prepare_chat_messages(messages, state_scope)
 
         # Inject cache_control at the message level for prompt caching
-        cache_points = (
-            self.cache_control_injection_points
-            if cache_control_injection_points is None
-            else cache_control_injection_points
-        )
-        prepared_messages = self._inject_cache_control(
-            messages, cache_points, model=effective_model
+        prepared_messages, _, _ = self._prepare_cache_boundary(
+            messages, responses=False, model=effective_model
         )
 
         api_params = {
@@ -1955,7 +1815,6 @@ class CompletionClient(UnifiedLLM):
         messages: list[dict[str, Any] | LLMResponse],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """
@@ -1968,17 +1827,13 @@ class CompletionClient(UnifiedLLM):
         call_config = {**self.config, **kwargs}
         self._validate_request_config("messages", call_config)
         effective_model = self._effective_model(call_config)
+        self._validate_cache_breakpoint_model(effective_model)
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
         messages = replay_state.prepare_chat_messages(messages, state_scope)
 
         # Inject cache_control at the message level for prompt caching
-        cache_points = (
-            self.cache_control_injection_points
-            if cache_control_injection_points is None
-            else cache_control_injection_points
-        )
-        prepared_messages = self._inject_cache_control(
-            messages, cache_points, model=effective_model
+        prepared_messages, _, _ = self._prepare_cache_boundary(
+            messages, responses=False, model=effective_model
         )
 
         api_params = {
@@ -2077,13 +1932,10 @@ class ReasoningCompletionClient(CompletionClient):
         messages: list[dict[str, Any] | LLMResponse],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """Call with <think> tag extraction."""
-        response = super().call(
-            messages, tools, output_model, cache_control_injection_points, **kwargs
-        )
+        response = super().call(messages, tools, output_model, **kwargs)
 
         # Extract think tags from content
         if isinstance(response.content, str) and response.content:
@@ -2113,13 +1965,10 @@ class ReasoningCompletionClient(CompletionClient):
         messages: list[dict[str, Any] | LLMResponse],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """Async call with <think> tag extraction."""
-        response = await super().acall(
-            messages, tools, output_model, cache_control_injection_points, **kwargs
-        )
+        response = await super().acall(messages, tools, output_model, **kwargs)
 
         # Extract think tags from content
         if isinstance(response.content, str) and response.content:
@@ -2151,7 +2000,7 @@ class ResponsesClient(UnifiedLLM):
         model: str,
         retry_config: RetryConfig | None = None,
         http_config: HttpConfig | None = None,
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
+        cache_breakpoint: Literal["auto", "openai"] | None = "auto",
         **config,
     ):
         """
@@ -2174,20 +2023,20 @@ class ResponsesClient(UnifiedLLM):
                          settings. Applied only to THIS client's requests (its
                          own httpx client is passed to litellm per call). No
                          global state and no monkey-patching of httpx.
-            cache_control_injection_points: Optional list of role/position rules to
-                enable prompt caching (for example: {"role": "system"} or
-                {"role": "tool", "position": "last"}). Applied to all calls.
+            cache_breakpoint: Set to ``"openai"`` to map the cached renderer's
+                stable-prefix boundary to a Responses explicit breakpoint.
+                Opt in only on a route supporting the explicit wire fields.
+                Default ``"auto"`` marks Anthropic bridge instructions and leaves
+                other routes' caching implicit. ``None`` disables NOOA markers.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
+        if cache_breakpoint not in {None, "auto", "openai"}:
+            raise ValueError("ResponsesClient supports only the 'openai' cache mapping")
         super().__init__(model, **config)
         self.retry_config = retry_config or RetryConfig()
+        self.cache_breakpoint = cache_breakpoint
         self._http_config = http_config or HttpConfig()
         self._http = _ClientHttp.for_responses(self.model, self.config, self._http_config)
-        # Only set default if explicitly None (not if empty list is passed)
-        if cache_control_injection_points is not None:
-            self.cache_control_injection_points = cache_control_injection_points
-        else:
-            self.cache_control_injection_points = DEFAULT_CACHE_CONTROL_INJECTION_POINTS
 
     def _convert_tool_to_schema(self, tool: Tool) -> dict[str, Any]:
         """Convert Tool object to Responses API schema format."""
@@ -2223,7 +2072,6 @@ class ResponsesClient(UnifiedLLM):
         messages: list[dict[str, Any] | LLMResponse],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """
@@ -2240,9 +2088,10 @@ class ResponsesClient(UnifiedLLM):
         call_config = {**self.config, **kwargs}
         self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
+        self._validate_cache_breakpoint_model(effective_model)
         state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
-        input_messages, instructions = self._prepare_input(
-            messages, state_scope, effective_model, cache_control_injection_points
+        input_messages, instructions, openai_explicit = self._prepare_input(
+            messages, state_scope, effective_model
         )
 
         api_params = {
@@ -2252,6 +2101,8 @@ class ResponsesClient(UnifiedLLM):
             **kwargs,
             "input": input_messages,
         }
+        if openai_explicit:
+            enable_openai_explicit_cache(api_params)
 
         if instructions:
             api_params["instructions"] = instructions
@@ -2298,7 +2149,6 @@ class ResponsesClient(UnifiedLLM):
         messages: list[dict[str, Any] | LLMResponse],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """
@@ -2312,9 +2162,10 @@ class ResponsesClient(UnifiedLLM):
         call_config = {**self.config, **kwargs}
         self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
+        self._validate_cache_breakpoint_model(effective_model)
         state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
-        input_messages, instructions = self._prepare_input(
-            messages, state_scope, effective_model, cache_control_injection_points
+        input_messages, instructions, openai_explicit = self._prepare_input(
+            messages, state_scope, effective_model
         )
 
         api_params = {
@@ -2324,6 +2175,8 @@ class ResponsesClient(UnifiedLLM):
             **kwargs,
             "input": input_messages,
         }
+        if openai_explicit:
+            enable_openai_explicit_cache(api_params)
 
         if instructions:
             api_params["instructions"] = instructions
@@ -2365,25 +2218,12 @@ class ResponsesClient(UnifiedLLM):
 
         return self._response_from_output(raw_response, state_scope, usage, output_model)
 
-    def _prepare_input(self, messages, state_scope, model, cache_points):
-        """Run dict-only cache helpers only after canonical turn projection."""
+    def _prepare_input(self, messages, state_scope, model):
+        """Choose cache markers only after canonical turn projection."""
         input_messages, instructions = self._transform_messages(messages, state_scope)
-        if _is_anthropic_model(model):
-            cache_points = (
-                self.cache_control_injection_points if cache_points is None else cache_points
-            )
-            input_messages = self._inject_cache_control(input_messages, cache_points, model=model)
-            # Legacy cache injection may create Chat-shaped text blocks.
-            # Only the final adapter chooses their Responses wire type.
-            for message in input_messages:
-                for block in (
-                    message.get("content", []) if isinstance(message.get("content"), list) else []
-                ):
-                    if block.get("type") == "text":
-                        block["type"] = (
-                            "output_text" if message.get("role") == "assistant" else "input_text"
-                        )
-        return input_messages, instructions
+        return self._prepare_cache_boundary(
+            input_messages, responses=True, model=model, instructions=instructions
+        )
 
     def _response_from_output(self, raw_response, scope, usage, output_model):
         parts = response_parts.capture_parts(raw_response.output, scope)
