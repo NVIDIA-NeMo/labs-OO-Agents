@@ -316,10 +316,18 @@ class Skill(metaclass=SkillMeta):
         if obj is not None:
             self._skill_obj = obj
             cls_name = name or "Skill"
-            self.__class__ = type(cls_name, (Skill,), {"__doc__": obj.__doc__ or ""})  # pyright: ignore[reportAttributeAccessIssue]
+            self.__class__ = type(cls_name, (type(self),), {"__doc__": obj.__doc__ or ""})  # pyright: ignore[reportAttributeAccessIssue]
         elif content is not None:
             cls_name = name or "Skill"
-            self.__class__ = type(cls_name, (Skill,), {"__doc__": content})  # pyright: ignore[reportAttributeAccessIssue]
+            self.__class__ = type(cls_name, (type(self),), {"__doc__": content})  # pyright: ignore[reportAttributeAccessIssue]
+
+    @hidden
+    def __context_view__(self) -> Any:
+        """Return the instance or class context view registered for this skill."""
+        instance_view = vars(self).get("_context_view")
+        if instance_view is not None:
+            return instance_view
+        return getattr(type(self), "_context_view", None)
 
     @hidden
     def attach(self, agent: Any) -> None:

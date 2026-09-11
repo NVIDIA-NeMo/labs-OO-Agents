@@ -20,6 +20,7 @@ from nooa import (
     context_text,
     evaluate_context_expression,
     resolve_context_view,
+    select_context_events,
     spec,
     strategy,
 )
@@ -32,6 +33,7 @@ from nooa.context_blocks import (
     render_context,
 )
 from nooa.context_blocks.events import UserEvent
+from nooa.events import DebugTrace, LLMOutput, Task
 from nooa.strategies.current_call import CurrentCall
 
 
@@ -125,6 +127,48 @@ def test_agent_instance_replaces_class_view():
     )
     assert class_view.name == "class"
     assert instance_view.name == "instance"
+
+
+def test_resolution_uses_explicit_owner_hook():
+    expected = NamedView("hook")
+
+    class Owner:
+        __slots__ = ()
+
+        def __context_view__(self):
+            return expected
+
+    assert resolve_context_view(Owner(), default=NamedView("default")) is expected
+
+
+def test_resolution_without_owner_hook_uses_default_without_private_reflection():
+    default = NamedView("default")
+
+    class Owner:
+        _context_view = NamedView("private")
+
+    assert resolve_context_view(object(), default=default) is default
+    assert resolve_context_view(Owner(), default=default) is default
+
+
+def test_agent_and_skill_expose_view_resolution_hook():
+    class ExampleAgent(Agent, llm=object(), context_view=NamedView("agent_class")):
+        pass
+
+    class ExampleSkill(Skill, context_view=NamedView("skill_class")):
+        pass
+
+    agent = ExampleAgent(context_view=NamedView("agent_instance"))
+    skill = ExampleSkill(context_view=NamedView("skill_instance"))
+    assert agent.__context_view__().name == "agent_instance"
+    assert skill.__context_view__().name == "skill_instance"
+
+
+def test_wrapped_skill_preserves_registered_class_view():
+    class ConfiguredSkill(Skill, context_view=NamedView("configured")):
+        pass
+
+    assert ConfiguredSkill(content="instructions").__context_view__().name == "configured"
 
 
 async def test_custom_agent_view_bypasses_managers_and_skills():
@@ -302,8 +346,6 @@ async def test_default_view_places_one_boundary_before_trailing_context():
 
 
 async def test_empty_llm_output_is_persisted_but_not_provider_visible():
-    from nooa.events import LLMOutput
-
     class Example(Agent, llm=object()):
         async def run(self): ...
 
@@ -318,6 +360,34 @@ async def test_empty_llm_output_is_persisted_but_not_provider_visible():
     assert empty not in items
     assert visible in items
     assert empty in agent.event_manager.values()
+
+
+def test_event_helper_uses_active_history_and_filters_non_model_events():
+    class Example(Agent, llm=object()):
+        pass
+
+    agent = Example()
+    agent.event_manager.add(Task(prompt="archived one"))
+    agent.event_manager.add(Task(prompt="archived two"))
+    summary_tag = agent.events.collapse("1", "2", "active summary")
+    metadata = DebugTrace(content="diagnostic")
+    empty = LLMOutput(content="")
+    visible = LLMOutput(content="answer")
+    agent.event_manager.add(metadata)
+    agent.event_manager.add(empty)
+    agent.event_manager.add(visible)
+
+    call = CurrentCall(id="changed", method_name="run", decorator="plan")
+    selected = select_context_events(agent.events, call=call)
+
+    assert [event.tag for event in selected] == [summary_tag, visible.tag]
+    assert metadata not in selected
+    assert empty not in selected
+    assert all(
+        event.prompt not in {"archived one", "archived two"}
+        for event in selected
+        if isinstance(event, Task)
+    )
 
 
 async def test_default_view_boundary_with_empty_history_and_no_trailing_context():

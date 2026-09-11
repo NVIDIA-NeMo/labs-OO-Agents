@@ -249,16 +249,16 @@ class Agent(metaclass=AgentMeta):
         # Initialize context state (always present, hidden)
         self.context_manager = ContextManager()
 
-        # Register framework blocks as protected (re-evaluated each LLM turn).
-        # ``system_prompt`` and ``self`` are stable across turns — cacheable prefix.
-        # ``state`` is the instance's current field values — re-evaluated each
-        # turn since skills can attach at runtime and field values change.
+        # Reserve framework block names and their default placement. The default
+        # view derives their content directly from the agent; declarations here
+        # are therefore overrides only.
         cm = self.context_manager
-        cm.set_static_protected("system_prompt", expr="self._resolve_system_prompt()")
-        cm.set_static_protected("self", expr="doc(type(self))")
-        cm.set_dynamic_protected(
+        cm.protect("system_prompt", static=True, expression="self._resolve_system_prompt()")
+        cm.protect("self", static=True, expression="doc(type(self))")
+        cm.protect(
             "state",
-            "pformat(self, max_length=50, max_string=500, max_depth=4)",
+            static=False,
+            expression="pformat(self, max_length=50, max_string=500, max_depth=4)",
         )
 
         # Apply class-level context blocks (from __init_subclass__)
@@ -280,6 +280,15 @@ class Agent(metaclass=AgentMeta):
 
         # Create runtime (manages execution, caching, signals)
         self.runtime = ActorRuntime(self)
+
+    @no_trace
+    @hidden
+    def __context_view__(self) -> "ContextView[Agent] | None":
+        """Return the instance or class context view registered for this agent."""
+        instance_view = vars(self).get("_context_view")
+        if instance_view is not None:
+            return instance_view
+        return getattr(type(self), "_context_view", None)
 
     @no_trace
     @hidden
@@ -480,48 +489,10 @@ class Agent(metaclass=AgentMeta):
     @no_trace
     @hidden
     def _resolve_system_prompt(self) -> str:
-        """Resolve the system prompt from the class docstring.
+        """Compatibility wrapper for the default view's prompt helper."""
+        from nooa.default_context_view import resolve_agent_system_prompt
 
-        Walks the MRO to find the nearest class with a docstring — that
-        docstring IS the system prompt. Placeholders like ``{type(self).__name__}``
-        are resolved as Python expressions (same mechanism as method docstrings).
-
-        Subclasses customize by writing a class docstring — no method override needed.
-        """
-        import string
-
-        # Walk MRO to find nearest docstring (Python doesn't inherit __doc__)
-        doc = ""
-        for cls in type(self).__mro__:
-            if cls.__doc__:
-                doc = cls.__doc__
-                break
-        if not doc or "{" not in doc:
-            return doc
-        # Resolve {expr} placeholders using the agent's namespace
-        formatter = string.Formatter()
-        parts = []
-        for literal, field, fmt_spec, conversion in formatter.parse(doc):
-            parts.append(literal)
-            if field is not None:
-                try:
-                    value = eval(field, {"self": self, "type": type})  # noqa: S307
-                    if conversion == "r":
-                        value = repr(value)
-                    elif conversion == "s":
-                        value = str(value)
-                    if fmt_spec:
-                        value = format(value, fmt_spec)
-                    parts.append(str(value))
-                except Exception:
-                    logger.debug("Prompt template eval failed for %r", field, exc_info=True)
-                    placeholder = field
-                    if conversion:
-                        placeholder = f"{field}!{conversion}"
-                    if fmt_spec:
-                        placeholder = f"{placeholder}:{fmt_spec}"
-                    parts.append("{" + placeholder + "}")
-        return "".join(parts)
+        return resolve_agent_system_prompt(self)
 
     def __setattr__(self, name: str, value: Any) -> None:
         from nooa.runtime.method_guard import guard_dynamic_method

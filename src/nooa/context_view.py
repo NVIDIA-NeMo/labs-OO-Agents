@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict
 from nooa.context_blocks.events import EventBase
 from nooa.context_blocks.models import BlockMetadata
 from nooa.context_blocks.roles import Role
+from nooa.events import LLMOutput
 
 if TYPE_CHECKING:
     from nooa.strategies.current_call import CurrentCall
@@ -49,11 +50,30 @@ class ContextView[Owner](Protocol):
 
 def resolve_context_view(owner: Any, *, default: ContextView[Any]) -> ContextView[Any]:
     """Resolve instance, then class, then default view."""
-    instance_view = vars(owner).get("_context_view")
-    if instance_view is not None:
-        return cast(ContextView[Any], instance_view)
-    class_view = getattr(type(owner), "_context_view", None)
-    return cast(ContextView[Any], class_view if class_view is not None else default)
+    resolver = getattr(owner, "__context_view__", None)
+    if resolver is None:
+        return default
+    view = resolver()
+    return cast(ContextView[Any], view if view is not None else default)
+
+
+def select_context_events(events: Any, *, call: "CurrentCall") -> tuple[EventBase, ...]:
+    """Select active, model-visible events using the call's resolved query."""
+    active = tuple(event for key in events.keys() if (event := events.get(key)) is not None)
+    selected = active
+    if call.event_query is not None:
+        selected = tuple(call.event_query.apply(list(active), current_call_id=call.invocation_id))
+    return tuple(
+        event
+        for event in selected
+        if getattr(event, "_role", Role.USER) not in (Role.RUNTIME_EVENT, Role.METADATA)
+        and not (
+            isinstance(event, LLMOutput)
+            and not event.content
+            and not getattr(event, "llm_state", None)
+            and not getattr(event, "reasoning", None)
+        )
+    )
 
 
 async def collect_context[Owner](
@@ -161,4 +181,5 @@ __all__ = [
     "context_text",
     "evaluate_context_expression",
     "resolve_context_view",
+    "select_context_events",
 ]

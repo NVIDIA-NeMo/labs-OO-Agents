@@ -5,8 +5,8 @@
 When EventManager.collapse() archives a range of events, those events must
 not show up in the context blocks passed to the LLM.
 
-The default view uses event_manager.values() (active_tags only) for all paths —
-archived events are represented by the Summary that replaced them in active_tags.
+The default view uses the public EventsApi active keys for all paths — archived
+events are represented by the Summary that replaced them in active tags.
 """
 
 from types import SimpleNamespace
@@ -16,6 +16,7 @@ import pytest
 from nooa.context_blocks.events import AssistantEvent, ToolCallEvent, UserEvent
 from nooa.default_context_view import visible_events
 from nooa.runtime.event_manager import EventManager
+from nooa.runtime.events import EventsApi
 from nooa.storage.sqlite import SQLiteEventBackend
 from nooa.strategies.current_call import CurrentCall
 
@@ -37,6 +38,7 @@ def event_manager(request, sqlite_conn):
 
 def _visible(em, query=None):
     agent = SimpleNamespace(event_manager=em)
+    agent.events = EventsApi(agent)
     call = CurrentCall(
         id="call",
         method_name="run",

@@ -36,6 +36,7 @@ from nooa.context_view import (  # noqa: E402
     context_text,
     evaluate_context_expression,
     resolve_context_view,
+    select_context_events,
 )
 from nooa.decorators import strategy  # noqa: E402
 from nooa.default_context_view import DefaultAgentView, DefaultSkillView  # noqa: E402
@@ -136,6 +137,7 @@ __all__ = [
     "context_text",
     "evaluate_context_expression",
     "resolve_context_view",
+    "select_context_events",
     "EventQuery",  # Event filtering configuration
     "ContextApi",  # LLM-facing context API wrapper (Skill)
     "ContextManager",  # Context block state backend

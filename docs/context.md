@@ -57,6 +57,8 @@ skill = SearchSkill(context_view=OtherSearchView())
 
 `@strategy(..., context_view=view)` is the method override. Skills have no method or call override. Composition is ordinary Python; there is no merge protocol.
 
+`Agent` and `Skill` expose `__context_view__()` as the owner-resolution hook. Registration storage is internal to those classes; generic resolution does not inspect it.
+
 ## Sources and helpers
 
 `ContextView` is a projection interface, not a storage API. Agents retain `self.context` and `context_manager`; the default view uses them as one source. Custom views may use them, another state system, or neither.
@@ -76,9 +78,12 @@ context_text(value, *, call) -> str
 async collect_context(view, owner, call) -> tuple[ContextItem, ...]
 apply_context_budget(items, *, call, evictable) -> tuple[ContextItem, ...]
 async evaluate_context_expression(expression, *, owner, call) -> object
+select_context_events(events, *, call) -> tuple[EventBase, ...]
 ```
 
-`context_text` formats one value; `collect_context` validates and retains yielded order; expression evaluation binds `self` to `owner`; budgeting follows the caller's eviction order and counts blocks only, so it is not a full rendered-request limit. A source helper may retrieve, evaluate, or format one source. It does not select other sources or decide global precedence, placement, or order.
+`context_text` formats one value; `collect_context` validates and retains yielded order; expression evaluation binds `self` to `owner`; event selection reads active events, applies the resolved query with stable `call.invocation_id`, and excludes non-model events; budgeting follows the caller's eviction order and counts blocks only, so it is not a full rendered-request limit. A source helper may retrieve, evaluate, or format one source. It does not select other sources or decide global precedence, placement, or order.
+
+Iterative views must explicitly include the task, model outputs, and execution feedback they need. Strategies produce these as typed events; rendering injects none. `self.events.query()` searches stored history, including archived events, so it is an inspection API rather than prompt selection. `call.invocation_id` stays stable while a strategy may change `call.id`. Tool schemas and execution policy remain strategy-owned.
 
 ## Defaults
 
@@ -87,11 +92,26 @@ async evaluate_context_expression(expression, *, owner, call) -> object
 ```python
 class DefaultAgentView(ContextView[Agent]):
     async def assemble(self, agent, call):
-        blocks = [
-            await system_prompt_block(agent, call),
-            await agent_interface_block(agent, call),
-            await agent_state_block(agent, call),
-        ]
+        disabled = agent.context_manager.disabled()
+        declarations = dict(agent.context_manager.declarations())
+        blocks = []
+        for key, build in (
+            ("system_prompt", system_prompt_block),
+            ("self", agent_interface_block),
+            ("state", agent_state_block),
+        ):
+            if key in disabled:
+                continue
+            if key in declarations:
+                block = (await stored_context_blocks(
+                    agent.context_manager, agent, call, include={key}
+                ))[0]
+            elif agent.context_manager.is_protected(key):
+                block = await build(agent, call)
+                agent.context_manager.update_resolved({key: block.content})
+            else:
+                continue
+            blocks.append(block)
 
         blocks += await stored_context_blocks(
             agent.context_manager, agent, call, exclude={"system_prompt", "self", "state"}
@@ -131,6 +151,8 @@ class DefaultAgentView(ContextView[Agent]):
 ```
 
 `apply_context_overrides` exposes replacement, deletion, inherited placement, and explicit prefix hints. Changing or removing a source is a local edit to `assemble()`.
+
+The three built-in helpers derive content directly from the agent. Protected-key registration selects which defaults apply; disable state and stored overrides are checked before evaluation. The manager stores those controls, user declarations, and the last materialized values for compatible named reads, but does not create defaults.
 
 ```python
 class DefaultSkillView(ContextView[Skill]):
@@ -177,10 +199,13 @@ resolve view
 - The selected agent view owns cache placement. The default adds at most one boundary after visible history and before trailing context; custom views receive none implicitly.
 - Bounded serialization is formatting; recovery for missing data or other invented content belongs to event production or view policy.
 - Downstream stages preserve semantics or raise `UnsupportedContextLayout`; they never reorder, omit, resolve, evict, repair, or add context.
+- A view omission is prompt policy, not an access-control boundary; tools and generated code may expose data available through other APIs.
 
 ## Migration
 
 Keep `agent.context`, context managers, event creation, strategy/scoped overrides, skill activation, and `Skill.context_block` as public state APIs.
+
+These are the default application's context APIs, not requirements of `ContextView`. A custom view may use an independent state API. Native iterative strategies still use NOOA events unless replaced together with the strategy.
 
 `DefaultAgentView` and its helpers use only public agent, call, manager, strategy, and event interfaces. `ActorRuntime` only creates `CurrentCall`, resolves and collects the view, renders it, and calls the LLM.
 
@@ -198,6 +223,8 @@ Keep `agent.context`, context managers, event creation, strategy/scoped override
 - `DefaultAgentView` uses public helpers, not private runtime assembly;
 - the standalone default module imports no `nooa.runtime.*`;
 - an external custom view ignores a sentinel `context_manager` and completes Predict and CodeAct calls;
+- an independent context API affects a CodeAct result only after its view selects and emits state;
+- active summaries remain selectable while archived, metadata, and empty-output events do not leak into prompts;
 - event expansion preserves position;
 - cache boundaries preserve their exact position through complete event expansion, emit no content, cost no tokens, and map correctly or become a no-op, including with empty history or no trailing context;
 - a custom view with no cache boundary receives no implicit marker;

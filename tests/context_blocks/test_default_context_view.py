@@ -8,6 +8,7 @@ import pytest
 
 from nooa import Agent, Context, DefaultAgentView, DynamicContext, collect_context
 from nooa.context_blocks import Role
+from nooa.context_blocks.exceptions import DynamicNotResolvedError
 from nooa.default_context_view import (
     agent_interface_block,
     agent_state_block,
@@ -77,6 +78,153 @@ async def test_named_helpers_make_framework_sources_explicit():
     assert stored == ()
 
 
+async def test_framework_source_helpers_do_not_read_context_manager():
+    agent = ExampleAgent()
+    call = _call(agent)
+    expected = (
+        await system_prompt_block(agent, call),
+        await agent_interface_block(agent, call),
+        await agent_state_block(agent, call),
+    )
+
+    class ForbiddenManager:
+        def __getattribute__(self, name):
+            raise AssertionError(f"context manager access: {name}")
+
+    object.__setattr__(agent, "context_manager", ForbiddenManager())
+    assert (
+        await system_prompt_block(agent, call),
+        await agent_interface_block(agent, call),
+        await agent_state_block(agent, call),
+    ) == expected
+
+
+async def test_default_materialization_preserves_protected_named_reads():
+    agent = ExampleAgent()
+    with pytest.raises(DynamicNotResolvedError):
+        agent.context_manager["system_prompt"]
+
+    items = await collect_context(DefaultAgentView(), agent, _call(agent))
+    by_key = {item.key: item for item in items if hasattr(item, "key")}
+    assert agent.context_manager["system_prompt"] == by_key["system_prompt"].content
+    assert agent.context_manager["self"] == by_key["self"].content
+    assert agent.context_manager["state"] == by_key["state"].content
+
+
+async def test_unregistered_framework_defaults_are_not_built():
+    class MinimalManager:
+        def disabled(self):
+            return set()
+
+        def declarations(self):
+            return ()
+
+        def update_resolved(self, resolved):
+            assert resolved == {}
+
+        def is_protected(self, key):
+            return False
+
+    owner = SimpleNamespace(
+        context_manager=MinimalManager(),
+        active_skills=lambda: (),
+        events=SimpleNamespace(keys=lambda: [], get=lambda key: None),
+    )
+    assert await collect_context(DefaultAgentView(), owner, _call(ExampleAgent())) == ()
+
+
+async def test_unprotected_framework_declaration_is_still_materialized():
+    from nooa.runtime.context_manager import ContextManager
+
+    manager = ContextManager()
+    manager["system_prompt"] = "standalone override"
+    owner = SimpleNamespace(
+        context_manager=manager,
+        active_skills=lambda: (),
+        events=SimpleNamespace(keys=lambda: [], get=lambda key: None),
+    )
+    items = await collect_context(DefaultAgentView(), owner, _call(ExampleAgent()))
+    assert next(
+        item for item in items if getattr(item, "key", None) == "system_prompt"
+    ).content == ("standalone override")
+
+
+@pytest.mark.parametrize("policy", ["disabled", "override"])
+async def test_unselected_system_prompt_is_not_evaluated(policy):
+    class ExplodingAgent(Agent, llm=object()):
+        """{self.mark_called()}"""
+
+        calls = 0
+
+        def mark_called(self):
+            self.calls += 1
+            return "unexpected"
+
+        async def run(self): ...
+
+    agent = ExplodingAgent()
+    if policy == "disabled":
+        agent.context["system_prompt"] = None
+    else:
+        agent.context_manager.apply_override("system_prompt", Context("replacement", prefix=True))
+
+    items = await collect_context(DefaultAgentView(), agent, _call(agent))
+    prompts = [item.content for item in items if getattr(item, "key", None) == "system_prompt"]
+    assert prompts == ([] if policy == "disabled" else ["replacement"])
+    assert agent.calls == 0
+
+
+async def test_framework_sources_publish_named_reads_in_source_order_each_turn():
+    class DependentAgent(
+        Agent,
+        llm=object(),
+        context={"state": Context(expr='self.context["system_prompt"]')},
+    ):
+        """prompt-{self.version}"""
+
+        version = "one"
+
+        async def run(self): ...
+
+    agent = DependentAgent()
+    first = await collect_context(DefaultAgentView(), agent, _call(agent))
+    first_by_key = {item.key: item for item in first if hasattr(item, "key")}
+    assert first_by_key["state"].content == "prompt-one"
+
+    agent.version = "two"
+    second = await collect_context(DefaultAgentView(), agent, _call(agent))
+    second_by_key = {item.key: item for item in second if hasattr(item, "key")}
+    assert second_by_key["state"].content == "prompt-two"
+
+
+async def test_malformed_system_prompt_is_materialized_as_an_error():
+    class MalformedAgent(Agent, llm=object()):
+        """malformed {"""
+
+        async def run(self): ...
+
+    agent = MalformedAgent()
+    items = await collect_context(DefaultAgentView(), agent, _call(agent))
+    prompt = next(item for item in items if getattr(item, "key", None) == "system_prompt")
+    assert prompt.content.startswith("ValueError:")
+
+
+async def test_interface_and_state_failures_are_materialized_as_errors():
+    class BrokenInterfaceAgent(ExampleAgent):
+        @classmethod
+        def __type_info__(cls):
+            raise RuntimeError("broken interface")
+
+    class BrokenStateAgent(ExampleAgent):
+        def __instance_values__(self):
+            raise RuntimeError("broken state")
+
+    interface = await agent_interface_block(BrokenInterfaceAgent(), _call(ExampleAgent()))
+    state = await agent_state_block(BrokenStateAgent(), _call(ExampleAgent()))
+    assert interface.content == "RuntimeError: broken interface"
+    assert state.content == "RuntimeError: broken state"
+
+
 async def test_default_source_precedence_and_removal_are_visible_policy():
     agent = ExampleAgent(context={"shared": "stored", "removed": "stored"})
     strategy = ExampleStrategy({"shared": "strategy", "removed": "strategy"})
@@ -127,8 +275,7 @@ async def test_each_override_source_shares_dynamic_error_and_none_semantics(sour
 async def test_override_placement_inherits_or_uses_explicit_policy():
     agent = ExampleAgent()
     call = _call(agent)
-    base = await stored_context_blocks(agent.context_manager, agent, call)
-    fixed = next(block for block in base if block.key == "system_prompt")
+    fixed = await system_prompt_block(agent, call)
 
     blocks = await apply_context_overrides(
         (fixed,),
@@ -171,12 +318,12 @@ async def test_strategy_order_lists_keys_first_and_keeps_remainder_stable():
 
 
 def test_visible_events_uses_public_stable_invocation_id():
-    event = Task(prompt="task", call_id="outer")
-    manager = SimpleNamespace(values=lambda: [event])
+    event = Task(prompt="task", metadata={"call_id": "outer"}, tag="1")
+    events = SimpleNamespace(keys=lambda: ["1"], get=lambda key: event if key == "1" else None)
     query = SimpleNamespace(
         apply=lambda events, *, current_call_id: events if current_call_id == "outer" else []
     )
-    agent = SimpleNamespace(event_manager=manager)
+    agent = SimpleNamespace(events=events)
     call = CurrentCall(
         id="strategy-mutated",
         method_name="run",

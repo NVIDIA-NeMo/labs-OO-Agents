@@ -39,14 +39,15 @@ class ContextManager:
       Cache is populated by update_resolved() after each context assembly,
       and invalidated on set_dynamic() or __setitem__().
 
-    Protected blocks (system_prompt, self, state) are registered via
-    set_protected() / set_dynamic_protected() and cannot be overwritten
-    by the LLM-facing API (set / set_dynamic / __setitem__ / __delitem__).
+    Protected keys (system_prompt, self, state) are reserved with protect().
+    Their default content belongs to the default view; declarations stored here
+    are explicit overrides. Protected keys cannot be removed by the LLM-facing API.
     """
 
     def __init__(self) -> None:
         self._blocks: dict[str, Any | DynamicContext] = {}
         self.protected_keys: set[str] = set()
+        self._protected_expressions: dict[str, str] = {}
         self._dynamic_cache: dict[str, Any] = {}
         self._static: dict[str, bool] = {}
         self.disabled_keys: set[str] = set()
@@ -222,6 +223,10 @@ class ContextManager:
                 first LLM turn (expression hasn't been evaluated yet).
         """
         if key not in self._blocks:
+            if key in self.protected_keys:
+                if key in self._dynamic_cache:
+                    return self._dynamic_cache[key]
+                raise DynamicNotResolvedError(key, self._protected_expressions.get(key, f"<{key}>"))
             raise KeyError(key)
 
         value = self._blocks[key]
@@ -242,10 +247,10 @@ class ContextManager:
             KeyError: If key not found.
             ProtectedBlockError: If key is protected.
         """
-        if key not in self._blocks:
-            raise KeyError(key)
         if key in self.protected_keys:
             raise ProtectedBlockError(key, "remove")
+        if key not in self._blocks:
+            raise KeyError(key)
         del self._blocks[key]
         self._static.pop(key, None)
         self.disabled_keys.discard(key)
@@ -308,6 +313,13 @@ class ContextManager:
         """Return whether *key* is a framework-owned block."""
         return key in self.protected_keys
 
+    def protect(self, key: str, *, static: bool, expression: str) -> None:
+        """Reserve a framework block key, placement, and read diagnostic."""
+        self.protected_keys.add(key)
+        self._protected_expressions[key] = expression
+        self._static[key] = static
+        self.disabled_keys.discard(key)
+
     def update_resolved(self, resolved: dict[str, Any]) -> None:
         """Cache values produced while materializing dynamic declarations."""
         self._dynamic_cache.update(resolved)
@@ -327,12 +339,12 @@ class ContextManager:
 
         Like dict.pop() — returns default if provided, raises KeyError otherwise.
         """
+        if key in self.protected_keys:
+            raise ProtectedBlockError(key, "remove")
         if key not in self._blocks:
             if args:
                 return args[0]
             raise KeyError(key)
-        if key in self.protected_keys:
-            raise ProtectedBlockError(key, "remove")
 
         # Get value before removal
         raw = self._blocks[key]
@@ -457,6 +469,7 @@ class ContextManager:
             raise KeyError(key)
         del self._blocks[key]
         self.protected_keys.discard(key)
+        self._protected_expressions.pop(key, None)
         self._static.pop(key, None)
         self.disabled_keys.discard(key)
         self._invalidate(key)

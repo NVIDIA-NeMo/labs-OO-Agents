@@ -78,6 +78,7 @@ def _get_agent_cls(module_name: str) -> type:
     from nooa.runtime.actor import ActorRuntime
     from nooa.runtime.context_manager import ContextManager
     from nooa.runtime.event_manager import EventManager
+    from nooa.runtime.events import EventsApi
 
     class _StandaloneAgent:
         """Minimal agent stub: no framework blocks, fresh state per call."""
@@ -90,6 +91,7 @@ def _get_agent_cls(module_name: str) -> type:
             self._truncation = TruncationConfig()
             self.render_config = RenderConfig()
             self.event_manager = EventManager()
+            self.events = EventsApi(self)
             self.context_manager = ContextManager()
             self.runtime = ActorRuntime(self)
             # Used by ActorRuntime to default prompt_cache_key per agent.

@@ -18,8 +18,8 @@ from nooa.context_view import (
     context_text,
     evaluate_context_expression,
     resolve_context_view,
+    select_context_events,
 )
-from nooa.events import LLMOutput
 
 if TYPE_CHECKING:
     from nooa.agent import Agent
@@ -105,28 +105,94 @@ async def stored_context_blocks(
     return tuple(blocks)
 
 
+def resolve_agent_system_prompt(agent: "Agent") -> str:
+    """Resolve the nearest agent class docstring as a prompt template."""
+    import string
+
+    prompt = next((cls.__doc__ for cls in type(agent).__mro__ if cls.__doc__), "")
+    if not prompt or "{" not in prompt:
+        return prompt
+
+    parts: list[str] = []
+    for literal, field, format_spec, conversion in string.Formatter().parse(prompt):
+        parts.append(literal)
+        if field is None:
+            continue
+        try:
+            value = eval(field, {"self": agent, "type": type})  # noqa: S307
+            if conversion == "r":
+                value = repr(value)
+            elif conversion == "s":
+                value = str(value)
+            if format_spec:
+                value = format(value, format_spec)
+            parts.append(str(value))
+        except Exception:
+            logger.debug("Prompt template eval failed for %r", field, exc_info=True)
+            placeholder = field
+            if conversion:
+                placeholder = f"{field}!{conversion}"
+            if format_spec:
+                placeholder = f"{placeholder}:{format_spec}"
+            parts.append("{" + placeholder + "}")
+    return "".join(parts)
+
+
+def _source_error(key: str, exc: Exception) -> str:
+    logger.warning("Context source %r failed to resolve: %s: %s", key, type(exc).__name__, exc)
+    return f"{type(exc).__name__}: {exc}"
+
+
 async def system_prompt_block(agent: "Agent", call: "CurrentCall") -> Block | None:
-    """Materialize the agent's named system-prompt declaration."""
-    blocks = await stored_context_blocks(
-        agent.context_manager, agent, call, include=frozenset({"system_prompt"})
+    """Build the default system prompt directly from the agent."""
+    try:
+        content = resolve_agent_system_prompt(agent)
+    except Exception as exc:
+        content = _source_error("system_prompt", exc)
+    return _block(
+        "system_prompt",
+        content,
+        BlockMetadata(
+            expr="self._resolve_system_prompt()",
+            static=True,
+            source_dynamic=True,
+        ),
     )
-    return blocks[0] if blocks else None
 
 
 async def agent_interface_block(agent: "Agent", call: "CurrentCall") -> Block | None:
-    """Materialize the agent's named interface declaration."""
-    blocks = await stored_context_blocks(
-        agent.context_manager, agent, call, include=frozenset({"self"})
+    """Build the default documented agent interface directly from the agent."""
+    from nooa.agentdoc import doc
+
+    try:
+        content = doc(type(agent))
+    except Exception as exc:
+        content = _source_error("self", exc)
+    return _block(
+        "self",
+        content,
+        BlockMetadata(expr="doc(type(self))", static=True, source_dynamic=True),
     )
-    return blocks[0] if blocks else None
 
 
 async def agent_state_block(agent: "Agent", call: "CurrentCall") -> Block | None:
-    """Materialize the agent's named state declaration."""
-    blocks = await stored_context_blocks(
-        agent.context_manager, agent, call, include=frozenset({"state"})
+    """Build the default visible agent state directly from the agent."""
+    from nooa.agentdoc import pformat
+
+    try:
+        content = pformat(agent, max_length=50, max_string=500, max_depth=4)
+    except Exception as exc:
+        content = _source_error("state", exc)
+    return _block(
+        "state",
+        content,
+        BlockMetadata(
+            expr="pformat(self, max_length=50, max_string=500, max_depth=4)",
+            user_block=False,
+            static=False,
+            source_dynamic=True,
+        ),
     )
-    return blocks[0] if blocks else None
 
 
 async def apply_context_overrides(
@@ -227,20 +293,7 @@ def partition_blocks(blocks: Sequence[Block]) -> tuple[tuple[Block, ...], tuple[
 
 def visible_events(agent: "Agent", call: "CurrentCall") -> tuple[EventBase, ...]:
     """Select model-visible events using the invocation's resolved query."""
-    events = agent.event_manager.values()
-    if call.event_query is not None:
-        events = call.event_query.apply(events, current_call_id=call.invocation_id)
-    return tuple(
-        event
-        for event in events
-        if getattr(event, "_role", Role.USER) not in (Role.RUNTIME_EVENT, Role.METADATA)
-        and not (
-            isinstance(event, LLMOutput)
-            and not event.content
-            and not getattr(event, "llm_state", None)
-            and not getattr(event, "reasoning", None)
-        )
-    )
+    return select_context_events(agent.events, call=call)
 
 
 class DefaultAgentView(ContextView["Agent"]):
@@ -249,16 +302,31 @@ class DefaultAgentView(ContextView["Agent"]):
     async def assemble(self, owner: "Agent", call: "CurrentCall") -> AsyncIterator[ContextItem]:
         manager = owner.context_manager
         disabled = manager.disabled()
-
-        blocks: tuple[Block, ...] = tuple(
-            block
-            for block in (
-                await system_prompt_block(owner, call),
-                await agent_interface_block(owner, call),
-                await agent_state_block(owner, call),
-            )
-            if block is not None
+        declaration_keys = {key for key, _ in manager.declarations()}
+        default_builders = (
+            ("system_prompt", system_prompt_block),
+            ("self", agent_interface_block),
+            ("state", agent_state_block),
         )
+        blocks_list: list[Block] = []
+        for key, build in default_builders:
+            if key in disabled:
+                continue
+            if key in declaration_keys:
+                overrides = await stored_context_blocks(
+                    manager, owner, call, include=frozenset({key})
+                )
+                block = overrides[0] if overrides else None
+            elif not manager.is_protected(key):
+                continue
+            else:
+                block = await build(owner, call)
+                if block is not None:
+                    manager.update_resolved({key: block.content})
+            if block is not None:
+                blocks_list.append(block)
+
+        blocks: tuple[Block, ...] = tuple(blocks_list)
         blocks += await stored_context_blocks(manager, owner, call, exclude=_FRAMEWORK_KEYS)
 
         custom_skill_items: list[ContextItem] = []
