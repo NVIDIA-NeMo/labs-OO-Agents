@@ -38,7 +38,7 @@ def test_responses_detaches_public_content_once_without_copying_state(
         type="reasoning", id="rs_test", encrypted_content="test-ciphertext", summary=[]
     )
     state = {
-        "version": 1,
+        "version": 2,
         "scope": SCOPE,
         "format": "openai-responses",
         "payload": {

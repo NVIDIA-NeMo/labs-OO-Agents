@@ -30,7 +30,7 @@ from nooa._llm_state import (
 
 logger = logging.getLogger(__name__)
 
-_STATE_VERSION = 1
+_STATE_VERSION = 2
 _CHAT_FORMAT = "litellm-chat"
 _RESPONSES_FORMAT = "openai-responses"
 _ENCRYPTED_REASONING_INCLUDE = "reasoning.encrypted_content"
@@ -192,7 +192,7 @@ def _matching_payload(state: Any, scope: str | None, state_format: str) -> dict 
         or not isinstance(payload, dict)
     ):
         raise ReasoningReplayError(
-            "Malformed version-1 opaque reasoning envelope: expected a known format, "
+            "Malformed version-2 opaque reasoning envelope: expected a known format, "
             "a string scope, and a mapping payload."
         )
     _scope_provider(source_scope)
@@ -224,8 +224,33 @@ def _scope_provider(scope: str | None) -> str | None:
     return parts[1]
 
 
-def _chat_public_carrier(message: Any, scope: str | None) -> dict[str, Any] | None:
-    """Project the public assistant data to which opaque Chat state is bound."""
+def _fingerprint(value: Any) -> str:
+    """Hash validation-only public data without retaining a second copy of it."""
+    digest = hashlib.sha256()
+    for chunk in json.JSONEncoder(sort_keys=True, separators=(",", ":")).iterencode(value):
+        digest.update(chunk.encode())
+    return digest.hexdigest()
+
+
+def _valid_fingerprint(value: Any) -> bool:
+    return (
+        isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+    )
+
+
+def _valid_reasoning_items(items: Any) -> bool:
+    """Validate the OpenAI wire container, not the encrypted contents."""
+    return isinstance(items, list) and all(
+        isinstance(item, dict)
+        and response_item_type(item) == "reasoning"
+        and isinstance(item.get("encrypted_content"), str)
+        and bool(item["encrypted_content"])
+        for item in items
+    )
+
+
+def _chat_public_carrier(message: Any, scope: str | None) -> str | None:
+    """Fingerprint the public assistant data to which opaque Chat state is bound."""
     if _field(message, "role") != "assistant":
         return None
     raw_calls = _field(message, "tool_calls")
@@ -252,27 +277,16 @@ def _chat_public_carrier(message: Any, scope: str | None) -> dict[str, Any] | No
             }
         )
 
+    if len({call["id"] for call in calls}) != len(calls):
+        return None
+
     content = _field(message, "content")
     if content is not None and not isinstance(content, str):
         return None
     # The canonical formatter uses None for an empty assistant tool-call turn
     # and an empty string for an assistant turn with no public carrier.
     content = (content or None) if calls else (content or "")
-    return {"content": content, "tool_calls": calls}
-
-
-def _valid_chat_carrier(value: Any) -> bool:
-    if not isinstance(value, dict) or set(value) != {"content", "tool_calls"}:
-        return False
-    if value.get("content") is not None and not isinstance(value.get("content"), str):
-        return False
-    calls = value.get("tool_calls")
-    return isinstance(calls, list) and all(
-        isinstance(call, dict)
-        and set(call) == {"id", "name", "arguments"}
-        and all(isinstance(call.get(key), str) for key in ("id", "name", "arguments"))
-        for call in calls
-    )
+    return _fingerprint({"content": content, "tool_calls": calls})
 
 
 def _sanitize_chat_payload(payload: dict[str, Any], scope: str | None) -> dict[str, Any]:
@@ -288,6 +302,8 @@ def _sanitize_chat_payload(payload: dict[str, Any], scope: str | None) -> dict[s
     for key in fields_by_provider.get(provider or "", ()):
         value = payload.get(key)
         if isinstance(value, list) and value:
+            if key == "reasoning_items" and not _valid_reasoning_items(value):
+                raise ReasoningReplayError("Opaque chat reasoning items are malformed.")
             clean[key] = value
 
     provider_fields = (
@@ -327,20 +343,19 @@ def _sanitize_chat_payload(payload: dict[str, Any], scope: str | None) -> dict[s
 
     has_state = bool(clean)
     carrier = payload.get("carrier")
-    if has_state and _valid_chat_carrier(carrier):
+    if has_state and _valid_fingerprint(carrier):
         clean["carrier"] = carrier
     if has_state and payload.get("state_only") is True:
         clean["state_only"] = True
     if (
         not has_state
+        or not _valid_fingerprint(carrier)
         or clean != payload
         or (
-            "tool_calls" in clean
-            and len(clean["tool_calls"]) != len(clean.get("carrier", {}).get("tool_calls", ()))
-        )
-        or (
             clean.get("state_only") is True
-            and ("tool_calls" in clean or clean.get("carrier") != {"content": "", "tool_calls": []})
+            and (
+                "tool_calls" in clean or carrier != _fingerprint({"content": "", "tool_calls": []})
+            )
         )
     ):
         raise ReasoningReplayError(
@@ -432,9 +447,7 @@ def capture_chat_state(message: Any, scope: str | None) -> dict | None:
     if not payload:
         return None
     carrier = _chat_public_carrier(message, scope)
-    if carrier is None or len({call["id"] for call in carrier["tool_calls"]}) != len(
-        carrier["tool_calls"]
-    ):
+    if carrier is None:
         raise ReasoningReplayError(
             "Cannot retain opaque reasoning state for a malformed public assistant carrier."
         )
@@ -466,6 +479,8 @@ def responses_output_text(output: list[Any]) -> str:
 
 
 def _responses_call_slot(item: Any) -> dict[str, Any] | None:
+    # Calls replay from LLMResponse; arguments here only detect edits. Message
+    # slots still retain text to reconstruct provider boundaries and phases.
     call_id = _field(item, "call_id")
     name = _field(item, "name") or ""
     arguments = _field(item, "arguments") or ""
@@ -477,7 +492,7 @@ def _responses_call_slot(item: Any) -> dict[str, Any] | None:
         "type": "function_call",
         "call_id": call_id,
         "name": name,
-        "arguments": arguments,
+        "arguments_sha256": _fingerprint(arguments),
     }
 
 
@@ -489,13 +504,7 @@ def _valid_responses_payload(payload: dict[str, Any]) -> bool:
     order = payload.get("order")
     if not isinstance(items, list) or not isinstance(order, list) or not order:
         return False
-    if any(
-        not isinstance(item, dict)
-        or response_item_type(item) != "reasoning"
-        or not isinstance(item.get("encrypted_content"), str)
-        or not item["encrypted_content"]
-        for item in items
-    ):
+    if not _valid_reasoning_items(items):
         return False
 
     indexes: list[int] = []
@@ -512,9 +521,11 @@ def _valid_responses_payload(payload: dict[str, Any]) -> bool:
                 return False
             indexes.append(index)
         elif slot_type == "function_call":
-            if set(slot) != {"type", "call_id", "name", "arguments"}:
+            if set(slot) != {"type", "call_id", "name", "arguments_sha256"}:
                 return False
-            if not all(isinstance(slot.get(key), str) for key in ("call_id", "name", "arguments")):
+            if not all(isinstance(slot.get(key), str) for key in ("call_id", "name")):
+                return False
+            if not _valid_fingerprint(slot.get("arguments_sha256")):
                 return False
             carriers.append(slot)
         elif slot_type == "message":
@@ -622,13 +633,14 @@ def _strip_chat_state(
     return public_call_ids
 
 
-def _restore_chat_state(message: dict[str, Any], payload: dict[str, Any]) -> bool:
+def _restore_chat_state(message: dict[str, Any], payload: dict[str, Any]) -> dict[str, str] | None:
+    """Restore state and return public-to-wire call IDs, or None for an edited turn."""
     if _chat_public_carrier(message, None) != payload.get("carrier"):
         logger.warning(
             "Opaque reasoning state was not replayed because its public assistant carrier "
             "changed; portable reasoning text will be replayed instead."
         )
-        return False
+        return None
 
     for key in ("reasoning_items", "thinking_blocks", "provider_specific_fields"):
         if key in payload:
@@ -636,8 +648,11 @@ def _restore_chat_state(message: dict[str, Any], payload: dict[str, Any]) -> boo
     tool_calls = message.get("tool_calls")
     tool_state = payload.get("tool_calls")
     if tool_state is None:
-        return True
-    # The payload validator and identity check above guarantee equal lists.
+        return {}
+    if len(tool_state) != len(tool_calls or []):
+        raise ReasoningReplayError("Stored thought signatures do not match the public tool calls.")
+    # The fingerprint and length checks bind each signature to its original call.
+    call_ids: dict[str, str] = {}
     for call, state in zip(cast(list[Any], tool_calls), cast(list[Any], tool_state), strict=True):
         if state is not None:
             call = cast(dict[str, Any], call)
@@ -645,8 +660,10 @@ def _restore_chat_state(message: dict[str, Any], payload: dict[str, Any]) -> boo
             if "provider_specific_fields" in state:
                 call["provider_specific_fields"] = state["provider_specific_fields"]
             if inline_signature := state.get("inline_thought_signature"):
-                call["id"] = f"{call['id']}{_INLINE_THOUGHT_SIGNATURE_SEPARATOR}{inline_signature}"
-    return True
+                public_id = call["id"]
+                call["id"] = f"{public_id}{_INLINE_THOUGHT_SIGNATURE_SEPARATOR}{inline_signature}"
+                call_ids[public_id] = call["id"]
+    return call_ids
 
 
 def _flatten_responses_carriers(carriers: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -790,15 +807,10 @@ def prepare_chat_messages(messages: list[dict[str, Any]], scope: str | None) -> 
         payload = _matching_payload(state, scope, _CHAT_FORMAT)
         if payload is not None:
             payload = _sanitize_chat_payload(payload, scope)
-        restored = payload is not None and _restore_chat_state(message, payload)
-        if restored:
-            public_calls = cast(dict[str, Any], payload)["carrier"]["tool_calls"]
-            private_calls = message.get("tool_calls") or []
-            for public_call, private_call in zip(public_calls, private_calls, strict=True):
-                public_id = public_call["id"]
-                private_id = private_call["id"]
-                if public_id != private_id:
-                    private_call_ids[public_id] = private_id
+        restored_ids = _restore_chat_state(message, payload) if payload is not None else None
+        restored = restored_ids is not None
+        if restored_ids:
+            private_call_ids.update(restored_ids)
         tool_call_id = message.get("tool_call_id")
         # Structural signature evidence on a raw assistant call also applies to
         # its matching result, even when neither route identifies Gemini.

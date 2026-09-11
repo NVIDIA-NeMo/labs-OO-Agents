@@ -7,6 +7,7 @@ transient 502 Bad Gateway errors bubbled out and terminated agent runs even thou
 RetryConfig lists 502 as retryable. These tests verify parity with CompletionClient.
 """
 
+import hashlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import litellm
@@ -140,14 +141,14 @@ class TestResponsesClientSyncRetry:
                     "type": "function_call",
                     "call_id": "call-1",
                     "name": "one",
-                    "arguments": "{}",
+                    "arguments_sha256": hashlib.sha256(b'"{}"').hexdigest(),
                 },
                 {"type": "reasoning", "index": 1},
                 {
                     "type": "function_call",
                     "call_id": "call-2",
                     "name": "two",
-                    "arguments": "{}",
+                    "arguments_sha256": hashlib.sha256(b'"{}"').hexdigest(),
                 },
             ],
         }
