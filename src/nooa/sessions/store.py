@@ -57,6 +57,11 @@ class SessionInfo:
     title_is_user_set: bool = False
     host: str = ""
 
+    @property
+    def origin(self) -> str:
+        """Compatibility spelling for the canonical session host."""
+        return self.host
+
 
 @dataclass(frozen=True, slots=True)
 class SessionTurn:
@@ -169,6 +174,7 @@ class SessionStore:
         agent: str = "",
         working_directory: str = "",
         host: str = "",
+        origin: str | None = None,
         session_id: str | None = None,
         check_same_thread: bool = True,
     ) -> SessionHandle:
@@ -183,7 +189,7 @@ class SessionStore:
         for event_type in SESSION_EVENT_TYPES:
             events.register_event_type(event_type)
         started = SessionStarted(
-            host=host,
+            host=origin if origin is not None else host,
             model=model,
             agent=agent,
             working_directory=working_directory,
@@ -204,7 +210,7 @@ class SessionStore:
                 started_at=timestamp,
                 last_active=timestamp,
                 working_directory=working_directory,
-                host=host,
+                host=started.host,
             ),
         )
 
@@ -383,7 +389,7 @@ class SessionStore:
             host=str(
                 start.get(
                     "host",
-                    "tui" if start_event_type == "TUISessionStart" else "",
+                    start.get("origin", "tui" if start_event_type == "TUISessionStart" else ""),
                 )
             ),
         )

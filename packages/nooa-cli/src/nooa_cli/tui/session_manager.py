@@ -11,11 +11,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from nooa.paths import get_project_dir
 from nooa.sessions import SessionHandle, SessionInfo, SessionStore
 from nooa.storage.sqlite import delete_sqlite_database, is_sqlite_database_active
+from nooa_cli.interactive.session_paths import session_directory
 
-SESSIONS_DIR = get_project_dir("sessions")
+SESSIONS_DIR = session_directory()
 
 
 def _make_trace_session_name(session_id: str) -> str:

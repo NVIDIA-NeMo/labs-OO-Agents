@@ -88,7 +88,7 @@ async def close_every_adapter(monkeypatch):
 
 def _completed_llm() -> FakeLLMClient:
     return FakeLLMClient.with_tool_call(
-        "execute_python",
+        "python_cell",
         {
             "code": (
                 "self.message('ACP response')\n"
@@ -307,6 +307,7 @@ async def test_adapter_loads_workspace_skills_and_advertises_commands(tmp_path, 
     assert len(advertised) == 1
     assert [command.name for command in advertised[0].available_commands] == [
         "diagnose",
+        "mcp-add",
         "skill-status",
     ]
     diagnose = advertised[0].available_commands[0]
@@ -628,7 +629,7 @@ async def test_adapter_republishes_commands_after_skill_activation(tmp_path):
         update for update in client.updates if isinstance(update, AvailableCommandsUpdate)
     ]
     assert len(advertised) == 2
-    assert [command.name for command in advertised[-1].available_commands] == ["later"]
+    assert [command.name for command in advertised[-1].available_commands] == ["later", "mcp-add"]
     await adapter.close()
 
 
@@ -670,7 +671,7 @@ async def test_adapter_replaces_advertised_commands_after_skill_reload(tmp_path,
         update for update in client.updates if isinstance(update, AvailableCommandsUpdate)
     ]
     assert len(advertised) == 1
-    assert [command.name for command in advertised[0].available_commands] == ["repair"]
+    assert [command.name for command in advertised[0].available_commands] == ["mcp-add", "repair"]
     invoked = await runtime.commands.invoke("repair", "deep")
     assert invoked.text == "Repair using deep mode (reloaded)."
     await adapter.close()
@@ -706,6 +707,7 @@ async def test_failed_skill_reload_keeps_previous_command_and_advertisement(tmp_
     assert not any(isinstance(update, AvailableCommandsUpdate) for update in client.updates)
     assert [command.name for command in runtime.commands.commands()] == [
         "diagnose",
+        "mcp-add",
         "skill-status",
     ]
     invoked = await runtime.commands.invoke("diagnose", "deep")
@@ -965,8 +967,8 @@ async def test_adapter_routes_distinct_workspace_commands_to_their_sessions(tmp_
         for session_id, update in client.accepted
         if isinstance(update, AvailableCommandsUpdate)
     }
-    assert commands_by_session[alpha_session.session_id] == ["alpha"]
-    assert commands_by_session[beta_session.session_id] == ["beta"]
+    assert commands_by_session[alpha_session.session_id] == ["alpha", "mcp-add"]
+    assert commands_by_session[beta_session.session_id] == ["beta", "mcp-add"]
     messages = {
         session_id: update.content.text
         for session_id, update in client.accepted

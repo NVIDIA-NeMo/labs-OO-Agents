@@ -99,6 +99,13 @@ def load_settings(cfg: Config) -> Config:
         sect = data.get(section)
         if isinstance(sect, dict):
             _apply_section(getattr(cfg, section), sect, section)
+    coding = data.get("coding")
+    if isinstance(coding, dict):
+        behavior = dict(coding)
+        summarization = behavior.pop("summarization", None)
+        if isinstance(summarization, dict):
+            _apply_section(cfg.agent.summarization, summarization, "agent.summarization")
+        _apply_section(cfg.tui, behavior, "tui")
     return cfg
 
 

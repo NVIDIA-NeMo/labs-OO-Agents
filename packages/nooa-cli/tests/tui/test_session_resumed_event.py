@@ -138,7 +138,7 @@ async def test_resume_without_snapshot_emits_restored_false(tmp_path, monkeypatc
     resumed.session_manager.close()
 
 
-def test_configured_skills_activate_before_session_resumed_event() -> None:
+def test_configured_skills_activate_before_session_resumed_event(tmp_path) -> None:
     """Resume hooks exist only when configured skills attach before the event."""
     from types import SimpleNamespace
     from unittest.mock import MagicMock
@@ -146,6 +146,10 @@ def test_configured_skills_activate_before_session_resumed_event() -> None:
     from nooa_cli.tui.bootstrap import BootstrapResult, build_registry
 
     config = Config()
+    config.agent.working_dir = str(tmp_path)
+    skill_root = tmp_path / "configured-skills"
+    skill_root.mkdir()
+    config.tui.skills_dirs = [skill_root]
     config.tui.active_skills = ["nvzurich.agent_mesh"]
     agent = MagicMock()
     agent.skills.discovered.return_value = ["nvzurich.agent_mesh"]
@@ -166,7 +170,10 @@ def test_configured_skills_activate_before_session_resumed_event() -> None:
     agent.event_manager.add.side_effect = record_event
     build_registry(result, SimpleNamespace())
 
-    agent.skills.discover_skills_dirs.assert_called_once_with(config.tui.skills_dirs)
+    agent.skills.discover_skills_dirs.assert_called_once()
+    discovered_roots = agent.skills.discover_skills_dirs.call_args.args[0]
+    assert discovered_roots[0] == skill_root
+    assert all(root.is_absolute() and root.is_dir() for root in discovered_roots)
     agent.skills.activate.assert_any_call(["nvzurich.agent_mesh"])
     agent.event_manager.add.assert_called_once()
 
