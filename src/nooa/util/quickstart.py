@@ -40,7 +40,10 @@ def _oci_signer_from_profile(profile: str) -> Any:
     if "security_token_file" in config:
         with open(os.path.expanduser(config["security_token_file"])) as f:
             token = f.read().strip()
-        private_key = oci.signer.load_private_key_from_file(config["key_file"])
+        # Profiles made with `oci session authenticate --use-passphrase` store the passphrase too.
+        private_key = oci.signer.load_private_key_from_file(
+            config["key_file"], pass_phrase=config.get("pass_phrase")
+        )
         return oci.auth.signers.SecurityTokenSigner(token, private_key)
     return oci.signer.Signer(
         tenancy=config["tenancy"],
