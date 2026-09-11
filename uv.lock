@@ -1452,7 +1452,7 @@ requires-dist = [
     { name = "arcengine", marker = "extra == 'arc'", specifier = ">=0.9.3" },
     { name = "fastapi", marker = "extra == 'viewer'", specifier = ">=0.100.0" },
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "litellm", specifier = ">=1.97.0" },
+    { name = "litellm", specifier = "==1.97.0" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.0.0" },
     { name = "nemo-relay", marker = "extra == 'nemo-relay'", specifier = ">=0.6,<0.7" },
     { name = "nooa-acp", marker = "extra == 'acp'", editable = "packages/nooa-acp" },

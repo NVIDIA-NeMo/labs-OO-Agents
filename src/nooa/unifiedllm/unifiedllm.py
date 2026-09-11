@@ -22,10 +22,13 @@ from nooa.llm_types import AssistantReasoning, AssistantText, LLMResponse, LLMUs
 
 from . import replay_state, response_parts
 from .http_config import HttpConfig
+from .litellm_compat import apply_reasoning_items_patch
 from .retry import EmptyContentError, sync_retry, with_retry
 from .retry_config import RetryConfig
 
 logger = logging.getLogger(__name__)
+
+apply_reasoning_items_patch()
 
 # Bedrock/Anthropic reject requests where messages contain tool_call blocks but
 # no tools= param is passed (e.g. PredictStrategy after a CodeAct turn).

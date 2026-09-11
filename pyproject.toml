@@ -25,9 +25,11 @@ dependencies = [
     "pydantic>=2.5.0",
     # context_blocks + unifiedllm now ship as nooa.context_blocks /
     # nooa.unifiedllm subpackages — pull their formerly-external deps in.
-    # >=1.97.0: routes GPT-5.4 tool calls through Responses and replays reasoning_items;
+    # 1.97.0 routes GPT-5.4 tool calls through Responses and replays reasoning_items;
     # also stays past CVE-2026-49468 and the yanked 1.82.7/1.82.8 backdoor.
-    "litellm>=1.97.0",
+    # Temporary compatibility branch: the reasoning_items shim in
+    # nooa.unifiedllm.litellm_compat is intentionally guarded to this release.
+    "litellm==1.97.0",
     # from mcp-nemo-oo-agents (now internal)
     "httpx>=0.27.0",
     "openinference-instrumentation-litellm>=0.1.30",
