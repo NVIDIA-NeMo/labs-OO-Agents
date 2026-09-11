@@ -10,7 +10,6 @@ provider-specific layer explicitly recognizes it.
 
 from __future__ import annotations
 
-import copy
 from typing import Any
 from uuid import uuid4
 
@@ -114,10 +113,12 @@ def demote_responses_batch(
     llm_state: dict[str, Any] | None,
     reasoning: str | None,
 ) -> list[dict[str, Any]]:
-    """Build public Responses items, withholding opaque state by default."""
-    clean = [copy.deepcopy(dict(item)) for item in batch]
-    for item in clean:
-        item.pop(LLM_STATE_KEY, None)
+    """Demote reasoning into a cleaned, request-owned Responses batch.
+
+    Replay preparation has already detached public data and removed untrusted
+    state. Reuse that batch instead of allocating another copy of the history.
+    """
+    clean = batch
 
     if not reasoning:
         if (
