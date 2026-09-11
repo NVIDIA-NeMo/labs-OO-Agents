@@ -119,12 +119,8 @@ async def test_mocked_dispatch_after_sqlite_resume_with_dynamic_suffix(
         api_key="test",
     )
 
-    async def invoke(messages, *, turns=None):
-        return (
-            await client.acall(messages, turns=turns)
-            if is_async
-            else client.call(messages, turns=turns)
-        )
+    async def invoke(messages):
+        return await client.acall(messages) if is_async else client.call(messages)
 
     try:
         turn = await invoke([{"role": "user", "content": "Start"}])
@@ -138,14 +134,13 @@ async def test_mocked_dispatch_after_sqlite_resume_with_dynamic_suffix(
             context = LLMCallContext(
                 messages=[
                     {"role": "system", "content": "Stable instructions"},
-                    {**restored.public_message(), "nooa_turn": restored.id},
+                    restored,
                     {"role": "tool", "tool_call_id": "call_1", "content": "Completed"},
                     {"nooa_cache_boundary": True},
                     {"role": "user", "content": suffix},
                 ]
             )
-            context.messages = json.loads(json.dumps(context.messages))
-            await invoke(context.messages, turns={restored.id: restored})
+            await invoke(context.messages)
         assert captured[-1][:-1] == captured[-2][:-1]
         assert captured[-1][-1] != captured[-2][-1]
         expected = message(model)

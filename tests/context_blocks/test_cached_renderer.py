@@ -272,7 +272,7 @@ class TestCachedRendererEndToEndOpenAI:
         assert first[:-2] == second[: len(first) - 2]
         assert first[-1] != second[-1]
         assert all(LLM_STATE_KEY not in message for message in second if isinstance(message, dict))
-        assert second[2] == {**turn.public_message(), "nooa_turn": turn.id}
+        assert second[2] == turn
         assert "version two" in second[-1]["content"]
 
     def test_volatile_appended_after_assistant(self):

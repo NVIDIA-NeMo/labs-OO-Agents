@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Plain dictionary boundary: native turn lookup is private to dispatch."""
+"""Responses pass directly through history; replacing a message discards native state."""
 
 import copy
 import inspect
@@ -23,16 +23,13 @@ from nooa.unifiedllm.response_parts import capture_parts
     [UnifiedLLM, CompletionClient, ResponsesClient, ReasoningCompletionClient, FakeLLMClient],
 )
 @pytest.mark.parametrize("method", ["call", "acall"])
-def test_every_client_declares_private_turn_lookup(client_type, method):
-    parameter = inspect.signature(getattr(client_type, method)).parameters["turns"]
-    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
-    assert parameter.default is None
-    assert parameter.annotation is not inspect.Parameter.empty
+def test_clients_need_no_private_turn_lookup(client_type, method):
+    assert "turns" not in inspect.signature(getattr(client_type, method)).parameters
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_call", [False, True])
-async def test_fake_resolves_references_but_records_only_portable_messages(async_call):
+async def test_fake_projects_response_objects_as_portable_messages(async_call):
     scope = replay_scope("anthropic/claude-sonnet-4", "chat", {})
     turn = LLMResponse(
         parts=capture_chat_parts(
@@ -51,16 +48,16 @@ async def test_fake_resolves_references_but_records_only_portable_messages(async
         ),
         replay_scope=scope,
     )
-    messages = [{**turn.public_message(), "nooa_turn": turn.id}]
+    messages = [turn]
     async with FakeLLMClient() as client:
         if async_call:
-            await client.acall(messages, turns={turn.id: turn})
+            await client.acall(messages)
         else:
-            client.call(messages, turns={turn.id: turn})
+            client.call(messages)
         assert client.last_messages == [
             {"role": "assistant", "content": "portable thought\n\nanswer"}
         ]
-        assert "nooa_turn" in messages[0]
+        assert messages[0] is turn
         assert turn.parts[0].native is not None
 
 
@@ -74,11 +71,11 @@ def test_hand_built_null_content_call_uses_the_same_public_builder():
     message = RenderedMessage(
         role=Role.ASSISTANT,
         tool_calls=(ToolCallInfo(id="c", name="run", arguments=arguments),),
-        render_reference=turn.id,
+        replay_message=turn,
     )
-    assert message.content is None
+    message = message.model_copy(update={"content": ""})
     public = OpenAIProviderFormatter().format([message])
-    assert ResponsesClient._resolve_turns(public, {turn.id: turn})[0] is turn
+    assert public[0] is turn
     assert public[0]["tool_calls"][0]["function"]["arguments"] is arguments
 
 
@@ -90,7 +87,7 @@ def test_hand_built_null_content_call_uses_the_same_public_builder():
         "calls_null",
         "text_calls",
         "reasoning_calls",
-        pytest.param("truncated", marks=pytest.mark.expected_replay_edit),
+        "truncated",
     ],
 )
 @pytest.mark.parametrize("cached", [False, True])
@@ -148,8 +145,7 @@ def test_real_renderer_preserves_every_unedited_assistant_shape(shape, cached, r
         block_formatter=Formatter(),
         provider_formatter=ResponsesProviderFormatter() if responses else OpenAIProviderFormatter(),
     )
-    public = next(message for message in result.output if message.get("nooa_turn") == turn.id)
-    resolved = ResponsesClient._resolve_turns([public], {turn.id: turn})[0]
+    resolved = next(message for message in result.output if message.get("role") == "assistant")
     if shape == "truncated":
         assert type(resolved) is dict
         assert resolved["content"] == "ans"
@@ -160,7 +156,7 @@ def test_real_renderer_preserves_every_unedited_assistant_shape(shape, cached, r
 @pytest.mark.parametrize("middleware", [False, True])
 @pytest.mark.parametrize("recover", [False, True])
 @pytest.mark.asyncio
-async def test_runtime_lookup_is_private_and_refreshed_on_recovery(
+async def test_runtime_preserves_response_objects_and_rebuilds_on_recovery(
     monkeypatch, middleware, recover
 ):
     from nooa import Agent
@@ -183,10 +179,9 @@ async def test_runtime_lookup_is_private_and_refreshed_on_recovery(
     class ContextWindowExceededError(Exception):
         pass
 
-    async def dispatch(messages, *, turns, **kwargs):
-        seen.append((messages, turns))
-        assert all(type(message) is dict for message in messages)
-        assert "native-secret" not in json.dumps(messages)
+    async def dispatch(messages, **kwargs):
+        seen.append(messages)
+        assert "native-secret" not in json.dumps([dict(m) for m in messages])
         assert "turns" not in kwargs
         if recover and len(seen) == 1:
             raise ContextWindowExceededError("context window exceeded")
@@ -194,9 +189,7 @@ async def test_runtime_lookup_is_private_and_refreshed_on_recovery(
 
     async def intercept(ctx, nxt):
         assert "turns" not in ctx.params
-        assert "native-secret" not in json.dumps(ctx.messages)
-        # Relay-style JSON round trips must retain the reference, not the object.
-        ctx.messages = json.loads(json.dumps(ctx.messages))
+        assert "native-secret" not in json.dumps([dict(m) for m in ctx.messages])
         intercepted.append(ctx)
         return await nxt(ctx)
 
@@ -217,11 +210,10 @@ async def test_runtime_lookup_is_private_and_refreshed_on_recovery(
         _current_llm_var.reset(token)
         _current_method_var.reset(method_token)
 
-    assert seen[0][1][previous.id] is previous
+    assert any(message is previous for message in seen[0])
     assert len(seen) == (2 if recover else 1)
     if recover:
-        assert previous.id not in seen[1][1]
-        assert seen[0][1] is not seen[1][1]
+        assert not any(message is previous for message in seen[1])
     assert len(intercepted) == (len(seen) if middleware else 0)
 
 
@@ -259,7 +251,7 @@ def source_turn(api):
 
 
 @pytest.mark.asyncio
-async def test_render_lookup_borrows_existing_blocks_without_reading_storage_again(monkeypatch):
+async def test_render_borrows_existing_response_without_reading_storage_again(monkeypatch):
     from unittest.mock import AsyncMock, Mock
 
     from nooa import Agent
@@ -275,32 +267,20 @@ async def test_render_lookup_borrows_existing_blocks_without_reading_storage_aga
     monkeypatch.setattr(agent.runtime, "_prepare_context", AsyncMock(return_value=blocks))
     read_again = Mock(side_effect=AssertionError("History must not be loaded a second time"))
     monkeypatch.setattr(agent.event_manager, "values", read_again)
-    turns = {}
-    messages = await agent.runtime._build_messages(type(agent).respond, turns=turns)
-    assert turns[original.id] is original
-    assert any(message.get("nooa_turn") == original.id for message in messages)
+    messages = await agent.runtime._build_messages(type(agent).respond)
+    assert any(message is original for message in messages)
     read_again.assert_not_called()
 
 
 @pytest.mark.parametrize("api", ["responses", "chat"])
 @pytest.mark.parametrize("is_async", [False, True])
-@pytest.mark.parametrize(
-    "edit", [False, pytest.param(True, marks=pytest.mark.expected_replay_edit)]
-)
+@pytest.mark.parametrize("edit", [False, True])
 @pytest.mark.asyncio
-async def test_dict_lookup_stays_private_and_edits_drop_native(api, is_async, edit, monkeypatch):
+async def test_response_replay_and_dict_replacement_edit_contract(api, is_async, edit, monkeypatch):
     model, turn = source_turn(api)
-    # A JSON round trip has no special sidecar or object identity to preserve.
-    messages = json.loads(
-        json.dumps(
-            [
-                {**turn.public_message(), "nooa_turn": turn.id},
-                {"role": "user", "content": "live state 1"},
-            ]
-        )
-    )
+    messages = [turn, {"role": "user", "content": "live state 1"}]
     if edit:
-        messages[0]["content"] = "edited answer"
+        messages[0] = {**dict(turn), "content": "edited answer"}
     before = copy.deepcopy(messages)
     captured = []
 
@@ -319,9 +299,9 @@ async def test_dict_lookup_stays_private_and_edits_drop_native(api, is_async, ed
     client_type = ResponsesClient if api == "responses" else CompletionClient
     async with client_type(model=model, api_key="test") as client:
         if is_async:
-            await client.acall(messages, turns={turn.id: turn})
+            await client.acall(messages)
         else:
-            client.call(messages, turns={turn.id: turn})
+            client.call(messages)
     assert messages == before
     request = captured[0]
     assert "turns" not in request
@@ -350,8 +330,7 @@ def test_scope_uses_the_per_call_model_override(api, monkeypatch):
     client_type = ResponsesClient if api == "responses" else CompletionClient
     with client_type(model=model, api_key="test") as client:
         client.call(
-            [{**turn.public_message(), "nooa_turn": turn.id}],
-            turns={turn.id: turn},
+            [turn],
             model="openai/gpt-4o",
         )
     assert captured[0]["model"] == "openai/gpt-4o"
@@ -359,29 +338,24 @@ def test_scope_uses_the_per_call_model_override(api, monkeypatch):
     assert "turns" not in captured[0]
 
 
-@pytest.mark.parametrize("client_type", [CompletionClient, ResponsesClient])
-@pytest.mark.parametrize("config_path", ["constructor", "extra_body"])
-def test_turn_lookup_cannot_enter_provider_configuration(client_type, config_path):
-    _, turn = source_turn("responses")
-    config = {"turns": {turn.id: turn}}
-    if config_path == "extra_body":
-        config = {"extra_body": config}
-    with client_type(model="openai/gpt-5.6", api_key="test", **config) as client:
-        with pytest.raises(ValueError, match="turns"):
-            client.call([{"role": "user", "content": "hi"}])
+def test_response_is_a_read_only_public_mapping():
+    from collections.abc import Mapping
 
-
-def test_missing_reference_warns_and_never_replays_native(caplog):
-    _, turn = source_turn("responses")
-    public = turn.public_message()
-    assert ResponsesClient._resolve_turns([{**public, "nooa_turn": turn.id}], {}) == [public]
-    assert "unavailable" in caplog.text
-    assert "native-secret" not in caplog.text
-
-
-def test_lookup_cannot_substitute_an_event_under_the_wrong_id():
-    _, turn = source_turn("responses")
-    with pytest.raises(ValueError, match="original LLMResponse"):
-        ResponsesClient._resolve_turns(
-            [{**turn.public_message(), "nooa_turn": "wrong"}], {"wrong": turn}
-        )
+    _, response = source_turn("responses")
+    assert isinstance(response, Mapping)
+    public = dict(response)
+    assert public == response.public_message()
+    assert "native-secret" not in json.dumps(public)
+    assert "native-secret" in response.model_dump_json()
+    assert response.get("role") == "assistant"
+    assert response["content"] == "answer"
+    assert set(response) == set(public)
+    assert len(response) == len(public)
+    assert "parts" not in response
+    with pytest.raises(TypeError, match="Replace the history element"):
+        response["content"] = "edited"
+    with pytest.raises(TypeError, match="Replace the history element"):
+        del response["content"]
+    # Nested public containers are projections, never aliases into the turn.
+    public["content"] = "edited"
+    assert response.content == "answer"

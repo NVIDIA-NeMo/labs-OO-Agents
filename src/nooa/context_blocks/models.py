@@ -283,7 +283,7 @@ class RenderedMessage(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    render_reference: str | None = Field(default=None, exclude=True)
+    replay_message: Any = Field(default=None, exclude=True, repr=False)
 
     role: Role = Field(description="Message role (SYSTEM / USER / ASSISTANT / TOOL)")
     content: str | None = Field(

@@ -34,10 +34,9 @@ def test_sync_cleanup_mutates_only_reasoning_views() -> None:
     identity = (response.id, response.timestamp)
     client = ReasoningCompletionClient(model="test-model")
 
-    turns = {response.id: response}
     with patch.object(CompletionClient, "call", return_value=response) as parent:
-        returned = client.call([{"role": "user", "content": "hi"}], turns=turns)
-    assert parent.call_args.kwargs["turns"] is turns
+        returned = client.call([{"role": "user", "content": "hi"}])
+    assert "turns" not in parent.call_args.kwargs
 
     _assert_cleaned_in_place(response, returned)
     assert (returned.id, returned.timestamp) == identity
@@ -50,10 +49,9 @@ async def test_async_cleanup_mutates_only_reasoning_views() -> None:
     identity = (response.id, response.timestamp)
     client = ReasoningCompletionClient(model="test-model")
 
-    turns = {response.id: response}
     with patch.object(CompletionClient, "acall", new=AsyncMock(return_value=response)) as parent:
-        returned = await client.acall([{"role": "user", "content": "hi"}], turns=turns)
-    assert parent.call_args.kwargs["turns"] is turns
+        returned = await client.acall([{"role": "user", "content": "hi"}])
+    assert "turns" not in parent.call_args.kwargs
 
     _assert_cleaned_in_place(response, returned)
     assert (returned.id, returned.timestamp) == identity

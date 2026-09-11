@@ -994,7 +994,7 @@ def _needs_dummy_tool(model: str) -> bool:
     return model_lower.startswith(("anthropic/", "anthropic."))
 
 
-def _messages_have_tool_calls(messages: list[dict[str, Any]]) -> bool:
+def _messages_have_tool_calls(messages: list[dict[str, Any] | LLMResponse]) -> bool:
     """Return True if any message contains tool_call blocks."""
     for msg in messages:
         if msg.get("role") == "assistant":
@@ -1075,7 +1075,7 @@ _token_calibration = TokenCalibration()
 
 def _update_token_calibration(
     model: str,
-    messages: list[dict[str, Any]],
+    messages: list[dict[str, Any] | LLMResponse],
     usage: LLMUsage,
     tools: list[dict[str, Any]] | None = None,
 ) -> None:
@@ -1168,49 +1168,8 @@ class UnifiedLLM(ABC):
         return model
 
     @staticmethod
-    def _resolve_turns(
-        messages: list[dict[str, Any]], turns: Mapping[str, LLMResponse] | None
-    ) -> list[dict[str, Any] | LLMResponse]:
-        """Resolve public references only inside UnifiedLLM, before wire projection.
-
-        The lookup is request-local and never part of provider kwargs. Comparing
-        against the canonical public view makes ordinary dictionary edits safe:
-        an edited message is sent portably, without opening native state.
-        """
-        resolved: list[dict[str, Any] | LLMResponse] = []
-        for original in messages:
-            if isinstance(original, dict) and "nooa_cache_boundary" in original:
-                original = dict(original)
-                if original.pop("nooa_cache_boundary") is not True:
-                    raise ValueError("nooa_cache_boundary must be true")
-                resolved.append({"nooa_cache_boundary": True})
-                if not original:
-                    continue
-            if not isinstance(original, dict) or "nooa_turn" not in original:
-                resolved.append(original)
-                continue
-            public = copy.copy(original)
-            reference = public.pop("nooa_turn")
-            if not isinstance(reference, str) or not reference:
-                raise ValueError("nooa_turn must be a nonempty event id")
-            turn = turns.get(reference) if turns is not None else None
-            if turn is None:
-                logger.warning("Referenced assistant turn is unavailable; replaying public text.")
-            elif not isinstance(turn, LLMResponse) or turn.id != reference:
-                raise ValueError("turns must map event ids to their original LLMResponse")
-            elif public == turn.public_message():
-                resolved.append(turn)
-                continue
-            else:
-                logger.warning("Assistant message was edited; replaying it without native state.")
-            resolved.append(public)
-        return resolved
-
-    @staticmethod
     def _validate_request_config(name: str, call_config: dict[str, Any]) -> None:
         """Keep provider payloads and routing on their validated top-level paths."""
-        if "turns" in call_config:
-            raise ValueError("turns is request-local; pass it only as the client call keyword")
         if name in call_config:
             raise ValueError(
                 f"{name!r} is managed by UnifiedLLM; pass conversation data through "
@@ -1219,9 +1178,7 @@ class UnifiedLLM(ABC):
         extra_body = call_config.get("extra_body")
         if extra_body is not None and not isinstance(extra_body, Mapping):
             raise ValueError("extra_body must be a mapping")
-        if isinstance(extra_body, Mapping) and (
-            reserved := {name, "model", "turns"} & set(extra_body)
-        ):
+        if isinstance(extra_body, Mapping) and (reserved := {name, "model"} & set(extra_body)):
             fields = ", ".join(repr(field) for field in sorted(reserved))
             raise ValueError(
                 f"extra_body may not override reserved field(s) {fields}; pass model at "
@@ -1276,7 +1233,7 @@ class UnifiedLLM(ABC):
 
     def _inject_cache_control(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse],
         injection_points: list[dict[str, Any]],
         *,
         model: str | None = None,
@@ -1384,7 +1341,7 @@ class UnifiedLLM(ABC):
         return prepared
 
     @staticmethod
-    def _strip_cache_boundary(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _strip_cache_boundary(messages: list[dict[str, Any] | LLMResponse]) -> list[dict[str, Any]]:
         """Consume renderer metadata without changing provider cache policy."""
         clean = []
         seen = False
@@ -1496,11 +1453,9 @@ class UnifiedLLM(ABC):
     @abstractmethod
     def call(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        *,
-        turns: Mapping[str, LLMResponse] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """
@@ -1511,8 +1466,7 @@ class UnifiedLLM(ABC):
         4. If no tool calls, parses structured output (if requested)
         5. Returns everything in standardized LLMResponse
 
-        ``turns`` is a dispatch-only lookup of stored assistant events referenced
-        by messages. It is never forwarded as a provider parameter.
+        Pass prior LLMResponse objects directly in messages to retain compatible state.
 
         Raises:
         - ValidationError: if output_model validation fails
@@ -1524,11 +1478,9 @@ class UnifiedLLM(ABC):
     @abstractmethod
     async def acall(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        *,
-        turns: Mapping[str, LLMResponse] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """Async version of call"""
@@ -1928,12 +1880,10 @@ class CompletionClient(UnifiedLLM):
 
     def call(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         cache_control_injection_points: list[dict[str, Any]] | None = None,
-        *,
-        turns: Mapping[str, LLMResponse] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """
@@ -1947,7 +1897,6 @@ class CompletionClient(UnifiedLLM):
         self._validate_request_config("messages", call_config)
         effective_model = self._effective_model(call_config)
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
-        messages = self._resolve_turns(messages, turns)
         messages = replay_state.prepare_chat_messages(messages, state_scope)
 
         # Inject cache_control at the message level for prompt caching
@@ -2026,12 +1975,10 @@ class CompletionClient(UnifiedLLM):
 
     async def acall(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         cache_control_injection_points: list[dict[str, Any]] | None = None,
-        *,
-        turns: Mapping[str, LLMResponse] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """
@@ -2045,7 +1992,6 @@ class CompletionClient(UnifiedLLM):
         self._validate_request_config("messages", call_config)
         effective_model = self._effective_model(call_config)
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
-        messages = self._resolve_turns(messages, turns)
         messages = replay_state.prepare_chat_messages(messages, state_scope)
 
         # Inject cache_control at the message level for prompt caching
@@ -2152,17 +2098,15 @@ class ReasoningCompletionClient(CompletionClient):
 
     def call(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         cache_control_injection_points: list[dict[str, Any]] | None = None,
-        *,
-        turns: Mapping[str, LLMResponse] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """Call with <think> tag extraction."""
         response = super().call(
-            messages, tools, output_model, cache_control_injection_points, turns=turns, **kwargs
+            messages, tools, output_model, cache_control_injection_points, **kwargs
         )
 
         # Extract think tags from content
@@ -2190,17 +2134,15 @@ class ReasoningCompletionClient(CompletionClient):
 
     async def acall(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         cache_control_injection_points: list[dict[str, Any]] | None = None,
-        *,
-        turns: Mapping[str, LLMResponse] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """Async call with <think> tag extraction."""
         response = await super().acall(
-            messages, tools, output_model, cache_control_injection_points, turns=turns, **kwargs
+            messages, tools, output_model, cache_control_injection_points, **kwargs
         )
 
         # Extract think tags from content
@@ -2302,12 +2244,10 @@ class ResponsesClient(UnifiedLLM):
 
     def call(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         cache_control_injection_points: list[dict[str, Any]] | None = None,
-        *,
-        turns: Mapping[str, LLMResponse] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """
@@ -2325,7 +2265,6 @@ class ResponsesClient(UnifiedLLM):
         self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
         state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
-        messages = self._resolve_turns(messages, turns)
         input_messages, instructions = self._prepare_input(
             messages, state_scope, effective_model, cache_control_injection_points
         )
@@ -2380,12 +2319,10 @@ class ResponsesClient(UnifiedLLM):
 
     async def acall(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         cache_control_injection_points: list[dict[str, Any]] | None = None,
-        *,
-        turns: Mapping[str, LLMResponse] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """
@@ -2400,7 +2337,6 @@ class ResponsesClient(UnifiedLLM):
         self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
         state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
-        messages = self._resolve_turns(messages, turns)
         input_messages, instructions = self._prepare_input(
             messages, state_scope, effective_model, cache_control_injection_points
         )

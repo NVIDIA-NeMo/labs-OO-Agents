@@ -40,12 +40,12 @@ def test_reasoning_backed_structured_output_replays_after_persistence() -> None:
     rendered = _render(restored)
 
     # The renderer exposes public JSON plus identity, never native state.
-    assert rendered[-1] == {**restored.public_message(), "nooa_turn": restored.id}
+    assert rendered[-1] == restored
 
     client = CompletionClient(model="openai/gpt-4o")
     try:
         with patch("litellm.completion", return_value=_chat_response()) as completion:
-            client.call(rendered, turns={restored.id: restored})
+            client.call(rendered)
 
         assert restored.parsed is None
         assert restored.content == ""

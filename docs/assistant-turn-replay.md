@@ -2,9 +2,9 @@
 
 NOOA stores each model response as one `LLMResponse` event containing ordered
 text, tool-call, and reasoning parts. UnifiedLLM interprets provider extensions;
-the renderer, middleware, and relay continue to exchange ordinary public JSON
-messages. This preserves the information needed for replay without exposing
-provider formats throughout the framework.
+the renderer and middleware pass the response object alongside ordinary message
+dictionaries. Public read-only mapping access keeps consumers independent of
+provider formats. JSON-only integrations project explicitly at their boundary.
 
 ## Why ordered parts
 
@@ -14,16 +14,17 @@ bookkeeping. Signed thinking, encrypted reasoning, and thought signatures also
 must not be attached to edited public content or sent to an incompatible model.
 
 The ordered response remains the authority. Wire messages are generated at
-dispatch, using native extensions only when the public message is unchanged and
-the destination scope matches. This preserves supported provider message order,
+dispatch, using native extensions only for a response object whose destination
+scope matches. Replacing the response with a dictionary discards native state. This preserves supported provider message order,
 boundaries, and fields rather than reconstructing them from separate carriers.
 Stable replay is necessary for prompt-cache reuse; it does not guarantee a cache
 hit or select a provider cache policy.
 
 Compared with the superseded replay implementation, this removes order ledgers,
 batch identities, content fingerprints, private dict-subclass carriers, and relay
-index reconciliation. It retains one equality comparison at dispatch, provider
-validation, and the final wire adapters. Those costs are explicit, not eliminated.
+lookup machinery. It retains provider validation and final wire adapters. The
+relay has one public-content equality check to recover unchanged objects after
+its JSON round trip; that cost is local to the integration, not every dispatch.
 
 ## Caller-facing contract
 
@@ -32,27 +33,31 @@ validation, and the final wire adapters. Those costs are explicit, not eliminate
 - `.content`, `.tool_calls`, and `.reasoning` are derived public views. They are
   not a second stored copy of the response. `.usage` stores normalized input,
   output, cache-read, cache-write, reasoning-token, and estimated-cost fields.
-- `call` and `acall` accept public message dictionaries plus an optional,
-  keyword-only `turns: Mapping[str, LLMResponse]`. This lookup is request-local,
-  never a provider parameter. Runtime callers receive it automatically.
-- A public assistant dictionary can carry `nooa_turn`, the original event ID.
-  UnifiedLLM removes it before the network request. The runtime borrows the
-  original events already rendered; it does not reload the archive to build the
-  lookup. Context-window recovery builds a new lookup from the rebuilt history.
-- Middleware may edit ordinary dictionaries. If a referenced assistant message
-  differs from the event's public view, UnifiedLLM warns and sends only portable
-  content. Missing references also warn and replay portably. Invalid reference
-  types or mismatched ID-to-event associations raise an error.
+- `call` and `acall` accept ordinary message dictionaries and prior
+  `LLMResponse` objects in the same list. There is no ID key or separate lookup.
+- Responses expose public read-only mapping access: `reply["content"]`,
+  `reply.get("role")`, and `dict(reply)`. Native state is never part of that view.
+  Nested projected containers are detached; changing them alone does not edit
+  the response.
+- Middleware can replace any list element with an ordinary dictionary. That
+  replacement is portable and has no native authority. Assignment into the
+  response raises a helpful error explaining this edit contract.
+- The renderer retains the original object when text and calls are unchanged;
+  truncation or omitted calls produce a portable dictionary instead.
+- The relay receives only public JSON. Unchanged entries at the same index regain
+  their original response objects on return. Insertions/deletions conservatively
+  demote shifted entries; they never associate native state by fuzzy matching.
 
 For direct callers:
 
 ```python
-turns = {}
 reply = await client.acall(messages)
-messages.append({**reply.public_message(), "nooa_turn": reply.id})
-turns[reply.id] = reply
-# Append matching tool results if reply contains tool calls, then continue:
-next_reply = await client.acall(messages, turns=turns)
+messages.append(reply)
+# Append matching tool results if reply contains calls, then continue:
+next_reply = await client.acall(messages)
+
+# To edit a historical response, replace that element:
+messages[index] = {**dict(messages[index]), "content": "edited text"}
 ```
 
 Use `replace_parts()` or `replace_text()` to construct edited responses. These
@@ -113,12 +118,11 @@ absence of reasoning, and a zero cost estimate does not prove free inference.
    rather than spreading into strategy and UI code.
 3. `unifiedllm/replay_state.py`: resolves scope and validates provider variations.
    It grants no authority to opaque fields supplied in ordinary wire dictionaries.
-4. `unifiedllm/unifiedllm.py`: resolves public IDs, compares with the authoritative
-   event, and dispatches to the effective model. This is where edits lose native
-   replay authority. Its abstract and concrete methods expose the same lookup
-   contract, including the reasoning wrapper and fake client.
-5. Renderer/formatter/runtime: carry only public values and an event reference;
-   one shared assistant-message builder keeps both sides of the comparison equal.
+4. `unifiedllm/unifiedllm.py`: projects response objects for the effective model.
+   All clients, including the reasoning wrapper and fake, accept the same history
+   shape. Runtime lookup building and per-dispatch public equality are deleted.
+5. Renderer/formatter/runtime: preserve the response object through a generic
+   event hook, with existing public text/tool views for display and budgeting.
    The live-context boundary prevents Responses from moving trailing system
    context into leading instructions. Provider cache mapping is not added here.
 6. Storage and event hooks: serialization, searchable fields, and empty-event
@@ -126,7 +130,8 @@ absence of reasoning, and a zero cost estimate does not prove free inference.
    response representation. Archives preserve replay state; public export does not.
 7. Contract tests: cover exact wire order, edits/truncation, same-scope and
    cross-scope replay, SQLite resume, collapse, provider variation, and public
-   tracing. Unexpected edited-turn downgrade warnings fail UnifiedLLM tests.
+   tracing. Identity assertions detect accidental conversion to dictionaries;
+   replacement tests verify that edits discard native state.
 
 Live evidence from the preceding prototype included all three closed providers
 with SQLite resume and changing trailing context; all six directed opaque-state

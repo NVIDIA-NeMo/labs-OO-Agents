@@ -125,15 +125,15 @@ class TestLLMRequestIntercepts:
     """Verify that LLM request intercepts (header injection) work end-to-end."""
 
     @pytest.mark.asyncio
-    async def test_noop_relay_roundtrip_preserves_public_references(self):
-        """Ordinary JSON ids survive relay; native data never enters its request."""
+    async def test_noop_relay_roundtrip_preserves_response_identity(self):
+        """The downstream client receives the original response after relay JSON."""
         from nooa.llm_types import AssistantReasoning, LLMResponse
 
         turn = LLMResponse(
             parts=(AssistantReasoning(native={"encrypted_content": "opaque"}),),
             replay_scope="responses:openai:test",
         )
-        messages = [{"nooa_cache_boundary": True}, {**turn.public_message(), "nooa_turn": turn.id}]
+        messages = [{"nooa_cache_boundary": True}, turn]
         ctx = _make_llm_ctx(messages=messages)
         seen: list[list[dict[str, Any]]] = []
 
@@ -146,7 +146,8 @@ class TestLLMRequestIntercepts:
 
         assert len(seen[0]) == len(messages)
         assert seen[0] == messages
-        assert "opaque" not in json.dumps(seen[0])
+        assert seen[0][1] is turn
+        assert "opaque" not in json.dumps([dict(message) for message in seen[0]])
 
     @pytest.mark.asyncio
     async def test_request_intercept_injects_header(self):

@@ -108,16 +108,14 @@ async def test_collapse_keeps_only_complete_active_native_turns(
     dispatch = client.acall
     captured = []
 
-    async def observe_dispatch(messages, *, turns, **kwargs):
-        assert set(turns) == {second.id}
-        assert turns[second.id] is rendered_events[second.id]
-        resolved = client._resolve_turns(messages, turns)
-        assert any(item is turns[second.id] for item in resolved)
+    async def observe_dispatch(messages, **kwargs):
+        assert any(item is rendered_events[second.id] for item in messages)
+        assert not any(item is rendered_events.get(first.id) for item in messages)
         summary = next(m for m in messages if "Earlier work summarized." in str(m.get("content")))
         assert summary["role"] == "assistant"
         assert set(summary) == {"role", "content"}
-        assert "native-secret" not in json.dumps(messages)
-        return await dispatch(messages, turns=turns, **kwargs)
+        assert "native-secret" not in json.dumps([dict(m) for m in messages])
+        return await dispatch(messages, **kwargs)
 
     async def provider(**kwargs):
         captured.append(kwargs)
@@ -131,7 +129,7 @@ async def test_collapse_keeps_only_complete_active_native_turns(
     method_token = _current_method_var.set(type(agent).respond)
     try:
         await agent.runtime.generate()
-        assert agent.events[summary_tag].render_reference() is None
+        assert agent.events[summary_tag].render_message() is None
         # Collapse archives, rather than destroys, the original record.
         assert "native-secret-1" in agent.events[first_tag].model_dump_json()
     finally:

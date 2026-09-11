@@ -238,9 +238,9 @@ async def test_real_responses_message_structure_survives_json_resume(
         assert any(part.native is not None for part in resumed.parts)
         rendered = _render_responses(resumed)
         if is_async:
-            await client.acall(rendered, turns={resumed.id: resumed})
+            await client.acall(rendered)
         else:
-            client.call(rendered, turns={resumed.id: resumed})
+            client.call(rendered)
         expected = output + (
             [{"type": "function_call_output", "call_id": "call_1", "output": "complete"}]
             if shape == "trailing_message"
@@ -251,9 +251,9 @@ async def test_real_responses_message_structure_survives_json_resume(
         # A public text edit must still invalidate the saved message structure.
         resumed = resumed.replace_text("edited answer")
         if is_async:
-            await client.acall(_render_responses(resumed), turns={resumed.id: resumed})
+            await client.acall(_render_responses(resumed))
         else:
-            client.call(_render_responses(resumed), turns={resumed.id: resumed})
+            client.call(_render_responses(resumed))
         assert bodies[2]["input"][0] == {"role": "assistant", "content": "edited answer"}
         assert "encrypted_content" not in json.dumps(bodies[2]["input"])
         assert "phase" not in json.dumps(bodies[2]["input"])
@@ -268,7 +268,7 @@ def test_responses_state_is_hidden_from_a_different_model() -> None:
         with patch("litellm.responses", return_value=_responses(REASONING, MESSAGE)):
             first = source.call([{"role": "user", "content": "think"}])
         with patch("litellm.responses", return_value=_responses(MESSAGE)) as call:
-            target.call(_render_responses(first), turns={first.id: first})
+            target.call(_render_responses(first))
 
         replay = call.call_args.kwargs["input"]
         assert REASONING not in replay
@@ -372,7 +372,7 @@ def test_azure_responses_state_is_captured_replayed_and_requested() -> None:
             side_effect=[_responses(REASONING, MESSAGE), _responses(MESSAGE)],
         ) as call:
             first = client.call([{"role": "user", "content": "think"}])
-            client.call(_render_responses(first), turns={first.id: first})
+            client.call(_render_responses(first))
 
         assert first.replay_scope is not None
         assert first.replay_scope.startswith("responses:azure:")
@@ -397,7 +397,7 @@ def test_responses_state_replays_across_gateways() -> None:
         with patch("litellm.responses", return_value=_responses(REASONING, MESSAGE)):
             first = source_client.call([{"role": "user", "content": "think"}])
         with patch("litellm.responses", return_value=_responses(MESSAGE)) as target_call:
-            target_client.call(_render_responses(first), turns={first.id: first})
+            target_client.call(_render_responses(first))
 
         assert REASONING in target_call.call_args.kwargs["input"]
     finally:

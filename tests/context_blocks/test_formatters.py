@@ -299,7 +299,7 @@ class TestXMLBlockFormatter:
 
         carrier = next(message for message in messages if message.role is Role.ASSISTANT)
         assert carrier.content == ""
-        assert carrier.render_reference == response.id
+        assert carrier.replay_message is response
         assert (
             response.reasoning if field == "reasoning" else dict(response.parts[0].native)
         ) == value
@@ -327,7 +327,7 @@ class TestXMLBlockFormatter:
 
         carrier = next(message for message in messages if message.role is Role.ASSISTANT)
         assert carrier.content == ""
-        assert carrier.render_reference == response.id
+        assert carrier.replay_message is response
         assert dict(response.parts[0].native) == {"opaque": "state"}
 
     def test_linked_execution_is_omitted_when_carrier_is_rejected(self):

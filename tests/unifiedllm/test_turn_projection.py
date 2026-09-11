@@ -207,24 +207,23 @@ def test_replacements_strip_all_native_slots_and_leave_original_untouched():
     )
 
 
-@pytest.mark.parametrize(
-    "edited", [False, pytest.param(True, marks=pytest.mark.expected_replay_edit)]
-)
+@pytest.mark.parametrize("edited", [False, True])
 def test_relay_json_round_trip_preserves_only_unchanged_turn_references(edited):
     original = turn()
     ctx = LLMCallContext(
         messages=[
             {"role": "system", "content": "stable"},
-            {**original.public_message(), "nooa_turn": original.id},
+            original,
         ]
     )
-    public = json.loads(json.dumps(ctx.messages))
+    public = json.loads(json.dumps([dict(m) for m in ctx.messages]))
     assert "opaque" not in json.dumps(public)
     assert public[1]["reasoning_content"] == original.reasoning
     if edited:
         public[1]["content"] = "changed"
-    ctx.messages = public
-    resolved = ResponsesClient._resolve_turns(ctx.messages, {original.id: original})
+    from nooa.nemo_relay_middleware import _reconcile_messages
+
+    resolved = _reconcile_messages(ctx.messages, public)
     assert (resolved[1] is original) is not edited
     if edited:
         assert resolved[1] == {**original.public_message(), "content": "changed"}
@@ -232,17 +231,18 @@ def test_relay_json_round_trip_preserves_only_unchanged_turn_references(edited):
 
 def test_relay_insertion_does_not_attach_state_to_new_neighbors():
     original = turn()
-    ctx = LLMCallContext(messages=[{**original.public_message(), "nooa_turn": original.id}])
-    ctx.messages.insert(0, {"role": "user", "content": "inserted"})
-    resolved = ResponsesClient._resolve_turns(ctx.messages, {original.id: original})
-    assert resolved[1] is original
+    ctx = LLMCallContext(messages=[original])
+    from nooa.nemo_relay_middleware import _reconcile_messages
+
+    public = [{"role": "user", "content": "inserted"}, dict(original)]
+    resolved = _reconcile_messages(ctx.messages, public)
+    assert type(resolved[1]) is dict
     assert resolved[0] == {"role": "user", "content": "inserted"}
 
 
-@pytest.mark.expected_replay_edit
 def test_renderer_keeps_reference_and_truncation_replaces_without_native_state():
     original = turn()
-    assert render(original).output[1] == {**original.public_message(), "nooa_turn": original.id}
+    assert render(original).output[1] == original
 
     class ShortFormatter(CachedBlockFormatter):
         def format_event(self, event, event_format=None):
@@ -250,20 +250,19 @@ def test_renderer_keeps_reference_and_truncation_replaces_without_native_state()
 
     replacement = render(original, formatter=ShortFormatter()).output[1]
     assert replacement["content"] == "Bef"
-    resolved = ResponsesClient._resolve_turns([replacement], {original.id: original})
+    resolved = [replacement]
     assert isinstance(resolved[0], dict)
     assert "nooa_turn" not in resolved[0]
     assert original.content == "Before.Between."
 
 
-@pytest.mark.expected_replay_edit
 def test_renderer_drops_incomplete_calls_as_a_state_stripping_edit():
     original = turn()
     original.finish_reason = "length"
     result = render(original)
     replacement = result.output[1]
     assert "tool_calls" not in replacement
-    resolved = ResponsesClient._resolve_turns([replacement], {original.id: original})
+    resolved = [replacement]
     assert isinstance(resolved[0], dict)
     assert "nooa_turn" not in resolved[0]
     assert original.tool_calls
@@ -363,8 +362,8 @@ async def test_mocked_dispatch_resume_and_changing_live_suffix(monkeypatch, tmp_
     try:
         call = client.acall if is_async else client.call
 
-        async def invoke(messages, *, turns=None):
-            result = call(messages, turns=turns)
+        async def invoke(messages):
+            result = call(messages)
             return await result if is_async else result
 
         original = await invoke([{"role": "user", "content": "start"}])
@@ -376,9 +375,8 @@ async def test_mocked_dispatch_resume_and_changing_live_suffix(monkeypatch, tmp_
         resumed.close()
         for state in ("live 1", "live 2"):
             ctx = LLMCallContext(messages=render(loaded, state).output)
-            ctx.messages = json.loads(json.dumps(ctx.messages))
-            assert ctx.messages[1]["nooa_turn"] == loaded.id
-            await invoke(ctx.messages, turns={loaded.id: loaded})
+            assert ctx.messages[1] is loaded
+            await invoke(ctx.messages)
         assert captured[-2][:-1] == captured[-1][:-1]
         assert captured[-2][-1] != captured[-1][-1]
         # Tool-result cache markers are policy, not a turn-model change.
@@ -410,19 +408,16 @@ def test_boundary_beside_turn_preserves_reference_and_state():
     )
     assert len(rendered) == 2
     assert rendered[0] == {"nooa_cache_boundary": True}
-    assert rendered[1] == {**original.public_message(), "nooa_turn": original.id}
+    assert rendered[1] == original
     client = ResponsesClient("openai/gpt-5.6", api_key="test")
     try:
-        wire, _ = client._transform_messages(
-            client._resolve_turns(rendered, {original.id: original}), SCOPE
-        )
+        wire, _ = client._transform_messages(rendered, SCOPE)
         assert carried_cache_boundary(wire[0])
         assert wire[1:] == output_items()
     finally:
         client.close()
 
 
-@pytest.mark.expected_replay_edit
 def test_rendered_public_values_share_strings_but_no_native_objects():
     original = turn()
     message = render(original).messages[1]
@@ -432,7 +427,7 @@ def test_rendered_public_values_share_strings_but_no_native_objects():
     assert not hasattr(message.tool_calls[0], "native")
     replacement = message.model_copy(update={"content": "edited"})
     public = ResponsesProviderFormatter().format([replacement])
-    assert isinstance(ResponsesClient._resolve_turns(public, {original.id: original})[0], dict)
+    assert isinstance(public[0], dict)
 
 
 def test_live_flat_constructor_rejects_removed_native_state():
@@ -558,16 +553,18 @@ def test_search_retains_response_metadata_without_native_parts():
     assert "opaque-one" not in text
 
 
-def test_relay_deletion_preserves_unchanged_turn_by_id_not_index():
+def test_relay_deletion_conservatively_discards_shifted_native_state():
     original = turn()
     ctx = LLMCallContext(
         messages=[
             {"role": "user", "content": "removed"},
-            {**original.public_message(), "nooa_turn": original.id},
+            original,
         ]
     )
-    ctx.messages = json.loads(json.dumps(ctx.messages[1:]))
-    assert ResponsesClient._resolve_turns(ctx.messages, {original.id: original}) == [original]
+    from nooa.nemo_relay_middleware import _reconcile_messages
+
+    public = [dict(original)]
+    assert type(_reconcile_messages(ctx.messages, public)[0]) is dict
 
 
 def test_native_mapping_is_intentionally_unhashable():

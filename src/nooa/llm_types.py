@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Annotated, Any, ClassVar, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
@@ -29,7 +29,7 @@ def assistant_message(
     tool_calls: Iterable[_PublicToolCall] = (),
     reasoning: str | None = None,
 ) -> dict[str, Any]:
-    """Build the one public assistant shape used for rendering and replay equality.
+    """Build the public assistant shape used for rendering and JSON integrations.
 
     Only public values enter this projection; native state is never inspected.
     Captured JSON arguments stay byte-for-byte intact, while synthetic calls
@@ -181,6 +181,11 @@ class LLMResponse(EventBase):
 
     Parts are immutable; model_copy also strips native authority on part edits
     because Pydantic's frozen fields alone do not protect copy(update=...).
+
+    Pass this object directly back in a client's message list. Mapping access
+    exposes public values only; replace the list element with dict(response)
+    to edit it without native state. Nested projected containers are detached:
+    editing them alone does not modify this response.
     """
 
     _role: ClassVar[Role] = Role.ASSISTANT
@@ -338,8 +343,49 @@ class LLMResponse(EventBase):
         public.update(self.public_message())
         return public
 
-    def render_reference(self) -> str:
-        return self.id
+    def render_message(self, content=None, tool_calls=None):
+        """Preserve the turn unless rendering changed its public parts."""
+        if content is None and tool_calls is None:
+            return self
+        calls = self.tool_calls if tool_calls is None else tool_calls
+        if content == self.content and tuple(
+            (call.id, call.name, call.arguments) for call in calls
+        ) == tuple((call.id, call.name, call.arguments) for call in self.tool_calls):
+            return self
+        return assistant_message(content, tool_calls=calls, reasoning=self.reasoning)
+
+    def __getitem__(self, key: str) -> Any:
+        return self.public_message()[key]
+
+    def __iter__(self):
+        return iter(self.public_message())
+
+    def __len__(self) -> int:
+        return len(self.public_message())
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.public_message().get(key, default)
+
+    def keys(self):
+        return self.public_message().keys()
+
+    def items(self):
+        return self.public_message().items()
+
+    def values(self):
+        return self.public_message().values()
+
+    def __contains__(self, key: object) -> bool:
+        return key in self.public_message()
+
+    def __setitem__(self, key, value):
+        raise TypeError(
+            "LLMResponse is read-only. Replace the history element with "
+            "a public message dict to edit it and discard native replay state."
+        )
+
+    def __delitem__(self, key):
+        self.__setitem__(key, None)
 
     def __snapshot_data__(self) -> dict[str, Any]:
         """Durable JSON, excluding live SDK objects and honoring native serializers."""
@@ -394,3 +440,8 @@ class LLMResponse(EventBase):
     def replay_content(self) -> str:
         """Return the serializable assistant text used for event replay."""
         return self.content
+
+
+# Register the public read-only protocol without replacing Pydantic's durable
+# model serializer. dict(response) is portable; model_dump() is an archive.
+Mapping.register(LLMResponse)

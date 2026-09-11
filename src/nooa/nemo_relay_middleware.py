@@ -49,6 +49,22 @@ from nooa.runtime.middleware import (
 _logger = logging.getLogger(__name__)
 
 
+def _reconcile_messages(originals, public):
+    """Only unchanged JSON entries at the same position recover their turn.
+
+    Insertions/deletions conservatively demote shifted turns to portable dicts.
+    No native fields cross the relay's JSON boundary.
+    """
+    return [
+        originals[index]
+        if index < len(originals)
+        and isinstance(originals[index], LLMResponse)
+        and message == originals[index].public_message()
+        else message
+        for index, message in enumerate(public)
+    ]
+
+
 def _relay_response(response: LLMResponse) -> dict[str, Any]:
     """Project the canonical response only when NeMo Relay needs wire JSON."""
     result: dict[str, Any] = {"finish_reason": response.finish_reason}
@@ -170,7 +186,11 @@ async def nemo_relay_llm_middleware(
         for k, v in ctx.params.items()
         if k not in _SENSITIVE_KEYS and k not in _NON_SERIALIZABLE_KEYS
     }
-    safe_params["messages"] = ctx.messages
+    original_messages = list(ctx.messages)
+    safe_params["messages"] = [
+        dict(message) if isinstance(message, LLMResponse) else message
+        for message in original_messages
+    ]
     # Tools are excluded via _NON_SERIALIZABLE_KEYS.  Do NOT re-add them:
     # including a "tools" key in request.content triggers an AttributeError
     # ('dict' object has no attribute 'name') inside NeMo Relay's native pipeline.
@@ -191,7 +211,7 @@ async def nemo_relay_llm_middleware(
             intercepted = req.content
             intercepted_msgs = intercepted.get("messages")
             if intercepted_msgs is not None:
-                ctx.messages = intercepted_msgs
+                ctx.messages = _reconcile_messages(original_messages, intercepted_msgs)
             # Propagate any supported param changes from the intercept.
             for key in _PROPAGATABLE_LLM_PARAMS:
                 if key in intercepted:

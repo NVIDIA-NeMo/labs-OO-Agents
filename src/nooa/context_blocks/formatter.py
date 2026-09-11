@@ -114,7 +114,7 @@ class BlockFormatter(ABC):
         No OOM-safety cap is applied here — that belongs to L2 (stdout/stderr
         capture).
         """
-        if event.render_reference() is not None:
+        if event.render_message() is not None:
             return event.replay_content
         if getattr(event, "_role", None) is Role.ASSISTANT:
             content = getattr(event, "content", None)
@@ -236,18 +236,18 @@ def _event_block_to_messages(
     """
     from nooa.context_blocks.models import BlockPart
 
-    if block.event is not None and block.event.render_reference() is not None:
+    if block.event is not None and block.event.render_message() is not None:
         event = block.event
         if event.is_empty:
             return []
-        # Incomplete calls are omitted from this public projection. UnifiedLLM
-        # detects that edit against the stored event and drops native state.
+        # The event hook emits a portable replacement when rendering omits calls
+        # or edits text, so incomplete turns cannot retain native authority.
         return [
             RenderedMessage(
                 role=Role.ASSISTANT,
                 content=block.content,
                 reasoning=event.reasoning,
-                render_reference=event.render_reference(),
+                replay_message=event,
             )
         ]
 
@@ -304,7 +304,7 @@ def _event_blocks_to_messages(
         block.event.id
         for block in blocks
         if block.event is not None
-        and block.event.render_reference() is not None
+        and block.event.render_message() is not None
         and block.event.replay_tool_calls
     }
     executions: dict[str, dict[str, ToolCallEvent]] = {}
@@ -320,7 +320,7 @@ def _event_blocks_to_messages(
     messages: list[RenderedMessage] = []
     for block in blocks:
         event = block.event
-        if event is not None and event.render_reference() is not None and event.replay_tool_calls:
+        if event is not None and event.render_message() is not None and event.replay_tool_calls:
             by_call_id = executions.get(event.id, {})
             if any(
                 call.id not in by_call_id or by_call_id[call.id].result is None
@@ -341,7 +341,7 @@ def _event_blocks_to_messages(
                         ToolCallInfo(id=call.id, name=call.name, arguments=call.arguments)
                         for call in event.replay_tool_calls
                     ),
-                    render_reference=event.render_reference(),
+                    replay_message=event,
                 )
             )
             for call in event.replay_tool_calls:
@@ -537,7 +537,9 @@ class OpenAIProviderFormatter(ProviderFormatter):
         out: list[dict] = []
         for msg in messages:
             start = len(out)
-            if msg.tool_calls:
+            if msg.replay_message is not None:
+                out.append(msg.replay_message.render_message(msg.content, msg.tool_calls))
+            elif msg.tool_calls:
                 out.append(
                     assistant_message(
                         msg.content, tool_calls=msg.tool_calls, reasoning=msg.reasoning
@@ -564,8 +566,6 @@ class OpenAIProviderFormatter(ProviderFormatter):
                         msg.reasoning,
                     )
                 )
-            if msg.render_reference is not None:
-                out[start]["nooa_turn"] = msg.render_reference
             _carry_cache_boundary(out, start, msg)
         return out
 
@@ -583,7 +583,9 @@ class AnthropicProviderFormatter(ProviderFormatter):
                 continue
 
             start = len(out)
-            if msg.tool_calls:
+            if msg.replay_message is not None:
+                out.append(msg.replay_message.render_message(msg.content, msg.tool_calls))
+            elif msg.tool_calls:
                 content: list[dict[str, Any]] = []
                 if msg.content:
                     content.append({"type": "text", "text": msg.content})
@@ -634,12 +636,10 @@ class AnthropicProviderFormatter(ProviderFormatter):
                         msg.reasoning,
                     )
                 )
-            if msg.render_reference is not None:
-                out[start]["nooa_turn"] = msg.render_reference
             _carry_cache_boundary(out, start, msg)
 
         return {"system": "\n\n".join(system_parts), "messages": out}
 
 
 class ResponsesProviderFormatter(OpenAIProviderFormatter):
-    """Emit public message dicts; ResponsesClient resolves references at dispatch."""
+    """Emit public message dicts; ResponsesClient projects assistant turns at dispatch."""

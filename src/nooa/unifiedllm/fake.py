@@ -5,7 +5,6 @@
 import asyncio
 import json
 from collections import deque
-from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
@@ -56,7 +55,7 @@ class FakeLLMClient(UnifiedLLM):
         self._response_queue = deque(responses)
         self._lock = asyncio.Lock()
         self.call_count = 0
-        self.last_messages: list[dict[str, Any]] = []
+        self.last_messages: list[dict[str, Any] | LLMResponse] = []
         self.last_tools: list[Tool] | None = None
         self._context_window = 128_000
 
@@ -71,11 +70,9 @@ class FakeLLMClient(UnifiedLLM):
 
     async def acall(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        *,
-        turns: Mapping[str, LLMResponse] | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
         """
@@ -87,7 +84,7 @@ class FakeLLMClient(UnifiedLLM):
         async with self._lock:
             self.call_count += 1
             # A non-provider test client must never observe private replay state.
-            self.last_messages = prepare_chat_messages(self._resolve_turns(messages, turns), None)
+            self.last_messages = prepare_chat_messages(messages, None)
             self.last_tools = tools
 
             # Return next response from queue, or empty response if none left
@@ -106,17 +103,15 @@ class FakeLLMClient(UnifiedLLM):
 
     def call(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        *,
-        turns: Mapping[str, LLMResponse] | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
         """Synchronous version of acall for UnifiedLLM compatibility."""
         # For sync call, we don't need locking since tests are usually single-threaded
         self.call_count += 1
-        self.last_messages = prepare_chat_messages(self._resolve_turns(messages, turns), None)
+        self.last_messages = prepare_chat_messages(messages, None)
         self.last_tools = tools
 
         if self._response_queue:

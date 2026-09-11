@@ -893,14 +893,12 @@ class ActorRuntime:
         # No proactive clamping — recovery is error-driven. If the API rejects
         # with ContextWindowExceededError, the except handler archives events,
         # rebuilds messages, and retries.
-        turns: dict[str, Any] = {}
         messages = await self._build_messages(
             self._current_method,
             call_args=self._current_call.args if self._current_call else (),
             call_kwargs=self._current_call.kwargs if self._current_call else {},
             tools=tools,
             max_output_tokens=kwargs.get("max_tokens"),
-            turns=turns,
         )
         _gen_hm = get_harness_metrics()
 
@@ -981,7 +979,6 @@ class ActorRuntime:
                     )
                     ctx.response = await llm_client.acall(
                         ctx.messages,
-                        turns=turns,
                         output_model=om,
                         **call_params,
                     )
@@ -1015,14 +1012,12 @@ class ActorRuntime:
                         )
                         # Re-build messages after archival so the retry sees the
                         # reduced event store.
-                        turns = {}
                         ctx.messages = await self._build_messages(
                             self._current_method,
                             call_args=self._current_call.args if self._current_call else (),
                             call_kwargs=self._current_call.kwargs if self._current_call else {},
                             tools=ctx.params.get("tools"),
                             max_output_tokens=_reduced,
-                            turns=turns,
                         )
                         _dynamic_context = _snapshot_llm_request(
                             self.event_manager, ctx.messages, current_generation_id or ""
@@ -1071,7 +1066,6 @@ class ActorRuntime:
                     try:
                         response = await llm_client.acall(
                             messages,
-                            turns=turns,
                             tools=tools,
                             output_model=output_model,
                             **_kwargs,
@@ -1106,14 +1100,12 @@ class ActorRuntime:
                         # Re-build messages after archival so the retry sees the
                         # reduced event store. Retrying with the same messages would
                         # fail again when input tokens exceed the context window.
-                        turns = {}
                         messages = await self._build_messages(
                             self._current_method,
                             call_args=self._current_call.args if self._current_call else (),
                             call_kwargs=self._current_call.kwargs if self._current_call else {},
                             tools=tools,
                             max_output_tokens=_reduced,
-                            turns=turns,
                         )
                         _dynamic_context = _snapshot_llm_request(
                             self.event_manager, messages, current_generation_id or ""
@@ -1123,7 +1115,6 @@ class ActorRuntime:
                         _recovery_kw = {**_kwargs, "max_tokens": _reduced}
                         response = await llm_client.acall(
                             messages,
-                            turns=turns,
                             tools=tools,
                             output_model=output_model,
                             **_recovery_kw,
@@ -2931,17 +2922,12 @@ class ActorRuntime:
         *,
         tools: list[Any] | None = None,
         max_output_tokens: int | None = None,
-        turns: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Build messages for LLM API.
 
         Calls _prepare_context() to gather and resolve all blocks,
         then render_context() to format them using the agent's configured
         block and provider formatters.
-
-        If supplied, ``turns`` receives borrowed references to the events actually
-        rendered. The caller owns this lookup for one dispatch; it never enters
-        middleware params. Borrowing these objects avoids reloading SQL history.
 
         ``tools`` is accepted for call-site compatibility. This method no
         longer performs full-payload pre-call token estimation; context stats
@@ -3039,15 +3025,6 @@ class ActorRuntime:
         # the call. Until then, keep render_context's local estimate as a fallback
         # for diagnostics and context-window error recovery.
         messages = result.output
-        if turns is not None:
-            references = {message.render_reference for message in result.messages}
-            turns.update(
-                (reference, block.event)
-                for block in blocks
-                if block.event is not None
-                and (reference := block.event.render_reference()) is not None
-                and reference in references
-            )
         self._last_context_stats = result.stats
         self._last_prompt_tokens_actual = None
         return messages

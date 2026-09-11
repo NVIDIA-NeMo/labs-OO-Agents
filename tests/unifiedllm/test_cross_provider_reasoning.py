@@ -218,7 +218,7 @@ def test_cross_provider_replay_warns_hides_opaque_state_and_keeps_reasoning_text
             "litellm.completion",
             return_value=_chat_response(Message(role="assistant", content="done"), "stop"),
         ) as completion:
-            target.call(_render(first), turns={first.id: first}, tools=[TOOL])
+            target.call(_render(first), tools=[TOOL])
 
         replayed = completion.call_args.kwargs["messages"]
         assistant = next(message for message in replayed if message.get("role") == "assistant")
@@ -247,7 +247,7 @@ def test_plain_reasoning_replays_as_ordinary_text_for_every_model() -> None:
         with patch("litellm.completion", return_value=response):
             first = source.call([{"role": "user", "content": "think"}])
         with patch("litellm.completion", return_value=response) as completion:
-            target.call(_render(first), turns={first.id: first})
+            target.call(_render(first))
 
         assert all(part.native is None for part in first.parts)
         assistant = next(
@@ -311,9 +311,9 @@ async def test_summary_without_encrypted_content_is_portable_text(is_async, has_
         with patch(target, return_value=raw) as replay:
             rendered = _render(restored, responses=True)
             if is_async:
-                await client.acall(rendered, turns={first.id: first})
+                await client.acall(rendered)
             else:
-                client.call(rendered, turns={first.id: first})
+                client.call(rendered)
         expected = [{"role": "assistant", "content": "Check the evidence."}]
         if has_answer:
             expected.append({"role": "assistant", "content": "Answer."})
@@ -370,7 +370,7 @@ def test_reasoning_only_responses_turn_demotes_without_an_empty_message() -> Non
         with patch(
             "litellm.responses", return_value=_responses_output(RESPONSES_MESSAGE)
         ) as changed:
-            target.call(_render(first, responses=True), turns={first.id: first})
+            target.call(_render(first, responses=True))
 
         assert changed.call_args.kwargs["input"] == [
             {"role": "assistant", "content": "Check the evidence."}
