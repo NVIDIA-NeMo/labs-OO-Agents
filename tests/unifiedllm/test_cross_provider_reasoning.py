@@ -124,7 +124,9 @@ def _render(response: LLMResponse, *, responses: bool = False) -> list[dict]:
     return formatter.format(neutral)
 
 
-def test_public_thinking_content_blocks_require_a_response(caplog: pytest.LogCaptureFixture) -> None:
+def test_public_thinking_content_blocks_require_a_response(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     messages = [
         {
             "role": "assistant",
