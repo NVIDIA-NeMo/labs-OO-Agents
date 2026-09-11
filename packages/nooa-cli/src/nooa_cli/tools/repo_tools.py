@@ -463,14 +463,14 @@ class RepoTools(Skill):
         ``await self.shell.replace(result[0], new_text)`` to edit a hit.
         """
         resolved = self._resolve(path)
-        if not resolved.exists():
+        if not await self._path_exists(resolved):
             diagnostic = PathResolutionError(
                 "symbols", path, resolved, base_name="self.repo.root", base_path=self._root
             )
             return RepoResult(query=path, lines=[], diagnostic=diagnostic)
         query_lower = query.lower()
 
-        if resolved.is_file():
+        if await self._path_is_file(resolved):
             file_result = await self._filemap(path, max_symbols=max_results if not query else 500)
             pairs = [
                 (symbol, anchor)
@@ -518,7 +518,7 @@ class RepoTools(Skill):
         ``await self.shell.replace(result[0], new_text)`` to edit a hit.
         """
         resolved = self._resolve(path)
-        if not resolved.exists():
+        if not await self._path_exists(resolved):
             diagnostic = PathResolutionError(
                 "refs", path, resolved, base_name="self.repo.root", base_path=self._root
             )
@@ -531,6 +531,34 @@ class RepoTools(Skill):
             total_matches=result.total_matches,
             truncated=result.truncated,
         )
+
+    async def _path_exists(self, resolved: Path) -> bool:
+        """Existence probe that works for sandbox-mounted roots.
+
+        With a shared session the repo root lives in the session's filesystem
+        (e.g. a Gym-hosted seeded sandbox), where a host-side
+        ``Path.exists()`` would wrongly report paths as missing. Probe via
+        the session when one is wired; fall back to the host otherwise.
+        """
+        if self._session:
+            import shlex
+
+            _, _, code = await self._session.run(
+                f"test -e {shlex.quote(str(resolved))}", timeout=10
+            )
+            return code == 0
+        return resolved.exists()
+
+    async def _path_is_file(self, resolved: Path) -> bool:
+        """File (not directory) probe, session-aware like ``_path_exists``."""
+        if self._session:
+            import shlex
+
+            _, _, code = await self._session.run(
+                f"test -f {shlex.quote(str(resolved))}", timeout=10
+            )
+            return code == 0
+        return resolved.is_file()
 
     async def _check_rg(self) -> bool:
         """Check if rg (ripgrep) is available, caching the result."""
