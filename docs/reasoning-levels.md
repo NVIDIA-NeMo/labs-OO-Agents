@@ -5,6 +5,13 @@ determine those choices: registry YAML maps each label to exact request paramete
 Selecting a label applies `params.update(level_settings)` before dispatch.
 
 ```python
+from pathlib import Path
+
+from nooa.unifiedllm import get_llm_client
+from nooa.unifiedllm.registry import reload_registry
+
+# From the repository root; this example registry is not loaded automatically.
+reload_registry(Path("examples/reasoning_levels/llm_config.yaml"))
 client = get_llm_client("gpt-5.6-sol")
 print(client.reasoning_levels)  # tuple of labels; None = unknown, () = unsupported
 print(client.reasoning_default)  # documented default, or None when unknown
