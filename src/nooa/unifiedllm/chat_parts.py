@@ -64,11 +64,15 @@ def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, 
             if field == "thinking_blocks":
                 if kind == "thinking":
                     text = native.pop("thinking", "")
-                    if (
-                        not isinstance(text, str)
-                        or not isinstance(native.get("signature"), str)
-                        or not native["signature"]
-                    ):
+                    if not isinstance(text, str):
+                        raise ReasoningReplayError("Thinking text must be a string.")
+                    if "signature" not in native:
+                        # Gemini can expose unsigned thoughts beside signed text
+                        # or calls. Keep the text without discarding those parts'
+                        # independent signatures.
+                        parts.append(AssistantReasoning(text=text))
+                        continue
+                    if not isinstance(native["signature"], str) or not native["signature"]:
                         raise ReasoningReplayError("Malformed signed thinking block.")
                 elif (
                     kind == "redacted_thinking"

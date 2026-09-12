@@ -19,6 +19,32 @@ from nooa.unifiedllm.response_parts import project_turn
 MODELS = ["anthropic/claude-sonnet-4", "gemini/gemini-2.5-pro", "openai/gateway-gemini"]
 
 
+@pytest.mark.parametrize("scope", [None, "chat:gemini:test", "chat:openai:test"])
+def test_unsigned_thinking_is_portable_without_dropping_neighbor_signatures(scope):
+    source = message("gemini/test")
+    source["thinking_blocks"] = [{"type": "thinking", "thinking": "Check inputs."}]
+    source["reasoning_content"] = "Check inputs."
+    turn = LLMResponse(parts=capture_chat_parts(source, scope), replay_scope=scope)
+    assert turn.reasoning == "Check inputs."
+    assert turn.parts[0].native is None
+    restored = LLMResponse.model_validate_json(turn.model_dump_json())
+    projected, _ = project_chat_turn(restored, scope)
+    assert projected["content"] == "Check inputs."
+    assert "thinking_blocks" not in projected
+    if scope is not None:
+        assert projected["tool_calls"] == source["tool_calls"]
+        assert projected["provider_specific_fields"] == source["provider_specific_fields"]
+    else:
+        assert "opaque-signature" not in json.dumps(projected)
+
+
+@pytest.mark.parametrize("signature", [None, "", 42])
+def test_present_but_malformed_thinking_signature_still_raises(signature):
+    source = {"thinking_blocks": [{"type": "thinking", "thinking": "x", "signature": signature}]}
+    with pytest.raises(ReasoningReplayError, match="Malformed signed thinking"):
+        capture_chat_parts(source, "chat:openai:test")
+
+
 def message(model):
     calls = [
         {
