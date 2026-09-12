@@ -235,3 +235,24 @@ complete native app-behavior suite then passed **155 tests**, including that
 test, without further code changes. All ACP tests passed in the full run.
 Focused removal/configuration/parity checks passed **92 tests**. Ruff, formatting,
 and `git diff --check` pass.
+
+## Agent-facing skill persistence
+
+The shared interactive setup now attaches `nooa.persisting_skills` as
+`self.persisting_skills`. Its `remember(skill_id, directory=None)` and
+`forget(skill_id)` methods reuse the operations behind `/skills` and write only
+this workspace's NOOA settings. Remember activates now and saves the default;
+forget deactivates now and records an inactive preference for future sessions.
+Source directories, package installations, and other live sessions are retained.
+No core registry API or general agent persistence contract was added.
+
+The skill raises on a save failure, including the shared operation's account of
+any live changes. Skills controls read current saved preferences before updating
+lists, so sequential writes from another live session are retained.
+
+Validation: **159 passed, 3 existing xfailed** across the complete ACP suite and
+native settings, skill controls, resume events, and coding-agent tests. Generated
+agent code remembers a repository skill from either host; fresh agents in both
+hosts restore it. Coverage also checks forgetting, interleaved agent/command
+writes, workspace isolation, and save failures. Ruff, formatting, and
+`git diff --check` pass.

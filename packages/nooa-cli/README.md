@@ -169,6 +169,20 @@ published through the `nooa.skills` entry-point group. Toolbar extensions can
 similarly publish named providers through `nooa_cli.tui.toolbar_items`; users
 select their order with `/toolbar set <item> ...`.
 
+Native and ACP agents have a `self.persisting_skills` skill for workspace
+preferences. Ask the agent to remember a Python skill for future sessions:
+
+```python
+await self.persisting_skills.remember("your.skill", directory="/path/to/skills")
+await self.persisting_skills.forget("your.skill")
+```
+
+`remember` activates the skill and saves its ID (and optional discovery directory)
+in the workspace's `.nooa/settings.yaml`. `forget` deactivates it and disables
+automatic activation there. Both reuse `/skills` operations; other live sessions
+retain their state. Package installation and ordinary session-local
+`self.skills.load/activate` are unchanged.
+
 Long-term memory and idle reflection are explicit opt-ins:
 
 ```text

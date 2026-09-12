@@ -79,6 +79,7 @@ def configure_session_skills(agent: Any, options: SessionOptions) -> list[str]:
     does not activate it; negative activation preferences override positives.
     """
     from nooa_cli.interactive.mcp_registry import MCPRegistry
+    from nooa_cli.interactive.persisting_skills import PersistingSkills
 
     skills = getattr(agent, "skills", None)
     if skills is None:
@@ -95,6 +96,8 @@ def configure_session_skills(agent: Any, options: SessionOptions) -> list[str]:
         ),
     )
     skills.activate(["nemo.mcp"])
+    skills.register("nooa.persisting_skills", PersistingSkills(root))
+    skills.activate(["nooa.persisting_skills"])
     warnings: list[str] = []
     discover = getattr(skills, "discover_skills_dirs", None)
     if options.active_skills and callable(discover):
