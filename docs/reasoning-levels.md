@@ -34,6 +34,10 @@ Write the complete nested block for each level. There is no deep merge or
 inheritance: selecting a level replaces the base value at each key it sets.
 The declarations are trusted configuration, just like the rest of the registry;
 they are not restricted to a list of provider fields maintained by NOOA.
+Client routing and framework controls are reserved: `model`, `api_base`,
+`base_url`, `api_key`, `custom_llm_provider`, `messages`, `input`, `extra_body`,
+and the three `reasoning_*` configuration fields. They cannot appear inside a
+level's settings. A level changes effort, not the endpoint, credentials or history.
 
 Omit `reasoning_levels` (or use null) when support is unknown. An empty mapping
 explicitly declares selection unsupported. Unknown support, unsupported selection

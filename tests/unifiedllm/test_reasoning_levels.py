@@ -79,6 +79,32 @@ def test_malformed_declarations_fail_early(declaration):
         ReasoningConfig(**declaration)
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "model",
+        "api_base",
+        "base_url",
+        "api_key",
+        "custom_llm_provider",
+        "messages",
+        "input",
+        "extra_body",
+        "reasoning_levels",
+        "reasoning_default",
+        "reasoning_level",
+    ],
+)
+def test_level_settings_cannot_replace_framework_or_routing_fields(field):
+    with pytest.raises(ValidationError, match="reserved.*" + field):
+        CompletionClient("openai/test", reasoning_levels={"low": {field: "value"}})
+
+
+def test_level_settings_allow_new_provider_fields_without_an_allowlist():
+    config = ReasoningConfig(levels={"low": {"future_provider_control": {"budget": 12}}})
+    assert config.settings("low") == {"future_provider_control": {"budget": 12}}
+
+
 def test_no_selection_preserves_raw_controls_and_default_is_only_metadata():
     raw = {"reasoning": {"effort": "medium", "summary": "auto"}}
     with CompletionClient(

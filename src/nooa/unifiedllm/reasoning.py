@@ -9,6 +9,18 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, model_validator
 
 _DECLARATIONS = {"reasoning_levels", "reasoning_default"}
+# These select the client/request itself, not a provider's effort behavior.
+_RESERVED = _DECLARATIONS | {
+    "reasoning_level",
+    "model",
+    "api_base",
+    "base_url",
+    "api_key",
+    "custom_llm_provider",
+    "messages",
+    "input",
+    "extra_body",
+}
 
 
 class ReasoningConfig(BaseModel):
@@ -26,14 +38,20 @@ class ReasoningConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_declaration(self):
+        """Reject malformed choices and request-control fields at construction."""
         if self.default is not None and self.default not in (self.levels or {}):
             raise ValueError("reasoning_default must name a declared reasoning level")
         for level, settings in (self.levels or {}).items():
             if not level.strip() or not settings:
                 raise ValueError("reasoning_levels must have non-empty names and request settings")
+            if conflict := _RESERVED & settings.keys():
+                raise ValueError(
+                    f"reasoning level {level!r} contains reserved fields: {sorted(conflict)}"
+                )
         return self
 
     def settings(self, level: str) -> dict[str, Any]:
+        """Validate a selection and detach its settings from the stored declaration."""
         if self.levels is None:
             raise ValueError(
                 "Reasoning levels are unknown for this route; declare reasoning_levels"
