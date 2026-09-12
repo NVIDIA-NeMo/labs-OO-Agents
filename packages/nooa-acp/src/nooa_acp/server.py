@@ -282,12 +282,13 @@ class CodingACPAdapter:
 
         store = self._store(root)
         # ACP has no standard field for disabling a busy entry in the picker.
-        # Filter before pagination so open sessions cannot hide later results.
+        # Like native resume, omit startup-only sessions with no conversation.
+        # Filter before pagination so excluded sessions cannot hide later results.
         # The load-time lock still handles sessions opened after this check.
         found = [
             info
             for info in store.list(limit=None)
-            if not is_sqlite_database_active(store.path_for(info.id))
+            if info.turn_count > 0 and not is_sqlite_database_active(store.path_for(info.id))
         ]
         page = found[offset : offset + _SESSION_PAGE_SIZE]
         sessions = [

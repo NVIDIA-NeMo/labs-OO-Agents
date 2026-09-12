@@ -1153,7 +1153,9 @@ async def test_adapter_lists_closes_loads_and_replays_durable_session(tmp_path):
     await replay_adapter.close()
 
 
-async def test_resume_pagination_skips_open_sessions_before_slicing(tmp_path, monkeypatch):
+async def test_resume_pagination_skips_open_and_empty_sessions_before_slicing(
+    tmp_path, monkeypatch
+):
     from contextlib import ExitStack
 
     from nooa_acp import server
@@ -1165,11 +1167,18 @@ async def test_resume_pagination_skips_open_sessions_before_slicing(tmp_path, mo
     adapter = CodingACPAdapter(_completed_llm)
     with ExitStack() as open_sessions:
         for index in range(3):
-            with store.create(session_id=f"ready-{index}", working_directory=str(tmp_path)):
-                pass
-            open_sessions.enter_context(
+            with store.create(
+                session_id=f"ready-{index}", working_directory=str(tmp_path)
+            ) as ready:
+                ready.record_user_message("A saved conversation, even without a reply or title")
+            busy = open_sessions.enter_context(
                 store.create(session_id=f"busy-{index}", working_directory=str(tmp_path))
             )
+            busy.record_user_message("An open conversation")
+            with store.create(
+                session_id=f"empty-{index}", working_directory=str(tmp_path)
+            ) as empty:
+                empty.set_title("A title alone is not a conversation")
 
         first = await adapter.list_sessions(str(tmp_path))
         assert [session.session_id for session in first.sessions] == ["ready-2", "ready-1"]
@@ -1177,6 +1186,7 @@ async def test_resume_pagination_skips_open_sessions_before_slicing(tmp_path, mo
         second = await adapter.list_sessions(str(tmp_path), cursor=first.next_cursor)
         assert [session.session_id for session in second.sessions] == ["ready-0"]
         assert second.next_cursor is None
+        assert len(store.list(limit=None)) == 9  # Filtering never deletes databases.
 
 
 async def test_loading_session_is_not_available_until_replay_finishes(tmp_path):

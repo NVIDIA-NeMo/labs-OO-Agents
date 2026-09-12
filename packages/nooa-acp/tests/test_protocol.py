@@ -263,12 +263,14 @@ async def test_acp_lists_native_sessions_with_absolute_workspaces(tmp_path, monk
     native = session_manager.SessionManager.create(working_dir=".")
     native_id = native.session_id
     assert native.working_dir == str(workspace)
+    native.record_user("A native conversation")
     native.close()
     expected = {native_id: str(workspace)}
     # These are persisted legacy values, deliberately bypassing normalization
     # at native creation. Do not rewrite existing user databases to repair them.
     for index, cwd in enumerate((".", "../workspace", "", str(server_cwd))):
         with store.create(session_id=f"old-{index}", host="tui", working_directory=cwd) as old:
+            old.record_user_message("A legacy native conversation")
             expected[old.id] = str(server_cwd) if cwd == str(server_cwd) else str(workspace)
 
     client = _RecordingClient()
@@ -292,6 +294,7 @@ async def test_resume_hides_open_sessions_and_explains_a_stale_selection(tmp_pat
     store = SessionStore(tmp_path / ".nooa" / "sessions")
     with store.create(working_directory=str(tmp_path), host="tui") as native:
         session_id = native.id
+        native.record_user_message("Resume this conversation")
 
     client = _RecordingClient()
     fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
@@ -300,8 +303,11 @@ async def test_resume_hides_open_sessions_and_explains_a_stale_selection(tmp_pat
         _process,
     ):
         await connection.initialize(PROTOCOL_VERSION)
+        empty = await connection.new_session(str(tmp_path))
+        await connection.close_session(empty.session_id)
         listed = await connection.list_sessions(cwd=str(tmp_path))
         assert [session.session_id for session in listed.sessions] == [session_id]
+        assert store.path_for(empty.session_id).exists()
 
         # Another client opens it after the picker was populated.
         with store.open(session_id):
