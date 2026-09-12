@@ -23,6 +23,9 @@ Both terminals need those environment variables and the same credentials and
 model-registry environment. Launch from the acceptance workspace so registry
 discovery agrees. Do not use a native-only `--llm-config` override in this test.
 Record `pool --version`, the NOOA commit, and the model alias/configuration.
+Leave `NEMO_OO_PROJECT_DIR` unset, or point it at this workspace's `.nooa`
+directory: native honors that explicit override, while ACP selects its session
+workspace.
 
 Configure behavior once in `$NOOA_WORKSPACE/.nooa/settings.yaml`. Existing `tui`
 behavior fields remain readable; shared `coding` fields take precedence:
@@ -116,6 +119,53 @@ using native NOOA, and record fresh approval/OAuth parity as a follow-up gap.
 Likewise, native settings menus and the full set of host slash commands are not
 part of this slice; skill-provided slash commands are shared.
 
+## Shared settings and Markdown command checks
+
+In the acceptance workspace, add `skills/parity-review/SKILL.md`:
+
+```markdown
+---
+name: parity-review
+description: Check shared skill command behavior
+argument-hint: [target]
+---
+Read $ARGUMENTS and report its first line. Do not modify it.
+```
+
+Create a `notes.md` with an easily recognized first line. Restart both hosts so
+they discover the new command. Native completion and Pool's agent commands
+should both offer `/parity-review`. Run `/parity-review "@notes.md"` in each:
+both should read the same file and report the same first line. The saved user
+turn should contain the expanded skill instruction once. Repeat on fresh
+sessions to check automatic titling from a skill command as the first prompt.
+A skill marked `user-invocable: false` should not appear in either command list.
+
+For settings, begin with `coding.keep_going: true` in the acceptance workspace
+and a configured judge model. In native, run `/keep-going off`, then exit.
+Verify `.nooa/settings.yaml` now has `coding.keep_going: false`. Start a fresh
+session in each host and check the effective value without depending on an old
+snapshot's preferences. For an exact configuration check from that workspace:
+
+```bash
+uv run --project "$NOOA_CHECKOUT" --no-sync python - <<'PYTHON'
+from pathlib import Path
+from nooa_cli.interactive.options import SessionOptions
+from nooa_cli.tui.config import Config
+root = Path.cwd()
+native = SessionOptions.from_native_config(Config.load(working_dir=str(root)))
+acp = SessionOptions.load(root)
+assert native == acp
+assert acp.keep_going is False
+print("Both hosts load the same behavior; keep-going is off.")
+PYTHON
+```
+
+New behavior writes use `coding.*`; legacy `tui.*` and
+`agent.summarization` settings remain readable. Partial summarization overrides
+preserve unspecified legacy fields. Presentation preferences remain in `tui.*`.
+These checks establish shared configuration; ACP does not yet implement the
+native `/keep-going`, `/memory`, `/skills` or model-control operations.
+
 ## Handoff the same database
 
 Exit **both** clients. Point Poolside at `$NOOA_PARITY/native` and resume the
@@ -149,8 +199,9 @@ owner has exited before removing them on that host.
 `packages/nooa-acp/tests/test_native_parity.py` uses the real native bootstrap,
 ACP adapter, SQLite snapshots and an explicitly activated fixture skill, with a
 deterministic fake LLM. It checks both handoff directions, variables, Todos,
-title protection, skill resume hooks, workspace bindings, transcript parity and
-writer exclusion. `test_foreground_runtime.py` exercises both admission styles,
+title protection, skill resume hooks, workspace bindings, transcript parity,
+Markdown command input and writer exclusion. `test_protocol.py` verifies
+Markdown command advertisement and invocation over ACP JSON-RPC. `test_foreground_runtime.py` exercises both admission styles,
 WAIT, notifications after DONE, cancellation and runner ownership.
 `test_parity_sessions.py` checks identical independent copies and live-source
 rejection. These tests do not substitute for running the actual Poolside client.
@@ -160,3 +211,8 @@ consolidates duplicate session registries and stores, and makes ACP use the
 native persistent engine. Compatibility imports preserve old module paths.
 The LLM backend and response IR are unchanged; repeat these gates after the
 ordered #312 → #310 → #311 → #313 stack is integrated before upstreaming to main.
+
+Latest configuration/skill-command regression gate: **1,911 passed, 2 skipped,
+3 existing xfailed** across the CLI and ACP suites. Ruff and formatting pass.
+ACP default session creation was also checked in a fresh process for absence of
+native TUI imports. The actual Poolside checks above remain manual acceptance.

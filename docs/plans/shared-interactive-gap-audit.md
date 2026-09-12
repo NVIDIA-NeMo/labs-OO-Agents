@@ -12,10 +12,11 @@ The agent factory and persistent runner are shared, but the session composition
 and control layer still has two implementations. The title omission was one
 instance of host behavior being attached outside that shared boundary.
 
-Three additional divergences were reproduced without calling an LLM. Several
-other source-confirmed omissions need their own parity acceptance cases.
+Three additional divergences were reproduced without calling an LLM. The
+configuration and skill-command follow-up below now addresses those three.
+Other source-confirmed omissions still need their own parity acceptance cases.
 
-## Reproduced divergences
+## Original reproduced divergences (resolved in the follow-up)
 
 ### 1. Configuration merging can change agent behavior
 
@@ -97,19 +98,21 @@ resulting agent input, not just that the same skill roots were discovered.
 
 | Area | Current difference | Shared extraction and acceptance |
 | --- | --- | --- |
-| Behavior controls | Native `commands.py` implements `/model`, `/reasoning`, `/compact`, `/skills`, `/memory`, `/reflection`, and `/keep-going`. ACP exposes loaded Python skill commands and has no equivalent model/config control handlers. | Extract the operations and structured results. Map them to native commands and appropriate ACP controls. Verify state changes, saved preferences, and cancellation. The Pool client's own commands do not establish that NOOA performed these operations. |
+| Behavior controls | Native `commands.py` implements `/model`, `/reasoning`, `/compact`, `/skills`, `/memory`, `/reflection`, and `/keep-going`. ACP exposes Markdown and Python skill commands and has no equivalent model/config control handlers. | Extract the operations and structured results. Map them to native commands and appropriate ACP controls. Verify state changes, saved preferences, and cancellation. The Pool client's own commands do not establish that NOOA performed these operations. |
 | MCP interaction | The registry and approvals are shared. Native `CommandRegistry._bind_mcp_oauth_prompt` binds user interaction and `/mcp approve` records approval. ACP does not supply these interaction paths. | Shared interaction requests with host adapters. Test a previously unapproved server and a fresh OAuth flow. Preapproved MCP success covers only part of parity. |
-| Input normalization | Native `tui/completer.py:expand_mentions` resolves typed `@path` mentions into absolute Markdown links; the composer preserves pasted text as opaque. Native also expands mentions in skill results. ACP `_prompt_text` accepts text and resource links, with links rendered as `Resource name: URI`. | Define common semantic input/attachment handling with provenance. Test literal pasted `@text`, real file references, and references returned by skills. Preserve opaque payloads. Do not expand them indiscriminately. |
+| Input normalization | Native `tui/completer.py:expand_mentions` resolves typed `@path` mentions into absolute Markdown links; the composer preserves pasted text as opaque. Both hosts now expand mentions in skill results through the shared helper. ACP `_prompt_text` accepts text and resource links, with links rendered as `Resource name: URI`. | Define common semantic input/attachment handling with provenance. Test literal pasted `@text`, real file references, and references returned by skills. Preserve opaque payloads. Do not expand them indiscriminately. |
 | Startup and restore policy | Native `bootstrap` handles invalid custom agents with a fallback and snapshot restoration errors with warnings. ACP `_create_runtime` propagates failures. Native configures memory before skill setup; ACP configures skills before memory. Their MCP connection and `SessionResumed` notification ordering also differ. | One create/load lifecycle with explicit fallback/restoration results and a readiness barrier. Test a failing custom agent, missing/corrupt snapshot, and a skill whose resume hook inspects all configured resources. The ordering differences are confirmed; their effects on arbitrary custom skills were not dynamically tested. |
 | Session eligibility and metadata | The store is canonical, but native picker, native `--continue`, and ACP still apply separate selection rules. The title and empty-session fixes exposed this duplication. Native `--continue` examines only its initial limited list before filtering; ACP now filters all candidates before pagination. | Shared resumable-session queries and title/display metadata. Test empty, untitled-but-nonempty, active, and paginated histories; keep direct ID loading a separate operation. |
 | Model readiness and diagnostics | Native owns startup health probes, deferred-input handling, model-switch validation, and actionable diagnostics in `tui/health_check.py`, `session.py`, and `commands.py`. ACP has no equivalent readiness layer; its prompt handler maps only specific generation limits and otherwise propagates generation errors. | Shared readiness/failure results with host presentation. Test an unresolved alias, endpoint failure and recovery, and inspect the actual ACP error message. Exact Pool rendering of these failures remains unverified. |
 | Tracing and observations | Native bootstrap initializes configured exporters and trace/session correlation. ACP does not use that bootstrap. Native exposes Todo/job/memory views; ACP's event bridge currently forwards messages, tool activity, usage and session titles, with no equivalent Todo/plan projection. | Extract trace setup and stable observation data where needed. Keep terminal explorers and layouts with native. Verify the same session identity in diagnostics and the same Todo state through each host's supported view. |
 
-The settings loader/model-selection entry points also remain host-specific:
+Model-selection entry points remain host-specific:
 native reads its default model from settings, while ACP requires `--model` or
 `NOOA_MODEL`. The current acceptance commands deliberately equalize these.
-Explicit `--llm-config` paths and selecting a session workspace different from
-the server's process directory need additional configuration-scope tests.
+Native also retains its explicit `NEMO_OO_PROJECT_DIR` override, whereas ACP
+selects the session workspace's project settings. Aligning that scope contract
+and explicit `--llm-config` paths remains follow-up work; acceptance leaves the
+project override unset or points it at the tested workspace.
 
 ## Already shared; preserve these boundaries
 
@@ -160,5 +163,37 @@ Ruff and diff checks passed.
 
 The three configuration/command probes above used temporary directories and an
 isolated Python environment, with a fake LLM for agent construction. No user
-settings or session databases were changed by the audit. The additional gaps
-are documented for follow-up implementation; they are not fixed by this audit.
+settings or session databases were changed by the audit. The remaining lifecycle, controls and interaction gaps are documented for
+follow-up implementation.
+
+
+## Configuration and skill-command follow-up
+
+The shared `interactive/settings.py` now resolves behavior for both hosts,
+including partial summarization overrides. It writes `coding.*`, reads legacy
+`tui.*` and `agent.summarization` aliases, and removes same-file aliases when
+explicitly deleting a value. Native export and the first-run scaffold use the
+canonical namespace. Skill roots resolve against the session workspace, and an
+explicit `coding.additional_skills_dirs` list replaces its legacy YAML alias,
+including when the new list is empty.
+
+Both hosts now use `CodingSlashCommandRegistry` to discover Markdown and Python
+commands. Markdown frontmatter, user visibility, root precedence, reserved host
+names, Python-over-Markdown collisions, refresh, typed argument parsing and
+skill-result file mentions have one implementation. Native preserves quoted
+Python arguments. ACP dispatches expanded Markdown bodies through the shared
+user-turn path, so recording and first-turn title instructions also agree.
+Direct prompt/paste/attachment normalization remains a separate gap.
+
+Regression coverage checks settings round trips through a real native command,
+shared discovery and quoted arguments, actual native/ACP LLM input and durable
+turns, and Markdown advertisement/invocation over the ACP subprocess protocol.
+The LLM backend and response IR are untouched.
+
+Validation after the follow-up: full CLI and ACP suites, **1,911 passed,
+2 skipped, 3 existing xfailed** in 166.27 seconds; Ruff, formatting and diff
+checks passed. ACP default session construction still imports no native TUI
+modules. The full run also exposed a native picker shutdown race: completed
+preview tasks could starve their own cleanup callbacks. A separate native-only
+commit fixes it with a deterministic regression test; keep that commit out of
+the eventual non-TUI upstream slice.

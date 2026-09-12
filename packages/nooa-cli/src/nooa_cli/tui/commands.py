@@ -2112,32 +2112,7 @@ class SessionCommand(Command):
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class _UserSkill:
-    """Metadata for a user-invocable skill slash command."""
-
-    name: str
-    body: str
-    description: str
-    argument_hint: str | None = None
-    completions: tuple[str, ...] = ()
-    output_to_agent: bool = True
-    _method: Any = field(default=None, repr=False)
-
-    def help_entry(self) -> tuple[str, str]:
-        hint = self.argument_hint or ""
-        key = f"/{self.name} {hint}".strip()
-        return key, self.description
-
-    def make_agent_message(self, args: list[str]) -> str:
-        body = self.body
-        if args:
-            joined = " ".join(args)
-            if "$ARGUMENTS" in body:
-                return body.replace("$ARGUMENTS", joined)
-            return f"{body}\n\nArguments: {joined}"
-        return body
-
+from nooa_cli.coding.slash_commands import CodingSlashCommand as _UserSkill  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Jobs command
@@ -2818,121 +2793,21 @@ class CommandRegistry:
             except Exception as exc:
                 logger.warning("Failed to auto-connect MCP server %r: %s", server_name, exc)
 
-    def _discover_user_skills(self) -> "dict[str, _UserSkill]":
-        """Scan skills dirs for install-as:command skills and register them as slash commands.
+    def _discover_user_skills(self) -> dict[str, _UserSkill]:
+        from nooa_cli.coding.slash_commands import CodingSlashCommandRegistry
 
-        Uses rglob to match SkillRegistry.discover_skills_dirs() — finds skills at any depth.
-        Parses SKILL.md frontmatter inline to avoid depending on private nooa
-        internals that may not be present in older installed versions.
-        """
-        skills: dict[str, _UserSkill] = {}
-        if not self.skills_dirs:
-            return skills
-        try:
-            import yaml
-        except ImportError:
-            return skills
-        for skills_dir in self.skills_dirs:
-            skills_dir = Path(skills_dir)
-            if not skills_dir.is_dir():
-                continue
-            for skill_md in sorted(skills_dir.rglob("SKILL.md")):
-                entry = skill_md.parent
-                try:
-                    content = skill_md.read_text(encoding="utf-8")
-                    if not content.startswith("---"):
-                        continue
-                    parts = content.split("---", 2)
-                    if len(parts) < 3:
-                        continue
-                    try:
-                        meta = yaml.safe_load(parts[1]) or {}
-                        if not isinstance(meta, dict):
-                            raise ValueError("not a mapping")
-                    except Exception:
-                        # Fallback: line-by-line regex for invalid-YAML values like
-                        # argument-hint: "<action>" [issue-id]  (Claude Code style).
-                        # Parse each scalar individually so "false" → False (not "false").
-                        import re
+        self._skill_commands = CodingSlashCommandRegistry(
+            self.agent,
+            skills_dirs=self.skills_dirs or (),
+            reserved=self._commands,
+            bind_registry=False,
+        )
+        return {command.name: command for command in self._skill_commands.commands()}
 
-                        meta = {}
-                        for line in parts[1].splitlines():
-                            m = re.match(r"^([a-zA-Z][a-zA-Z0-9_-]*):\s*(.+)$", line)
-                            if not m:
-                                continue
-                            raw = m.group(2).strip()
-                            try:
-                                parsed = yaml.safe_load(raw)
-                                meta[m.group(1)] = (
-                                    str(parsed) if isinstance(parsed, list) else parsed
-                                )
-                            except Exception:
-                                meta[m.group(1)] = raw
-                    if not isinstance(meta, dict):
-                        continue
-                    # CC convention: user-invocable defaults to true.
-                    # Opt out with user-invocable: false.
-                    # install-as: command is honored for backward compat.
-                    if meta.get("user-invocable") is False:
-                        continue
-                    raw_name = str(meta.get("name") or "").strip()
-                    cmd_name = raw_name.lower()
-                    if not cmd_name or cmd_name in self._commands or cmd_name in skills:
-                        continue
-                    description = str(meta.get("description", "")).strip()
-                    body = parts[2].strip()
-                    hint = meta.get("argument-hint")
-                    if isinstance(hint, list):
-                        # YAML parses [label] as a list; reconstruct bracket notation
-                        hint = "[" + ", ".join(str(x) for x in hint) + "]"
-                    elif hint is not None:
-                        hint = str(hint)
-                    skills[cmd_name] = _UserSkill(
-                        name=cmd_name,
-                        body=body,
-                        description=description,
-                        argument_hint=hint,
-                    )
-                except Exception as e:
-                    logger.warning("Failed to load skill from %s: %s", entry, e)
-        # Also discover @slash_command methods from loaded Skills
-        skills.update(self._discover_skill_commands())
-        return skills
+    def _discover_skill_commands(self) -> dict[str, _UserSkill]:
+        from nooa_cli.coding.slash_commands import RESERVED_COMMAND_NAMES, discover_python_commands
 
-    def _discover_skill_commands(self) -> "dict[str, _UserSkill]":
-        """Discover @slash_command methods from loaded Skill instances on the agent."""
-        skills: dict[str, _UserSkill] = {}
-        try:
-            from nooa.skill import get_slash_commands
-        except ImportError:
-            return skills
-
-        from nooa.skill import Skill
-
-        for attr_name in dir(self.agent):
-            if attr_name.startswith("_"):
-                continue
-            try:
-                obj = getattr(self.agent, attr_name)
-            except Exception:
-                continue
-            if not isinstance(obj, Skill):
-                continue
-            for meta, method in get_slash_commands(obj):
-                cmd_name = meta.name.lower()
-                if cmd_name in self._commands or cmd_name in skills:
-                    continue
-                description = (method.__doc__ or "").strip().split("\n")[0]
-                skills[cmd_name] = _UserSkill(
-                    name=cmd_name,
-                    body="",
-                    description=description,
-                    argument_hint=meta.argument_hint,
-                    completions=getattr(meta, "completions", ()),
-                    output_to_agent=getattr(meta, "output_to_agent", True),
-                    _method=method,
-                )
-        return skills
+        return discover_python_commands(self.agent, RESERVED_COMMAND_NAMES | self._commands.keys())
 
     def _discover_directory_skills(self) -> None:
         """Load directory skills without making them model-visible by default."""
@@ -2994,11 +2869,7 @@ class CommandRegistry:
         slash commands become available and removed ones are deregistered
         without TUI restart.
         """
-        fresh = self._discover_skill_commands()
-        # Remove stale @slash_command entries (those with _method set);
-        # preserve text-skill entries (SKILL.md, _method is None).
-        self._user_skills = {k: v for k, v in self._user_skills.items() if v._method is None}
-        self._user_skills.update(fresh)
+        self._user_skills = self._discover_user_skills()
 
     @classmethod
     def get_all_command_classes(cls) -> dict[str, type[Command]]:
@@ -3060,13 +2931,6 @@ class CommandHandler:
         self.frontend = frontend
         self._agent_run_async = agent_run_async
 
-    def _expand_agent_mentions(self, text: str) -> str:
-        """Expand @paths in skill output immediately before it becomes an agent turn."""
-        from .completer import expand_mentions
-
-        agent = getattr(self.registry, "agent", None)
-        return expand_mentions(text, base_dir=getattr(agent, "cwd", None))
-
     async def handle(self, input_text: str, *, render_outputs: bool = True) -> "CommandResult":
         if not input_text.startswith("/"):
             return CommandResult(False)
@@ -3089,51 +2953,33 @@ class CommandHandler:
         # Check user-invocable skills before falling through to unknown-command error
         skill = self.registry.get_user_skill(cmd_name)
         if skill is not None:
-            if skill._method is not None:
-                import inspect
+            from nooa.slash_dispatch import CoercionError
+            from nooa_cli.coding.slash_commands import invoke_skill_command
 
-                from nooa.slash_dispatch import (
-                    CoercionError,
-                    SlashCommandResult,
-                    parse_typed_args,
-                )
+            raw_parts = input_text[1:].split(maxsplit=1)
+            raw_args = raw_parts[1] if len(raw_parts) == 2 else ""
+            agent = getattr(self.registry, "agent", None)
+            try:
 
-                raw_args = " ".join(args)
-                try:
-                    kwargs = parse_typed_args(skill._method, raw_args)
-                except CoercionError as e:
-                    msg = f"/{cmd_name}: {e.message}"
-                    if e.hint:
-                        msg += f"\nUsage: /{cmd_name} {e.hint}"
-                    result = CommandResult.err(msg)
-                    if render_outputs:
-                        for output in result.outputs:
-                            await self.frontend.render(output)
-                    return result
-
-                def _call_skill_method():
-                    return skill._method(**kwargs)
+                async def invoke():
+                    return await invoke_skill_command(skill, raw_args, agent=agent)
 
                 if self._agent_run_async is not None:
-                    result_val = await self._agent_run_async(_call_skill_method)
+                    result = await self._agent_run_async(invoke)
                 else:
-                    result_val = _call_skill_method()
-                    if inspect.isawaitable(result_val):
-                        result_val = await result_val
-
-                result_text = str(result_val) if result_val is not None else None
-                if result_text is not None and skill.output_to_agent:
-                    result_text = self._expand_agent_mentions(result_text)
-                slash_result = SlashCommandResult(
-                    command=cmd_name,
-                    args=raw_args,
-                    value=result_val,
-                    text=result_text,
-                    output_to_agent=skill.output_to_agent,
-                )
-                return CommandResult(success=True, slash_result=slash_result)
-            agent_message = self._expand_agent_mentions(skill.make_agent_message(args))
-            return CommandResult(success=True, agent_message=agent_message)
+                    result = await invoke()
+            except CoercionError as exc:
+                message = f"/{cmd_name}: {exc.message}"
+                if exc.hint:
+                    message += f"\nUsage: /{cmd_name} {exc.hint}"
+                error = CommandResult.err(message)
+                if render_outputs:
+                    for output in error.outputs:
+                        await self.frontend.render(output)
+                return error
+            if skill._method is None:
+                return CommandResult(success=True, agent_message=result.text)
+            return CommandResult(success=True, slash_result=result)
 
         command = self.registry.get_command(cmd_name)
         if not command:
