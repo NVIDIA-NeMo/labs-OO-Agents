@@ -297,6 +297,8 @@ class Config(BaseModel):
         from .settings import load_settings
 
         # Layers 1-2: dataclass defaults, then layered settings.yaml.
+        # The CLI scopes the project directory before loading; retain explicit
+        # NEMO_OO_PROJECT_DIR overrides for both reads and command writes.
         cfg = load_settings(cls())
 
         # Layer 3: explicit overrides (highest priority)
@@ -336,10 +338,13 @@ class Config(BaseModel):
 
         persisted = [Path(d) for d in cfg.tui.additional_skills_dirs]
         ordered = explicit + persisted + cfg.tui.skills_dirs
-        cfg.tui.skills_dirs = list(dict.fromkeys(ordered))
-
-        # Ignore absent conventional locations.
-        cfg.tui.skills_dirs = [d for d in cfg.tui.skills_dirs if d.exists()]
+        root = Path(cfg.agent.working_dir).expanduser().resolve()
+        resolved = [
+            (d.expanduser() if d.expanduser().is_absolute() else root / d.expanduser()).resolve()
+            for d in ordered
+        ]
+        # Resolve against the session workspace before filtering absent roots.
+        cfg.tui.skills_dirs = [d for d in dict.fromkeys(resolved) if d.is_dir()]
 
         return cfg
 

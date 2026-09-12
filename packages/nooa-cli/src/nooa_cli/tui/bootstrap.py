@@ -384,9 +384,8 @@ def build_registry(result: BootstrapResult, frontend: Frontend) -> CommandRegist
 
     from .commands import CommandRegistry
 
-    warnings = configure_session_skills(
-        result.agent, SessionOptions.from_native_config(result.config)
-    )
+    options = SessionOptions.from_native_config(result.config)
+    warnings = configure_session_skills(result.agent, options)
     result.messages.extend(TextOutput(message, "warning") for message in warnings)
 
     if result.session_id is not None:
@@ -401,7 +400,7 @@ def build_registry(result: BootstrapResult, frontend: Frontend) -> CommandRegist
         config=result.config.tui,
         agent=result.agent,
         frontend=frontend,
-        skills_dirs=result.config.tui.skills_dirs,
+        skills_dirs=options.skills_dirs,
         mcp_file=result.config.tui.mcp_file,
         session_manager=result.session_manager,
         root_config=result.config,

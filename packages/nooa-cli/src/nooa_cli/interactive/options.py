@@ -9,8 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from nooa.interactive import SummarizationConfig
-from nooa.layered_config import load_layered_yaml
+from nooa.interactive import DEFAULT_MODEL, SummarizationConfig
 from nooa_cli.coding.settings import load_coding_skills_dirs
 
 
@@ -22,6 +21,8 @@ class SessionOptions(BaseModel):
     legacy_agent: bool = False
     agent_spec: str | None = None
     skills_dirs: list[Path] = Field(default_factory=list)
+    additional_skills_dirs: list[Path] = Field(default_factory=list)
+    default_model: str = DEFAULT_MODEL
     active_skills: list[str] = Field(default_factory=list)
     inactive_skills: list[str] = Field(default_factory=list)
     mcp_file: Path = Path(".mcp.json")
@@ -50,16 +51,9 @@ class SessionOptions(BaseModel):
     def load(cls, workspace: str | Path, **overrides: Any) -> SessionOptions:
         """Load legacy ``tui`` and shared ``coding`` settings for this workspace."""
         root = Path(workspace).expanduser().resolve()
-        data = load_layered_yaml("settings.yaml", "NEMO_OO_SETTINGS", project_dir=root / ".nooa")
-        values: dict[str, Any] = {}
-        agent = data.get("agent", {})
-        if isinstance(agent, dict) and "summarization" in agent:
-            values["summarization"] = agent["summarization"]
-        for section in ("tui", "coding"):
-            if isinstance(data.get(section), dict):
-                values.update(data[section])
-        # Like native Config, select legacy mode only through invocation flags.
-        values.pop("legacy_agent", None)
+        from .settings import load_settings_data, resolve_behavior_settings
+
+        values = resolve_behavior_settings(load_settings_data(root))
         values.update({key: value for key, value in overrides.items() if value is not None})
         values["working_dir"] = str(root)
         values["skills_dirs"] = load_coding_skills_dirs(root)

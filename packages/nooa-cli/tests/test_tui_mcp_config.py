@@ -5,7 +5,6 @@
 from types import SimpleNamespace
 
 import yaml
-from nooa_cli.tui import settings
 from nooa_cli.tui.commands import MCPCommand
 from nooa_cli.tui.config import TUIConfig
 from nooa_cli.tui.mcp_registry import MCPRegistry
@@ -15,7 +14,7 @@ from nooa.skill import get_slash_commands
 
 def _project_settings(monkeypatch, tmp_path):
     path = tmp_path / ".nooa" / "settings.yaml"
-    monkeypatch.setattr(settings, "settings_path", lambda scope="project": path)
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(path.parent))
     return path
 
 
@@ -35,7 +34,7 @@ async def test_mcp_add_and_remove_round_trip_project_settings(monkeypatch, tmp_p
     assert added.success
     assert "Added HTTP MCP server 'docs'" in added.outputs[0].content
     data = yaml.safe_load(path.read_text())
-    assert data["tui"]["mcp_servers"]["docs"] == {
+    assert data["coding"]["mcp_servers"]["docs"] == {
         "url": "https://docs.example/mcp",
         "transport": "streamable-http",
     }
@@ -44,7 +43,7 @@ async def test_mcp_add_and_remove_round_trip_project_settings(monkeypatch, tmp_p
     removed = await command.execute(["remove", "docs"])
     assert removed.success
     data = yaml.safe_load(path.read_text())
-    assert "docs" not in data.get("tui", {}).get("mcp_servers", {})
+    assert "docs" not in data.get("coding", {}).get("mcp_servers", {})
     assert registry._servers == {"keep": {"url": "https://keep.example/mcp"}}
 
 
@@ -57,7 +56,7 @@ async def test_mcp_add_stdio_command_requires_later_approval(monkeypatch, tmp_pa
     assert result.success
     assert "Review it with /mcp approve local" in result.outputs[0].content
     data = yaml.safe_load(path.read_text())
-    assert data["tui"]["mcp_servers"]["local"] == {"command": "my-mcp-server"}
+    assert data["coding"]["mcp_servers"]["local"] == {"command": "my-mcp-server"}
     assert registry._is_approved("local") is False
 
 
