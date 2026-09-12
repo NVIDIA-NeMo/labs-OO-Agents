@@ -68,7 +68,7 @@ from nooa.errors import GenerationError
 from nooa.mcp import MCPManager, MCPTool
 from nooa.sessions import SessionResumed
 from nooa.slash_dispatch import CoercionError
-from nooa.storage.sqlite import SessionAlreadyActiveError
+from nooa.storage.sqlite import SessionAlreadyActiveError, is_sqlite_database_active
 from nooa.unifiedllm import UnifiedLLM
 from nooa_acp._runtime import (
     SessionBusyError,
@@ -234,8 +234,12 @@ class CodingACPAdapter:
         except (InvalidSessionIdError, SessionNotFoundError):
             raise RequestError.resource_not_found(session_id) from None
         except SessionAlreadyActiveError as exc:
-            raise RequestError.invalid_request(
-                {"sessionId": session_id, "reason": str(exc)}
+            # Clients may display only error.message, without error.data.
+            raise RequestError(
+                -32600,
+                f"Session {session_id[:8]!r} is already open. "
+                "Close it in the other client or tab, then try resuming again.",
+                {"sessionId": session_id, "reason": str(exc)},
             ) from None
         runtime: SessionRuntime[_ACPSession] | None = None
         try:
@@ -275,7 +279,15 @@ class CodingACPAdapter:
         if offset < 0:
             raise RequestError.invalid_params({"cursor": cursor, "reason": "Invalid cursor"})
 
-        found = self._store(root).list(limit=offset + _SESSION_PAGE_SIZE + 1)
+        store = self._store(root)
+        # ACP has no standard field for disabling a busy entry in the picker.
+        # Filter before pagination so open sessions cannot hide later results.
+        # The load-time lock still handles sessions opened after this check.
+        found = [
+            info
+            for info in store.list(limit=None)
+            if not is_sqlite_database_active(store.path_for(info.id))
+        ]
         page = found[offset : offset + _SESSION_PAGE_SIZE]
         sessions = [
             ACPSessionInfo(

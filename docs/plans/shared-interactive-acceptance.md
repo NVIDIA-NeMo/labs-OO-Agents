@@ -123,7 +123,11 @@ native NOOA and verify both changes. Repeat in the opposite direction using
 
 Only one host owns a live database. Two simultaneous windows above operate on
 copies; attaching both to one live agent would require a separate daemon/client
-architecture. A concurrent ACP load must reject the active session. Native's
+architecture. With a session open in native NOOA, refresh Poolside's `/resume`
+picker against that same store: the active session must be absent. Close it in
+native NOOA and refresh again: it must reappear and resume successfully. If a
+session becomes active after the picker was populated, loading it must explain
+that it is already open and must be closed in the other client or tab. Native's
 existing recovery may offer/start a fresh session after a lock conflict; verify
 the ID so that this cannot be mistaken for successful resume.
 
