@@ -174,12 +174,3 @@ class TestPresence:
         (user_dir / "settings.yaml").write_text(dump_settings(original))
         loaded = load_settings(Config())
         assert loaded.tui.toolbar_items == ["cwd", "model"]
-
-    def test_keep_going_round_trip(self, user_dir, project_dir):
-        original = Config()
-        original.tui.keep_going = True
-        original.tui.keep_going_model = "audit-model"
-        (user_dir / "settings.yaml").write_text(dump_settings(original))
-        loaded = load_settings(Config())
-        assert loaded.tui.keep_going is True
-        assert loaded.tui.keep_going_model == "audit-model"

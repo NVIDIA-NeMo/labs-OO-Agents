@@ -131,11 +131,6 @@ class TUIConfig(BaseModel):
     # Show bounded unified diffs for semantic file-edit events.
     show_diffs: bool = True
 
-    # Audit DONE turns and continue autonomously when the configured judge
-    # finds unfinished work. Disabled until explicitly enabled by the user.
-    keep_going: bool = False
-    keep_going_model: str | None = None
-
     # Long-term memory is opt-in and can be scoped to this session or shared
     # by every session rooted in the current project. Per-agent maps let custom
     # agents keep independent choices in the same settings file.

@@ -290,7 +290,7 @@ class MutableRecordingOutput(DummyOutput):
             sys.__stdout__.flush()
 
 
-def _wire_local_turn_policy(agent: Any, runner: Any, app: Any, config: Any) -> Any:
+def _wire_local_turn_policy(agent: Any, runner: Any, app: Any) -> Any:
     """Mirror Session's composition-root policy wiring for focused tests."""
     from nooa_cli.tui.local_turn_policy import LocalTurnPolicy
     from nooa_cli.tui.tui_application import DispatcherExit
@@ -303,7 +303,6 @@ def _wire_local_turn_policy(agent: Any, runner: Any, app: Any, config: Any) -> A
     policy = LocalTurnPolicy(
         agent,
         runner,
-        config,
         emit_output=_emit_output,
         invalidate=app.invalidate,
     )
@@ -311,10 +310,7 @@ def _wire_local_turn_policy(agent: Any, runner: Any, app: Any, config: Any) -> A
         on_state_change=app.runtime_state_changed,
         on_before_handle=policy.before_handle,
         on_after_handle=policy.after_handle,
-        on_notification=lambda notification: (
-            policy.on_notification(notification),
-            app.runtime_notification_received(),
-        ),
+        on_notification=lambda notification: app.runtime_notification_received(),
         dispatcher_exit=DispatcherExit,
         on_cancelled=app.runtime_cancelled,
     )
@@ -340,14 +336,12 @@ def make_local_tui_app(agent: Any, **kwargs: Any) -> Any:
         kwargs["host_services"] = TUIHostServices(
             auxiliary_status=(None if reflection is None else reflection.indicator_frame)
         )
-    config = kwargs.get("config")
     kwargs.setdefault("display_mode", "native-replay")
     app = TUIApplication(agent=runner, **kwargs)
     app_ref.append(app)
     app.observe_agent()
     app._test_agent_runner = runner
-    policy = _wire_local_turn_policy(agent, runner, app, config)
-    app._on_agent_activity = policy.invalidate_keep_going
+    _wire_local_turn_policy(agent, runner, app)
     return app
 
 
@@ -424,8 +418,7 @@ class TUIHarness(AbstractAsyncContextManager["TUIHarness"]):
             **kwargs,
         )
         app_ref.append(self.app)
-        policy = _wire_local_turn_policy(self.agent, agent_runner, self.app, self._config)
-        self.app._on_agent_activity = policy.invalidate_keep_going
+        _wire_local_turn_policy(self.agent, agent_runner, self.app)
         self._pipe = pipe
 
         agent_runner.activate(asyncio.get_running_loop())

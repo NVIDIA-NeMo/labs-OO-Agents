@@ -49,7 +49,7 @@ class CodingSlashCommand:
 # Native host controls reserve these names in every host so installed skills
 # cannot silently change meaning when a session is handed off.
 RESERVED_COMMAND_NAMES = frozenset(
-    "help exit quit clear compact context edit connect model models theme skills show-python show-diffs keep-going memory memories reflection session resume restart jobs events todos mcp trace-url toolbar activity reasoning".split()
+    "help exit quit clear compact context edit connect model models theme skills show-python show-diffs memory memories reflection session resume restart jobs events todos mcp trace-url toolbar activity reasoning".split()
 )
 
 

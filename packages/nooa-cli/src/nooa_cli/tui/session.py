@@ -572,12 +572,10 @@ class Session:
         gate, letting a turn's epilogue-scheduled pass slip through).
         """
         command_runner = self._command_runner
-        policy = getattr(self, "_local_turn_policy", None)
         return (
             self._app.input_drain_idle
             and self._reflection_idle()
             and (command_runner is None or command_runner.is_idle)
-            and (policy is None or policy.is_idle)
         )
 
     def _has_daemon_producers(self) -> bool:
@@ -792,10 +790,6 @@ class Session:
         self._local_agent_runner = agent_runner
         policy_ref: list[Any] = []
 
-        def _invalidate_turn_policy() -> None:
-            if policy_ref:
-                policy_ref[0].invalidate_keep_going()
-
         async def _shutdown_turn_policy() -> None:
             if policy_ref:
                 await policy_ref[0].shutdown()
@@ -894,7 +888,6 @@ class Session:
             on_cancel_command=self._cancel_active_slash_command,
             on_bang=self._on_bang,
             on_output=self._on_app_output,
-            on_agent_activity=_invalidate_turn_policy,
             completer=SlashCommandCompleter(self.registry),
             session_label=self._session_label,
             config=self.config,
@@ -914,7 +907,6 @@ class Session:
         turn_policy = LocalTurnPolicy(
             self.agent,
             agent_runner,
-            self.config,
             emit_output=self._on_app_output,
             invalidate=self._app.invalidate,
         )
@@ -924,10 +916,7 @@ class Session:
             on_state_change=self._app.runtime_state_changed,
             on_before_handle=turn_policy.before_handle,
             on_after_handle=turn_policy.after_handle,
-            on_notification=lambda notification: (
-                turn_policy.on_notification(notification),
-                self._app.runtime_notification_received(),
-            ),
+            on_notification=lambda notification: self._app.runtime_notification_received(),
             dispatcher_exit=DispatcherExit,
             on_cancelled=self._app.runtime_cancelled,
         )

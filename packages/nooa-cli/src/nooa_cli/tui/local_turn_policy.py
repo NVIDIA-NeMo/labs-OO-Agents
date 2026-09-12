@@ -8,8 +8,8 @@ from .output import StopReasonOutput
 
 
 class LocalTurnPolicy(SharedTurnPolicy):
-    def __init__(self, agent, runtime, config, *, emit_output, invalidate):
+    def __init__(self, agent, runtime, *, emit_output, invalidate):
         async def emit(status):
             await emit_output(StopReasonOutput(status.kind, status.explanation))
 
-        super().__init__(agent, runtime, config, emit_output=emit, invalidate=invalidate)
+        super().__init__(agent, runtime, emit_output=emit, invalidate=invalidate)

@@ -215,11 +215,6 @@ coding:
   # LLM model alias (from the unifiedllm registry) or a litellm model name.
   # default_model: {default_model}
 
-  # Audit DONE turns and continue when autonomous work remains.
-  # Configure the judge model before enabling this.
-  # keep_going: false
-  # keep_going_model: nemotron3-nano-30b
-
   # Long-term memory. "project" shares one store across project sessions;
   # "session" uses a sidecar database for only the current session.
   # Prefer /memory so the choice is persisted per agent.

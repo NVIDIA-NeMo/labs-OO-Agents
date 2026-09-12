@@ -844,17 +844,6 @@ class LocalAgentRunner:
             for name, channel in self._queue_manager.channels().items()
         )
 
-    def queue_continuation(self, text: str) -> str | None:
-        """Queue a host continuation, preferring the system channel."""
-        system = getattr(self._agent, "_system_messages_in", None)
-        if system is not None:
-            system.put(text)
-            return "system"
-        if self._user_messages is not None:
-            self._user_messages.put(text)
-            return "user"
-        return None
-
     def _withdraw_pending_input(self) -> tuple[bool, str | None]:
         """Withdraw on the runtime owner, serialized against submit/close/swap."""
         return self.run(self._withdraw_pending_input_on_owner)
@@ -873,18 +862,6 @@ class LocalAgentRunner:
             # overwritten by this stale withdrawal snapshot.
             self._update_pending_inputs(pending_inputs)
         return True, None if item is None else str(item)
-
-    def cancel_tasks(self, tasks: list[asyncio.Task[Any]]) -> None:
-        """Cancel worker-owned tasks safely from any calling thread."""
-        for task in tasks:
-            try:
-                loop = task.get_loop()
-            except RuntimeError:
-                loop = None
-            if loop is not None and loop.is_running():
-                loop.call_soon_threadsafe(task.cancel)
-            else:
-                task.cancel()
 
     async def swap_agent(self, agent: Any, *, seed_prompt: str | None = None) -> None:
         """Rebind the concrete-agent callbacks without stopping either agent."""

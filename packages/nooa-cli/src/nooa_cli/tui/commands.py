@@ -1476,12 +1476,6 @@ class ReflectionCommand(_BehaviorCommand):
     _control_name = "reflection"
 
 
-class KeepGoingCommand(_BehaviorCommand):
-    """Toggle stop auditing and autonomous continuation for unfinished work."""
-
-    _control_name = "keep-going"
-
-
 class ToolbarCommand(Command):
     """Configure ordered, named toolbar items."""
 
@@ -2315,7 +2309,6 @@ class CommandRegistry:
         "skills": SkillsCommand,
         "show-python": ShowPythonCommand,
         "show-diffs": ShowDiffsCommand,
-        "keep-going": KeepGoingCommand,
         "memory": MemoryCommand,
         "memories": MemoriesCommand,
         "reflection": ReflectionCommand,

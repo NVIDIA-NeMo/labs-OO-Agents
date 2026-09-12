@@ -117,7 +117,7 @@ class Completer:
         # Model completion
         if lower.startswith("/connect "):
             return self._model_registry_endpoint_completions(text)
-        if lower.startswith("/model ") or lower.startswith("/keep-going model "):
+        if lower.startswith("/model "):
             return self._model_completions(text)
 
         # Directory-only completion for adding a live skill root.
@@ -132,24 +132,6 @@ class Completer:
         # Toolbar item completion after the `set` action.
         if lower.startswith("/toolbar set "):
             return self._toolbar_item_completions(text)
-
-        if lower.startswith("/keep-going "):
-            prefix = "/keep-going "
-            partial = text[len(prefix) :].lower()
-            actions = {
-                "on": "Enable stop auditing",
-                "off": "Disable stop auditing",
-                "model": "Configure the judge model",
-            }
-            return [
-                CompletionItem(
-                    text=prefix + action,
-                    display=prefix + action,
-                    description=description,
-                )
-                for action, description in actions.items()
-                if action.startswith(partial)
-            ]
 
         action_sets = {
             "/session ": {
@@ -335,15 +317,8 @@ class Completer:
         except Exception:
             return []
 
-        prefix = (
-            "/keep-going model " if text.lower().startswith("/keep-going model ") else "/model "
-        )
+        prefix = "/model "
         partial = text[len(prefix) :]
-        description = (
-            "Use {name} as keep-going judge"
-            if prefix == "/keep-going model "
-            else "Switch to {name}"
-        )
         items = []
         for name in sorted(MODELS.keys()):
             if name.lower().startswith(partial.lower()):
@@ -351,7 +326,7 @@ class Completer:
                     CompletionItem(
                         text=prefix + name,
                         display=prefix + name,
-                        description=description.format(name=name),
+                        description=f"Switch to {name}",
                     )
                 )
         return items

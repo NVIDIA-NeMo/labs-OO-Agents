@@ -348,7 +348,7 @@ class CodingACPAdapter:
                         if requested in RESERVED_COMMAND_NAMES:
                             message = (
                                 f"NOOA /{requested} is not available through ACP yet. "
-                                "Available behavior controls: /skills, /memory, /reflection, /keep-going. "
+                                "Available behavior controls: /skills, /memory, /reflection. "
                                 "Use native NOOA for the other agent controls."
                             )
                             session.bridge.publish(update_agent_message(text_block(message)))
@@ -463,7 +463,6 @@ class CodingACPAdapter:
         async with session.cancel_lock:
             try:
                 if session.policy is not None:
-                    session.policy.invalidate_keep_going()
                     await session.policy.interrupt_reflection()
                 if await session.dispatcher.cancel():
                     await session.bridge.fail_open_tools("Cancelled by user.", title="Cancelled")
@@ -527,15 +526,12 @@ class CodingACPAdapter:
             bridge.watch_session(handle)
 
             async def emit_status(status: Any) -> None:
-                # Policy diagnostics are not the agent's answer. Report audit
-                # decisions explicitly; ACP stop reasons represent normal ends.
-                if str(status.kind) == "KEEP_GOING":
-                    bridge.publish(update_agent_message(text_block(status.explanation)))
+                # ACP stop reasons represent normal turn completion.
+                logger.debug("session %s: %s", handle.id, status)
 
             policy = LocalTurnPolicy(
                 agent,
                 dispatcher.runtime,
-                options.policy_config(),
                 emit_output=emit_status,
                 invalidate=lambda: None,
             )
@@ -547,7 +543,6 @@ class CodingACPAdapter:
             dispatcher.runtime.set_dispatch_hooks(
                 on_before_handle=policy.before_handle,
                 on_after_handle=checkpoint,
-                on_notification=policy.on_notification,
             )
 
             def configure_memory():

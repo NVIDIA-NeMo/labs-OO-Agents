@@ -120,7 +120,6 @@ async def test_acp_subprocess_transcript(tmp_path, monkeypatch):
         update for _, update in client.updates if isinstance(update, AvailableCommandsUpdate)
     )
     assert [command.name for command in commands.available_commands] == [
-        "keep-going",
         "mcp-add",
         "memory",
         "protocol-check",
@@ -501,7 +500,6 @@ async def test_acp_subprocess_behavior_controls_do_not_call_the_llm(tmp_path, mo
             ("/memory off", "Memory disabled"),
             ("/memory invalid", "Usage: /memory"),
             ("/reflection on", "Memory is not attached"),
-            ("/keep-going on", "Keep-going model is not configured"),
             ("/skills list", "Skills"),
             ("/compact", "NOOA /compact is not available through ACP yet"),
         ]:

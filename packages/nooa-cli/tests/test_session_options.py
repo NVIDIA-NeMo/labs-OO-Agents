@@ -27,7 +27,7 @@ def test_native_and_acp_resolve_same_workspace_behavior(tmp_path, monkeypatch):
 tui:
   active_skills: [legacy.skill]
   memory: project
-  keep_going: true
+  reflection: true
 agent:
   summarization:
     max_tokens: 2000
@@ -48,32 +48,33 @@ coding:
     assert acp.active_skills == ["shared.skill"]
     assert acp.inactive_skills == ["disabled.skill"]
     assert acp.memory == "session"
-    assert acp.keep_going is True
+    assert acp.reflection is True
     assert acp.summarization.max_tokens == 4000
     assert acp.summarization.policy == "none"
     assert acp.summarization.preserve_recent == 3
 
 
-async def test_native_setting_change_survives_reload_in_both_hosts(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-    from unittest.mock import AsyncMock
-
-    from nooa_cli.tui.commands import KeepGoingCommand
+@pytest.mark.parametrize("section", ["tui", "coding"])
+def test_retired_keep_going_settings_are_ignored_in_both_hosts(tmp_path, monkeypatch, section):
+    from nooa_cli.tui.settings import settings_to_dict
 
     project = tmp_path / ".nooa"
     project.mkdir()
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project))
     monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
     (project / "settings.yaml").write_text(
-        "tui:\n  keep_going: true\ncoding:\n  keep_going: true\n"
+        f"{section}:\n  keep_going: true\n  keep_going_model: obsolete-judge\n"
     )
     config = Config.load(working_dir=str(tmp_path))
-    command = KeepGoingCommand(AsyncMock(), config.tui, SimpleNamespace(vars={}))
-    assert (await command.execute(["off"])).success
-
-    native = SessionOptions.from_native_config(Config.load(working_dir=str(tmp_path)))
+    native = SessionOptions.from_native_config(config)
     acp = SessionOptions.load(tmp_path)
-    assert native.keep_going is acp.keep_going is False
+    assert native == acp
+    for key in ("keep_going", "keep_going_model"):
+        assert not hasattr(config.tui, key)
+        assert not hasattr(acp, key)
+        exported = settings_to_dict(config)
+        assert key not in exported["coding"]
+        assert key not in exported["tui"]
 
 
 @pytest.mark.parametrize("with_canonical", [False, True])
@@ -108,8 +109,8 @@ def test_export_keeps_behavior_in_shared_namespace():
     from nooa_cli.tui.settings import settings_to_dict
 
     data = settings_to_dict(Config())
-    assert "keep_going" in data["coding"]
+    assert "reflection" in data["coding"]
     assert "summarization" in data["coding"]
-    assert "keep_going" not in data["tui"]
+    assert "reflection" not in data["tui"]
     assert "summarization" not in data["agent"]
     assert "theme" in data["tui"]
