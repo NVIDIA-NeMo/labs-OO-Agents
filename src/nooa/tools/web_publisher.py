@@ -32,9 +32,9 @@ class RichOutput(Metadata):  # type: ignore[misc]
 class WebPublisher(Skill):
     """Inline rich output — interactive charts, images, HTML, and formatted data rendered in the web panel.
 
-    Available when the agent runs inside ``nooa term``.  Call methods on
-    ``self.web`` to render content inline at the current position in the
-    terminal scroll buffer.  All methods are fire-and-forget; if the browser
+    An explicitly constructed publisher can render content inline at the
+    current position in a compatible terminal scroll buffer. Agents do not
+    install this publisher automatically.  All methods are fire-and-forget; if the browser
     is not connected the call is silently skipped.  Content is persisted in
     the session and replayed automatically when resuming with ``--continue``.
 
@@ -47,100 +47,100 @@ class WebPublisher(Skill):
         fig = px.scatter(df, x="year", y="gdp", color="country",
                          size="population", hover_name="country",
                          title="GDP over time")
-        self.web.plot(fig)
+        publisher.plot(fig)
 
         # Line with multiple traces
         fig = px.line(df, x="date", y="value", color="metric", title="Metrics")
-        self.web.plot(fig)
+        publisher.plot(fig)
 
         # Bar (grouped or stacked)
         fig = px.bar(df, x="category", y="revenue", color="region",
                      barmode="group", title="Revenue by region")
-        self.web.plot(fig)
+        publisher.plot(fig)
 
         # Histogram
         fig = px.histogram(df, x="age", nbins=30, color="group",
                            title="Age distribution")
-        self.web.plot(fig)
+        publisher.plot(fig)
 
         # Box plot
         fig = px.box(df, x="department", y="salary", color="level",
                      title="Salary distribution")
-        self.web.plot(fig)
+        publisher.plot(fig)
 
         # Heatmap / correlation matrix
         corr = df.corr()
         fig = go.Figure(go.Heatmap(z=corr.values, x=corr.columns,
                                    y=corr.index, colorscale="RdBu",
                                    zmid=0))
-        self.web.plot(fig, title="Correlation matrix")
+        publisher.plot(fig, title="Correlation matrix")
 
         # Choropleth map
         fig = px.choropleth(df, locations="iso_alpha", color="value",
                             hover_name="country", title="World map")
-        self.web.plot(fig)
+        publisher.plot(fig)
 
         # Sunburst / treemap
         fig = px.sunburst(df, path=["continent", "country"], values="gdp")
-        self.web.plot(fig, title="GDP breakdown")
+        publisher.plot(fig, title="GDP breakdown")
 
         # Subplots (make_subplots is pre-loaded from plotly.subplots)
         fig = make_subplots(rows=1, cols=2, subplot_titles=("Before", "After"))
         fig.add_trace(go.Histogram(x=before), row=1, col=1)
         fig.add_trace(go.Histogram(x=after),  row=1, col=2)
-        self.web.plot(fig, title="Before vs After")
+        publisher.plot(fig, title="Before vs After")
 
         # 3-D scatter
         fig = px.scatter_3d(df, x="x", y="y", z="z", color="label")
-        self.web.plot(fig)
+        publisher.plot(fig)
 
         # Animated chart
         fig = px.scatter(df, x="gdp", y="life_exp", color="continent",
                          size="population", animation_frame="year",
                          title="Gapminder")
-        self.web.plot(fig)
+        publisher.plot(fig)
 
     Markdown (formatted summaries, tables, code blocks)::
 
-        self.web.markdown("## Results\\n- accuracy: **94.2 %**\\n- f1: **0.91**")
+        publisher.markdown("## Results\\n- accuracy: **94.2 %**\\n- f1: **0.91**")
 
-        self.web.markdown(f"```python\\n{code}\\n```")
+        publisher.markdown(f"```python\\n{code}\\n```")
 
         # Markdown table
         rows = "\\n".join(f"| {k} | {v} |" for k, v in metrics.items())
-        self.web.markdown(f"| Metric | Value |\\n|--------|-------|\\n{rows}")
+        publisher.markdown(f"| Metric | Value |\\n|--------|-------|\\n{rows}")
 
     HTML fragments (custom tables, styled output — no <html>/<head>/<script> tags)::
 
-        self.web.html("<table><tr><th>Name</th><th>Score</th></tr>...</table>")
+        publisher.html("<table><tr><th>Name</th><th>Score</th></tr>...</table>")
 
-        self.web.html('<p style="color:salmon">Warning: missing values in column age</p>')
+        publisher.html('<p style="color:salmon">Warning: missing values in column age</p>')
 
         # DataFrame as HTML table
-        self.web.html(df.head(20).to_html(index=False))
+        publisher.html(df.head(20).to_html(index=False))
 
     Images (data URIs or URLs — base64, io are pre-loaded)::
 
         buf = io.BytesIO()
         plt.savefig(buf, format="png", bbox_inches="tight")
         src = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
-        self.web.image(src, title="matplotlib figure")
+        publisher.image(src, title="matplotlib figure")
 
         # PIL image
         img_bytes = io.BytesIO()
         pil_img.save(img_bytes, format="PNG")
         src = "data:image/png;base64," + base64.b64encode(img_bytes.getvalue()).decode()
-        self.web.image(src)
+        publisher.image(src)
 
     JSON data (pretty-printed, useful for dicts and lists)::
 
-        self.web.json({"accuracy": 0.94, "loss": 0.12, "epochs": 50})
-        self.web.json(results_list, title="Top matches")
-        self.web.json(df.describe().to_dict(), title="Summary statistics")
+        publisher.json({"accuracy": 0.94, "loss": 0.12, "epochs": 50})
+        publisher.json(results_list, title="Top matches")
+        publisher.json(df.describe().to_dict(), title="Summary statistics")
 
     Clear all inline items::
 
-        self.web.clear()
+        publisher.clear()
     """
 
     def attach(self, agent: Any) -> None:

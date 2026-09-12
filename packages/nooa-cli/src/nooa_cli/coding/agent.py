@@ -142,12 +142,13 @@ class CodingAgent(InteractiveAgent):
         # but leave them inactive until the user opts in with ``/skills``.
         # Memory is host-configured because its scope, store and owner are
         # session-specific; loading its default entry point would attach it
-        # even when the host has memory disabled.
+        # even when the host has memory disabled. Also ignore the retired web
+        # publisher entry point in older installed package metadata.
         loaded = set(self.skills.loaded())
         installed = []
         for name in self.skills.discovered():
             attr_name = name.rsplit(".", 1)[-1].replace("-", "_")
-            if name == "nemo.memory" or name in loaded or hasattr(self, attr_name):
+            if name in {"nemo.memory", "nemo.web"} or name in loaded or hasattr(self, attr_name):
                 continue
             installed.append(name)
         if installed:
