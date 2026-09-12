@@ -1725,3 +1725,21 @@ async def test_close_drains_worker_after_preview_task_was_already_cancelled(monk
     assert worker_finished.is_set()
     assert not picker._all_preview_tasks
     assert not picker._preview_worker_tasks
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_close_yields_to_pending_preview_completion_callbacks():
+    from nooa_cli.tui.resume_picker import ResumePicker
+
+    picker = ResumePicker.__new__(ResumePicker)
+    completed = asyncio.get_running_loop().create_future()
+    completed.set_result(None)
+    picker._all_preview_tasks = {completed}
+    picker._preview_worker_tasks = set()
+    completed.add_done_callback(picker._all_preview_tasks.discard)
+
+    # Await directly: a separate task would run after the pending callback
+    # and conceal the synchronous gather loop that can freeze picker close.
+    await picker.wait_closed()
+    assert picker._all_preview_tasks == set()
