@@ -131,9 +131,7 @@ def _folded_with_source(text: str) -> tuple[str, list[int]]:
     return entry
 
 
-def _term_hits(
-    terms: list[str], text: str
-) -> tuple[set[str], int, tuple[int, ...]] | None:
+def _term_hits(terms: list[str], text: str) -> tuple[set[str], int, tuple[int, ...]] | None:
     """Locate query terms in one field, in original-text coordinates.
 
     Returns the distinct terms hit, the earliest hit position, and the
@@ -907,6 +905,7 @@ class ResumePicker(ExplorerBrowser):
             if on_chunk is not None:
                 on_chunk(transcript)
         return transcript
+
     def _preview_model(self, width: int):
         row = self.model.current
         if row is None:
@@ -1120,6 +1119,9 @@ class ResumePicker(ExplorerBrowser):
         while self._all_preview_tasks or self._preview_worker_tasks:
             tasks = tuple(self._all_preview_tasks | self._preview_worker_tasks)
             await asyncio.gather(*tasks, return_exceptions=True)
+            # gather() can finish synchronously for already-completed tasks.
+            # Let their discard callbacks run before inspecting the sets again.
+            await asyncio.sleep(0)
 
     def selected_id(self) -> str | None:
         return self.model.current.id if self.model.can_select and self.model.current else None
