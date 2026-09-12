@@ -20,9 +20,14 @@ MODELS = ["anthropic/claude-sonnet-4", "gemini/gemini-2.5-pro", "openai/gateway-
 
 
 @pytest.mark.parametrize("scope", [None, "chat:gemini:test", "chat:openai:test"])
-def test_unsigned_thinking_is_portable_without_dropping_neighbor_signatures(scope):
+@pytest.mark.parametrize("signature_fields", [{}, {"signature": None}])
+def test_unsigned_thinking_is_portable_without_dropping_neighbor_signatures(
+    scope, signature_fields
+):
     source = message("gemini/test")
-    source["thinking_blocks"] = [{"type": "thinking", "thinking": "Check inputs."}]
+    source["thinking_blocks"] = [
+        {"type": "thinking", "thinking": "Check inputs.", **signature_fields}
+    ]
     source["reasoning_content"] = "Check inputs."
     turn = LLMResponse(parts=capture_chat_parts(source, scope), replay_scope=scope)
     assert turn.reasoning == "Check inputs."
@@ -38,7 +43,7 @@ def test_unsigned_thinking_is_portable_without_dropping_neighbor_signatures(scop
         assert "opaque-signature" not in json.dumps(projected)
 
 
-@pytest.mark.parametrize("signature", [None, "", 42])
+@pytest.mark.parametrize("signature", ["", 42])
 def test_present_but_malformed_thinking_signature_still_raises(signature):
     source = {"thinking_blocks": [{"type": "thinking", "thinking": "x", "signature": signature}]}
     with pytest.raises(ReasoningReplayError, match="Malformed signed thinking"):

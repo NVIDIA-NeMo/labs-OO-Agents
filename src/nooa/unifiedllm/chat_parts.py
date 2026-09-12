@@ -66,7 +66,7 @@ def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, 
                     text = native.pop("thinking", "")
                     if not isinstance(text, str):
                         raise ReasoningReplayError("Thinking text must be a string.")
-                    if "signature" not in native:
+                    if native.get("signature") is None:
                         # Gemini can expose unsigned thoughts beside signed text
                         # or calls. Keep the text without discarding those parts'
                         # independent signatures.
