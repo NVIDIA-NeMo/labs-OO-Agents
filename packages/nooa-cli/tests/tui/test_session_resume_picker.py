@@ -1288,7 +1288,9 @@ async def test_full_application_screen_keeps_picker_help_visible(
                 timeout=5.0,
             )
         else:
-            await harness.wait_for(lambda: any(line.strip() for line in rendered_lines()))
+            await harness.wait_for(
+                lambda: any("Terminal too small" in line for line in rendered_lines())
+            )
         visible = rendered_lines()
         if usable:
             joined = "\n".join(visible)
