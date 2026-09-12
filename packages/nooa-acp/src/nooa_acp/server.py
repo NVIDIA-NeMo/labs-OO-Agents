@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -301,7 +302,9 @@ class CodingACPAdapter:
                     if Path(info.working_directory).is_absolute()
                     else str(root)
                 ),
-                title=info.title,
+                # Old ACP sessions never requested an automatic title. Give
+                # pickers a nonempty label without rewriting durable metadata.
+                title=info.title or f"Untitled session [{info.id[:8]}]",
                 updated_at=datetime.fromtimestamp(info.last_active, UTC).isoformat(),
             )
             for info in page
@@ -491,6 +494,7 @@ class CodingACPAdapter:
             dispatcher = InteractiveSessionDispatcher(agent)
             dispatcher.runtime.set_user_message_accepted_callback(handle.record_user_message)
             bridge = ACPEventBridge(agent, self._client, handle.id)
+            bridge.watch_session(handle)
 
             async def emit_status(status: Any) -> None:
                 # Policy diagnostics are not the agent's answer. Report audit
@@ -719,15 +723,42 @@ async def serve(
     options_factory: Callable[[Path], SessionOptions] | None = None,
 ) -> None:
     adapter = CodingACPAdapter(llm_factory, options_factory=options_factory)
+    # ACP clients may terminate their subprocess instead of closing stdin.
+    # Let normal teardown save snapshots and release shared-filesystem claims.
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    terminating = False
+
+    def terminate() -> None:
+        nonlocal terminating
+        if not terminating and task is not None:
+            terminating = True
+            task.cancel()
+
+    signal_installed = False
+    try:
+        loop.add_signal_handler(signal.SIGTERM, terminate)
+        signal_installed = True
+    except (NotImplementedError, RuntimeError):
+        pass  # Non-Unix event loops or an embedded server outside the main thread.
     try:
         # session/close is registered by the router as unstable. initialize()
         # advertises the close capability, so without this flag the agent
         # promises a method that answers "method not found", and a client can
         # never release a session. session/list is stable and unaffected.
         await run_agent(cast(Agent, adapter), use_unstable_protocol=True)
+    except asyncio.CancelledError:
+        if not terminating:
+            raise
     finally:
-        with suppress(Exception):
-            await adapter.close()
+        try:
+            with suppress(Exception):
+                await adapter.close()
+        finally:
+            if signal_installed:
+                loop.remove_signal_handler(signal.SIGTERM)
+                signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 def _available_commands_update(commands: tuple[CodingSlashCommand, ...]):

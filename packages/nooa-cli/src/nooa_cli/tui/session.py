@@ -337,7 +337,6 @@ class Session:
 
         self._toolbar = ToolbarRegistry()
         self._initial_outputs = list(initial_outputs or [])
-        self._session_title_requested = False
         # Building the next request temporarily replaces context_stats with a
         # version whose provider token count is unknown. Keep the last exact
         # display for the same context-window budget so the toolbar does not
@@ -964,7 +963,6 @@ class Session:
                         event_id = getattr(event, "id", None)
                         if event_id is not None:
                             user_event_id = str(event_id)
-                self._request_session_title(text)
                 # UI rendering must happen on the UI loop.
                 app = self._app
                 loop = getattr(app, "_loop", None) if app is not None else None
@@ -1500,7 +1498,6 @@ class Session:
                     extra_outputs = await self._local_agent_runner.run_async(post_swap)
                     if extra_outputs:
                         result.outputs.extend(extra_outputs)
-                self._session_title_requested = False
             finally:
                 self._app._session_transitioning = False
 
@@ -1951,25 +1948,6 @@ class Session:
             set_session(_make_trace_session_name(new_sm.session_id or ""))
         except Exception:
             pass
-
-    # ------------------------------------------------------------------
-    # Session auto-titling
-    # ------------------------------------------------------------------
-
-    def _request_session_title(self, opening_message: str) -> bool:
-        """Ask the normal agent turn to title a new, unnamed session once."""
-        if self._session_title_requested:
-            return False
-        self._session_title_requested = True
-
-        manager = self._session_manager
-        if manager is None or manager.user_named or (manager.name or "").strip():
-            return False
-        request_title = getattr(self.agent, "request_session_title", None)
-        if not callable(request_title):
-            return False
-        request_title(opening_message)
-        return True
 
     # ------------------------------------------------------------------
     # Bang (!) command routing
