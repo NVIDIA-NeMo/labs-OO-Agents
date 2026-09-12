@@ -118,7 +118,7 @@ async def test_skills_add_discovers_immediately_and_persists(tmp_path, monkeypat
     assert "local.tool" in agent.skills.discovered()
     assert "review-code" in registry._user_skills
     saved = yaml.safe_load((project_dir / "settings.yaml").read_text())
-    assert saved["tui"]["additional_skills_dirs"] == [str(skills_root.resolve())]
+    assert saved["coding"]["additional_skills_dirs"] == [str(skills_root.resolve())]
 
 
 @pytest.mark.asyncio
@@ -139,8 +139,8 @@ async def test_skills_activate_and_deactivate_are_persisted(tmp_path, monkeypatc
     assert config.active_skills == ["local.reconnect"]
     assert config.inactive_skills == []
     saved = yaml.safe_load((project_dir / "settings.yaml").read_text())
-    assert saved["tui"]["active_skills"] == ["local.reconnect"]
-    assert saved["tui"]["inactive_skills"] == []
+    assert saved["coding"]["active_skills"] == ["local.reconnect"]
+    assert saved["coding"]["inactive_skills"] == []
 
     deactivated = await command.execute(["deactivate", "local.reconnect"])
 
@@ -148,8 +148,8 @@ async def test_skills_activate_and_deactivate_are_persisted(tmp_path, monkeypatc
     assert config.active_skills == []
     assert config.inactive_skills == ["local.reconnect"]
     saved = yaml.safe_load((project_dir / "settings.yaml").read_text())
-    assert saved["tui"]["active_skills"] == []
-    assert saved["tui"]["inactive_skills"] == ["local.reconnect"]
+    assert saved["coding"]["active_skills"] == []
+    assert saved["coding"]["inactive_skills"] == ["local.reconnect"]
 
 
 @pytest.mark.asyncio

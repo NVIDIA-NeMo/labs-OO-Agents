@@ -58,7 +58,7 @@ class MCPRegistry(Skill):
     """Connect to MCP servers and surface their tools to the agent.
 
     Mirrors :class:`SkillRegistry`. An MCP server is *configured* (in
-    ``.mcp.json`` or the TUI ``tui.mcp_servers`` settings.yaml block), *connected* (an
+    ``.mcp.json`` or the shared ``coding.mcp_servers`` settings.yaml block), *connected* (an
     authenticated client that lists the server's tools), and *activated* (its
     tools are listed as callable free functions in the ``<mcp>`` context
     block). A connected-but-deactivated server keeps its generated tool/client
@@ -110,7 +110,7 @@ class MCPRegistry(Skill):
         )
         await self.mcp.connect(["myserver"])
 
-    To persist a server, add a ``tui.mcp_servers.<name>`` block to
+    To persist a server, add a ``coding.mcp_servers.<name>`` block to
     ``.nooa/settings.yaml`` or a VS Code /
     Claude-style ``.mcp.json``; ``register`` is in-memory only.
 
@@ -179,7 +179,7 @@ class MCPRegistry(Skill):
         The user pastes whatever they have about a server — a name and URL, a
         ``claude mcp add ...`` line, a docs snippet, an OAuth client id, etc.
         This does NOT edit anything itself; it returns a task for the agent,
-        which reads the details, writes the ``tui.mcp_servers.<name>`` block in
+        which reads the details, writes the ``coding.mcp_servers.<name>`` block in
         ``.nooa/settings.yaml``, and guides the user through connecting
         (OAuth/host-browser handoff as needed).
         """
@@ -200,7 +200,7 @@ class MCPRegistry(Skill):
             "Do the following:\n"
             "1. Parse the server name, URL, transport (default `streamable-http` for HTTP "
             "URLs), and any auth info (OAuth client_id, static API key/headers).\n"
-            f"2. Add a `tui.mcp_servers.<name>` YAML block to the TUI config at `{config_path}` "
+            f"2. Add a `coding.mcp_servers.<name>` YAML block to the shared config at `{config_path}` "
             "(create the file/section if missing; do NOT clobber existing servers). Use an "
             "environment placeholder in `headers` for a static API key, or `oauth_client_id` "
             "for a pre-provisioned OAuth client. Never write a secret value into project "
@@ -238,7 +238,7 @@ class MCPRegistry(Skill):
 
         Args:
             mcp_file: Path to a VS Code / Claude-style ``.mcp.json``.
-            servers: Inline server config (from TUI ``tui.mcp_servers`` in settings.yaml).
+            servers: Inline server config (from shared ``coding.mcp_servers`` in settings.yaml).
             approval_path: Override the user approval store path (primarily for tests).
             watch_settings: Reload layered TUI settings before lifecycle commands.
                 The production TUI enables this so agent-assisted config edits
@@ -293,12 +293,12 @@ class MCPRegistry(Skill):
         if raw_servers is None:
             raw_servers = {}
         if not isinstance(raw_servers, dict):
-            raise ValueError("tui.mcp_servers must be a mapping")
+            raise ValueError("coding.mcp_servers must be a mapping")
 
         fresh: dict[str, dict[str, Any]] = {}
         for name, definition in raw_servers.items():
             if not isinstance(name, str) or not isinstance(definition, dict):
-                raise ValueError("each tui.mcp_servers entry must map a name to a mapping")
+                raise ValueError("each coding.mcp_servers entry must map a name to a mapping")
             fresh[name] = copy.deepcopy(definition)
 
         removed = self._settings_server_names - set(fresh)
@@ -363,7 +363,7 @@ class MCPRegistry(Skill):
 
         Use ``url``/``headers``/``transport`` for HTTP servers, or
         ``command``/``args``/``env`` for stdio servers. To persist, add a
-        ``tui.mcp_servers.<name>`` block to settings.yaml instead.
+        ``coding.mcp_servers.<name>`` block to settings.yaml instead.
         """
         if name in self._connected or name in self._pending:
             raise RuntimeError(f"Disconnect MCP server {name!r} before changing its configuration")

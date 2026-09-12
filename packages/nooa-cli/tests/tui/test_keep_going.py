@@ -74,8 +74,8 @@ async def test_keep_going_command_configures_and_persists(monkeypatch, tmp_path)
     import yaml
 
     settings = yaml.safe_load((tmp_path / "settings.yaml").read_text())
-    assert settings["tui"]["keep_going_model"] == "audit-model"
-    assert settings["tui"]["keep_going"] is True
+    assert settings["coding"]["keep_going_model"] == "audit-model"
+    assert settings["coding"]["keep_going"] is True
 
 
 @pytest.mark.asyncio
