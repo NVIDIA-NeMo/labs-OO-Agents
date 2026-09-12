@@ -167,8 +167,25 @@ commands now report that limitation without invoking the model.
 
 ## Persistent skills and memory controls
 
-Asking the model to load a skill changes the current session. Use these commands
-in either host to save workspace defaults for fresh agents:
+Ordinary `self.skills.load/activate` changes the current session. The interactive
+hosts also attach `self.persisting_skills` for saving workspace defaults. In Pool,
+ask the agent to remember an exact Python skill ID and its source directory:
+
+```python
+await self.persisting_skills.remember(
+    "nvzurich.session_search",
+    directory="/localhome/local-pfurgale/dev/nemo-oo-skills",
+)
+```
+
+Restart and start fresh sessions in both hosts; the skill should be active.
+Repeat from native NOOA. Then ask the agent to call
+`await self.persisting_skills.forget("nvzurich.session_search")`: it should
+deactivate here and no longer auto-activate in fresh sessions in either host.
+Other live sessions keep their state. Source directories and session data remain.
+This skill belongs to the interactive hosts; the core `SkillRegistry` is unchanged.
+
+These slash commands use the same operations:
 
 ```text
 /skills add /absolute/path/to/nemo-oo-skills

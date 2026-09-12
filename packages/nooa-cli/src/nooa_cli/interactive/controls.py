@@ -146,6 +146,15 @@ class SkillsControl(BehaviorControl):
     async def execute(self, args: list[str]) -> ControlResult:
         subcmd = args[0].lower()
         subargs = args[1:]
+        if self.workspace is None:
+            cwd = getattr(self.agent, "cwd", None)
+            if isinstance(cwd, (str, Path)):
+                self.workspace = Path(cwd)
+        # Another session (or the agent's persistence skill) may have saved
+        # choices since this command's configuration was constructed.
+        from .settings import load_settings_data, resolve_behavior_settings
+
+        saved = resolve_behavior_settings(load_settings_data(self.workspace))
 
         if subcmd == "add":
             if self._registry is None:
@@ -168,7 +177,9 @@ class SkillsControl(BehaviorControl):
             persisted = list(
                 dict.fromkeys(
                     (base / Path(item).expanduser()).resolve()
-                    for item in getattr(self.config, "additional_skills_dirs", [])
+                    for item in saved.get(
+                        "additional_skills_dirs", self.config.additional_skills_dirs
+                    )
                 )
             )
             if path not in persisted:
@@ -248,8 +259,14 @@ class SkillsControl(BehaviorControl):
                 return ControlResult.err(f"Failed to activate `{skill_id}`: {e}")
             if skill_id not in registry.activated():
                 return ControlResult.err(f"Failed to activate `{skill_id}`")
-            active = list(dict.fromkeys([*self.config.active_skills, skill_id]))
-            inactive = [name for name in self.config.inactive_skills if name != skill_id]
+            active = list(
+                dict.fromkeys([*saved.get("active_skills", self.config.active_skills), skill_id])
+            )
+            inactive = [
+                name
+                for name in saved.get("inactive_skills", self.config.inactive_skills)
+                if name != skill_id
+            ]
             self.config.active_skills = active
             self.config.inactive_skills = inactive
             try:
@@ -272,8 +289,14 @@ class SkillsControl(BehaviorControl):
             return ControlResult.err(f"Failed to deactivate `{skill_id}`: {e}")
         if skill_id in registry.activated():
             return ControlResult.err(f"Failed to deactivate `{skill_id}`")
-        active = [name for name in self.config.active_skills if name != skill_id]
-        inactive = list(dict.fromkeys([*self.config.inactive_skills, skill_id]))
+        active = [
+            name
+            for name in saved.get("active_skills", self.config.active_skills)
+            if name != skill_id
+        ]
+        inactive = list(
+            dict.fromkeys([*saved.get("inactive_skills", self.config.inactive_skills), skill_id])
+        )
         self.config.active_skills = active
         self.config.inactive_skills = inactive
         try:

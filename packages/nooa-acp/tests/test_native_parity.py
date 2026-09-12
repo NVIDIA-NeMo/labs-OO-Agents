@@ -359,23 +359,9 @@ async def test_behavior_controls_match_native_without_generating_turns(workspace
         await close_native(result)
 
 
-async def test_acp_skill_selection_persists_after_agent_loaded_it(workspace, tmp_path):
+async def test_acp_skill_selection_persists_after_agent_loaded_it(workspace, external):
     from nooa_cli.interactive.options import SessionOptions
 
-    external = tmp_path / "extra skills"
-    package = external / "extra" / "src" / "parity_extra"
-    package.mkdir(parents=True)
-    (package.parents[1] / "pyproject.toml").write_text(
-        '[project]\nname="parity-extra"\n[project.entry-points."nooa.skills"]\n'
-        '"parity.extra"="parity_extra:ExtraSkill"\n'
-    )
-    (package / "__init__.py").write_text(
-        "from nooa.skill import Skill, slash_command\n"
-        "class ExtraSkill(Skill):\n"
-        '    @slash_command("extra-probe", output_to_agent=False)\n'
-        "    def probe(self, args: str):\n"
-        '        return "extra:" + args\n'
-    )
     adapter = CodingACPAdapter(parity_llm)
     client = RecordingClient()
     adapter.on_connect(client)
@@ -427,3 +413,159 @@ async def test_both_coding_agents_omit_web_publisher(workspace, monkeypatch, leg
         assert "web" not in agent.context
     finally:
         await agent.close()
+
+
+@pytest.fixture
+def external(tmp_path):
+    external = tmp_path / "extra skills"
+    package = external / "extra" / "src" / "parity_extra"
+    package.mkdir(parents=True)
+    (package.parents[1] / "pyproject.toml").write_text(
+        '[project]\nname="parity-extra"\n[project.entry-points."nooa.skills"]\n'
+        '"parity.extra"="parity_extra:ExtraSkill"\n'
+    )
+    (package / "__init__.py").write_text(
+        "from nooa.skill import Skill, slash_command\n"
+        "class ExtraSkill(Skill):\n"
+        '    @slash_command("extra-probe", output_to_agent=False)\n'
+        "    def probe(self, args: str):\n"
+        '        return "extra:" + args\n'
+    )
+    return external
+
+
+@pytest.mark.parametrize("host", ["native", "acp"])
+async def test_agent_remembers_skills_for_both_clients(workspace, external, host, monkeypatch):
+    from nooa_cli.interactive.options import SessionOptions
+
+    def remembering_llm():
+        return FakeLLMClient.with_tool_call(
+            "python_cell",
+            {
+                "code": (
+                    "self.message(await self.persisting_skills.remember("
+                    f"'parity.extra', directory={str(external)!r}))\n"
+                    "return_result(RespondReason.DONE, explanation='Remembered skill')"
+                )
+            },
+        )
+
+    source_adapter = CodingACPAdapter(remembering_llm)
+    source_adapter.on_connect(RecordingClient())
+    reader = CodingACPAdapter(parity_llm)
+    reader.on_connect(RecordingClient())
+    source_native = fresh_native = runner = None
+    try:
+        if host == "acp":
+            created = await source_adapter.new_session(str(workspace))
+            source = (await source_adapter._sessions.get(created.session_id)).value.agent
+            await source_adapter.prompt(
+                created.session_id, [text_block("Remember the extra skill")]
+            )
+        else:
+            monkeypatch.setattr(native_config, "get_llm", lambda *_: remembering_llm())
+            source_native = await open_native(workspace)
+            source = source_native.agent
+            runner = LocalAgentRunner(
+                source, emit_text=lambda _: None, agent_id=source_native.session_id
+            )
+            done = asyncio.Event()
+            runner.set_dispatch_hooks(on_after_handle=lambda *_: done.set())
+            assert runner.submit("Remember the extra skill")
+            await asyncio.wait_for(done.wait(), 5)
+            monkeypatch.setattr(native_config, "get_llm", lambda *_: parity_llm())
+
+        assert "parity.extra" in source.skills.activated()
+        assert "self.persisting_skills" in source.skills.status()
+        saved = SessionOptions.load(workspace)
+        assert "parity.extra" in saved.active_skills
+        assert "parity.fixture" in saved.active_skills
+        assert external in saved.skills_dirs
+
+        # Fresh agents must discover the source and restore activation, without
+        # sharing a snapshot or relying on the original host's in-memory config.
+        fresh_native = await open_native(workspace)
+        created = await reader.new_session(str(workspace))
+        fresh_acp = (await reader._sessions.get(created.session_id)).value.agent
+        for agent in (fresh_native.agent, fresh_acp):
+            assert "parity.extra" in agent.skills.activated()
+            assert "nooa.persisting_skills" in agent.skills.activated()
+
+        # Interleave a native slash command with the agent operation. Its
+        # configuration predates these writes and must retain other choices.
+        await source.persisting_skills.remember("nemo.methodwriting")
+        result = await fresh_native.agent._command_registry.get_command("skills").execute(
+            ["activate", "nemo.libwriting"]
+        )
+        assert result.success
+        assert {"nemo.methodwriting", "nemo.libwriting"} <= set(
+            SessionOptions.load(workspace).active_skills
+        )
+
+        await fresh_acp.persisting_skills.forget("parity.extra")
+        assert "parity.extra" not in fresh_acp.skills.activated()
+        assert "parity.extra" in fresh_native.agent.skills.activated()
+        saved = SessionOptions.load(workspace)
+        assert "parity.extra" not in saved.active_skills
+        assert "parity.extra" in saved.inactive_skills
+        assert external in saved.skills_dirs
+        await close_native(fresh_native)
+        fresh_native = await open_native(workspace)
+        created = await reader.new_session(str(workspace))
+        another_acp = (await reader._sessions.get(created.session_id)).value.agent
+        for agent in (fresh_native.agent, another_acp):
+            assert "parity.extra" not in agent.skills.activated()
+            assert "parity.extra" in agent.skills.discovered()
+    finally:
+        await source_adapter.close()
+        await reader.close()
+        if runner is not None:
+            await runner.shutdown()
+        if source_native is not None:
+            await close_native(source_native)
+        if fresh_native is not None:
+            await close_native(fresh_native)
+
+
+@pytest.mark.parametrize(
+    "operation, action", [("remember", "activation"), ("forget", "deactivation")]
+)
+async def test_agent_skill_persistence_reports_save_failure(
+    workspace, monkeypatch, operation, action
+):
+    from nooa_cli.interactive import settings
+
+    result = await open_native(workspace)
+    before = (workspace / ".nooa" / "settings.yaml").read_text()
+    try:
+
+        def fail(*args, **kwargs):
+            raise OSError("fixture write failure")
+
+        monkeypatch.setattr(settings, "write_settings_updates", fail)
+        with pytest.raises(RuntimeError, match=f"Could not save skill {action}"):
+            await getattr(result.agent.persisting_skills, operation)("parity.fixture")
+        assert (workspace / ".nooa" / "settings.yaml").read_text() == before
+        with pytest.raises(RuntimeError, match="not found"):
+            await result.agent.persisting_skills.remember("nonexistent.skill")
+    finally:
+        await close_native(result)
+
+
+async def test_persisting_skills_uses_session_workspace(workspace, tmp_path, monkeypatch):
+    from nooa_cli.interactive.options import SessionOptions
+
+    other = tmp_path / "other-workspace"
+    other.mkdir()
+    monkeypatch.chdir(workspace)
+    adapter = CodingACPAdapter(parity_llm)
+    adapter.on_connect(RecordingClient())
+    before = (workspace / ".nooa" / "settings.yaml").read_text()
+    try:
+        created = await adapter.new_session(str(other))
+        agent = (await adapter._sessions.get(created.session_id)).value.agent
+        await agent.persisting_skills.remember("nemo.methodwriting")
+        assert SessionOptions.load(other).active_skills == ["nemo.methodwriting"]
+        assert (workspace / ".nooa" / "settings.yaml").read_text() == before
+    finally:
+        await adapter.close()
