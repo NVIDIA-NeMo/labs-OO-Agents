@@ -11,8 +11,10 @@ from uuid import uuid4
 
 from pydantic import BaseModel
 
+from nooa.llm_types import CacheBoundary
 from nooa.unifiedllm.unifiedllm import LLMResponse, LLMUsage, Tool, ToolCall, UnifiedLLM
 
+from .cache_policy import apply_cache_policy
 from .replay_state import prepare_chat_messages
 
 
@@ -55,7 +57,7 @@ class FakeLLMClient(UnifiedLLM):
         self._response_queue = deque(responses)
         self._lock = asyncio.Lock()
         self.call_count = 0
-        self.last_messages: list[dict[str, Any] | LLMResponse] = []
+        self.last_messages: list[dict[str, Any]] = []
         self.last_tools: list[Tool] | None = None
         self._context_window = 128_000
 
@@ -70,7 +72,7 @@ class FakeLLMClient(UnifiedLLM):
 
     async def acall(
         self,
-        messages: list[dict[str, Any] | LLMResponse],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
@@ -84,7 +86,9 @@ class FakeLLMClient(UnifiedLLM):
         async with self._lock:
             self.call_count += 1
             # A non-provider test client must never observe private replay state.
-            self.last_messages = prepare_chat_messages(messages, None)
+            self.last_messages, _, _ = apply_cache_policy(
+                prepare_chat_messages(messages, None), None, responses=False
+            )
             self.last_tools = tools
 
             # Return next response from queue, or empty response if none left
@@ -103,7 +107,7 @@ class FakeLLMClient(UnifiedLLM):
 
     def call(
         self,
-        messages: list[dict[str, Any] | LLMResponse],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
@@ -111,7 +115,9 @@ class FakeLLMClient(UnifiedLLM):
         """Synchronous version of acall for UnifiedLLM compatibility."""
         # For sync call, we don't need locking since tests are usually single-threaded
         self.call_count += 1
-        self.last_messages = prepare_chat_messages(messages, None)
+        self.last_messages, _, _ = apply_cache_policy(
+            prepare_chat_messages(messages, None), None, responses=False
+        )
         self.last_tools = tools
 
         if self._response_queue:

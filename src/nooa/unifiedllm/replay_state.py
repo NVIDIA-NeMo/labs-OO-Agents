@@ -17,7 +17,8 @@ from urllib.parse import urlsplit
 
 import litellm
 
-from nooa.llm_types import LLMResponse
+from nooa.llm_types import CacheBoundary, LLMResponse
+from nooa.unifiedllm.cache_policy import reject_boundary_dict
 from nooa.unifiedllm.errors import ReasoningReplayError
 
 logger = logging.getLogger(__name__)
@@ -277,8 +278,8 @@ def responses_reasoning_text(output: list[Any]) -> str | None:
 
 
 def prepare_chat_messages(
-    messages: list[LLMResponse | dict[str, Any]], scope: str | None
-) -> list[dict]:
+    messages: list[LLMResponse | dict[str, Any] | CacheBoundary], scope: str | None
+) -> list[dict | CacheBoundary]:
     """Project stored turns; retain explicit fields in caller-written dictionaries.
 
     Portable reasoning demotion belongs to LLMResponse projection. A raw
@@ -288,7 +289,7 @@ def prepare_chat_messages(
     """
     from .chat_parts import project_chat_turn
 
-    prepared: list[dict[str, Any]] = []
+    prepared: list[dict[str, Any] | CacheBoundary] = []
     private_call_ids: dict[str, str] = {}
     for original in messages:
         if isinstance(original, LLMResponse):
@@ -304,9 +305,13 @@ def prepare_chat_messages(
             ):
                 prepared.append(message)
             continue
+        if isinstance(original, CacheBoundary):
+            prepared.append(original)
+            continue
         # Accept any Mapping; validation reads a plain dict before the one deep
         # copy that detaches caller-owned containers for the SDK.
         message = dict(original)
+        reject_boundary_dict(message)
         reject_native_message(message, scope)
         message = copy.deepcopy(message)
         call_id = message.get("tool_call_id")

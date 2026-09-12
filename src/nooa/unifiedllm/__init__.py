@@ -4,6 +4,7 @@ from nooa.llm_types import (
     AssistantPart,
     AssistantReasoning,
     AssistantText,
+    CacheBoundary,
     LLMResponse,
     LLMUsage,
     ToolCall,
@@ -55,6 +56,7 @@ __all__ = [
     "create_tool_from_callable",
     # Response types
     "LLMResponse",
+    "CacheBoundary",
     "LLMUsage",
     "AssistantPart",
     "AssistantText",

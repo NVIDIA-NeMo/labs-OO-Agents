@@ -19,7 +19,7 @@ from nooa.runtime.middleware import LLMCallContext
 from nooa.storage.sqlite import SQLiteStorageManager
 from nooa.tracing._journal_builder import build_journal_payload
 from nooa.tracing._secret_scrubber import scrub_value
-from nooa.unifiedllm import ResponsesClient
+from nooa.unifiedllm import CacheBoundary, ResponsesClient
 from nooa.unifiedllm.replay_state import ReasoningReplayError, prepare_chat_messages, replay_scope
 from nooa.unifiedllm.response_parts import capture_parts, project_turn
 
@@ -522,17 +522,17 @@ async def test_cache_helpers_and_calibration_receive_projected_dicts(monkeypatch
     )
     client = ResponsesClient("anthropic/claude-sonnet-4-5", api_key="test")
     try:
-        messages = [LLMResponse(content="previous"), {"role": "user", "content": "go"}]
-        params = {"cache_control_injection_points": [{"role": "user", "position": "last"}]}
-        result = (
-            await client.acall(messages, **params) if is_async else client.call(messages, **params)
-        )
+        messages = [
+            LLMResponse(content="previous"),
+            {"role": "user", "content": "go"},
+            CacheBoundary(),
+        ]
+        result = await client.acall(messages) if is_async else client.call(messages)
         assert result.content == "done"
         assert len(calibrated) == 1
         assert calibrated[0] is sent[0]
         assert all(isinstance(message, dict) for message in sent[0])
-        assert sent[0][-1]["content"][0]["type"] == "input_text"
-        assert sent[0][-1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+        assert sent[0][-1] == {"role": "user", "content": "go"}
     finally:
         await client.aclose()
 

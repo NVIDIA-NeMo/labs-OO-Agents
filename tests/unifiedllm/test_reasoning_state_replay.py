@@ -294,7 +294,7 @@ def test_responses_state_is_hidden_from_a_different_model() -> None:
 
 
 def test_responses_model_override_uses_effective_replay_scope() -> None:
-    client = ResponsesClient(model="openai/gpt-5.6", api_key="account-a")
+    client = ResponsesClient(model="openai/gpt-5.6", api_key="account-a", cache_breakpoint=None)
     try:
         with patch("litellm.responses", return_value=_responses(REASONING, MESSAGE)):
             first = client.call([{"role": "user", "content": "think"}])
@@ -303,7 +303,6 @@ def test_responses_model_override_uses_effective_replay_scope() -> None:
             client.call(
                 _render_responses(first),
                 model="anthropic/claude-sonnet-4-5",
-                cache_control_injection_points=[],
             )
 
         assert call.call_args.kwargs["model"] == "anthropic/claude-sonnet-4-5"
@@ -317,7 +316,7 @@ def test_completion_model_override_uses_effective_replay_scope() -> None:
     client = CompletionClient(
         model="openai/gpt-5.6",
         api_key="account-a",
-        cache_control_injection_points=[],
+        cache_breakpoint=None,
     )
     try:
         with patch("litellm.completion", return_value=_chat_response(reasoning_items=[REASONING])):
@@ -338,11 +337,11 @@ def test_completion_model_override_uses_effective_replay_scope() -> None:
 
 @pytest.mark.asyncio
 async def test_async_clients_use_effective_model_for_replay_scope() -> None:
-    responses = ResponsesClient(model="openai/gpt-5.6", api_key="account-a")
+    responses = ResponsesClient(model="openai/gpt-5.6", api_key="account-a", cache_breakpoint=None)
     completion = CompletionClient(
         model="openai/gpt-5.6",
         api_key="account-a",
-        cache_control_injection_points=[],
+        cache_breakpoint=None,
     )
     try:
         with patch("litellm.responses", return_value=_responses(REASONING, MESSAGE)):
@@ -359,7 +358,6 @@ async def test_async_clients_use_effective_model_for_replay_scope() -> None:
             await responses.acall(
                 _render_responses(responses_first),
                 model="anthropic/claude-sonnet-4-5",
-                cache_control_injection_points=[],
             )
             await completion.acall(
                 _render_chat(completion_first),

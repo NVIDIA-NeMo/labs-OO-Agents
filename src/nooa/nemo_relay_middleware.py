@@ -39,7 +39,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
-from nooa.llm_types import LLMResponse
+from nooa.llm_types import CacheBoundary, LLMResponse
 from nooa.runtime.middleware import (
     MIDDLEWARE_AGENT_CALL,
     MIDDLEWARE_EXECUTE_PYTHON,
@@ -58,7 +58,7 @@ def _reconcile_messages(originals, public):
     return [
         originals[index]
         if index < len(originals)
-        and isinstance(originals[index], LLMResponse)
+        and isinstance(originals[index], (LLMResponse, CacheBoundary))
         and message == originals[index].public_message()
         else message
         for index, message in enumerate(public)
@@ -188,7 +188,7 @@ async def nemo_relay_llm_middleware(
     }
     original_messages = list(ctx.messages)
     safe_params["messages"] = [
-        dict(message) if isinstance(message, LLMResponse) else message
+        dict(message) if isinstance(message, (LLMResponse, CacheBoundary)) else message
         for message in original_messages
     ]
     # Tools are excluded via _NON_SERIALIZABLE_KEYS.  Do NOT re-add them:
