@@ -137,7 +137,8 @@ the ID so that this cannot be mistaken for successful resume.
 Create a fresh session through Poolside, send a prompt, and exit Poolside without
 an explicit session-close command. Restart Poolside and verify that `/resume`
 lists and loads that session with its generated title. Repeat while a turn is
-running. Older untitled sessions get an `Untitled session [id]` picker label
+running. Sessions with no conversation turns must be absent from `/resume`.
+Older untitled conversations get an `Untitled session [id]` picker label
 without rewriting their saved metadata. The subprocess tests cover both stdin
 closure and SIGTERM. SIGKILL cannot run cleanup; old `.active` claims still
 require confirming the original
