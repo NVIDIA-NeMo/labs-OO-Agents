@@ -63,8 +63,15 @@ To load a specific file instead of discovery, pass its `Path` to `reload_registr
 
 Keys come from `.env` (library use) or `~/.config/nooa/secrets.yaml`.
 
-**Caching:** the cached renderer places a boundary before live context; UnifiedLLM
-maps it at dispatch. `cache_breakpoint="auto"` (CompletionClient default) marks recognized Anthropic
+**Caching:** the cached renderer inserts a `CacheBoundary()` block before live
+context. This UnifiedLLM type passes through the formatter in the message list,
+like `LLMResponse`; consumers do not translate its contents. Its public JSON
+view is `{"role": "metadata", "nooa_cache_boundary": true}`. Here `metadata`
+means a framework control record, not a system/user/assistant message for the
+model. UnifiedLLM consumes the boundary before provider dispatch and maps it to
+the selected provider's cache settings; the metadata record itself never goes
+to the model. Direct callers can put `CacheBoundary()` in their history too.
+`cache_breakpoint="auto"` (CompletionClient default) marks recognized Anthropic
 routes and leaves other providers' caches implicit. A supported OpenAI Responses
 route can opt into `cache_breakpoint="openai"`; `None` disables NOOA markers and
 is the ResponsesClient default.
