@@ -17,6 +17,7 @@ from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from nooa.agentdoc import pformat
 from nooa.context_blocks import EventStatus
 from nooa.context_blocks.models import Role
 from nooa.events import (
@@ -461,10 +462,7 @@ class EventManager:
 
         for value in event.searchable_fields().values():
             if value is not None:
-                if isinstance(value, list):
-                    parts.append(" ".join(str(item) for item in value))
-                else:
-                    parts.append(str(value))
+                parts.append(pformat(value))
 
         return " ".join(parts) if parts else event.event_type
 

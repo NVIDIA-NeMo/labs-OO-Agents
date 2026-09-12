@@ -54,6 +54,8 @@ _SENSITIVE_KEYS = frozenset(
 _OPAQUE_PROVIDER_STATE_KEYS = frozenset(
     {
         "encrypted_content",
+        "inline_thought_signature",
+        "signature",
         "native",
         "nooa_llm_state",
         "thought_signature",

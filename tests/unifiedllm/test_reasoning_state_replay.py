@@ -285,7 +285,7 @@ def test_responses_state_is_hidden_from_a_different_model() -> None:
             target.call(_render_responses(first))
 
         replay = call.call_args.kwargs["input"]
-        assert REASONING not in replay
+        assert all(item.get("type") != "reasoning" for item in replay)
         assert {"role": "assistant", "content": "done"} in replay
         assert "provider-secret" not in repr(replay)
     finally:
@@ -307,7 +307,7 @@ def test_responses_model_override_uses_effective_replay_scope() -> None:
             )
 
         assert call.call_args.kwargs["model"] == "anthropic/claude-sonnet-4-5"
-        assert REASONING not in call.call_args.kwargs["input"]
+        assert all(item.get("type") != "reasoning" for item in call.call_args.kwargs["input"])
         assert "include" not in call.call_args.kwargs
     finally:
         client.close()
@@ -367,7 +367,9 @@ async def test_async_clients_use_effective_model_for_replay_scope() -> None:
                 model="anthropic/claude-sonnet-4-5",
             )
 
-        assert REASONING not in response_call.call_args.kwargs["input"]
+        assert all(
+            item.get("type") != "reasoning" for item in response_call.call_args.kwargs["input"]
+        )
         assert "provider-secret" not in repr(chat_call.call_args.kwargs["messages"])
     finally:
         await responses.aclose()
@@ -442,6 +444,7 @@ def test_scope_is_stable_across_environment_selected_endpoints(monkeypatch) -> N
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway-b.example/v1")
     second = replay_scope("openai/gpt-5.6", "responses", {"api_key": "account-a"})
 
+    assert first is not None
     assert first == second
 
 

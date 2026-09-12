@@ -252,7 +252,6 @@ def test_renderer_keeps_reference_and_truncation_replaces_without_native_state()
     assert replacement["content"] == "Bef"
     resolved = [replacement]
     assert isinstance(resolved[0], dict)
-    assert "nooa_turn" not in resolved[0]
     assert original.content == "Before.Between."
 
 
@@ -264,7 +263,6 @@ def test_renderer_drops_incomplete_calls_as_a_state_stripping_edit():
     assert "tool_calls" not in replacement
     resolved = [replacement]
     assert isinstance(resolved[0], dict)
-    assert "nooa_turn" not in resolved[0]
     assert original.tool_calls
 
 
@@ -398,8 +396,10 @@ async def test_mocked_dispatch_resume_and_changing_live_suffix(monkeypatch, tmp_
             await invoke(ctx.messages)
         assert captured[-2][:-1] == captured[-1][:-1]
         assert captured[-2][-1] != captured[-1][-1]
-        # Tool-result cache markers are policy, not a turn-model change.
-        assert captured[-1][: len(output_items())] == output_items()
+        assert captured[-1][:-1] == output_items() + [
+            {"type": "function_call_output", "call_id": call_id, "output": "done"}
+            for call_id in ("call_1", "call_2")
+        ]
         assert "live 2" in captured[-1][-1]["content"]
     finally:
         await client.aclose()

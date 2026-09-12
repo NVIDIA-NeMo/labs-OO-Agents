@@ -1,7 +1,7 @@
 ---
 name: nooa-agent-authoring
 description: Author agents with NVIDIA-labs Object Oriented Agents (NOOA). Use when writing or modifying an Agent subclass, agentic methods (ellipsis bodies), docstring prompts, structured output contracts, strategy selection (CodeAct/Predict), visibility control, orchestrators, or subagent composition.
-compatibility: Python >= 3.12, uv, nooa package (CLI: nooa)
+compatibility: 'Python >= 3.12, uv, nooa package (CLI: nooa)'
 ---
 
 # Authoring NVIDIA-labs Object Oriented Agents (NOOA)
@@ -52,7 +52,14 @@ llm = get_llm_client("gpt-4o-mini", retry_config=RetryConfig(max_retries=5))  # 
 llm = CompletionClient(model="m", base_url="https://.../v1", api_key="...")  # any OpenAI-compatible endpoint
 ```
 
-**Registry:** models are defined in YAML configs loaded from `~/.config/nooa/models.yaml` (user) and the package's built-in `model_registry.yaml`. Each entry maps an alias to `{model, base_url, api_key_env}`. Inspect with `nooa config show` (shows all config layers and resolved values) or programmatically via `from nooa.unifiedllm.registry import reload_registry; configs = reload_registry()`.
+**Registry:** YAML has a top-level `models` mapping from aliases to entries with
+`model_name`, optional `api_base`, and `api_key_env`. Use `client_type: responses`
+for a Responses client. The framework discovers `llm_config.yaml` files and
+optional bundled configuration packages; NOOA does not ship a provider catalog.
+Inspect the actual paths with `from nooa.llm_config import llm_config_chain`.
+Inspect or refresh entries with
+`from nooa.unifiedllm.registry import reload_registry; configs = reload_registry()`.
+To load a specific file instead of discovery, pass its `Path` to `reload_registry`.
 
 Keys come from `.env` (library use) or `~/.config/nooa/secrets.yaml`.
 

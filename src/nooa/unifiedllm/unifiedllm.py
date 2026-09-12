@@ -2229,8 +2229,8 @@ class ResponsesClient(UnifiedLLM):
         """
         Sync version: Call LLM and parse response.
 
-        Handles both native Responses format (from ResponsesProviderFormatter) and
-        legacy OpenAI Chat format. System messages are extracted to the `instructions` param.
+        Accepts public message dictionaries and LLMResponse objects. Stored turns
+        are projected here; only leading system messages become `instructions`.
         """
         # Inject cache_control only for Anthropic-served models. litellm.responses
         # passes input[] through verbatim — no equivalent of the Chat Completions
@@ -2304,8 +2304,8 @@ class ResponsesClient(UnifiedLLM):
         """
         Async version: Call LLM and parse response.
 
-        Handles both native Responses format (from ResponsesProviderFormatter) and
-        legacy OpenAI Chat format. System messages are extracted to the `instructions` param.
+        Accepts public message dictionaries and LLMResponse objects. Stored turns
+        are projected here; only leading system messages become `instructions`.
         """
         # See ResponsesClient.call for why cache_control injection is gated on
         # Anthropic models only.
@@ -2412,6 +2412,8 @@ class ResponsesClient(UnifiedLLM):
         transformed: list[dict[str, Any]] = []
         leading_system = True
         for original in messages:
+            if not isinstance(original, Mapping):
+                raise TypeError("Each message must be a mapping or LLMResponse.")
             # Moving a later system message to instructions would reorder history.
             leading_system = leading_system and original.get("role") == "system"
             if isinstance(original, LLMResponse):
@@ -2419,10 +2421,16 @@ class ResponsesClient(UnifiedLLM):
                 continue
             msg = dict(original)
             replay_state.reject_native_message(msg, state_scope)
+            if isinstance(msg.get("content"), list) and any(
+                not isinstance(block, dict) for block in msg["content"]
+            ):
+                raise TypeError("Message content blocks must be dictionaries.")
             if leading_system:
                 if msg.get("content"):
                     instructions.append(msg["content"])
             elif msg.get("role") == "tool":
+                if not isinstance(msg.get("tool_call_id"), str):
+                    raise ValueError("Tool result requires a string 'tool_call_id'.")
                 content = msg.get("content", "")
                 cache_control = msg.get("cache_control")
                 if isinstance(content, list):

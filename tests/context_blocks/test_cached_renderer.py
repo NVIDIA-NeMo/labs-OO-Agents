@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the cached renderer (static-prefix / events / dynamic-suffix)."""
 
+import json
+
 from nooa.context_blocks.events import (
     AssistantEvent,
     ToolCallEvent,
@@ -16,7 +18,6 @@ from nooa.context_blocks.models import BlockMetadata, DynamicContext, ResolvedBl
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 from nooa.events import LLMResponse
-from nooa.unifiedllm.replay_state import LLM_STATE_KEY
 
 
 def _static_block(key: str, content: str, expr: str | None = None) -> ResolvedBlock:
@@ -33,7 +34,7 @@ def _dynamic_block(key: str, content: str, expr: str | None = None) -> ResolvedB
         key=key,
         content=content,
         role=Role.SYSTEM,
-        metadata=BlockMetadata(expr=expr, static=False, user_block=True),
+        metadata=BlockMetadata(expr=expr, static=False, user_block=True, source_dynamic=bool(expr)),
     )
 
 
@@ -84,7 +85,6 @@ class TestCachedBlockFormatterPartition:
         )
         assert len(messages) == 2
         sys_msg = messages[0]
-        assert sys_msg.index("<sys>") < sys_msg.index("<self_doc>") if False else True  # sanity
         assert sys_msg.content.index("<sys>") < sys_msg.content.index("<self_doc>")
         user_msg = messages[1]
         assert user_msg.content.index("<plan>") < user_msg.content.index("<state>")
@@ -116,6 +116,7 @@ class TestCachedRendererEndToEndOpenAI:
         assert result[-1]["role"] == "user"
         assert "<context>" in result[-1]["content"]
         assert "<plan" in result[-1]["content"]
+        assert "expr=" in result[-1]["content"]
 
     def test_volatile_appended_after_trailing_user_event(self):
         """Dynamic ``<context>`` is its own user message — never merged into a
@@ -270,8 +271,8 @@ class TestCachedRendererEndToEndOpenAI:
 
         assert first[:-1] == second[: len(first) - 1]
         assert first[-1] != second[-1]
-        assert all(LLM_STATE_KEY not in message for message in second if isinstance(message, dict))
-        assert second[2] == turn
+        assert second[2] is turn
+        assert "native" not in json.dumps([dict(message) for message in second])
         assert "version two" in second[-1]["content"]
 
     def test_volatile_appended_after_assistant(self):
@@ -325,6 +326,5 @@ class TestCachedRendererEndToEndAnthropic:
         assert "system" in result and "messages" in result
         assert "<sys>" in result["system"]
         assert len(result["messages"]) == 1
-        assert "nooa_cache_boundary" not in str(result)
         assert result["messages"][-1]["role"] == "user"
         assert "<context>" in result["messages"][-1]["content"]

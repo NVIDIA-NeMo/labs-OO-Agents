@@ -279,7 +279,7 @@ def responses_reasoning_text(output: list[Any]) -> str | None:
 def prepare_chat_messages(
     messages: list[LLMResponse | dict[str, Any]], scope: str | None
 ) -> list[dict]:
-    """Project canonical turns; retain explicit fields in caller-written dictionaries.
+    """Project stored turns; retain explicit fields in caller-written dictionaries.
 
     Portable reasoning demotion belongs to LLMResponse projection. A raw
     reasoning_content field is a caller's explicit wire setting, not a request
@@ -304,6 +304,8 @@ def prepare_chat_messages(
             ):
                 prepared.append(message)
             continue
+        # Accept any Mapping; validation reads a plain dict before the one deep
+        # copy that detaches caller-owned containers for the SDK.
         message = dict(original)
         reject_native_message(message, scope)
         message = copy.deepcopy(message)

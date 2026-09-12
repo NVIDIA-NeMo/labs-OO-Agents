@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Test that certain event fields are never truncated by pformat max_string.
+"""Discovered regression tests for event fields that must not be truncated.
 
 Fields annotated with spec(max_string=None) should render their full content
 regardless of the max_string kwarg passed to pformat(). This matches the

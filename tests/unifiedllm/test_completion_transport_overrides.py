@@ -56,17 +56,23 @@ async def test_completion_uses_per_call_route_without_changing_defaults(
     )
     client_http = client._http
     assert client_http is not None
-    # Intercept LiteLLM's default client too. Its real provider dispatch and SDK
-    # still choose the URL and Authorization header; only HTTP is replaced.
+    # Only overridden routes may use LiteLLM's default pool. An unchanged route
+    # must use NOOA's owned client, not merely reach an equivalent mock transport.
+    allow_default_pool = False
+
+    def default_pool(*, is_async=False, **kwargs):
+        assert allow_default_pool, "Unchanged routing must reuse the owned HTTP client"
+        return client_http.httpx_async if is_async else client_http.httpx_sync
+
     monkeypatch.setattr(
         OpenAIChatCompletion,
         "_get_sync_http_client",
-        staticmethod(lambda: client_http.httpx_sync),
+        staticmethod(default_pool),
     )
     monkeypatch.setattr(
         OpenAIChatCompletion,
         "_get_async_http_client",
-        staticmethod(lambda **kwargs: client_http.httpx_async),
+        staticmethod(lambda **kwargs: default_pool(is_async=True)),
     )
     try:
         owned_client = client_http.async_client if is_async else client_http.sync_client
@@ -75,6 +81,7 @@ async def test_completion_uses_per_call_route_without_changing_defaults(
         assert client._completion_http_client(unchanged, is_async=is_async) is owned_client
 
         for params in ({}, overrides, {}):
+            allow_default_pool = bool(params)
             messages = [{"role": "user", "content": "Hello"}]
             result = (
                 await client.acall(messages, **params)

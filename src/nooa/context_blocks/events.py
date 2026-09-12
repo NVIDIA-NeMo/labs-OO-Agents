@@ -106,7 +106,8 @@ class EventBase(BaseModel):
 
     def searchable_fields(self) -> dict[str, Any]:
         """Public fields for search/debug export; consumers need not know their layout."""
-        return self.model_dump()
+        # Keep nested objects intact so their display rules still hide private fields.
+        return self.__instance_values__()
 
     # Discriminator field - excluded from repr.
     # Default is "" (empty); model_post_init fills it with cls.__name__ if unset.

@@ -12,6 +12,7 @@ from typing import Annotated, Any, ClassVar, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from nooa._immutable_json import NativeJSON, freeze, json_containers
+from nooa.agentdoc import spec
 from nooa.context_blocks.events import EventBase
 from nooa.context_blocks.roles import Role
 
@@ -174,13 +175,13 @@ class LLMUsage(BaseModel):
 
 
 class LLMResponse(EventBase):
-    """Canonical response produced by UnifiedLLM and persisted by NOOA.
+    """Response produced by UnifiedLLM and stored by NOOA.
 
     UnifiedLLM creates a fresh object for every call. The runtime records that
     same object; renderers project its conversational fields while telemetry
     consumers read its model and usage metadata.
 
-    Parts are immutable; model_copy also strips native authority on part edits
+    Parts are immutable; model_copy also strips native state on part edits
     because Pydantic's frozen fields alone do not protect copy(update=...).
 
     Pass this object directly back in a client's message list. Mapping access
@@ -298,8 +299,18 @@ class LLMResponse(EventBase):
         return value
 
     @property
-    def content(self) -> str:
+    def content(self) -> Annotated[str, spec(max_string=None)]:
         return "".join(part.text for part in self.parts if isinstance(part, AssistantText))
+
+    def __instance_values__(self) -> dict[str, Any]:
+        """Display readable response values, not the archived provider parts."""
+        values = super().__instance_values__()
+        values.update(
+            (name, value)
+            for name in ("content", "reasoning", "tool_calls")
+            if (value := getattr(self, name))
+        )
+        return values
 
     @property
     def reasoning(self) -> str | None:
@@ -405,7 +416,7 @@ class LLMResponse(EventBase):
         return cls.model_validate(data, context={"archive": True})
 
     def replace_parts(self, parts: tuple[AssistantPart, ...]) -> LLMResponse:
-        """Edit public content without ever inheriting native replay authority.
+        """Edit public content without inheriting private provider state.
 
         Metadata stays associated with the originating event. The stored event
         is untouched; only this request's replacement loses opaque extensions.
@@ -415,7 +426,7 @@ class LLMResponse(EventBase):
     def model_copy(self, *, update=None, deep=False):
         # Pydantic's normal model_copy bypasses frozen fields and validation.
         # Metadata-only copies can share the turn; public edits cannot share
-        # its replay authority, even when a caller uses model_copy directly.
+        # its native state, even when a caller uses model_copy directly.
         if (
             update
             and {"parts", "replay_scope", "content", "reasoning", "tool_calls"} & update.keys()
@@ -431,6 +442,7 @@ class LLMResponse(EventBase):
                 "replay_scope": None,
                 "raw_response": None,
                 "parsed": None,
+                "metadata": dict(update.get("metadata", self.metadata)),
             }
         result = super().model_copy(update=update, deep=deep)
         if update and "parts" in update:
@@ -438,7 +450,7 @@ class LLMResponse(EventBase):
         return result
 
     def replace_text(self, text: str) -> LLMResponse:
-        """Replace flattened visible text, retaining portable calls/reasoning."""
+        """Replace visible text, retaining readable reasoning and public tool calls."""
         parts = [part for part in self.parts if not isinstance(part, AssistantText)]
         parts.insert(0, AssistantText(text=text))
         return self.replace_parts(tuple(parts))
@@ -449,7 +461,7 @@ class LLMResponse(EventBase):
 
     @property
     def replay_content(self) -> str:
-        """Return the serializable assistant text used for event replay."""
+        """Alias of content for the formatter's event-to-message interface."""
         return self.content
 
 

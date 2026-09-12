@@ -16,6 +16,21 @@ from nooa.unifiedllm.response_parts import project_turn
 SCOPE = "responses:openai:sha256:test"
 
 
+@pytest.mark.parametrize("edit", ["text", "parts", "copy"])
+def test_edited_response_owns_its_metadata(edit):
+    original = LLMResponse(parts=(AssistantText(text="before"),), metadata={"k": 1})
+    parts = (AssistantText(text="after"),)
+    edited = (
+        original.replace_text("after")
+        if edit == "text"
+        else original.replace_parts(parts)
+        if edit == "parts"
+        else original.model_copy(update={"parts": parts})
+    )
+    edited.metadata["k"] = 2
+    assert original.metadata == {"k": 1}
+
+
 class _NoDeepCopy(dict[str, Any]):
     def __deepcopy__(self, memo):
         raise AssertionError("Rejected opaque state must not be copied")

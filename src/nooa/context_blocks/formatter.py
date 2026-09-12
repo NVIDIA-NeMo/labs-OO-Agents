@@ -653,4 +653,7 @@ class AnthropicProviderFormatter(ProviderFormatter):
 
 
 class ResponsesProviderFormatter(OpenAIProviderFormatter):
-    """Emit public message dicts; ResponsesClient projects assistant turns at dispatch."""
+    """Select Responses dispatch in the runtime, using the same public message format.
+
+    No wire translation belongs here: ResponsesClient projects stored turns at dispatch.
+    """

@@ -307,7 +307,6 @@ async def test_response_replay_and_dict_replacement_edit_contract(api, is_async,
     assert "turns" not in request
     wire = request["input" if api == "responses" else "messages"]
     encoded = json.dumps(wire)
-    assert "nooa_turn" not in encoded
     assert ("native-secret" in encoded) is not edit
     assert "why" in encoded
     assert ("edited answer" in encoded) is edit
