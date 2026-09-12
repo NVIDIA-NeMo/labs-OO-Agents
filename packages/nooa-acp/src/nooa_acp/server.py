@@ -339,8 +339,10 @@ class CodingACPAdapter:
                     if slash is None:
                         result = await session.dispatcher.submit(text)
                     else:
-                        session.handle.record_user_message(text)
                         name, raw_args = slash
+                        command = session.commands.get(name)
+                        if command is not None and command._method is not None:
+                            session.handle.record_user_message(text)
                         try:
                             submission = await session.dispatcher.invoke_slash(
                                 session.commands,
@@ -520,7 +522,7 @@ class CodingACPAdapter:
                 on_after_handle=checkpoint,
                 on_notification=policy.on_notification,
             )
-            commands = CodingSlashCommandRegistry(agent)
+            commands = CodingSlashCommandRegistry(agent, skills_dirs=options.skills_dirs)
             value = _ACPSession(
                 handle,
                 agent,

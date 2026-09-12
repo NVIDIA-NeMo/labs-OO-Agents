@@ -436,3 +436,38 @@ async def test_cancelling_a_shell_command_reports_it_as_cancellation(tmp_path):
     rendered = "".join(str(update) for _, update in client.updates)
     assert "Cancelled by user." in rendered
     assert "CancelledError" not in rendered
+
+
+async def test_acp_subprocess_advertises_and_invokes_markdown_skill(tmp_path, monkeypatch):
+    from nooa.sessions import SessionStore
+
+    _write_protocol_skill(tmp_path)
+    skill = tmp_path / "external-skills" / "review" / "SKILL.md"
+    skill.parent.mkdir()
+    skill.write_text(
+        "---\nname: protocol-review\ndescription: Review through ACP\n"
+        "argument-hint: [target]\n---\nReview $ARGUMENTS"
+    )
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user-config"))
+    monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
+    client = _RecordingClient()
+    fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
+    async with spawn_agent_process(
+        client,
+        sys.executable,
+        str(fixture),
+        cwd=tmp_path,
+    ) as (connection, _process):
+        await connection.initialize(PROTOCOL_VERSION)
+        session = await connection.new_session(str(tmp_path))
+        await asyncio.wait_for(client.commands_updated.wait(), timeout=5)
+        commands = next(u for _, u in client.updates if isinstance(u, AvailableCommandsUpdate))
+        command = next(c for c in commands.available_commands if c.name == "protocol-review")
+        assert command.input.root.hint == "[target]"
+        response = await asyncio.wait_for(
+            connection.prompt(session.session_id, [text_block('/protocol-review "two words"')]),
+            timeout=_HANG_TIMEOUT,
+        )
+        assert response.stop_reason == "end_turn"
+    turns = SessionStore(tmp_path / ".nooa" / "sessions").load_turns(session.session_id)
+    assert [t.content for t in turns if t.role == "user"] == ["Review two words"]

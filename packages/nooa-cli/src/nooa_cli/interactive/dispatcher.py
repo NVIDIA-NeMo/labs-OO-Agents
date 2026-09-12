@@ -50,6 +50,11 @@ class InteractiveSessionDispatcher:
             result = await commands.invoke(name, raw_args)
             if not result.output_to_agent:
                 return result, None
+            command = commands.get(name)
+            if command is not None and command._method is None:
+                # Markdown skills prepare the next user turn in both hosts.
+                # The runner records that input once and requests its title.
+                return result, await self.runtime.submit_and_wait(result.text or "")
             return result, await self.runtime.submit_slash_and_wait(result)
 
         return await self._run_active(_invoke())

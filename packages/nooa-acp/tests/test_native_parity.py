@@ -260,3 +260,56 @@ async def test_native_admission_and_acp_produce_same_durable_turn(workspace):
         await adapter.close()
         await runtime.shutdown()
         await close_native(result)
+
+
+async def test_markdown_command_prepares_same_llm_input_and_durable_turn(workspace):
+    from unittest.mock import AsyncMock
+
+    from acp.schema import AvailableCommandsUpdate
+    from nooa_cli.tui.commands import CommandHandler
+
+    skill = workspace / "skills" / "review" / "SKILL.md"
+    skill.parent.mkdir()
+    skill.write_text(
+        "---\nname: parity-review\ndescription: Review a file\nargument-hint: [target]\n"
+        "---\nReview $ARGUMENTS"
+    )
+    target = workspace / "notes.md"
+    target.write_text("A file both agents can read.")
+    expected = f"Review [notes.md](<{target}>)"
+    result = await open_native(workspace)
+    runtime = LocalAgentRunner(result.agent, emit_text=lambda _: None, agent_id=result.session_id)
+    runtime.set_user_message_accepted_callback(result.session_manager.record_user)
+    adapter = CodingACPAdapter(parity_llm)
+    client = RecordingClient()
+    adapter.on_connect(client)
+    try:
+        handler = CommandHandler(result.agent._command_registry, AsyncMock())
+        prepared = await handler.handle('/parity-review "@notes.md"')
+        assert prepared.agent_message == expected
+        await runtime.submit_and_wait(prepared.agent_message)
+        created = await adapter.new_session(str(workspace))
+        response = await adapter.prompt(
+            created.session_id, [text_block('/parity-review "@notes.md"')]
+        )
+        assert response.stop_reason == "end_turn"
+        session = (await adapter._sessions.get(created.session_id)).value
+        assert any(
+            isinstance(update, AvailableCommandsUpdate)
+            and any(command.name == "parity-review" for command in update.available_commands)
+            for update in client.updates
+        )
+        for agent in (result.agent, session.agent):
+            inputs = json.dumps(agent.llm.last_messages)
+            assert expected in inputs
+            assert "[session-title]" in inputs
+        store = SessionStore(workspace / ".nooa" / "sessions")
+        for session_id in (result.session_id, created.session_id):
+            assert [(t.role, t.content) for t in store.load_turns(session_id)] == [
+                ("user", expected),
+                ("agent", "counter=1"),
+            ]
+    finally:
+        await adapter.close()
+        await runtime.shutdown()
+        await close_native(result)
