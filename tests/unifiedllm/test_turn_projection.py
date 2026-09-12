@@ -353,7 +353,7 @@ def test_legacy_flat_archives_are_portable_only(event_type):
 def test_journal_and_scrubber_keep_readable_reasoning_not_native_state():
     response = turn()
     journal = build_journal_payload(render(response).messages)
-    assert journal.skeleton[1]["reasoning_content"] == response.reasoning
+    assert journal.blocks[journal.skeleton[1]["reasoning_content_hash"]] == response.reasoning
     assert "opaque" not in json.dumps(journal.skeleton)
     scrubbed, count = scrub_value(response.model_dump(mode="json"))
     assert count > 0

@@ -19,6 +19,7 @@ from nooa.context_blocks.formatter import (
     XMLBlockFormatter,
 )
 from nooa.context_blocks.models import ResolvedBlock, Role
+from nooa.llm_types import AssistantText, ToolCall
 from nooa.storage.sqlite import SQLiteEventBackend, _ensure_schema
 from nooa.unifiedllm import CompletionClient, LLMResponse, ResponsesClient, Tool
 from nooa.unifiedllm.replay_state import (
@@ -143,6 +144,32 @@ def _render_chat(response: LLMResponse) -> list[dict]:
     return OpenAIProviderFormatter().format(neutral)
 
 
+@pytest.mark.parametrize("call_id", ["same", ""])
+@pytest.mark.parametrize("archive", ["current", "legacy"])
+def test_duplicate_ids_cannot_reuse_one_execution(call_id, archive, caplog):
+    calls = [ToolCall(id=call_id, name="run", arguments="{}") for _ in range(2)]
+    if archive == "legacy":
+        turn = LLMResponse.model_validate(
+            {
+                "content": "answer",
+                "tool_calls": [c.model_dump() for c in calls],
+                "finish_reason": "tool_calls",
+            },
+            context={"archive": True},
+        )
+    else:
+        turn = LLMResponse(parts=(AssistantText(text="answer"), *calls), finish_reason="tool_calls")
+        turn = LLMResponse.model_validate_json(turn.model_dump_json())
+    # Only one execution exists for the two calls, including after archive load.
+    neutral = XMLBlockFormatter().format(_response_blocks(turn)[:2])
+    wire = OpenAIProviderFormatter().format(neutral)
+    assert len(turn.tool_calls) == 2  # Preserve the original for investigation.
+    assert not any(m.get("tool_calls") or m.get("role") == "tool" for m in wire)
+    assert turn.content == "answer"  # The record survives, the invalid batch does not replay.
+    assert not any(m.get("content") == "answer" for m in wire)
+    assert "omitting the assistant tool-call turn" in caplog.text
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("is_async", [False, True])
 @pytest.mark.parametrize("shape", ["text_blocks", "phases", "phase_only", "trailing_message"])
@@ -163,7 +190,6 @@ async def test_real_responses_message_structure_survives_json_resume(
                 ],
             },
         ]
-        expected = [REASONING, {"role": "assistant", "content": "firstsecond"}]
     elif shape == "phases":
         output = [
             REASONING,
@@ -176,22 +202,10 @@ async def test_real_responses_message_structure_survives_json_resume(
             REASONING_2,
             phased_message,
         ]
-        expected = [
-            REASONING,
-            {"role": "assistant", "content": "Checking.", "phase": "commentary"},
-            REASONING_2,
-            {"role": "assistant", "content": "done", "phase": "final_answer"},
-        ]
     elif shape == "phase_only":
         output = [phased_message]
-        expected = [{"role": "assistant", "content": "done", "phase": "final_answer"}]
     else:
         output = [CALL, MESSAGE]
-        expected = [
-            {key: value for key, value in CALL.items() if key not in {"id", "status"}},
-            {"role": "assistant", "content": "done"},
-            {"type": "function_call_output", "call_id": "call_1", "output": "complete"},
-        ]
 
     raw = ResponsesAPIResponse.model_validate(
         {

@@ -114,6 +114,7 @@ def _skeleton_dict_message(msg: dict, blocks: dict[str, str]) -> dict:
     Fields transformed:
 
     * ``content`` (string) → replaced with ``parts=[{"block_hash": …}]``.
+    * ``reasoning_content`` (string) → replaced with ``reasoning_content_hash``.
     * ``tool_calls[i].function.arguments`` (string) → replaced with
       ``arguments_hash`` under the same ``function`` object.
     * ``images`` (list[str]) → replaced with ``image_hashes``
@@ -123,6 +124,13 @@ def _skeleton_dict_message(msg: dict, blocks: dict[str, str]) -> dict:
     message-level extras) are carried through untouched.
     """
     entry: dict = {k: v for k, v in msg.items() if k not in ("content", "tool_calls", "images")}
+
+    reasoning = msg.get("reasoning_content")
+    if isinstance(reasoning, str) and reasoning:
+        h = _hash_str(reasoning)
+        blocks[h] = reasoning
+        entry.pop("reasoning_content")
+        entry["reasoning_content_hash"] = h
 
     content = msg.get("content")
     if content is not None:

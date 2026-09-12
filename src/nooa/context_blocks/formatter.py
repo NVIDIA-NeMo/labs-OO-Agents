@@ -333,7 +333,10 @@ def _event_blocks_to_messages(
         event = block.event
         if _is_llm_response(event) and event.replay_tool_calls:
             by_call_id = executions.get(event.id, {})
-            if any(
+            # Old archives/direct constructions can contain duplicate ids.
+            # They cannot be paired with executions, even when one id matches.
+            calls = event.replay_tool_calls
+            if len({call.id for call in calls}) != len(calls) or any(
                 call.id not in by_call_id or by_call_id[call.id].result is None
                 for call in event.replay_tool_calls
             ):
