@@ -2426,8 +2426,19 @@ class ResponsesClient(UnifiedLLM):
             ):
                 raise TypeError("Message content blocks must be dictionaries.")
             if leading_system:
-                if msg.get("content"):
-                    instructions.append(msg["content"])
+                content = msg.get("content")
+                if isinstance(content, list):
+                    if any(
+                        block.get("type") not in {"text", "input_text"}
+                        or not isinstance(block.get("text"), str)
+                        for block in content
+                    ):
+                        raise ValueError(
+                            "Leading system content requires text blocks with string text."
+                        )
+                    content = "".join(block["text"] for block in content)
+                if content:
+                    instructions.append(content)
             elif msg.get("role") == "tool":
                 if not isinstance(msg.get("tool_call_id"), str):
                     raise ValueError("Tool result requires a string 'tool_call_id'.")

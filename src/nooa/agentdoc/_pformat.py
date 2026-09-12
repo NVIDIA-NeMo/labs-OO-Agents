@@ -1366,14 +1366,14 @@ def _format_nested_instance(
     field_names = [
         f.name
         for f in type_info.fields
-        if f.name in values and f.name not in excluded and not is_hidden_field(obj_type, f.name)
+        if f.name in values and f.name not in excluded and not is_hidden_field(obj, f.name)
     ]
     for name in values:
         if (
             name not in field_names
             and name not in excluded
             and not name.startswith("_")
-            and not is_hidden_field(obj_type, name)
+            and not is_hidden_field(obj, name)
         ):
             field_names.append(name)
 

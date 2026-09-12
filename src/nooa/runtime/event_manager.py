@@ -462,7 +462,7 @@ class EventManager:
 
         for value in event.searchable_fields().values():
             if value is not None:
-                parts.append(pformat(value))
+                parts.append(pformat(value, unquote_strings=True))
 
         return " ".join(parts) if parts else event.event_type
 
