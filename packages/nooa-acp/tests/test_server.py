@@ -603,7 +603,12 @@ async def test_cancel_clears_agent_facing_slash_result_and_session_remains_usabl
         resumed = await adapter.prompt(created.session_id, [text_block("continue")])
 
     assert resumed.stop_reason == "end_turn"
-    assert observed == [{"user_messages": ["continue"]}]
+    assert len(observed) == 1
+    assert set(observed[0]) == {"user_messages", "system_messages"}
+    assert observed[0]["user_messages"] == ["continue"]
+    housekeeping = observed[0]["system_messages"]
+    assert len(housekeeping) == 1
+    assert str(housekeeping[0]).startswith("[session-title]")
     await adapter.close()
 
 

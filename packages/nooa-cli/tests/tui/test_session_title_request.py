@@ -5,38 +5,47 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from nooa_cli.interactive.session_title import SessionTitleRequest
 from nooa_cli.tui.commands import SessionCommand
-from nooa_cli.tui.session import Session
 
 
-def _session(*, name: str | None = None, user_named: bool = False) -> Session:
-    session = Session.__new__(Session)
-    session._session_title_requested = False
-    session._session_manager = SimpleNamespace(name=name, user_named=user_named)
-    session.agent = SimpleNamespace(request_session_title=MagicMock())
-    return session
+def _agent(*, name: str | None = None, user_named: bool = False):
+    return SimpleNamespace(
+        _session_manager=SimpleNamespace(name=name, user_named=user_named),
+        request_session_title=MagicMock(),
+    )
 
 
 def test_unnamed_session_requests_title_once() -> None:
-    session = _session()
+    agent = _agent()
+    request = SessionTitleRequest()
 
-    assert session._request_session_title("Fix the TUI") is True
-    assert session._request_session_title("A later message") is False
-    session.agent.request_session_title.assert_called_once_with("Fix the TUI")
+    assert request.request(agent, "Fix the TUI") is True
+    assert request.request(agent, "A later message") is False
+    agent.request_session_title.assert_called_once_with("Fix the TUI")
 
 
 def test_existing_title_skips_automatic_request() -> None:
-    session = _session(name="Existing title")
+    agent = _agent(name="Existing title")
 
-    assert session._request_session_title("Fix the TUI") is False
-    session.agent.request_session_title.assert_not_called()
+    assert SessionTitleRequest().request(agent, "Fix the TUI") is False
+    agent.request_session_title.assert_not_called()
 
 
 def test_user_selected_title_skips_automatic_request() -> None:
-    session = _session(user_named=True)
+    agent = _agent(user_named=True)
 
-    assert session._request_session_title("Fix the TUI") is False
-    session.agent.request_session_title.assert_not_called()
+    assert SessionTitleRequest().request(agent, "Fix the TUI") is False
+    agent.request_session_title.assert_not_called()
+
+
+def test_swapping_sessions_requests_a_title_for_the_new_session():
+    agent = _agent(name="Previous session")
+    request = SessionTitleRequest()
+    assert request.request(agent, "Existing conversation") is False
+    agent._session_manager = SimpleNamespace(name=None, user_named=False)
+    assert request.request(agent, "New conversation") is True
+    agent.request_session_title.assert_called_once_with("New conversation")
 
 
 def test_manual_session_rename_requires_a_title() -> None:

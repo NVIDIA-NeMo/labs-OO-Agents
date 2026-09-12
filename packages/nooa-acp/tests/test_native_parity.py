@@ -3,11 +3,14 @@
 """Native bootstrap and ACP must restore the same agent, skills and state."""
 
 import asyncio
+import json
+import re
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from acp import RequestError, text_block
+from acp.schema import SessionInfoUpdate
 from nooa_acp.server import CodingACPAdapter
 from nooa_cli.interactive.local_agent import LocalAgentRunner
 from nooa_cli.tui import bootstrap as native
@@ -101,6 +104,65 @@ async def close_native(result):
         await result.agent.close()
     finally:
         result.session_manager.close()
+
+
+async def test_both_hosts_request_and_persist_automatic_titles(workspace, monkeypatch):
+    def title_llm():
+        return FakeLLMClient.with_tool_call(
+            "python_cell",
+            {
+                "code": (
+                    "self.rename_session('Shared session housekeeping')\n"
+                    "self.message('Title test complete.')\n"
+                    "return_result(RespondReason.DONE, explanation='complete')"
+                )
+            },
+        )
+
+    monkeypatch.setattr(native_config, "get_llm", lambda *_: title_llm())
+    result = await open_native(workspace)
+    runner = LocalAgentRunner(result.agent, emit_text=lambda _: None, agent_id=result.session_id)
+    runner.set_user_message_accepted_callback(result.session_manager.record_user)
+    adapter = CodingACPAdapter(title_llm)
+    client = RecordingClient()
+    adapter.on_connect(client)
+    try:
+        prompt = "Make native and ACP session behavior agree"
+        await runner.submit_and_wait(prompt)
+        created = await adapter.new_session(str(workspace))
+        await adapter.prompt(created.session_id, [text_block(prompt)])
+        session = (await adapter._sessions.get(created.session_id)).value
+        # Inspect the actual LLM inputs, so a forced rename alone cannot hide
+        # a missing housekeeping instruction in either host's first turn.
+        housekeeping = []
+        for agent in (result.agent, session.agent):
+            inputs = json.dumps(agent.llm.last_messages)
+            assert "[session-title]" in inputs
+            assert "self.rename_session" in inputs
+            assert prompt in inputs
+            assert "Parity workspace instruction." in inputs
+            housekeeping.append(
+                re.search(r"\[session-title\].*?</opening_user_message>", inputs).group()
+            )
+        assert housekeeping[0] == housekeeping[1]
+        assert (
+            result.session_manager.name
+            == session.handle.info.title
+            == "Shared session housekeeping"
+        )
+        assert any(
+            isinstance(u, SessionInfoUpdate) and u.title == session.handle.info.title
+            for u in client.updates
+        )
+        await adapter.close_session(created.session_id)
+        listed = await adapter.list_sessions(str(workspace))
+        assert [(s.session_id, s.title) for s in listed.sessions] == [
+            (created.session_id, "Shared session housekeeping")
+        ]
+    finally:
+        await adapter.close()
+        await runner.shutdown()
+        await close_native(result)
 
 
 async def test_native_to_acp_to_native_preserves_state_and_skills(workspace):

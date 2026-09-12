@@ -21,7 +21,13 @@ from acp import (
     update_tool_call,
 )
 from acp.interfaces import Client
-from acp.schema import ContentToolCallContent, Cost, ToolCallLocation, UsageUpdate
+from acp.schema import (
+    ContentToolCallContent,
+    Cost,
+    SessionInfoUpdate,
+    ToolCallLocation,
+    UsageUpdate,
+)
 from nooa_cli.coding import (
     CodingAgent,
     FileEdit,
@@ -34,6 +40,7 @@ from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
 from nooa.events import LLMComplete, PythonOutput
 from nooa.interactive import AgentMessage
+from nooa.sessions import SessionHandle, SessionTitleUpdated
 
 # ACP owns stdout for JSON-RPC; diagnostics belong on stderr, which is where
 # the logging default sends them.
@@ -104,6 +111,20 @@ class ACPEventBridge:
     def publish_best_effort(self, update: Any) -> None:
         """Queue bootstrap metadata without poisoning the live event stream."""
         self._enqueue(_BestEffortUpdate(update))
+
+    def watch_session(self, handle: SessionHandle) -> None:
+        """Forward durable metadata changes from the session's event manager."""
+
+        def on_title(event: SessionTitleUpdated) -> None:
+            self._enqueue(
+                SessionInfoUpdate(
+                    session_update="session_info_update",
+                    title=event.title,
+                    updated_at=event.timestamp.isoformat(),
+                )
+            )
+
+        self._unsubscribers.append(handle.events.on("SessionTitleUpdated", on_title))
 
     def _on_agent_message(self, event: EventBase) -> None:
         if not isinstance(event, AgentMessage):

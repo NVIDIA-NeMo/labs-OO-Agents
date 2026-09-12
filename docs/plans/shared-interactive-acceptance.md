@@ -51,8 +51,10 @@ nooa tui --model "$NOOA_MODEL"
 
 Ask it to set `self.v.parity_marker = 'seed'`, create a Todo with a persistent
 checkpoint, and report active skills and its working directory. Exercise the
-fixture skill's slash command. Set a recognizable session title. Exit cleanly
-so the snapshot is saved, then record the full session ID as `NOOA_SESSION`.
+fixture skill's slash command. Verify that the agent generates a descriptive
+session title during its first turn without an explicit user request to rename.
+Exit cleanly so the snapshot is saved, then record the full session ID as
+`NOOA_SESSION`.
 
 ```bash
 export NOOA_SESSION='<full session id>'
@@ -96,6 +98,7 @@ not a reason to substitute a new session.
 | Check | Pass condition in both clients |
 | --- | --- |
 | Restore | Same session ID/title/transcript; marker is `seed`; Todo checkpoint survives. |
+| Automatic title | A fresh session in each client receives the same title housekeeping instruction on its first prompt; ACP reports the chosen title to the client. User-selected titles survive later prompts. |
 | Configuration | Same agent class, model, workspace, discovered/active skills and instructions from AGENTS.md. |
 | Skill command | Same advertised fixture command, arguments and observable result. |
 | Agent execution | Same prompted operation reaches the same durable state; compare tool effects, not exact LLM wording. |
@@ -130,6 +133,15 @@ session becomes active after the picker was populated, loading it must explain
 that it is already open and must be closed in the other client or tab. Native's
 existing recovery may offer/start a fresh session after a lock conflict; verify
 the ID so that this cannot be mistaken for successful resume.
+
+Create a fresh session through Poolside, send a prompt, and exit Poolside without
+an explicit session-close command. Restart Poolside and verify that `/resume`
+lists and loads that session with its generated title. Repeat while a turn is
+running. Older untitled sessions get an `Untitled session [id]` picker label
+without rewriting their saved metadata. The subprocess tests cover both stdin
+closure and SIGTERM. SIGKILL cannot run cleanup; old `.active` claims still
+require confirming the original
+owner has exited before removing them on that host.
 
 ## Automated evidence and boundaries
 

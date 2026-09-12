@@ -19,6 +19,7 @@ from dataclasses import replace
 from typing import Any
 
 from nooa_cli.interactive.runtime import JobSnapshot
+from nooa_cli.interactive.session_title import SessionTitleRequest
 from nooa_cli.interactive.state import (
     AgentJobState,
     AgentJobSummary,
@@ -278,6 +279,7 @@ class LocalAgentRunner:
         self._previous_user_on_get = getattr(self._user_messages, "_on_get", None)
         self._owned_user_on_get: Callable[[str], None] | None = None
         self._user_message_accepted_callback: Callable[[str], None] | None = None
+        self._session_title_request = SessionTitleRequest()
         self._pending_user_messages = tuple(
             item for item in self._user_messages.snapshot() if isinstance(item, str)
         )
@@ -812,6 +814,7 @@ class LocalAgentRunner:
                 previous(text)
             if callback is not None:
                 callback(text)
+            self._session_title_request.request(self._agent, text)
 
     def submit_slash_result(self, result: Any) -> bool:
         """Route a slash result to the concrete agent channel, if present."""

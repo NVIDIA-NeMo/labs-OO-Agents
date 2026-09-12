@@ -3,7 +3,9 @@
 """End-to-end ACP JSON-RPC subprocess test."""
 
 import asyncio
+import signal
 import sys
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -315,6 +317,60 @@ async def test_resume_hides_open_sessions_and_explains_a_stale_selection(tmp_pat
         assert [session.session_id for session in listed.sessions] == [session_id]
         await connection.load_session(session_id=session_id, cwd=str(tmp_path))
         await connection.close_session(session_id)
+
+
+@pytest.mark.parametrize("shutdown", ["eof", "sigterm"])
+@pytest.mark.parametrize("during_turn", [False, True])
+async def test_client_shutdown_releases_sessions_for_resume(tmp_path, shutdown, during_turn):
+    """A client need not call session/close before exiting its agent server."""
+    from nooa.sessions import SessionStore
+    from nooa.storage.sqlite import is_sqlite_database_active
+
+    fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
+    client = _RecordingClient()
+    async with spawn_agent_process(
+        client,
+        sys.executable,
+        str(fixture),
+        "--blocking" if during_turn else "--idle",
+        cwd=tmp_path,
+    ) as (
+        connection,
+        process,
+    ):
+        await connection.initialize(PROTOCOL_VERSION)
+        session = await connection.new_session(str(tmp_path))
+        prompt = asyncio.create_task(
+            connection.prompt(session.session_id, [text_block("Remember this conversation")])
+        )
+        if during_turn:
+            await asyncio.wait_for(client.tool_started.wait(), _HANG_TIMEOUT)
+        else:
+            await prompt
+        if shutdown == "sigterm":
+            process.send_signal(signal.SIGTERM)
+        else:
+            process.stdin.close()
+        await asyncio.wait_for(process.wait(), _HANG_TIMEOUT)
+        assert process.returncode == 0
+        with suppress(Exception):
+            await prompt
+
+    store = SessionStore(tmp_path / ".nooa" / "sessions")
+    assert not is_sqlite_database_active(store.path_for(session.session_id))
+    async with spawn_agent_process(
+        _RecordingClient(), sys.executable, str(fixture), cwd=tmp_path
+    ) as (
+        connection,
+        _process,
+    ):
+        await connection.initialize(PROTOCOL_VERSION)
+        listed = await connection.list_sessions(cwd=str(tmp_path))
+        assert [item.session_id for item in listed.sessions] == [session.session_id]
+        assert listed.sessions[0].title == f"Untitled session [{session.session_id[:8]}]"
+        assert store.list()[0].title is None  # A display fallback, not a persisted rename.
+        await connection.load_session(cwd=str(tmp_path), session_id=session.session_id)
+        await connection.close_session(session.session_id)
 
 
 async def test_cancelling_a_turn_says_so_in_the_conversation(tmp_path):
