@@ -82,6 +82,7 @@ class FakeLLMClient(UnifiedLLM):
         Thread-safe: uses asyncio.Lock to ensure concurrent calls get responses in order.
         """
         async with self._lock:
+            self._prepare_call_config(kwargs)
             self.call_count += 1
             # A non-provider test client must never observe private replay state.
             self.last_messages = prepare_chat_messages(messages, None)
@@ -110,6 +111,7 @@ class FakeLLMClient(UnifiedLLM):
     ) -> LLMResponse:
         """Synchronous version of acall for UnifiedLLM compatibility."""
         # For sync call, we don't need locking since tests are usually single-threaded
+        self._prepare_call_config(kwargs)
         self.call_count += 1
         self.last_messages = prepare_chat_messages(messages, None)
         self.last_tools = tools
