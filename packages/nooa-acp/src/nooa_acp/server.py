@@ -280,7 +280,15 @@ class CodingACPAdapter:
         sessions = [
             ACPSessionInfo(
                 session_id=info.id,
-                cwd=info.working_directory or str(root),
+                # Older native sessions persisted CLI values such as "." or
+                # "../workspace". ACP requires an absolute cwd for every list
+                # entry. Their workspace is the store's requested scope; using
+                # the server process cwd would resolve relative paths twice.
+                cwd=(
+                    info.working_directory
+                    if Path(info.working_directory).is_absolute()
+                    else str(root)
+                ),
                 title=info.title,
                 updated_at=datetime.fromtimestamp(info.last_active, UTC).isoformat(),
             )
