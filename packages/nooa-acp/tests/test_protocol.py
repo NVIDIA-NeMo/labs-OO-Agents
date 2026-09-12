@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from acp import PROTOCOL_VERSION, spawn_agent_process, text_block
+from acp import PROTOCOL_VERSION, RequestError, spawn_agent_process, text_block
 from acp.connection import StreamDirection
 from acp.schema import (
     AgentMessageChunk,
@@ -281,6 +281,40 @@ async def test_acp_lists_native_sessions_with_absolute_workspaces(tmp_path, monk
         listed = await connection.list_sessions(cwd=str(workspace))
         assert {session.session_id: session.cwd for session in listed.sessions} == expected
         assert all(Path(session.cwd).is_absolute() for session in listed.sessions)
+
+
+async def test_resume_hides_open_sessions_and_explains_a_stale_selection(tmp_path):
+    """The picker and error message must work across the actual process boundary."""
+    from nooa.sessions import SessionStore
+
+    store = SessionStore(tmp_path / ".nooa" / "sessions")
+    with store.create(working_directory=str(tmp_path), host="tui") as native:
+        session_id = native.id
+
+    client = _RecordingClient()
+    fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
+    async with spawn_agent_process(client, sys.executable, str(fixture), cwd=tmp_path) as (
+        connection,
+        _process,
+    ):
+        await connection.initialize(PROTOCOL_VERSION)
+        listed = await connection.list_sessions(cwd=str(tmp_path))
+        assert [session.session_id for session in listed.sessions] == [session_id]
+
+        # Another client opens it after the picker was populated.
+        with store.open(session_id):
+            assert (await connection.list_sessions(cwd=str(tmp_path))).sessions == []
+            with pytest.raises(RequestError, match="already open") as caught:
+                await connection.load_session(session_id=session_id, cwd=str(tmp_path))
+            # Poolside renders error.message, not the diagnostic error.data.
+            assert "Close it in the other client or tab" in str(caught.value)
+            assert caught.value.data["sessionId"] == session_id
+
+        # Releasing the owning client makes the existing session resumable.
+        listed = await connection.list_sessions(cwd=str(tmp_path))
+        assert [session.session_id for session in listed.sessions] == [session_id]
+        await connection.load_session(session_id=session_id, cwd=str(tmp_path))
+        await connection.close_session(session_id)
 
 
 async def test_cancelling_a_turn_says_so_in_the_conversation(tmp_path):

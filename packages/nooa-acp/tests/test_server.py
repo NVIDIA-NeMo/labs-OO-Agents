@@ -1117,9 +1117,11 @@ async def test_adapter_lists_closes_loads_and_replays_durable_session(tmp_path):
     await first_adapter.prompt(created.session_id, [text_block("remember this")])
 
     listed = await first_adapter.list_sessions(str(tmp_path))
+    assert listed.sessions == []  # Already open in this ACP server.
+    await first_adapter.close_session(created.session_id)
+    listed = await first_adapter.list_sessions(str(tmp_path))
     assert [session.session_id for session in listed.sessions] == [created.session_id]
     assert listed.sessions[0].cwd == str(tmp_path)
-    await first_adapter.close_session(created.session_id)
     with pytest.raises(RequestError):
         await first_adapter.prompt(created.session_id, [text_block("closed")])
     await first_adapter.close()
@@ -1144,6 +1146,32 @@ async def test_adapter_lists_closes_loads_and_replays_durable_session(tmp_path):
     ]
     assert replayed_user_text == ["remember this\n"]
     await replay_adapter.close()
+
+
+async def test_resume_pagination_skips_open_sessions_before_slicing(tmp_path, monkeypatch):
+    from contextlib import ExitStack
+
+    from nooa_acp import server
+
+    from nooa.sessions import SessionStore
+
+    monkeypatch.setattr(server, "_SESSION_PAGE_SIZE", 2)
+    store = SessionStore(tmp_path / ".nooa" / "sessions")
+    adapter = CodingACPAdapter(_completed_llm)
+    with ExitStack() as open_sessions:
+        for index in range(3):
+            with store.create(session_id=f"ready-{index}", working_directory=str(tmp_path)):
+                pass
+            open_sessions.enter_context(
+                store.create(session_id=f"busy-{index}", working_directory=str(tmp_path))
+            )
+
+        first = await adapter.list_sessions(str(tmp_path))
+        assert [session.session_id for session in first.sessions] == ["ready-2", "ready-1"]
+        assert first.next_cursor == "2"
+        second = await adapter.list_sessions(str(tmp_path), cursor=first.next_cursor)
+        assert [session.session_id for session in second.sessions] == ["ready-0"]
+        assert second.next_cursor is None
 
 
 async def test_loading_session_is_not_available_until_replay_finishes(tmp_path):
