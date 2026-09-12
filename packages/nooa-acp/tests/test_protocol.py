@@ -114,9 +114,15 @@ async def test_acp_subprocess_transcript(tmp_path, monkeypatch):
     commands = next(
         update for _, update in client.updates if isinstance(update, AvailableCommandsUpdate)
     )
-    assert [command.name for command in commands.available_commands] == ["protocol-check"]
-    assert commands.available_commands[0].input is not None
-    assert commands.available_commands[0].input.root.hint == "<value>"
+    assert [command.name for command in commands.available_commands] == [
+        "mcp-add",
+        "protocol-check",
+    ]
+    protocol_command = next(
+        command for command in commands.available_commands if command.name == "protocol-check"
+    )
+    assert protocol_command.input is not None
+    assert protocol_command.input.root.hint == "<value>"
     started = next(update for _, update in client.updates if isinstance(update, ToolCallStart))
     assert started.kind == "other"
     assert started.status == "in_progress"
@@ -236,6 +242,45 @@ async def test_acp_subprocess_closes_a_session_over_the_wire(tmp_path):
 
     capabilities = initialized.agent_capabilities.session_capabilities
     assert capabilities is not None and capabilities.close is not None
+
+
+async def test_acp_lists_native_sessions_with_absolute_workspaces(tmp_path, monkeypatch):
+    """One legacy relative cwd must not invalidate a client's whole resume list."""
+    from nooa_cli.tui import session_manager
+
+    from nooa.sessions import SessionStore
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    server_cwd = tmp_path / "server"
+    server_cwd.mkdir()
+    store = SessionStore(workspace / ".nooa" / "sessions")
+    monkeypatch.delenv("NOOA_SESSIONS_DIR", raising=False)
+    monkeypatch.setattr(session_manager, "SESSIONS_DIR", store.root)
+    monkeypatch.chdir(workspace)
+    native = session_manager.SessionManager.create(working_dir=".")
+    native_id = native.session_id
+    assert native.working_dir == str(workspace)
+    native.close()
+    expected = {native_id: str(workspace)}
+    # These are persisted legacy values, deliberately bypassing normalization
+    # at native creation. Do not rewrite existing user databases to repair them.
+    for index, cwd in enumerate((".", "../workspace", "", str(server_cwd))):
+        with store.create(session_id=f"old-{index}", host="tui", working_directory=cwd) as old:
+            expected[old.id] = str(server_cwd) if cwd == str(server_cwd) else str(workspace)
+
+    client = _RecordingClient()
+    fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
+    async with spawn_agent_process(client, sys.executable, str(fixture), cwd=server_cwd) as (
+        connection,
+        _process,
+    ):
+        initialized = await connection.initialize(PROTOCOL_VERSION)
+        capabilities = initialized.agent_capabilities.session_capabilities
+        assert capabilities is not None and capabilities.list is not None
+        listed = await connection.list_sessions(cwd=str(workspace))
+        assert {session.session_id: session.cwd for session in listed.sessions} == expected
+        assert all(Path(session.cwd).is_absolute() for session in listed.sessions)
 
 
 async def test_cancelling_a_turn_says_so_in_the_conversation(tmp_path):

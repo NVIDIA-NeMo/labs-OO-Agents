@@ -83,7 +83,9 @@ class SessionManager:
         handle = SessionStore(SESSIONS_DIR).create(
             model=model,
             agent=agent_cls,
-            working_directory=working_dir,
+            working_directory=(
+                str(Path(working_dir).expanduser().resolve()) if working_dir else ""
+            ),
             host="tui",
             session_id=session_id,
             check_same_thread=False,
