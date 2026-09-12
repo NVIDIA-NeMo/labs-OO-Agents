@@ -62,6 +62,9 @@ class ReasoningConfig(BaseModel):
             raise ValueError(
                 f"Invalid reasoning level {level!r}; allowed: {', '.join(self.levels)}"
             )
+        # Frozen Pydantic attributes do not freeze nested dictionaries. Reuse the
+        # declaration checks so later edits cannot introduce routing controls.
+        self.validate_declaration()
         # Only the small chosen configuration is copied, never conversation data.
         return deepcopy(self.levels[level])
 

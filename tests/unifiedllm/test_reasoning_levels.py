@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from nooa.config.model_config import ModelConfig
 from nooa.unifiedllm import CompletionClient, FakeLLMClient, ResponsesClient, get_llm_client
-from nooa.unifiedllm.reasoning import ReasoningConfig
+from nooa.unifiedllm.reasoning import ReasoningConfig, apply_reasoning_level
 
 LEVELS = {
     "low": {"reasoning": {"effort": "low", "context": "all_turns"}},
@@ -103,6 +103,14 @@ def test_level_settings_cannot_replace_framework_or_routing_fields(field):
 def test_level_settings_allow_new_provider_fields_without_an_allowlist():
     config = ReasoningConfig(levels={"low": {"future_provider_control": {"budget": 12}}})
     assert config.settings("low") == {"future_provider_control": {"budget": 12}}
+
+
+@pytest.mark.parametrize("field", ["model", "api_base", "extra_body", "reasoning_level"])
+def test_mutating_a_declared_level_cannot_bypass_reserved_fields(field):
+    config = ReasoningConfig(levels={"low": {"reasoning_effort": "low"}})
+    config.levels["low"][field] = "injected"
+    with pytest.raises(ValueError, match="reserved.*" + field):
+        apply_reasoning_level(config, "openai/test", {}, {}, "low")
 
 
 def test_no_selection_preserves_raw_controls_and_default_is_only_metadata():
