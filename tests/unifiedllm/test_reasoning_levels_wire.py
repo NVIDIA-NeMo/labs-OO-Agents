@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import httpx
+import litellm
 import pytest
 import yaml
 
@@ -68,6 +69,9 @@ async def test_declared_settings_survive_the_sdk(alias, level, monkeypatch):
 
     monkeypatch.setattr(registry, "ensure_loaded", lambda: None)
     monkeypatch.setattr(registry, "MODELS", MODELS)
+    # Other suites enable LiteLLM's process-global parameter dropping. It
+    # overrides even per-call False; this test verifies an unsuppressed request.
+    monkeypatch.setattr(litellm, "drop_params", False)
     bodies = []
 
     async def send(http_client, request, **kwargs):

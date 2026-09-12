@@ -66,6 +66,11 @@ the opt-in live test checks route acceptance, not reasoning quality or every
 level's behavior. Do not infer support merely from a successful HTTP response
 if a gateway silently ignores parameters.
 
+Do not enable LiteLLM's global `drop_params` when verifying a declaration: it can
+discard fields for gateway IDs it does not recognize, even with per-call
+`drop_params=False`. The HTTP tests explicitly disable that global flag and check
+the serialized fields. NOOA does not change process-global SDK configuration.
+
 LangChain/Pi data can inform maintenance, but neither is a runtime dependency or
 an automatic build input. Updating a route means reviewing its small declaration
 and request tests, rather than importing hundreds of profiles.

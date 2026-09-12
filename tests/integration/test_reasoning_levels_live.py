@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 import httpx
+import litellm
 import pytest
 import yaml
 
@@ -34,6 +35,7 @@ async def test_low_effort_on_hub(alias, monkeypatch):
         pytest.fail("Set NVIDIA_INFERENCE_API_KEY to run Hub probes")
     monkeypatch.setattr(registry, "ensure_loaded", lambda: None)
     monkeypatch.setattr(registry, "MODELS", MODELS)
+    monkeypatch.setattr(litellm, "drop_params", False)
     settings = MODELS[alias]["reasoning_levels"]["low"]
     sent = []
     original_send = httpx.AsyncClient.send
