@@ -158,3 +158,20 @@ def test_install_summarizer_attaches(agent):
     summarizers = getattr(agent, "_summarizers", [])
     assert len(summarizers) == 1
     assert summarizers[0].config.max_tokens == 50_000
+
+
+async def test_web_publisher_is_not_installed_or_restored(monkeypatch):
+    from nooa import Context
+    from nooa.sessions import SessionResumed
+
+    monkeypatch.setenv("NEMO_OO_RICH_URL", "http://localhost:9999")
+    agent = _Host(llm=FakeLLMClient())
+    try:
+        assert not hasattr(agent, "web")
+        assert "web" not in agent.context
+        assert "WebPublisher" not in doc(agent)
+        agent.context["web"] = Context("WebPublisher: call self.web.plot(fig)", prefix=True)
+        agent.event_manager.add(SessionResumed(session_id="old-session", restored=True))
+        assert "web" not in agent.context
+    finally:
+        await agent.llm.aclose()
