@@ -30,7 +30,6 @@ from nooa.context_blocks import (
     ResolvedBlock,
     Role,
 )
-from nooa.events import LLMResponse
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import FormatConfig
@@ -460,13 +459,7 @@ def _phase_events(
         # API. CodeAct's text-only recovery appends its feedback after this
         # event, so removing only the provider-visible block preserves the
         # append-only history without producing an invalid message.
-        if (
-            isinstance(event, LLMResponse)
-            and not event.replay_content.strip()
-            and not event.tool_calls
-            and not getattr(event, "llm_state", None)
-            and not getattr(event, "reasoning", None)
-        ):
+        if event.is_empty:
             continue
 
         tag = event.tag if event.tag is not None else event.id

@@ -13,6 +13,8 @@ correctly support:
 - ATIF trajectory export
 """
 
+import json
+
 import pytest
 
 nemo_relay = pytest.importorskip("nemo_relay", reason="nemo_relay not installed")
@@ -21,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import MagicMock
 
+from nooa.llm_types import LLMResponse
 from nooa.nemo_relay_middleware import (
     install_nemo_relay,
     nemo_relay_agent_call_middleware,
@@ -52,19 +55,10 @@ def _nemo_relay_scope():
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class FakeLLMResponse:
-    content: str = "hello"
-    tool_calls: list = field(default_factory=list)
-    finish_reason: str = "stop"
-    assistant_message: dict = field(
-        default_factory=lambda: {"role": "assistant", "content": "hello"}
+def FakeLLMResponse(content: str = "hello") -> LLMResponse:
+    return LLMResponse(
+        content=content, finish_reason="stop", usage={"input_tokens": 10, "output_tokens": 5}
     )
-    reasoning: str | None = None
-    usage: dict | None = field(
-        default_factory=lambda: {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
-    )
-    raw_response: Any = None
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +123,31 @@ def _make_exec_ctx(code: str = "x = 1", agent: Any = None) -> ExecutePythonConte
 
 class TestLLMRequestIntercepts:
     """Verify that LLM request intercepts (header injection) work end-to-end."""
+
+    @pytest.mark.asyncio
+    async def test_noop_relay_roundtrip_preserves_response_identity(self):
+        """The downstream client receives the original response after relay JSON."""
+        from nooa.llm_types import AssistantReasoning, LLMResponse
+
+        turn = LLMResponse(
+            parts=(AssistantReasoning(native={"encrypted_content": "opaque"}),),
+            replay_scope="responses:openai:test",
+        )
+        messages = [{"role": "user", "content": "Start"}, turn]
+        ctx = _make_llm_ctx(messages=messages)
+        seen: list[list[dict[str, Any]]] = []
+
+        async def nxt(c):
+            seen.append(c.messages)
+            c.response = FakeLLMResponse()
+            return c
+
+        await nemo_relay_llm_middleware(ctx, nxt)
+
+        assert len(seen[0]) == len(messages)
+        assert seen[0] == messages
+        assert seen[0][1] is turn
+        assert "opaque" not in json.dumps([dict(message) for message in seen[0]])
 
     @pytest.mark.asyncio
     async def test_request_intercept_injects_header(self):
@@ -290,7 +309,6 @@ class TestLLMSanitizeResponse:
             ctx = _make_llm_ctx()
             fake_resp = FakeLLMResponse(
                 content="hello world",
-                assistant_message={"role": "assistant", "content": "hello world"},
             )
 
             async def nxt(c):
@@ -320,7 +338,6 @@ class TestLLMSanitizeResponse:
         ctx = _make_llm_ctx()
         fake_resp = FakeLLMResponse(
             content="original text",
-            assistant_message={"role": "assistant", "content": "original text"},
         )
 
         async def nxt(c):

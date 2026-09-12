@@ -5,19 +5,32 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from litellm.types.llms.openai import ResponsesAPIResponse
 
+from nooa.context_blocks.formatter import ResponsesProviderFormatter
+from nooa.context_blocks.models import RenderedMessage, Role, ToolCallInfo
 from nooa.unifiedllm import ResponsesClient
 
 
-def make_mock_responses_response(content: str = "ok"):
-    """Create a minimal litellm.ResponsesAPIResponse for testing."""
-    from unittest.mock import MagicMock
-
-    resp = MagicMock()
-    resp.output = [MagicMock(type="message", content=[MagicMock(type="output_text", text=content)])]
-    resp.output_text = content
-    resp.usage = None
-    return resp
+def make_mock_responses_response(content: str = "ok") -> ResponsesAPIResponse:
+    """Use the SDK shape so optional fields are absent, not auto-created mocks."""
+    return ResponsesAPIResponse.model_validate(
+        {
+            "id": "resp_test",
+            "created_at": 0,
+            "model": "test-model",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg_test",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": content, "annotations": []}],
+                }
+            ],
+        }
+    )
 
 
 class TestResponsesClientCacheControlDefaults:
@@ -119,6 +132,27 @@ class TestResponsesClientCacheControlInjection:
         user_msgs = [m for m in input_msgs if m.get("role") == "user"]
         assert user_msgs[0].get("cache_control") == {"type": "ephemeral"}
 
+    def test_stateful_assistant_batch_is_visible_to_cache_injection(self, client):
+        messages = ResponsesProviderFormatter().format(
+            [
+                RenderedMessage(
+                    role=Role.ASSISTANT,
+                    content="I will run it.",
+                    tool_calls=(ToolCallInfo(id="c1", name="run", arguments="{}"),),
+                )
+            ]
+        )
+
+        projected, _ = client._transform_messages(messages)
+        input_messages = client._inject_cache_control(
+            projected, [{"role": "assistant", "position": "last"}]
+        )
+
+        assistant = next(
+            message for message in input_messages if message.get("role") == "assistant"
+        )
+        assert assistant["cache_control"] == {"type": "ephemeral"}
+
 
 class TestToolOutputNotCorrupted:
     """Ensure tool message output stays a string after position-based injection."""
@@ -166,6 +200,32 @@ class TestResponsesClientEndToEnd:
     """
 
     ANTHROPIC_MODEL = "anthropic/claude-haiku-4-5"
+
+    def test_assistant_cache_copy_preserves_portable_reasoning(self):
+        """Copy-on-write cache marking must retain private replay metadata."""
+        client = ResponsesClient(model=self.ANTHROPIC_MODEL)
+        messages = ResponsesProviderFormatter().format(
+            [
+                RenderedMessage(
+                    role=Role.ASSISTANT,
+                    content="public answer",
+                    reasoning="portable reasoning text",
+                )
+            ]
+        )
+        try:
+            with patch("litellm.responses", return_value=make_mock_responses_response()) as call:
+                client.call(
+                    messages,
+                    cache_control_injection_points=[{"role": "assistant", "position": "last"}],
+                )
+
+            sent = call.call_args.kwargs["input"]
+            assert sent[0] == {"role": "assistant", "content": "portable reasoning text"}
+            assert sent[1]["content"][0]["text"] == "public answer"
+            assert sent[1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+        finally:
+            client.close()
 
     @pytest.mark.asyncio
     async def test_acall_injects_cache_control(self):

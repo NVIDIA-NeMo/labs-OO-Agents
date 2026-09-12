@@ -1120,6 +1120,7 @@ def _resolve_message(msg: dict[str, Any], blocks: dict[str, str]) -> dict[str, A
 
     * ``parts: [{block_hash}]`` / ``[{text}]`` -> ``content`` (string, parts joined).
     * ``tool_calls[i].function.arguments_hash`` -> ``arguments``.
+    * ``reasoning_content_hash`` -> ``reasoning_content``.
     * ``image_hashes`` -> ``images`` (placeholder URLs in resolution order).
 
     Block hashes that don't resolve (``hash`` not in *blocks*) are kept as a
@@ -1130,6 +1131,10 @@ def _resolve_message(msg: dict[str, Any], blocks: dict[str, str]) -> dict[str, A
     unchanged -- the v3 protocol can carry both shapes simultaneously.
     """
     out = dict(msg)
+
+    reasoning_hash = out.pop("reasoning_content_hash", None)
+    if reasoning_hash is not None and "reasoning_content" not in out:
+        out["reasoning_content"] = blocks.get(reasoning_hash, f"<missing block: {reasoning_hash}>")
 
     parts = out.pop("parts", None)
     if parts is not None and "content" not in out:

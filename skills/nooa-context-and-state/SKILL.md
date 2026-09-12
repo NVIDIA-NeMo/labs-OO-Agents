@@ -71,6 +71,10 @@ stable content in the prefix: changing a prefix block invalidates cache reuse
 for that block and everything after it. Keep live or frequently changing blocks
 in the volatile suffix so the stable prefix remains reusable.
 
+The cached renderer automatically marks where that volatile suffix begins.
+This keeps live system context in its original position when UnifiedLLM builds
+provider requests; it does not enable a provider-specific cache policy.
+
 Per-method overrides via `ScopedContext`:
 
 ```python
@@ -86,6 +90,17 @@ async def solve(self, problem: str) -> str:
 ## Events
 
 Event history is what fills the LLM's conversation window. Key model-visible event types (names have no "Event" suffix): `Task`, `Message`, `Reasoning`, `Error`, `Feedback`, `LLMResponse`, `PythonOutput`, `Summary`, `Notification`. `LLMResponse` is both the canonical assistant turn and the home of its token/cost metadata; renderers expose only its conversational fields. Runtime-only events (never shown to the LLM) include `BeforeAgentCall`/`AfterAgentCall` and `LLMCallStart`/`LLMCallEnd`.
+
+`LLMResponse.reasoning` is provider-exposed text and remains useful across model switches, where UnifiedLLM replays it as ordinary assistant text. Opaque state lives on ordered `LLMResponse.parts`; UnifiedLLM alone interprets it and replays it through a matching provider/API/model gate.
+
+Pass prior `LLMResponse` objects directly in the next call's message list.
+Responses expose read-only public mapping access (`response["content"]`,
+`response.get("role")`). To edit a turn, replace that history element with
+`{**dict(response), "content": "edited text"}`; the replacement has no opaque
+state. `dict(response)` is a public projection, while `model_dump()` is for
+durable archives. JSON-only integrations must explicitly project public messages.
+
+An intentional model/API mismatch logs a warning and falls back to the portable text. A malformed current-version part or provider signature raises `ReasoningReplayError`; do not catch it and silently continue, because it signals archive corruption or an unsupported provider contract change.
 
 ```python
 # Query (AND semantics; chronological; limit keeps most recent)

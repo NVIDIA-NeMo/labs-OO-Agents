@@ -17,6 +17,7 @@ from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from nooa.agentdoc import pformat
 from nooa.context_blocks import EventStatus
 from nooa.context_blocks.models import Role
 from nooa.events import (
@@ -459,13 +460,9 @@ class EventManager:
         """Extract searchable text from an event's public fields."""
         parts: list[str] = []
 
-        # Opaque replay state is durable but not a conversational/search field.
-        for value in event.model_dump(exclude={"llm_state"}).values():
+        for value in event.searchable_fields().values():
             if value is not None:
-                if isinstance(value, list):
-                    parts.append(" ".join(str(item) for item in value))
-                else:
-                    parts.append(str(value))
+                parts.append(pformat(value, unquote_strings=True))
 
         return " ".join(parts) if parts else event.event_type
 

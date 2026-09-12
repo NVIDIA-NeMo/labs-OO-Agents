@@ -120,7 +120,8 @@ class LLMCallContext(BaseModel):
     """Context for ``llm_call`` middleware.
 
     Attributes:
-        messages: The prompt messages list (mutable — middleware may edit).
+        messages: Public dictionaries and read-only responses. Replace a response
+                  with a dictionary to edit it and discard its native state.
         params: Extra keyword arguments forwarded to ``acall()``
                 (tools, output_model, etc.).  Middleware may add / remove keys.
         agent: The agent instance that owns the runtime.
@@ -131,7 +132,7 @@ class LLMCallContext(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    messages: list[dict[str, Any]]
+    messages: list[dict[str, Any] | LLMResponse]
     params: dict[str, Any] = {}
     agent: Agent | None = None
     runtime: ActorRuntime | None = None

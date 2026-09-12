@@ -175,9 +175,8 @@ class TestXMLBlockFormatter:
 
         messages = XMLBlockFormatter().format(
             [
-                # Runtime event projection carries the object on an otherwise
-                # contentless block; assistant text comes from the canonical turn.
-                ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=turn),
+                # render_context supplies the formatted public text before this step.
+                ResolvedBlock(key="turn", content=turn.content, role=Role.ASSISTANT, event=turn),
                 call_1,
                 ResolvedBlock(key="output_1", content="first output", role=Role.USER),
                 call_2,
@@ -275,22 +274,35 @@ class TestXMLBlockFormatter:
         )
 
         assert all(not message.tool_calls for message in messages)
-        assert AnthropicProviderFormatter().format(messages) == {
-            "system": "",
-            "messages": ([{"role": "assistant", "content": content}] if content else []),
-        }
+        output = AnthropicProviderFormatter().format(messages)
+        assert output["system"] == ""
+        assert [message["content"] for message in output["messages"]] == (
+            [content] if content else []
+        )
+        assert all("tool_calls" not in message for message in output["messages"])
 
     @pytest.mark.parametrize("field", ["reasoning", "llm_state"])
     def test_replay_only_response_creates_private_carrier(self, field):
         value = "private thought" if field == "reasoning" else {"opaque": "state"}
-        response = LLMResponse(content="", **{field: value})
+        from nooa.llm_types import AssistantReasoning
+
+        response = (
+            LLMResponse(reasoning=value)
+            if field == "reasoning"
+            else LLMResponse(
+                parts=(AssistantReasoning(native=value),), replay_scope="chat:openai:test"
+            )
+        )
         messages = XMLBlockFormatter().format(
             [ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=response)]
         )
 
         carrier = next(message for message in messages if message.role is Role.ASSISTANT)
-        assert carrier.content is None
-        assert getattr(carrier, field) == value
+        assert carrier.content == ""
+        assert carrier.replay_message is response
+        assert (
+            response.reasoning if field == "reasoning" else dict(response.parts[0].native)
+        ) == value
 
     def test_event_type_spoof_does_not_impersonate_an_llm_response(self):
         from nooa.events import Message
@@ -303,15 +315,20 @@ class TestXMLBlockFormatter:
         class CustomLLMResponse(LLMResponse):
             pass
 
-        response = CustomLLMResponse(content="", llm_state={"opaque": "state"})
+        from nooa.llm_types import AssistantReasoning
+
+        response = CustomLLMResponse(
+            parts=(AssistantReasoning(native={"opaque": "state"}),), replay_scope="chat:openai:test"
+        )
 
         messages = XMLBlockFormatter().format(
             [ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=response)]
         )
 
         carrier = next(message for message in messages if message.role is Role.ASSISTANT)
-        assert carrier.content is None
-        assert carrier.llm_state == {"opaque": "state"}
+        assert carrier.content == ""
+        assert carrier.replay_message is response
+        assert dict(response.parts[0].native) == {"opaque": "state"}
 
     def test_linked_execution_is_omitted_when_carrier_is_rejected(self):
         turn = LLMResponse(
@@ -448,7 +465,7 @@ class TestOpenAIProviderFormatter:
         result = OpenAIProviderFormatter().format(messages)
         assert len(result) == 2
         msg = result[1]
-        assert msg["role"] == "assistant" and msg["content"] is None
+        assert msg["role"] == "assistant" and msg["content"] == ""
         assert msg["tool_calls"][0]["id"] == "call_abc"
         assert msg["tool_calls"][0]["function"]["name"] == "get_weather"
 
@@ -628,7 +645,7 @@ class TestEndToEndPipelines:
 
         messages = XMLBlockFormatter().format(blocks)
         openai_input = OpenAIProviderFormatter().format(messages)
-        responses_input = ResponsesProviderFormatter().format(messages)
+        responses_input = _responses_wire(messages)
 
         openai_tool_call = next(message for message in openai_input if "tool_calls" in message)
         assert "reasoning_items" not in openai_tool_call
@@ -673,6 +690,14 @@ class TestBlockFormatterFormatEvent:
         assert "Hello world" in MinimalFormatter().format_event(event)
 
 
+def _responses_wire(messages):
+    from nooa.unifiedllm import ResponsesClient
+
+    with ResponsesClient(model="openai/gpt-5.6") as client:
+        wire, _ = client._transform_messages(ResponsesProviderFormatter().format(messages))
+    return wire
+
+
 class TestResponsesProviderFormatterImages:
     """Responses API image blocks: image_url must be a URL STRING, not the
     Chat-Completions {"url": ...} object (regression — the object shape makes the
@@ -684,7 +709,7 @@ class TestResponsesProviderFormatterImages:
 
     def test_image_url_object_becomes_input_image_string(self):
         msgs = self._image_message({"url": "data:image/png;base64,AAAA", "detail": "high"})
-        out = ResponsesProviderFormatter().format(msgs)
+        out = _responses_wire(msgs)
         parts = out[-1]["content"]
         assert parts[0] == {"type": "input_text", "text": "the grid"}
         img = parts[1]
@@ -694,11 +719,11 @@ class TestResponsesProviderFormatterImages:
         assert img.get("detail") == "high"
 
     def test_image_url_already_string_passthrough(self):
-        out = ResponsesProviderFormatter().format(self._image_message("data:image/png;base64,BBBB"))
+        out = _responses_wire(self._image_message("data:image/png;base64,BBBB"))
         img = out[-1]["content"][1]
         assert img == {"type": "input_image", "image_url": "data:image/png;base64,BBBB"}
 
     def test_image_url_dict_without_url_raises(self):
         # Fail fast instead of emitting an empty image_url the API rejects opaquely.
         with pytest.raises(ValueError, match="no 'url'"):
-            ResponsesProviderFormatter().format(self._image_message({"detail": "high"}))
+            _responses_wire(self._image_message({"detail": "high"}))

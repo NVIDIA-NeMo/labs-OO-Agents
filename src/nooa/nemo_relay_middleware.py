@@ -49,23 +49,27 @@ from nooa.runtime.middleware import (
 _logger = logging.getLogger(__name__)
 
 
+def _reconcile_messages(originals, public):
+    """Only unchanged JSON entries at the same position recover their turn.
+
+    Insertions/deletions conservatively demote shifted turns to portable dicts.
+    No native fields cross the relay's JSON boundary.
+    """
+    return [
+        originals[index]
+        if index < len(originals)
+        and isinstance(originals[index], LLMResponse)
+        and message == originals[index].public_message()
+        else message
+        for index, message in enumerate(public)
+    ]
+
+
 def _relay_response(response: LLMResponse) -> dict[str, Any]:
     """Project the canonical response only when NeMo Relay needs wire JSON."""
     result: dict[str, Any] = {"finish_reason": response.finish_reason}
     if response.content or response.tool_calls or response.reasoning:
-        message: dict[str, Any] = {"role": "assistant", "content": response.content}
-        if response.tool_calls:
-            message["tool_calls"] = [
-                {
-                    "id": call.id,
-                    "type": "function",
-                    "function": {"name": call.name, "arguments": call.arguments},
-                }
-                for call in response.tool_calls
-            ]
-        if response.reasoning:
-            message["reasoning_content"] = response.reasoning
-        result["message"] = message
+        result["message"] = response.public_message()
     if response.usage is not None:
         result["usage"] = {
             "prompt_tokens": response.usage.input_tokens,
@@ -77,28 +81,6 @@ def _relay_response(response: LLMResponse) -> dict[str, Any]:
             "cost_usd": response.usage.cost_usd,
         }
     return result
-
-
-def _response_for_relay(response: Any) -> dict[str, Any]:
-    """Return observable Relay JSON without exposing canonical opaque state."""
-    # Canonical responses may retain a raw SDK object containing encrypted
-    # provider state. Always project their public fields before considering raw
-    # compatibility fallbacks.
-    if isinstance(response, LLMResponse):
-        return _relay_response(response)
-    raw = getattr(response, "raw_response", None)
-    if raw is not None and hasattr(raw, "model_dump"):
-        return raw.model_dump(mode="json")
-    if hasattr(response, "model_dump"):
-        return response.model_dump(mode="json")
-    if hasattr(response, "assistant_message"):
-        result: dict[str, Any] = {"message": response.assistant_message}
-        if response.usage:
-            result["usage"] = response.usage
-        if response.finish_reason:
-            result["finish_reason"] = response.finish_reason
-        return result
-    return {}
 
 
 if TYPE_CHECKING:
@@ -204,7 +186,11 @@ async def nemo_relay_llm_middleware(
         for k, v in ctx.params.items()
         if k not in _SENSITIVE_KEYS and k not in _NON_SERIALIZABLE_KEYS
     }
-    safe_params["messages"] = ctx.messages
+    original_messages = list(ctx.messages)
+    safe_params["messages"] = [
+        dict(message) if isinstance(message, LLMResponse) else message
+        for message in original_messages
+    ]
     # Tools are excluded via _NON_SERIALIZABLE_KEYS.  Do NOT re-add them:
     # including a "tools" key in request.content triggers an AttributeError
     # ('dict' object has no attribute 'name') inside NeMo Relay's native pipeline.
@@ -225,7 +211,7 @@ async def nemo_relay_llm_middleware(
             intercepted = req.content
             intercepted_msgs = intercepted.get("messages")
             if intercepted_msgs is not None:
-                ctx.messages = intercepted_msgs
+                ctx.messages = _reconcile_messages(original_messages, intercepted_msgs)
             # Propagate any supported param changes from the intercept.
             for key in _PROPAGATABLE_LLM_PARAMS:
                 if key in intercepted:
@@ -236,7 +222,7 @@ async def nemo_relay_llm_middleware(
         resp = captured_ctx.response
         if resp is None:
             return {}
-        return _response_for_relay(resp)
+        return _relay_response(resp)
 
     # Note: nemo_relay.llm.execute() returns the pre-guardrail response.
     # Sanitize-response guardrails transform data for NeMo Relay internals

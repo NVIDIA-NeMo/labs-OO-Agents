@@ -158,7 +158,7 @@ def _write_trajectory(agent: Any) -> None:
                 "event_type": type(event).__name__,
                 # Opaque provider replay state belongs only in the durable event
                 # backend and compatible provider requests, never debug exports.
-                **event.model_dump(mode="json", exclude={"llm_state"}),
+                **event.searchable_fields(),
             }
             for event_id, event in manager.items()
         ]
