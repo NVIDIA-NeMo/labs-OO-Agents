@@ -62,6 +62,7 @@ async def test_skills_commands_lists_extensions_without_requiring_skill_registry
             )
         }
     )
+    registry.skill_commands = lambda: registry._user_skills
     command = SkillsCommand(
         MagicMock(), TUIConfig(), SimpleNamespace(), registry=registry, skills_dirs=[]
     )

@@ -116,8 +116,8 @@ also injecting the same server through Poolside. This slice shares the existing
 approval store and enforces its fingerprints. Native `/mcp approve` and OAuth
 dialogs have not yet been mapped into ACP interaction: preapprove the fixture
 using native NOOA, and record fresh approval/OAuth parity as a follow-up gap.
-Likewise, native settings menus and the full set of host slash commands are not
-part of this slice; skill-provided slash commands are shared.
+Native settings menus and some host controls remain native. `/skills`, `/memory`,
+`/reflection`, `/keep-going`, and skill-provided slash commands are now shared.
 
 ## Shared settings and Markdown command checks
 
@@ -163,8 +163,47 @@ PYTHON
 New behavior writes use `coding.*`; legacy `tui.*` and
 `agent.summarization` settings remain readable. Partial summarization overrides
 preserve unspecified legacy fields. Presentation preferences remain in `tui.*`.
-These checks establish shared configuration; ACP does not yet implement the
-native `/keep-going`, `/memory`, `/skills` or model-control operations.
+Both clients now support `/skills`, `/memory`, `/reflection`, and `/keep-going`
+through shared operations. Model/reasoning selection, compaction, and MCP
+approval/connection commands still need ACP mappings. Unsupported reserved NOOA
+commands now report that limitation without invoking the model.
+
+## Persistent skills and memory controls
+
+Asking the model to load a skill changes the current session. Use these commands
+in either host to save workspace defaults for fresh agents:
+
+```text
+/skills add /absolute/path/to/nemo-oo-skills
+/skills list
+/skills activate <skill-id-from-the-list>
+/skills commands
+```
+
+The directory and activation preferences are saved in `.nooa/settings.yaml`.
+Activation is idempotent: it saves the preference even if the agent already
+activated that skill. Restart both hosts and start **new** sessions; check that
+the chosen skill is active and its Python slash commands are offered. Existing
+live sessions keep their own skill instances and are not reconfigured by another
+session's settings write.
+
+In both clients, try `/memory local`, `/memory`, `/reflection on`,
+`/reflection off`, `/keep-going`, and `/memory off`. Status should describe the
+actual NOOA agent. Commands display results without a model turn, automatic
+titling, or adding conversation turns to an otherwise empty resume entry.
+`/keep-going on` requires `/keep-going model <configured-model>` first.
+For a memory handoff, enable local memory, ask the agent to remember a test fact,
+exit, resume the same session in the other host, and recall it.
+
+MCP connections belong to each live session. Saved server definitions are
+workspace configuration; use `coding.mcp_auto_connect` for restart behavior.
+Approvals are user-level fingerprints of the exact server definition.
+ACP `/mcp` interaction is still pending.
+
+Automatic `self.web` installation has been removed from the common agent base.
+Check fresh and resumed sessions in both hosts: the agent should have no
+`self.web`, including when launched with `NEMO_OO_RICH_URL` set. Historical
+WebPublisher context instructions are removed on the resume event.
 
 ## Handoff the same database
 
@@ -212,7 +251,16 @@ native persistent engine. Compatibility imports preserve old module paths.
 The LLM backend and response IR are unchanged; repeat these gates after the
 ordered #312 → #310 → #311 → #313 stack is integrated before upstreaming to main.
 
-Latest configuration/skill-command regression gate: **1,911 passed, 2 skipped,
+Previous configuration/skill-command regression gate: **1,911 passed, 2 skipped,
 3 existing xfailed** across the CLI and ACP suites. Ruff and formatting pass.
 ACP default session creation was also checked in a fresh process for absence of
 native TUI imports. The actual Poolside checks above remain manual acceptance.
+
+Validation for the controls and WebPublisher removal: the full CLI/ACP plus
+focused core regression run had **1,962 passed, 2 skipped, 3 existing xfailed**
+and one native picker rendering test failure. That test was waiting for any
+rendered frame instead of the picker; after correcting its wait, the complete
+picker suite passed **69 tests**. All ACP tests passed in the full run, including
+wire-level controls and fresh-agent skill persistence. Ruff, formatting,
+`git diff --check`, and `uv lock --check` pass. A fresh-process check confirmed
+that ACP controls execute without importing native TUI modules.

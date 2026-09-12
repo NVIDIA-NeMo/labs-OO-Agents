@@ -313,3 +313,127 @@ async def test_markdown_command_prepares_same_llm_input_and_durable_turn(workspa
         await adapter.close()
         await runtime.shutdown()
         await close_native(result)
+
+
+async def test_behavior_controls_match_native_without_generating_turns(workspace):
+    from acp.schema import AgentMessageChunk
+    from nooa_cli.interactive.options import SessionOptions
+
+    result = await open_native(workspace)
+    adapter = CodingACPAdapter(parity_llm)
+    client = RecordingClient()
+    adapter.on_connect(client)
+    created = await adapter.new_session(str(workspace))
+    session = (await adapter._sessions.get(created.session_id)).value
+    try:
+        for name, args in [
+            ("memory", ["local"]),
+            ("reflection", ["on"]),
+            ("reflection", ["off"]),
+            ("keep-going", ["model", "test-judge"]),
+            ("keep-going", ["on"]),
+            ("keep-going", ["status"]),
+            ("keep-going", ["off"]),
+        ]:
+            native_result = await result.agent._command_registry.get_command(name).execute(args)
+            assert native_result.success
+            client.updates.clear()
+            reply = await adapter.prompt(
+                created.session_id, [text_block("/" + name + " " + " ".join(args))]
+            )
+            assert reply.stop_reason == "end_turn"
+            text = "".join(
+                u.content.text for u in client.updates if isinstance(u, AgentMessageChunk)
+            )
+            assert text == "\n".join(o.content for o in native_result.outputs)
+
+        for agent, sid in ((result.agent, result.session_id), (session.agent, created.session_id)):
+            assert agent.memory._mgr.store.path.endswith(f"{sid}-memory.db")
+            assert agent.vars["tui_keep_going"] is False
+            assert agent.vars["tui_keep_going_model"] == "test-judge"
+            assert "counter" not in agent.vars
+            assert SessionStore(workspace / ".nooa" / "sessions").load_turns(sid) == []
+        saved = SessionOptions.load(workspace)
+        assert saved.memory_agents["nooa_cli.tui.agent:TUIAgent"] == "session"
+        assert saved.keep_going is False
+        assert saved.keep_going_model == "test-judge"
+
+        # Controls remain in the catalog after memory replaces its skill instance.
+        await adapter.prompt(created.session_id, [text_block("/memory off")])
+        assert not hasattr(session.agent, "memory")
+        assert {"skills", "memory", "reflection", "keep-going"} <= {
+            c.name for c in session.commands.commands()
+        }
+    finally:
+        await adapter.close()
+        await close_native(result)
+
+
+async def test_acp_skill_selection_persists_after_agent_loaded_it(workspace, tmp_path):
+    from nooa_cli.interactive.options import SessionOptions
+
+    external = tmp_path / "extra skills"
+    package = external / "extra" / "src" / "parity_extra"
+    package.mkdir(parents=True)
+    (package.parents[1] / "pyproject.toml").write_text(
+        '[project]\nname="parity-extra"\n[project.entry-points."nooa.skills"]\n'
+        '"parity.extra"="parity_extra:ExtraSkill"\n'
+    )
+    (package / "__init__.py").write_text(
+        "from nooa.skill import Skill, slash_command\n"
+        "class ExtraSkill(Skill):\n"
+        '    @slash_command("extra-probe", output_to_agent=False)\n'
+        "    def probe(self, args: str):\n"
+        '        return "extra:" + args\n'
+    )
+    adapter = CodingACPAdapter(parity_llm)
+    client = RecordingClient()
+    adapter.on_connect(client)
+    native_result = None
+    try:
+        first = await adapter.new_session(str(workspace))
+        session = (await adapter._sessions.get(first.session_id)).value
+        # The user's initial path: the model loads/activates a package locally.
+        session.agent.skills.discover_skills_dirs([external])
+        session.agent.skills.activate(["parity.extra"])
+        assert "parity.extra" in session.agent.skills.activated()
+        assert "parity.extra" not in SessionOptions.load(workspace).active_skills
+
+        await adapter.prompt(first.session_id, [text_block(f'/skills add "{external}"')])
+        await adapter.prompt(first.session_id, [text_block("/skills activate parity.extra")])
+        saved = SessionOptions.load(workspace)
+        assert external in saved.skills_dirs, [getattr(u, "content", None) for u in client.updates]
+        assert "parity.extra" in saved.active_skills
+        await adapter.close_session(first.session_id)
+
+        fresh = await adapter.new_session(str(workspace))
+        fresh_session = (await adapter._sessions.get(fresh.session_id)).value
+        native_result = await open_native(workspace)
+        for agent in (fresh_session.agent, native_result.agent):
+            assert "parity.extra" in agent.skills.activated()
+        assert (
+            await fresh_session.commands.invoke("extra-probe", '"two words"')
+        ).text == 'extra:"two words"'
+        assert native_result.agent._command_registry.get_user_skill("extra-probe") is not None
+    finally:
+        await adapter.close()
+        if native_result is not None:
+            await close_native(native_result)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_both_coding_agents_omit_web_publisher(workspace, monkeypatch, legacy):
+    from nooa_cli.coding.factory import create_session_agent
+    from nooa_cli.interactive.options import SessionOptions
+
+    monkeypatch.setenv("NEMO_OO_RICH_URL", "http://localhost:9999")
+    agent = create_session_agent(
+        llm=parity_llm(),
+        storage=None,
+        options=SessionOptions.load(workspace, legacy_agent=legacy),
+    )
+    try:
+        assert not hasattr(agent, "web")
+        assert "web" not in agent.context
+    finally:
+        await agent.close()
