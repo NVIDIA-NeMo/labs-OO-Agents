@@ -102,8 +102,16 @@ NOOA_RUN_REASONING_LEVELS_LIVE=1 uv run pytest \
 ```
 
 There is one low-effort request per example route, capped at 256 output tokens,
-with retries disabled. On 2026-09-12, GPT returned successfully with 19 input /
-5 output tokens and Sonnet with 24 input / 3 output tokens. Gemini returned a
-response but failed the base branch's signed-thinking capture validation; it
-has not passed the end-to-end check. These probes verify route acceptance and
-the outgoing settings, not that every effort label changes model behavior.
+with retries disabled. All three passed on 2026-09-12 at `3e672ae0`:
+
+| Hub route | Input tokens | Output tokens | Reasoning tokens (included in output) |
+|---|---:|---:|---:|
+| GPT-5.6 Sol | 19 | 5 | 0 |
+| Claude Sonnet 5 | 24 | 3 | 0 |
+| Gemini 3.1 Pro Preview | 15 | 145 | 142 |
+
+The first Gemini probe exposed unsigned thinking that the base capture code
+rejected. That was corrected separately in #318 before this run; unsigned text
+is portable and neighboring signatures remain attached to their own parts.
+These probes verify route acceptance and the outgoing settings, not that every
+effort label changes model behavior.
