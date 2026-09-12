@@ -23,6 +23,7 @@ from nooa.llm_types import AssistantReasoning, AssistantText, LLMResponse, LLMUs
 from . import replay_state, response_parts
 from .errors import EmptyContentError
 from .http_config import HttpConfig
+from .reasoning import ReasoningConfig, apply_reasoning_level
 from .retry import sync_retry, with_retry
 from .retry_config import RetryConfig
 
@@ -1145,7 +1146,21 @@ def _copy_cache_marker_target(
 class UnifiedLLM(ABC):
     _registry_config: dict[str, Any] | None
 
-    def __init__(self, model: str, **config):
+    def __init__(
+        self,
+        model: str,
+        *,
+        reasoning_levels: dict[str, dict[str, Any]] | None = None,
+        reasoning_default: str | None = None,
+        reasoning_level: str | None = None,
+        **config,
+    ):
+        self._reasoning_config = ReasoningConfig(
+            levels=reasoning_levels, default=reasoning_default
+        ).model_copy(deep=True)
+        if reasoning_level is not None:
+            self._reasoning_config.settings(reasoning_level)
+        self.reasoning_level = reasoning_level
         self.model = model
         self.config = config
         self._registry_config = None
@@ -1156,6 +1171,22 @@ class UnifiedLLM(ABC):
         # Per-client HTTP transport (httpx clients + litellm wrappers). Set by
         # concrete subclasses; guarded here so base helpers stay safe.
         self._http: _ClientHttp | None = None
+
+    @property
+    def reasoning_levels(self) -> tuple[str, ...] | None:
+        """Selectable levels; None means unknown, () means unsupported."""
+        levels = self._reasoning_config.levels
+        return None if levels is None else tuple(levels)
+
+    @property
+    def reasoning_default(self) -> str | None:
+        """Documented route default; not a request override."""
+        return self._reasoning_config.default
+
+    def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
+        return apply_reasoning_level(
+            self._reasoning_config, self.model, self.config, overrides, self.reasoning_level
+        )
 
     def _effective_model(self, call_config: dict[str, Any]) -> str:
         """Return the model this individual request will actually dispatch."""
@@ -1871,7 +1902,7 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
-        call_config = {**self.config, **kwargs}
+        call_config = self._prepare_call_config(kwargs)
         self._validate_request_config("messages", call_config)
         effective_model = self._effective_model(call_config)
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
@@ -1889,8 +1920,7 @@ class CompletionClient(UnifiedLLM):
 
         api_params = {
             "model": self.model,
-            **self.config,
-            **kwargs,
+            **call_config,
             "messages": prepared_messages,
         }
 
@@ -1965,7 +1995,7 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
-        call_config = {**self.config, **kwargs}
+        call_config = self._prepare_call_config(kwargs)
         self._validate_request_config("messages", call_config)
         effective_model = self._effective_model(call_config)
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
@@ -1983,8 +2013,7 @@ class CompletionClient(UnifiedLLM):
 
         api_params = {
             "model": self.model,
-            **self.config,
-            **kwargs,
+            **call_config,
             "messages": prepared_messages,
         }
 
@@ -2237,7 +2266,7 @@ class ResponsesClient(UnifiedLLM):
         # OpenAIGPTConfig.remove_cache_control_flag strip — so leaving the marker
         # on OpenAI/Azure/NIM Responses calls triggers a 400 "Unknown parameter:
         # input[N].cache_control" at the gateway.
-        call_config = {**self.config, **kwargs}
+        call_config = self._prepare_call_config(kwargs)
         self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
         state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
@@ -2248,8 +2277,7 @@ class ResponsesClient(UnifiedLLM):
         api_params = {
             "model": self.model,
             "truncation": "disabled",
-            **self.config,
-            **kwargs,
+            **call_config,
             "input": input_messages,
         }
 
@@ -2309,7 +2337,7 @@ class ResponsesClient(UnifiedLLM):
         """
         # See ResponsesClient.call for why cache_control injection is gated on
         # Anthropic models only.
-        call_config = {**self.config, **kwargs}
+        call_config = self._prepare_call_config(kwargs)
         self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
         state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
@@ -2320,8 +2348,7 @@ class ResponsesClient(UnifiedLLM):
         api_params = {
             "model": self.model,
             "truncation": "disabled",
-            **self.config,
-            **kwargs,
+            **call_config,
             "input": input_messages,
         }
 

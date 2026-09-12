@@ -1,0 +1,45 @@
+# Example NVIDIA Inference Hub routes; load explicitly, never a built-in catalog.
+# Levels describe these request paths, not every gateway serving the model.
+models:
+  gpt-5.6-sol:
+    model_name: openai/openai/openai/gpt-5.6-sol
+    client_type: responses
+    api_base: https://inference-api.nvidia.com/v1
+    api_key_env: NVIDIA_INFERENCE_API_KEY
+    store: false
+    include: [reasoning.encrypted_content]
+    reasoning: {effort: medium}
+    # https://developers.openai.com/api/docs/models/gpt-5.6-sol
+    reasoning_default: medium
+    reasoning_levels:
+      none: {reasoning: {effort: none}}
+      low: {reasoning: {effort: low}}
+      medium: {reasoning: {effort: medium}}
+      high: {reasoning: {effort: high}}
+      xhigh: {reasoning: {effort: xhigh}}
+      max: {reasoning: {effort: max}}
+
+  claude-sonnet-5:
+    model_name: anthropic/azure/anthropic/claude-sonnet-5
+    api_base: https://inference-api.nvidia.com
+    api_key_env: NVIDIA_INFERENCE_API_KEY
+    # https://platform.claude.com/docs/en/build-with-claude/effort
+    reasoning_default: high
+    reasoning_levels:
+      low: {thinking: {type: adaptive}, output_config: {effort: low}}
+      medium: {thinking: {type: adaptive}, output_config: {effort: medium}}
+      high: {thinking: {type: adaptive}, output_config: {effort: high}}
+      # xhigh is native-supported, but the installed LiteLLM rejects this Hub ID.
+      max: {thinking: {type: adaptive}, output_config: {effort: max}}
+
+  gemini-3.1-pro-preview:
+    model_name: openai/gcp/google/gemini-3.1-pro-preview
+    api_base: https://inference-api.nvidia.com/v1
+    api_key_env: NVIDIA_INFERENCE_API_KEY
+    allowed_openai_params: [reasoning_effort]
+    # https://ai.google.dev/gemini-api/docs/openai#thinking
+    reasoning_default: high
+    reasoning_levels:
+      low: {reasoning_effort: low}
+      medium: {reasoning_effort: medium}
+      high: {reasoning_effort: high}
