@@ -98,7 +98,7 @@ resulting agent input, not just that the same skill roots were discovered.
 
 | Area | Current difference | Shared extraction and acceptance |
 | --- | --- | --- |
-| Behavior controls | Native `commands.py` implements `/model`, `/reasoning`, `/compact`, `/skills`, `/memory`, `/reflection`, and `/keep-going`. ACP exposes Markdown and Python skill commands and has no equivalent model/config control handlers. | Extract the operations and structured results. Map them to native commands and appropriate ACP controls. Verify state changes, saved preferences, and cancellation. The Pool client's own commands do not establish that NOOA performed these operations. |
+| Behavior controls | The shared layer now owns `/skills`, `/memory`, `/reflection`, and `/keep-going`. `/model`, `/reasoning`, `/compact`, and MCP interaction still need ACP mappings. ACP also exposes Markdown and Python skill commands. | Extract the operations and structured results. Map them to native commands and appropriate ACP controls. Verify state changes, saved preferences, and cancellation. The Pool client's own commands do not establish that NOOA performed these operations. |
 | MCP interaction | The registry and approvals are shared. Native `CommandRegistry._bind_mcp_oauth_prompt` binds user interaction and `/mcp approve` records approval. ACP does not supply these interaction paths. | Shared interaction requests with host adapters. Test a previously unapproved server and a fresh OAuth flow. Preapproved MCP success covers only part of parity. |
 | Input normalization | Native `tui/completer.py:expand_mentions` resolves typed `@path` mentions into absolute Markdown links; the composer preserves pasted text as opaque. Both hosts now expand mentions in skill results through the shared helper. ACP `_prompt_text` accepts text and resource links, with links rendered as `Resource name: URI`. | Define common semantic input/attachment handling with provenance. Test literal pasted `@text`, real file references, and references returned by skills. Preserve opaque payloads. Do not expand them indiscriminately. |
 | Startup and restore policy | Native `bootstrap` handles invalid custom agents with a fallback and snapshot restoration errors with warnings. ACP `_create_runtime` propagates failures. Native configures memory before skill setup; ACP configures skills before memory. Their MCP connection and `SessionResumed` notification ordering also differ. | One create/load lifecycle with explicit fallback/restoration results and a readiness barrier. Test a failing custom agent, missing/corrupt snapshot, and a skill whose resume hook inspects all configured resources. The ordering differences are confirmed; their effects on arbitrary custom skills were not dynamically tested. |
@@ -197,3 +197,26 @@ modules. The full run also exposed a native picker shutdown race: completed
 preview tasks could starve their own cleanup callbacks. A separate native-only
 commit fixes it with a deterministic regression test; keep that commit out of
 the eventual non-TUI upstream slice.
+
+
+## Behavior-control follow-up
+
+`interactive/controls.py` now owns `/skills`, `/memory`, `/reflection`, and
+`/keep-going`. Native renders its structured messages/tables; ACP advertises the
+same operations and returns their output without generating an agent turn.
+Skills directory and activation choices persist for new sessions, including
+when a skill was already active from a one-off model action. Other reserved
+NOOA commands return a clear unsupported-control message in ACP.
+
+Automatic WebPublisher attachment was removed from `InteractiveAgent`, covering
+both default and legacy coding agents. A resume hook removes historical
+WebPublisher context instructions; the standalone publishing utility remains.
+
+Validation for the controls and WebPublisher removal: the full CLI/ACP plus
+focused core regression run had **1,962 passed, 2 skipped, 3 existing xfailed**
+and one native picker rendering test failure. That test was waiting for any
+rendered frame instead of the picker; after correcting its wait, the complete
+picker suite passed **69 tests**. All ACP tests passed in the full run, including
+wire-level controls and fresh-agent skill persistence. Ruff, formatting,
+`git diff --check`, and `uv lock --check` pass. A fresh-process check confirmed
+that ACP controls execute without importing native TUI modules.

@@ -54,6 +54,8 @@ from nooa_cli.coding import (
     CodingSlashCommandRegistry,
 )
 from nooa_cli.coding.factory import create_session_agent
+from nooa_cli.coding.slash_commands import RESERVED_COMMAND_NAMES
+from nooa_cli.interactive.controls import behavior_commands
 from nooa_cli.interactive.local_turn_policy import LocalTurnPolicy
 from nooa_cli.interactive.memory import configure_tui_memory
 from nooa_cli.interactive.options import SessionOptions, configure_session_skills
@@ -337,11 +339,30 @@ class CodingACPAdapter:
                         session.commands_sent_on_prompt = True
                     slash = self._slash_invocation(session.commands, text)
                     if slash is None:
+                        stripped = text.strip()
+                        requested = (
+                            stripped[1:].split(maxsplit=1)[0].lower()
+                            if stripped.startswith("/") and stripped[1:].strip()
+                            else ""
+                        )
+                        if requested in RESERVED_COMMAND_NAMES:
+                            message = (
+                                f"NOOA /{requested} is not available through ACP yet. "
+                                "Available behavior controls: /skills, /memory, /reflection, /keep-going. "
+                                "Use native NOOA for the other agent controls."
+                            )
+                            session.bridge.publish(update_agent_message(text_block(message)))
+                            await session.bridge.flush()
+                            return PromptResponse(stop_reason="end_turn")
                         result = await session.dispatcher.submit(text)
                     else:
                         name, raw_args = slash
                         command = session.commands.get(name)
-                        if command is not None and command._method is not None:
+                        if (
+                            command is not None
+                            and command._method is not None
+                            and not command.is_control
+                        ):
                             session.handle.record_user_message(text)
                         try:
                             submission = await session.dispatcher.invoke_slash(
@@ -386,7 +407,13 @@ class CodingACPAdapter:
                             slash_result, result = submission
                             if not slash_result.output_to_agent:
                                 message = str(slash_result)
-                                if message:
+                                if command is not None and command.is_control:
+                                    if message:
+                                        session.bridge.publish(
+                                            update_agent_message(text_block(message))
+                                        )
+                                    session.handle.storage.save_snapshot(session.agent)
+                                elif message:
                                     session.agent.message(message)
                                 await session.bridge.flush()
                                 return PromptResponse(stop_reason="end_turn")
@@ -522,7 +549,22 @@ class CodingACPAdapter:
                 on_after_handle=checkpoint,
                 on_notification=policy.on_notification,
             )
+
+            def configure_memory():
+                configure_tui_memory(
+                    agent, options.policy_config(), agent_db=handle.path, session_id=handle.id
+                )
+
             commands = CodingSlashCommandRegistry(agent, skills_dirs=options.skills_dirs)
+            commands.set_controls(
+                behavior_commands(
+                    agent,
+                    options,
+                    configure_memory=configure_memory,
+                    workspace=root,
+                    command_registry=commands,
+                )
+            )
             value = _ACPSession(
                 handle,
                 agent,

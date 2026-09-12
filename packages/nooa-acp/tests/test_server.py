@@ -307,8 +307,12 @@ async def test_adapter_loads_workspace_skills_and_advertises_commands(tmp_path, 
     assert len(advertised) == 1
     assert [command.name for command in advertised[0].available_commands] == [
         "diagnose",
+        "keep-going",
         "mcp-add",
+        "memory",
+        "reflection",
         "skill-status",
+        "skills",
     ]
     diagnose = advertised[0].available_commands[0]
     assert diagnose.description == "Diagnose the workspace."
@@ -634,7 +638,14 @@ async def test_adapter_republishes_commands_after_skill_activation(tmp_path):
         update for update in client.updates if isinstance(update, AvailableCommandsUpdate)
     ]
     assert len(advertised) == 2
-    assert [command.name for command in advertised[-1].available_commands] == ["later", "mcp-add"]
+    assert [command.name for command in advertised[-1].available_commands] == [
+        "keep-going",
+        "later",
+        "mcp-add",
+        "memory",
+        "reflection",
+        "skills",
+    ]
     await adapter.close()
 
 
@@ -676,7 +687,14 @@ async def test_adapter_replaces_advertised_commands_after_skill_reload(tmp_path,
         update for update in client.updates if isinstance(update, AvailableCommandsUpdate)
     ]
     assert len(advertised) == 1
-    assert [command.name for command in advertised[0].available_commands] == ["mcp-add", "repair"]
+    assert [command.name for command in advertised[0].available_commands] == [
+        "keep-going",
+        "mcp-add",
+        "memory",
+        "reflection",
+        "repair",
+        "skills",
+    ]
     invoked = await runtime.commands.invoke("repair", "deep")
     assert invoked.text == "Repair using deep mode (reloaded)."
     await adapter.close()
@@ -712,8 +730,12 @@ async def test_failed_skill_reload_keeps_previous_command_and_advertisement(tmp_
     assert not any(isinstance(update, AvailableCommandsUpdate) for update in client.updates)
     assert [command.name for command in runtime.commands.commands()] == [
         "diagnose",
+        "keep-going",
         "mcp-add",
+        "memory",
+        "reflection",
         "skill-status",
+        "skills",
     ]
     invoked = await runtime.commands.invoke("diagnose", "deep")
     assert invoked.text == "Diagnose using deep mode."
@@ -972,8 +994,22 @@ async def test_adapter_routes_distinct_workspace_commands_to_their_sessions(tmp_
         for session_id, update in client.accepted
         if isinstance(update, AvailableCommandsUpdate)
     }
-    assert commands_by_session[alpha_session.session_id] == ["alpha", "mcp-add"]
-    assert commands_by_session[beta_session.session_id] == ["beta", "mcp-add"]
+    assert commands_by_session[alpha_session.session_id] == [
+        "alpha",
+        "keep-going",
+        "mcp-add",
+        "memory",
+        "reflection",
+        "skills",
+    ]
+    assert commands_by_session[beta_session.session_id] == [
+        "beta",
+        "keep-going",
+        "mcp-add",
+        "memory",
+        "reflection",
+        "skills",
+    ]
     messages = {
         session_id: update.content.text
         for session_id, update in client.accepted

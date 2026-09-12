@@ -32,6 +32,7 @@ class _RecordingClient:
         self.updates: list[tuple[str, object]] = []
         self.tool_started = asyncio.Event()
         self.commands_updated = asyncio.Event()
+        self.message_updated = asyncio.Event()
 
     async def session_update(self, session_id: str, update: object, **kwargs) -> None:
         self.updates.append((session_id, update))
@@ -39,6 +40,8 @@ class _RecordingClient:
             self.tool_started.set()
         if isinstance(update, AvailableCommandsUpdate):
             self.commands_updated.set()
+        if isinstance(update, AgentMessageChunk):
+            self.message_updated.set()
 
 
 def _write_protocol_skill(workspace: Path) -> None:
@@ -117,8 +120,12 @@ async def test_acp_subprocess_transcript(tmp_path, monkeypatch):
         update for _, update in client.updates if isinstance(update, AvailableCommandsUpdate)
     )
     assert [command.name for command in commands.available_commands] == [
+        "keep-going",
         "mcp-add",
+        "memory",
         "protocol-check",
+        "reflection",
+        "skills",
     ]
     protocol_command = next(
         command for command in commands.available_commands if command.name == "protocol-check"
@@ -471,3 +478,43 @@ async def test_acp_subprocess_advertises_and_invokes_markdown_skill(tmp_path, mo
         assert response.stop_reason == "end_turn"
     turns = SessionStore(tmp_path / ".nooa" / "sessions").load_turns(session.session_id)
     assert [t.content for t in turns if t.role == "user"] == ["Review two words"]
+
+
+async def test_acp_subprocess_behavior_controls_do_not_call_the_llm(tmp_path, monkeypatch):
+    from nooa.sessions import SessionStore
+
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user-config"))
+    monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
+    client = _RecordingClient()
+    fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
+    async with spawn_agent_process(client, sys.executable, str(fixture), cwd=tmp_path) as (
+        connection,
+        _,
+    ):
+        await connection.initialize(PROTOCOL_VERSION)
+        session = await connection.new_session(str(tmp_path))
+        for prompt, expected in [
+            ("/memory local", "Memory local (this session only) enabled"),
+            ("/memory", "Memory: local (this session only)"),
+            ("/reflection on", "Idle reflection enabled"),
+            ("/reflection off", "Idle reflection disabled"),
+            ("/memory off", "Memory disabled"),
+            ("/memory invalid", "Usage: /memory"),
+            ("/reflection on", "Memory is not attached"),
+            ("/keep-going on", "Keep-going model is not configured"),
+            ("/skills list", "Skills"),
+            ("/compact", "NOOA /compact is not available through ACP yet"),
+        ]:
+            client.updates.clear()
+            client.message_updated.clear()
+            response = await asyncio.wait_for(
+                connection.prompt(session.session_id, [text_block(prompt)]), timeout=_HANG_TIMEOUT
+            )
+            assert response.stop_reason == "end_turn"
+            await asyncio.wait_for(client.message_updated.wait(), timeout=5)
+            text = "".join(
+                u.content.text for _, u in client.updates if isinstance(u, AgentMessageChunk)
+            )
+            assert expected in text
+            assert not any(isinstance(u, ToolCallStart) for _, u in client.updates)
+    assert SessionStore(tmp_path / ".nooa" / "sessions").load_turns(session.session_id) == []

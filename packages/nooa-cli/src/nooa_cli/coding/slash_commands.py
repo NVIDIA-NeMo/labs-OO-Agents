@@ -28,6 +28,7 @@ class CodingSlashCommand:
     argument_hint: str | None = None
     completions: tuple[str, ...] = ()
     output_to_agent: bool = True
+    is_control: bool = False
     _method: Any = field(default=None, repr=False)
 
     def help_entry(self) -> tuple[str, str]:
@@ -161,10 +162,11 @@ class CodingSlashCommandRegistry:
     """Discover and invoke Markdown and Python skill commands without UI coupling."""
 
     def __init__(
-        self, agent: Any, *, skills_dirs=(), reserved=(), bind_registry: bool = True
+        self, agent: Any, *, skills_dirs=(), reserved=(), controls=(), bind_registry: bool = True
     ) -> None:
         self.agent = agent
         self.skills_dirs = tuple(skills_dirs)
+        self.controls = {command.name: command for command in controls}
         self.reserved = RESERVED_COMMAND_NAMES | frozenset(reserved)
         self._commands: dict[str, CodingSlashCommand] = {}
         self._on_change: Callable[[tuple[CodingSlashCommand, ...]], None] | None = None
@@ -175,6 +177,22 @@ class CodingSlashCommandRegistry:
 
     def commands(self) -> tuple[CodingSlashCommand, ...]:
         return tuple(self._commands[name] for name in sorted(self._commands))
+
+    def skill_commands(self):
+        return {name: command for name, command in self._commands.items() if not command.is_control}
+
+    def add_skills_dir(self, path: Path) -> bool:
+        path = path.expanduser().resolve()
+        added = path not in self.skills_dirs
+        if added:
+            self.skills_dirs = (*self.skills_dirs, path)
+        self.agent.skills.discover_skills_dirs([path])
+        self.refresh_skill_commands()
+        return added
+
+    def set_controls(self, controls):
+        self.controls = {command.name: command for command in controls}
+        self.refresh_skill_commands()
 
     def get(self, name: str) -> CodingSlashCommand | None:
         return self._commands.get(name.lower())
@@ -194,6 +212,7 @@ class CodingSlashCommandRegistry:
         previous = self.commands()
         commands = discover_markdown_commands(self.skills_dirs, self.reserved)
         commands.update(discover_python_commands(self.agent, self.reserved))
+        commands.update(self.controls)
         self._commands = commands
         if self._on_change is not None and self.commands() != previous:
             self._on_change(self.commands())
