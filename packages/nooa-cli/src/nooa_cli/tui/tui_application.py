@@ -1474,7 +1474,6 @@ class TUIApplication:
         on_cancel_command: Callable[[], bool] | None = None,
         on_bang: Callable[[str], Awaitable[None] | None] | None = None,
         on_output: Callable[[Any], Awaitable[None] | None] | None = None,
-        on_agent_activity: Callable[[], None] | None = None,
         completer: Completer | None = None,
         session_label: Callable[[], str] | None = None,
         config: Any = None,
@@ -1537,7 +1536,6 @@ class TUIApplication:
         self._on_cancel_command = on_cancel_command
         self._on_bang = on_bang
         self._on_output = on_output
-        self._on_agent_activity = on_agent_activity
         self._session_label_fn: Callable[[], str] | None = session_label
         self._config = config
         self._submission_guard = submission_guard
@@ -4066,8 +4064,6 @@ class TUIApplication:
             if self._app.is_running:
                 self._app.invalidate()
             self._ensure_spinner_task()
-            if self._on_agent_activity is not None:
-                self._on_agent_activity()
         return accepted
 
     def _resume_input_cursor_following(self) -> None:

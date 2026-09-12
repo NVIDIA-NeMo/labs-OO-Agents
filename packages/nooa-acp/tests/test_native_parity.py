@@ -330,10 +330,6 @@ async def test_behavior_controls_match_native_without_generating_turns(workspace
             ("memory", ["local"]),
             ("reflection", ["on"]),
             ("reflection", ["off"]),
-            ("keep-going", ["model", "test-judge"]),
-            ("keep-going", ["on"]),
-            ("keep-going", ["status"]),
-            ("keep-going", ["off"]),
         ]:
             native_result = await result.agent._command_registry.get_command(name).execute(args)
             assert native_result.success
@@ -349,21 +345,15 @@ async def test_behavior_controls_match_native_without_generating_turns(workspace
 
         for agent, sid in ((result.agent, result.session_id), (session.agent, created.session_id)):
             assert agent.memory._mgr.store.path.endswith(f"{sid}-memory.db")
-            assert agent.vars["tui_keep_going"] is False
-            assert agent.vars["tui_keep_going_model"] == "test-judge"
             assert "counter" not in agent.vars
             assert SessionStore(workspace / ".nooa" / "sessions").load_turns(sid) == []
         saved = SessionOptions.load(workspace)
         assert saved.memory_agents["nooa_cli.tui.agent:TUIAgent"] == "session"
-        assert saved.keep_going is False
-        assert saved.keep_going_model == "test-judge"
 
         # Controls remain in the catalog after memory replaces its skill instance.
         await adapter.prompt(created.session_id, [text_block("/memory off")])
         assert not hasattr(session.agent, "memory")
-        assert {"skills", "memory", "reflection", "keep-going"} <= {
-            c.name for c in session.commands.commands()
-        }
+        assert {"skills", "memory", "reflection"} <= {c.name for c in session.commands.commands()}
     finally:
         await adapter.close()
         await close_native(result)

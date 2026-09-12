@@ -432,90 +432,10 @@ class ReflectionControl(MemoryControl):
         )
 
 
-class KeepGoingControl(BehaviorControl):
-    """Toggle stop auditing and autonomous continuation for unfinished work."""
-
-    _VAR_KEY = "tui_keep_going"
-    _MODEL_VAR_KEY = "tui_keep_going_model"
-
-    @property
-    def name(self) -> str:
-        return "keep-going"
-
-    def help_text(self) -> dict[str, str]:  # type: ignore[override]
-        state = "on" if self._enabled() else "off"
-        model = self._model() or "not configured"
-        return {
-            "/keep-going [on|off]": (
-                f"Audit completed turns and continue unfinished work (currently {state}; "
-                f"model: {model})"
-            ),
-            "/keep-going model <name>": f"Set the keep-going judge model (currently {model})",
-        }
-
-    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
-        if not args or (len(args) == 1 and args[0].lower() == "status"):
-            return True, None
-        subcommand = args[0].lower()
-        if subcommand in {"on", "off"} and len(args) == 1:
-            return True, None
-        if subcommand == "model" and len(args) == 2 and args[1].strip():
-            return True, None
-        return False, "Usage: /keep-going [on|off] or /keep-going model <name>"
-
-    async def execute(self, args: list[str]) -> ControlResult:
-        if not args or (len(args) == 1 and args[0].lower() == "status"):
-            state = "on" if self._enabled() else "off"
-            model = self._model() or "not configured"
-            return ControlResult.ok(
-                ControlMessage(f"Keep-going mode: {state}; model: {model}", "info")
-            )
-
-        if args[0].lower() == "model":
-            model = args[1].strip()
-            self.config.keep_going_model = model
-            vars_obj = getattr(self.agent, "vars", None)
-            if vars_obj is not None:
-                vars_obj[self._MODEL_VAR_KEY] = model
-            self._persist_setting("keep_going_model", model)
-            return ControlResult.ok(ControlMessage(f"Keep-going model set to {model}.", "success"))
-
-        enabled = args[0].lower() == "on"
-        if enabled and not self._model():
-            return ControlResult.err(
-                "Keep-going model is not configured. Run /keep-going model <model-id> first."
-            )
-        self.config.keep_going = enabled
-        vars_obj = getattr(self.agent, "vars", None)
-        if vars_obj is not None:
-            vars_obj[self._VAR_KEY] = enabled
-        self._persist_setting("keep_going", enabled)
-        state = "enabled" if enabled else "disabled"
-        return ControlResult.ok(ControlMessage(f"Keep-going mode {state}.", "success"))
-
-    def _enabled(self) -> bool:
-        vars_obj = getattr(self.agent, "vars", None)
-        if vars_obj is not None and self._VAR_KEY in vars_obj:
-            return bool(vars_obj.get(self._VAR_KEY))
-        return bool(getattr(self.config, "keep_going", False))
-
-    def _model(self) -> str | None:
-        vars_obj = getattr(self.agent, "vars", None)
-        if vars_obj is not None and self._MODEL_VAR_KEY in vars_obj:
-            value = vars_obj.get(self._MODEL_VAR_KEY)
-        else:
-            value = getattr(self.config, "keep_going_model", None)
-        if value is None:
-            return None
-        model = str(value).strip()
-        return model or None
-
-
 CONTROL_TYPES = {
     "skills": SkillsControl,
     "memory": MemoryControl,
     "reflection": ReflectionControl,
-    "keep-going": KeepGoingControl,
 }
 
 
@@ -542,7 +462,6 @@ def behavior_commands(
                     "skills": "<list|commands|add DIR|activate ID|deactivate ID>",
                     "memory": "[status|on|local|off]",
                     "reflection": "[status|on|off|now]",
-                    "keep-going": "[status|on|off|model <name>]",
                 }[control.name],
                 output_to_agent=False,
                 is_control=True,

@@ -1105,12 +1105,6 @@ async def test_session_run_startup_failure_teardown_order(
         async def after_handle(self, _agent, _result):
             pass
 
-        def on_notification(self, _notification):
-            pass
-
-        def invalidate_keep_going(self):
-            pass
-
         async def shutdown(self):
             order.append("policy shutdown")
             raise RuntimeError("policy shutdown failed")
@@ -1288,7 +1282,6 @@ async def test_restart_waits_for_agent_command_policy_and_callback_work() -> Non
 
     app.input_drain_idle = True
     command.is_idle = True
-    policy.is_idle = True
     agent.is_quiescent = True
     await asyncio.wait_for(waiter, timeout=1)
 

@@ -81,7 +81,7 @@ class CodingAgent(InteractiveAgent):
     # Host-driven input channels. These live here rather than on
     # InteractiveAgent because they are coding-host concepts: slash commands
     # are a UI affordance whose registry is in this package, and
-    # system_messages carries host continuations such as keep-going.
+    # system_messages carries host-provided system input.
     _slash_commands_in: Annotated[Channel, hidden, nosnapshot]
     slash_commands: Annotated[Any, nosnapshot]
     _system_messages_in: Annotated[Channel, hidden, nosnapshot]

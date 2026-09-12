@@ -523,7 +523,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
         Hosts declare the rest. ``CodingAgent`` adds ``"slash_commands"``
         (``SlashCommandResult``) and ``"system_messages"`` (host-owned
-        prompts such as keep-going continuations); a harness might add
+        prompts supplied by the host); a harness might add
         ``"job_outputs"``. The
         ``<queue_status>`` context block lists the pending count per
         queue each turn. After any stop reason, the dispatcher races every

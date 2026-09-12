@@ -169,19 +169,7 @@ published through the `nooa.skills` entry-point group. Toolbar extensions can
 similarly publish named providers through `nooa_cli.tui.toolbar_items`; users
 select their order with `/toolbar set <item> ...`.
 
-Keep-going mode is an explicit opt-in. It audits a completed turn with a
-separate judge model and sends an internal continuation only when autonomous
-work remains:
-
-```text
-/keep-going model nemotron3-nano-30b
-/keep-going on
-```
-
-Use `/keep-going off` to disable it. New user input supersedes and cancels an
-in-flight audit.
-
-Long-term memory and idle reflection are also explicit opt-ins:
+Long-term memory and idle reflection are explicit opt-ins:
 
 ```text
 /memory on        # project-wide store shared across sessions

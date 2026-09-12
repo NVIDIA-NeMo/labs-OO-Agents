@@ -36,7 +36,6 @@ coding:
   active_skills: [your.installed.skill]
   inactive_skills: []
   memory: session
-  keep_going: false
   reflection: false
 ```
 
@@ -117,7 +116,7 @@ approval store and enforces its fingerprints. Native `/mcp approve` and OAuth
 dialogs have not yet been mapped into ACP interaction: preapprove the fixture
 using native NOOA, and record fresh approval/OAuth parity as a follow-up gap.
 Native settings menus and some host controls remain native. `/skills`, `/memory`,
-`/reflection`, `/keep-going`, and skill-provided slash commands are now shared.
+`/reflection`, and skill-provided slash commands are now shared.
 
 ## Shared settings and Markdown command checks
 
@@ -140,11 +139,10 @@ turn should contain the expanded skill instruction once. Repeat on fresh
 sessions to check automatic titling from a skill command as the first prompt.
 A skill marked `user-invocable: false` should not appear in either command list.
 
-For settings, begin with `coding.keep_going: true` in the acceptance workspace
-and a configured judge model. In native, run `/keep-going off`, then exit.
-Verify `.nooa/settings.yaml` now has `coding.keep_going: false`. Start a fresh
-session in each host and check the effective value without depending on an old
-snapshot's preferences. For an exact configuration check from that workspace:
+For settings, add and activate a skill using the commands below, then exit.
+Verify `.nooa/settings.yaml` contains its `coding.active_skills` entry. Start a
+fresh session in each host and confirm the skill is active. For an exact
+configuration check from that workspace:
 
 ```bash
 uv run --project "$NOOA_CHECKOUT" --no-sync python - <<'PYTHON'
@@ -155,15 +153,14 @@ root = Path.cwd()
 native = SessionOptions.from_native_config(Config.load(working_dir=str(root)))
 acp = SessionOptions.load(root)
 assert native == acp
-assert acp.keep_going is False
-print("Both hosts load the same behavior; keep-going is off.")
+print("Both hosts load the same behavior and skill preferences.")
 PYTHON
 ```
 
 New behavior writes use `coding.*`; legacy `tui.*` and
 `agent.summarization` settings remain readable. Partial summarization overrides
 preserve unspecified legacy fields. Presentation preferences remain in `tui.*`.
-Both clients now support `/skills`, `/memory`, `/reflection`, and `/keep-going`
+Both clients now support `/skills`, `/memory`, and `/reflection`
 through shared operations. Model/reasoning selection, compaction, and MCP
 approval/connection commands still need ACP mappings. Unsupported reserved NOOA
 commands now report that limitation without invoking the model.
@@ -188,10 +185,9 @@ live sessions keep their own skill instances and are not reconfigured by another
 session's settings write.
 
 In both clients, try `/memory local`, `/memory`, `/reflection on`,
-`/reflection off`, `/keep-going`, and `/memory off`. Status should describe the
+`/reflection off`, and `/memory off`. Status should describe the
 actual NOOA agent. Commands display results without a model turn, automatic
 titling, or adding conversation turns to an otherwise empty resume entry.
-`/keep-going on` requires `/keep-going model <configured-model>` first.
 For a memory handoff, enable local memory, ask the agent to remember a test fact,
 exit, resume the same session in the other host, and recall it.
 
@@ -264,3 +260,17 @@ picker suite passed **69 tests**. All ACP tests passed in the full run, includin
 wire-level controls and fresh-agent skill persistence. Ruff, formatting,
 `git diff --check`, and `uv lock --check` pass. A fresh-process check confirmed
 that ACP controls execute without importing native TUI modules.
+
+## Removed keep-going behavior
+
+Keep-going is removed from both hosts. Neither command list should offer
+`/keep-going`, and a completed turn should not start a judge or enqueue a
+continuation. Legacy `keep_going` / `keep_going_model` settings and snapshot
+preferences are ignored; no manual settings or session cleanup is required.
+
+Validation: the full CLI/ACP run had **1,909 passed, 2 skipped, 3 existing
+xfailed**, with one timeout in the native input-buffer submission test. The
+complete native app-behavior suite then passed **155 tests**, including that
+test, without further code changes. All ACP tests passed in the full run.
+Focused removal/configuration/parity checks passed **92 tests**. Ruff, formatting,
+and `git diff --check` pass.

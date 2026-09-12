@@ -98,7 +98,7 @@ resulting agent input, not just that the same skill roots were discovered.
 
 | Area | Current difference | Shared extraction and acceptance |
 | --- | --- | --- |
-| Behavior controls | The shared layer now owns `/skills`, `/memory`, `/reflection`, and `/keep-going`. `/model`, `/reasoning`, `/compact`, and MCP interaction still need ACP mappings. ACP also exposes Markdown and Python skill commands. | Extract the operations and structured results. Map them to native commands and appropriate ACP controls. Verify state changes, saved preferences, and cancellation. The Pool client's own commands do not establish that NOOA performed these operations. |
+| Behavior controls | The shared layer now owns `/skills`, `/memory`, and `/reflection`. `/model`, `/reasoning`, `/compact`, and MCP interaction still need ACP mappings. ACP also exposes Markdown and Python skill commands. | Extract the operations and structured results. Map them to native commands and appropriate ACP controls. Verify state changes, saved preferences, and cancellation. The Pool client's own commands do not establish that NOOA performed these operations. |
 | MCP interaction | The registry and approvals are shared. Native `CommandRegistry._bind_mcp_oauth_prompt` binds user interaction and `/mcp approve` records approval. ACP does not supply these interaction paths. | Shared interaction requests with host adapters. Test a previously unapproved server and a fresh OAuth flow. Preapproved MCP success covers only part of parity. |
 | Input normalization | Native `tui/completer.py:expand_mentions` resolves typed `@path` mentions into absolute Markdown links; the composer preserves pasted text as opaque. Both hosts now expand mentions in skill results through the shared helper. ACP `_prompt_text` accepts text and resource links, with links rendered as `Resource name: URI`. | Define common semantic input/attachment handling with provenance. Test literal pasted `@text`, real file references, and references returned by skills. Preserve opaque payloads. Do not expand them indiscriminately. |
 | Startup and restore policy | Native `bootstrap` handles invalid custom agents with a fallback and snapshot restoration errors with warnings. ACP `_create_runtime` propagates failures. Native configures memory before skill setup; ACP configures skills before memory. Their MCP connection and `SessionResumed` notification ordering also differ. | One create/load lifecycle with explicit fallback/restoration results and a readiness barrier. Test a failing custom agent, missing/corrupt snapshot, and a skill whose resume hook inspects all configured resources. The ordering differences are confirmed; their effects on arbitrary custom skills were not dynamically tested. |
@@ -138,7 +138,7 @@ layouts can remain native.
    persistence first so parity tests really configure both agents identically.
 2. **Common commands and input preparation.** Bring Markdown skills and Python
    commands under one registry, then extract the behavior operations from native
-   command classes. Prioritize skills, compaction and memory/reflection/keep-going.
+   command classes. Prioritize skills, compaction and memory/reflection.
 3. **Common session lifecycle.** Own create/load readiness, configured resources,
    resume events, metadata eligibility, checkpoint and shutdown policy together.
    Reuse the existing agent factory, `LocalAgentRunner` and core session store.
@@ -201,8 +201,7 @@ the eventual non-TUI upstream slice.
 
 ## Behavior-control follow-up
 
-`interactive/controls.py` now owns `/skills`, `/memory`, `/reflection`, and
-`/keep-going`. Native renders its structured messages/tables; ACP advertises the
+`interactive/controls.py` now owns `/skills`, `/memory`, and `/reflection`. Native renders its structured messages/tables; ACP advertises the
 same operations and returns their output without generating an agent turn.
 Skills directory and activation choices persist for new sessions, including
 when a skill was already active from a one-off model action. Other reserved
@@ -220,3 +219,19 @@ picker suite passed **69 tests**. All ACP tests passed in the full run, includin
 wire-level controls and fresh-agent skill persistence. Ruff, formatting,
 `git diff --check`, and `uv lock --check` pass. A fresh-process check confirmed
 that ACP controls execute without importing native TUI modules.
+
+## Keep-going removal
+
+Keep-going was subsequently removed at user request from both native and ACP:
+the judge, automatic continuations, control, completion, and saved-setting fields
+are gone. Legacy settings and snapshot flags cannot reactivate it. The shared
+turn policy retains reflection scheduling and normal completion notices. The
+keep-going settings probe above records the original settings-drift finding;
+use skill activation for the current persistence acceptance test.
+
+Validation: the full CLI/ACP run had **1,909 passed, 2 skipped, 3 existing
+xfailed**, with one timeout in the native input-buffer submission test. The
+complete native app-behavior suite then passed **155 tests**, including that
+test, without further code changes. All ACP tests passed in the full run.
+Focused removal/configuration/parity checks passed **92 tests**. Ruff, formatting,
+and `git diff --check` pass.

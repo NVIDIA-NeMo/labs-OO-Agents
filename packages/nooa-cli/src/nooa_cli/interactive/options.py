@@ -28,8 +28,6 @@ class SessionOptions(BaseModel):
     mcp_file: Path = Path(".mcp.json")
     mcp_servers: dict[str, dict[str, Any]] = Field(default_factory=dict)
     mcp_auto_connect: list[str] = Field(default_factory=list)
-    keep_going: bool = False
-    keep_going_model: str | None = None
     memory: Literal["off", "session", "project"] = "off"
     memory_agents: dict[str, Literal["off", "session", "project"]] = Field(default_factory=dict)
     memory_path: Path | None = None
