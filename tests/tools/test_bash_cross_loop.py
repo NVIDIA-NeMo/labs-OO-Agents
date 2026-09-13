@@ -119,6 +119,49 @@ class TestCrossLoopLockContention:
         finally:
             await session.close()
 
+    async def test_loop_change_reset_keeps_concurrent_runs_serialized(self, tmp_path, monkeypatch):
+        """A loop-change reset must not replace a lock held by run()."""
+        session = BashSession(cwd=tmp_path)
+        session._started = True
+        session._started_on_loop = object()
+
+        restart_started = asyncio.Event()
+        allow_restart = asyncio.Event()
+        command_started = asyncio.Event()
+        allow_command = asyncio.Event()
+
+        async def start():
+            session._started = True
+            session._started_on_loop = asyncio.get_running_loop()
+            restart_started.set()
+            await allow_restart.wait()
+
+        async def send_and_wait(_script, _sentinel, timeout):
+            command_started.set()
+            await allow_command.wait()
+            return ["0", str(tmp_path)], "", "", False
+
+        monkeypatch.setattr(session, "start", start)
+        monkeypatch.setattr(session, "_send_and_wait", send_and_wait)
+
+        first = asyncio.create_task(session.run("echo first"))
+        await asyncio.wait_for(restart_started.wait(), timeout=1)
+        second = asyncio.create_task(session.run("echo second"))
+
+        entered_during_reset = False
+        try:
+            await asyncio.sleep(0)
+            entered_during_reset = command_started.is_set()
+        finally:
+            allow_restart.set()
+            allow_command.set()
+            results = await asyncio.wait_for(
+                asyncio.gather(first, second, return_exceptions=True), timeout=1
+            )
+
+        assert not entered_during_reset
+        assert results == [("", "", 0), ("", "", 0)]
+
     async def test_shell_tools_survives_loop_restart(self, tmp_path):
         """ShellTools concurrent usage survives loop restart."""
         shell = ShellTools(cwd=tmp_path)
