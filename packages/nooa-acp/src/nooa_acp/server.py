@@ -73,6 +73,7 @@ from nooa.sessions import SessionResumed
 from nooa.slash_dispatch import CoercionError
 from nooa.storage.sqlite import SessionAlreadyActiveError, is_sqlite_database_active
 from nooa.unifiedllm import UnifiedLLM
+from nooa_acp._mcp_trace import MCPHandoffTrace
 from nooa_acp._runtime import (
     SessionBusyError,
     SessionRuntime,
@@ -763,6 +764,7 @@ async def serve(
     options_factory: Callable[[Path], SessionOptions] | None = None,
 ) -> None:
     adapter = CodingACPAdapter(llm_factory, options_factory=options_factory)
+    mcp_trace = MCPHandoffTrace.from_env()
     # ACP clients may terminate their subprocess instead of closing stdin.
     # Let normal teardown save snapshots and release shared-filesystem claims.
     loop = asyncio.get_running_loop()
@@ -787,7 +789,11 @@ async def serve(
         # advertises the close capability, so without this flag the agent
         # promises a method that answers "method not found", and a client can
         # never release a session. session/list is stable and unaffected.
-        await run_agent(cast(Agent, adapter), use_unstable_protocol=True)
+        await run_agent(
+            cast(Agent, adapter),
+            use_unstable_protocol=True,
+            observers=[mcp_trace] if mcp_trace is not None else [],
+        )
     except asyncio.CancelledError:
         if not terminating:
             raise
