@@ -41,15 +41,21 @@ async def tail(path: str, *, poll_interval: float = 0.5):
     """Tail a file, yielding new lines as they appear.
 
     Starts from the current end of file. Polls every
-    *poll_interval* seconds.
+    *poll_interval* seconds. A line that is still being written is
+    held until its newline arrives, so a poll landing mid-write does
+    not split one line across two yields.
     """
     fh = open(path)
     try:
         fh.seek(0, 2)
+        partial = ""
         while True:
-            line = fh.readline()
-            if line:
-                yield line.rstrip("\n")
+            chunk = fh.readline()
+            if chunk:
+                partial += chunk
+                if partial.endswith("\n"):
+                    yield partial.rstrip("\n")
+                    partial = ""
             else:
                 await asyncio.sleep(poll_interval)
     finally:

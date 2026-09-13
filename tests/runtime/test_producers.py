@@ -8,7 +8,34 @@ import platform
 
 import pytest
 
-from nooa.runtime.producers import monitor
+from nooa.runtime.producers import monitor, tail
+
+
+class TestTail:
+    """Verify tail() assembles whole lines."""
+
+    async def test_partial_line_is_not_split(self, tmp_path):
+        """A poll landing mid-write must not split one line across two yields."""
+        f = tmp_path / "app.log"
+        f.write_text("", encoding="utf-8")
+
+        async def write_in_two_parts():
+            await asyncio.sleep(0.05)
+            with open(f, "a", encoding="utf-8") as fh:
+                fh.write("ERROR db timeout")
+                fh.flush()
+                await asyncio.sleep(0.3)  # tail polls repeatedly during this gap
+                fh.write(" after 30s\n")
+
+        async def first_line():
+            async for line in tail(str(f), poll_interval=0.01):
+                return line
+            return None
+
+        writer = asyncio.create_task(write_in_two_parts())
+        line = await asyncio.wait_for(first_line(), timeout=5.0)
+        await writer
+        assert line == "ERROR db timeout after 30s"
 
 
 class TestMonitorProcessIsolation:
