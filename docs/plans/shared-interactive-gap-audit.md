@@ -256,3 +256,32 @@ agent code remembers a repository skill from either host; fresh agents in both
 hosts restore it. Coverage also checks forgetting, interleaved agent/command
 writes, workspace isolation, and save failures. Ruff, formatting, and
 `git diff --check` pass.
+
+
+## Workspace settings and the Pool MCP probe
+
+`self.workspace_settings` supersedes `self.persisting_skills`. The host-owned
+skill exposes remember_skill/forget_skill, configure_memory/configure_reflection,
+remember_mcp/forget_mcp, set_default_model, and status. Saved preferences stay in
+the session workspace. Status separates saved defaults from live state and
+reports MCP names without credential values. Memory/reflection reuse the shared
+controls and update the same configuration object used by commands in that host;
+other live sessions retain their own memory configuration.
+
+MCP persistence saves definitions already registered with NOOA; it neither
+connects nor grants approval. Client-supplied definitions are not copied. Saved
+model preferences do not override the current ACP CLI's required explicit model.
+The core registry and LLM backend APIs are unchanged.
+
+`scripts/pool_mcp_probe.py` is a dependency-free stdio MCP server that journals
+starts and nonce-echo calls. The adapter integration test exercises it through
+session/new and session/load. `docs/plans/pool-mcp-acceptance.md` describes the
+separate manual Pool test; Pool itself has not been run here.
+
+Validation: the broader ACP/settings/memory/reflection run passed **206 tests
+with 3 existing xfailed**. After the final live-configuration adjustment,
+**85 tests passed**, including agent-generated skill calls in both hosts,
+memory/reflection controls, actual MCP reconnect/forget behavior, the probe,
+native resume/bootstrap, and subprocess ACP controls. The native memory test
+fixture now isolates its working directory as well as its configuration paths.
+Ruff, formatting, and `git diff --check` pass.

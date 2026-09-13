@@ -7,6 +7,8 @@ from nooa_cli.tui.config import Config
 
 
 def _configure_project(monkeypatch, tmp_path):
+    # Memory paths use the working directory, independently of config overrides.
+    monkeypatch.chdir(tmp_path)
     project_dir = tmp_path / ".nooa"
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project_dir))
     import nooa_cli.tui.session_manager as session_manager

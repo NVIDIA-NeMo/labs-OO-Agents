@@ -110,9 +110,11 @@ class MCPRegistry(Skill):
         )
         await self.mcp.connect(["myserver"])
 
-    To persist a server, add a ``coding.mcp_servers.<name>`` block to
-    ``.nooa/settings.yaml`` or a VS Code /
-    Claude-style ``.mcp.json``; ``register`` is in-memory only.
+    In NOOA interactive sessions, persist a registered server with
+    ``self.workspace_settings.remember_mcp("myserver", auto_connect=True)``.
+    This writes ``coding.mcp_servers`` in ``.nooa/settings.yaml`` without
+    connecting or granting approval. ``register`` itself is in-memory only;
+    a VS Code / Claude-style ``.mcp.json`` remains supported.
 
     ## OAuth: what the AGENT can do vs. what the HUMAN must do
 
@@ -362,8 +364,9 @@ class MCPRegistry(Skill):
         """Add an in-memory server entry (not persisted to config).
 
         Use ``url``/``headers``/``transport`` for HTTP servers, or
-        ``command``/``args``/``env`` for stdio servers. To persist, add a
-        ``coding.mcp_servers.<name>`` block to settings.yaml instead.
+        ``command``/``args``/``env`` for stdio servers. In NOOA interactive
+        sessions, follow this with self.workspace_settings.remember_mcp(name)
+        to save the definition and startup preference.
         """
         if name in self._connected or name in self._pending:
             raise RuntimeError(f"Disconnect MCP server {name!r} before changing its configuration")

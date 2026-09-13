@@ -72,14 +72,16 @@ class SessionOptions(BaseModel):
         return cls(**values)
 
 
-def configure_session_skills(agent: Any, options: SessionOptions) -> list[str]:
+def configure_session_skills(
+    agent: Any, options: SessionOptions, *, live_config: Any = None
+) -> list[str]:
     """Attach the same MCP registry and explicit skills before resume events.
 
     Return actionable warnings for either host to display. Discovering a skill
     does not activate it; negative activation preferences override positives.
     """
     from nooa_cli.interactive.mcp_registry import MCPRegistry
-    from nooa_cli.interactive.persisting_skills import PersistingSkills
+    from nooa_cli.interactive.workspace_settings import WorkspaceSettings
 
     skills = getattr(agent, "skills", None)
     if skills is None:
@@ -96,8 +98,8 @@ def configure_session_skills(agent: Any, options: SessionOptions) -> list[str]:
         ),
     )
     skills.activate(["nemo.mcp"])
-    skills.register("nooa.persisting_skills", PersistingSkills(root))
-    skills.activate(["nooa.persisting_skills"])
+    skills.register("nooa.workspace_settings", WorkspaceSettings(options, live_config=live_config))
+    skills.activate(["nooa.workspace_settings"])
     warnings: list[str] = []
     discover = getattr(skills, "discover_skills_dirs", None)
     if options.active_skills and callable(discover):
