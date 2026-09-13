@@ -91,8 +91,9 @@ until this forwarding test is finished.
   forwarding, discovery, and invocation worked.
 
 This checkout tests the probe against the actual NOOA ACP adapter for new and
-loaded sessions. The installed Pool application's forwarding remains the part
-verified by this manual test.
+loaded sessions. The manual Pool 1.0.16 test below received empty MCP lists on
+session/new, including with a CLI-visible global registration. Pool forwarding
+on session/load has not been manually verified.
 
 ## Observed result: Pool 1.0.16
 
@@ -110,12 +111,12 @@ approval did not test client forwarding.
 
 Pool's [MCP documentation](https://docs.poolside.ai/mcp-servers) explicitly
 supports `.poolside/settings.local.yaml`, but the documented `mcp list` command
-does not specify whether it includes project settings. These observations alone
+does not specify whether it includes project settings. Those initial observations alone
 do not distinguish configuration discovery from missing external-agent forwarding.
 The prepared directory is also not a Git repository; whether that affects Pool's
 project discovery has not been established.
 
-### Next control: a registration created by Pool
+### Global configuration control
 
 Add a distinct temporary server using Pool's CLI. This writes to the user's
 `~/.config/poolside/settings.yaml`, making the probe available across projects
@@ -135,8 +136,59 @@ works and project configuration discovery remains the question. If the list is
 still empty, even the CLI-visible registration was not forwarded in that run.
 If forwarded, use `self.pool_probe_global.probe` for the invocation/resume steps.
 
+The user completed this control. `pool mcp list` reported one configured server,
+`pool_probe_global`, with the expected command and arguments. Subsequent server
+processes still recorded empty handoffs:
+
+```json
+{"pid": 487555, "event": "trace_started"}
+{"pid": 487555, "event": "session/new", "mcpServersField": "list", "servers": []}
+{"pid": 487826, "event": "trace_started"}
+{"pid": 487826, "event": "session/new", "mcpServersField": "list", "servers": []}
+```
+
+This establishes that Pool 1.0.16 did not forward the CLI-visible global stdio
+registration to the external NOOA ACP agent in these runs. The empty list was
+captured before NOOA's session setup or MCP connection code ran. NOOA approvals
+and tool discovery cannot explain an absent definition at that boundary.
+
 After completing this control, remove only its temporary global registration:
 
 ```bash
 pool mcp remove pool_probe_global
 ```
+
+### Report draft
+
+**Title:** Pool 1.0.16 sends an empty session/new mcpServers list to an external
+ACP agent despite a configured global MCP server
+
+**Reproduction:** Add the stdio probe with `pool mcp add` as above, confirm it
+appears in `pool mcp list`, then start `pool --agent-server nooa-acp` with the
+handoff trace enabled. Create a fresh session and inspect the incoming request
+before sending any model prompt. NOOA advertises HTTP/SSE MCP support as well as
+implementing the baseline stdio transport.
+
+**Expected for this integration:** The configured probe is included in the
+session/new `mcpServers` list, or Pool documents the configuration needed to
+forward it to an external ACP agent.
+
+**Actual:** The global registration is listed by Pool but `mcpServers` is an
+empty list. The sanitized records above include independent process starts.
+
+**Scope:** Observed with Pool 1.0.16, a local external NOOA ACP agent, and a stdio
+MCP server. This does not establish behavior for other Pool versions,
+transports, or session/load. The protocol permits a client to send no MCP
+servers; this report concerns interoperability, not a malformed ACP request.
+
+This report is a local draft; it has not been submitted to Poolside.
+
+### Path for shared NOOA sessions
+
+Configure MCP definitions in NOOA's shared workspace settings for both native
+and ACP agents: register with `self.mcp.register(...)`, then persist with
+`self.workspace_settings.remember_mcp(name)`. Approval remains separate; the
+current first-time approval UI is the native TUI's `/mcp approve` command.
+After approving the exact saved definition there, fresh native and ACP sessions
+can auto-connect it. This path is covered by the automated native/ACP parity
+test; it does not depend on Pool forwarding or reading Pool's private settings.
