@@ -3,6 +3,7 @@
 """End-to-end ACP JSON-RPC subprocess test."""
 
 import asyncio
+import json
 import signal
 import sys
 from contextlib import suppress
@@ -15,6 +16,8 @@ from acp.schema import (
     AgentMessageChunk,
     AvailableCommandsUpdate,
     ContentToolCallContent,
+    EnvVariable,
+    McpServerStdio,
     TextContentBlock,
     ToolCallProgress,
     ToolCallStart,
@@ -42,6 +45,56 @@ class _RecordingClient:
             self.commands_updated.set()
         if isinstance(update, AgentMessageChunk):
             self.message_updated.set()
+
+
+async def test_mcp_handoff_trace_observes_new_and_load_requests(tmp_path):
+    """Exercise the real wire observer, including an empty handoff on resume."""
+    client = _RecordingClient()
+    fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
+    probe = Path(__file__).resolve().parents[3] / "scripts" / "pool_mcp_probe.py"
+    trace = tmp_path / "handoff.jsonl"
+    secret = "private-mcp-environment-value"
+    server = McpServerStdio(
+        name="pool_probe",
+        command=sys.executable,
+        args=[str(probe), "--journal", str(tmp_path / "probe.jsonl")],
+        env=[EnvVariable(name="TEST_SECRET", value=secret)],
+    )
+
+    async with spawn_agent_process(
+        client,
+        sys.executable,
+        str(fixture),
+        env={
+            "NOOA_ACP_MCP_TRACE": str(trace),
+            "NEMO_OO_USER_DIR": str(tmp_path / "user-config"),
+        },
+        cwd=tmp_path,
+        use_unstable_protocol=True,
+    ) as (connection, process):
+        await connection.initialize(PROTOCOL_VERSION)
+        session = await connection.new_session(str(tmp_path), mcp_servers=[server])
+        await connection.close_session(session.session_id)
+        await connection.load_session(str(tmp_path), session.session_id, mcp_servers=[])
+
+        content = trace.read_text()
+        assert secret not in content
+        assert str(probe) not in content
+        assert [json.loads(line) for line in content.splitlines()] == [
+            {"pid": process.pid, "event": "trace_started"},
+            {
+                "pid": process.pid,
+                "event": "session/new",
+                "mcpServersField": "list",
+                "servers": [{"name": "pool_probe", "transport": "stdio"}],
+            },
+            {
+                "pid": process.pid,
+                "event": "session/load",
+                "mcpServersField": "list",
+                "servers": [],
+            },
+        ]
 
 
 def _write_protocol_skill(workspace: Path) -> None:
