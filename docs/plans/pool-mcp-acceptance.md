@@ -93,3 +93,50 @@ until this forwarding test is finished.
 This checkout tests the probe against the actual NOOA ACP adapter for new and
 loaded sessions. The installed Pool application's forwarding remains the part
 verified by this manual test.
+
+## Observed result: Pool 1.0.16
+
+The user reported this handoff from the prepared workspace on 2026-09-13:
+
+```json
+{"pid": 484799, "event": "trace_started"}
+{"pid": 484799, "event": "session/new", "mcpServersField": "list", "servers": []}
+```
+
+`pool --version` returned `1.0.16`; `pool mcp list` returned
+`No MCP servers configured`. No MCP definition reached NOOA in this request.
+The agent's earlier manual registration of `pool_probe` and request for NOOA
+approval did not test client forwarding.
+
+Pool's [MCP documentation](https://docs.poolside.ai/mcp-servers) explicitly
+supports `.poolside/settings.local.yaml`, but the documented `mcp list` command
+does not specify whether it includes project settings. These observations alone
+do not distinguish configuration discovery from missing external-agent forwarding.
+The prepared directory is also not a Git repository; whether that affects Pool's
+project discovery has not been established.
+
+### Next control: a registration created by Pool
+
+Add a distinct temporary server using Pool's CLI. This writes to the user's
+`~/.config/poolside/settings.yaml`, making the probe available across projects
+until removed. It does not register or approve anything in NOOA.
+
+```bash
+cd /localhome/local-pfurgale/dev/nooa-pool-mcp-test
+pool mcp add pool_probe_global -- /usr/local/bin/uv run --no-project --no-config python \
+  /localhome/local-pfurgale/dev/labs-OO-Agents-shared-interactive/scripts/pool_mcp_probe.py \
+  --journal /localhome/local-pfurgale/dev/nooa-pool-mcp-test/probe.jsonl
+pool mcp list
+```
+
+Once `pool_probe_global` is listed, repeat the launch above and inspect the new
+`session/new` trace before prompting. If this name is present, global forwarding
+works and project configuration discovery remains the question. If the list is
+still empty, even the CLI-visible registration was not forwarded in that run.
+If forwarded, use `self.pool_probe_global.probe` for the invocation/resume steps.
+
+After completing this control, remove only its temporary global registration:
+
+```bash
+pool mcp remove pool_probe_global
+```
