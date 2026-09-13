@@ -75,6 +75,13 @@ class ExecutionNamespaceBuilder:
                 "self": agent,
                 "asyncio": asyncio,
                 "typing": _typing,
+                # Match ActorRuntime.execute_code's defaults: helpers are
+                # precompiled before the cell's typing imports can execute.
+                "Annotated": _typing.Annotated,
+                "Any": _typing.Any,
+                "Literal": _typing.Literal,
+                "Optional": _typing.Optional,
+                "Union": _typing.Union,
                 # agentdoc helpers (doc respects hidden fields)
                 "doc": doc,
                 "methods": methods,
