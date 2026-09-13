@@ -203,6 +203,7 @@ If the viewer isn't running, tracing is silently disabled — no configuration n
 ## Learn more
 
 - **[Documentation](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/README.md)** — human-oriented reading paths, core concepts, architecture, and safety guidance.
+- **[Composable instruction overlays proposal](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/proposals/model-aware-instruction-profiles.md)** — a proposed cross-harness mechanism for combining shared repository guidance, private developer workflows, and model-selected instruction policy.
 - **[Framework tour](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/tour.md)** — a concise conceptual showcase of NOOA's core ideas and Python-first design.
 - **[Notebook tutorials](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/notebook_tutorials/README.md)** — the primary hands-on path for your first agent, strategy selection, CodeAct's live-object workflow, and composing subagents. More notebooks are planned.
 - **[Examples catalog](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md)** — runnable quickstarts, advanced mechanics, and complete benchmark systems, indexed by capability and setup requirements.
