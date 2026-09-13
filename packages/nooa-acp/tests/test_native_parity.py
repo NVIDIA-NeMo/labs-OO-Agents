@@ -443,7 +443,7 @@ async def test_agent_remembers_skills_for_both_clients(workspace, external, host
             "python_cell",
             {
                 "code": (
-                    "self.message(await self.persisting_skills.remember("
+                    "self.message(await self.workspace_settings.remember_skill("
                     f"'parity.extra', directory={str(external)!r}))\n"
                     "return_result(RespondReason.DONE, explanation='Remembered skill')"
                 )
@@ -476,7 +476,7 @@ async def test_agent_remembers_skills_for_both_clients(workspace, external, host
             monkeypatch.setattr(native_config, "get_llm", lambda *_: parity_llm())
 
         assert "parity.extra" in source.skills.activated()
-        assert "self.persisting_skills" in source.skills.status()
+        assert "self.workspace_settings" in source.skills.status()
         saved = SessionOptions.load(workspace)
         assert "parity.extra" in saved.active_skills
         assert "parity.fixture" in saved.active_skills
@@ -489,11 +489,11 @@ async def test_agent_remembers_skills_for_both_clients(workspace, external, host
         fresh_acp = (await reader._sessions.get(created.session_id)).value.agent
         for agent in (fresh_native.agent, fresh_acp):
             assert "parity.extra" in agent.skills.activated()
-            assert "nooa.persisting_skills" in agent.skills.activated()
+            assert "nooa.workspace_settings" in agent.skills.activated()
 
         # Interleave a native slash command with the agent operation. Its
         # configuration predates these writes and must retain other choices.
-        await source.persisting_skills.remember("nemo.methodwriting")
+        await source.workspace_settings.remember_skill("nemo.methodwriting")
         result = await fresh_native.agent._command_registry.get_command("skills").execute(
             ["activate", "nemo.libwriting"]
         )
@@ -502,7 +502,7 @@ async def test_agent_remembers_skills_for_both_clients(workspace, external, host
             SessionOptions.load(workspace).active_skills
         )
 
-        await fresh_acp.persisting_skills.forget("parity.extra")
+        await fresh_acp.workspace_settings.forget_skill("parity.extra")
         assert "parity.extra" not in fresh_acp.skills.activated()
         assert "parity.extra" in fresh_native.agent.skills.activated()
         saved = SessionOptions.load(workspace)
@@ -528,7 +528,7 @@ async def test_agent_remembers_skills_for_both_clients(workspace, external, host
 
 
 @pytest.mark.parametrize(
-    "operation, action", [("remember", "activation"), ("forget", "deactivation")]
+    "operation, action", [("remember_skill", "activation"), ("forget_skill", "deactivation")]
 )
 async def test_agent_skill_persistence_reports_save_failure(
     workspace, monkeypatch, operation, action
@@ -544,10 +544,10 @@ async def test_agent_skill_persistence_reports_save_failure(
 
         monkeypatch.setattr(settings, "write_settings_updates", fail)
         with pytest.raises(RuntimeError, match=f"Could not save skill {action}"):
-            await getattr(result.agent.persisting_skills, operation)("parity.fixture")
+            await getattr(result.agent.workspace_settings, operation)("parity.fixture")
         assert (workspace / ".nooa" / "settings.yaml").read_text() == before
         with pytest.raises(RuntimeError, match="not found"):
-            await result.agent.persisting_skills.remember("nonexistent.skill")
+            await result.agent.workspace_settings.remember_skill("nonexistent.skill")
     finally:
         await close_native(result)
 
@@ -564,8 +564,182 @@ async def test_persisting_skills_uses_session_workspace(workspace, tmp_path, mon
     try:
         created = await adapter.new_session(str(other))
         agent = (await adapter._sessions.get(created.session_id)).value.agent
-        await agent.persisting_skills.remember("nemo.methodwriting")
+        await agent.workspace_settings.remember_skill("nemo.methodwriting")
         assert SessionOptions.load(other).active_skills == ["nemo.methodwriting"]
         assert (workspace / ".nooa" / "settings.yaml").read_text() == before
     finally:
         await adapter.close()
+
+
+@pytest.mark.parametrize("host", ["native", "acp"])
+async def test_workspace_settings_memory_reflection_and_status(workspace, host):
+    adapter = CodingACPAdapter(parity_llm)
+    client = RecordingClient()
+    adapter.on_connect(client)
+    native_result = await open_native(workspace)
+    created = await adapter.new_session(str(workspace))
+    acp_agent = (await adapter._sessions.get(created.session_id)).value.agent
+    agent = native_result.agent if host == "native" else acp_agent
+    fresh_native = None
+    try:
+        settings = agent.workspace_settings
+        assert not hasattr(agent, "persisting_skills")
+        with pytest.raises(RuntimeError, match="Memory is not attached"):
+            await settings.configure_reflection(True)
+        await settings.configure_memory("session")
+        await settings.configure_reflection(True)
+        status = settings.status()
+        assert status["saved"]["memory"] == "session"
+        assert status["saved"]["reflection"] is True
+        assert status["current"]["memory_attached"] is True
+        assert status["current"]["reflection_enabled"] is True
+        assert status["current"]["memory"] == "session"
+        other = acp_agent if host == "native" else native_result.agent
+        assert other.workspace_settings.status()["current"]["memory"] == "off"
+        if host == "native":
+            reply = await native_result.agent._command_registry.get_command("memory").execute([])
+            assert "Memory: local" in reply.outputs[0].content
+        else:
+            from acp.schema import AgentMessageChunk
+
+            client.updates.clear()
+            await adapter.prompt(created.session_id, [text_block("/memory")])
+            assert "Memory: local" in "".join(
+                u.content.text for u in client.updates if isinstance(u, AgentMessageChunk)
+            )
+        assert agent.memory._mgr.store.path.endswith("-memory.db")
+        # A native command constructed before the agent wrote preferences sees
+        # the saved state and applies its new choice through the same operation.
+        command = native_result.agent._command_registry.get_command("reflection")
+        assert (await command.execute(["off"])).success
+        assert settings.status()["saved"]["reflection"] is False
+        await settings.configure_memory("project")
+        assert agent.memory._mgr.store.path.endswith("memory/memory.sqlite")
+        fresh_native = await open_native(workspace)
+        fresh = await adapter.new_session(str(workspace))
+        fresh_acp = (await adapter._sessions.get(fresh.session_id)).value.agent
+        for current in (fresh_native.agent, fresh_acp):
+            assert current.workspace_settings.status()["saved"]["memory"] == "project"
+            assert current.memory._mgr.store.path.endswith("memory/memory.sqlite")
+        previous_model = settings.status()["current"]["model"]
+        settings.set_default_model("fixture-model-for-future")
+        assert settings.status()["saved"]["default_model"] == "fixture-model-for-future"
+        assert settings.status()["current"]["model"] == previous_model
+        await settings.configure_memory("off")
+        assert not hasattr(agent, "memory")
+    finally:
+        await adapter.close()
+        await close_native(native_result)
+        if fresh_native is not None:
+            await close_native(fresh_native)
+
+
+async def test_workspace_settings_remembers_mcp_without_connecting_or_approving(
+    workspace, monkeypatch
+):
+    from nooa_cli.interactive.options import SessionOptions
+
+    result = await open_native(workspace)
+    registry = result.agent.mcp
+    registry.register(
+        "fixture", url="https://example.test/mcp", headers={"Authorization": "Bearer ${TEST_TOKEN}"}
+    )
+    monkeypatch.setattr(registry, "_approve", lambda *_: pytest.fail("Must not approve"))
+    monkeypatch.setattr(registry, "connect", lambda *_: pytest.fail("Must not connect"))
+    try:
+        settings = result.agent.workspace_settings
+        settings.remember_mcp("fixture")
+        saved = SessionOptions.load(workspace)
+        assert saved.mcp_auto_connect == ["fixture"]
+        assert saved.mcp_servers["fixture"]["headers"] == {"Authorization": "Bearer ${TEST_TOKEN}"}
+        assert not registry._is_approved("fixture")
+        assert "Authorization" not in str(settings.status())
+        settings.remember_mcp("fixture", auto_connect=False)
+        assert SessionOptions.load(workspace).mcp_auto_connect == []
+        settings.forget_mcp("fixture")
+        assert "fixture" not in SessionOptions.load(workspace).mcp_servers
+        with pytest.raises(ValueError, match="no valid configuration"):
+            settings.remember_mcp("not-registered")
+    finally:
+        await close_native(result)
+
+
+async def test_pool_mcp_probe_is_callable_on_new_and_loaded_acp_sessions(workspace, tmp_path):
+    import sys
+
+    from acp.schema import McpServerStdio
+
+    journal = tmp_path / "mcp-journal.jsonl"
+    script = Path(__file__).resolve().parents[3] / "scripts" / "pool_mcp_probe.py"
+    server = McpServerStdio(
+        name="pool_probe",
+        command=sys.executable,
+        args=[str(script), "--journal", str(journal)],
+        env=[],
+    )
+    adapter = CodingACPAdapter(parity_llm)
+    adapter.on_connect(RecordingClient())
+    try:
+        created = await adapter.new_session(str(workspace), mcp_servers=[server])
+        for nonce in ("first", "resumed"):
+            if nonce == "resumed":
+                await adapter.close_session(created.session_id)
+                await adapter.load_session(str(workspace), created.session_id, mcp_servers=[server])
+            agent = (await adapter._sessions.get(created.session_id)).value.agent
+            assert "mcp.pool_probe" in agent.skills.activated()
+            response = await agent.pool_probe.probe(nonce=nonce)
+            payload = json.loads(response)
+            assert payload["nonce"] == nonce
+            entries = [json.loads(line) for line in journal.read_text().splitlines()]
+            assert payload in entries
+            assert payload["server_token"]
+            # Client-supplied configuration has not become a NOOA default.
+            assert "pool_probe" not in agent.workspace_settings.status()["saved"]["mcp_servers"]
+    finally:
+        await adapter.close()
+
+
+async def test_remembered_mcp_reconnects_in_both_hosts_and_forget_stops_startup(
+    workspace, tmp_path
+):
+    import sys
+
+    script = Path(__file__).resolve().parents[3] / "scripts" / "pool_mcp_probe.py"
+    journal = tmp_path / "remembered-mcp.jsonl"
+    source = await open_native(workspace)
+    fresh_native = None
+    adapter = CodingACPAdapter(parity_llm)
+    adapter.on_connect(RecordingClient())
+    try:
+        source.agent.mcp.register(
+            "saved_probe", command=sys.executable, args=[str(script), "--journal", str(journal)]
+        )
+        source.agent.workspace_settings.remember_mcp("saved_probe")
+        # Simulate a human having approved this exact harmless fixture. The
+        # workspace skill itself must not grant that approval.
+        request = source.agent.mcp._approval_request("saved_probe")
+        source.agent.mcp._approval_store.approve(request)
+        fresh_native = await open_native(workspace)
+        await fresh_native.agent._command_registry.auto_connect_mcp()
+        created = await adapter.new_session(str(workspace))
+        fresh_acp = (await adapter._sessions.get(created.session_id)).value.agent
+        for agent in (fresh_native.agent, fresh_acp):
+            assert "saved_probe" in agent.mcp.connected()
+            assert (
+                json.loads(await agent.saved_probe.probe(nonce="remembered"))["nonce"]
+                == "remembered"
+            )
+        fresh_acp.workspace_settings.forget_mcp("saved_probe")
+        await close_native(fresh_native)
+        fresh_native = await open_native(workspace)
+        await fresh_native.agent._command_registry.auto_connect_mcp()
+        created = await adapter.new_session(str(workspace))
+        next_acp = (await adapter._sessions.get(created.session_id)).value.agent
+        for agent in (fresh_native.agent, next_acp):
+            assert "saved_probe" not in agent.mcp.connected()
+            assert "saved_probe" not in agent.mcp.discovered()
+    finally:
+        await adapter.close()
+        await close_native(source)
+        if fresh_native is not None:
+            await close_native(fresh_native)

@@ -168,11 +168,11 @@ commands now report that limitation without invoking the model.
 ## Persistent skills and memory controls
 
 Ordinary `self.skills.load/activate` changes the current session. The interactive
-hosts also attach `self.persisting_skills` for saving workspace defaults. In Pool,
+hosts also attach `self.workspace_settings` for saving workspace defaults. In Pool,
 ask the agent to remember an exact Python skill ID and its source directory:
 
 ```python
-await self.persisting_skills.remember(
+await self.workspace_settings.remember_skill(
     "nvzurich.session_search",
     directory="/localhome/local-pfurgale/dev/nemo-oo-skills",
 )
@@ -180,7 +180,7 @@ await self.persisting_skills.remember(
 
 Restart and start fresh sessions in both hosts; the skill should be active.
 Repeat from native NOOA. Then ask the agent to call
-`await self.persisting_skills.forget("nvzurich.session_search")`: it should
+`await self.workspace_settings.forget_skill("nvzurich.session_search")`: it should
 deactivate here and no longer auto-activate in fresh sessions in either host.
 Other live sessions keep their state. Source directories and session data remain.
 This skill belongs to the interactive hosts; the core `SkillRegistry` is unchanged.
@@ -291,3 +291,41 @@ complete native app-behavior suite then passed **155 tests**, including that
 test, without further code changes. All ACP tests passed in the full run.
 Focused removal/configuration/parity checks passed **92 tests**. Ruff, formatting,
 and `git diff --check` pass.
+
+## Workspace settings skill
+
+`self.workspace_settings` replaces `self.persisting_skills`. It is attached by
+NOOA's shared interactive setup, with no core SkillRegistry API changes.
+
+```python
+self.workspace_settings.status()
+await self.workspace_settings.remember_skill("your.skill", directory="/path/to/skills")
+await self.workspace_settings.forget_skill("your.skill")
+await self.workspace_settings.configure_memory(scope="session")
+await self.workspace_settings.configure_reflection(enabled=True)
+self.workspace_settings.set_default_model("your-model-alias")
+```
+
+Status distinguishes effective saved defaults from current runtime state and
+shows MCP names without connection credentials. Memory/reflection preferences
+apply to this agent type in the workspace, and use the same operations as the
+native/ACP commands. Verify those commands see changes made by the agent.
+
+For NOOA-owned MCP definitions:
+
+```python
+self.mcp.register("docs", url="https://example.test/mcp", transport="streamable-http")
+self.workspace_settings.remember_mcp("docs", auto_connect=True)
+self.workspace_settings.forget_mcp("docs")
+```
+
+Remember saves an existing NOOA registry definition without connecting or
+approving it. First-time approval/authentication follows the existing MCP flow.
+Forget disables startup connection and masks the workspace definition; it does
+not revoke approvals or credentials. Client-supplied MCP servers are not
+implicitly copied into NOOA settings. Test Pool's contribution separately with
+[the Pool MCP probe](pool-mcp-acceptance.md).
+
+The saved default model does not switch the running agent. Explicit model
+launch arguments and NOOA_MODEL take precedence; the current ACP CLI requires
+one of them, so Pool sessions continue using that override.

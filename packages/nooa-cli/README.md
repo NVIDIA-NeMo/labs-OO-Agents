@@ -169,19 +169,27 @@ published through the `nooa.skills` entry-point group. Toolbar extensions can
 similarly publish named providers through `nooa_cli.tui.toolbar_items`; users
 select their order with `/toolbar set <item> ...`.
 
-Native and ACP agents have a `self.persisting_skills` skill for workspace
+Native and ACP agents have a `self.workspace_settings` skill for workspace
 preferences. Ask the agent to remember a Python skill for future sessions:
 
 ```python
-await self.persisting_skills.remember("your.skill", directory="/path/to/skills")
-await self.persisting_skills.forget("your.skill")
+await self.workspace_settings.remember_skill("your.skill", directory="/path/to/skills")
+await self.workspace_settings.forget_skill("your.skill")
 ```
 
-`remember` activates the skill and saves its ID (and optional discovery directory)
-in the workspace's `.nooa/settings.yaml`. `forget` deactivates it and disables
+`remember_skill` activates the skill and saves its ID (and optional discovery directory)
+in the workspace's `.nooa/settings.yaml`. `forget_skill` deactivates it and disables
 automatic activation there. Both reuse `/skills` operations; other live sessions
 retain their state. Package installation and ordinary session-local
 `self.skills.load/activate` are unchanged.
+
+The same skill also exposes `configure_memory(scope)`,
+`configure_reflection(enabled)`, `remember_mcp(name, auto_connect=True)`,
+`forget_mcp(name)`, `set_default_model(model)`, and `status()`. Register a NOOA
+MCP definition with `self.mcp.register` before remembering it. Persistence does
+not connect or approve a server. Status separates saved defaults from live
+state and omits MCP credentials. An explicit model launch override still wins;
+the current ACP CLI requires such an override.
 
 Long-term memory and idle reflection are explicit opt-ins:
 

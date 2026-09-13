@@ -385,7 +385,7 @@ def build_registry(result: BootstrapResult, frontend: Frontend) -> CommandRegist
     from .commands import CommandRegistry
 
     options = SessionOptions.from_native_config(result.config)
-    warnings = configure_session_skills(result.agent, options)
+    warnings = configure_session_skills(result.agent, options, live_config=result.config.tui)
     result.messages.extend(TextOutput(message, "warning") for message in warnings)
 
     if result.session_id is not None:
