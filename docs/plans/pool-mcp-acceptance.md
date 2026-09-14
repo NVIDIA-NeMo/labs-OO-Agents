@@ -2,8 +2,10 @@
 
 The prepared workspace is `/localhome/local-pfurgale/dev/nooa-pool-mcp-test`.
 Its `.poolside/settings.local.yaml` registers only one probe, `pool_probe`.
-It launches this checkout's dependency-free `scripts/pool_mcp_probe.py` through
-`uv`. No probe definition has been added to NOOA's workspace settings.
+For new runs, point its command at this checkout's dependency-free
+`packages/nooa-acp/tests/fixtures/mcp_probe.py` through `uv`. Older prepared
+workspaces need that command path updated. The probe is an ACP test fixture;
+no probe definition has been added to NOOA's workspace settings.
 
 Pool documents project-local MCP configuration in
 [its settings reference](https://docs.poolside.ai/settings-file-reference#mcp-servers).
@@ -125,7 +127,7 @@ until removed. It does not register or approve anything in NOOA.
 ```bash
 cd /localhome/local-pfurgale/dev/nooa-pool-mcp-test
 pool mcp add pool_probe_global -- /usr/local/bin/uv run --no-project --no-config python \
-  /localhome/local-pfurgale/dev/labs-OO-Agents-shared-interactive/scripts/pool_mcp_probe.py \
+  /localhome/local-pfurgale/dev/labs-OO-Agents-shared-interactive/packages/nooa-acp/tests/fixtures/mcp_probe.py \
   --journal /localhome/local-pfurgale/dev/nooa-pool-mcp-test/probe.jsonl
 pool mcp list
 ```
