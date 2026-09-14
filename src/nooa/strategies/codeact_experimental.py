@@ -7,6 +7,7 @@ from html import escape
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
+from nooa.agentdoc.visibility import iter_agent_mro_modules as _iter_agent_mro_modules
 from nooa.context_blocks import DynamicContext
 from nooa.decorators import strategy
 from nooa.events import Error
@@ -40,6 +41,10 @@ class CodeActExperimental(CodeActStrategy):
         # With no provider-level return_result tool, plain text must stay non-terminal.
         effective = effective.model_copy(update={"text_only_stop_behavior": "synthetic_comment"})
         super().__init__(config=effective, error_formatter=error_formatter)
+        # python_cell_context content is fixed per agent class (module symbols
+        # don't change mid-session) — memoize so the block renders once, not
+        # per turn.
+        self._cell_context_cache: dict[str, str] = {}
 
     @property
     def name(self) -> str:
@@ -49,6 +54,13 @@ class CodeActExperimental(CodeActStrategy):
         """Put the execution contract on the tool and keep only runtime context blocks."""
         overrides = super().get_block_overrides()
         overrides["strategy_prompt"] = None
+        # python_cell_context IS the execution context for this strategy: one
+        # capability block carrying the in-scope symbol stub (from-imports
+        # included) plus module labels. The base execution_context block is
+        # removed so every agent using this strategy — TUI or benchmark adapter
+        # — sees exactly one, and adapters that import everything ``from``-style
+        # (e.g. GymBenchAgent) still get a populated block.
+        overrides["execution_context"] = None
         overrides["python_cell_context"] = DynamicContext(
             "strategy.python_cell_context(runtime)"
         )
@@ -58,10 +70,11 @@ class CodeActExperimental(CodeActStrategy):
         return overrides
 
     def get_static_block_keys(self) -> set[str]:
-        """Exclude the removed strategy prompt from the cacheable context prefix."""
-        return (super().get_static_block_keys() - {"strategy_prompt"}) | {
-            "python_cell_context"
-        }
+        """Exclude removed blocks from the cacheable context prefix."""
+        return (
+            super().get_static_block_keys()
+            - {"strategy_prompt", "execution_context"}
+        ) | {"python_cell_context"}
 
     def get_block_order(self) -> list[str] | None:
         """Place live locals immediately after the stable execution context."""
@@ -70,41 +83,66 @@ class CodeActExperimental(CodeActStrategy):
         return [
             *order[:index],
             "python_cell_context",
-            "execution_context",
             "python_cell_state",
             *order[index + 1 :],
         ]
 
     async def python_cell_context(self, runtime: RuntimeServices) -> str:
-        """Render static module capabilities available in generated Python cells."""
-        agent_module = inspect.getmodule(type(runtime.agent))
+        """Render the execution context for generated Python cells.
+
+        This block IS the execution context for this strategy (the separate
+        ``execution_context`` block is removed in ``get_block_overrides``): it
+        advertises everything already in scope inside ``python_cell()`` —
+        module aliases AND from-imported classes/functions — rendered as a
+        Python stub. Memoized per agent class: module symbols are fixed for a
+        session, so the block renders once instead of re-deriving every turn.
+        """
+        agent_cls = type(runtime.agent)
+        cached = self._cell_context_cache.get(agent_cls.__qualname__)
+        if cached is not None:
+            return cached
+
+        agent_module = inspect.getmodule(agent_cls)
         if agent_module is None:
             return ""
 
         from nooa.runtime.restrictions import is_from_blocked_module
 
         context = self._extract_module_context(agent_module, agent=runtime.agent)
+        blocked = self.config.restrictions.blocked_modules
+
         modules = sorted(
             (name, value.__name__)
             for name, value in context.items()
             if isinstance(value, ModuleType)
-            and not is_from_blocked_module(value, self.config.restrictions.blocked_modules)
+            and not is_from_blocked_module(value, blocked)
         )
-        if not modules:
-            return ""
-
         labels = ", ".join(
             f"`{name}`" if name == module_name else f"`{name}` → `{module_name}`"
             for name, module_name in modules
         )
-        return "\n".join(
-            (
-                "## Python cell context",
-                "",
+
+        lines = ["## Python cell context", ""]
+        if labels:
+            lines.extend((
                 f"Module capabilities already in scope: {labels}.",
                 "Use them directly; do not re-import them.",
-            )
+            ))
+        # In-scope symbol stub (the base execution_context content): names,
+        # signatures, and types available in python_cell(), from-imports
+        # included. Keeps the block useful for adapters (e.g. GymBenchAgent)
+        # whose modules import everything ``from``-style and bind no modules.
+        stub = self._render_execution_context_stub(
+            context,
+            {m.__name__ for m in _iter_agent_mro_modules(agent_cls)},
+            blocked,
         )
+        if stub:
+            lines.extend(("", stub))
+
+        rendered = "\n".join(lines)
+        self._cell_context_cache[agent_cls.__qualname__] = rendered
+        return rendered
 
     @staticmethod
     def _python_cell_state_label(value: Any, *, max_chars: int = 160) -> str:
