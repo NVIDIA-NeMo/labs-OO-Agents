@@ -1,8 +1,8 @@
 # nooa-bench
 
-Benchmark agent (`BenchAgent`) and Harbor runner for
-[NOOA](https://github.com/NVIDIA-NeMo/labs-OO-Agents). Reproduces the SWE-bench
-and Terminal-Bench results from the NOOA tech report.
+Coding benchmark agents and Harbor runner for
+[NOOA](https://github.com/NVIDIA-NeMo/labs-OO-Agents), supporting SWE-bench
+and Terminal-Bench tasks.
 
 ```bash
 uv add nooa-bench
@@ -11,5 +11,30 @@ nemo-harbor --help
 
 See the [main repository](https://github.com/NVIDIA-NeMo/labs-OO-Agents) for
 documentation.
+
+Two agent variants are available through `nemo-harbor --agent-type`:
+
+- `bench` — compact CodeAct baseline with automatic summarization and optional delegation.
+- `rlm` — the same capabilities with instructions emphasizing delegation for bounded work.
+
+Both use the single `python_cell` tool and return a structured `TaskResult`.
+The strategy allows ten retries, uses a 1,800-second cell timeout, and has no
+fixed iteration cap; configure the enclosing benchmark's time/token budget.
+Workers use the same agent type, model client and working directory, with their
+own execution context and shell. Delegation defaults to a maximum depth of four.
+Passing a Todo gives the worker an independent task copy; successful worker
+updates are merged after cleanup. Task-local state stays on Todos, and automatic
+summarization handles context maintenance. Method-writing tools are available in
+both variants.
+
+The runner writes `result.json`, `trajectory.json` and aggregate `behavior.json`
+under `/logs/agent`, and the verifier command to `/app/answer.txt`. Behavior
+metrics count both Python tool names and exclude framework prefill. Set
+`NOOA_INTERFACE_CHANGE_ID` to label a comparison; the default is `baseline`.
+Failure to generate the behavior report does not fail an otherwise completed
+task. Agents close their shells; the runner closes the shared model client.
+
+These are the current agent prompts and strategy. Reproducing a historical tech
+report run requires its original code revision and configuration.
 
 Apache-2.0 licensed.
