@@ -214,6 +214,7 @@ asyncio_mode = "auto"
 timeout = 300
 testpaths = [
     "tests",
+    "src/nooa/runtime/tests",
     "tests/agentdoc",
     "tests/viewer",
     "tests/context_blocks",
