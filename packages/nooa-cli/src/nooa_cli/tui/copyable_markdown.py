@@ -23,7 +23,12 @@ _CODE_SOURCE_URI_PREFIX = "nooa-code-source://"
 
 
 class TerminalMarkdown(Markdown):
-    """Rich Markdown whose parser also permits validated ``file://`` links."""
+    """Rich Markdown whose parser also permits validated ``file://`` links.
+
+    Fenced code uses the wrap-safe block (see the assignment after
+    ``CopyableMarkdown`` below) so ``soft_wrap=True`` folds long code lines
+    instead of cropping them at the terminal width.
+    """
 
     def __init__(self, markup: str, **kwargs: Any) -> None:
         self.uses_active_code_theme = "code_theme" not in kwargs
@@ -104,15 +109,22 @@ def visible_code_line(source: str) -> tuple[str, tuple[tuple[int, int], ...]]:
 
 
 class _CopyableCodeBlock(CodeBlock):
-    """Rich code block with a clickable, source-backed Copy label."""
+    """Rich code block with a clickable, source-backed Copy label.
+
+    The wrap-safe rendering is shared with ``TerminalMarkdown`` (whose fence
+    elements pass ``action_id=None``): ``Console.print(..., soft_wrap=True)``
+    sets ``no_wrap`` on every nested renderable, which would otherwise crop a
+    long code line at the terminal width instead of folding it.
+    """
 
     @classmethod
     def create(cls, markdown: Markdown, token: Any) -> _CopyableCodeBlock:
         node_info = token.info or ""
         lexer_name = node_info.partition(" ")[0] or "text"
-        copyable = markdown
-        assert isinstance(copyable, CopyableMarkdown)
-        action_id = copyable._action_for_token(token)
+        if isinstance(markdown, CopyableMarkdown):
+            action_id = markdown._action_for_token(token)
+        else:
+            action_id = None
         return cls(lexer_name, markdown.code_theme, action_id)
 
     def __init__(self, lexer_name: str, theme: str, action_id: str | None) -> None:
@@ -192,10 +204,13 @@ class _SemanticBlockQuote(BlockQuote):
         # before adding the quote marker to every resulting visual row.
         prefix_text = "▌ " if options.max_width >= 3 else ""
         content_width = max(options.max_width - cell_len(prefix_text), 1)
+        # Children render at >=80 columns so narrow viewports keep full
+        # content (the per-row wrap below reflows it).
+        child_width = max(content_width, 80)
         rendered = console.render(
             self.elements,
             options.update(
-                width=max(options.max_width, 80),
+                width=child_width,
                 height=None,
                 no_wrap=False,
                 overflow="fold",
@@ -312,3 +327,13 @@ class CopyableMarkdown(TerminalMarkdown):
         if id(token) in self._token_actions:
             return self._token_actions[id(token)]
         return self._register_token(token)
+
+
+# Route plain TerminalMarkdown fences through the same wrap-safe block as
+# CopyableMarkdown (action_id=None -> no Copy header). Assigned here because
+# _CopyableCodeBlock is defined below TerminalMarkdown in this module.
+TerminalMarkdown.elements = {
+    **Markdown.elements,
+    "fence": _CopyableCodeBlock,
+    "code_block": _CopyableCodeBlock,
+}
