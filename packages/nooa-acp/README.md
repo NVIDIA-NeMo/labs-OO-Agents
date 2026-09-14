@@ -143,11 +143,13 @@ Open only repositories whose code and conversation history you trust. The
 adapter also advertises session close; closing a live session preserves its
 durable history.
 
-The current stdio adapter hosts those live agents in its own process. That is
-an adapter-private implementation detail rather than part of the durable
-session API: the live-session registry is isolated inside `nooa-acp` so it can
-later be replaced by handles to an agent daemon without changing stored
-sessions, the shared coding agent, or the ACP protocol surface.
+The current stdio adapter hosts those live agents in its own process. The core
+`nooa.sessions` runtime owns turn serialization, cancellation-safe cleanup, and
+registration until resources are released. The ACP adapter owns the agent and
+event-bridge bundle and decides when it is ready for client requests: a loaded
+session stays unavailable until transcript replay finishes. These ACP policies
+stay outside the core runtime. The adapter can later use handles to an agent
+daemon without changing stored sessions or the shared coding agent.
 
 Python skill packages use the interpreter's normal import machinery. Multiple
 sessions may use distinct skill package names, but two workspaces must not load

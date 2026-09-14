@@ -204,7 +204,7 @@ class SessionStore:
                 started_at=timestamp,
                 last_active=timestamp,
                 working_directory=working_directory,
-                host=host,
+                host=started.host,
             ),
         )
 
@@ -383,7 +383,7 @@ class SessionStore:
             host=str(
                 start.get(
                     "host",
-                    "tui" if start_event_type == "TUISessionStart" else "",
+                    start.get("origin", "tui" if start_event_type == "TUISessionStart" else ""),
                 )
             ),
         )

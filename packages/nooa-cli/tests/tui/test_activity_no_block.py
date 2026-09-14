@@ -276,7 +276,8 @@ async def test_python_skill_slash_commands_use_async_agent_dispatch():
 
     async def agent_run_async(fn):
         used["async"] = True
-        return fn()
+        value = fn()
+        return await value if asyncio.iscoroutine(value) else value
 
     handler = CommandHandler(
         registry=registry,

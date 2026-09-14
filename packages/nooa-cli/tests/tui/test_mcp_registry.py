@@ -671,7 +671,7 @@ async def test_mcp_add_slash_command_returns_agent_task(monkeypatch, tmp_path):
         "maas-gdrive https://maas.prd.astra.nvidia.com/maas/gdrive/mcp streamable-http"
     )
     assert "maas-gdrive" in out
-    assert "tui.mcp_servers" in out
+    assert "coding.mcp_servers" in out
     assert "settings.yaml" in out
     # Includes the currently-configured servers for context.
     assert "maas" in out

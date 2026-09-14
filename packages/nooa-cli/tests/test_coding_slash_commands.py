@@ -175,3 +175,84 @@ async def test_commands_are_sorted_deduplicated_and_case_insensitive(tmp_path):
     finally:
         registry.close()
         await agent.close()
+
+
+async def test_markdown_discovery_precedence_visibility_and_refresh(tmp_path):
+    roots = [tmp_path / "first", tmp_path / "second"]
+
+    def write(root, name, body, metadata=""):
+        target = root / name / "SKILL.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"---\nname: {name}\ndescription: Test {name}\n{metadata}---\n{body}")
+        return target
+
+    target = write(roots[0], "review", "First $ARGUMENTS", "argument-hint: [target]\n")
+    write(roots[1], "review", "Second $ARGUMENTS")
+    write(roots[0], "hidden", "Hidden", "user-invocable: false\n")
+    write(roots[0], "help", "Must not shadow host controls")
+    write(roots[0], "diagnose", "Must not shadow Python commands")
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
+    agent.skills.register("test.workflow", _WorkflowSkill())
+    registry = CodingSlashCommandRegistry(agent, skills_dirs=roots)
+    try:
+        assert [c.name for c in registry.commands()] == ["diagnose", "review"]
+        assert registry.get("review").argument_hint == "[target]"
+        assert (await registry.invoke("review", '"two words"')).text == "First two words"
+        assert (await registry.invoke("diagnose", "deep")).text == "Diagnose in deep mode."
+        updates = []
+        registry.set_on_change(updates.append)
+        target.write_text(target.read_text().replace("First", "Updated"))
+        registry.refresh_skill_commands()
+        assert len(updates) == 1
+        assert (await registry.invoke("review", "file")).text == "Updated file"
+    finally:
+        registry.close()
+        await agent.close()
+
+
+async def test_native_and_shared_python_invocation_preserve_quoted_arguments(tmp_path):
+    from unittest.mock import AsyncMock
+
+    from nooa_cli.tui.commands import CommandHandler
+
+    class QuotedSkill(Skill):
+        @slash_command("quoted")
+        def quoted(self, target: str, count: int) -> str:
+            return f"{target}: {count} @notes.md"
+
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
+    agent.skills.register("test.quoted", QuotedSkill())
+    registry = CodingSlashCommandRegistry(agent)
+    (tmp_path / "notes.md").touch()
+
+    class NativeRegistry:
+        get_user_skill = registry.get
+
+    native_registry = NativeRegistry()
+    native_registry.agent = agent
+    try:
+        native = await CommandHandler(native_registry, AsyncMock()).handle('/quoted "two words" 3')
+        shared = await registry.invoke("quoted", '"two words" 3')
+        assert native.slash_result == shared
+        assert shared.text == f"two words: 3 [notes.md](<{tmp_path / 'notes.md'}>)"
+    finally:
+        registry.close()
+        await agent.close()
+
+
+@pytest.mark.parametrize("raw_args", ["", 'add "two words"'])
+async def test_string_args_annotation_preserves_raw_input(tmp_path, raw_args):
+    class StringArgsSkill(Skill):
+        @slash_command("raw-input", output_to_agent=False)
+        def raw_input(self, args: "str"):
+            return args
+
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
+    agent.skills.register("test.raw", StringArgsSkill())
+    registry = CodingSlashCommandRegistry(agent)
+    try:
+        result = await registry.invoke("raw-input", raw_args)
+        assert result.text == raw_args
+    finally:
+        registry.close()
+        await agent.close()

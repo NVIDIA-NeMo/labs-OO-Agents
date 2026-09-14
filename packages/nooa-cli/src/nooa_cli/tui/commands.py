@@ -31,7 +31,6 @@ from .output import (  # noqa: E402
     Output,
     TableOutput,
     TextOutput,
-    _RichReplayPayload,
 )
 from .session_manager import SessionManager, build_resume_outputs  # noqa: E402
 
@@ -73,36 +72,10 @@ def _batch_render_ctx(frontend: "Frontend"):
 
 
 async def render_command_outputs(frontend: "Frontend", outputs: list[Output]) -> None:
-    """Render command outputs, preserving Rich replay sentinel handling.
-
-    ``_RichReplayPayload`` is an internal sentinel, not a public frontend output.
-    CommandHandler normally intercepts it before rendering; Session uses this
-    helper when output rendering is deferred until after the durable done line.
-    """
-    import os as _os
-
-    _rich_url = (
-        _os.environ.get("NEMO_OO_RICH_URL")
-        if any(isinstance(o, _RichReplayPayload) for o in outputs)
-        else None
-    )
+    """Render a command's outputs in order as one terminal batch."""
     with _batch_render_ctx(frontend):
         for output in outputs:
-            if isinstance(output, _RichReplayPayload):
-                if _rich_url:
-                    try:
-                        import httpx as _httpx
-
-                        await asyncio.to_thread(
-                            _httpx.post,
-                            _rich_url,
-                            json={**output.payload, "_replay": True},
-                            timeout=5.0,
-                        )
-                    except Exception as exc:
-                        logger.debug("replay POST to %s failed: %s", _rich_url, exc)
-            else:
-                await frontend.render(output)
+            await frontend.render(output)
 
 
 def _detect_language(suffix: str) -> str:
@@ -445,10 +418,7 @@ class ClearCommand(Command):
         # the agent loop when available. Doing it here would run on the UI loop
         # and can race or deadlock with the active turn.
 
-        outputs: list[Output] = [
-            ClearScreen(),
-            _RichReplayPayload(payload={"kind": "clear"}),  # type: ignore[list-item]
-        ]
+        outputs: list[Output] = [ClearScreen()]
         if self._registry and self._registry.startup_info:
             outputs.append(self._registry.startup_info)
         outputs.append(TextOutput("Started new session. Previous session saved.", "success"))
@@ -1212,180 +1182,6 @@ class ThemeCommand(Command):
 # ---------------------------------------------------------------------------
 
 
-class SkillsCommand(Command):
-    required_capabilities: ClassVar[frozenset[str]] = frozenset()
-
-    def __init__(self, frontend, config, agent, **kwargs):
-        super().__init__(frontend, config, agent, **kwargs)
-        self.skills_dirs = kwargs.get("skills_dirs")
-        self._registry: CommandRegistry | None = kwargs.get("registry")
-
-    @property
-    def name(self) -> str:
-        return "skills"
-
-    @classmethod
-    def help_text(cls) -> dict[str, str]:
-        return {
-            "/skills <list|add DIR|commands|activate ID|deactivate ID>": (
-                "List and manage skills or show their slash commands"
-            ),
-        }
-
-    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
-        if not args:
-            return False, "Usage: /skills <list|add|activate|deactivate|commands>"
-        if args[0].lower() not in ("list", "add", "activate", "deactivate", "commands"):
-            return False, f"Unknown subcommand `{args[0]}`"
-        if args[0].lower() == "add" and len(args) != 2:
-            return False, "Usage: /skills add <directory>"
-        if args[0].lower() in ("activate", "deactivate") and len(args) < 2:
-            return False, f"Usage: /skills {args[0]} <skill_id>"
-        return True, None
-
-    async def execute(self, args: list[str]) -> "CommandResult":
-        subcmd = args[0].lower()
-        subargs = args[1:]
-
-        if subcmd == "add":
-            if self._registry is None:
-                return CommandResult.err("The command registry is unavailable.")
-            raw_path = Path(subargs[0]).expanduser()
-            base = Path(getattr(self.agent, "cwd", Path.cwd()))
-            path = (base / raw_path).resolve() if not raw_path.is_absolute() else raw_path.resolve()
-            if not path.is_dir():
-                return CommandResult.err(f"Skills directory not found: {path}")
-
-            before_skills = set(
-                getattr(getattr(self.agent, "skills", None), "discovered", lambda: [])()
-            )
-            before_commands = set(self._registry._user_skills)
-            try:
-                added = self._registry.add_skills_dir(path)
-            except Exception as exc:
-                return CommandResult.err(f"Failed to add skills directory {path}: {exc}")
-
-            persisted = list(
-                dict.fromkeys(
-                    Path(item).expanduser().resolve()
-                    for item in getattr(self.config, "additional_skills_dirs", [])
-                )
-            )
-            if path not in persisted:
-                persisted.append(path)
-                self.config.additional_skills_dirs = persisted
-            try:
-                settings_path = self._persist_tui_setting(
-                    "additional_skills_dirs", [str(item) for item in persisted]
-                )
-            except Exception as exc:
-                return CommandResult.ok(
-                    TextOutput(f"Added skills directory: {path}", "success"),
-                    TextOutput(f"Could not save the skills directory: {exc}", "warning"),
-                )
-
-            after_skills = set(
-                getattr(getattr(self.agent, "skills", None), "discovered", lambda: [])()
-            )
-            after_commands = set(self._registry._user_skills)
-            detail = (
-                f"Discovered {len(after_skills - before_skills)} skill(s) and "
-                f"{len(after_commands - before_commands)} slash command(s)."
-            )
-            verb = "Added" if added else "Already using"
-            return CommandResult.ok(
-                TextOutput(f"{verb} skills directory: {path}", "success"),
-                TextOutput(detail, "info"),
-                TextOutput(f"Saved in {settings_path}", "status"),
-            )
-
-        if subcmd == "commands":
-            user_skills = self._registry._user_skills if self._registry else {}
-            rows_cmd = [
-                [f"/{name}", skill.argument_hint or "", skill.description]
-                for name, skill in sorted(user_skills.items())
-            ]
-            if rows_cmd:
-                return CommandResult.ok(
-                    TableOutput(
-                        columns=["Command", "Args", "Description"],
-                        rows=rows_cmd,
-                        title="Skill slash commands",
-                    ),
-                    TextOutput(f"Searched: {self.skills_dirs}", "status"),
-                )
-            return CommandResult.ok(
-                TextOutput("No user-invocable skill commands found.", "info"),
-                TextOutput(f"Searched: {self.skills_dirs}", "status"),
-            )
-
-        from nooa.skill_registry import SkillRegistry
-
-        registry = getattr(self.agent, "skills", None)
-        if not isinstance(registry, SkillRegistry):
-            return CommandResult.err(
-                "Agent has no SkillRegistry. Skills require self.skills = SkillRegistry(self)."
-            )
-
-        if subcmd == "list":
-            all_names = registry.discovered()
-            activated = set(registry.activated())
-            if not all_names:
-                return CommandResult.ok(TextOutput("No skills found", "info"))
-            rows = [[name, "\u2713" if name in activated else "", ""] for name in all_names]
-            return CommandResult.ok(
-                TableOutput(columns=["ID", "Active", "Description"], rows=rows, title="Skills"),
-            )
-
-        if subcmd == "activate":
-            skill_id = subargs[0]
-            if skill_id in registry.activated():
-                return CommandResult.err(f"Skill `{skill_id}` already active")
-            if skill_id not in registry.discovered():
-                return CommandResult.err(f"Skill `{skill_id}` not found. Use /skills list.")
-            try:
-                registry.activate([skill_id])
-            except Exception as e:
-                return CommandResult.err(f"Failed to activate `{skill_id}`: {e}")
-            if skill_id not in registry.activated():
-                return CommandResult.err(f"Failed to activate `{skill_id}`")
-            active = list(dict.fromkeys([*self.config.active_skills, skill_id]))
-            inactive = [name for name in self.config.inactive_skills if name != skill_id]
-            self.config.active_skills = active
-            self.config.inactive_skills = inactive
-            try:
-                self._persist_tui_settings({"active_skills": active, "inactive_skills": inactive})
-            except Exception as exc:
-                return CommandResult.ok(
-                    TextOutput(f"Skill `{skill_id}` activated", "success"),
-                    TextOutput(f"Could not save skill activation: {exc}", "warning"),
-                )
-            return CommandResult.ok(TextOutput(f"Skill `{skill_id}` activated", "success"))
-
-        # deactivate
-        skill_id = subargs[0]
-        if skill_id not in registry.activated():
-            return CommandResult.err(f"`{skill_id}` not active. Use /skills list.")
-        try:
-            registry.deactivate([skill_id])
-        except Exception as e:
-            return CommandResult.err(f"Failed to deactivate `{skill_id}`: {e}")
-        if skill_id in registry.activated():
-            return CommandResult.err(f"Failed to deactivate `{skill_id}`")
-        active = [name for name in self.config.active_skills if name != skill_id]
-        inactive = list(dict.fromkeys([*self.config.inactive_skills, skill_id]))
-        self.config.active_skills = active
-        self.config.inactive_skills = inactive
-        try:
-            self._persist_tui_settings({"active_skills": active, "inactive_skills": inactive})
-        except Exception as exc:
-            return CommandResult.ok(
-                TextOutput(f"Skill `{skill_id}` deactivated", "success"),
-                TextOutput(f"Could not save skill deactivation: {exc}", "warning"),
-            )
-        return CommandResult.ok(TextOutput(f"Skill `{skill_id}` deactivated", "success"))
-
-
 # ---------------------------------------------------------------------------
 # Todo commands
 # ---------------------------------------------------------------------------
@@ -1572,248 +1368,82 @@ class ShowDiffsCommand(Command):
         )
 
 
-def _set_agent_settings_preference(agent: "Agent | None", field: str, value: object) -> Path:
-    """Persist one per-agent TUI preference in layered ``settings.yaml``."""
-    from .settings import write_settings_updates
+class _BehaviorCommand(Command):
+    """Native presentation and owner-loop dispatch for shared behavior controls."""
 
-    key = getattr(agent, "_tui_memory_key", None)
-    if key is None and agent is not None:
-        key = f"{type(agent).__module__}:{type(agent).__qualname__}"
-    path, _data = write_settings_updates({("tui", field, key or "default"): value})
-    return path
+    _control_name: str
+
+    def _control(self):
+        from nooa_cli.interactive.controls import CONTROL_TYPES
+        from nooa_cli.interactive.memory import configure_tui_memory
+
+        def configure_memory():
+            root = self._root_config or getattr(self._registry, "_root_config", None)
+            if root is None:
+                raise RuntimeError("the session root configuration is unavailable")
+            manager = self.session_manager or getattr(self._registry, "session_manager", None)
+            configure_tui_memory(
+                self.agent,
+                root,
+                agent_db=manager.agent_db_path if manager is not None else None,
+                session_id=manager.session_id if manager is not None else None,
+            )
+
+        control_type = CONTROL_TYPES[self._control_name]
+        return control_type(
+            self.agent,
+            self.config,
+            configure_memory=configure_memory,
+            command_registry=self._registry,
+        )
+
+    @property
+    def name(self) -> str:
+        return self._control_name
+
+    def help_text(self) -> dict[str, str]:
+        return self._control().help_text()
+
+    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
+        return self._control().validate_args(args)
+
+    async def execute(self, args: list[str]) -> CommandResult:
+        from nooa_cli.interactive.controls import ControlTable
+
+        result = await self.agent_run_async(lambda: self._control().run(args))
+        return CommandResult(
+            success=result.success,
+            outputs=[
+                TableOutput(columns=output.columns, rows=output.rows, title=output.title)
+                if isinstance(output, ControlTable)
+                else TextOutput(output.content, output.style)
+                for output in result.outputs
+            ],
+        )
 
 
-_MEMORY_MODES = {"on": "project", "local": "session", "off": "off"}
-_SCOPE_LABELS = {
-    "project": "on (shared across sessions, project-wide)",
-    "session": "local (this session only)",
-    "off": "off",
-}
+class SkillsCommand(_BehaviorCommand):
+    """Configure skill discovery and activation for this workspace."""
+
+    _control_name = "skills"
+
+    @classmethod
+    def help_text(cls):
+        from nooa_cli.interactive.controls import SkillsControl
+
+        return SkillsControl.help_text()
 
 
-class MemoryCommand(Command):
+class MemoryCommand(_BehaviorCommand):
     """Configure long-term memory for this agent."""
 
-    @property
-    def name(self) -> str:
-        return "memory"
-
-    def help_text(self) -> dict[str, str]:  # type: ignore[override]
-        return {
-            "/memory [on|local|off]": (
-                "Configure long-term memory: on shares a project store; "
-                f"local uses this session (currently {self._scope_label()})"
-            )
-        }
-
-    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
-        if len(args) > 1 or (args and args[0].lower() not in {*_MEMORY_MODES, "status"}):
-            return False, "Usage: /memory [on|local|off]"
-        return True, None
-
-    def _agent_key(self) -> str:
-        return getattr(
-            self.agent,
-            "_tui_memory_key",
-            f"{type(self.agent).__module__}:{type(self.agent).__qualname__}",
-        )
-
-    def _scope(self) -> str:
-        return self.config.memory_agents.get(self._agent_key(), self.config.memory)
-
-    def _scope_label(self) -> str:
-        scope = self._scope()
-        return _SCOPE_LABELS.get(scope, scope)
-
-    def _configure(self) -> None:
-        from .bootstrap import configure_tui_memory
-
-        root_config = getattr(self._registry, "_root_config", None)
-        if root_config is None:
-            raise RuntimeError("the TUI root configuration is unavailable")
-        session_manager = self.session_manager or getattr(self._registry, "session_manager", None)
-        configure_tui_memory(
-            self.agent,
-            root_config,
-            agent_db=session_manager.agent_db_path if session_manager is not None else None,
-            session_id=session_manager.session_id if session_manager is not None else None,
-        )
-
-    async def execute(self, args: list[str]) -> "CommandResult":
-        if not args or args[0].lower() == "status":
-            line = f"Memory: {self._scope_label()}"
-            skill = getattr(self.agent, "memory", None)
-            manager = getattr(skill, "_mgr", None) if skill is not None else None
-            if manager is not None:
-                line += f" — you are {manager.owner} · store: {manager.store.path}"
-            return CommandResult.ok(TextOutput(line, "info"))
-
-        scope = _MEMORY_MODES[args[0].lower()]
-        self.config.memory = scope
-        self.config.memory_agents[self._agent_key()] = scope
-        _set_agent_settings_preference(self.agent, "memory_agents", scope)
-        try:
-            await self.agent_run_async(self._configure)
-        except Exception as exc:
-            return CommandResult.err(f"Failed to configure memory: {exc}")
-
-        if scope == "off":
-            return CommandResult.ok(TextOutput("Memory disabled for this agent.", "success"))
-        return CommandResult.ok(
-            TextOutput(f"Memory {_SCOPE_LABELS[scope]} enabled for this agent.", "success")
-        )
+    _control_name = "memory"
 
 
-class ReflectionCommand(MemoryCommand):
+class ReflectionCommand(_BehaviorCommand):
     """Configure idle consolidation for the current agent's memory."""
 
-    @property
-    def name(self) -> str:
-        return "reflection"
-
-    def help_text(self) -> dict[str, str]:  # type: ignore[override]
-        state = "on" if self._enabled() else "off"
-        return {
-            "/reflection [on|off|now]": (
-                f"Configure idle memory reflection (currently {state}); now runs immediately"
-            )
-        }
-
-    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
-        if len(args) > 1 or (args and args[0].lower() not in {"on", "off", "status", "now"}):
-            return False, "Usage: /reflection [on|off|now]"
-        return True, None
-
-    def _enabled(self) -> bool:
-        return bool(self.config.reflection_agents.get(self._agent_key(), self.config.reflection))
-
-    def _runner(self):
-        return getattr(self.agent, "_tui_reflection_runner", None)
-
-    def _status_output(self) -> TextOutput:
-        state = "on" if self._enabled() else "off"
-        runner = self._runner()
-        if runner is None:
-            return TextOutput(f"Idle reflection: {state} (memory is not attached)", "info")
-        line = f"Idle reflection: {state} | dirty: {runner.dirty}"
-        report = runner.last_report
-        if report is not None:
-            stopped = f"interrupted @ {report.stopped_in}, " if report.interrupted else ""
-            line += (
-                f" | last: merged {report.merged}, +{report.edges_added} edges, "
-                f"rescored {report.rescored}, pruned {report.pruned}, "
-                f"created {report.created} ({stopped}{report.duration_ms / 1000:.1f}s)"
-            )
-        return TextOutput(line, "info")
-
-    async def execute(self, args: list[str]) -> "CommandResult":
-        if not args or args[0].lower() == "status":
-            return CommandResult.ok(self._status_output())
-
-        if args[0].lower() == "now":
-            runner = self._runner()
-            if runner is None:
-                return CommandResult.err("Memory is not attached. Enable it with /memory first.")
-            started = await self.agent_run_async(runner.run_now)
-            if not started:
-                return CommandResult.ok(TextOutput("A reflection run is already pending.", "info"))
-            return CommandResult.ok(
-                TextOutput("Reflection started; /reflection shows the report.", "success")
-            )
-
-        enabled = args[0].lower() == "on"
-        if enabled and getattr(self.agent, "memory", None) is None:
-            return CommandResult.err("Memory is not attached. Enable it with /memory first.")
-
-        self.config.reflection = enabled
-        self.config.reflection_agents[self._agent_key()] = enabled
-        _set_agent_settings_preference(self.agent, "reflection_agents", enabled)
-        runner = self._runner()
-        if runner is not None and not enabled:
-            await self.agent_run_async(runner.interrupt)
-        try:
-            await self.agent_run_async(self._configure)
-        except Exception as exc:
-            return CommandResult.err(f"Failed to configure reflection: {exc}")
-        state = "enabled" if enabled else "disabled"
-        return CommandResult.ok(TextOutput(f"Idle reflection {state} for this agent.", "success"))
-
-
-class KeepGoingCommand(Command):
-    """Toggle stop auditing and autonomous continuation for unfinished work."""
-
-    _VAR_KEY = "tui_keep_going"
-    _MODEL_VAR_KEY = "tui_keep_going_model"
-
-    @property
-    def name(self) -> str:
-        return "keep-going"
-
-    def help_text(self) -> dict[str, str]:  # type: ignore[override]
-        state = "on" if self._enabled() else "off"
-        model = self._model() or "not configured"
-        return {
-            "/keep-going [on|off]": (
-                f"Audit completed turns and continue unfinished work (currently {state}; "
-                f"model: {model})"
-            ),
-            "/keep-going model <name>": f"Set the keep-going judge model (currently {model})",
-        }
-
-    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
-        if not args:
-            return True, None
-        subcommand = args[0].lower()
-        if subcommand in {"on", "off"} and len(args) == 1:
-            return True, None
-        if subcommand == "model" and len(args) == 2 and args[1].strip():
-            return True, None
-        return False, "Usage: /keep-going [on|off] or /keep-going model <name>"
-
-    async def execute(self, args: list[str]) -> "CommandResult":
-        if not args:
-            state = "on" if self._enabled() else "off"
-            model = self._model() or "not configured"
-            return CommandResult.ok(TextOutput(f"Keep-going mode: {state}; model: {model}", "info"))
-
-        if args[0].lower() == "model":
-            model = args[1].strip()
-            self.config.keep_going_model = model
-            vars_obj = getattr(self.agent, "vars", None)
-            if vars_obj is not None:
-                vars_obj[self._MODEL_VAR_KEY] = model
-            self._persist_tui_setting("keep_going_model", model)
-            return CommandResult.ok(TextOutput(f"Keep-going model set to {model}.", "success"))
-
-        enabled = args[0].lower() == "on"
-        if enabled and not self._model():
-            return CommandResult.err(
-                "Keep-going model is not configured. Run /keep-going model <model-id> first."
-            )
-        self.config.keep_going = enabled
-        vars_obj = getattr(self.agent, "vars", None)
-        if vars_obj is not None:
-            vars_obj[self._VAR_KEY] = enabled
-        self._persist_tui_setting("keep_going", enabled)
-        state = "enabled" if enabled else "disabled"
-        return CommandResult.ok(TextOutput(f"Keep-going mode {state}.", "success"))
-
-    def _enabled(self) -> bool:
-        vars_obj = getattr(self.agent, "vars", None)
-        if vars_obj is not None and self._VAR_KEY in vars_obj:
-            return bool(vars_obj.get(self._VAR_KEY))
-        return bool(getattr(self.config, "keep_going", False))
-
-    def _model(self) -> str | None:
-        vars_obj = getattr(self.agent, "vars", None)
-        if vars_obj is not None and self._MODEL_VAR_KEY in vars_obj:
-            value = vars_obj.get(self._MODEL_VAR_KEY)
-        else:
-            value = getattr(self.config, "keep_going_model", None)
-        if value is None:
-            return None
-        model = str(value).strip()
-        return model or None
+    _control_name = "reflection"
 
 
 class ToolbarCommand(Command):
@@ -1994,12 +1624,9 @@ class SessionCommand(Command):
                 return CommandResult.err(f"Ambiguous session prefix '{session_id}' matches: {ids}")
             full_id = matches[0]
 
-            import os as _os
-
             from .session_manager import SESSIONS_DIR as _SESSIONS_DIR
 
             _session_db_path = _SESSIONS_DIR / f"{full_id}.db"
-            _in_nemo_term = bool(_os.environ.get("NEMO_OO_RICH_URL"))
 
             from nooa.storage.sqlite import SessionAlreadyActiveError
 
@@ -2009,9 +1636,7 @@ class SessionCommand(Command):
                 return CommandResult.err(str(e))
 
             try:
-                outputs = build_resume_outputs(
-                    _session_db_path, full_id, in_nemo_term=_in_nemo_term
-                )
+                outputs = build_resume_outputs(_session_db_path, full_id)
                 if not outputs:
                     new_sm.close()
                     return CommandResult.err(f"Session '{session_id}' is empty.")
@@ -2092,10 +1717,7 @@ class SessionCommand(Command):
             # acknowledged turn cancellation and after the storage/session swap,
             # on the agent loop when available.
 
-            outputs: list[Output] = [
-                ClearScreen(),
-                _RichReplayPayload(payload={"kind": "clear"}),  # type: ignore[list-item]
-            ]
+            outputs: list[Output] = [ClearScreen()]
             if self._registry and self._registry.startup_info:
                 outputs.append(self._registry.startup_info)
             outputs.append(TextOutput("Started new session. History cleared.", "success"))
@@ -2112,32 +1734,7 @@ class SessionCommand(Command):
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class _UserSkill:
-    """Metadata for a user-invocable skill slash command."""
-
-    name: str
-    body: str
-    description: str
-    argument_hint: str | None = None
-    completions: tuple[str, ...] = ()
-    output_to_agent: bool = True
-    _method: Any = field(default=None, repr=False)
-
-    def help_entry(self) -> tuple[str, str]:
-        hint = self.argument_hint or ""
-        key = f"/{self.name} {hint}".strip()
-        return key, self.description
-
-    def make_agent_message(self, args: list[str]) -> str:
-        body = self.body
-        if args:
-            joined = " ".join(args)
-            if "$ARGUMENTS" in body:
-                return body.replace("$ARGUMENTS", joined)
-            return f"{body}\n\nArguments: {joined}"
-        return body
-
+from nooa_cli.coding.slash_commands import CodingSlashCommand as _UserSkill  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Jobs command
@@ -2674,7 +2271,6 @@ class CommandRegistry:
         "skills": SkillsCommand,
         "show-python": ShowPythonCommand,
         "show-diffs": ShowDiffsCommand,
-        "keep-going": KeepGoingCommand,
         "memory": MemoryCommand,
         "memories": MemoriesCommand,
         "reflection": ReflectionCommand,
@@ -2818,121 +2414,21 @@ class CommandRegistry:
             except Exception as exc:
                 logger.warning("Failed to auto-connect MCP server %r: %s", server_name, exc)
 
-    def _discover_user_skills(self) -> "dict[str, _UserSkill]":
-        """Scan skills dirs for install-as:command skills and register them as slash commands.
+    def _discover_user_skills(self) -> dict[str, _UserSkill]:
+        from nooa_cli.coding.slash_commands import CodingSlashCommandRegistry
 
-        Uses rglob to match SkillRegistry.discover_skills_dirs() — finds skills at any depth.
-        Parses SKILL.md frontmatter inline to avoid depending on private nooa
-        internals that may not be present in older installed versions.
-        """
-        skills: dict[str, _UserSkill] = {}
-        if not self.skills_dirs:
-            return skills
-        try:
-            import yaml
-        except ImportError:
-            return skills
-        for skills_dir in self.skills_dirs:
-            skills_dir = Path(skills_dir)
-            if not skills_dir.is_dir():
-                continue
-            for skill_md in sorted(skills_dir.rglob("SKILL.md")):
-                entry = skill_md.parent
-                try:
-                    content = skill_md.read_text(encoding="utf-8")
-                    if not content.startswith("---"):
-                        continue
-                    parts = content.split("---", 2)
-                    if len(parts) < 3:
-                        continue
-                    try:
-                        meta = yaml.safe_load(parts[1]) or {}
-                        if not isinstance(meta, dict):
-                            raise ValueError("not a mapping")
-                    except Exception:
-                        # Fallback: line-by-line regex for invalid-YAML values like
-                        # argument-hint: "<action>" [issue-id]  (Claude Code style).
-                        # Parse each scalar individually so "false" → False (not "false").
-                        import re
+        self._skill_commands = CodingSlashCommandRegistry(
+            self.agent,
+            skills_dirs=self.skills_dirs or (),
+            reserved=self._commands,
+            bind_registry=False,
+        )
+        return {command.name: command for command in self._skill_commands.commands()}
 
-                        meta = {}
-                        for line in parts[1].splitlines():
-                            m = re.match(r"^([a-zA-Z][a-zA-Z0-9_-]*):\s*(.+)$", line)
-                            if not m:
-                                continue
-                            raw = m.group(2).strip()
-                            try:
-                                parsed = yaml.safe_load(raw)
-                                meta[m.group(1)] = (
-                                    str(parsed) if isinstance(parsed, list) else parsed
-                                )
-                            except Exception:
-                                meta[m.group(1)] = raw
-                    if not isinstance(meta, dict):
-                        continue
-                    # CC convention: user-invocable defaults to true.
-                    # Opt out with user-invocable: false.
-                    # install-as: command is honored for backward compat.
-                    if meta.get("user-invocable") is False:
-                        continue
-                    raw_name = str(meta.get("name") or "").strip()
-                    cmd_name = raw_name.lower()
-                    if not cmd_name or cmd_name in self._commands or cmd_name in skills:
-                        continue
-                    description = str(meta.get("description", "")).strip()
-                    body = parts[2].strip()
-                    hint = meta.get("argument-hint")
-                    if isinstance(hint, list):
-                        # YAML parses [label] as a list; reconstruct bracket notation
-                        hint = "[" + ", ".join(str(x) for x in hint) + "]"
-                    elif hint is not None:
-                        hint = str(hint)
-                    skills[cmd_name] = _UserSkill(
-                        name=cmd_name,
-                        body=body,
-                        description=description,
-                        argument_hint=hint,
-                    )
-                except Exception as e:
-                    logger.warning("Failed to load skill from %s: %s", entry, e)
-        # Also discover @slash_command methods from loaded Skills
-        skills.update(self._discover_skill_commands())
-        return skills
+    def _discover_skill_commands(self) -> dict[str, _UserSkill]:
+        from nooa_cli.coding.slash_commands import RESERVED_COMMAND_NAMES, discover_python_commands
 
-    def _discover_skill_commands(self) -> "dict[str, _UserSkill]":
-        """Discover @slash_command methods from loaded Skill instances on the agent."""
-        skills: dict[str, _UserSkill] = {}
-        try:
-            from nooa.skill import get_slash_commands
-        except ImportError:
-            return skills
-
-        from nooa.skill import Skill
-
-        for attr_name in dir(self.agent):
-            if attr_name.startswith("_"):
-                continue
-            try:
-                obj = getattr(self.agent, attr_name)
-            except Exception:
-                continue
-            if not isinstance(obj, Skill):
-                continue
-            for meta, method in get_slash_commands(obj):
-                cmd_name = meta.name.lower()
-                if cmd_name in self._commands or cmd_name in skills:
-                    continue
-                description = (method.__doc__ or "").strip().split("\n")[0]
-                skills[cmd_name] = _UserSkill(
-                    name=cmd_name,
-                    body="",
-                    description=description,
-                    argument_hint=meta.argument_hint,
-                    completions=getattr(meta, "completions", ()),
-                    output_to_agent=getattr(meta, "output_to_agent", True),
-                    _method=method,
-                )
-        return skills
+        return discover_python_commands(self.agent, RESERVED_COMMAND_NAMES | self._commands.keys())
 
     def _discover_directory_skills(self) -> None:
         """Load directory skills without making them model-visible by default."""
@@ -2984,6 +2480,9 @@ class CommandRegistry:
         """
         return list(self._commands.values())
 
+    def skill_commands(self):
+        return dict(self._user_skills)
+
     def get_user_skill(self, name: str) -> "_UserSkill | None":
         return self._user_skills.get(name.lower())
 
@@ -2994,11 +2493,7 @@ class CommandRegistry:
         slash commands become available and removed ones are deregistered
         without TUI restart.
         """
-        fresh = self._discover_skill_commands()
-        # Remove stale @slash_command entries (those with _method set);
-        # preserve text-skill entries (SKILL.md, _method is None).
-        self._user_skills = {k: v for k, v in self._user_skills.items() if v._method is None}
-        self._user_skills.update(fresh)
+        self._user_skills = self._discover_user_skills()
 
     @classmethod
     def get_all_command_classes(cls) -> dict[str, type[Command]]:
@@ -3060,13 +2555,6 @@ class CommandHandler:
         self.frontend = frontend
         self._agent_run_async = agent_run_async
 
-    def _expand_agent_mentions(self, text: str) -> str:
-        """Expand @paths in skill output immediately before it becomes an agent turn."""
-        from .completer import expand_mentions
-
-        agent = getattr(self.registry, "agent", None)
-        return expand_mentions(text, base_dir=getattr(agent, "cwd", None))
-
     async def handle(self, input_text: str, *, render_outputs: bool = True) -> "CommandResult":
         if not input_text.startswith("/"):
             return CommandResult(False)
@@ -3089,51 +2577,33 @@ class CommandHandler:
         # Check user-invocable skills before falling through to unknown-command error
         skill = self.registry.get_user_skill(cmd_name)
         if skill is not None:
-            if skill._method is not None:
-                import inspect
+            from nooa.slash_dispatch import CoercionError
+            from nooa_cli.coding.slash_commands import invoke_skill_command
 
-                from nooa.slash_dispatch import (
-                    CoercionError,
-                    SlashCommandResult,
-                    parse_typed_args,
-                )
+            raw_parts = input_text[1:].split(maxsplit=1)
+            raw_args = raw_parts[1] if len(raw_parts) == 2 else ""
+            agent = getattr(self.registry, "agent", None)
+            try:
 
-                raw_args = " ".join(args)
-                try:
-                    kwargs = parse_typed_args(skill._method, raw_args)
-                except CoercionError as e:
-                    msg = f"/{cmd_name}: {e.message}"
-                    if e.hint:
-                        msg += f"\nUsage: /{cmd_name} {e.hint}"
-                    result = CommandResult.err(msg)
-                    if render_outputs:
-                        for output in result.outputs:
-                            await self.frontend.render(output)
-                    return result
-
-                def _call_skill_method():
-                    return skill._method(**kwargs)
+                async def invoke():
+                    return await invoke_skill_command(skill, raw_args, agent=agent)
 
                 if self._agent_run_async is not None:
-                    result_val = await self._agent_run_async(_call_skill_method)
+                    result = await self._agent_run_async(invoke)
                 else:
-                    result_val = _call_skill_method()
-                    if inspect.isawaitable(result_val):
-                        result_val = await result_val
-
-                result_text = str(result_val) if result_val is not None else None
-                if result_text is not None and skill.output_to_agent:
-                    result_text = self._expand_agent_mentions(result_text)
-                slash_result = SlashCommandResult(
-                    command=cmd_name,
-                    args=raw_args,
-                    value=result_val,
-                    text=result_text,
-                    output_to_agent=skill.output_to_agent,
-                )
-                return CommandResult(success=True, slash_result=slash_result)
-            agent_message = self._expand_agent_mentions(skill.make_agent_message(args))
-            return CommandResult(success=True, agent_message=agent_message)
+                    result = await invoke()
+            except CoercionError as exc:
+                message = f"/{cmd_name}: {exc.message}"
+                if exc.hint:
+                    message += f"\nUsage: /{cmd_name} {exc.hint}"
+                error = CommandResult.err(message)
+                if render_outputs:
+                    for output in error.outputs:
+                        await self.frontend.render(output)
+                return error
+            if skill._method is None:
+                return CommandResult(success=True, agent_message=result.text)
+            return CommandResult(success=True, slash_result=result)
 
         command = self.registry.get_command(cmd_name)
         if not command:

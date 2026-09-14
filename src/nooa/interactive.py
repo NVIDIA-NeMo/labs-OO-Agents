@@ -26,7 +26,6 @@ from typing import Annotated, Any, ClassVar, Literal
 from pydantic import BaseModel, Field, field_validator
 
 from nooa import hidden, strategy
-from nooa.agentdoc import doc
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
 from nooa.storage.markers import nosnapshot
@@ -42,7 +41,6 @@ with hidden:
     from nooa.runtime.channels import Channel, QueueManager, _ChannelReader
     from nooa.runtime.producers_skill import ProducersSkill
     from nooa.strategies import CodeActStrategy
-    from nooa.tools.web_publisher import WebPublisher
 
 # Standard library — all visible in REPL
 import asyncio  # noqa: F401
@@ -52,11 +50,6 @@ import re  # noqa: F401
 
 from nooa.runtime import producers  # noqa: F401
 from nooa.runtime.producers import after, cron, monitor, run_job, tail  # noqa: F401
-
-# os is used by this module (NEMO_OO_RICH_URL check) but not useful to expose to
-# the agent's REPL — hide it so doc(self) / exec_globals don't advertise it.
-with hidden:
-    import os
 
 # Optional third-party libraries — visible in REPL (use np, pd, px, go directly)
 try:
@@ -362,18 +355,12 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         from nooa import Context
 
         self.context["queues"] = Context(expr="self.queue_manager.status()")
-        if os.environ.get("NEMO_OO_RICH_URL"):
-            from nooa.tools.web_publisher import RichOutput
+        self.event_manager.on("SessionResumed", self._remove_legacy_web_context)
 
-            self.event_manager.register_event_type(RichOutput)
-            self.web: Annotated[WebPublisher, nosnapshot] = WebPublisher(
-                event_manager=self.event_manager
-            )
-            # The WebPublisher's doc is static across the session, so
-            # it goes into the cacheable prefix with the system prompt.
-            from nooa import Context
-
-            self.context["web"] = Context(doc(self.web), prefix=True)
+    def _remove_legacy_web_context(self, event: Any) -> None:
+        """Retire WebPublisher instructions carried by older session snapshots."""
+        if "web" in self.context and "WebPublisher" in str(self.context["web"]):
+            del self.context["web"]
 
     @property
     def v(self) -> PersistentVars:
@@ -536,7 +523,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
         Hosts declare the rest. ``CodingAgent`` adds ``"slash_commands"``
         (``SlashCommandResult``) and ``"system_messages"`` (host-owned
-        prompts such as keep-going continuations); a harness might add
+        prompts supplied by the host); a harness might add
         ``"job_outputs"``. The
         ``<queue_status>`` context block lists the pending count per
         queue each turn. After any stop reason, the dispatcher races every

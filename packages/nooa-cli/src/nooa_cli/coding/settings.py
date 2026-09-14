@@ -50,8 +50,11 @@ def load_coding_skills_dirs(
     )
 
     configured: list[str | Path] = []
-    configured.extend(_setting_paths(settings, "coding"))
-    configured.extend(_setting_paths(settings, "tui"))
+    coding = settings.get("coding")
+    section = (
+        "coding" if isinstance(coding, Mapping) and "additional_skills_dirs" in coding else "tui"
+    )
+    configured.extend(_setting_paths(settings, section))
     # A workspace's old config.toml is still a workspace layer. Do not let an
     # unrelated user-level settings.yaml silently suppress it. A modern
     # workspace settings file supersedes the legacy file, and an explicit

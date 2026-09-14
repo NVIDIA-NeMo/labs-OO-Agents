@@ -48,7 +48,6 @@ trace-explorer = "nooa.trace_explorer:main"
 "nemo.context" = "nooa.runtime.context:ContextApi"
 "nemo.events" = "nooa.runtime.events:EventsApi"
 "nemo.producers" = "nooa.runtime.producers_skill:ProducersSkill"
-"nemo.web" = "nooa.tools.web_publisher:WebPublisher"
 "nemo.libwriting" = "nooa.tools.library_writing_lib:SkillWriting"
 "nemo.methodwriting" = "nooa.tools.method_writing_lib:MethodWriting"
 

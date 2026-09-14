@@ -337,7 +337,6 @@ class Session:
 
         self._toolbar = ToolbarRegistry()
         self._initial_outputs = list(initial_outputs or [])
-        self._session_title_requested = False
         # Building the next request temporarily replaces context_stats with a
         # version whose provider token count is unknown. Keep the last exact
         # display for the same context-window budget so the toolbar does not
@@ -573,12 +572,10 @@ class Session:
         gate, letting a turn's epilogue-scheduled pass slip through).
         """
         command_runner = self._command_runner
-        policy = getattr(self, "_local_turn_policy", None)
         return (
             self._app.input_drain_idle
             and self._reflection_idle()
             and (command_runner is None or command_runner.is_idle)
-            and (policy is None or policy.is_idle)
         )
 
     def _has_daemon_producers(self) -> bool:
@@ -793,10 +790,6 @@ class Session:
         self._local_agent_runner = agent_runner
         policy_ref: list[Any] = []
 
-        def _invalidate_turn_policy() -> None:
-            if policy_ref:
-                policy_ref[0].invalidate_keep_going()
-
         async def _shutdown_turn_policy() -> None:
             if policy_ref:
                 await policy_ref[0].shutdown()
@@ -895,7 +888,6 @@ class Session:
             on_cancel_command=self._cancel_active_slash_command,
             on_bang=self._on_bang,
             on_output=self._on_app_output,
-            on_agent_activity=_invalidate_turn_policy,
             completer=SlashCommandCompleter(self.registry),
             session_label=self._session_label,
             config=self.config,
@@ -915,7 +907,6 @@ class Session:
         turn_policy = LocalTurnPolicy(
             self.agent,
             agent_runner,
-            self.config,
             emit_output=self._on_app_output,
             invalidate=self._app.invalidate,
         )
@@ -925,10 +916,7 @@ class Session:
             on_state_change=self._app.runtime_state_changed,
             on_before_handle=turn_policy.before_handle,
             on_after_handle=turn_policy.after_handle,
-            on_notification=lambda notification: (
-                turn_policy.on_notification(notification),
-                self._app.runtime_notification_received(),
-            ),
+            on_notification=lambda notification: self._app.runtime_notification_received(),
             dispatcher_exit=DispatcherExit,
             on_cancelled=self._app.runtime_cancelled,
         )
@@ -964,7 +952,6 @@ class Session:
                         event_id = getattr(event, "id", None)
                         if event_id is not None:
                             user_event_id = str(event_id)
-                self._request_session_title(text)
                 # UI rendering must happen on the UI loop.
                 app = self._app
                 loop = getattr(app, "_loop", None) if app is not None else None
@@ -1500,7 +1487,6 @@ class Session:
                     extra_outputs = await self._local_agent_runner.run_async(post_swap)
                     if extra_outputs:
                         result.outputs.extend(extra_outputs)
-                self._session_title_requested = False
             finally:
                 self._app._session_transitioning = False
 
@@ -1951,25 +1937,6 @@ class Session:
             set_session(_make_trace_session_name(new_sm.session_id or ""))
         except Exception:
             pass
-
-    # ------------------------------------------------------------------
-    # Session auto-titling
-    # ------------------------------------------------------------------
-
-    def _request_session_title(self, opening_message: str) -> bool:
-        """Ask the normal agent turn to title a new, unnamed session once."""
-        if self._session_title_requested:
-            return False
-        self._session_title_requested = True
-
-        manager = self._session_manager
-        if manager is None or manager.user_named or (manager.name or "").strip():
-            return False
-        request_title = getattr(self.agent, "request_session_title", None)
-        if not callable(request_title):
-            return False
-        request_title(opening_message)
-        return True
 
     # ------------------------------------------------------------------
     # Bang (!) command routing

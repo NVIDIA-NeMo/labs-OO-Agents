@@ -11,11 +11,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from nooa.paths import get_project_dir
 from nooa.sessions import SessionHandle, SessionInfo, SessionStore
 from nooa.storage.sqlite import delete_sqlite_database, is_sqlite_database_active
+from nooa_cli.interactive.session_paths import session_directory
 
-SESSIONS_DIR = get_project_dir("sessions")
+SESSIONS_DIR = session_directory()
 
 
 def _make_trace_session_name(session_id: str) -> str:
@@ -83,7 +83,9 @@ class SessionManager:
         handle = SessionStore(SESSIONS_DIR).create(
             model=model,
             agent=agent_cls,
-            working_directory=working_dir,
+            working_directory=(
+                str(Path(working_dir).expanduser().resolve()) if working_dir else ""
+            ),
             host="tui",
             session_id=session_id,
             check_same_thread=False,
@@ -195,11 +197,10 @@ def build_resume_outputs(
     session_db_path: Path,
     session_id: str,
     *,
-    in_nemo_term: bool = False,
     max_turns: int | None = None,
 ) -> list:
-    """Build interleaved conversation and legacy rich-content replay output."""
-    from .output import HistoryReplay, HistoryTurn, _RichReplayPayload
+    """Build bounded conversation replay output."""
+    from .output import HistoryReplay, HistoryTurn
 
     if max_turns is None:
         max_turns = RESUME_MAX_TURNS
@@ -214,7 +215,6 @@ def build_resume_outputs(
     except (OSError, sqlite3.Error):
         rows = []
 
-    items: list[tuple[str, object]] = []
     pending: list[HistoryTurn] = []
     for row in rows:
         try:
@@ -228,53 +228,14 @@ def build_resume_outputs(
                 pending.append(HistoryTurn(role="user", content=str(content)))
         elif event_type in {"AgentMessage", "TUIAgentMessage"} and raw.get("content"):
             pending.append(HistoryTurn(role="agent", content=str(raw["content"])))
-        elif event_type == "RichOutput" and in_nemo_term and raw.get("payload"):
-            if pending:
-                items.append(("turns", pending))
-                pending = []
-            items.append(("rich", raw["payload"]))
-    if pending:
-        items.append(("turns", pending))
-    if not items:
+    omitted = max(0, len(pending) - max_turns) if max_turns else 0
+    pending = pending[omitted:]
+    if not pending:
         return []
-
-    total_turns = sum(len(data) for kind, data in items if kind == "turns")  # type: ignore[arg-type]
-    omitted = max(0, total_turns - max_turns) if max_turns else 0
-    if omitted:
-        remaining = omitted
-        kept: list[tuple[str, object]] = []
-        keeping = False
-        for kind, data in items:
-            if kind == "turns":
-                turns = data  # type: ignore[assignment]
-                if remaining >= len(turns):
-                    remaining -= len(turns)
-                    continue
-                if remaining:
-                    turns = turns[remaining:]
-                    remaining = 0
-                keeping = True
-                kept.append((kind, turns))
-            elif keeping:
-                kept.append((kind, data))
-        items = kept
-
-    turn_indices = [index for index, (kind, _) in enumerate(items) if kind == "turns"]
-    if not turn_indices:
-        return []
-    first, last = turn_indices[0], turn_indices[-1]
-    outputs: list = []
-    for index, (kind, data) in enumerate(items):
-        if kind == "turns":
-            outputs.append(
-                HistoryReplay(
-                    turns=data,
-                    session_id=session_id[:8] if index == first else "",
-                    show_header=index == first,
-                    show_footer=index == last,
-                    omitted_count=omitted if index == first else 0,
-                )
-            )
-        else:
-            outputs.append(_RichReplayPayload(payload=data))
-    return outputs
+    return [
+        HistoryReplay(
+            turns=pending,
+            session_id=session_id[:8],
+            omitted_count=omitted,
+        )
+    ]
