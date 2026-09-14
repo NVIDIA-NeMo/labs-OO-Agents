@@ -25,15 +25,24 @@ models:
 
 The formats are `chat` (OpenAI-compatible Chat Completions), `responses`
 (OpenAI Responses, with `client_type: responses`), and `anthropic` (Anthropic
-Messages, with `client_type: completion`). Existing `openai/` and `anthropic/`
-routing prefixes are removed before sending the model name. Other recognized
-legacy prefixes require an explicit server URL; the direct path does not
-discover endpoints or convert authentication schemes.
+Messages, with `client_type: completion`). If `api_style` is omitted, the
+`anthropic/` routing prefix selects Messages; otherwise the client class selects
+Chat or Responses. This compatibility default does not infer model capabilities.
+
+The routing prefixes `openai/`, `anthropic/`, `azure/`, `deepseek/`,
+`nvidia_nim/`, `openrouter/`, `hosted_vllm/`, `together_ai/`, `xai/`, and
+`gemini/` are removed before sending the model name. All except `openai/` and
+`anthropic/` require an explicit server URL. Other names, including names with
+slashes, are sent verbatim. They do not select a provider: without `api_base`,
+the selected SDK uses its default endpoint. Set the URL explicitly for custom
+servers; native Bedrock and Vertex routing prefixes are not supported.
 
 For a temporary soak run, `NOOA_LLM_TRANSPORT=direct uv run ...` selects the
 direct path for clients in that process. Set it to `litellm` to compare the
 legacy path, or unset it to use each registry entry. This is a client setting,
-not a per-call setting. There is no automatic retry through the other transport.
+not a per-call setting. The environment override also takes precedence over an
+explicit constructor `transport` argument. There is no automatic retry through
+the other transport.
 
 ## What stays shared
 
@@ -65,11 +74,20 @@ and native reasoning state are redacted. Journal errors are logged without
 failing or repeating the provider call. Tracing no longer instruments unrelated
 raw `litellm.completion` calls made outside UnifiedLLM.
 
+One legacy-path limitation remains: a per-call model or route override may use
+LiteLLM's own HTTP pool, bypassing the request hook. That call still records its
+public response and usage, but not its outbound input. Construct a client for
+the desired route when complete request tracing is required.
+
 The LiteLLM tracing instrumentor, its monkeypatch, token calibration and
 `UnifiedLLM.count_tokens` are removed. No tokenizer replaces them. Direct
 clients use the registry's context window; the existing summarizer character
 estimate and actor usage-based sizing remain. Unknown costs are not calculated
 from a model table on the direct path.
+LiteLLM may estimate Anthropic's reasoning-token breakdown; the direct path
+does not. When the server reports only total output tokens, that total is
+preserved and the separate reasoning count remains unknown (represented as zero
+by the existing usage type).
 
 ## Testing and limits
 
@@ -83,9 +101,21 @@ trace/journal parity.
 This first version does not implement streaming, native Google APIs, Azure
 deployment authentication, Bedrock or Vertex SDKs. Use an OpenAI-compatible
 endpoint or keep LiteLLM for those routes. Anthropic direct calls require an
-explicit `max_tokens`; only leading system messages are accepted. Unknown
-provider fields are sent through the SDK's `extra_body`, not translated or
-silently dropped.
+positive `max_tokens`; only leading system messages are accepted. The Anthropic
+base URL may end in `/v1` (removed before SDK dispatch), but must not include
+`/messages`. This suffix handling is case-sensitive.
+
+Direct calls reject `stream=True`, `num_retries` other than `0`, and the
+LiteLLM-specific `client` and `custom_llm_provider` overrides. They discard
+`drop_params`, `allowed_openai_params`, an empty `additional_drop_params`, and
+`context_window`; non-empty `additional_drop_params` is rejected. Anthropic
+also omits `prompt_cache_key`, which its API does not accept. Other provider
+fields go through the SDK's `extra_body` without translation. Image `detail`
+has no Anthropic equivalent and is omitted during image conversion.
+
+OpenAI is pinned to 2.44.0 because structured-output conversion uses its private
+schema helper. An SDK upgrade must rerun the structured-output and wire tests;
+the pin avoids silently depending on a changing private interface.
 
 No live soak result is claimed by these offline tests. Live release checks
 must use configured `release-gate-*` aliases; endpoints, credentials and

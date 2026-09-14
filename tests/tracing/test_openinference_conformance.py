@@ -17,8 +17,7 @@ Design:
     the framework spans: AGENT (``method.*``), ``generation`` (CHAIN),
     ``code_execution`` (TOOL), and — depending on the strategy — ``method_call``
     / ``tool_execution`` / ``context_snapshot``.  It produces **no** ``LLM`` span.
-  - ``llm_span`` drives ``litellm.acompletion(mock_response=...)`` so the
-    ``LiteLLMInstrumentor`` (+ our ``apply_litellm_patch``) emits the real
+  - ``llm_span`` drives UnifiedLLM against mocked HTTP so its boundary emits the real
     ``LLM`` span with ``llm.*`` attributes and ``tool_call.id``.
 """
 
@@ -331,7 +330,7 @@ async def test_session_id_present(framework_spans):
 
 
 # ---------------------------------------------------------------------------
-# LLM-span conformance (delegated to litellm instrumentor + our patch).
+# LLM-span conformance at the shared UnifiedLLM boundary.
 # ---------------------------------------------------------------------------
 
 
@@ -404,7 +403,7 @@ async def test_llm_span_conformance(monkeypatch):
 
         # Span name (catches an upstream litellm rename).
         assert span.get("name") == "llm.call", (
-            f"expected litellm span name 'acompletion', got {span.get('name')!r}"
+            f"expected UnifiedLLM span name 'llm.call', got {span.get('name')!r}"
         )
 
         # Core LLM attributes.
@@ -419,12 +418,10 @@ async def test_llm_span_conformance(monkeypatch):
             if tok in attrs:
                 assert isinstance(attrs[tok], int), f"{tok} must be int, got {attrs[tok]!r}"
 
-        # Cost is stamped (llm.cost.*) — the litellm instrumentor omits it, our
-        # patch adds it from litellm's computed cost / gateway headers. gpt-3.5-turbo
-        # has known pricing so a positive total is expected here.
+        # This response reports no price; the existing usage type defaults to zero.
         total_cost = attrs.get(SpanAttributes.LLM_COST_TOTAL)
         assert isinstance(total_cost, (int, float)) and total_cost == 0, (
-            f"LLM span missing positive llm.cost.total; got {total_cost!r}"
+            f"Expected the unknown-cost default; got {total_cost!r}"
         )
 
         # Input/output messages present.

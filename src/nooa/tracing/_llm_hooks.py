@@ -76,7 +76,9 @@ def capture_request(request):
         if leading:
             messages = [{"role": "system", "content": leading}, *messages]
         span.set_attribute("llm.model_name", metadata["model"])
-        span.set_attribute("input.value", json.dumps(body, ensure_ascii=False))
+        # SDKs can order JSON keys differently for the same request. Stable
+        # serialization lets traces compare the fields without that noise.
+        span.set_attribute("input.value", json.dumps(body, ensure_ascii=False, sort_keys=True))
         span.set_attribute("input.mime_type", "application/json")
         _messages(span, "input", messages)
         invocation = {
@@ -84,10 +86,13 @@ def capture_request(request):
             for k, v in body.items()
             if k not in {"messages", "input", "system", "instructions", "tools"}
         }
-        span.set_attribute("llm.invocation_parameters", json.dumps(invocation, ensure_ascii=False))
+        span.set_attribute(
+            "llm.invocation_parameters", json.dumps(invocation, ensure_ascii=False, sort_keys=True)
+        )
         for i, tool in enumerate(body.get("tools") or []):
             span.set_attribute(
-                f"llm.tools.{i}.tool.json_schema", json.dumps(tool, ensure_ascii=False)
+                f"llm.tools.{i}.tool.json_schema",
+                json.dumps(tool, ensure_ascii=False, sort_keys=True),
             )
         _notify("log_pre_api_call", metadata["model"], messages, metadata)
     except Exception as exc:

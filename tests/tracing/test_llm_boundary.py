@@ -12,7 +12,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from nooa.unifiedllm import CompletionClient, RetryConfig
+from nooa.unifiedllm import CompletionClient, RetryConfig, Tool
 
 
 def test_tracing_startup_does_not_load_provider_libraries(tmp_path):
@@ -27,7 +27,8 @@ assert not {{'litellm', 'openai', 'anthropic'}} & sys.modules.keys()
 
 
 @pytest.mark.asyncio
-async def test_shared_trace_and_journal_parity(monkeypatch):
+@pytest.mark.parametrize("style", ["chat", "anthropic"])
+async def test_shared_trace_and_journal_parity(monkeypatch, style):
     from nooa.tracing import _llm_hooks
     from nooa.tracing._litellm_journal import FileMessageJournalCallback
 
@@ -71,22 +72,62 @@ async def test_shared_trace_and_journal_parity(monkeypatch):
         "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
     }
 
+    if style == "anthropic":
+        raw = {
+            "id": "r1",
+            "type": "message",
+            "role": "assistant",
+            "model": "test",
+            "content": [
+                {"type": "thinking", "thinking": "readable", "signature": "SECRET"},
+                {"type": "text", "text": "answer"},
+                {"type": "tool_use", "id": "call", "name": "f", "input": {}},
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 10, "output_tokens": 2},
+        }
+
+    bodies = []
+
     async def respond(self, request):
+        bodies.append(json.loads(request.content))
         return httpx.Response(200, json=raw)
 
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", respond)
     for transport in ("litellm", "direct"):
         async with CompletionClient(
-            "openai/test",
+            "anthropic/test" if style == "anthropic" else "openai/test",
             transport=transport,
             api_key="test",
-            api_base="https://models.example/v1",
+            api_base="https://models.example"
+            if style == "anthropic"
+            else "https://models.example/v1",
+            max_tokens=100,
             retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),
         ) as client:
-            await client.acall([{"role": "user", "content": "question"}])
+
+            def f() -> str:
+                raise AssertionError("Tools must not execute")
+
+            await client.acall(
+                [
+                    {"role": "system", "content": "Be precise."},
+                    {"role": "user", "content": "question"},
+                ],
+                tools=[Tool(name="f", description="Read a fact", callable=f)],
+                tool_choice="required",
+                parallel_tool_calls=False,
+            )
+    assert bodies[0] == bodies[1]
     spans = exporter.get_finished_spans()
     assert len(spans) == 2
-    assert dict(spans[0].attributes) == dict(spans[1].attributes)
+    attributes = [dict(span.attributes) for span in spans]
+    if style == "anthropic":
+        # LiteLLM estimates a thinking/text split; Anthropic reports only the
+        # total output here. The direct path must not invent that breakdown.
+        assert attributes[0].pop("llm.token_count.completion_details.reasoning") == 2
+        assert attributes[1].pop("llm.token_count.completion_details.reasoning") == 0
+    assert attributes[0] == attributes[1]
     assert "SECRET" not in json.dumps([dict(s.attributes) for s in spans])
     assert spans[0].attributes["llm.token_count.prompt"] == 10
     assert len(journals) == 2

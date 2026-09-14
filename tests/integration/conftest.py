@@ -76,3 +76,46 @@ def auto_reset_tracing_state():
     _reset_tracing_module_state()
     yield
     _reset_tracing_module_state()
+
+
+@pytest.fixture
+def mock_model_client(monkeypatch):
+    """Real UnifiedLLM/SDK dispatch with only the model's HTTP pool mocked."""
+    import httpx
+
+    from nooa.unifiedllm import CompletionClient
+    from nooa.unifiedllm.direct import DirectTransport
+    from nooa.unifiedllm.unifiedllm import _ClientHttp
+
+    def make(reply, transport="direct"):
+        def respond(request):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "test",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "test",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": reply},
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+                },
+            )
+
+        mock = httpx.MockTransport(respond)
+        monkeypatch.setattr(
+            DirectTransport, "_http_settings", staticmethod(lambda config: {"transport": mock})
+        )
+        monkeypatch.setattr(
+            _ClientHttp, "_httpx_hardening", staticmethod(lambda: {"transport": mock})
+        )
+        return CompletionClient(
+            "openai/test", transport=transport, api_key="test", api_base="https://models.example/v1"
+        )
+
+    return make

@@ -11,10 +11,7 @@ import os
 import time
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    import litellm
+from typing import Any
 
 import yaml
 from fastapi import APIRouter, HTTPException
@@ -559,42 +556,28 @@ def get_model_config(model_id: str) -> dict | None:
     return None
 
 
-DEFAULT_SANDBOX_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "execute_python",
-            "description": "Execute Python code and return the result",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "code": {
-                        "type": "string",
-                        "description": "The Python code to execute",
-                    }
-                },
-                "required": ["code"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "return_result",
-            "description": "Return the final result to the user",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "result": {
-                        "type": "string",
-                        "description": "The result to return",
-                    }
-                },
-                "required": ["result"],
-            },
-        },
-    },
-]
+def _sandbox_tools():
+    """Describe playground tools without executing them."""
+    from nooa.unifiedllm import Tool
+
+    def execute_python(code: str):
+        raise RuntimeError("Playground tool calls are returned as data")
+
+    def return_result(result: str):
+        raise RuntimeError("Playground tool calls are returned as data")
+
+    return [
+        Tool(
+            name="execute_python",
+            description="Execute Python code and return the result",
+            callable=execute_python,
+        ),
+        Tool(
+            name="return_result",
+            description="Return the final result to the user",
+            callable=return_result,
+        ),
+    ]
 
 
 def normalize_messages_for_api(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -641,35 +624,17 @@ def normalize_messages_for_api(messages: list[dict[str, Any]]) -> list[dict[str,
     return normalized
 
 
-async def _collect(
-    response: "litellm.ModelResponse | litellm.CustomStreamWrapper",
-) -> "litellm.ModelResponse":
-    """Consume a streaming or non-streaming litellm response, always returning ModelResponse."""
-    import litellm
-
-    if isinstance(response, litellm.CustomStreamWrapper):
-        chunks = [chunk async for chunk in response]  # type: ignore
-        result = litellm.stream_chunk_builder(chunks)
-        if result is None:
-            raise ValueError("stream_chunk_builder returned None for empty stream")
-        if not isinstance(result, litellm.ModelResponse):
-            raise TypeError(f"Expected ModelResponse, got {type(result)}")
-        return result
-    return response
-
-
 @router.post("/api/playground/inference")
 async def run_inference(request: InferenceRequest):
     """Run LLM inference with the specified model and messages."""
     try:
-        import litellm
+        from nooa.unifiedllm import CompletionClient
 
         model_config = get_model_config(request.model)
         normalized_messages = normalize_messages_for_api(request.messages)
 
         kwargs = {
             "model": request.model,
-            "messages": normalized_messages,
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
         }
@@ -678,11 +643,13 @@ async def run_inference(request: InferenceRequest):
             msg.get("tool_calls") for msg in normalized_messages if isinstance(msg, dict)
         )
         if has_tool_calls:
-            kwargs["tools"] = DEFAULT_SANDBOX_TOOLS
+            tools = _sandbox_tools()
+        else:
+            tools = None
 
         if model_config and model_config.get("endpoint"):
             kwargs["api_base"] = model_config["endpoint"]
-            kwargs["custom_llm_provider"] = "openai"
+            kwargs["model"] = f"openai/{request.model}"
 
         if model_config:
             api_key = resolve_api_key_from_config(
@@ -693,35 +660,26 @@ async def run_inference(request: InferenceRequest):
             if api_key:
                 kwargs["api_key"] = api_key
 
-        response = await litellm.acompletion(**kwargs)
-        raw_response = await _collect(response)  # type: ignore[arg-type]
-
-        choice = raw_response.choices[0]
-        if not isinstance(choice, litellm.Choices):
-            raise TypeError(f"Expected Choices, got {type(choice)}")
-        message = choice.message
-        reasoning_content = getattr(message, "reasoning_content", None)
-        usage = getattr(raw_response, "usage", None)
+        client = CompletionClient(**kwargs)
+        try:
+            response = await client.acall(normalized_messages, tools=tools)
+        finally:
+            await client.aclose()
+        message = response.public_message()
+        usage = response.usage
         return {
             "status": "success",
             "response": {
-                "role": message.role,
-                "content": message.content,
-                "tool_calls": (
-                    [tc.model_dump() for tc in message.tool_calls] if message.tool_calls else None
-                ),
-                "reasoning_content": reasoning_content,
+                **message,
+                "tool_calls": message.get("tool_calls"),
+                "reasoning_content": response.reasoning or None,
             },
             "usage": {
-                "prompt_tokens": usage.prompt_tokens if usage is not None else None,
-                "completion_tokens": usage.completion_tokens if usage is not None else None,
-                "total_tokens": usage.total_tokens if usage is not None else None,
+                "prompt_tokens": usage.input_tokens if usage else None,
+                "completion_tokens": usage.output_tokens if usage else None,
+                "total_tokens": usage.total_tokens if usage else None,
             },
-            "model": raw_response.model,
+            "model": request.model,
         }
-    except ImportError as e:
-        raise HTTPException(
-            status_code=500, detail="litellm not installed. Run: pip install litellm"
-        ) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Inference error: {str(e)}") from e

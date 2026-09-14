@@ -31,7 +31,7 @@ from nooa.tracing import enable_tracing, exporters, flush_traces, set_session
 
 @pytest.mark.asyncio
 async def test_saved_jsonl_has_input_and_output_messages_on_llm_span(monkeypatch):
-    """A direct ``litellm.acompletion`` call with a file exporter must produce
+    """A UnifiedLLM call with a file exporter must produce
     a JSONL whose LLM span carries the full input + output messages."""
     import httpx
 
@@ -62,9 +62,7 @@ async def test_saved_jsonl_has_input_and_output_messages_on_llm_span(monkeypatch
         enable_tracing(exporters=[exporters.jsonl(tmpdir)])
         set_session("t1-jsonl-messages")
 
-        # litellm.acompletion with mock_response triggers the OpenInference
-        # litellm instrumentor (which writes message attrs to spans) without
-        # any network call.
+        # Mock only HTTP; the real call boundary writes the message attributes.
         client = CompletionClient("test", transport="direct", api_key="test")
         await client.acall(
             messages=[

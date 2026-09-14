@@ -57,6 +57,14 @@ async def test_sdk_round_trip(style, asynchronous, monkeypatch):
             }
         elif style == "anthropic":
             assert request.url.path == "/v1/messages"
+            assert request.headers["x-api-key"] == "test-key"
+            assert body["system"] == [
+                {"type": "text", "text": "Be precise.", "cache_control": {"type": "ephemeral"}}
+            ]
+            assert body["messages"] == [
+                {"role": "user", "content": [{"type": "text", "text": "Question"}]}
+            ]
+            assert body["max_tokens"] == 100
             result = {
                 "id": "m1",
                 "type": "message",
@@ -96,25 +104,34 @@ async def test_sdk_round_trip(style, asynchronous, monkeypatch):
 
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle_async)
     cls = ResponsesClient if style == "responses" else CompletionClient
-    client = cls(
-        "test-model",
-        transport="direct",
-        api_style=style,
-        api_base="https://models.example/v1",
-        api_key="test-key",
-        max_tokens=100,
-        retry_config=NO_RETRY,
-    )
-    try:
-        history = [{"role": "user", "content": "Question"}]
-        response = await client.acall(history) if asynchronous else client.call(history)
-        assert isinstance(response, LLMResponse)
-        assert response.content == "42"
-        assert response.usage.input_tokens == 10
-        assert response.usage.output_tokens == 2
-        assert len(bodies) == 1
-    finally:
-        await client.aclose()
+    for transport in ("litellm", "direct"):
+        client = cls(
+            f"{'anthropic' if style == 'anthropic' else 'openai'}/test-model",
+            transport=transport,
+            api_style=style,
+            api_base="https://models.example"
+            if style == "anthropic"
+            else "https://models.example/v1",
+            api_key="test-key",
+            **{"max_output_tokens" if style == "responses" else "max_tokens": 100},
+            retry_config=NO_RETRY,
+        )
+        try:
+            history = [
+                {"role": "system", "content": "Be precise."},
+                {"role": "user", "content": "Question"},
+            ]
+            response = await client.acall(history) if asynchronous else client.call(history)
+            assert isinstance(response, LLMResponse)
+            assert response.content == "42"
+            if style == "chat":
+                assert response.reasoning == "calculation"
+            assert response.usage.input_tokens == 10
+            assert response.usage.output_tokens == 2
+        finally:
+            await client.aclose()
+    assert len(bodies) == 2
+    assert bodies[0] == bodies[1]
 
 
 def test_direct_import_does_not_import_litellm():

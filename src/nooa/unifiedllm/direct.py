@@ -38,6 +38,15 @@ _PREFIXES = {
 _LEGACY_OPTIONS = {"drop_params", "allowed_openai_params", "additional_drop_params"}
 
 
+def _data_source(url):
+    if not isinstance(url, str) or not url.startswith("data:") or ";base64," not in url:
+        raise ValueError("content data URL must be data:<media>;base64,<data>")
+    media, data = url[5:].split(";base64,", 1)
+    if not media or not data:
+        raise ValueError("content data URL requires a media type and data")
+    return {"type": "base64", "media_type": media, "data": data}
+
+
 def _blocks(content: Any) -> list[dict]:
     if content is None or content == "":
         return []
@@ -52,60 +61,107 @@ def _blocks(content: Any) -> list[dict]:
         if kind in {"input_text", "output_text"}:
             block["type"] = "text"
         elif kind == "image_url":
-            image = block.pop("image_url")
-            url = image["url"] if isinstance(image, dict) else image
+            image = block.pop("image_url", None)
+            url = image.get("url") if isinstance(image, dict) else image
+            if not isinstance(url, str) or not url:
+                raise ValueError("content image_url requires a URL string")
             if url.startswith("data:"):
-                media, data = url[5:].split(";base64,", 1)
-                source = {"type": "base64", "media_type": media, "data": data}
+                source = _data_source(url)
             else:
                 source = {"type": "url", "url": url}
             block.update(type="image", source=source)
         elif kind == "file":
-            file = block.pop("file")
-            if "file_data" not in file:
+            file = block.pop("file", None)
+            if not isinstance(file, dict) or "file_data" not in file:
                 raise ValueError(
-                    "Anthropic file blocks require file_data; use a native document for file ids"
+                    "Anthropic content file blocks require file_data; use a native document for file ids"
                 )
-            media, data = file["file_data"][5:].split(";base64,", 1)
-            block.update(
-                type="document", source={"type": "base64", "media_type": media, "data": data}
-            )
+            block.update(type="document", source=_data_source(file["file_data"]))
+        elif kind not in {
+            "text",
+            "image",
+            "document",
+            "tool_result",
+            "tool_use",
+            "thinking",
+            "redacted_thinking",
+        }:
+            raise ValueError(f"Unsupported content block type {kind!r} for Anthropic")
         result.append(block)
     return result
 
 
-def anthropic_request(params: dict) -> dict:
-    """Translate projected Chat messages, keeping signed blocks and cache markers."""
-    result = dict(params)
-    messages, system = [], []
-    for message in result.pop("messages"):
-        role = message["role"]
+def _anthropic_message(message, index):
+    """Validate one public message and identify bad input without printing its data."""
+    try:
+        if not isinstance(message, dict):
+            raise ValueError("must be a message dictionary")
+        role = message.get("role")
+        if role not in {"system", "developer", "user", "assistant", "tool"}:
+            raise ValueError(f"unsupported role {role!r}")
         content = _blocks(message.get("content"))
-        if role in {"system", "developer"}:
-            if messages:
-                raise ValueError("Anthropic accepts only leading system messages")
-            system.extend(content)
-            continue
         if role == "tool":
+            if not isinstance(message.get("tool_call_id"), str):
+                raise ValueError("tool_call_id is required for tool messages")
             content = [
                 {"type": "tool_result", "tool_use_id": message["tool_call_id"], "content": content}
             ]
             role = "user"
         elif role == "assistant":
-            content = [*message.get("thinking_blocks", []), *content]
+            thinking = message.get("thinking_blocks") or []
+            if not isinstance(thinking, list) or not all(isinstance(b, dict) for b in thinking):
+                raise ValueError("thinking_blocks must be a list of blocks")
+            content = [*thinking, *content]
             if message.get("reasoning_content"):
                 content.insert(0, {"type": "text", "text": message["reasoning_content"]})
-            for call in message.get("tool_calls") or []:
+            calls = message.get("tool_calls") or []
+            if not isinstance(calls, list):
+                raise ValueError("tool_calls must be a list")
+            for call in calls:
+                if not isinstance(call, dict) or not isinstance(call.get("id"), str):
+                    raise ValueError("tool_calls require an id string")
+                function = call.get("function")
+                if not isinstance(function, dict) or not isinstance(function.get("name"), str):
+                    raise ValueError("tool_calls require function.name")
+                arguments = function.get("arguments")
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"tool_calls {call['id']!r} arguments are not JSON"
+                        ) from exc
+                if not isinstance(arguments, dict):
+                    raise ValueError(f"tool_calls {call['id']!r} arguments must be a JSON object")
                 content.append(
                     {
                         "type": "tool_use",
                         "id": call["id"],
-                        "name": call["function"]["name"],
-                        "input": json.loads(call["function"]["arguments"]),
+                        "name": function["name"],
+                        "input": arguments,
                     }
                 )
-        elif role != "user":
-            raise ValueError(f"Unsupported Anthropic message role: {role!r}")
+        return role, content
+    except ValueError as exc:
+        raise ValueError(f"Anthropic message[{index}]: {exc}") from exc
+
+
+def anthropic_request(params: dict) -> dict:
+    """Translate projected Chat messages, keeping signed blocks and cache markers."""
+    result = dict(params)
+    source = result.pop("messages", None)
+    if not isinstance(source, list):
+        raise ValueError("Anthropic messages must be a list")
+    messages, system = [], []
+    for index, message in enumerate(source):
+        role, content = _anthropic_message(message, index)
+        if role in {"system", "developer"}:
+            if messages:
+                raise ValueError(
+                    f"Anthropic message[{index}]: only leading system messages are accepted"
+                )
+            system.extend(content)
+            continue
         if content:
             if messages and messages[-1]["role"] == role:
                 messages[-1]["content"].extend(content)
@@ -117,6 +173,7 @@ def anthropic_request(params: dict) -> dict:
     if "tools" in result:
         result["tools"] = [
             {
+                "type": "custom",
                 "name": t["function"]["name"],
                 "description": t["function"].get("description", ""),
                 "input_schema": t["function"]["parameters"],
@@ -137,16 +194,26 @@ def anthropic_request(params: dict) -> dict:
         result["tool_choice"] = choice
     elif parallel is False and result.get("tools"):
         result["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
-    if "response_format" in result:
-        fmt = result.pop("response_format")["json_schema"]
+    fmt = result.pop("response_format", None)
+    if fmt is not None:
+        if (
+            not isinstance(fmt, dict)
+            or fmt.get("type") != "json_schema"
+            or not isinstance(fmt.get("json_schema"), dict)
+            or not isinstance(fmt["json_schema"].get("schema"), dict)
+        ):
+            raise ValueError("Anthropic response_format requires type json_schema with a schema")
         result["output_config"] = {
             **result.get("output_config", {}),
-            "format": {"type": "json_schema", "schema": fmt["schema"]},
+            "format": {"type": "json_schema", "schema": fmt["json_schema"]["schema"]},
         }
     # A cache shard key has meaning only on the OpenAI APIs.
     result.pop("prompt_cache_key", None)
-    if "max_tokens" not in result:
-        raise ValueError("Anthropic direct calls require an explicit max_tokens reply limit")
+    limit = result.get("max_tokens")
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+        raise ValueError(
+            "Anthropic direct calls require an explicit positive max_tokens reply limit"
+        )
     return result
 
 

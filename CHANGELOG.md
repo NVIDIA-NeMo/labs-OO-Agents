@@ -6,6 +6,10 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- LLM tracing and journals now cover UnifiedLLM calls on either transport,
+  including the viewer playground. Raw LiteLLM calls outside UnifiedLLM are
+  no longer automatically instrumented.
+
 - Security: the sandbox parent no longer unpickles worker bytes. Brokered `self.*`
   arguments, `self.x = value` assignments, cell return values and `return_result`
   payloads now cross as msgpack; rich values are rebuilt only from a fixed set of
