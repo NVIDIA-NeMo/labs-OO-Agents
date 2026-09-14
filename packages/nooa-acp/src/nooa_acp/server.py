@@ -64,21 +64,19 @@ from nooa_cli.interactive.options import (
     connect_session_mcp,
 )
 from nooa_cli.interactive.session_paths import session_directory
-from nooa_cli.sessions import (
-    InvalidSessionIdError,
-    SessionHandle,
-    SessionNotFoundError,
-    SessionStore,
-)
 
 from nooa.errors import GenerationError
 from nooa.mcp import MCPManager, MCPTool
 from nooa.sessions import (
+    InvalidSessionIdError,
     SessionBusyError,
+    SessionHandle,
+    SessionNotFoundError,
     SessionResumed,
     SessionRuntime,
     SessionRuntimeClosedError,
     SessionRuntimePool,
+    SessionStore,
 )
 from nooa.slash_dispatch import CoercionError
 from nooa.storage.sqlite import SessionAlreadyActiveError, is_sqlite_database_active
