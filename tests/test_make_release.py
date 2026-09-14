@@ -831,6 +831,7 @@ def test_ci_never_creates_draft_after_gate_failure(mr, tmp_path, monkeypatch, fa
     provider_calls = []
 
     def providers(*_args, **_kwargs):
+        assert _kwargs["internal_wheel"] == args.internal_wheel.resolve()
         provider_calls.append(True)
         if failure_point == "provider":
             raise mr.ReleaseError("provider replay failed")
@@ -923,7 +924,20 @@ def test_release_runner_contains_no_publish_operation(mr):
 
 @pytest.mark.parametrize(
     "outcome",
-    ["passed", "skipped", "failure", "error", "empty", "partial", "missing", "malformed", "exit"],
+    [
+        "passed",
+        "skipped",
+        "failure",
+        "error",
+        "empty",
+        "partial",
+        "missing",
+        "malformed",
+        "exit",
+        "duplicate",
+        "wrong_name",
+        "wrong_module",
+    ],
 )
 def test_provider_gate_requires_seven_passes(mr, monkeypatch, tmp_path, outcome):
     monkeypatch.setenv("NOOA_TEST_OMITTED_REASONING", "1")
@@ -942,6 +956,25 @@ def test_provider_gate_requires_seven_passes(mr, monkeypatch, tmp_path, outcome)
         ]
         report = Path(cmd[cmd.index("--junitxml") + 1])
         count = {"empty": 0, "partial": 6}.get(outcome, 7)
+        identities = [
+            (
+                "tests.integration.test_cache_resume_live",
+                f"test_reasoning_and_prompt_cache_survive_sqlite_resume[{family}]",
+            )
+            for family in ("openai", "anthropic", "gemini")
+        ] + [
+            (
+                "tests.integration.test_open_model_tool_reasoning_live",
+                f"test_open_model_tool_reasoning_after_sqlite_resume[{family}]",
+            )
+            for family in ("deepseek", "kimi", "glm", "qwen")
+        ]
+        if outcome == "duplicate":
+            identities[0] = identities[1]
+        elif outcome == "wrong_name":
+            identities[0] = (identities[0][0], "unrelated_test")
+        elif outcome == "wrong_module":
+            identities[0] = ("unrelated_module", identities[0][1])
         child = f"<{outcome}/>" if outcome in {"skipped", "failure", "error"} else ""
         if outcome != "missing":
             report.write_text(
@@ -949,8 +982,8 @@ def test_provider_gate_requires_seven_passes(mr, monkeypatch, tmp_path, outcome)
                 if outcome == "malformed"
                 else "<testsuites><testsuite>"
                 + "".join(
-                    f'<testcase name="case{i}">{child if i == 0 else ""}</testcase>'
-                    for i in range(count)
+                    f'<testcase classname="{module}" name="{name}">{child if i == 0 else ""}</testcase>'
+                    for i, (module, name) in enumerate(identities[:count])
                 )
                 + "</testsuite></testsuites>"
             )
@@ -968,6 +1001,39 @@ def test_provider_gate_requires_seven_passes(mr, monkeypatch, tmp_path, outcome)
             mr.provider_checks(tmp_path, manifest)
         assert manifest.data["provider_validation"]["outcome"] == "failed"
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("with_wheel", [False, True])
+def test_provider_gate_loads_alias_package_ephemerally(mr, monkeypatch, tmp_path, with_wheel):
+    wheel = tmp_path / "model_aliases-1.0-py3-none-any.whl" if with_wheel else None
+
+    def run(cmd, **kwargs):
+        assert cmd[:3] == ["uv", "run", "--frozen"]
+        if wheel:
+            assert cmd[3:6] == ["--with", str(wheel), "pytest"]
+        else:
+            assert cmd[3] == "pytest"
+        raise mr.ReleaseError("stop before provider calls")
+
+    monkeypatch.setattr(mr, "run", run)
+    with pytest.raises(mr.ReleaseError, match="stop before provider calls"):
+        mr.provider_checks(tmp_path, internal_wheel=wheel)
+
+
+def test_local_release_forwards_alias_wheel_to_provider_gate(mr, monkeypatch, tmp_path):
+    wheel = tmp_path / "model_aliases.whl"
+    args = mr._parser().parse_args(["v1.2.3", "--internal-wheel", str(wheel)])
+    monkeypatch.setattr(mr, "preflight", lambda *_args: ("a" * 40, "v1.2.2", "b" * 40, None))
+    monkeypatch.setattr(mr, "fast_checks", lambda: None)
+    monkeypatch.setattr(mr, "build_and_smoke", lambda *_args: None)
+
+    def providers(*_args, **kwargs):
+        assert kwargs["internal_wheel"] == wheel
+        raise mr.ReleaseError("reached provider gate")
+
+    monkeypatch.setattr(mr, "provider_checks", providers)
+    with pytest.raises(mr.ReleaseError, match="reached provider gate"):
+        mr.local_main(args)
 
 
 def test_existing_publication_workflow_still_uses_published_release_trigger():

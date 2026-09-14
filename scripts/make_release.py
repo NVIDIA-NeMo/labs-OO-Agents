@@ -329,15 +329,23 @@ def tool_versions(image_digest: str | None) -> dict[str, str]:
     return versions
 
 
-def provider_checks(artifact_dir: Path, manifest: ReleaseManifest | None = None) -> None:
+def provider_checks(
+    artifact_dir: Path,
+    manifest: ReleaseManifest | None = None,
+    *,
+    internal_wheel: Path | None = None,
+) -> None:
     """Check replay and cache behavior on the candidate before creating a draft.
 
     Use the existing opt-in provider tests, not the much larger integration suite.
     Their model routes and credentials come from registry aliases installed with
     a bundled-config package, so a runner without that package fails this gate
     (the cases skip, and skips are rejected below).
+    The supplied alias wheel is loaded in uv's temporary environment, since the
+    locked project sync removes packages outside the lockfile. Local callers may
+    omit it when their registry aliases are otherwise available.
     Seven cases make at most 17 capped calls without retries. A fresh report
-    directory and explicit pass count prevent stale or skipped evidence from
+    directory and exact case identities prevent stale or skipped evidence from
     satisfying the gate. Session databases and reports stay in private artifacts.
     """
     # Credentials are not this runner's concern: each ``release-gate-<family>``
@@ -363,6 +371,7 @@ def provider_checks(artifact_dir: Path, manifest: ReleaseManifest | None = None)
                 "uv",
                 "run",
                 "--frozen",
+                *(["--with", str(internal_wheel)] if internal_wheel else []),
                 "pytest",
                 "-q",
                 "-m",
@@ -384,12 +393,32 @@ def provider_checks(artifact_dir: Path, manifest: ReleaseManifest | None = None)
             capture=False,
         )
         cases = ET.parse(report).findall(".//testcase")
-        if len(cases) != 7 or any(
-            case.find(status) is not None
-            for case in cases
-            for status in ("skipped", "failure", "error")
+        expected = {
+            (
+                "tests.integration.test_cache_resume_live",
+                f"test_reasoning_and_prompt_cache_survive_sqlite_resume[{family}]",
+            )
+            for family in ("openai", "anthropic", "gemini")
+        } | {
+            (
+                "tests.integration.test_open_model_tool_reasoning_live",
+                f"test_open_model_tool_reasoning_after_sqlite_resume[{family}]",
+            )
+            for family in ("deepseek", "kimi", "glm", "qwen")
+        }
+        actual = {(case.get("classname"), case.get("name")) for case in cases}
+        if (
+            len(cases) != len(expected)
+            or actual != expected
+            or any(
+                case.find(status) is not None
+                for case in cases
+                for status in ("skipped", "failure", "error")
+            )
         ):
-            die("Provider validation requires all seven cases to pass; no skips")
+            die(
+                "Provider validation requires the seven expected cases to pass exactly once; no skips. Check the alias package if cases were skipped (use --internal-wheel)."
+            )
     except (ReleaseError, OSError, ET.ParseError) as exc:
         if manifest:
             manifest.update(provider_validation={**evidence, "outcome": "failed"})
@@ -1737,7 +1766,7 @@ def ci_main(args: argparse.Namespace) -> int:
         distributions = _copy_distributions(artifact_dir)
         manifest.update(distributions=distributions)
 
-        provider_checks(artifact_dir, manifest)
+        provider_checks(artifact_dir, manifest, internal_wheel=internal_wheel)
 
         manifest.update(capability={"hard_gate_outcome": "running"})
         try:
@@ -1828,13 +1857,7 @@ def ci_main(args: argparse.Namespace) -> int:
 
 
 def local_main(args: argparse.Namespace) -> int:
-    if (
-        args.create_draft
-        or args.candidate_sha
-        or args.candidate_ref
-        or args.internal_wheel
-        or args.artifact_dir
-    ):
+    if args.create_draft or args.candidate_sha or args.candidate_ref or args.artifact_dir:
         die("CI-only arguments require --ci")
 
     models = args.models.split(",") if args.models else GATE_MODELS
@@ -1845,7 +1868,7 @@ def local_main(args: argparse.Namespace) -> int:
     head_sha, prev_tag, _prev_sha, existing = preflight(args.tag, args.allow_dirty)
     fast_checks()
     build_and_smoke(args.tag, head_sha)
-    provider_checks(REPORT_PATH.parent)
+    provider_checks(REPORT_PATH.parent, internal_wheel=args.internal_wheel)
 
     report = ""
     if args.skip_capability:

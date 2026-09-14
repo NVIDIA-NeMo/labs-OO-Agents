@@ -19,16 +19,20 @@ and `tests/integration/test_open_model_tool_reasoning_live.py`. The model routes
 are not: each case resolves a registry alias named `release-gate-<family>`
 through `tests/integration/_release_gate.py`. Those aliases, with their
 endpoint, credential variable and client type, come from a bundled-config
-package installed on the release runner. Without it every case skips, and the
+package supplied with `--internal-wheel`. The gate loads that wheel through
+`uv run --with`, independently of the locked project environment; local runs
+may omit it if their registry already contains the aliases. Without the aliases
+every case skips, and the
 gate rejects skips, so a release cannot be drafted unless the checks ran.
 
 One run makes at most 17 requests with retries disabled and a 15-minute
-timeout. The runner requires seven passing cases, records the outcome and the
+timeout. The runner requires each of the seven expected test names and modules
+to pass exactly once, records the outcome and the
 JUnit report path in the release manifest, and keeps reports and session
 databases in private artifacts; they contain provider state and must not be
 attached to public release notes. `tests/test_make_release.py` checks the gate
-without paid calls: missing credentials, process failures, and skipped,
-partial, malformed or missing reports.
+without paid calls: process failures, skipped cases, wrong or duplicate case
+identities, and partial, malformed or missing reports.
 
 Budgets, credentials, the alias definitions, manual invocation and recorded
 results are maintained with the private release controller documentation.
