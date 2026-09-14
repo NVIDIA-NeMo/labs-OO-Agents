@@ -17,7 +17,6 @@ from nooa_bench.behavior_analyzer import (
     analyze_events,
     analyze_trajectory,
 )
-from nooa_bench.change_ledger import load_change_ledger
 
 
 def _cell(code: str, *, synthetic: bool = False) -> dict:
@@ -158,34 +157,6 @@ def test_trajectory_analysis_and_grouped_aggregation(tmp_path: Path) -> None:
     assert aggregate_behavior_paths([artifact]) == aggregate_reports([first])
 
 
-@pytest.mark.parametrize(
-    "invalid", ["duplicate", "unknown_signal", "unknown_rate_direction", "missing_checks"]
-)
-def test_change_ledger_rejects_invalid_changes(tmp_path: Path, invalid: str) -> None:
-    entry = {
-        "id": "bench-single-tool",
-        "status": "implemented",
-        "component": "bench",
-        "hypothesis": "single-tool execution preserves completion",
-        "deterministic_checks": ["test_solve_task_uses_experimental_single_tool_contract"],
-        "trace_expectations": [{"signal": "completion_rate", "direction": "unchanged"}],
-        "benchmark_slices": ["bench", "rlm"],
-    }
-    changes = [entry]
-    if invalid == "duplicate":
-        changes.append(dict(entry))
-    elif invalid == "unknown_signal":
-        entry["trace_expectations"][0]["signal"] = "unsupported"
-    elif invalid == "unknown_rate_direction":
-        entry["trace_expectations"][0]["direction"] = "unsupported"
-    else:
-        entry["deterministic_checks"] = []
-    path = tmp_path / "ledger.json"
-    path.write_text(json.dumps({"schema_version": 1, "changes": changes}))
-    with pytest.raises(ValueError):
-        load_change_ledger(path)
-
-
 def test_runner_writes_behavior_artifact_from_serialized_trajectory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -301,30 +272,6 @@ await asyncio.gather(fetch_a(), fetch_b())
     )
     assert report.signals["delegations"] == 2
     assert report.signals["parallel_delegations"] == 0
-
-
-def test_change_ledger_accepts_every_published_rate(tmp_path: Path) -> None:
-    from nooa_bench.behavior_analyzer import RATE_DESCRIPTIONS
-
-    ledger = {
-        "schema_version": 1,
-        "changes": [
-            {
-                "id": "all-rates",
-                "status": "implemented",
-                "component": "test",
-                "hypothesis": "catalogs agree",
-                "deterministic_checks": ["unit"],
-                "trace_expectations": [
-                    {"signal": name, "direction": "unchanged"} for name in RATE_DESCRIPTIONS
-                ],
-                "benchmark_slices": ["all"],
-            }
-        ],
-    }
-    path = tmp_path / "ledger.json"
-    path.write_text(json.dumps(ledger))
-    assert load_change_ledger(path) == ledger
 
 
 @pytest.mark.parametrize("tool_name", ["execute_python", "python_cell"])

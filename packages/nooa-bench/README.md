@@ -14,10 +14,14 @@ documentation.
 
 Two agent variants are available through `nemo-harbor --agent-type`:
 
-- `bench` — compact CodeAct baseline with automatic summarization and optional delegation.
-- `rlm` — the same capabilities with instructions emphasizing delegation for bounded work.
+- `bench` — `BenchAgent` in `nooa_bench.bench_agent`: compact CodeAct baseline
+  with automatic summarization and optional delegation.
+- `rlm` — `RLMBenchAgent` in `nooa_bench.rlm_bench_agent`: the same capabilities
+  with instructions emphasizing delegation for bounded work.
 
 Both use the single `python_cell` tool and return a structured `TaskResult`.
+Both delegate through an awaited call returning a `TaskResult`; neither exposes
+the interactive coding agent's background `spawn()` / job-handle API.
 The strategy allows ten retries, uses a 1,800-second cell timeout, and has no
 fixed iteration cap; configure the enclosing benchmark's time/token budget.
 Workers use the same agent type, model client and working directory, with their

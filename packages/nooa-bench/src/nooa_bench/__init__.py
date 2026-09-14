@@ -12,7 +12,7 @@ from __future__ import annotations
 AGENT_CLASSES: dict[str, str] = {
     # Unified SWE-bench + Terminal-Bench baseline.
     "bench": "nooa_bench.bench_agent:BenchAgent",
-    "rlm": "nooa_bench.bench_agent:RLMBenchAgent",
+    "rlm": "nooa_bench.rlm_bench_agent:RLMBenchAgent",
 }
 
 __all__ = ["AGENT_CLASSES"]

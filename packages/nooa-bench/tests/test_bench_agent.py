@@ -9,7 +9,8 @@ import json
 import pytest
 from nooa_bench import bench_agent as bench_agent_module
 from nooa_bench import runner
-from nooa_bench.bench_agent import BenchAgent, RLMBenchAgent, TaskResult
+from nooa_bench.bench_agent import BenchAgent, TaskResult
+from nooa_bench.rlm_bench_agent import RLMBenchAgent
 
 from nooa.agentdoc import doc
 from nooa.unifiedllm import AssistantReasoning, AssistantText, FakeLLMClient, LLMResponse, ToolCall
@@ -408,7 +409,7 @@ async def test_bench_workers_start_with_task_local_state(agent_type, tmp_path):
 def test_variants_share_identity_and_document_delegation_hierarchy():
     from nooa_bench import AGENT_CLASSES
 
-    assert AGENT_CLASSES["rlm"] == "nooa_bench.bench_agent:RLMBenchAgent"
+    assert AGENT_CLASSES["rlm"] == "nooa_bench.rlm_bench_agent:RLMBenchAgent"
     for agent_type in (BenchAgent, RLMBenchAgent):
         prompt = doc(agent_type)
         assert "You are an autonomous software engineering agent." in prompt
