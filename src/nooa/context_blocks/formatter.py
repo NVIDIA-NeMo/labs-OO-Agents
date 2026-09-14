@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from nooa.llm_types import LLMResponse
 
 from nooa.agentdoc import pformat
-from nooa.context_blocks.events import EventBase, ToolCallEvent
+from nooa.context_blocks.events import CODEACT_INLINE_RETURN, EventBase, ToolCallEvent
 from nooa.context_blocks.models import (
     RenderedMessage,
     ResolvedBlock,
@@ -266,7 +266,7 @@ def _event_block_to_messages(
 
     if isinstance(block.event, ToolCallEvent):
         event = block.event
-        if event.metadata.get("synthetic_type") == "codeact_inline_return":
+        if event.metadata.get("synthetic_type") == CODEACT_INLINE_RETURN:
             # Inline return_result() ran inside a Python cell. CodeAct records its
             # value for traces, but the provider never issued a separate return_result
             # tool call. Replaying this marker would invent an assistant turn/tool

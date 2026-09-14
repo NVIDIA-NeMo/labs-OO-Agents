@@ -36,22 +36,15 @@ SIGNAL_DESCRIPTIONS: dict[str, str] = {
     "completion_calls": "Observed return_result tool calls.",
     "execution_attempts": "Observed PythonOutput execution attempts.",
     "execution_errors": "PythonOutput events with error execution status.",
-    "retry_attempts": "Execution attempts explicitly linked to an earlier attempt.",
-    "recovered_execution_errors": "Failed attempts followed by a successful linked retry.",
     "restricted_code_errors": "Python outputs containing a stable validator error code.",
     "path_resolution_errors": "Python outputs containing a structured path-resolution code.",
-    "recovered_restricted_code_errors": "Restriction failures followed by a successful linked retry.",
-    "recovered_path_resolution_errors": "Path failures followed by a successful linked retry.",
     "text_only_replies": "Model replies that did not initially use a tool.",
-    "recovered_text_only_replies": "Text-only replies followed by valid tool use.",
 }
 
 
 RATE_DESCRIPTIONS: dict[str, str] = {
     "self_reference_rate": "Python cells containing at least one self reference",
     "execution_error_rate": "Execution attempts that ended in error",
-    "execution_recovery_rate": "Execution errors linked to a successful retry",
-    "text_only_recovery_rate": "Text-only replies followed by recovered execution",
     "completion_rate": "Whether the trajectory contains a completion call",
 }
 
@@ -192,21 +185,26 @@ def analyze_events(
 ) -> BehaviorReport:
     """Analyze already-serialized framework events."""
     signals = dict.fromkeys(SIGNAL_DESCRIPTIONS, 0)
-    failed_attempts: dict[str, set[str]] = {}
-    recovered_attempts: set[str] = set()
     for event in events:
+        if not isinstance(event, dict):
+            continue
         event_type = _event_type(event)
         if event_type == "ToolCallEvent":
-            metadata = event.get("metadata") or {}
+            if not isinstance(event.get("name"), str):
+                continue
+            metadata = event.get("metadata")
+            metadata = metadata if isinstance(metadata, dict) else {}
             if event.get("name") == "return_result":
                 signals["completion_calls"] += 1
             if (
                 event.get("name") not in {"execute_python", "python_cell"}
-                or metadata.get("synthetic")
-                or metadata.get("prefill")
+                or event.get("synthetic", metadata.get("synthetic"))
+                or event.get("prefill", metadata.get("prefill"))
             ):
                 continue
             arguments = event.get("arguments") or {}
+            if not isinstance(arguments, dict):
+                continue
             code = arguments.get("code", "")
             if not isinstance(code, str):
                 continue
@@ -217,56 +215,27 @@ def analyze_events(
             signals["execution_attempts"] += 1
             status = str(event.get("execution_status", "")).lower()
             is_error = status.endswith("error")
-            attempt_id = str(event.get("tool_call_id") or "")
-            retry_of = str(event.get("retry_of") or "")
-            if retry_of:
-                signals["retry_attempts"] += 1
-
             diagnostic_text = (
                 f"{event.get('failure_code', '')}\n{event.get('stdout', '')}\n"
                 f"{event.get('stderr', '')}\n{event.get('error', '')}"
             )
-            categories: set[str] = set()
-            if re.search(r"(?:\[E\d{3}\]|\bE\d{3}\b)", diagnostic_text):
+            if re.search(r"\[E\d{3}\]", diagnostic_text):
                 signals["restricted_code_errors"] += 1
-                categories.add("restricted")
-            if re.search(r"(?:\[PATH_[A-Z_]+\]|\bPATH_[A-Z_]+\b)", diagnostic_text):
+            if re.search(r"\[PATH_[A-Z_]+\]", diagnostic_text):
                 signals["path_resolution_errors"] += 1
-                categories.add("path")
 
             if is_error:
                 signals["execution_errors"] += 1
-                if attempt_id:
-                    failed_attempts[attempt_id] = categories
-            elif retry_of in failed_attempts and retry_of not in recovered_attempts:
-                recovered_attempts.add(retry_of)
-                signals["recovered_execution_errors"] += 1
-                failed_categories = failed_attempts[retry_of]
-                if "restricted" in failed_categories:
-                    signals["recovered_restricted_code_errors"] += 1
-                if "path" in failed_categories:
-                    signals["recovered_path_resolution_errors"] += 1
         elif event_type == "TextOnlyReply":
             signals["text_only_replies"] += 1
-            if event.get("recovered") is True:
-                signals["recovered_text_only_replies"] += 1
 
     cells = signals["python_cells"]
-    text_only = signals["text_only_replies"]
     rates = {
         "self_reference_rate": signals["self_references"] / cells if cells else 0.0,
         "execution_error_rate": (
             signals["execution_errors"] / signals["execution_attempts"]
             if signals["execution_attempts"]
             else 0.0
-        ),
-        "execution_recovery_rate": (
-            signals["recovered_execution_errors"] / signals["execution_errors"]
-            if signals["execution_errors"]
-            else 0.0
-        ),
-        "text_only_recovery_rate": (
-            signals["recovered_text_only_replies"] / text_only if text_only else 0.0
         ),
         "completion_rate": 1.0 if signals["completion_calls"] else 0.0,
     }
@@ -276,6 +245,7 @@ def analyze_events(
 def analyze_trajectory(
     path: str | Path,
     *,
+    task_id: str | None = None,
     model: str = "unknown",
     agent_type: str = "unknown",
     change_id: str = "baseline",
@@ -287,7 +257,7 @@ def analyze_trajectory(
         raise ValueError("trajectory must be a JSON list of serialized events")
     return analyze_events(
         raw,
-        task_id=trajectory_path.parent.name or trajectory_path.stem,
+        task_id=task_id or trajectory_path.parent.name or trajectory_path.stem,
         model=model,
         agent_type=agent_type,
         change_id=change_id,

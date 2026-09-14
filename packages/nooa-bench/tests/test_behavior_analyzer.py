@@ -88,20 +88,13 @@ self.message('working')
         "completion_calls": 1,
         "execution_attempts": 3,
         "execution_errors": 1,
-        "retry_attempts": 1,
-        "recovered_execution_errors": 1,
         "restricted_code_errors": 1,
         "path_resolution_errors": 1,
-        "recovered_restricted_code_errors": 1,
-        "recovered_path_resolution_errors": 0,
         "text_only_replies": 1,
-        "recovered_text_only_replies": 1,
     }
     assert report.rates == {
         "self_reference_rate": 1.0,
         "execution_error_rate": 1 / 3,
-        "execution_recovery_rate": 1.0,
-        "text_only_recovery_rate": 1.0,
         "completion_rate": 1.0,
     }
 
@@ -173,6 +166,7 @@ def test_runner_writes_behavior_artifact_from_serialized_trajectory(
     agent = SimpleNamespace(event_manager={str(i): event for i, event in enumerate(calls)})
     monkeypatch.setattr(runner, "LOGS_DIR", tmp_path)
     monkeypatch.setenv("NOOA_INTERFACE_CHANGE_ID", "prompt-v2")
+    monkeypatch.setenv("NOOA_TASK_ID", "actual-task-id")
 
     runner._write_trajectory(agent)
     runner._write_behavior_report("model-z", "rlm")
@@ -181,6 +175,7 @@ def test_runner_writes_behavior_artifact_from_serialized_trajectory(
     assert payload["model"] == "model-z"
     assert payload["agent_type"] == "rlm"
     assert payload["change_id"] == "prompt-v2"
+    assert payload["task_id"] == "actual-task-id"
     assert payload["signals"]["persistent_state_uses"] == 1
     assert payload["signals"]["completion_calls"] == 1
 
@@ -193,7 +188,7 @@ def test_behavior_reporting_is_non_fatal_without_trajectory(
     assert not (tmp_path / "behavior.json").exists()
 
 
-def test_success_after_error_is_not_recovery_without_explicit_link() -> None:
+def test_recovery_metrics_are_not_reported_without_framework_linkage() -> None:
     report = analyze_events(
         [
             {
@@ -207,8 +202,7 @@ def test_success_after_error_is_not_recovery_without_explicit_link() -> None:
     )
 
     assert report.signals["execution_errors"] == 1
-    assert report.signals["recovered_execution_errors"] == 0
-    assert report.signals["recovered_restricted_code_errors"] == 0
+    assert not any("recover" in key or "retry" in key for key in {*report.signals, *report.rates})
 
 
 def test_behavior_report_is_content_free_with_sensitive_inputs() -> None:
@@ -257,7 +251,6 @@ def test_behavior_report_is_content_free_with_sensitive_inputs() -> None:
     assert payload["content_policy"] == "aggregate-counts-only"
     assert all(isinstance(value, int) for value in payload["signals"].values())
     assert all(isinstance(value, float) for value in payload["rates"].values())
-    assert payload["signals"]["recovered_path_resolution_errors"] == 1
 
 
 def test_parallel_delegations_must_be_arguments_of_the_same_gather() -> None:
@@ -282,3 +275,56 @@ def test_model_cells_are_counted_without_framework_prefill(tool_name):
     report = analyze_events([prefill, cell, synthetic])
     assert report.signals["python_cells"] == 1
     assert report.signals["todo_creations"] == 1
+
+
+def test_real_export_preserves_only_metric_classification_metadata(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from nooa.context_blocks import ToolCallEvent
+
+    events = [
+        ToolCallEvent(
+            tool_call_id="prefill",
+            name="python_cell",
+            arguments={"code": "print('inputs')"},
+            metadata={"prefill": True, "private_state": "private-sentinel"},
+        ),
+        ToolCallEvent(
+            tool_call_id="synthetic",
+            name="python_cell",
+            arguments={"code": "print('setup')"},
+            metadata={"synthetic": True},
+        ),
+        ToolCallEvent(
+            tool_call_id="model", name="python_cell", arguments={"code": "self.todo.status()"}
+        ),
+    ]
+    monkeypatch.setattr(runner, "LOGS_DIR", tmp_path)
+    runner._write_trajectory(SimpleNamespace(event_manager=dict(enumerate(events))))
+    raw = (tmp_path / "trajectory.json").read_text()
+    assert "private-sentinel" not in raw
+    report = analyze_trajectory(tmp_path / "trajectory.json")
+    assert report.signals["python_cells"] == 1
+    assert report.rates["self_reference_rate"] == 1.0
+
+
+@pytest.mark.parametrize("output", ["E501 line too long", "route E101 to bus", "PATH_TO_FILE=/x"])
+def test_ordinary_output_does_not_count_as_a_framework_diagnostic(output):
+    report = analyze_events([{"event_type": "PythonOutput", "stdout": output}])
+    assert report.signals["restricted_code_errors"] == 0
+    assert report.signals["path_resolution_errors"] == 0
+
+
+def test_malformed_events_do_not_discard_valid_cells():
+    report = analyze_events(
+        [
+            None,
+            "broken",
+            [],
+            3,
+            {"event_type": "ToolCallEvent", "name": []},
+            {"event_type": "ToolCallEvent", "name": "python_cell", "arguments": [1]},
+            _cell("self.todo.status()"),
+        ]
+    )
+    assert report.signals["python_cells"] == 1

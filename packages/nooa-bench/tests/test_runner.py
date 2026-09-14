@@ -140,7 +140,9 @@ async def test_runner_executes_delegation_and_preserves_provider_turns(
     result = json.loads((tmp_path / "logs/result.json").read_text())
     assert result["success"] is True
     metrics = json.loads((tmp_path / "logs/behavior.json").read_text())
-    assert metrics["signals"]["python_cells"] == 3  # Controller and worker cells.
+    # Only controller model cells are in this trajectory; prefill is excluded.
+    # Worker cells live in their separate event managers.
+    assert metrics["signals"]["python_cells"] == 2
     assert metrics["signals"]["delegations"] == 1
     assert metrics["rates"]["completion_rate"] == 1.0
 

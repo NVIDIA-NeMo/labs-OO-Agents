@@ -53,6 +53,13 @@ _OPTIONAL_TESTBED_ACTIVATE = (
     "fi"
 )
 
+_SOLVE_STRATEGY = CodeActExperimental(config=CodeActConfig(max_retries=10, cell_timeout=1800.0))
+_SOLVE_CONTEXT = {
+    "state": None,
+    "execution_context": None,
+    "self": Context(expr="doc(type(self), concise=True)", prefix=True),
+}
+
 
 class TaskResult(BaseModel):
     """Structured result the agent must return when finishing a task."""
@@ -119,6 +126,7 @@ class BenchAgent(
         )
         self._delegation_depth = delegation_depth
         self._max_delegation_depth = max_delegation_depth
+        self._summarization = summarization or SummarizationConfig()
         self._install_python_tools(cwd)
         self.todo = TodoManager()
         self.methodwriting = MethodWriting()
@@ -126,13 +134,23 @@ class BenchAgent(
         self.context_manager["python_cell_tools"] = Context(
             doc(ShellTools, RepoTools, TodoManager, MethodWriting), prefix=True
         )
-        install_summarizer(summarization or SummarizationConfig(), self)
+        self.context_manager["working_directory"] = Context(
+            expr="self._working_directory_context()"
+        )
+        install_summarizer(self._summarization, self)
+
+    def _working_directory_context(self) -> str:
+        """Render the application's shell location as a bounded context label."""
+        from html import escape
+
+        path = str(self.shell.cwd).replace("\n", "\\n").replace("\r", "\\r")
+        return "Working directory for self.shell: " + escape(path[:160], quote=False)
 
     def _install_python_tools(self, cwd: str) -> None:
         """Install shell/repo tools rooted at the same working directory."""
         self.shell = ShellTools(
             cwd=cwd,
-            init_command=getattr(self, "_worker_init_command", _OPTIONAL_TESTBED_ACTIVATE),
+            init_command=_OPTIONAL_TESTBED_ACTIVATE,
         )
         self.repo = RepoTools(root=cwd, session=self.shell.session)
 
@@ -184,7 +202,7 @@ class BenchAgent(
         Pass a :class:`Todo` to make it the subagent's task. The subagent receives an
         independent task copy and can record comments or variables with ``self.todo``;
         those changes are merged into this agent's Todo before this method returns.
-        String objectives retain the existing behavior.
+        A string objective is used as the task text verbatim.
 
         Use delegation when isolated context helps exploration, diagnosis, review, or
         implementation. Recursive same-kind delegation is bounded by
@@ -200,6 +218,7 @@ class BenchAgent(
             working_dir=str(self.shell.cwd),
             delegation_depth=self._delegation_depth + 1,
             max_delegation_depth=self._max_delegation_depth,
+            summarization=self._summarization,
         )
         if todo_base is not None:
             subagent.todo = TodoManager.with_todo(todo_base)
@@ -231,12 +250,8 @@ class BenchAgent(
 
     @_hidden
     @strategy(
-        CodeActExperimental(config=CodeActConfig(max_retries=10, cell_timeout=1800.0)),
-        context={
-            "state": None,
-            "execution_context": None,
-            "self": Context(expr="doc(type(self), concise=True)", prefix=True),
-        },
+        _SOLVE_STRATEGY,
+        context=_SOLVE_CONTEXT,
     )
     async def _solve_task(self, description: str) -> TaskResult:
         """Solve the supplied task completely.

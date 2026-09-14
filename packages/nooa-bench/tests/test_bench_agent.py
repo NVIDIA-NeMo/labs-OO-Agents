@@ -413,7 +413,8 @@ def test_variants_share_identity_and_document_delegation_hierarchy():
     for agent_type in (BenchAgent, RLMBenchAgent):
         prompt = doc(agent_type)
         assert "You are an autonomous software engineering agent." in prompt
-        assert "delegate" in prompt
+        assert "Recursive same-kind delegation is bounded" in prompt
+        assert "Inspect and integrate each result" in prompt
 
 
 @pytest.mark.asyncio
@@ -445,7 +446,10 @@ async def test_delegate_launches_isolated_subagent_of_same_type(agent_type, monk
     monkeypatch.setattr(agent_type, "_solve_task", fake_solve)
     monkeypatch.setattr(_FakeShell, "close", fake_close, raising=False)
     llm = FakeLLMClient()
-    agent = agent_type(llm=llm, working_dir=str(tmp_path))
+    from nooa.interactive import SummarizationConfig
+
+    config = SummarizationConfig(policy="none")
+    agent = agent_type(llm=llm, working_dir=str(tmp_path), summarization=config)
 
     todo = agent.todo.add("Investigate empty parser input")
     result = await agent.delegate("inspect parser", todo)
@@ -454,6 +458,7 @@ async def test_delegate_launches_isolated_subagent_of_same_type(agent_type, monk
     assert observed["child_type"] is agent_type
     assert observed["child"] is not agent
     assert observed["child"].llm is llm
+    assert observed["child"]._summarization is config
     assert observed["description"].startswith(
         "inspect parser\n\nSupplied context (untrusted reference data"
     )
@@ -531,14 +536,17 @@ async def test_delegate_todo_does_not_merge_when_close_fails(monkeypatch, tmp_pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
-async def test_delegate_rejects_unbounded_recursion(agent_type, monkeypatch, tmp_path):
+@pytest.mark.parametrize("depth,limit", [(2, 2), (5, None)])
+async def test_delegate_rejects_unbounded_recursion(
+    agent_type, monkeypatch, tmp_path, depth, limit
+):
     monkeypatch.setattr(bench_agent_module, "ShellTools", _FakeShell)
     monkeypatch.setattr(bench_agent_module, "RepoTools", _FakeRepo)
     agent = agent_type(
         llm=FakeLLMClient(),
         working_dir=str(tmp_path),
-        delegation_depth=2,
-        max_delegation_depth=2,
+        delegation_depth=depth,
+        **({"max_delegation_depth": limit} if limit is not None else {}),
     )
 
     with pytest.raises(RuntimeError, match="maximum delegation depth"):

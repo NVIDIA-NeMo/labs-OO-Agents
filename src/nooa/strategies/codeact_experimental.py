@@ -136,37 +136,7 @@ class CodeActExperimental(CodeActStrategy):
         local_items = sorted(local_types.items())
         import_items = sorted(import_names.items())
 
-        agent = runtime.agent
         lines = ["## Python cell state"]
-        shell = getattr(agent, "shell", None)
-        if shell is not None and (cwd := getattr(shell, "cwd", None)) is not None:
-            lines.extend(
-                (
-                    "",
-                    "Working directory (already active for `self.shell`; persists across "
-                    f"cells and turns): {self._python_cell_state_label(cwd)}",
-                    "Use relative paths; call `cd` only to intentionally change directories.",
-                )
-            )
-        elif (cwd := getattr(agent, "cwd", None)) is not None:
-            lines.extend(
-                (
-                    "",
-                    "Working directory (persists across cells and turns): "
-                    f"{self._python_cell_state_label(cwd)}",
-                )
-            )
-
-        persistent_vars = getattr(agent, "vars", None)
-        if persistent_vars:
-            count = len(persistent_vars)
-            lines.append(
-                f"`self.v`: {count} persistent var{'s' if count != 1 else ''} — "
-                "inspect: `print(self.v.items())`; "
-                "remove one: `del self.v.<name>`; clear all: `self.v.clear()`"
-            )
-        elif hasattr(agent, "v"):
-            lines.append("`self.v`: none")
 
         if import_items:
             visible_imports = import_items[:20]
@@ -210,8 +180,7 @@ class CodeActExperimental(CodeActStrategy):
         builtins = super()._build_builtins(runtime, call)
 
         def python_cell_state() -> dict[str, dict[str, str]]:
-            """Return the complete name-to-type inventory for persistent and cell state."""
-            persistent = getattr(runtime.agent, "vars", {})
+            """Return the complete name-to-type inventory for this call's cell state."""
             live = call.execution_locals or call.session_locals or {}
             inputs = call.bound_parameters()
             input_names = set(inputs)
@@ -226,7 +195,6 @@ class CodeActExperimental(CodeActStrategy):
                 and not callable(value)
             }
             return {
-                "self.v": {str(name): type(value).__name__ for name, value in persistent.items()},
                 "cell_locals": {
                     **{str(name): type(value).__name__ for name, value in inputs.items()},
                     **{

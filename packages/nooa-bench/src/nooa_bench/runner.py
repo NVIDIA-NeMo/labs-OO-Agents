@@ -186,6 +186,10 @@ def _write_trajectory(agent: Any) -> None:
                 # Opaque provider replay state belongs only in the durable event
                 # backend and compatible provider requests, never debug exports.
                 **_public_json_default(event),
+                # Export only the framework classification flags needed by metrics;
+                # the rest of metadata may contain private provider state.
+                "prefill": bool(event.metadata.get("prefill")),
+                "synthetic": bool(event.metadata.get("synthetic")),
             }
             for event_id, event in manager.items()
         ]
@@ -214,7 +218,11 @@ def _write_behavior_report(model: str, agent_type: str) -> None:
 
         change_id = os.environ.get("NOOA_INTERFACE_CHANGE_ID", "baseline")
         report = analyze_trajectory(
-            trajectory, model=model, agent_type=agent_type, change_id=change_id
+            trajectory,
+            model=model,
+            agent_type=agent_type,
+            change_id=change_id,
+            task_id=os.environ.get("NOOA_TASK_ID"),
         )
         out = LOGS_DIR / "behavior.json"
         out.write_text(json.dumps(report.to_dict(), indent=2))

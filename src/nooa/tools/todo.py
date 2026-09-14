@@ -168,7 +168,7 @@ class TodoManager(Skill):
         for raw in data.get("todos", []):
             if isinstance(raw, dict):
                 raw = dict(raw)
-                raw["status"] = {"blocked": "open", "COMPLETED": "done"}.get(
+                raw["status"] = {"blocked": "open"}.get(
                     raw.get("status"), raw.get("status", "open")
                 )
             t = Todo.model_validate(raw)
@@ -212,6 +212,7 @@ class TodoManager(Skill):
     @hidden
     def merge_todo(self, updated: Todo, *, base: Todo) -> Todo:
         """Atomically merge delegated changes without overwriting concurrent edits."""
+        # Freeze the worker result so the committed parent cannot alias worker state.
         updated = updated.model_copy(deep=True)
         if updated.id != base.id:
             raise ValueError("updated and base todos must have the same id")
@@ -253,6 +254,7 @@ class TodoManager(Skill):
         existing_comment_ids = {comment.id for comment in candidate.comments}
         for comment in updated.comments[len(base.comments) :]:
             if comment.id not in existing_comment_ids:
+                # Parent comments must remain independent of the worker result.
                 candidate.comments.append(comment.model_copy(deep=True))
                 existing_comment_ids.add(comment.id)
 
@@ -496,9 +498,7 @@ class TodoManager(Skill):
         """Resolve dependency-derived open/blocked state."""
         if todo.status == "done":
             return "done"
-        if todo.status in {"open", "blocked"}:
-            return "blocked" if todo.is_blocked(self._todos) else "open"
-        return todo.status
+        return "blocked" if todo.is_blocked(self._todos) else "open"
 
     def list_todos(self, status: str | None = None) -> list[Todo]:
         """Return todos in creation order, optionally filtered by effective status.
@@ -688,14 +688,10 @@ class TodoManager(Skill):
             return output
 
         by_status: dict[str, list[Todo]] = {"open": [], "blocked": [], "done": []}
-        other: list[Todo] = []
         for todo in todos:
             effective = self._effective_status(todo)
-            if effective in by_status:
-                by_status[effective].append(todo)
-            else:
-                other.append(todo)
-        ordered = [*by_status["open"], *by_status["blocked"], *other, *reversed(by_status["done"])]
+            by_status[effective].append(todo)
+        ordered = [*by_status["open"], *by_status["blocked"], *reversed(by_status["done"])]
         selected = ordered[:max_items]
 
         def render(rows: list[Todo]) -> str:

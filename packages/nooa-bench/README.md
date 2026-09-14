@@ -35,6 +35,11 @@ The runner writes `result.json`, `trajectory.json` and aggregate `behavior.json`
 under `/logs/agent`, and the verifier command to `/app/answer.txt`. Behavior
 metrics count both Python tool names and exclude framework prefill. Set
 `NOOA_INTERFACE_CHANGE_ID` to label a comparison; the default is `baseline`.
+Set `NOOA_TASK_ID` to identify the task when logs share the `/logs/agent` path.
+Metrics cover the controller's history; delegated workers keep separate histories
+and their cells are not included. Recovery and retry metrics are omitted until
+framework events carry explicit attempt linkage. Delegation context redaction
+uses credential-like mapping keys; arbitrary free text is not scrubbed.
 Failure to generate the behavior report does not fail an otherwise completed
 task. Agents close their shells; the runner closes the shared model client.
 
