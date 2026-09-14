@@ -110,7 +110,7 @@ the framework setting must never become a provider request field.
 credentials. Synthetic provider replies pass through the real clients and SDKs;
 an HTTP mock captures the outgoing requests and unexpected httpx requests fail.
 It covers Responses encrypted reasoning, Anthropic signed thinking, the Gemini
-Hub tool-signature format, and Chat `reasoning_content`.
+OpenAI-compatible tool-signature format, and Chat `reasoning_content`.
 
 The matrix compares complete requests before and after rendering, SQLite
 close/reopen, relay JSON reconciliation, and their combination, in both sync
@@ -133,53 +133,19 @@ uv run pytest tests/unifiedllm/test_history_wire_contract.py
 These tests prove request preservation, not provider cache hits. The bounded
 live release checks remain necessary to detect provider and gateway changes.
 
-### Live provider evidence
-
-The object-in-list stack was tested through NVIDIA Inference Hub on 2026-09-11,
-with production code frozen at `e527f9ce`. All three providers have passing live
-checks. SQLite events, native state and the stable HTTP prefix were equal after
-reopen with a fresh client; the trailing live context changed.
-
-| Model | Passing test revision | Resumed input tokens | Cached input tokens |
-|---|---|---:|---:|
-| GPT-5.6 Sol | `fef83178` | 6,120 | 6,096 |
-| Claude Sonnet 5 | `fef83178` | 10,858 | 10,828 |
-| Gemini 3.1 Pro Preview | `808ddbfe` | 24,667 | 20,350 |
-
-The warm requests reported zero cache-read tokens. OpenAI's
-`prompt_cache_breakpoint` and `prompt_cache_options` fields were verified on the
-serialized HTTP request and accepted by this live route, not inferred from the
-installed SDK schema. Support on other routes is not established. Gemini used
-implicit caching; exact replay does not control how much a provider caches.
-
-Two test assumptions were corrected during validation: compare durable public
-projections rather than transient SDK response objects after SQLite reopen,
-and accept either a final answer or a valid tool continuation after cache reuse.
-The latter does not guarantee identical sampled output. Gemini initially passed
-the state/wire checks but selected another tool call; its isolated rerun passed
-all assertions after the test correction. No production changes were needed.
-Including these attempts, the round used 14 requests, 140,307 input tokens and
-5,856 output tokens, with retries disabled.
-
-Offline tests:
+### Provider validation
 
 Multimodal placement has regression tests through both serialized HTTP paths.
 The opt-in resume test now ends the OpenAI and Anthropic stable prefixes with a
 fixed image, and checks that the image itself carries the breakpoint. This adds
-no calls to the existing three-call scenario. The historical live numbers above
-predate this image case; they are not evidence of live image-cache support.
+no calls to the existing three-call scenario. Offline preservation tests do not
+establish cache support on a particular deployment.
 
 ```sh
 uv run --extra nemo-relay pytest tests/unifiedllm/test_cache_policy.py tests/unifiedllm/test_explicit_cache_boundary.py
 ```
 
-The live suite is opt-in and spends tokens:
-
-```sh
-NOOA_RUN_CACHE_RESUME_LIVE=1 uv run --extra nemo-relay pytest tests/integration/test_cache_resume_live.py -m integration -k reasoning_and_prompt_cache -s
-```
-
-Set `NVIDIA_INFERENCE_API_KEY` separately. Three same-provider cases use nine
-requests with retries disabled, roughly 90k input tokens. Additional cases cover
-cross-provider stripping and portable reasoning from Nemotron, Qwen and DeepSeek.
-The suite prints usage and checks, not opaque contents.
+Live tests are opt-in and spend tokens. Configure their registry aliases for
+your deployment. Keep endpoint details, credentials guidance and measured
+results alongside that private configuration. Exact replay does not control
+how much a provider caches; compare reported usage as well as outgoing requests.

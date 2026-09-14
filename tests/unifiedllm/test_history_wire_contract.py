@@ -28,8 +28,8 @@ from nooa.unifiedllm.unifiedllm import _ClientHttp
 MODELS = {
     "responses": "openai/gpt-5.6",
     "anthropic": "anthropic/claude-sonnet-4-5",
-    "gemini-hub": "openai/gateway-gemini",
-    "gemini-hub-inline": "openai/gateway-gemini",
+    "gemini-compatible": "openai/gateway-gemini",
+    "gemini-compatible-inline": "openai/gateway-gemini",
     "reasoning-content": "openai/gateway-deepseek",
 }
 THOUGHT = "Check the original inputs."
@@ -102,11 +102,11 @@ def _reply(family):
         "tool_calls": [call],
         "reasoning_content": THOUGHT,
     }
-    if family.startswith("gemini-hub"):
+    if family.startswith("gemini-compatible"):
         call["id"] += "__thought__" + SECRET
         # Some OpenAI-compatible routes expose only the inline encoding.
         # Requiring this extra field would hide a public-history leak.
-    if family == "gemini-hub":
+    if family == "gemini-compatible":
         call["provider_specific_fields"] = {"thought_signature": SECRET}
     return {
         "id": "chat_test",
@@ -278,7 +278,9 @@ def _assert_replay(body, family):
         assert assistant["reasoning_content"] == THOUGHT
         call = assistant["tool_calls"][0]
         assert call["function"]["arguments"] == ARGUMENTS
-        expected_id = "call_1" + ("__thought__" + SECRET if family.startswith("gemini-hub") else "")
+        expected_id = "call_1" + (
+            "__thought__" + SECRET if family.startswith("gemini-compatible") else ""
+        )
         assert call["id"] == expected_id
         result = next(item for item in body["messages"] if item["role"] == "tool")
         assert result["tool_call_id"] == expected_id
