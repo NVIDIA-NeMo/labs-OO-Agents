@@ -61,6 +61,9 @@ class CurrentCall:
     return_type: type | None = None
     pre_ellipsis_code: str | None = None
     session_locals: dict[str, Any] | None = None
+    # Live CodeAct REPL namespace. Strategies may attach their session dictionary
+    # here so dynamic context blocks can describe names created in earlier cells.
+    execution_locals: dict[str, Any] | None = None
     # Per-parameter spec overrides extracted from Annotated metadata.
     # Each value is a dict of kwargs from spec() — e.g. {"max_length": 20,
     # "max_string": 500}. Used by format_parameters_as_code to override the

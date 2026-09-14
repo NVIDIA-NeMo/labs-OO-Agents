@@ -263,7 +263,7 @@ def test_bench_agent_uses_python_tools_and_todo_context_blocks():
 
     todo_doc = agent.context_manager["todo"]
     assert "def add(" in todo_doc
-    assert "def done(" in todo_doc
+    assert "def complete(" in todo_doc
 
 
 def test_bench_agent_wires_repo_to_shell_session():

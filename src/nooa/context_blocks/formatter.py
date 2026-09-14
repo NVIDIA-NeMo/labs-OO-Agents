@@ -266,6 +266,9 @@ def _event_block_to_messages(
 
     if isinstance(block.event, ToolCallEvent):
         event = block.event
+        if event.metadata.get("synthetic_type") == "codeact_inline_return":
+            # Framework completion markers are observable, but were never model turns.
+            return []
         return [
             RenderedMessage(
                 role=Role.ASSISTANT,
