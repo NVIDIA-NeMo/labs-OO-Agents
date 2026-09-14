@@ -99,42 +99,24 @@ class TestTruncation:
         total = sum(len(r.turns) for r in replays)
         assert total == RESUME_MAX_TURNS
 
-    def test_rich_items_after_truncated_turns_are_dropped(self):
-        """Rich items interleaved with truncated turns are not kept."""
-        # Create: 10 user turns, then a rich event, then 5 more user turns
-        turns = (
-            [("user", f"early {i}") for i in range(10)]
-            + [("rich", "plot_data")]
-            + [("user", f"late {i}") for i in range(5)]
+    def test_legacy_rich_events_do_not_interrupt_conversation_replay(self):
+        db = _make_session_db(
+            [
+                ("rich", "old plot"),
+                ("user", "hello"),
+                ("rich", "another old plot"),
+                ("agent", "response"),
+                ("rich", "final old plot"),
+            ]
         )
-        db = _make_session_db(turns)
-        # Keep only 5 turns — all "early" turns + the rich event should be dropped
-        outputs = build_resume_outputs(db, "abc12345", max_turns=5, in_nemo_term=True)
-        replays = [o for o in outputs if isinstance(o, HistoryReplay)]
-        total = sum(len(r.turns) for r in replays)
-        assert total == 5
-        # No rich events should survive since they precede kept turns
-        from nooa_cli.tui.output import _RichReplayPayload
-
-        rich_items = [o for o in outputs if isinstance(o, _RichReplayPayload)]
-        assert len(rich_items) == 0
-
-    def test_rich_items_after_kept_turns_are_preserved(self):
-        """Rich items interleaved with kept turns survive truncation."""
-        # Create: 5 user turns, then 5 more + a rich event at the end
-        turns = (
-            [("user", f"early {i}") for i in range(5)]
-            + [("user", f"late {i}") for i in range(4)]
-            + [("rich", "kept_plot")]
-            + [("user", "final")]
-        )
-        db = _make_session_db(turns)
-        # Keep 5 turns — last 5 turns include "late 3", "late 4" area + rich + final
-        outputs = build_resume_outputs(db, "abc12345", max_turns=5, in_nemo_term=True)
-        from nooa_cli.tui.output import _RichReplayPayload
-
-        rich_items = [o for o in outputs if isinstance(o, _RichReplayPayload)]
-        assert len(rich_items) == 1
+        outputs = build_resume_outputs(db, "abc12345")
+        assert len(outputs) == 1
+        assert isinstance(outputs[0], HistoryReplay)
+        assert [(turn.role, turn.content) for turn in outputs[0].turns] == [
+            ("user", "hello"),
+            ("agent", "response"),
+        ]
+        assert outputs[0].show_header and outputs[0].show_footer
 
 
 class TestBatchRendering:

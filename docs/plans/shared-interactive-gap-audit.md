@@ -209,7 +209,9 @@ NOOA commands return a clear unsupported-control message in ACP.
 
 Automatic WebPublisher attachment was removed from `InteractiveAgent`, covering
 both default and legacy coding agents. A resume hook removes historical
-WebPublisher context instructions; the standalone publishing utility remains.
+WebPublisher context instructions. The publishing module and browser POST/replay
+support have also been deleted; saved rich-output payloads are ignored during
+conversation replay.
 
 Validation for the controls and WebPublisher removal: the full CLI/ACP plus
 focused core regression run had **1,962 passed, 2 skipped, 3 existing xfailed**
