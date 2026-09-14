@@ -159,25 +159,72 @@ async def test_coding_agent_owns_session_naming(tmp_path):
 
 
 def test_repository_instructions_are_read_boundedly(tmp_path, monkeypatch):
-    """The renderer passes a bounded content budget to its safe file reader."""
+    """The real reader asks the stream for at most budget + 1 characters."""
     from nooa_cli.coding import instructions
 
     (tmp_path / ".git").mkdir()
-    (tmp_path / "AGENTS.md").write_text("placeholder")
+    (tmp_path / "AGENTS.md").write_text("x" * 1000)
     reads: list[int] = []
+    real_fdopen = instructions.os.fdopen
 
-    def fake_read(path, limit):
-        reads.append(limit)
-        return "x" * limit, True
+    class BoundedStream:
+        def __init__(self, *args, **kwargs):
+            self.stream = real_fdopen(*args, **kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.stream.close()
+
+        def read(self, size=-1):
+            reads.append(size)
+            assert 0 <= size <= 101
+            return self.stream.read(size)
 
     monkeypatch.setattr(instructions, "_MAX_INSTRUCTION_FILE_CHARS", 100)
-    monkeypatch.setattr(instructions, "_read_instruction_file", fake_read)
+    monkeypatch.setattr(instructions.os, "fdopen", BoundedStream)
 
     rendered = instructions.render_agent_instructions(tmp_path)
 
-    assert reads == [100]
+    assert reads == [101]
     assert "[... truncated ...]" in rendered
     assert len(rendered) <= instructions._MAX_INSTRUCTION_TOTAL_CHARS
+
+
+def test_repository_instructions_allow_a_symlinked_workspace(tmp_path):
+    from nooa_cli.coding.instructions import render_agent_instructions
+
+    root = tmp_path / "real"
+    root.mkdir()
+    (root / "AGENTS.md").write_text("reachable repository instructions")
+    alias = tmp_path / "alias"
+    alias.symlink_to(root, target_is_directory=True)
+    assert "reachable repository instructions" in render_agent_instructions(alias)
+    (root / "AGENTS.md").unlink()
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside instructions")
+    (root / "AGENTS.md").symlink_to(outside)
+    assert not render_agent_instructions(alias)
+
+
+async def test_coding_agent_owns_bounded_application_state_context(tmp_path):
+    from nooa_cli.coding.experimental_agent import ExperimentalCodingAgent
+
+    from nooa.unifiedllm import FakeLLMClient
+
+    agent = ExperimentalCodingAgent(cwd=tmp_path, llm=FakeLLMClient())
+    try:
+        agent.vars["token"] = "private-value"
+        agent.shell.cwd = "</coding_state>\n" + "x" * 500
+        rendered = agent._coding_state_context()
+        assert "1 persistent vars" in rendered
+        assert "print(self.v.items())" in rendered
+        assert "private-value" not in rendered
+        assert "</coding_state>" not in rendered
+        assert len(rendered) < 600
+    finally:
+        await agent.close()
 
 
 async def test_a_directly_assigned_protected_attribute_is_still_protected(tmp_path):

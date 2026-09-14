@@ -32,6 +32,7 @@ def test_create_record_title_list_and_resume(tmp_path):
     session.record_user_message("hello")
     session.events.add(AgentMessage(content="hi back"))
     session.set_title("First session", user_set=True)
+    live_turn_count = session.info.turn_count
     session.close()
 
     info = store.list()[0]
@@ -42,7 +43,7 @@ def test_create_record_title_list_and_resume(tmp_path):
     assert info.working_directory == "/workspace"
     assert info.title == "First session"
     assert info.title_is_user_set is True
-    assert info.turn_count == 2
+    assert info.turn_count == live_turn_count == 1
 
     resumed = store.open("session-one")
     try:
@@ -222,7 +223,8 @@ def test_forked_child_close_does_not_remove_parent_claim(tmp_path, monkeypatch):
     assert not claim_path.exists()
 
 
-def test_orphaned_shared_claim_requires_explicit_recovery(tmp_path, monkeypatch):
+@pytest.mark.parametrize("owner", [{"token": "unknown", "pid": 123}, [], None, "invalid", 7])
+def test_orphaned_shared_claim_requires_explicit_recovery(tmp_path, monkeypatch, owner):
     """An orphaned claim never silently admits a potentially live old writer."""
     import nooa.storage.sqlite as sqlite_storage
 
@@ -234,7 +236,7 @@ def test_orphaned_shared_claim_requires_explicit_recovery(tmp_path, monkeypatch)
     claim_path = sqlite_storage._claim_path(path)
     claim_path.mkdir()
     owner_path = claim_path / "owner-unknown.json"
-    owner_path.write_text('{"token": "unknown", "pid": 123}')
+    owner_path.write_text(json.dumps(owner))
     monkeypatch.setattr(sqlite_storage.fcntl, "flock", lambda *_args: None)
 
     assert sqlite_storage.is_sqlite_database_active(path)
@@ -458,7 +460,7 @@ def test_reads_legacy_tui_session_events(tmp_path):
     assert info.working_directory == "/legacy"
     assert info.title == "Legacy title"
     assert info.title_is_user_set is True
-    assert info.turn_count == 2
+    assert info.turn_count == 1
     assert [(turn.role, turn.content) for turn in store.load_turns("legacy")] == [
         ("user", "old user"),
         ("agent", "old agent"),

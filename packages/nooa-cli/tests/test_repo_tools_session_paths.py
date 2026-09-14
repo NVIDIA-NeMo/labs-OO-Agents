@@ -24,7 +24,7 @@ class FakeSession:
     """A scripted session over an in-memory filesystem.
 
     Answers the exact command vocabulary RepoTools issues: ``test -e/-f/-d``
-    probes, ``base64 -w 0`` reads, ``command -v rg``, ``rg``/``grep`` searches,
+    probes, portable ``base64`` reads, ``command -v rg``, ``rg``/``grep`` searches,
     and ``rg --files``/``find`` listings. Records every command for assertions.
     """
 
@@ -215,6 +215,20 @@ async def test_refs_returns_session_only_results() -> None:
     assert result.total_matches >= 1
     # The call site in caller.py must appear with content from the session.
     assert any("handler" in line for line in result.lines)
+
+
+@pytest.mark.asyncio
+async def test_reference_anchors_read_each_remote_file_once_per_search() -> None:
+    session = FakeSession({"/app/caller.py": "handler()\nhandler()\nhandler()\n"})
+    repo = RepoTools(root="/app", session=session)
+    result = await repo.refs("handler", path="/app")
+    assert len(result.matches) == 3
+    reads = [call for call in session.calls if call.startswith("base64")]
+    assert reads == ["base64 < /app/caller.py"]
+    # A later search must read fresh content, not reuse a persistent cache.
+    session.fs["/app/caller.py"] = "handler()\n"
+    assert len((await repo.refs("handler", path="/app")).matches) == 1
+    assert len([call for call in session.calls if call.startswith("base64")]) == 2
 
 
 @pytest.mark.asyncio

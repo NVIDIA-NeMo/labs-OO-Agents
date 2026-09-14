@@ -192,7 +192,7 @@ class ReflectionRunner:
             from nooa_memory.generative import render_recent_events
 
             events_text = render_recent_events(self._agent)
-        ticker = asyncio.ensure_future(self._tick())
+        ticker = asyncio.ensure_future(self._tick()) if self.invalidate is not None else None
         try:
             self.last_report = await asyncio.get_running_loop().run_in_executor(
                 None, self._reflect_in_thread, events_text
@@ -202,7 +202,9 @@ class ReflectionRunner:
             # the session down — the store is consistent per item.
             logger.exception("memory.reflection idle run failed")
         finally:
-            ticker.cancel()
+            if ticker is not None:
+                ticker.cancel()
+                await asyncio.gather(ticker, return_exceptions=True)
 
     def _reflect_in_thread(self, events_text: str = "") -> ReflectionReport:
         """The one sync function handed to the executor.

@@ -177,6 +177,15 @@ class RespondResult(BaseModel):
         ),
     )
 
+    @field_validator("kind", mode="before")
+    @classmethod
+    def _reject_legacy_kind(cls, value: object) -> object:
+        if value == "GET_USER_INPUT":
+            raise ValueError(
+                "GET_USER_INPUT was renamed to NEED_INPUT; use RespondReason.NEED_INPUT"
+            )
+        return value
+
     @field_validator("explanation")
     @classmethod
     def _explanation_must_not_be_blank(cls, value: str) -> str:
@@ -336,6 +345,13 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
     def __init__(self, llm=None, **kwargs):
         super().__init__(llm=llm or _DEFAULT_LLM, **kwargs)
+        import logging
+        import os
+
+        if os.environ.get("NEMO_OO_RICH_URL"):
+            logging.getLogger(__name__).warning(
+                "NEMO_OO_RICH_URL no longer auto-attaches a web publisher to interactive agents."
+            )
         self._render_message = None
         self._session_manager = None
         self.vars = SnapshotVars()

@@ -175,6 +175,7 @@ async def test_acp_subprocess_transcript(tmp_path, monkeypatch):
         update for _, update in client.updates if isinstance(update, AvailableCommandsUpdate)
     )
     assert [command.name for command in commands.available_commands] == [
+        "mcp",
         "mcp-add",
         "memory",
         "protocol-check",

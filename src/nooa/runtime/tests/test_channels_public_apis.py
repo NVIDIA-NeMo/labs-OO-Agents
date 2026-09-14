@@ -20,6 +20,40 @@ from nooa.runtime.channels import Channel, QueueManager
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
+async def test_cancelled_shutdown_retains_jobs_until_cleanup_finishes():
+    qm = QueueManager()
+    qm.queue("jobs")
+    started = [asyncio.Event(), asyncio.Event()]
+    cleaning = [asyncio.Event(), asyncio.Event()]
+    release = asyncio.Event()
+
+    async def work(index):
+        started[index].set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning[index].set()
+            await release.wait()
+
+    handles = [qm.spawn(work(i), channel="jobs") for i in range(2)]
+    await asyncio.gather(*(event.wait() for event in started))
+    shutdown = asyncio.create_task(qm.shutdown())
+    try:
+        await asyncio.wait_for(cleaning[0].wait(), timeout=2)
+        shutdown.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await shutdown
+        assert qm.handles() == handles
+        await asyncio.wait_for(cleaning[1].wait(), timeout=2)
+        assert all(not handle._task.done() for handle in handles)
+    finally:
+        release.set()
+        await qm.shutdown()
+    assert not qm.handles()
+    assert all(handle._task.done() for handle in handles)
+
+
 def test_drain_returns_items_fifo_and_empties():
     q: Channel[str] = Channel("q", "queue")
     q.put("a")

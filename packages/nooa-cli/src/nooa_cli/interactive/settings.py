@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Literal
@@ -12,12 +13,18 @@ from nooa.layered_config import load_layered_yaml
 
 SETTINGS_FILENAME = "settings.yaml"
 SETTINGS_ENV_VAR = "NEMO_OO_SETTINGS"
+logger = logging.getLogger(__name__)
 
 
 def behavior_fields() -> frozenset[str]:
     from .options import SessionOptions
 
-    return frozenset(SessionOptions.model_fields) - {"working_dir", "legacy_agent", "skills_dirs"}
+    return frozenset(SessionOptions.model_fields) - {
+        "working_dir",
+        "legacy_agent",
+        "skills_dirs",
+        "agent_spec",
+    }
 
 
 def load_settings_data(workspace: str | Path | None = None) -> dict[str, Any]:
@@ -38,6 +45,12 @@ def resolve_behavior_settings(data: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(section, dict):
             continue
         for key, value in section.items():
+            if key == "agent_spec":
+                logger.warning(
+                    "Ignoring %s.agent_spec in settings; select custom agents explicitly "
+                    "through the host CLI or SessionOptions overrides",
+                    name,
+                )
             if key not in behavior_fields():
                 continue
             if key == "summarization" and isinstance(value, dict):
@@ -123,55 +136,6 @@ def write_settings_updates(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(yaml.safe_dump(data, sort_keys=False))
     return path, data
-
-
-def delete_settings_value(
-    setting_path: tuple[str, ...],
-    *,
-    scope: Literal["project", "user"] = "project",
-    dry_run: bool = False,
-    workspace: str | Path | None = None,
-) -> tuple[Path, dict[str, Any], bool]:
-    """Delete one nested setting while preserving all sibling settings."""
-    import yaml
-
-    path = settings_path(scope, workspace=workspace)
-    data: dict[str, Any] = {}
-    if path.exists():
-        loaded = yaml.safe_load(path.read_text())
-        if isinstance(loaded, dict):
-            data = loaded
-
-    canonical = canonical_setting_path(setting_path)
-    paths = [canonical]
-    if canonical[0] == "coding" and len(canonical) >= 2:
-        paths.append(("tui", *canonical[1:]))
-        if canonical[1] == "summarization":
-            paths.append(("agent", *canonical[1:]))
-    deleted = False
-    for candidate in paths:
-        current = data
-        parents = []
-        for part in candidate[:-1]:
-            child = current.get(part)
-            if not isinstance(child, dict):
-                break
-            parents.append((current, part))
-            current = child
-        else:
-            if candidate[-1] not in current:
-                continue
-            del current[candidate[-1]]
-            deleted = True
-            for parent, key in reversed(parents):
-                if not parent[key]:
-                    del parent[key]
-                else:
-                    break
-    if deleted and not dry_run:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(yaml.safe_dump(data, sort_keys=False))
-    return path, data, deleted
 
 
 def _set_mapping_path(data: dict[str, Any], path: list[str], value: Any) -> None:

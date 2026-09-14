@@ -308,30 +308,68 @@ async def test_client_mcp_probe_is_callable_on_new_and_loaded_acp_sessions(works
         await adapter.close()
 
 
-async def test_remembered_mcp_reconnects_across_hosts_and_forget_stops_startup(workspace, tmp_path):
+@pytest.mark.parametrize("source_host", ["direct", "acp"])
+async def test_remembered_mcp_reconnects_across_hosts_and_forget_stops_startup(
+    workspace, tmp_path, source_host
+):
     import sys
 
     script = Path(__file__).parent / "fixtures" / "mcp_probe.py"
     journal = tmp_path / "remembered-mcp.jsonl"
-    async with open_host(workspace, "direct", parity_llm()) as source:
+    async with open_host(workspace, source_host, parity_llm()) as source:
         source.agent.mcp.register(
             "saved_probe", command=sys.executable, args=[str(script), "--journal", str(journal)]
         )
         source.agent.workspace_settings.remember_mcp("saved_probe")
         assert not source.agent.mcp._is_approved("saved_probe")
-        # Simulate a human approving this exact local test fixture.
+        # Use the actual shared host control, never hand-edit the approval store.
         request = source.agent.mcp._approval_request("saved_probe")
-        source.agent.mcp._approval_store.approve(request)
+        control = source.commands.get("mcp")
+        assert control is not None and control.is_control
+        review = await control._method("approve saved_probe")
+        assert review.success and request.confirmation in str(review)
+        assert not source.agent.mcp._is_approved("saved_probe")
+        for wrong in ("wrong", "é"):
+            rejected = await control._method(f"approve saved_probe {wrong}")
+            assert not rejected.success and "does not match" in str(rejected)
+            assert not source.agent.mcp._is_approved("saved_probe")
+            assert not journal.exists()
+        approved = await control._method(f"approve saved_probe {request.confirmation}")
+        assert approved.success, str(approved)
+        assert source.agent.mcp._is_approved("saved_probe")
+        assert "saved_probe" in source.agent.mcp.connected()
+        assert "approved" in str(await control._method("status"))
         for host in ("direct", "acp"):
             async with open_host(workspace, host, parity_llm()) as fresh:
                 assert "saved_probe" in fresh.agent.mcp.connected()
                 payload = json.loads(await fresh.agent.saved_probe.probe(nonce=host))
                 assert payload["nonce"] == host
+        revoked = await control._method("revoke saved_probe")
+        assert revoked.success, str(revoked)
+        assert not source.agent.mcp._is_approved("saved_probe")
+        assert "saved_probe" not in source.agent.mcp.connected()
         source.agent.workspace_settings.forget_mcp("saved_probe")
         for host in ("direct", "acp"):
             async with open_host(workspace, host, parity_llm()) as fresh:
                 assert "saved_probe" not in fresh.agent.mcp.connected()
                 assert "saved_probe" not in fresh.agent.mcp.discovered()
+
+
+@pytest.mark.parametrize("host", ["direct", "acp"])
+async def test_project_settings_cannot_execute_an_agent_module(workspace, host, caplog):
+    sentinel = workspace / "unexpected-import"
+    (workspace / "injected.py").write_text(
+        f"from pathlib import Path\nPath({str(sentinel)!r}).touch()\n"
+        "from nooa_cli.coding.experimental_agent import ExperimentalCodingAgent as Cls\n"
+    )
+    (workspace / ".nooa/settings.yaml").write_text("coding:\n  agent_spec: ./injected.py:Cls\n")
+    async with open_host(workspace, host, parity_llm()) as session:
+        assert type(session.agent).__name__ == "ExperimentalCodingAgent"
+        assert not sentinel.exists()
+        assert "Ignoring coding.agent_spec" in caplog.text
+    assert SessionOptions.load(workspace, agent_spec="./injected.py:Cls").agent_spec == (
+        "./injected.py:Cls"
+    )
 
 
 async def test_legacy_memory_owners_preserve_session_identity(workspace):
@@ -341,7 +379,15 @@ async def test_legacy_memory_owners_preserve_session_identity(workspace):
     path = workspace / ".nooa/memory/memory.sqlite"
     path.parent.mkdir(parents=True)
     store = MemoryStore(str(path))
-    owners = ["TUIAgent", "TUIAgent@12345678", "TUIAgent@archived", "AnotherAgent@12345678", ""]
+    owners = [
+        "TUIAgent",
+        "TUIAgent@12345678",
+        "TUIAgent@archived",
+        "AnotherAgent@12345678",
+        "",
+        "nooa_cli.tui.agent:TUIAgent",
+        "nooa_cli.tui.agent:TUIAgent@archived",
+    ]
     records = []
     try:
         for owner in owners:
@@ -367,5 +413,25 @@ async def test_legacy_memory_owners_preserve_session_identity(workspace):
                 "CodingAgent@archived",
                 "AnotherAgent@12345678",
                 "",
+                "CodingAgent",
+                "CodingAgent@archived",
             ]
             assert len(store.all_memories(include_archived=True)) == len(records)
+
+
+async def test_resume_warns_when_host_selects_a_different_agent(workspace):
+    store = SessionStore(session_directory(workspace))
+    with store.create(agent="CodingAgent", working_directory=str(workspace)) as handle:
+        session_id = handle.id
+        handle.record_user_message("saved conversation")
+    adapter = CodingACPAdapter(parity_llm)
+    adapter.on_connect(RecordingClient())
+    try:
+        await adapter.load_session(str(workspace), session_id)
+        session = (await adapter._sessions.get(session_id)).value
+        assert any(
+            "created with agent 'CodingAgent'" in warning and "ExperimentalCodingAgent" in warning
+            for warning in session.startup_warnings
+        )
+    finally:
+        await adapter.close()

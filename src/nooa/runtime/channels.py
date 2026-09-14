@@ -170,7 +170,8 @@ class JobHandle:
             except (asyncio.CancelledError, Exception):
                 pass
             return
-        self._task.cancel()
+        if not self._task.cancelling():
+            self._task.cancel()
         try:
             await asyncio.shield(self._task)
         except asyncio.CancelledError:
@@ -1229,9 +1230,15 @@ class QueueManager:
         is cleared.
         """
         handles = list(self._handles)
-        self._handles.clear()
+        # Request every cancellation before awaiting cleanup. If this caller is
+        # cancelled, unfinished jobs remain discoverable for a later shutdown.
+        for h in handles:
+            if not h._task.done() and not h._task.cancelling():
+                h._task.cancel()
         for h in handles:
             await h.cancel()
+            if h in self._handles:
+                self._handles.remove(h)
 
     # ---- job registry ----------------------------------------------------
 

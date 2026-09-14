@@ -37,7 +37,12 @@ _REDACTED_KEY_PARTS = {
 
 
 def _is_sensitive_key(key: str) -> bool:
-    """Conservatively identify common credential-bearing mapping keys."""
+    """Apply the delegated-prompt policy, which is broader than trace scrubbing.
+
+    Unlike the trace scrubber's exact/suffix key list, this intentionally hides
+    any credential-bearing component (including camel-case keys). Sharing the
+    trace predicate here would weaken the prompt's redaction contract.
+    """
     normalized = key.lower().replace("-", "_")
     parts = {part for part in normalized.split("_") if part}
     collapsed = normalized.replace("_", "")

@@ -99,6 +99,8 @@ for _cls in (
         )
     _CORE_TYPES[_key] = _cls
 
+_CORE_TYPES.update({"TuiSessionResumed": TuiSessionResumed, "TuiSessionCleared": TuiSessionCleared})
+
 _SCHEMA_VERSION = 1
 
 _SCHEMA = """\
@@ -660,6 +662,8 @@ def _read_claim_owner(claim_path: Path) -> int | None:
     try:
         owner_path = next(claim_path.glob("owner-*.json"))
         payload = json.loads(owner_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return None
         pid = payload.get("pid")
         return pid if isinstance(pid, int) else None
     except (OSError, StopIteration, ValueError, TypeError):
@@ -848,6 +852,13 @@ class SQLiteStorageManager:
 
     Provides persistent event storage and agent snapshots.
     Supports use as a context manager for safe resource cleanup.
+
+    File-backed databases also acquire a sibling ``.active`` directory claim,
+    visible across host/container lock namespaces. Clean close removes it; a
+    crash deliberately leaves it in place. After independently verifying that
+    no process still owns the database, remove that stale directory to reopen.
+    Never reclaim based only on a PID lookup from another namespace. This
+    fail-closed behavior applies to all file-backed users, not only sessions.
 
     Security: Snapshot restore executes stored Python source code via
     ``exec()``. The database file must be treated as trusted input —

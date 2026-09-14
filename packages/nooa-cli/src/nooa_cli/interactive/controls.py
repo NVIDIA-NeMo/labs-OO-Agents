@@ -95,10 +95,14 @@ class BehaviorControl:
     def _persist_agent_preference(self, field: str, value: object) -> Path:
         from .settings import write_settings_updates
 
-        key = getattr(self.agent, "_memory_key", None)
-        key = key or f"{type(self.agent).__module__}:{type(self.agent).__qualname__}"
+        key = self._agent_key()
         path, _ = write_settings_updates({("coding", field, key): value}, workspace=self.workspace)
         return path
+
+    def _agent_key(self) -> str:
+        return getattr(self.agent, "_memory_key", None) or (
+            f"{type(self.agent).__module__}:{type(self.agent).__qualname__}"
+        )
 
     async def run(self, args: list[str]) -> ControlResult:
         valid, error = self.validate_args(args)
@@ -337,13 +341,6 @@ class MemoryControl(BehaviorControl):
             return False, "Usage: /memory [on|local|off]"
         return True, None
 
-    def _agent_key(self) -> str:
-        return getattr(
-            self.agent,
-            "_memory_key",
-            f"{type(self.agent).__module__}:{type(self.agent).__qualname__}",
-        )
-
     def _scope(self) -> str:
         return self.config.memory_agents.get(self._agent_key(), self.config.memory)
 
@@ -361,18 +358,29 @@ class MemoryControl(BehaviorControl):
             return ControlResult.ok(ControlMessage(line, "info"))
 
         scope = _MEMORY_MODES[args[0].lower()]
-        self.config.memory = scope
+        previous = dict(self.config.memory_agents)
         self.config.memory_agents[self._agent_key()] = scope
-        self._persist_agent_preference("memory_agents", scope)
         try:
             await self.agent_run_async(self._configure)
+        except BaseException:
+            self.config.memory_agents = previous
+            raise
+
+        warnings = []
+        try:
+            self._persist_agent_preference("memory_agents", scope)
         except Exception as exc:
-            return ControlResult.err(f"Failed to configure memory: {exc}")
+            warnings.append(
+                ControlMessage(f"Memory changed, but could not save preference: {exc}", "warning")
+            )
 
         if scope == "off":
-            return ControlResult.ok(ControlMessage("Memory disabled for this agent.", "success"))
+            return ControlResult.ok(
+                ControlMessage("Memory disabled for this agent.", "success"), *warnings
+            )
         return ControlResult.ok(
-            ControlMessage(f"Memory {_SCOPE_LABELS[scope]} enabled for this agent.", "success")
+            ControlMessage(f"Memory {_SCOPE_LABELS[scope]} enabled for this agent.", "success"),
+            *warnings,
         )
 
 
@@ -439,19 +447,89 @@ class ReflectionControl(MemoryControl):
         if enabled and getattr(self.agent, "memory", None) is None:
             return ControlResult.err("Memory is not attached. Enable it with /memory first.")
 
-        self.config.reflection = enabled
+        previous = dict(self.config.reflection_agents)
         self.config.reflection_agents[self._agent_key()] = enabled
-        self._persist_agent_preference("reflection_agents", enabled)
-        runner = self._runner()
-        if runner is not None and not enabled:
-            await self.agent_run_async(runner.interrupt)
         try:
+            runner = self._runner()
+            if runner is not None and not enabled:
+                await self.agent_run_async(runner.interrupt)
             await self.agent_run_async(self._configure)
+        except BaseException:
+            self.config.reflection_agents = previous
+            raise
+        warnings = []
+        try:
+            self._persist_agent_preference("reflection_agents", enabled)
         except Exception as exc:
-            return ControlResult.err(f"Failed to configure reflection: {exc}")
+            warnings.append(
+                ControlMessage(
+                    f"Reflection changed, but could not save preference: {exc}", "warning"
+                )
+            )
         state = "enabled" if enabled else "disabled"
         return ControlResult.ok(
-            ControlMessage(f"Idle reflection {state} for this agent.", "success")
+            ControlMessage(f"Idle reflection {state} for this agent.", "success"), *warnings
+        )
+
+
+class MCPControl(BehaviorControl):
+    """Review, approve, and revoke MCP server configurations."""
+
+    @property
+    def name(self) -> str:
+        return "mcp"
+
+    @classmethod
+    def help_text(cls) -> dict[str, str]:
+        return {"/mcp [status|approve NAME [CODE]|revoke NAME]": cls.__doc__ or ""}
+
+    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
+        if not args or (args[0] == "status" and len(args) == 1):
+            return True, None
+        if args[0] == "approve" and len(args) in (2, 3):
+            return True, None
+        if args[0] == "revoke" and len(args) == 2:
+            return True, None
+        return False, "Usage: /mcp [status|approve NAME [CODE]|revoke NAME]"
+
+    async def execute(self, args: list[str]) -> ControlResult:
+        from .mcp_approval import _safe_display
+        from .mcp_registry import MCPRegistry
+
+        registry = getattr(self.agent, "mcp", None)
+        if not isinstance(registry, MCPRegistry):
+            return ControlResult.err("This agent has no MCP registry.")
+        if not args or args[0] == "status":
+            rows = []
+            for name in registry.discovered():
+                rows.append(
+                    [
+                        _safe_display(name),
+                        "approved" if registry._is_approved(name) else "approval required",
+                        "connected" if name in registry.connected() else "disconnected",
+                    ]
+                )
+            return ControlResult.ok(
+                ControlTable(
+                    columns=["Server", "Approval", "Connection"], rows=rows, title="MCP servers"
+                )
+            )
+        name = args[1]
+        # Registry APIs accept globs; approval commands name one exact definition.
+        pattern = "".join({"[": "[[]", "*": "[*]", "?": "[?]"}.get(c, c) for c in name)
+        if args[0] == "revoke":
+            # Revoke before disconnect so a transport failure cannot retain permission.
+            registry._revoke_approvals(name)
+            await registry.disconnect([pattern])
+            return ControlResult.ok(
+                ControlMessage(f"Revoked approvals for {_safe_display(name)}.", "success")
+            )
+        if len(args) == 2:
+            return ControlResult.ok(ControlMessage(registry._approval_request(name).review_text()))
+        registry._approve(name, args[2])
+        await registry.connect([pattern])
+        return ControlResult.ok(
+            ControlMessage(f"Approved and connected to {_safe_display(name)}.", "success")
         )
 
 
@@ -459,6 +537,7 @@ CONTROL_TYPES = {
     "skills": SkillsControl,
     "memory": MemoryControl,
     "reflection": ReflectionControl,
+    "mcp": MCPControl,
 }
 
 
@@ -485,6 +564,7 @@ def behavior_commands(
                     "skills": "<list|commands|add DIR|activate ID|deactivate ID>",
                     "memory": "[status|on|local|off]",
                     "reflection": "[status|on|off|now]",
+                    "mcp": "[status|approve NAME [CODE]|revoke NAME]",
                 }[control.name],
                 output_to_agent=False,
                 is_control=True,

@@ -326,55 +326,34 @@ class AfterAgentCall(EventBase):  # type: ignore[misc]
     )
 
 
-class TuiSessionResumed(EventBase):  # type: ignore[misc]
-    """Emitted once after a TUI agent is reconstituted from a snapshot.
-
-    Fired after ``restore_latest_snapshot()`` completes (both the ``-c``
-    startup resume in ``bootstrap`` and the ``/session resume`` command), before
-    the first turn runs — so the agent's snapshot-backed state (``self.v``,
-    todos, ...) is already in place. Skills can subscribe via
-    ``event_manager.on("TuiSessionResumed", handler)`` to run post-restore setup
-    (e.g. ``agent_mesh`` reconnecting and reclaiming its handle).
-
-    Always emitted on session startup/resume; ``restored`` distinguishes an
-    actual snapshot restore (True) from a fresh session with nothing to restore
-    (False), so handlers can no-op when there's nothing to reconstitute.
-
-    Uses Role.RUNTIME_EVENT — never recorded in conversation events, never in
-    LLM context.
-    """
+class SessionResumed(EventBase):  # type: ignore[misc]
+    """An interactive agent has been restored or initialized for a session."""
 
     _role: ClassVar[Role] = Role.RUNTIME_EVENT
-    handler_aliases: ClassVar[tuple[str, ...]] = ("SessionResumed",)
+    handler_aliases: ClassVar[tuple[str, ...]] = ("TuiSessionResumed",)
 
-    session_id: Annotated[str, Field(description="The resumed/started session id")]
+    session_id: Annotated[str, Field(description="The resumed or started session ID")]
     restored: Annotated[
         bool,
-        Field(description="True if a snapshot was actually restored into the agent"),
+        Field(description="Whether a snapshot was restored into the agent"),
     ]
 
 
-class TuiSessionCleared(EventBase):  # type: ignore[misc]
-    """Emitted once after a TUI agent's working state is reset by ``/clear``.
-
-    Fired at the end of ``_reset_agent_working_state()`` — after todos, vars,
-    user context blocks, and the shell have been reset, with the agent in its
-    clean post-clear state. The symmetric counterpart to ``TuiSessionResumed``:
-    skills subscribe via ``event_manager.on("TuiSessionCleared", handler)`` to
-    re-initialize session-scoped state (caches, connections, ...) for the fresh
-    session.
-
-    Uses Role.RUNTIME_EVENT — never recorded in conversation events, never in
-    LLM context.
-    """
+class SessionCleared(EventBase):  # type: ignore[misc]
+    """An interactive agent's working state has been reset."""
 
     _role: ClassVar[Role] = Role.RUNTIME_EVENT
-    handler_aliases: ClassVar[tuple[str, ...]] = ("SessionCleared",)
+    handler_aliases: ClassVar[tuple[str, ...]] = ("TuiSessionCleared",)
 
     session_id: Annotated[
         str | None,
-        Field(default=None, description="The new (post-clear) session id, if known"),
+        Field(default=None, description="The new post-clear session ID, when known"),
     ]
+
+
+# Historical Python imports resolve to the canonical lifecycle types.
+TuiSessionResumed = SessionResumed
+TuiSessionCleared = SessionCleared
 
 
 class LLMCallStart(EventBase):  # type: ignore[misc]

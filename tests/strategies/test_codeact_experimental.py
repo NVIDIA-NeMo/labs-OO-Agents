@@ -12,6 +12,7 @@ from nooa import Agent, strategy
 from nooa.config import CodeActConfig
 from nooa.context_blocks import ToolCallEvent
 from nooa.events import PythonOutput
+from nooa.strategies.codeact import CodeActStrategy
 from nooa.strategies.codeact_experimental import CodeActExperimental
 from nooa.unifiedllm import (
     AssistantReasoning,
@@ -38,6 +39,46 @@ def _response(code: str, call_id: str = "call_1") -> LLMResponse:
         tool_calls=[_python_cell(code, call_id)],
         finish_reason="tool_calls",
     )
+
+
+@pytest.mark.parametrize(
+    "strategy_type,tool_name",
+    [(CodeActStrategy, "execute_python"), (CodeActExperimental, "python_cell")],
+)
+@pytest.mark.parametrize("arguments", ["[]", '"text"', "null", "42"])
+@pytest.mark.asyncio
+async def test_non_object_arguments_allow_model_recovery(arguments, strategy_type, tool_name):
+    llm = FakeLLMClient(
+        scripted_responses=[
+            LLMResponse(
+                parts=(ToolCall(id="bad", name=tool_name, arguments=arguments),),
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                parts=(
+                    ToolCall(
+                        id="fixed",
+                        name=tool_name,
+                        arguments=json.dumps({"code": "return_result(42)"}),
+                    ),
+                ),
+                finish_reason="tool_calls",
+            ),
+        ]
+    )
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(strategy_type())
+        async def answer(self) -> int:
+            """Return the answer."""
+            ...
+
+    agent = TestAgent()
+    try:
+        assert await agent.answer() == 42
+        assert "tool arguments must be a JSON object" in str(llm.last_messages)
+    finally:
+        await agent.aclose()
 
 
 @pytest.mark.asyncio
@@ -170,8 +211,6 @@ async def test_trailing_string_is_suppressed_and_does_not_complete():
 def test_prompt_and_execution_context_advertise_inline_return_result():
     strategy_instance = CodeActExperimental(config=CodeActConfig(prefill=None))
     assert "return_result" in strategy_instance._always_available_text()
-    sentinel = object()
-    assert strategy_instance._strategy_builtins(sentinel) == {"return_result": sentinel}
     assert strategy_instance._available_tool_names() == "python_cell"
 
 
@@ -314,7 +353,7 @@ async def test_python_cell_state_context_bounds_many_values():
 
 
 @pytest.mark.asyncio
-async def test_python_cell_state_context_escapes_cwd_markup():
+async def test_python_cell_state_does_not_inspect_agent_shell():
     strategy_instance = CodeActExperimental(config=CodeActConfig(prefill=None))
     call = type(
         "Call",
@@ -332,7 +371,7 @@ async def test_python_cell_state_context_escapes_cwd_markup():
     rendered = await strategy_instance.python_cell_state_context(runtime)
 
     assert "</python_cell_state>" not in rendered
-    assert "&lt;/python_cell_state&gt;&lt;attack&gt;\\n`forged`" in rendered
+    assert "forged" not in rendered
     assert "\n`forged`" not in rendered
     assert len(rendered) < 500
     assert "Cell locals (includes method inputs; reuse unchanged values): message (str)" in rendered
@@ -373,7 +412,7 @@ async def test_python_cell_state_omits_inputs_outputs_and_framework_objects():
 
 
 @pytest.mark.asyncio
-async def test_python_cell_state_summarizes_persistent_vars_with_cleanup_actions():
+async def test_python_cell_state_does_not_inspect_agent_vars():
     strategy_instance = CodeActExperimental(config=CodeActConfig(prefill=None))
     call = type(
         "Call",
@@ -387,10 +426,7 @@ async def test_python_cell_state_summarizes_persistent_vars_with_cleanup_actions
 
     rendered = await strategy_instance.python_cell_state_context(runtime)
 
-    assert "`self.v`: 3 persistent vars" in rendered
-    assert "inspect: `print(self.v.items())`" in rendered
-    assert "remove one: `del self.v.<name>`" in rendered
-    assert "clear all: `self.v.clear()`" in rendered
+    assert "self.v" not in rendered
     assert "token (str)" not in rendered
     assert "plan (str)" not in rendered
     assert "&lt;/python_cell_state&gt;" not in rendered
@@ -399,7 +435,7 @@ async def test_python_cell_state_summarizes_persistent_vars_with_cleanup_actions
 
 
 @pytest.mark.asyncio
-async def test_python_cell_state_uses_bounded_agent_cwd_fallback_and_local_names():
+async def test_python_cell_state_ignores_agent_cwd_and_bounds_local_names():
     strategy_instance = CodeActExperimental(config=CodeActConfig(prefill=None))
     long_name = "local_" + "x" * 500 + "\nforged"
     call = type(
@@ -416,7 +452,7 @@ async def test_python_cell_state_uses_bounded_agent_cwd_fallback_and_local_names
 
     rendered = await strategy_instance.python_cell_state_context(runtime)
 
-    assert "Working directory (persists across cells and turns): /fallback/" in rendered
+    assert "Working directory" not in rendered
     assert "`self.shell.cwd`" not in rendered
     assert "\nforged" not in rendered
     assert "\\nforged" not in rendered  # truncated before the injected suffix
@@ -472,7 +508,7 @@ async def test_python_cell_state_helper_returns_complete_inventory():
     builtins = strategy_instance._build_builtins(runtime, call)
     inventory = builtins["python_cell_state"]()
 
-    assert inventory["self.v"] == {"plan": "str"}
+    assert "self.v" not in inventory
     assert len(inventory["cell_locals"]) == 26
     assert inventory["cell_locals"]["value_24"] == "int"
     assert inventory["cell_locals"]["question"] == "str"

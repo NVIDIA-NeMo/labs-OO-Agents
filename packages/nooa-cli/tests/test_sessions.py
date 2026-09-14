@@ -39,7 +39,7 @@ def test_create_record_title_list_and_resume(tmp_path):
     assert info.working_directory == "/workspace"
     assert info.title == "First session"
     assert info.title_is_user_set is True
-    assert info.turn_count == 2  # Canonical store counts user and assistant transcript entries.
+    assert info.turn_count == 1  # Accepted user messages, matching the live handle.
 
     resumed = store.open("session-one")
     try:
@@ -263,7 +263,7 @@ def test_reads_legacy_tui_session_events(tmp_path):
     assert info.working_directory == "/legacy"
     assert info.title == "Legacy title"
     assert info.title_is_user_set is True
-    assert info.turn_count == 2  # Canonical store counts user and assistant transcript entries.
+    assert info.turn_count == 1  # Accepted user messages, matching the live handle.
     assert [(turn.role, turn.content) for turn in store.load_turns("legacy")] == [
         ("user", "old user"),
         ("agent", "old agent"),

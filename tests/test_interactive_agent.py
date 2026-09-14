@@ -133,7 +133,7 @@ def test_respond_result_requires_explanation():
 
 
 def test_respond_result_rejects_removed_get_user_input_reason():
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="use RespondReason.NEED_INPUT"):
         RespondResult(kind="GET_USER_INPUT", explanation="legacy reason")
 
 

@@ -6,6 +6,16 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Interactive agents now use `RespondReason.NEED_INPUT` in place of
+  `GET_USER_INPUT`; legacy values produce a migration hint.
+- ACP defaults to the shared single-tool `ExperimentalCodingAgent`.
+  Use `nooa-acp --legacy-agent` for the multi-tool `CodingAgent`.
+- Interactive agents no longer auto-attach the web publisher from
+  `NEMO_OO_RICH_URL`.
+- File-backed SQLite state uses a cross-namespace `.active` ownership claim.
+  After a crash, verify that the former owner has stopped before removing the
+  stale claim; clean shutdown removes it automatically.
+
 - Security: the sandbox parent no longer unpickles worker bytes. Brokered `self.*`
   arguments, `self.x = value` assignments, cell return values and `return_result`
   payloads now cross as msgpack; rich values are rebuilt only from a fixed set of

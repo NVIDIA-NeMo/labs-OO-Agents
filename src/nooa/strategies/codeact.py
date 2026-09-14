@@ -39,6 +39,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from nooa.agentdoc._structured import format_type as _format_type
 from nooa.context_blocks import DynamicContext, EventBase, ResultStatus, ToolCallEvent, ToolResult
+from nooa.context_blocks.events import CODEACT_INLINE_RETURN
 from nooa.context_blocks.exceptions import BlockSyntaxError
 from nooa.decorators import strategy
 from nooa.errors import GenerationError
@@ -682,17 +683,9 @@ Standard Python builtins and agent instance (`self`) are available."""
     def _available_tool_names(self) -> str:
         return "execute_python, return_result"
 
-    def _strategy_builtins(self, return_result: Any) -> dict[str, Any]:
-        """Return strategy-specific names injected into Python cells."""
-        return {"return_result": return_result}
-
     def _python_output_value(self, result: Any) -> Any:
         """Select the value exposed as the cell's Jupyter-style output."""
         return result.returned_value if result.has_return and not result.error else None
-
-    def _record_completion(self, runtime: RuntimeServices, value: Any) -> None:
-        """Record a validated completion in the trajectory."""
-        self._emit_synthetic_inline_return(runtime, value)
 
     @strategy(TemplateStrategy())
     async def strategy_instructions(self, runtime: RuntimeServices) -> str:
@@ -1280,7 +1273,9 @@ Standard Python builtins and agent instance (`self`) are available."""
             # Parse arguments
             try:
                 args = json.loads(tool_call.arguments)
-            except json.JSONDecodeError as e:
+                if not isinstance(args, dict):
+                    raise ValueError("tool arguments must be a JSON object")
+            except ValueError as e:
                 session.record_error()
                 runtime.event_manager.add(
                     Error(content=f"Invalid arguments for tool `{tool_call.name}`: {e}")
@@ -1668,7 +1663,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # answer appears in the trajectory (otherwise the inline
                 # path leaves no trace of the value).  Mirrors PredictStrategy's
                 # append-only synthetic tool-call pattern.
-                self._record_completion(runtime, validated)
+                self._emit_synthetic_inline_return(runtime, validated)
                 logger.info("[CODEACT] Task completed successfully via inline return_result()")
                 return ("TASK_COMPLETE", validated)
 
@@ -1703,10 +1698,9 @@ Standard Python builtins and agent instance (`self`) are available."""
                         )
                     )
                     get_harness_metrics().explicit_return_completed()
-                    # Let the strategy record the validated completion. Standard
-                    # CodeAct emits a synthetic return_result event; experimental
-                    # variants may keep the execute_python event as the sole record.
-                    self._record_completion(runtime, validated)
+                    # Record a trace-only completion marker. Both CodeAct variants
+                    # omit this marker from provider replay: it was not an LLM call.
+                    self._emit_synthetic_inline_return(runtime, validated)
                     logger.info("[CODEACT] Auto-completed task from explicit return statement")
                     return ("TASK_COMPLETE", validated)
                 # Validation failed - continue with normal flow
@@ -1968,7 +1962,8 @@ Standard Python builtins and agent instance (`self`) are available."""
         ``metadata.synthetic = True`` and
         ``metadata.synthetic_type = "codeact_inline_return"`` so
         downstream consumers can distinguish framework-emitted markers
-        from genuine LLM tool_calls if desired.
+        from genuine LLM tool_calls. Both CodeAct variants retain this event for
+        traces and exports; provider replay omits it to avoid inventing a call.
         """
         tool_call_id = f"codeact_inline_{uuid4().hex[:8]}"
         # _jsonable() recurses unguarded — a self-referential dict/list
@@ -1996,7 +1991,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 ),
                 metadata={
                     "synthetic": True,
-                    "synthetic_type": "codeact_inline_return",
+                    "synthetic_type": CODEACT_INLINE_RETURN,
                 },
             )
         )
@@ -3027,7 +3022,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             builtins.update(self._extract_module_context(agent_module, agent=runtime.agent))
 
         # Add strategy builtins (these override any module-level names).
-        builtins.update(self._strategy_builtins(return_result))
+        builtins.update({"return_result": return_result})
 
         # Add method parameters as variables.
         # call.kwargs is already the fully merged positional+keyword mapping

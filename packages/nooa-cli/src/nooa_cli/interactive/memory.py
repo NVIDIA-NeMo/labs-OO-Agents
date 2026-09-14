@@ -151,13 +151,19 @@ def configure_session_memory(
     manager = agent.memory._mgr  # type: ignore[attr-defined]
     if key == CODING_AGENT and owner_role == "CodingAgent":
         # Preserve visibility of memories written under the historical built-in owner.
-        old_owners = {
-            memory.owner
-            for memory in manager.store.iter_memories(include_archived=True, owner="TUIAgent")
-            if memory.owner == "TUIAgent" or memory.owner.startswith("TUIAgent@")
-        }
-        for old_owner in old_owners:
-            manager.store.rename_owner(old_owner, owner_role + old_owner[len("TUIAgent") :])
+        for legacy_role in ("TUIAgent", "nooa_cli.tui.agent:TUIAgent"):
+            old_owners = {
+                memory.owner
+                for memory in manager.store.iter_memories(include_archived=True, owner=legacy_role)
+                if memory.owner == legacy_role or memory.owner.startswith(legacy_role + "@")
+            }
+            for old_owner in old_owners:
+                new_owner = owner_role + old_owner[len(legacy_role) :]
+                renamed = manager.store.rename_owner(old_owner, new_owner)
+                if renamed:
+                    manager.store.log_maintenance(
+                        "rename_owner", {"from": old_owner, "to": new_owner, "rows": renamed}
+                    )
     if key != owner_role:
         renamed = manager.store.rename_owner(key, owner_role)
         if renamed:

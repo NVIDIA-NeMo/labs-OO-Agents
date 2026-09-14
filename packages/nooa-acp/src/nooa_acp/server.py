@@ -357,7 +357,7 @@ class CodingACPAdapter:
                         if requested in RESERVED_COMMAND_NAMES:
                             message = (
                                 f"NOOA /{requested} is not available through ACP yet. "
-                                "Available behavior controls: /skills, /memory, /reflection. "
+                                "Available behavior controls: /skills, /memory, /reflection, /mcp. "
                                 "Use native NOOA for the other agent controls."
                             )
                             session.bridge.publish(update_agent_message(text_block(message)))
@@ -505,6 +505,16 @@ class CodingACPAdapter:
             restored = handle.storage.restore_latest_snapshot(agent) if restore else False
             agent._session_manager = handle
             registration_warnings = configure_session_skills(agent, options)
+            if restore and handle.info.agent:
+                from nooa_cli.coding.identity import canonical_agent_spec
+
+                saved = canonical_agent_spec(handle.info.agent)
+                current = f"{type(agent).__module__}:{type(agent).__qualname__}"
+                if saved not in {current, type(agent).__name__, options.agent_spec}:
+                    registration_warnings.append(
+                        f"Session was created with agent {handle.info.agent!r}; "
+                        f"resuming with {current!r} from the current host options."
+                    )
             try:
                 configure_session_memory(agent, options, agent_db=handle.path, session_id=handle.id)
             except Exception as exc:
@@ -535,7 +545,6 @@ class CodingACPAdapter:
                 agent,
                 dispatcher.runtime,
                 emit_output=emit_status,
-                invalidate=lambda: None,
             )
 
             async def checkpoint(current: Any, result: Any) -> None:

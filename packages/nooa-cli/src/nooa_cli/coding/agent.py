@@ -161,6 +161,7 @@ class CodingAgent(InteractiveAgent):
             prefix=True,
         )
         self.context["todo_status"] = Context(expr="self.todo.status()")
+        self.context["coding_state"] = Context(expr="self._coding_state_context()")
         self.context["context_usage"] = Context(
             expr="self.context_stats.format() if self.context_stats else ''"
         )
@@ -171,6 +172,20 @@ class CodingAgent(InteractiveAgent):
         spec(self, "events", hidden=False)
 
         install_summarizer(summarization or SummarizationConfig(), self)
+
+    def _coding_state_context(self) -> str:
+        """Describe coding-specific state without exposing stored values."""
+        from html import escape
+
+        cwd = str(self.shell.cwd).replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
+        cwd = escape(cwd[:159] + "…" if len(cwd) > 160 else cwd, quote=False)
+        count = len(self.vars)
+        return (
+            f"Working directory (already active for `self.shell`; persists across cells and turns): {cwd}\n"
+            "Use relative paths; call `cd` only to intentionally change directories.\n"
+            f"`self.v`: {count} persistent vars — inspect: `print(self.v.items())`; "
+            "remove one: `del self.v.<name>`; clear all: `self.v.clear()`"
+        )
 
     @hidden
     def request_session_title(self, opening_message: str) -> None:

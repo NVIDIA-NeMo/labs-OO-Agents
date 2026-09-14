@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Host-neutral durable metadata and transient lifecycle events for sessions."""
 
-from typing import Annotated, ClassVar
+from typing import ClassVar
 
 from pydantic import AliasChoices, Field
 
-from nooa.context_blocks import EventBase, Metadata
+from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
+from nooa.events import SessionCleared as SessionCleared
+from nooa.events import SessionResumed as SessionResumed
 
 
 class SessionStarted(Metadata):
@@ -36,31 +38,6 @@ class SessionUserMessage(Metadata):
     _role: ClassVar[Role] = Role.METADATA
 
     content: str = ""
-
-
-class SessionResumed(EventBase):  # type: ignore[misc]
-    """An interactive agent has been restored or initialized for a session."""
-
-    _role: ClassVar[Role] = Role.RUNTIME_EVENT
-    handler_aliases: ClassVar[tuple[str, ...]] = ("TuiSessionResumed",)
-
-    session_id: Annotated[str, Field(description="The resumed or started session ID")]
-    restored: Annotated[
-        bool,
-        Field(description="Whether a snapshot was restored into the agent"),
-    ]
-
-
-class SessionCleared(EventBase):  # type: ignore[misc]
-    """An interactive agent's working state has been reset."""
-
-    _role: ClassVar[Role] = Role.RUNTIME_EVENT
-    handler_aliases: ClassVar[tuple[str, ...]] = ("TuiSessionCleared",)
-
-    session_id: Annotated[
-        str | None,
-        Field(default=None, description="The new post-clear session ID, when known"),
-    ]
 
 
 SESSION_EVENT_TYPES: tuple[type[Metadata], ...] = (

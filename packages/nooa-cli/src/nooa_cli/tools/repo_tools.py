@@ -21,13 +21,46 @@ from pydantic import BaseModel, ConfigDict, Field
 from nooa.agentdoc import hidden, spec
 from nooa.skill import Skill
 from nooa.tools._bash_session import BashSession
-from nooa.tools.shell_tools import Match, PathResolutionError
+from nooa.tools.shell_tools import Match
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Result types
 # ---------------------------------------------------------------------------
+
+
+class PathResolutionError(FileNotFoundError):
+    """A path failure with the resolution base made explicit."""
+
+    def __init__(
+        self,
+        operation: str,
+        requested_path: str | Path,
+        resolved_path: str | Path,
+        *,
+        base_name: str,
+        base_path: str | Path,
+        reason: str | None = None,
+    ) -> None:
+        resolved = Path(resolved_path)
+        self.reason = reason or ("not_a_file" if resolved.exists() else "not_found")
+        self.code = "PATH_NOT_FILE" if self.reason == "not_a_file" else "PATH_NOT_FOUND"
+        self.operation = operation
+        self.requested_path = str(requested_path)
+        self.resolved_path = str(resolved)
+        self.base_name = base_name
+        self.base_path = str(base_path)
+        self.message = (
+            f"[{self.code}] {operation}: path is {self.reason.replace('_', ' ')}: "
+            f"{self.requested_path!r}; resolved to {self.resolved_path!r} against "
+            f"{base_name}={self.base_path!r}"
+        )
+        super().__init__(self.message)
+        self.filename = self.resolved_path
+
+    def __str__(self) -> str:
+        return self.message
 
 
 @dataclass
@@ -610,7 +643,7 @@ class RepoTools(Skill):
         """
         if self._session:
             stdout, _, code = await self._session.run(
-                f"base64 -w 0 {shlex.quote(str(resolved))}", timeout=30
+                f"base64 < {shlex.quote(str(resolved))}", timeout=30
             )
             if code != 0 or not stdout.strip():
                 return None
@@ -630,7 +663,9 @@ class RepoTools(Skill):
             return None
         return data.decode("utf-8", errors="replace").splitlines(keepends=True)
 
-    async def _anchor_from_match_line(self, line: str) -> Match | None:
+    async def _anchor_from_match_line(
+        self, line: str, *, cache: dict[Path, list[str] | None] | None = None
+    ) -> Match | None:
         """Build a ``Match`` from a ``file:line: content`` search result.
 
         Session-aware: the referenced file is read through the wired session
@@ -647,7 +682,12 @@ class RepoTools(Skill):
         if not fpath.is_absolute():
             fpath = self._root / fpath
         line_no = int(m.group(1))
-        lines = await self._read_lines(fpath)
+        if cache is None:
+            lines = await self._read_lines(fpath)
+        else:
+            if fpath not in cache:
+                cache[fpath] = await self._read_lines(fpath)
+            lines = cache[fpath]
         if lines is None:
             return None
         return _line_match_from_lines(fpath, line_no, lines)
@@ -904,10 +944,11 @@ class RepoTools(Skill):
 
         total = len(matches)
         paired: list[tuple[str, Match]] = []
+        file_lines: dict[Path, list[str] | None] = {}
         for match in matches[:max_results]:
             # Session-aware anchor creation: the referenced file is read
             # through the wired session when one is configured.
-            anchor = await self._anchor_from_match_line(match)
+            anchor = await self._anchor_from_match_line(match, cache=file_lines)
             if anchor is not None:
                 paired.append((match, anchor))
         if total == 0:
@@ -1034,6 +1075,7 @@ class RepoTools(Skill):
         # Filter out definitions, comments, and string-only lines.
         matches: list[str] = []
         anchors: list[Match] = []
+        file_lines: dict[Path, list[str] | None] = {}
         for raw in raw_lines:
             if len(matches) >= max_results:
                 break
@@ -1049,7 +1091,7 @@ class RepoTools(Skill):
             stripped = content.lstrip()
             if stripped.startswith("#") or stripped.startswith("//"):
                 continue
-            anchor = await self._anchor_from_match_line(raw)
+            anchor = await self._anchor_from_match_line(raw, cache=file_lines)
             if anchor is None:
                 continue
             matches.append(f"{parts[0]}:{parts[1]}: {content}")

@@ -51,7 +51,7 @@ class SessionInfo:
     agent: str
     started_at: float
     last_active: float
-    turn_count: int = 0
+    turn_count: int = 0  # Accepted user messages; agent output may contain several messages.
     working_directory: str = ""
     title: str | None = None
     title_is_user_set: bool = False
@@ -335,8 +335,8 @@ class SessionStore:
                 ).fetchall()
                 turn_count = int(
                     connection.execute(
-                        "SELECT COUNT(*) FROM events WHERE event_type IN (?, ?, ?, ?)",
-                        tuple(_TURN_EVENT_TYPES),
+                        "SELECT COUNT(*) FROM events WHERE event_type IN (?, ?)",
+                        tuple(_USER_EVENT_TYPES),
                     ).fetchone()[0]
                 )
                 last_row = connection.execute(

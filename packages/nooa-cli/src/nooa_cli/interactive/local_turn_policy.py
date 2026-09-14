@@ -23,7 +23,7 @@ class LocalTurnPolicy:
         runtime: AgentRuntime,
         *,
         emit_output: Callable[[Any], Awaitable[None]],
-        invalidate: Callable[[], None],
+        invalidate: Callable[[], None] | None = None,
     ) -> None:
         self._agent = agent
         self._runtime = runtime
@@ -44,11 +44,7 @@ class LocalTurnPolicy:
         if not self._is_active():
             return
         explanation = getattr(result, "explanation", "")
-        logger.info(
-            "[DISPATCHER] handle() returned kind=%r explanation=%r",
-            result.kind,
-            explanation,
-        )
+        logger.debug("[DISPATCHER] handle() returned kind=%r", result.kind)
         self._schedule_reflection(agent)
         if explanation and self._is_active():
             from .policy_events import TurnStatus as StopReasonOutput

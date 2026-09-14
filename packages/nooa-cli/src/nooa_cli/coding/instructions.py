@@ -30,7 +30,9 @@ def _is_safe_path(path: Path, root: Path) -> bool:
 
 def discover_agent_instruction_files(working_directory: str | Path) -> tuple[Path, ...]:
     """Return non-symlinked ``AGENTS.md`` files from repository root to cwd."""
-    cwd = Path(os.path.abspath(working_directory))
+    # The host may enter through a symlinked home or /tmp. Canonicalize that
+    # trusted entry point; instruction files and descendants still forbid links.
+    cwd = Path(working_directory).expanduser().resolve()
     root = _git_root(cwd)
     directories = [cwd]
     if root is not None:

@@ -10,7 +10,6 @@ observations are read-only leases and never own that lifecycle.
 from __future__ import annotations
 
 import asyncio
-import datetime
 import logging
 import threading
 from collections.abc import Awaitable, Callable
@@ -676,21 +675,17 @@ class LocalAgentRunner:
             running_work = getattr(qm, "running_work_handles", None)
             running = running_work() if running_work is not None else qm.running_handles()
             if running:
-                now = datetime.datetime.now().strftime("%H:%M:%S")
-                lines = "".join(f"  ⠿ {h.label}\n" for h in running)
-                self._present(
-                    f"\x1b[2m{now} waiting — {len(running)} job(s) running:\n{lines}\x1b[0m"
-                )
+                labels = ", ".join(h.label for h in running)
+                self._present(f"Waiting for {len(running)} running job(s): {labels}\n")
             try:
                 items = await self._wait_for_input(qm.race())
             except ValueError:
                 return
             if running and items:
-                now = datetime.datetime.now().strftime("%H:%M:%S")
                 names = {name for name, _ in items}
                 for handle in running:
                     if handle.name in names:
-                        self._present(f"\x1b[32m  ✓ {handle.label} — {now}\x1b[0m\n")
+                        self._present(f"Received output from {handle.label}\n")
             notification = self._drain(qm, items)
 
     @staticmethod
@@ -764,7 +759,7 @@ class LocalAgentRunner:
                 JobSnapshot(
                     name=handle.name,
                     label=handle.label,
-                    state=handle.state,
+                    state=AgentJobState(handle.state),
                     queued=channel.qsize() if channel is not None else 0,
                     values=tuple(str(value) for value in handle.values),
                     job_id=handle.job_id,
@@ -1341,17 +1336,7 @@ class LocalAgentRunner:
                 CancellationState.REQUESTED if self._cancel_requested else CancellationState.NONE
             )
             snapshots = self._job_snapshots_on_owner()
-        jobs = tuple(
-            AgentJobSummary(
-                snapshot.name,
-                snapshot.label,
-                AgentJobState(snapshot.state),
-                snapshot.queued,
-                tuple(str(value) for value in snapshot.values),
-                snapshot.job_id,
-            )
-            for snapshot in snapshots
-        )
+        jobs = snapshots
         return generation, cancellation, jobs
 
     def _publish_runtime_projection(

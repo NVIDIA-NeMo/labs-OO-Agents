@@ -175,9 +175,9 @@ class MCPApprovalRequest:
         return f"/mcp approve {quoted_name} {self.confirmation}"
 
     def accepts_confirmation(self, value: str) -> bool:
-        return hmac.compare_digest(value, self.confirmation) or hmac.compare_digest(
-            value, self.fingerprint
-        )
+        return hmac.compare_digest(
+            value.encode(), self.confirmation.encode()
+        ) or hmac.compare_digest(value.encode(), self.fingerprint.encode())
 
     def review_text(self) -> str:
         """Render a secret-safe review and a second-step confirmation command."""

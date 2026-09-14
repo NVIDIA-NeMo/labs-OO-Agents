@@ -6,22 +6,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from typing import Any, Protocol
 
-from nooa_cli.interactive.state import InteractiveAgent
+from nooa_cli.interactive.state import AgentJobSummary, InteractiveAgent
 
-
-@dataclass(frozen=True, slots=True)
-class JobSnapshot:
-    """Immutable background-job projection safe for frontend consumption."""
-
-    name: str
-    label: str
-    state: str
-    queued: int
-    values: tuple[Any, ...]
-    job_id: str = ""
+JobSnapshot = AgentJobSummary
 
 
 class AgentRuntime(InteractiveAgent, Protocol):
