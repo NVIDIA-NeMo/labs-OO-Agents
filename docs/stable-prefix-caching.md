@@ -109,8 +109,8 @@ the framework setting must never become a provider request field.
 `tests/unifiedllm/test_history_wire_contract.py` runs on ordinary PR CI without
 credentials. Synthetic provider replies pass through the real clients and SDKs;
 an HTTP mock captures the outgoing requests and unexpected httpx requests fail.
-It covers Responses encrypted reasoning, Anthropic signed thinking, the Gemini
-OpenAI-compatible tool-signature format, and Chat `reasoning_content`.
+It covers Responses encrypted reasoning, Anthropic signed thinking, Gemini tool
+signatures on OpenAI-compatible routes, and Chat `reasoning_content`.
 
 The matrix compares complete requests before and after rendering, SQLite
 close/reopen, relay JSON reconciliation, and their combination, in both sync
