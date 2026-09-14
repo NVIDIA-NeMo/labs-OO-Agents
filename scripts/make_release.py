@@ -332,18 +332,20 @@ def tool_versions(image_digest: str | None) -> dict[str, str]:
 def provider_checks(artifact_dir: Path, manifest: ReleaseManifest | None = None) -> None:
     """Check replay and cache behavior on the candidate before creating a draft.
 
-    Use the existing opt-in Hub tests, not the much larger integration suite.
+    Use the existing opt-in provider tests, not the much larger integration suite.
+    Their model routes and credentials come from registry aliases installed with
+    a bundled-config package, so a runner without that package fails this gate
+    (the cases skip, and skips are rejected below).
     Seven cases make at most 17 capped calls without retries. A fresh report
     directory and explicit pass count prevent stale or skipped evidence from
     satisfying the gate. Session databases and reports stay in private artifacts.
     """
+    # Credentials are not this runner's concern: each ``release-gate-<family>``
+    # registry alias names its own credential variable, and the private
+    # controller provides it. A missing credential fails the cases, which the
+    # count below rejects before any draft is created.
     env = os.environ.copy()
-    key = env.get("NVIDIA_INFERENCE_API_KEY") or env.get("NVIDIA_INTERNAL_API_KEY")
-    if not key:
-        die("NVIDIA_INFERENCE_API_KEY (or NVIDIA_INTERNAL_API_KEY) is required for provider checks")
-    env.update(
-        NVIDIA_INFERENCE_API_KEY=key, NOOA_RUN_OPEN_MODEL_REPLAY="1", NOOA_RUN_CACHE_RESUME_LIVE="1"
-    )
+    env.update(NOOA_RUN_OPEN_MODEL_REPLAY="1", NOOA_RUN_CACHE_RESUME_LIVE="1")
     env.pop(
         "NOOA_TEST_OMITTED_REASONING", None
     )  # Optional A/B calls are outside the release budget.
@@ -354,7 +356,7 @@ def provider_checks(artifact_dir: Path, manifest: ReleaseManifest | None = None)
     evidence = {"outcome": "running", "report": str(report), "expected_cases": 7}
     if manifest:
         manifest.update(provider_validation=evidence)
-    step("Provider replay and cache checks (17 capped Hub requests)")
+    step("Provider replay and cache checks (17 capped provider requests)")
     try:
         run(
             [
