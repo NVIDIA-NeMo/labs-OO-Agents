@@ -13,10 +13,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from nooa.events import LLMComplete
 from nooa.interactive import AgentMessage, RespondReason
 from nooa.sessions import SessionHandle, SessionResumed, SessionStore
 from nooa.storage.in_memory import InMemoryStorageManager
+from nooa.unifiedllm import LLMResponse
 from nooa_cli.coding import CodingAgent, load_coding_skills_dirs
 from nooa_cli.interactive.dispatcher import InteractiveSessionDispatcher
 
@@ -251,19 +251,19 @@ async def run_headless(
                 emit("agent.message", content=event.content)
 
         def on_usage(event: Any) -> None:
-            if not isinstance(event, LLMComplete):
+            if not isinstance(event, LLMResponse) or event.usage is None:
                 return
-            usage.prompt_tokens += event.prompt_tokens
-            usage.completion_tokens += event.completion_tokens
-            usage.cached_tokens += event.cached_tokens
-            usage.reasoning_tokens += event.reasoning_tokens
-            usage.cost_usd += event.cost_usd
+            usage.prompt_tokens += event.usage.input_tokens
+            usage.completion_tokens += event.usage.output_tokens
+            usage.cached_tokens += event.usage.cached_input_tokens
+            usage.reasoning_tokens += event.usage.reasoning_tokens
+            usage.cost_usd += event.usage.cost_usd
             emit("usage.updated", usage=asdict(usage))
 
         unsubscribers.extend(
             (
                 agent.event_manager.on("AgentMessage", on_message),
-                agent.event_manager.on("LLMComplete", on_usage),
+                agent.event_manager.on("LLMResponse", on_usage),
             )
         )
         if session_id is not None:

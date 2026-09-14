@@ -13,10 +13,9 @@ import pytest
 from nooa_cli.coding import CodingAgent
 from nooa_cli.headless import resolve_session, run_headless
 
-from nooa.events import LLMComplete
 from nooa.interactive import RespondReason, RespondResult
 from nooa.sessions import SessionStore
-from nooa.unifiedllm import FakeLLMClient
+from nooa.unifiedllm import FakeLLMClient, LLMResponse, LLMUsage
 
 
 def _config(
@@ -65,15 +64,20 @@ class _ResultAgent(CodingAgent):
 class _UsageAgent(CodingAgent):
     async def handle(self, notification: dict[str, list[Any]]) -> RespondResult:
         self.event_manager.add(
-            LLMComplete(
-                prompt_tokens=11,
-                completion_tokens=7,
-                cached_tokens=3,
-                reasoning_tokens=2,
-                cost_usd=0.125,
+            LLMResponse(
+                usage=LLMUsage(
+                    input_tokens=11,
+                    output_tokens=7,
+                    cached_input_tokens=3,
+                    reasoning_tokens=2,
+                    cost_usd=0.125,
+                )
             )
         )
-        self.event_manager.add(LLMComplete(prompt_tokens=5, completion_tokens=4, cost_usd=0.25))
+        self.event_manager.add(
+            LLMResponse(usage=LLMUsage(input_tokens=5, output_tokens=4, cost_usd=0.25))
+        )
+        self.event_manager.add(LLMResponse(content="Response without usage"))
         return RespondResult(kind=RespondReason.DONE, explanation="complete")
 
 

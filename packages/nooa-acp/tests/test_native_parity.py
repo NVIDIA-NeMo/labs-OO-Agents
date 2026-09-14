@@ -18,7 +18,118 @@ from nooa_cli.tui import config as native_config
 from nooa_cli.tui import session_manager
 
 from nooa.sessions import SessionStore
-from nooa.unifiedllm import FakeLLMClient
+from nooa.unifiedllm import AssistantReasoning, CacheBoundary, FakeLLMClient, LLMResponse, ToolCall
+
+
+@pytest.mark.parametrize("source_host", ["native", "acp"])
+async def test_handoff_preserves_native_response_replay_and_cache_boundary(
+    workspace, monkeypatch, source_host
+):
+    original = LLMResponse(
+        parts=(
+            AssistantReasoning(
+                text="portable reasoning", native={"signature": "fixture-native-state"}
+            ),
+            ToolCall(
+                id="handoff_call",
+                name="python_cell",
+                arguments=json.dumps(
+                    {
+                        "code": "self.message('seeded')\nreturn_result(RespondReason.DONE, explanation='done')"
+                    }
+                ),
+            ),
+        ),
+        replay_scope="fixture-issuer",
+        finish_reason="tool_calls",
+    )
+
+    class RecordingLLM(FakeLLMClient):
+        async def acall(self, messages, **kwargs):
+            self.request_messages = list(messages)
+            return await super().acall(messages, **kwargs)
+
+    first_llm = RecordingLLM(scripted_responses=[original])
+    next_llm = RecordingLLM(
+        scripted_responses=[
+            LLMResponse(
+                parts=(
+                    ToolCall(
+                        id="next_call",
+                        name="python_cell",
+                        arguments=json.dumps(
+                            {"code": "return_result(RespondReason.DONE, explanation='resumed')"}
+                        ),
+                    ),
+                ),
+                finish_reason="tool_calls",
+            ),
+        ]
+    )
+    adapter = CodingACPAdapter(lambda: first_llm if source_host == "acp" else next_llm)
+    adapter.on_connect(RecordingClient())
+    monkeypatch.setattr(
+        native_config, "get_llm", lambda *_: first_llm if source_host == "native" else next_llm
+    )
+    native_result = runner = None
+    try:
+        if source_host == "native":
+            native_result = await open_native(workspace)
+            session_id = native_result.session_id
+            runner = LocalAgentRunner(
+                native_result.agent, emit_text=lambda _: None, agent_id=session_id
+            )
+            runner.set_user_message_accepted_callback(native_result.session_manager.record_user)
+            await runner.submit_and_wait("seed")
+            await runner.shutdown()
+            runner = None
+            await close_native(native_result)
+            native_result = None
+            await adapter.load_session(str(workspace), session_id)
+            target = (await adapter._sessions.get(session_id)).value.agent
+            await adapter.prompt(session_id, [text_block("continue")])
+        else:
+            session_id = (await adapter.new_session(str(workspace))).session_id
+            await adapter.prompt(session_id, [text_block("seed")])
+            await adapter.close_session(session_id)
+            native_result = await open_native(workspace, session_id)
+            target = native_result.agent
+            runner = LocalAgentRunner(target, emit_text=lambda _: None, agent_id=session_id)
+            runner.set_user_message_accepted_callback(native_result.session_manager.record_user)
+            await runner.submit_and_wait("continue")
+
+        restored = target.event_manager[original.id]
+        assert restored.parts == original.parts
+        assert restored.replay_scope == original.replay_scope
+        messages = next_llm.request_messages
+        response_index = next(
+            i
+            for i, message in enumerate(messages)
+            if isinstance(message, LLMResponse) and message.id == restored.id
+        )
+        assert messages[response_index].parts == original.parts
+        assert messages[response_index].replay_scope == original.replay_scope
+        result_index = next(
+            i for i, message in enumerate(messages) if message.get("tool_call_id") == "handoff_call"
+        )
+        boundary = next(
+            i for i, message in enumerate(messages) if isinstance(message, CacheBoundary)
+        )
+        assert response_index < result_index < boundary
+        state_indices = [
+            i
+            for i, message in enumerate(messages)
+            if "## Python cell state" in str(message.get("content", ""))
+        ]
+        assert state_indices and all(i > boundary for i in state_indices)
+        assert "parity.fixture" in target.skills.activated()
+        assert "Parity workspace instruction." in json.dumps(next_llm.last_messages)
+    finally:
+        await adapter.close()
+        if runner is not None:
+            await runner.shutdown()
+        if native_result is not None:
+            await close_native(native_result)
 
 
 class RecordingClient:

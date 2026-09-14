@@ -168,23 +168,15 @@ def test_runner_writes_behavior_artifact_from_serialized_trajectory(
 ) -> None:
     """End-to-end: runner artifact -> parser -> deterministic behavior.json."""
 
-    class ToolCallEvent:
-        def model_dump(self, mode: str) -> dict:
-            assert mode == "json"
-            return {
-                "name": "execute_python",
-                "arguments": {"code": "self.v.note = 'kept'"},
-                "metadata": {},
-            }
+    from nooa.context_blocks import ToolCallEvent
 
-    class ReturnResultEvent:
-        def model_dump(self, mode: str) -> dict:
-            return {"event_type": "ToolCallEvent", "name": "return_result", "arguments": {}}
-
-    # _write_trajectory uses the concrete class name as event_type. Give the
-    # completion event the canonical name without coupling this test to Pydantic.
-    ReturnResultEvent.__name__ = "ToolCallEvent"
-    agent = SimpleNamespace(event_manager=SimpleNamespace(items=lambda: [("1", ToolCallEvent()), ("2", ReturnResultEvent())]))
+    calls = [
+        ToolCallEvent(
+            tool_call_id="1", name="execute_python", arguments={"code": "self.v.note = 'kept'"}
+        ),
+        ToolCallEvent(tool_call_id="2", name="return_result", arguments={}),
+    ]
+    agent = SimpleNamespace(event_manager={str(i): event for i, event in enumerate(calls)})
     monkeypatch.setattr(runner, "LOGS_DIR", tmp_path)
     monkeypatch.setenv("NOOA_INTERFACE_CHANGE_ID", "prompt-v2")
 

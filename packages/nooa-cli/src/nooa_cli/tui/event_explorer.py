@@ -101,8 +101,7 @@ class EventExplorerModel:
         self.matches = [
             i
             for i, row in enumerate(self.rows)
-            if row.event_type in self.enabled_types
-            and matches_all_terms(terms, row.search_text)
+            if row.event_type in self.enabled_types and matches_all_terms(terms, row.search_text)
         ]
         if self.sort_mode == "type":
             self.matches.sort(key=lambda index: (self.rows[index].event_type, index))
@@ -314,6 +313,12 @@ class EventExplorerView(ExplorerView):
 
 
 def _event_to_mapping(event: Any) -> dict[str, Any]:
+    from nooa.llm_types import LLMResponse
+
+    if isinstance(event, LLMResponse):
+        # model_dump() is a durable archive including private provider replay state.
+        # The explorer displays and searches only the public response projection.
+        return event.searchable_fields()
     if isinstance(event, dict):
         return event
     if hasattr(event, "model_dump"):
@@ -412,9 +417,7 @@ def _searchable_detail(event: Any, event_type: str) -> str:
     fields = [
         (key, value)
         for key, value in data.items()
-        if key != "event_type"
-        and key not in _NOISE_FIELDS
-        and not _is_empty_event_field(value)
+        if key != "event_type" and key not in _NOISE_FIELDS and not _is_empty_event_field(value)
     ]
     if not fields:
         return ""
@@ -468,6 +471,7 @@ _NOISE_FIELDS = {
     # Provider reasoning blobs (KBs per tool call) are opaque chrome in the
     # detail pane — never dump them into the repr or search text.
     "reasoning_items",
+    "replay_scope",
 }
 
 _RENDERED_FIELD_ORDER = {
@@ -491,6 +495,7 @@ _RENDERED_FIELD_ORDER = {
     "SessionCleared": ("session_id",),
     "TuiSessionCleared": ("session_id",),
     "LLMComplete": ("model", "finish_reason", "usage", "content"),
+    "LLMResponse": ("model_name", "finish_reason", "usage", "content", "reasoning", "tool_calls"),
     "SessionStarted": ("host", "model", "agent", "working_directory"),
     "TUISessionStart": ("model", "agent_cls", "working_dir"),
     "SessionTitleUpdated": ("title", "user_set"),

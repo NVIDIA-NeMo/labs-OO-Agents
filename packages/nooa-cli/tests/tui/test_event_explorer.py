@@ -23,6 +23,28 @@ from nooa_cli.tui.explorer_base import (
 )
 from nooa_cli.tui.output import TextOutput
 
+from nooa.unifiedllm import AssistantReasoning, AssistantText, LLMResponse, LLMUsage
+
+
+def test_canonical_response_explorer_uses_public_fields_only() -> None:
+    response = LLMResponse(
+        parts=(
+            AssistantReasoning(
+                text="portable explanation", native={"secret": "opaque-provider-data"}
+            ),
+            AssistantText(text="Public answer"),
+        ),
+        model_name="test-model",
+        usage=LLMUsage(input_tokens=12, output_tokens=3),
+    )
+    row = build_event_rows(SimpleNamespace(items=lambda: [("1", response)]))[0]
+    assert row.summary == "Public answer"
+    rendered = str(row)
+    assert "portable explanation" in rendered
+    assert "test-model" in rendered
+    assert "input_tokens" in rendered
+    assert "opaque-provider-data" not in rendered
+
 
 class _FakeEvent:
     def __init__(self, event_type: str, **fields):

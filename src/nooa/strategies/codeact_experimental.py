@@ -11,7 +11,11 @@ from nooa.context_blocks import DynamicContext
 from nooa.decorators import strategy
 from nooa.events import Error
 from nooa.strategies.base import RuntimeServices
-from nooa.strategies.codeact import CodeActStrategy
+from nooa.strategies.codeact import (
+    CodeActStrategy,
+    TextOnlyResponseAction,
+    TextOnlyResponseContext,
+)
 from nooa.strategies.template import TemplateStrategy
 
 if TYPE_CHECKING:
@@ -34,12 +38,11 @@ class CodeActExperimental(CodeActStrategy):
         *,
         error_formatter: Any = None,
     ) -> None:
-        from nooa.config.strategy_config import CodeActConfig
-
-        effective = config or CodeActConfig()
-        # With no provider-level return_result tool, plain text must stay non-terminal.
-        effective = effective.model_copy(update={"text_only_stop_behavior": "synthetic_comment"})
-        super().__init__(config=effective, error_formatter=error_formatter)
+        super().__init__(
+            config=config,
+            error_formatter=error_formatter,
+            on_text_only=self._retry_text_only_response,
+        )
 
     @property
     def name(self) -> str:
@@ -49,9 +52,7 @@ class CodeActExperimental(CodeActStrategy):
         """Put the execution contract on the tool and keep only runtime context blocks."""
         overrides = super().get_block_overrides()
         overrides["strategy_prompt"] = None
-        overrides["python_cell_context"] = DynamicContext(
-            "strategy.python_cell_context(runtime)"
-        )
+        overrides["python_cell_context"] = DynamicContext("strategy.python_cell_context(runtime)")
         overrides["python_cell_state"] = DynamicContext(
             "strategy.python_cell_state_context(runtime)"
         )
@@ -59,9 +60,7 @@ class CodeActExperimental(CodeActStrategy):
 
     def get_static_block_keys(self) -> set[str]:
         """Exclude the removed strategy prompt from the cacheable context prefix."""
-        return (super().get_static_block_keys() - {"strategy_prompt"}) | {
-            "python_cell_context"
-        }
+        return (super().get_static_block_keys() - {"strategy_prompt"}) | {"python_cell_context"}
 
     def get_block_order(self) -> list[str] | None:
         """Place live locals immediately after the stable execution context."""
@@ -309,12 +308,13 @@ Restrictions (will throw):
         ...
 
     @staticmethod
-    def _add_text_only_correction(runtime: RuntimeServices, call: "CurrentCall") -> None:
-        runtime.event_manager.add(
+    def _retry_text_only_response(context: TextOnlyResponseContext) -> TextOnlyResponseAction:
+        return TextOnlyResponseAction.retry(
             Error(
                 content=(
-                    "Your last reply was plain text with no tool call, so it was dropped. "
-                    f"To finish `{call.method_name}`, call `python_cell` with "
+                    "Your last reply was plain text with no tool call. It was preserved, "
+                    "but a bare message cannot end the turn or run code. "
+                    f"To finish `{context.call.method_name}`, call `python_cell` with "
                     "`return_result(value)` inside the cell. To continue working, "
                     "call `python_cell` with the next computation."
                 )

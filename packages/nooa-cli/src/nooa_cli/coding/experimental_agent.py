@@ -64,7 +64,6 @@ class ExperimentalCodingWorker(CodingWorker):
         CodeActExperimental(
             config=CodeActConfig(
                 max_retries=6,
-                text_only_stop_behavior="synthetic_comment",
                 prefill=SafeDelegationPrefill(),
             )
         ),

@@ -13,7 +13,14 @@ from nooa.config import CodeActConfig
 from nooa.context_blocks import ToolCallEvent
 from nooa.events import PythonOutput
 from nooa.strategies.codeact_experimental import CodeActExperimental
-from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
+from nooa.unifiedllm import (
+    AssistantReasoning,
+    AssistantText,
+    CacheBoundary,
+    FakeLLMClient,
+    LLMResponse,
+    ToolCall,
+)
 
 
 def _python_cell(code: str, call_id: str = "call_1") -> ToolCall:
@@ -30,8 +37,55 @@ def _response(code: str, call_id: str = "call_1") -> LLMResponse:
         content="",
         tool_calls=[_python_cell(code, call_id)],
         finish_reason="tool_calls",
-        assistant_message={"role": "assistant", "content": ""},
     )
+
+
+@pytest.mark.asyncio
+async def test_text_only_retry_preserves_response_and_uses_python_cell():
+    original = LLMResponse(
+        parts=(
+            AssistantReasoning(text="reasoning", native={"opaque": "retained"}),
+            AssistantText(text="I will calculate the result."),
+        ),
+    )
+
+    class RecordingLLM(FakeLLMClient):
+        async def acall(self, messages, **kwargs):
+            self.request_messages = list(messages)
+            return await super().acall(messages, **kwargs)
+
+    llm = RecordingLLM(scripted_responses=[original, _response("return_result(42)")])
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(CodeActExperimental(config=CodeActConfig(prefill=None)))
+        async def answer(self) -> int:
+            """Calculate the result."""
+            ...
+
+    agent = TestAgent()
+    assert await agent.answer() == 42
+    assert agent.event_manager[original.id] is original
+    assert any(message is original for message in llm.request_messages)
+    assert dict(original.parts[0].native) == {"opaque": "retained"}
+    feedback = [
+        message["content"]
+        for message in llm.last_messages
+        if "last reply was plain text" in str(message.get("content", ""))
+    ]
+    assert len(feedback) == 1
+    assert "python_cell" in feedback[0]
+    assert "execute_python" not in feedback[0]
+    assert "preserved" in feedback[0]
+    boundary = next(
+        i for i, message in enumerate(llm.request_messages) if isinstance(message, CacheBoundary)
+    )
+    state_indices = [
+        i
+        for i, message in enumerate(llm.request_messages)
+        if "## Python cell state" in str(message.get("content", ""))
+    ]
+    assert state_indices
+    assert all(i > boundary for i in state_indices)
 
 
 @pytest.mark.asyncio
@@ -281,10 +335,7 @@ async def test_python_cell_state_context_escapes_cwd_markup():
     assert "&lt;/python_cell_state&gt;&lt;attack&gt;\\n`forged`" in rendered
     assert "\n`forged`" not in rendered
     assert len(rendered) < 500
-    assert (
-        "Cell locals (includes method inputs; reuse unchanged values): "
-        "message (str)" in rendered
-    )
+    assert "Cell locals (includes method inputs; reuse unchanged values): message (str)" in rendered
 
 
 @pytest.mark.asyncio
@@ -316,8 +367,7 @@ async def test_python_cell_state_omits_inputs_outputs_and_framework_objects():
     assert "helper" not in rendered
     assert (
         "Cell locals (includes method inputs; reuse unchanged values): "
-        "large_text (str), notification (dict), working_path (str)"
-        in rendered
+        "large_text (str), notification (dict), working_path (str)" in rendered
     )
     assert "x" * 100 not in rendered
 
