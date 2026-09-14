@@ -251,7 +251,7 @@ async def test_agent_preferences_are_workspace_sticky_without_changing_other_liv
         assert "nemo.libwriting" in SessionOptions.load(workspace).inactive_skills
 
 
-def test_legacy_settings_are_normalized_at_the_boundary(workspace):
+def test_legacy_settings_are_normalized_at_the_boundary(workspace, caplog):
     (workspace / ".nooa/settings.yaml").write_text("""
 tui:
   memory_agents:
@@ -259,6 +259,7 @@ tui:
   reflection_agents:
     'nooa_cli.tui.agent:TUIAgent': true
 coding:
+  api_key: secret-value-must-not-be-logged
   memory_agents:
     'nooa_cli.tui.agent:TUIAgent': session
     'nooa_cli.coding.agent:CodingAgent': project
@@ -266,6 +267,10 @@ coding:
     options = SessionOptions.load(workspace)
     assert options.memory_agents == {CODING_AGENT: "project"}
     assert options.reflection_agents == {CODING_AGENT: True}
+    assert "Reading legacy tui settings" in caplog.text
+    assert "Migrating legacy memory_agents agent key" in caplog.text
+    assert "Ignoring unsupported coding setting 'api_key'" in caplog.text
+    assert "secret-value-must-not-be-logged" not in caplog.text
     assert not hasattr(options, "policy_config")
     assert load_agent_class("nooa_cli.tui.agent:TUIAgent") is load_agent_class(CODING_AGENT)
     assert load_agent_class(

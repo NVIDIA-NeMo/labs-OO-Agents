@@ -44,6 +44,8 @@ def resolve_behavior_settings(data: dict[str, Any]) -> dict[str, Any]:
         section = data.get(name)
         if not isinstance(section, dict):
             continue
+        if name == "tui" and section:
+            logger.warning("Reading legacy tui settings; move shared behavior settings to coding")
         for key, value in section.items():
             if key == "agent_spec":
                 logger.warning(
@@ -52,6 +54,8 @@ def resolve_behavior_settings(data: dict[str, Any]) -> dict[str, Any]:
                     name,
                 )
             if key not in behavior_fields():
+                if name == "coding" and key != "agent_spec":
+                    logger.warning("Ignoring unsupported coding setting %r", key)
                 continue
             if key == "summarization" and isinstance(value, dict):
                 values.setdefault(key, {}).update(value)
@@ -67,6 +71,7 @@ def resolve_behavior_settings(data: dict[str, Any]) -> dict[str, Any]:
             for old, new in LEGACY_AGENT_SPECS.items():
                 if old in preferences:
                     key = CODING_AGENT if new == EXPERIMENTAL_CODING_AGENT else new
+                    logger.warning("Migrating legacy %s agent key %r to %r", field, old, key)
                     preferences.setdefault(key, preferences[old])
                     del preferences[old]
     return SessionOptions(**values).model_dump(exclude_unset=True)

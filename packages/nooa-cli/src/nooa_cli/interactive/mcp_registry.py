@@ -289,6 +289,8 @@ class MCPRegistry(Skill):
         legacy = data.get("tui", {})
         tui = dict(legacy) if isinstance(legacy, dict) else {}
         coding = data.get("coding", {})
+        if "mcp_servers" in tui and not (isinstance(coding, dict) and "mcp_servers" in coding):
+            logger.warning("Reading legacy tui.mcp_servers; use coding.mcp_servers")
         if isinstance(coding, dict):
             tui.update(coding)
         raw_servers = tui.get("mcp_servers", {}) if isinstance(tui, dict) else {}
