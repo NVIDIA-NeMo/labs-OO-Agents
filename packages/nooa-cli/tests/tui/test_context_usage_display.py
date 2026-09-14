@@ -135,3 +135,38 @@ def test_tui_agent_installs_context_usage_dynamic_block():
     cm = agent.context_manager
     keys = list(cm.keys())
     assert "context_usage" in keys, f"context_usage missing; have: {keys}"
+
+
+def test_token_usage_updates_restores_and_clears_on_session_change():
+    from unittest.mock import Mock
+
+    from nooa_cli.tui.session import Session
+
+    from nooa.runtime.event_manager import EventManager
+    from nooa.unifiedllm import LLMResponse, LLMUsage
+
+    em = EventManager()
+    em.add(LLMResponse(usage=LLMUsage(input_tokens=100, output_tokens=10)))
+    latest = LLMResponse(
+        usage=LLMUsage(input_tokens=200, output_tokens=20, cached_input_tokens=150)
+    )
+    em.add(latest)
+    session = Session.__new__(Session)
+    session.agent = SimpleNamespace(event_manager=em)
+    session._app = SimpleNamespace(invalidate=Mock())
+    session._restore_token_usage()
+    assert session._token_usage_display == "↑ 200 ↓ 20 cache 75%"
+
+    unsubscribe = em.on("LLMResponse", session._on_llm_response)
+    try:
+        em.add(LLMResponse(usage=LLMUsage(input_tokens=400, output_tokens=30)))
+        assert session._token_usage_display == "↑ 400 ↓ 30 cache 0%"
+        em.add(LLMResponse())
+        assert session._token_usage_display == "↑ — ↓ — cache —"
+        session._on_llm_response(latest)
+        session.agent.event_manager = EventManager()
+        session._restore_token_usage()
+        assert session._token_usage_display == "↑ — ↓ — cache —"
+        assert session._app.invalidate.called
+    finally:
+        unsubscribe()

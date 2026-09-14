@@ -161,7 +161,7 @@ class TUIConfig(BaseModel):
     # Ordered, structured toolbar providers. Third-party packages can register
     # additional providers through the ``nooa_cli.tui.toolbar_items`` group.
     toolbar_items: list[str] = Field(
-        default_factory=lambda: ["time", "model", "context", "session"]
+        default_factory=lambda: ["time", "model", "tokens", "context", "session"]
     )
 
     # Dev-time update watcher: periodically compare the checked-out revision

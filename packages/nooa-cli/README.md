@@ -169,6 +169,13 @@ published through the `nooa.skills` entry-point group. Toolbar extensions can
 similarly publish named providers through `nooa_cli.tui.toolbar_items`; users
 select their order with `/toolbar set <item> ...`.
 
+The default toolbar includes `tokens`: `↑ 12.3k ↓ 456 cache 80%` shows input
+and output tokens for the latest completed LLM call, plus the percentage of
+input tokens read from the provider cache (cache writes do not count as hits).
+It updates after each response and restores the latest usage when resuming a
+session. A dash means usage is unavailable. If you have a saved toolbar layout,
+use `/toolbar reset` to adopt the new default, or add `tokens` with `/toolbar set`.
+
 Native and ACP agents have a `self.workspace_settings` skill for workspace
 preferences. Ask the agent to remember a Python skill for future sessions:
 

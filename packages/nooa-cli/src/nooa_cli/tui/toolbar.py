@@ -10,7 +10,10 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from importlib.metadata import entry_points
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from nooa.unifiedllm import LLMUsage
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +29,7 @@ class ToolbarContext:
     session_id: str | None = None
     session_title: str | None = None
     agent: Any = None
+    token_usage: str = "↑ — ↓ — cache —"
 
 
 class ToolbarRegistry:
@@ -37,6 +41,7 @@ class ToolbarRegistry:
             "model": lambda context: _short_model_name(context.model),
             "cwd": lambda context: context.working_directory.name or str(context.working_directory),
             "context": lambda context: context.context_usage,
+            "tokens": lambda context: context.token_usage,
             "session": _session_label,
         }
         if load_plugins:
@@ -90,3 +95,21 @@ def _session_label(context: ToolbarContext) -> str:
     if context.session_title and short_id:
         return f"{context.session_title} [{short_id}]"
     return f"[{short_id}]" if short_id else ""
+
+
+def format_token_usage(usage: LLMUsage | None) -> str:
+    """Show the latest response's tokens and the fraction of input read from cache."""
+    if usage is None:
+        return "↑ — ↓ — cache —"
+
+    def count(tokens: int) -> str:
+        if tokens >= 1_000_000:
+            return f"{tokens / 1_000_000:.1f}m"
+        if tokens >= 1_000:
+            return f"{tokens / 1_000:.1f}k"
+        return str(tokens)
+
+    cached = (
+        f"{usage.cached_input_tokens / usage.input_tokens:.0%}" if usage.input_tokens > 0 else "—"
+    )
+    return f"↑ {count(usage.input_tokens)} ↓ {count(usage.output_tokens)} cache {cached}"

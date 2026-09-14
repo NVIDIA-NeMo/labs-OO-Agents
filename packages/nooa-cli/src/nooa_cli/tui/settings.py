@@ -268,8 +268,8 @@ tui:
   # Write trace files here (relative to project root, or ":project:").
   # trace_dir: .nooa/traces
 
-  # Ordered toolbar items. Built-ins: time, model, cwd, context, session.
-  # toolbar_items: [time, model, context, session]
+  # Ordered toolbar items. Built-ins: time, model, cwd, tokens, context, session.
+  # toolbar_items: [time, model, tokens, context, session]
 """
 
 
