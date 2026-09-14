@@ -30,19 +30,33 @@ from nooa.tracing import enable_tracing, exporters, flush_traces, set_session
 
 
 @pytest.mark.asyncio
-async def test_saved_jsonl_has_input_and_output_messages_on_llm_span():
+async def test_saved_jsonl_has_input_and_output_messages_on_llm_span(monkeypatch):
     """A direct ``litellm.acompletion`` call with a file exporter must produce
     a JSONL whose LLM span carries the full input + output messages."""
-    pytest.importorskip(
-        "openinference.instrumentation.litellm",
-        reason=(
-            "openinference-instrumentation-litellm is required to populate "
-            "llm.input_messages.* / llm.output_messages.* on LLM spans. "
-            "The actor->file path relies on it; if it's not installed the "
-            "file output is incomplete. Make it a hard dep (Phase 2)."
-        ),
-    )
-    import litellm
+    import httpx
+
+    from nooa.unifiedllm import CompletionClient
+
+    async def respond(self, request):
+        return httpx.Response(
+            200,
+            json={
+                "id": "r1",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "test",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "T1_OUTPUT_MARKER 4"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+            },
+        )
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", respond)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         enable_tracing(exporters=[exporters.jsonl(tmpdir)])
@@ -51,16 +65,16 @@ async def test_saved_jsonl_has_input_and_output_messages_on_llm_span():
         # litellm.acompletion with mock_response triggers the OpenInference
         # litellm instrumentor (which writes message attrs to spans) without
         # any network call.
-        await litellm.acompletion(
-            model="gpt-3.5-turbo",
+        client = CompletionClient("test", transport="direct", api_key="test")
+        await client.acall(
             messages=[
                 {"role": "system", "content": "be terse"},
                 {"role": "user", "content": "T1_INPUT_MARKER what is 2+2?"},
             ],
-            mock_response="T1_OUTPUT_MARKER 4",
         )
 
         # Force flush so SimpleSpanProcessor writes everything.
+        await client.aclose()
         flush_traces()
 
         spans = read_all_otlp_jsonl_spans(tmpdir)

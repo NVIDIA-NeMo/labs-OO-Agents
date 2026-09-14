@@ -1,26 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""JournalExporter: spans (sans messages) + content-addressed message sideband.
+"""Export spans and a content-addressed message journal.
 
-Combines two responsibilities into a single exporter:
-
-1. Exports spans to the local viewer with ``llm.input_messages.*`` /
-   ``llm.output_messages.*`` attributes **stripped** — the viewer reconstructs
-   full messages from the journal instead.
-2. Installs a litellm ``CustomLogger`` callback that intercepts message lists
-   *before* each LLM call and posts only new (delta) messages to the viewer's
-   journal endpoints, reducing per-call storage from O(N) to O(delta).
-
-Multiple ``JournalExporter`` instances share a single
-``MessageJournalCallback`` -- each adds its base URL to the callback's
-destination list rather than installing a separate ``litellm.callbacks``
-entry.  litellm only delivers ``log_success_event`` to one callback per
-class, so a per-exporter callback would silently drop the call record on
-every destination after the first.
-
-Usage::
-
-    enable_tracing(exporters=[exporters.journal()])
+The shared UnifiedLLM call hook sends sanitized messages to the journal.
+Span exports omit message bodies because the viewer reconstructs them from
+that journal. Multiple exporters share a callback with destination reference
+counts; each shutdown releases only that exporter's destination.
 """
 
 from __future__ import annotations
@@ -40,7 +25,7 @@ class JournalExporter(SpanExporter):
 
     Delegates span export to an internal :class:`OtlpJsonHttpExporter` with
     ``strip_llm_messages=True`` so message attributes are omitted from the
-    wire payload.  The litellm callback handles message delivery separately.
+    wire payload.  The shared callback handles message delivery separately.
     """
 
     def __init__(self, base_url: str) -> None:
@@ -59,7 +44,7 @@ class JournalExporter(SpanExporter):
         """Register this exporter's base URL on the shared journal callback.
 
         If a :class:`MessageJournalCallback` is already in
-        ``litellm.callbacks`` we add our base URL to its destination list
+        ``journal.callbacks`` we add our base URL to its destination list
         rather than installing a second instance.  Returns the callback
         so :meth:`shutdown` can deregister.
 
@@ -70,15 +55,14 @@ class JournalExporter(SpanExporter):
         ``_Destination`` refcount only helps when the *same* callback
         is shared).
         """
-        import litellm
-
+        from nooa.tracing import _llm_hooks as journal
         from nooa.tracing._litellm_journal import (
             _INSTALL_LOCK,
             MessageJournalCallback,
         )
 
         with _INSTALL_LOCK:
-            for cb in litellm.callbacks:
+            for cb in journal.callbacks:
                 # FileMessageJournalCallback subclasses MessageJournalCallback
                 # to reuse normalization, but is a different sink.  Match the
                 # exact class so exporter construction order cannot mix them.
@@ -87,7 +71,7 @@ class JournalExporter(SpanExporter):
                     return cb
 
             cb = MessageJournalCallback(self._base_url)
-            litellm.callbacks.append(cb)
+            journal.callbacks.append(cb)
             return cb
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
@@ -98,17 +82,16 @@ class JournalExporter(SpanExporter):
         """Drop this exporter's base URL from the shared callback.
 
         If we held the last destination, also drop the callback from
-        ``litellm.callbacks`` entirely.  Other exporters' destinations on
+        ``journal.callbacks`` entirely.  Other exporters' destinations on
         the same callback are left intact.
 
         Holds the same lock ``_install`` does so a concurrent
-        ``enable_tracing`` for the same URL can't read ``litellm.callbacks``
+        ``enable_tracing`` for the same URL can't read ``journal.callbacks``
         and our refcount in inconsistent states (e.g., see refcount
         about-to-hit-zero, decide to install a fresh callback, while we're
         still in the middle of the rewrite).
         """
-        import litellm
-
+        from nooa.tracing import _llm_hooks as journal
         from nooa.tracing._litellm_journal import _INSTALL_LOCK, flush_pending
 
         # Join the journal callback's daemon-thread POSTs before tearing
@@ -122,7 +105,7 @@ class JournalExporter(SpanExporter):
         with _INSTALL_LOCK:
             self._callback.remove_destination(self._base_url)
             if not self._callback.has_destinations():
-                litellm.callbacks = [c for c in litellm.callbacks if c is not self._callback]
+                journal.callbacks = [c for c in journal.callbacks if c is not self._callback]
 
         self._span_exporter.shutdown()
 

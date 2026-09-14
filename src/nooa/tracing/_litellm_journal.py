@@ -1,23 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""LiteLLM CustomLogger that maintains a content-addressed message journal.
+"""Content-addressed message journals shared by both UnifiedLLM transports.
 
-Intercepts the message list *before* each LLM call and posts only messages
-not yet seen in this session to ``POST /v1/journal/messages``.  After each
-successful call, posts a call record referencing all messages by hash to
-``POST /v1/journal/calls``.
-
-This reduces per-call data transmission from O(N) to O(delta) — in a
-100-turn agentic loop only the 1–3 new messages per turn are transmitted,
-not the full accumulated context window.
-
-Usage (handled automatically by ``enable_tracing()``)::
-
-    import litellm
-    from nooa.tracing._litellm_journal import (
-        MessageJournalCallback,
-    )
-    litellm.callbacks.append(MessageJournalCallback("http://localhost:5001"))
+The call boundary supplies sanitized input messages and public response fields.
+Only newly seen blocks are sent to each destination. The historical
+litellm_call_id dictionary key remains for journal compatibility; this module
+does not depend on LiteLLM.
 """
 
 from __future__ import annotations
@@ -32,7 +20,6 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any
 
-from litellm.integrations.custom_logger import CustomLogger
 from opentelemetry import trace as otel_trace
 
 from nooa.tracing._journal_builder import _encode_image
@@ -383,8 +370,8 @@ class _Destination:
         self.sent_hashes: set[str] = set()
 
 
-class MessageJournalCallback(CustomLogger):
-    """LiteLLM callback that streams skeletons + content-addressed blocks.
+class MessageJournalCallback:
+    """Shared callback that streams skeletons + content-addressed blocks.
 
     Per LLM call:
 
@@ -398,11 +385,8 @@ class MessageJournalCallback(CustomLogger):
        ``/v1/journal/calls`` *on every configured destination*.  Output
        messages (assistant replies) are included inline.
 
-    Multiple destinations live behind a single callback so they all get
-    every event.  litellm dispatches ``log_pre_api_call`` to every
-    callback in ``litellm.callbacks`` but only delivers
-    ``log_success_event`` to one per class — putting all destinations
-    inside one callback instance sidesteps that asymmetry.
+    Multiple destinations share a callback so block hashes and reference counts
+    are maintained once for each session and destination.
 
     Per-destination, per-session in-memory hash sets avoid retransmitting
     blocks that were already sent for that session.
@@ -597,18 +581,17 @@ class MessageJournalCallback(CustomLogger):
         if output_blocks:
             self._send_new_blocks(session_id, output_blocks)
 
-        usage = getattr(response_obj, "usage", None)
+        from nooa.llm_types import LLMUsage
+
+        usage = LLMUsage.from_provider(getattr(response_obj, "usage", None))
         tokens: dict[str, int] | None = None
         if usage:
             tokens = {
-                "prompt": getattr(usage, "prompt_tokens", 0) or 0,
-                "completion": getattr(usage, "completion_tokens", 0) or 0,
+                "prompt": getattr(usage, "input_tokens", 0) or 0,
+                "completion": getattr(usage, "output_tokens", 0) or 0,
             }
-            details = getattr(usage, "prompt_tokens_details", None)
-            if details:
-                cached = getattr(details, "cached_tokens", 0) or 0
-                if cached:
-                    tokens["cached"] = cached
+            if usage.cached_input_tokens:
+                tokens["cached"] = usage.cached_input_tokens
 
         record: dict = {
             "call_id": call_id,
@@ -665,7 +648,6 @@ class FileMessageJournalCallback(MessageJournalCallback):
     """
 
     def __init__(self, writer: Any) -> None:
-        CustomLogger.__init__(self)
         self._call_inputs: dict[str, tuple[list[dict], str | None]] = {}
         self._lock = threading.Lock()
         self._writers: dict[Any, int] = {writer: 1}

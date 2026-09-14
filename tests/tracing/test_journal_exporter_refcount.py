@@ -12,14 +12,13 @@ sink survived.
 
 from __future__ import annotations
 
-import litellm
-
+from nooa.tracing import _llm_hooks as journal
 from nooa.tracing._journal_exporter import JournalExporter
 from nooa.tracing._litellm_journal import MessageJournalCallback
 
 
 def _journal_callbacks() -> list[MessageJournalCallback]:
-    return [cb for cb in litellm.callbacks if isinstance(cb, MessageJournalCallback)]
+    return [cb for cb in journal.callbacks if isinstance(cb, MessageJournalCallback)]
 
 
 def test_two_exporters_same_url_share_one_callback_with_refcount_two():

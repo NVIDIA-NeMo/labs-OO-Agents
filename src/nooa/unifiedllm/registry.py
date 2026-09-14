@@ -395,6 +395,9 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
         "store",
         "include",
         "cache_breakpoint",
+        "transport",
+        "api_style",
+        "replay_vendor",
     ):
         if key in config and key not in overrides:
             params[key] = config[key]

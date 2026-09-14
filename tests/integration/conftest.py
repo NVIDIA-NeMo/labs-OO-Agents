@@ -51,6 +51,10 @@ def _reset_tracing_module_state() -> None:
     # ``_async_success_callback`` / etc on the first call -- those copies
     # outlive the original list and would let a stale callback keep firing
     # against a recorder that has since been torn down.
+    from nooa.tracing import _llm_hooks
+
+    _llm_hooks.callbacks.clear()
+
     with contextlib.suppress(ImportError):
         import litellm
 

@@ -12,27 +12,21 @@ import copy
 import hashlib
 import logging
 import os
+import sys
 from typing import Any, Literal
 from urllib.parse import urlsplit
-
-import litellm
 
 from nooa.llm_types import CacheBoundary, LLMResponse
 from nooa.unifiedllm.cache_policy import reject_boundary_dict
 from nooa.unifiedllm.errors import ReasoningReplayError
+
+from ._legacy import litellm
 
 logger = logging.getLogger(__name__)
 LLM_STATE_KEY = "_nooa_llm_state"
 
 _ENCRYPTED_REASONING_INCLUDE = "reasoning.encrypted_content"
 _INLINE_THOUGHT_SIGNATURE_SEPARATOR = "__thought__"
-_SUPPORTED_PROVIDERS = {
-    "openai",
-    "azure",
-    "anthropic",
-    "gemini",
-    "deepseek",  # Plain reasoning_content is required on thinking-mode tool turns.
-}
 
 
 def _field(value: Any, key: str, default: Any = None) -> Any:
@@ -105,7 +99,7 @@ def _uses_native_openai_endpoint(api_params: dict[str, Any]) -> bool:
     endpoint = (
         api_params.get("api_base")
         or api_params.get("base_url")
-        or getattr(litellm, "api_base", None)
+        or getattr(sys.modules.get("litellm"), "api_base", None)
         or os.getenv("OPENAI_BASE_URL")
         or os.getenv("OPENAI_API_BASE")
         or "https://api.openai.com/v1"
@@ -139,12 +133,16 @@ def replay_scope(
             exc,
         )
         return None
-    if provider not in _SUPPORTED_PROVIDERS or (
-        api_style == "responses" and provider not in {"openai", "azure"}
-    ):
+    provider = params.get("replay_vendor") or provider
+    if api_style == "responses" and provider not in {"openai", "azure"}:
         return None
 
-    digest = hashlib.sha256(resolved_model.encode()).hexdigest()
+    return scope_for_route(resolved_model, provider, api_style)
+
+
+def scope_for_route(model: str, provider: str, api_style: str) -> str:
+    """The wire model and declared vendor define replay, not the HTTP client."""
+    digest = hashlib.sha256(model.encode()).hexdigest()
     return f"{api_style}:{provider}:sha256:{digest}"
 
 
