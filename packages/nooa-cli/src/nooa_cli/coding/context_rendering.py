@@ -1,6 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Safe, bounded rendering for model-facing delegated context."""
+"""Prepare caller-supplied reference data for an isolated coding worker's prompt.
+
+``BenchAgent.delegate`` uses this renderer instead of interpolating arbitrary reprs:
+it limits traversal/output, redacts credential-like fields, and tolerates cycles.
+The shared coding-agent package owns this application policy so benchmark and
+interactive workers can use the same renderer without depending on a TUI or ACP
+host. This is a lossy prompt view, not the snapshot/serialization layer; structured
+Todo state is copied separately. Redaction is conservative and is not a guarantee
+that arbitrary free text contains no secrets.
+"""
 
 from __future__ import annotations
 

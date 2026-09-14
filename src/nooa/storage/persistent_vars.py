@@ -1,6 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Shared attribute-access API for snapshot-backed persistent variables."""
+"""Shared attribute-access facade over an owner's existing ``vars`` mapping.
+
+This generalizes the ``TodoVars`` proxy formerly defined in ``nooa.tools.todo``;
+it does not implement a new persistence backend. Core ``Todo.v`` and application
+agents that expose ``self.v`` use the same API. It lives beside ``SnapshotVars``
+so the core Todo tool does not depend on the CLI or an interactive session host.
+Snapshot storage and its owner determine when values are saved and restored.
+"""
 
 from typing import Any
 
@@ -27,6 +34,8 @@ class PersistentVars:
 
     Values must be snapshot-serializable (for example dicts, lists, strings,
     numbers, or Pydantic models); unsupported live objects are not stored.
+    This facade does not install ``self.v`` on agents or enable disk persistence;
+    an application must supply the owner and configure its snapshot storage.
     """
 
     def __init__(self, owner: Any):
