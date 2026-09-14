@@ -273,7 +273,7 @@ connects nor grants approval. Client-supplied definitions are not copied. Saved
 model preferences do not override the current ACP CLI's required explicit model.
 The core registry and LLM backend APIs are unchanged.
 
-`scripts/pool_mcp_probe.py` is a dependency-free stdio MCP server that journals
+`packages/nooa-acp/tests/fixtures/mcp_probe.py` is a dependency-free stdio MCP fixture that journals
 starts and nonce-echo calls. The adapter integration test exercises it through
 session/new and session/load. `docs/plans/pool-mcp-acceptance.md` describes the
 separate manual Pool test; Pool itself has not been run here.

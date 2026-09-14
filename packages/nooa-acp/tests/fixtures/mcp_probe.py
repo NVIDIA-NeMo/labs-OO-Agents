@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Dependency-free stdio MCP probe for testing client-to-NOOA forwarding.
+"""Dependency-free stdio MCP fixture for forwarding and persistence tests.
 
-Run through Pool's MCP configuration with --journal /absolute/path/to/log.jsonl.
+Launch with --journal /absolute/path/to/log.jsonl.
 Only protocol replies go to stdout. The journal records starts and tool calls.
 """
 
@@ -38,7 +38,7 @@ def main() -> None:
             result = {
                 "protocolVersion": params["protocolVersion"],
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "nooa-pool-probe", "version": "1.0.0"},
+                "serverInfo": {"name": "nooa-mcp-probe", "version": "1.0.0"},
             }
         elif method == "ping":
             result = {}

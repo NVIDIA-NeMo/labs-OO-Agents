@@ -664,15 +664,15 @@ async def test_workspace_settings_remembers_mcp_without_connecting_or_approving(
         await close_native(result)
 
 
-async def test_pool_mcp_probe_is_callable_on_new_and_loaded_acp_sessions(workspace, tmp_path):
+async def test_client_mcp_probe_is_callable_on_new_and_loaded_acp_sessions(workspace, tmp_path):
     import sys
 
     from acp.schema import McpServerStdio
 
     journal = tmp_path / "mcp-journal.jsonl"
-    script = Path(__file__).resolve().parents[3] / "scripts" / "pool_mcp_probe.py"
+    script = Path(__file__).parent / "fixtures" / "mcp_probe.py"
     server = McpServerStdio(
-        name="pool_probe",
+        name="client_probe",
         command=sys.executable,
         args=[str(script), "--journal", str(journal)],
         env=[],
@@ -686,15 +686,15 @@ async def test_pool_mcp_probe_is_callable_on_new_and_loaded_acp_sessions(workspa
                 await adapter.close_session(created.session_id)
                 await adapter.load_session(str(workspace), created.session_id, mcp_servers=[server])
             agent = (await adapter._sessions.get(created.session_id)).value.agent
-            assert "mcp.pool_probe" in agent.skills.activated()
-            response = await agent.pool_probe.probe(nonce=nonce)
+            assert "mcp.client_probe" in agent.skills.activated()
+            response = await agent.client_probe.probe(nonce=nonce)
             payload = json.loads(response)
             assert payload["nonce"] == nonce
             entries = [json.loads(line) for line in journal.read_text().splitlines()]
             assert payload in entries
             assert payload["server_token"]
             # Client-supplied configuration has not become a NOOA default.
-            assert "pool_probe" not in agent.workspace_settings.status()["saved"]["mcp_servers"]
+            assert "client_probe" not in agent.workspace_settings.status()["saved"]["mcp_servers"]
     finally:
         await adapter.close()
 
@@ -704,7 +704,7 @@ async def test_remembered_mcp_reconnects_in_both_hosts_and_forget_stops_startup(
 ):
     import sys
 
-    script = Path(__file__).resolve().parents[3] / "scripts" / "pool_mcp_probe.py"
+    script = Path(__file__).parent / "fixtures" / "mcp_probe.py"
     journal = tmp_path / "remembered-mcp.jsonl"
     source = await open_native(workspace)
     fresh_native = None

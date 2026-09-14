@@ -51,11 +51,11 @@ async def test_mcp_handoff_trace_observes_new_and_load_requests(tmp_path):
     """Exercise the real wire observer, including an empty handoff on resume."""
     client = _RecordingClient()
     fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
-    probe = Path(__file__).resolve().parents[3] / "scripts" / "pool_mcp_probe.py"
+    probe = Path(__file__).parent / "fixtures" / "mcp_probe.py"
     trace = tmp_path / "handoff.jsonl"
     secret = "private-mcp-environment-value"
     server = McpServerStdio(
-        name="pool_probe",
+        name="client_probe",
         command=sys.executable,
         args=[str(probe), "--journal", str(tmp_path / "probe.jsonl")],
         env=[EnvVariable(name="TEST_SECRET", value=secret)],
@@ -88,7 +88,7 @@ async def test_mcp_handoff_trace_observes_new_and_load_requests(tmp_path):
                 "pid": process.pid,
                 "event": "session/new",
                 "mcpServersField": "list",
-                "servers": [{"name": "pool_probe", "transport": "stdio"}],
+                "servers": [{"name": "client_probe", "transport": "stdio"}],
             },
             {
                 "pid": process.pid,
