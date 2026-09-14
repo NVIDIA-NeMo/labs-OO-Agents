@@ -11,6 +11,7 @@ queues and re-enters ``handle()`` once per notification. It provides:
 * ``self.v`` — snapshot-backed persistent variables that survive turns
   and sessions,
 * ``message()`` — send a Markdown message to the user,
+* ``rename_session()`` — update the host's current session title,
 * the ``handle()`` → ``RespondResult`` turn protocol,
 * token-budget history summarization (``install_summarizer`` /
   ``apply_model_limits``).
@@ -25,10 +26,10 @@ from typing import Annotated, Any, ClassVar, Literal
 from pydantic import BaseModel, Field, field_validator
 
 from nooa import hidden, strategy
-from nooa.agentdoc import doc
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
 from nooa.storage.markers import nosnapshot
+from nooa.storage.persistent_vars import PersistentVars
 from nooa.storage.snapshot_vars import SnapshotVars
 
 with hidden:
@@ -36,11 +37,10 @@ with hidden:
 
     from nooa import Agent
     from nooa.agents import TokenBudgetSummarizer
-    from nooa.config import CodeActConfig, PredictConfig  # noqa: F401
+    from nooa.config import CodeActConfig  # noqa: F401
     from nooa.runtime.channels import Channel, QueueManager, _ChannelReader
     from nooa.runtime.producers_skill import ProducersSkill
     from nooa.strategies import CodeActStrategy
-    from nooa.tools.web_publisher import WebPublisher
 
 # Standard library — all visible in REPL
 import asyncio  # noqa: F401
@@ -50,11 +50,6 @@ import re  # noqa: F401
 
 from nooa.runtime import producers  # noqa: F401
 from nooa.runtime.producers import after, cron, monitor, run_job, tail  # noqa: F401
-
-# os is used by this module (NEMO_OO_RICH_URL check) but not useful to expose to
-# the agent's REPL — hide it so doc(self) / exec_globals don't advertise it.
-with hidden:
-    import os
 
 # Optional third-party libraries — visible in REPL (use np, pd, px, go directly)
 try:
@@ -94,10 +89,9 @@ class RespondReason(StrEnum):
     DONE = "DONE"
     NEED_INPUT = "NEED_INPUT"
     WAIT = "WAIT"
-    GET_USER_INPUT = "GET_USER_INPUT"
 
 
-RespondKind = Literal["DONE", "NEED_INPUT", "WAIT", "GET_USER_INPUT"]
+RespondKind = Literal["DONE", "NEED_INPUT", "WAIT"]
 
 
 class RespondResult(BaseModel):
@@ -111,38 +105,75 @@ class RespondResult(BaseModel):
           human input before continuing the current request.
         * ``RespondReason.WAIT`` — the agent is waiting for a background job or
           non-user queue/event before it can continue.
-        * ``RespondReason.GET_USER_INPUT`` — legacy spelling for waiting on
-          human input; prefer ``DONE`` or ``NEED_INPUT``.
 
       All stop reasons use the same dispatcher wake path: race every declared
       queue/event channel and re-enter ``handle()`` with the first arrival.
       ``kind`` records why the agent stopped; it does not choose a different
       queue primitive.
-    - ``explanation`` — required non-empty short reason why the agent is ending this
-      turn, or what external input/background event it is waiting for. The host
-      records and renders this line, so make it concrete: name the job/queue
-      being waited on, why it matters, or what user input is needed and why.
+    - ``explanation`` — short internal status note about why this turn ended.
+      This is NOT the reply to the user; it renders as a terse one-line status
+      (e.g. ``∴ done: <explanation>``), not as a chat reply.
+
+      User-facing content — answers, greetings, questions for the user — MUST
+      be sent via ``self.message(...)`` BEFORE ``return_result``. The rule per
+      ``kind``:
+
+        * ``DONE`` — if this turn was handling a user message, you almost
+          certainly owe the user a reply: call ``self.message(...)`` first.
+          Exceptions: the request was satisfied by a pure side effect the user
+          can already see (a slash-command mutation, a UI state change), or you
+          already sent a ``self.message(...)`` earlier in the turn.
+        * ``NEED_INPUT`` — you are asking the user something. ALWAYS call
+          ``self.message(...)`` with the question first; the ``explanation`` is
+          not the question.
+        * ``WAIT`` — no user reply expected. ``explanation`` IS the intended
+          surface: name the job/queue being waited on and why (e.g. "waiting
+          on build job #422 to finish before running tests").
+
+      Keep ``explanation`` terse and factual either way — it's a status line
+      for the host log, not prose.
 
 
     Use ``self.v.<name> = value`` for state that should survive across
     turns (snapshot-backed).
 
-    Build from within the LLM's ``execute_python`` code::
+    Correct pattern for a user-message reply — send the reply first, THEN
+    signal turn end::
 
+        self.message("Hi! I'm the coding agent. What would you like to work on?")
+        return_result(RespondReason.DONE, explanation="greeted the user")
+
+    WRONG — putting the reply in ``explanation`` (the user will not see it as
+    a chat reply; only a terse status line is shown)::
+
+        # BAD: no self.message() call, reply stuffed into explanation
         return_result(
             RespondReason.DONE,
-            explanation="answered the request; waiting for the next user message",
+            explanation="Hi! I'm the coding agent. What would you like to work on?",
         )
+
+    Correct pattern for WAIT — no ``self.message()`` needed; ``explanation``
+    is the status the UI shows::
+
+        return_result(RespondReason.WAIT, explanation="waiting on build job #422")
 
     The older explicit model form is still valid::
 
-        return_result(RespondResult(kind="DONE", explanation="answered the request"))
+        return_result(RespondResult(kind="DONE", explanation="greeted the user"))
     """
 
     kind: RespondReason = Field(description="What the outer dispatcher should do next")
     explanation: str = Field(
         min_length=1,
-        description=("Required: why handle() returned, or what the dispatcher is waiting for."),
+        description=(
+            "Short internal status note about why this turn ended (e.g. 'answered "
+            "the request', 'waiting on build job #422'). NOT shown to the user as "
+            "a chat reply — it renders as a terse status line. For DONE and "
+            "NEED_INPUT, send user-facing content via self.message(...) BEFORE "
+            "calling return_result; do not put the answer, greeting, or question "
+            "here. For WAIT, explanation IS the surfaced status — name the "
+            "job/queue being waited on."
+        ),
     )
 
     @field_validator("explanation")
@@ -257,46 +288,8 @@ def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
     )
 
 
-class AgentVars:
-    """Attribute-access proxy for an agent's persistent ``vars`` dict.
-
-    Mirrors ``TodoVars``: write ``self.v.spec = "..."`` instead of
-    ``self.vars["spec"] = "..."``. Reads and writes go straight
-    through to ``self.vars`` so snapshot serialization is unaffected.
-
-    Use for variables that need to survive across turns and across
-    sessions but aren't tied to a specific todo. (For per-todo state,
-    use ``self.todo.<id>.v`` — same shape, narrower scope.)
-
-    Values are snapshot-backed: assigning something that can't be
-    snapshot-serialized (a live client, socket, callable, ...) logs a
-    warning and is **not stored** — it won't survive ``/exit`` + resume.
-    Store serializable data (dict/str/number/Pydantic model) instead.
-    """
-
-    def __init__(self, agent: Any):
-        object.__setattr__(self, "_agent", agent)
-
-    def __getattr__(self, key: str) -> Any:
-        try:
-            return self._agent.vars[key]
-        except KeyError:
-            raise AttributeError(f"No var {key!r} on agent") from None
-
-    def __setattr__(self, key: str, value: Any) -> None:
-        self._agent.vars[key] = value
-
-    def __delattr__(self, key: str) -> None:
-        try:
-            del self._agent.vars[key]
-        except KeyError:
-            raise AttributeError(f"No var {key!r} on agent") from None
-
-    def __contains__(self, key: str) -> bool:
-        return key in self._agent.vars
-
-    def __repr__(self) -> str:
-        return repr(self._agent.vars)
+# Backward-compatible import name; both agent.v and todo.v use PersistentVars.
+AgentVars = PersistentVars
 
 
 @hidden
@@ -304,7 +297,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     """Base class for agents driven by an outer dispatcher (TUI, harness, ...).
 
     Subclass this and implement ``handle()`` to build a custom interactive
-    agent. ``message()`` is provided for free.
+    agent. ``message()`` and ``rename_session()`` are provided for free.
 
     **Input queues.** Every ``InteractiveAgent`` has a ``self.user_messages``
     queue (``InputQueue``) that the host feeds when the human types.
@@ -323,6 +316,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     """
 
     _render_message: Annotated[Callable[[str], None] | None, hidden, nosnapshot]
+    _session_manager: Annotated[Any | None, hidden, nosnapshot]
     # QueueManager owns the channel registry. Hidden from the LLM by
     # default — the LLM should access individual channels (e.g.
     # ``self.user_messages``) directly, not through a string-keyed
@@ -342,39 +336,36 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     def __init__(self, llm=None, **kwargs):
         super().__init__(llm=llm or _DEFAULT_LLM, **kwargs)
         self._render_message = None
+        self._session_manager = None
         self.vars = SnapshotVars()
         self.queue_manager = QueueManager(event_manager=self.event_manager)
         self._user_messages_in = self.queue_manager.queue("user_messages")
         self.user_messages = self._user_messages_in.reader
         self.producers = ProducersSkill()
-        # Surface pending-queue counts (and a short preview of each item)
-        # to the LLM every turn — the agent reads queue depth straight
+        # Surface payload-free pending-queue counts to the LLM every turn —
+        # the agent reads queue depth straight
         # from the ``queues`` context block. Composed via
         # ``QueueManager.status()`` so adding new channels Just Works.
         from nooa import Context
 
         self.context["queues"] = Context(expr="self.queue_manager.status()")
-        if os.environ.get("NEMO_OO_RICH_URL"):
-            from nooa.tools.web_publisher import RichOutput
+        self.event_manager.on("SessionResumed", self._remove_legacy_web_context)
 
-            self.event_manager.register_event_type(RichOutput)
-            self.web: Annotated[WebPublisher, nosnapshot] = WebPublisher(
-                event_manager=self.event_manager
-            )
-            # The WebPublisher's doc is static across the session, so
-            # it goes into the cacheable prefix with the system prompt.
-            from nooa import Context
-
-            self.context["web"] = Context(doc(self.web), prefix=True)
+    def _remove_legacy_web_context(self, event: Any) -> None:
+        """Retire WebPublisher instructions carried by older session snapshots."""
+        if "web" in self.context and "WebPublisher" in str(self.context["web"]):
+            del self.context["web"]
 
     @property
-    def v(self) -> AgentVars:
+    def v(self) -> PersistentVars:
         """Attribute-access proxy for ``self.vars`` — the agent's
         persistent variable dict.
 
-        Use for state that should survive across turns and sessions
-        but isn't tied to a specific todo. Snapshot-backed via
-        ``self.vars``.
+        Use for durable cross-task state such as agent identity, stable
+        preferences, environment facts, and long-running coordination. Put
+        task-specific plans, findings, artifacts, and checkpoints on the relevant
+        Todo's ``v`` proxy. Keep transient scratch data in cell locals.
+        Snapshot-backed via ``self.vars``.
 
         Usage::
 
@@ -384,12 +375,11 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
             del self.v.cursor
 
         Compare:
-        - REPL locals → cleared between turns.
-        - ``self.v.k = v`` → snapshot-backed, survives turns + sessions.
-        - ``self.todo.<t>.v.k = v`` → same as ``self.v`` but scoped to
-          one todo.
+        - ``self.v.k = v`` → durable cross-task identity/long-running state.
+        - ``todo.v.k = v`` → durable work state scoped to one task.
+        - REPL locals → transient scratch state for the current work session.
         """
-        return AgentVars(self)
+        return PersistentVars(self)
 
     def message(self, text: str, *, echo: bool = False) -> None:
         """Send a Markdown message to the user.
@@ -417,6 +407,41 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         if echo:
             print(text)
 
+    def rename_session(self, title: str) -> str:
+        """Rename the current interactive session and return its normalized title.
+
+        Use this when a host system message asks you to title the session. Keep
+        the title descriptive and very short (usually 2-5 words). This changes
+        session metadata only; do not call it in place of answering the user.
+        """
+        normalized = " ".join(str(title).strip().strip('"').strip("'").split())[:60]
+        if not normalized:
+            raise ValueError("Session title cannot be empty")
+
+        manager = self._session_manager
+        if manager is None:
+            raise RuntimeError("This host does not provide session renaming")
+
+        # A title explicitly chosen by the user always wins over an automatic
+        # request that was queued earlier in the turn.
+        info = getattr(manager, "info", None)
+        user_named = bool(
+            getattr(manager, "user_named", False) or getattr(info, "title_is_user_set", False)
+        )
+        if user_named:
+            current = getattr(manager, "name", None) or getattr(info, "title", None)
+            return str(current or normalized)
+
+        rename = getattr(manager, "rename", None)
+        if callable(rename):
+            rename(normalized, user_named=False)
+        else:
+            set_title = getattr(manager, "set_title", None)
+            if not callable(set_title):
+                raise RuntimeError("This host's session manager cannot rename sessions")
+            set_title(normalized, user_set=False)
+        return normalized
+
     @hidden
     @strategy(CodeActStrategy())
     async def handle(
@@ -442,10 +467,11 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
         ## Work ethic
 
-        Do ALL the work before returning. Use as many ``execute_python``
-        calls as needed — explore, implement, test, iterate. A turn that
+        Do ALL the work before returning. Use as many execution cells
+        as needed — explore, implement, test, iterate. A turn that
         returns after one or two cells when the task clearly needs more
-        is a bug. The only reasons to call ``return_result`` are:
+        is a bug, except when yielding for a live background dependency.
+        The only reasons to call ``return_result`` are:
 
         1. You have genuinely completed everything the user asked for.
         2. You need user input to proceed (ambiguity, confirmation).
@@ -455,9 +481,10 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
         End the turn with exactly one ``return_result(REASON_ENUM, explanation="...")``.
         ``explanation`` is required and must be non-empty. The host records and renders it as the
-        visible stop reason, so be specific and user-facing: if waiting on a
-        job/queue, name which job and why; if asking for input, say what input
-        is needed and why.
+        visible stop status, so keep it terse and factual. It is not the user reply:
+        send answers and questions through ``self.message()`` first. If waiting on a
+        job or queue, name which one and why. For ``NEED_INPUT``, summarize why input
+        is needed after sending the actual question through ``self.message()``.
 
         - Request complete; wait for the next user message::
 
@@ -476,8 +503,6 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         arrival. Use ``kind`` to say why you are stopping, not to select a
         different queue primitive.
 
-
-
         ## Available queues
 
         The dispatcher delivers the next item via ``notification``.
@@ -492,7 +517,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
         Hosts declare the rest. ``CodingAgent`` adds ``"slash_commands"``
         (``SlashCommandResult``) and ``"system_messages"`` (host-owned
-        prompts such as keep-going continuations); a harness might add
+        prompts supplied by the host); a harness might add
         ``"job_outputs"``. The
         ``<queue_status>`` context block lists the pending count per
         queue each turn. After any stop reason, the dispatcher races every

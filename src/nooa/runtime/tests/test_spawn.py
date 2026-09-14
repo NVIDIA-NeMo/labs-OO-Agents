@@ -8,6 +8,7 @@ No LLM / runtime required — just ``asyncio`` behaviour.
 from __future__ import annotations
 
 import asyncio
+import uuid
 
 import pytest
 
@@ -347,3 +348,134 @@ async def test_spawn_buffer_false_no_accumulation():
 
     assert handle.values == []
     assert handle.state == "done"
+
+
+@pytest.mark.asyncio
+async def test_cancel_does_not_swallow_callers_cancellation():
+    qm = QueueManager()
+    qm.queue("work")
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def stubborn_job():
+        try:
+            await asyncio.sleep(100)
+        finally:
+            cleanup_started.set()
+            await release_cleanup.wait()
+
+    handle = qm.spawn(stubborn_job(), channel="work")
+    cancel_task = asyncio.create_task(handle.cancel())
+    await cleanup_started.wait()
+    cancel_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancel_task
+    release_cleanup.set()
+    await asyncio.sleep(0)
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_replaced_channel_suppresses_stale_terminal_event_and_awaits_cleanup():
+    em = FakeEventManager()
+    qm = QueueManager(event_manager=em)
+    qm.queue("work")
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def old_job():
+        try:
+            yield "old"
+            await asyncio.sleep(100)
+        finally:
+            cleanup_started.set()
+            await release_cleanup.wait()
+
+    old_handle = qm.spawn(old_job(), channel="work")
+    await asyncio.sleep(0)
+    replacement = qm.queue("work", replace=True)
+    await cleanup_started.wait()
+    new_handle = qm.spawn(asyncio.sleep(0, result="new"), channel="work")
+    assert await replacement.reader.get() == "new"
+    await asyncio.sleep(0)
+    assert new_handle.state == "done"
+
+    shutdown = asyncio.create_task(qm.shutdown())
+    await asyncio.sleep(0)
+    assert not shutdown.done()
+    release_cleanup.set()
+    await shutdown
+    assert old_handle.state == "cancelled"
+    ends = [event for event in em.events if isinstance(event, StreamEnd)]
+    assert len(ends) == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_end_observer_failure_marks_job_failed_without_leaking():
+    class FailingEventManager(FakeEventManager):
+        def add(self, event):
+            if isinstance(event, StreamEnd):
+                raise RuntimeError("observer closed")
+            super().add(event)
+
+    qm = QueueManager(event_manager=FailingEventManager())
+    channel = qm.queue("work")
+    handle = qm.spawn(asyncio.sleep(0, result="done"), channel="work")
+
+    assert await channel.reader.get() == "done"
+    await asyncio.sleep(0)
+    assert handle.state == "failed"
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_spawned_jobs_have_unique_ids_and_cancel_by_id():
+    qm = QueueManager()
+    qm.queue("work")
+
+    async def wait_forever():
+        await asyncio.sleep(100)
+
+    first = qm.spawn(wait_forever(), channel="work")
+    second = qm.spawn(wait_forever(), channel="work")
+    assert first.job_id != second.job_id
+    assert len(first.job_id) == len(uuid.uuid4().hex)
+    assert qm.get_handle(first.job_id) is first
+    assert await qm.cancel_job(first.job_id) is True
+    assert first.state == "cancelled"
+    assert second.state == "running"
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_status_advertises_unique_job_cancellation():
+    qm = QueueManager()
+    qm.queue("work")
+
+    async def wait_forever():
+        await asyncio.sleep(100)
+
+    first = qm.spawn(wait_forever(), channel="work", label="first")
+    second = qm.spawn(wait_forever(), channel="work", label="second")
+    status = qm.status()
+    assert f"cancel_job('{first.job_id}')" in status
+    assert f"cancel_job('{second.job_id}')" in status
+    assert ".cancel('work')" not in status
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_failure_and_stream_end_are_correlated_by_job_id():
+    em = FakeEventManager()
+    qm = QueueManager(event_manager=em)
+    qm.queue("work")
+
+    async def fail():
+        raise RuntimeError("boom")
+
+    handle = qm.spawn(fail(), channel="work", label="failing job")
+    await asyncio.sleep(0)
+    error = next(event for event in em.events if isinstance(event, JobError))
+    end = next(event for event in em.events if isinstance(event, StreamEnd))
+    assert error.job_id == handle.job_id == end.job_id
+    assert error.label == "failing job"
