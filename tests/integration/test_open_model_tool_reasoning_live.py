@@ -1,9 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Opt-in Hub reasoning/tool replay: two capped calls per model, no retries.
+"""Opt-in open-model reasoning/tool replay: two capped calls per model, no retries.
 
-NOOA_RUN_OPEN_MODEL_REPLAY=1 uv run --env-file ../.env pytest -m integration -s
+NOOA_RUN_OPEN_MODEL_REPLAY=1 uv run pytest -m integration -s
     tests/integration/test_open_model_tool_reasoning_live.py
+
+Routes come from the ``release-gate-<family>`` registry aliases supplied by the
+bundled-config package (see tests/integration/_release_gate.py); a missing alias
+skips the case.
 
 Tests raw reasoning_content on the next HTTP request after SQLite close/reopen,
 not merely its visibility somewhere in answer text. No opaque state is printed.
@@ -20,9 +24,10 @@ import pytest
 
 from nooa.llm_types import LLMResponse
 from nooa.storage.sqlite import SQLiteStorageManager
-from nooa.unifiedllm import CompletionClient, Tool
+from nooa.unifiedllm import Tool
 from nooa.unifiedllm.http_config import HttpConfig
 from nooa.unifiedllm.retry_config import RetryConfig
+from tests.integration._release_gate import gate_client, gate_host
 
 pytestmark = [
     pytest.mark.integration,
@@ -32,12 +37,7 @@ pytestmark = [
     ),
 ]
 
-MODELS = {
-    "deepseek": "openai/nvidia/deepseek-ai/deepseek-v4-pro",
-    "kimi": "openai/nvidia/moonshotai/kimi-k3",
-    "glm": "openai/nvidia/zai-org/glm-5.3",
-    "qwen": "openai/nvidia/qwen/qwen3-5-397b-a17b",
-}
+FAMILIES = ("deepseek", "kimi", "glm", "qwen")
 
 
 def lookup(key: str) -> int:
@@ -46,18 +46,19 @@ def lookup(key: str) -> int:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("family", MODELS)
+@pytest.mark.parametrize("family", FAMILIES)
 async def test_open_model_tool_reasoning_after_sqlite_resume(
     family, tmp_path, monkeypatch, record_property
 ):
     monkeypatch.setenv("DISABLE_AIOHTTP_TRANSPORT", "True")
+    host = gate_host(family)
     sent = []
     omitted_status = []
     omit_reasoning = False
     original_send = httpx.AsyncClient.send
 
     async def capture(client, request, *args, **kwargs):
-        if request.method == "POST" and request.url.host == "inference-api.nvidia.com":
+        if request.method == "POST" and request.url.host == host:
             body = json.loads(request.content)
             if omit_reasoning:
                 assistant = next(m for m in body["messages"] if m.get("role") == "assistant")
@@ -96,16 +97,14 @@ async def test_open_model_tool_reasoning_after_sqlite_resume(
         {"role": "user", "content": "Live context: phase=before lookup."},
     ]
     options = {
-        "model": MODELS[family],
-        "api_base": "https://inference-api.nvidia.com/v1",
-        "api_key": os.environ["NVIDIA_INFERENCE_API_KEY"],
         "max_tokens": 1536,
         "http_config": HttpConfig(read_timeout=120),
         "num_retries": 0,
         "retry_config": RetryConfig(max_retries=0, rate_limit_extra_retries=0),
     }
     tools = [Tool(name="lookup", description="Look up an offset", callable=lookup)]
-    async with CompletionClient(**options) as client:
+    async with gate_client(family, **options) as client:
+        model_name = client.model
         seed = await client.acall(messages, tools=tools)
     print(
         json.dumps(
@@ -139,14 +138,14 @@ async def test_open_model_tool_reasoning_after_sqlite_resume(
         ],
         {"role": "user", "content": "Live context: lookup complete. Answer concisely."},
     ]
-    async with CompletionClient(**options) as client:
+    async with gate_client(family, **options) as client:
         result = await client.acall(history, tools=tools)
     assert len(sent) == 2, "probe must not retry"
     replay = next(m for m in sent[1]["messages"] if m.get("role") == "assistant")
     assert replay.get("reasoning_content") == raw, "native reasoning field changed on wire"
     assert result.finish_reason == "stop"
     assert result.content
-    record_property("model", MODELS[family])
+    record_property("model", model_name)
     record_property("seed_usage", seed.usage.model_dump_json())
     record_property("resumed_usage", result.usage.model_dump_json())
     print(
@@ -166,7 +165,7 @@ async def test_open_model_tool_reasoning_after_sqlite_resume(
         error_type = None
         omitted_result = None
         try:
-            async with CompletionClient(**options) as client:
+            async with gate_client(family, **options) as client:
                 omitted_result = await client.acall(history, tools=tools)
         except Exception as exc:
             # This is an observational negative probe: record rejection, never

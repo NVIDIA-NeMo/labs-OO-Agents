@@ -27,7 +27,7 @@ The strict gate performs:
    verifies their versions, and smoke-tests imports and `nooa --version` in a
    clean environment.
 3. Runs seven bounded [provider replay/cache checks](docs/release-provider-validation.md)
-   on the candidate (17 capped Hub requests, no retries), including SQLite resume
+   on the candidate (17 capped provider requests, no retries), including SQLite resume
    and changing trailing dynamic context. Missing or skipped results fail the gate.
 4. Runs the full capability suite for the candidate and previous release, fresh
    and back-to-back: four gate models, three runs, full data, no response cache.

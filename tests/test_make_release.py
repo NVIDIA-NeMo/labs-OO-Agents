@@ -930,14 +930,11 @@ def test_release_runner_contains_no_publish_operation(mr):
     ["passed", "skipped", "failure", "error", "empty", "partial", "missing", "malformed", "exit"],
 )
 def test_provider_gate_requires_seven_passes(mr, monkeypatch, tmp_path, outcome):
-    monkeypatch.delenv("NVIDIA_INFERENCE_API_KEY", raising=False)
-    monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "test-only-key")
     monkeypatch.setenv("NOOA_TEST_OMITTED_REASONING", "1")
     calls = []
 
     def run(cmd, **kwargs):
         calls.append((cmd, kwargs))
-        assert kwargs["env"]["NVIDIA_INFERENCE_API_KEY"] == "test-only-key"
         assert kwargs["env"]["NOOA_RUN_OPEN_MODEL_REPLAY"] == "1"
         assert kwargs["env"]["NOOA_RUN_CACHE_RESUME_LIVE"] == "1"
         assert "NOOA_TEST_OMITTED_REASONING" not in kwargs["env"]
@@ -975,14 +972,6 @@ def test_provider_gate_requires_seven_passes(mr, monkeypatch, tmp_path, outcome)
             mr.provider_checks(tmp_path, manifest)
         assert manifest.data["provider_validation"]["outcome"] == "failed"
     assert len(calls) == 1
-
-
-def test_provider_gate_requires_credentials_before_spending(mr, monkeypatch, tmp_path):
-    monkeypatch.delenv("NVIDIA_INFERENCE_API_KEY", raising=False)
-    monkeypatch.delenv("NVIDIA_INTERNAL_API_KEY", raising=False)
-    monkeypatch.setattr(mr, "run", lambda *a, **kw: pytest.fail("must fail before transport"))
-    with pytest.raises(mr.ReleaseError, match="API_KEY"):
-        mr.provider_checks(tmp_path)
 
 
 def test_existing_publication_workflow_still_uses_published_release_trigger():
