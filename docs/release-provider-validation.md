@@ -71,3 +71,19 @@ GitHub publishing workflow still only builds and uploads after human approval.
 `tests/test_make_release.py` checks the gate without paid calls: missing keys,
 process failures, skipped/partial/malformed/missing reports, and the rule that a
 provider failure prevents draft creation.
+
+## First live gate run
+
+On 2026-09-14, calling `provider_checks()` directly at `890da984` passed all seven
+cases in 135 seconds: 17 requests, no retries, 87,103 input tokens (including
+42,403 cached input tokens) and 5,350 output tokens. It created no release draft.
+
+| Provider | Cached input / total input after SQLite resume |
+| --- | ---: |
+| OpenAI | 6,098 / 6,122 |
+| Anthropic Sonnet | 10,812 / 10,842 |
+| Gemini | 24,420 / 24,666 |
+
+DeepSeek, Kimi, GLM and Qwen also passed exact source-field replay after resume.
+This validates the public gate function on the developer runner; the private
+GitLab controller was not launched as part of this test.
