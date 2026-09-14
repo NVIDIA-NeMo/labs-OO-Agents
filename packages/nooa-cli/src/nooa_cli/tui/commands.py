@@ -1474,9 +1474,9 @@ class ToolbarCommand(Command):
             )
 
         if args[0].lower() == "reset":
-            self.config.toolbar_items = ["time", "model", "context", "session"]
+            self.config.toolbar_items = ["time", "model", "tokens", "context", "session"]
             return CommandResult.ok(
-                TextOutput("Toolbar reset to time · model · context · session.", "success")
+                TextOutput("Toolbar reset to time · model · tokens · context · session.", "success")
             )
 
         requested = args[1:] if args[0].lower() == "set" else args

@@ -526,6 +526,7 @@ async def test_on_command_clear_cancels_agent_task() -> None:
     agent = MagicMock()
     agent._storage = MagicMock()
     agent.event_manager = MagicMock()
+    agent.event_manager.filter.return_value = []
     agent.event_manager.set_backend = MagicMock()
     agent.queue_manager = MagicMock()
     agent.queue_manager.shutdown = AsyncMock()
@@ -604,6 +605,7 @@ async def test_on_command_clear_without_running_task() -> None:
     agent = MagicMock()
     agent._storage = MagicMock()
     agent.event_manager = MagicMock()
+    agent.event_manager.filter.return_value = []
     agent.event_manager.set_backend = MagicMock()
     agent.queue_manager = MagicMock()
     agent.queue_manager.shutdown = AsyncMock()
@@ -756,6 +758,7 @@ async def test_session_swap_notifies_runtime_registration() -> None:
     session.agent = MagicMock()
     session.agent._storage = MagicMock()
     session.agent.event_manager = MagicMock()
+    session.agent.event_manager.filter.return_value = []
     session.registry = MagicMock()
     session.registry.commands.return_value = []
     session.config = MagicMock()
@@ -947,35 +950,25 @@ async def test_session_run_real_local_composition_submit_output_and_exit(monkeyp
     from nooa_cli.tui.tui_application import TUIApplication
 
     from nooa.runtime.channels import QueueManager
-
-    class EventManagerStub:
-        def __init__(self) -> None:
-            self._handlers: dict[str, list] = {}
-
-        def on(self, name, callback):
-            handlers = self._handlers.setdefault(name, [])
-            handlers.append(callback)
-
-            def unsubscribe() -> None:
-                if callback in handlers:
-                    handlers.remove(callback)
-
-            return unsubscribe
-
-        def items(self):
-            return ()
+    from nooa.runtime.event_manager import EventManager
+    from nooa.unifiedllm import LLMResponse, LLMUsage
 
     class AgentStub:
         def __init__(self) -> None:
             self.queue_manager = QueueManager()
             self._user_messages_in = self.queue_manager.queue("user_messages")
-            self.event_manager = EventManagerStub()
+            self.event_manager = EventManager()
             self._render_message = None
             self.notifications: list[dict[str, list[object]]] = []
 
         async def handle(self, notification):
             self.notifications.append(notification)
             assert self._render_message is not None
+            self.event_manager.add(
+                LLMResponse(
+                    usage=LLMUsage(input_tokens=1000, output_tokens=50, cached_input_tokens=800)
+                )
+            )
             self._render_message("agent output")
             return SimpleNamespace(kind="WAIT", explanation="")
 
@@ -1024,6 +1017,7 @@ async def test_session_run_real_local_composition_submit_output_and_exit(monkeyp
         observed["app"] = self
         assert agent.notifications[0]["user_messages"] == ["hello through composition"]
         assert "agent output" in self._fullscreen_transcript.text
+        assert "↑ 1.0k ↓ 50 cache 80%" in session._session_label()
 
     monkeypatch.setattr(TUIApplication, "run_async", exercise_real_app)
 
@@ -1033,6 +1027,7 @@ async def test_session_run_real_local_composition_submit_output_and_exit(monkeyp
     assert isinstance(app, TUIApplication)
     assert app._agent_controller.state is None
     assert frontend.closed
+    assert not agent.event_manager._handlers.get("LLMResponse")
 
 
 @pytest.mark.parametrize(

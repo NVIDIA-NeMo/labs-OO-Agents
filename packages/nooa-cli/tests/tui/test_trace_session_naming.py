@@ -61,6 +61,7 @@ def _make_mock_session(tmp_path, monkeypatch):
     agent = MagicMock()
     agent._storage = storage
     agent.event_manager = MagicMock()
+    agent.event_manager.filter.return_value = []
     agent.event_manager.on = MagicMock(return_value=lambda: None)
     agent.event_manager.keys = MagicMock(return_value=[])
     agent.handle = AsyncMock()

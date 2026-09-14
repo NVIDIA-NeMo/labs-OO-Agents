@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from nooa import Agent
     from nooa.tools.shell_tools import ShellTools
+    from nooa.unifiedllm import LLMResponse
 
     from .agent_event_renderer import AgentEventRenderer
     from .commands import CommandRegistry
@@ -336,6 +337,7 @@ class Session:
         from .toolbar import ToolbarRegistry
 
         self._toolbar = ToolbarRegistry()
+        self._token_usage_display = "↑ — ↓ — cache —"
         self._initial_outputs = list(initial_outputs or [])
         # Building the next request temporarily replaces context_stats with a
         # version whose provider token count is unknown. Keep the last exact
@@ -661,6 +663,23 @@ class Session:
     @property
     def session_id(self) -> str | None:
         return self._session_manager.session_id if self._session_manager else None
+
+    def _on_llm_response(self, event: "LLMResponse") -> None:
+        """Refresh usage on completion without scanning history on every repaint."""
+        from .toolbar import format_token_usage
+
+        self._token_usage_display = format_token_usage(event.usage)
+        self._invalidate_app()
+
+    def _restore_token_usage(self) -> None:
+        """Load the latest response on resume, or clear usage for a new session."""
+        self._token_usage_display = "↑ — ↓ — cache —"
+        em = getattr(self.agent, "event_manager", None)
+        if em is not None:
+            responses = em.filter(type="LLMResponse", limit=1)
+            if responses:
+                self._on_llm_response(responses[-1])
+        self._invalidate_app()
 
     def _context_usage_label(self) -> str:
         """Compact ``"ctx N%"`` label from the most recent ContextWindowStats.
@@ -1030,6 +1049,7 @@ class Session:
         self._prev_exception_handler = self._startup_loop.get_exception_handler()
         self._startup_loop.set_exception_handler(self._loud_handler)
 
+        unsub_token_usage: Callable[[], None] | None = None
         # Subscribe inside the try so any exception between attach and
         # ``app.run_async`` completion still fires ``renderer.detach``
         # in the finally.
@@ -1037,6 +1057,10 @@ class Session:
             agent_runner.bind()
             agent_runner.activate(asyncio.get_running_loop())
             self._renderer.attach()
+            em = getattr(self.agent, "event_manager", None)
+            if em is not None:
+                unsub_token_usage = em.on("LLMResponse", self._on_llm_response)
+                await agent_runner.run_async(self._restore_token_usage)
             # Event-driven activity tracking: LLMCallStart/LLMCallEnd "on"
             # hooks feed get_activity() (and /activity) without inferring
             # model-wait state from cell boundaries.
@@ -1082,6 +1106,9 @@ class Session:
             # stop producers before releasing persistence and terminal state.
             await _teardown_phase("renderer detach", self._renderer.detach)
             await _teardown_phase("agent observation close", self._app.close_agent_observation)
+
+            if unsub_token_usage is not None:
+                await _teardown_phase("token usage detach", unsub_token_usage)
 
             if self._unsub_activity is not None:
                 unsubscribe = self._unsub_activity
@@ -1620,6 +1647,7 @@ class Session:
                 model=model,
                 working_directory=cwd,
                 context_usage=self._context_usage_label(),
+                token_usage=getattr(self, "_token_usage_display", "↑ — ↓ — cache —"),
                 session_id=manager.session_id if manager is not None else None,
                 session_title=manager.name if manager is not None else None,
                 agent=self.agent,
@@ -1903,6 +1931,7 @@ class Session:
                 self.agent._storage = new_sm._storage
                 self.agent.event_manager.set_backend(new_sm._storage.event_backend)
                 self.agent._session_manager = new_sm
+                self._restore_token_usage()
 
                 from .bootstrap import configure_tui_memory
 
@@ -1920,6 +1949,8 @@ class Session:
                 await agent_runner.run_async(_do_swap)
             else:
                 _do_swap()
+        else:
+            self._restore_token_usage()
         # Propagate to registry and all command instances so /session export etc. use new ID.
         self.registry.session_manager = new_sm
         for cmd in self.registry.commands():

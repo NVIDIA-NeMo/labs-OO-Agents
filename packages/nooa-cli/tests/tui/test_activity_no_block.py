@@ -191,6 +191,7 @@ async def test_session_swap_uses_async_agent_dispatch():
     session.agent = MagicMock()
     session.agent.queue_manager = None
     session.agent.event_manager = MagicMock()
+    session.agent.event_manager.filter.return_value = []
     session.registry = MagicMock()
     session.registry.commands.return_value = []
     old_storage = MagicMock()
