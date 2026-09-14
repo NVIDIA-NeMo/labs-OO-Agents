@@ -366,6 +366,9 @@ class TodoManager(Skill):
     def update(self, todo_id: Todo | str, **kwargs: Any) -> Todo | None:
         """Update ``title``, ``status``, or ``description`` and return the todo.
 
+        ``status`` accepts only ``"open"`` or ``"done"``. Blocking is derived
+        from unfinished dependencies; use ``add_dep()`` to add a dependency.
+
         Keep title and description aligned with the current understanding of the
         task. Use ``comment()`` to append material progress and evidence. Returns
         ``None`` if the todo is missing; other keyword names are ignored.

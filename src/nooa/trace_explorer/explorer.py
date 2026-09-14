@@ -3763,29 +3763,40 @@ class TraceExplorer:
 
         lines = []
 
-        # Find the LLM turn that provides context for this execution
-        # First try preceding turn (standard flow), then following (prefill flow)
+        # Match either neighboring LLM turn: later prefills can follow an
+        # unrelated completed turn, and their calls can be in request history.
         context_llm_turn: LLMTurn | None = None
         context_turn_idx = None
         context_source = ""
-
-        # Look for preceding LLM turn first
-        for i in range(turn_index - 1, -1, -1):
-            t = session.turns[i]
-            if isinstance(t, LLMTurn):
-                context_llm_turn = t
-                context_turn_idx = i
-                context_source = "preceding"
-                break
-
-        # If no preceding turn, look for following LLM turn (prefill case)
-        if not context_llm_turn:
-            for i in range(turn_index + 1, len(session.turns)):
+        matching_call = None
+        adjacent_turns: list[tuple[int, LLMTurn, str]] = []
+        for indices, source in (
+            (range(turn_index - 1, -1, -1), "preceding"),
+            (range(turn_index + 1, len(session.turns)), "following"),
+        ):
+            for i in indices:
                 t = session.turns[i]
                 if isinstance(t, LLMTurn):
-                    context_llm_turn = t
-                    context_turn_idx = i
-                    context_source = "following"
+                    adjacent_turns.append((i, t, source))
+                    break
+        if adjacent_turns:
+            context_turn_idx, context_llm_turn, context_source = adjacent_turns[0]
+        if turn.tool_call_id:
+            for i, candidate, source in adjacent_turns:
+                calls = candidate.tool_calls + [
+                    tc for message in candidate.messages for tc in message.tool_calls
+                ]
+                matching_call = next(
+                    (
+                        tc
+                        for tc in calls
+                        if _is_python_tool(tc.function_name)
+                        and tc.tool_call_id == turn.tool_call_id
+                    ),
+                    None,
+                )
+                if matching_call is not None:
+                    context_turn_idx, context_llm_turn, context_source = i, candidate, source
                     break
 
         # Add self-documenting header
@@ -3870,18 +3881,13 @@ class TraceExplorer:
         # correlated LLM turn is available; legacy traces fall back to execute_python.
         if turn.code:
             tool_name = "execute_python"
-            if context_llm_turn:
+            if not turn.tool_call_id and context_llm_turn:
                 matching_call = next(
-                    (
-                        tc
-                        for tc in context_llm_turn.tool_calls
-                        if _is_python_tool(tc.function_name)
-                        and (not turn.tool_call_id or tc.tool_call_id == turn.tool_call_id)
-                    ),
+                    (tc for tc in context_llm_turn.tool_calls if _is_python_tool(tc.function_name)),
                     None,
                 )
-                if matching_call is not None:
-                    tool_name = matching_call.function_name
+            if matching_call is not None:
+                tool_name = matching_call.function_name
             id_attr = f' id="{turn.tool_call_id}"' if turn.tool_call_id else ""
             lines.append(f'  <tool_call name="{tool_name}"{id_attr}>')
             lines.extend(indent(trunc(turn.code), "    "))
