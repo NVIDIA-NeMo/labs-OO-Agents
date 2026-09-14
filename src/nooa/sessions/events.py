@@ -20,11 +20,6 @@ class SessionStarted(Metadata):
     agent: str = ""
     working_directory: str = ""
 
-    @property
-    def origin(self) -> str:
-        """Compatibility spelling used by early ACP session metadata."""
-        return self.host
-
 
 class SessionTitleUpdated(Metadata):
     """The latest human- or agent-selected session title."""

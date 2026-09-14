@@ -208,7 +208,7 @@ class CodingACPAdapter:
                 agent=options.agent_spec
                 or ("TUIAgent" if options.legacy_agent else "ExperimentalTUIAgent"),
                 working_directory=str(root),
-                origin="acp",
+                host="acp",
                 check_same_thread=False,
             )
         except BaseException:
