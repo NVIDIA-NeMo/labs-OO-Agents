@@ -110,7 +110,7 @@ async def main(
     from .bootstrap import bootstrap, build_registry, build_session, build_startup_info
     from .config import Config
     from .frontend import TerminalFrontend
-    from .output import TextOutput, _RichReplayPayload
+    from .output import TextOutput
     from .session_manager import SESSIONS_DIR, build_resume_outputs
 
     if config is None:
@@ -131,35 +131,15 @@ async def main(
     _startup_info = build_startup_info(result)
     _initial_outputs = [*_splash_outputs, *result.messages, _startup_info]
 
-    # Show resumed session history (interleaved with any rich content). Terminal
-    # text/markdown outputs are deferred until Session.run(), after the frontend
+    # Show resumed session history. Terminal text/markdown outputs are deferred
+    # until Session.run(), after the frontend
     # console is redirected through TUIApplication.emit_block; that makes them
     # part of fullscreen resize replay instead of one-off pre-app writes.
     if result.resumed and result.session_id is not None:
-        import os as _os
-
-        _in_nemo_term = bool(_os.environ.get("NEMO_OO_RICH_URL"))
         _db_path = SESSIONS_DIR / f"{result.session_id}.db"
-        _resume_outputs = build_resume_outputs(
-            _db_path, result.session_id, in_nemo_term=_in_nemo_term
-        )
+        _resume_outputs = build_resume_outputs(_db_path, result.session_id)
         if _resume_outputs:
-            _rich_url = _os.environ.get("NEMO_OO_RICH_URL") if _in_nemo_term else None
-            for _item in _resume_outputs:
-                if isinstance(_item, _RichReplayPayload):
-                    if _rich_url:
-                        try:
-                            import httpx as _httpx
-
-                            _httpx.post(
-                                _rich_url,
-                                json={**_item.payload, "_replay": True},
-                                timeout=5.0,
-                            )
-                        except Exception:
-                            pass
-                else:
-                    _initial_outputs.append(_item)
+            _initial_outputs.extend(_resume_outputs)
             _initial_outputs.append(
                 TextOutput(f"Session {result.session_id[:8]} resumed.", "status")
             )

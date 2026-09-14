@@ -213,7 +213,7 @@ workspace configuration; use `coding.mcp_auto_connect` for restart behavior.
 Approvals are user-level fingerprints of the exact server definition.
 ACP `/mcp` interaction is still pending.
 
-Automatic `self.web` installation has been removed from the common agent base.
+The web publisher implementation and browser POST/replay support have been deleted.
 Check fresh and resumed sessions in both hosts: the agent should have no
 `self.web`, including when launched with `NEMO_OO_RICH_URL` set. Historical
 WebPublisher context instructions are removed on the resume event.

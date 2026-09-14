@@ -31,7 +31,6 @@ from .output import (  # noqa: E402
     Output,
     TableOutput,
     TextOutput,
-    _RichReplayPayload,
 )
 from .session_manager import SessionManager, build_resume_outputs  # noqa: E402
 
@@ -73,36 +72,10 @@ def _batch_render_ctx(frontend: "Frontend"):
 
 
 async def render_command_outputs(frontend: "Frontend", outputs: list[Output]) -> None:
-    """Render command outputs, preserving Rich replay sentinel handling.
-
-    ``_RichReplayPayload`` is an internal sentinel, not a public frontend output.
-    CommandHandler normally intercepts it before rendering; Session uses this
-    helper when output rendering is deferred until after the durable done line.
-    """
-    import os as _os
-
-    _rich_url = (
-        _os.environ.get("NEMO_OO_RICH_URL")
-        if any(isinstance(o, _RichReplayPayload) for o in outputs)
-        else None
-    )
+    """Render a command's outputs in order as one terminal batch."""
     with _batch_render_ctx(frontend):
         for output in outputs:
-            if isinstance(output, _RichReplayPayload):
-                if _rich_url:
-                    try:
-                        import httpx as _httpx
-
-                        await asyncio.to_thread(
-                            _httpx.post,
-                            _rich_url,
-                            json={**output.payload, "_replay": True},
-                            timeout=5.0,
-                        )
-                    except Exception as exc:
-                        logger.debug("replay POST to %s failed: %s", _rich_url, exc)
-            else:
-                await frontend.render(output)
+            await frontend.render(output)
 
 
 def _detect_language(suffix: str) -> str:
@@ -445,10 +418,7 @@ class ClearCommand(Command):
         # the agent loop when available. Doing it here would run on the UI loop
         # and can race or deadlock with the active turn.
 
-        outputs: list[Output] = [
-            ClearScreen(),
-            _RichReplayPayload(payload={"kind": "clear"}),  # type: ignore[list-item]
-        ]
+        outputs: list[Output] = [ClearScreen()]
         if self._registry and self._registry.startup_info:
             outputs.append(self._registry.startup_info)
         outputs.append(TextOutput("Started new session. Previous session saved.", "success"))
@@ -1654,12 +1624,9 @@ class SessionCommand(Command):
                 return CommandResult.err(f"Ambiguous session prefix '{session_id}' matches: {ids}")
             full_id = matches[0]
 
-            import os as _os
-
             from .session_manager import SESSIONS_DIR as _SESSIONS_DIR
 
             _session_db_path = _SESSIONS_DIR / f"{full_id}.db"
-            _in_nemo_term = bool(_os.environ.get("NEMO_OO_RICH_URL"))
 
             from nooa.storage.sqlite import SessionAlreadyActiveError
 
@@ -1669,9 +1636,7 @@ class SessionCommand(Command):
                 return CommandResult.err(str(e))
 
             try:
-                outputs = build_resume_outputs(
-                    _session_db_path, full_id, in_nemo_term=_in_nemo_term
-                )
+                outputs = build_resume_outputs(_session_db_path, full_id)
                 if not outputs:
                     new_sm.close()
                     return CommandResult.err(f"Session '{session_id}' is empty.")
@@ -1752,10 +1717,7 @@ class SessionCommand(Command):
             # acknowledged turn cancellation and after the storage/session swap,
             # on the agent loop when available.
 
-            outputs: list[Output] = [
-                ClearScreen(),
-                _RichReplayPayload(payload={"kind": "clear"}),  # type: ignore[list-item]
-            ]
+            outputs: list[Output] = [ClearScreen()]
             if self._registry and self._registry.startup_info:
                 outputs.append(self._registry.startup_info)
             outputs.append(TextOutput("Started new session. History cleared.", "success"))
