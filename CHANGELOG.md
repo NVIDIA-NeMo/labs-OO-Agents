@@ -10,6 +10,17 @@ to follow semantic versioning.
   `GET_USER_INPUT`; legacy values produce a migration hint.
 - ACP defaults to the shared single-tool `ExperimentalCodingAgent`.
   Use `nooa-acp --legacy-agent` for the multi-tool `CodingAgent`.
+- Shared interactive hosts expose `/mcp status`, `/mcp approve NAME [CODE]`,
+  and `/mcp revoke NAME`. Approval applies to the exact server configuration
+  and persists across sessions; remembering a server does not approve it.
+- `coding.agent_spec` and `tui.agent_spec` are ignored in every settings layer,
+  including user-level and project-level files, with one warning per process.
+  Select custom agents explicitly with the host's `--agent` option or a
+  `SessionOptions` override.
+- `JobHandle.cancel()` waits for an existing cancellation to unwind without
+  interrupting cleanup with another cancellation request. Jobs that suppress
+  cancellation and resume work must call `Task.uncancel()` to accept a later
+  request; cancellation remains cooperative.
 - Interactive agents no longer auto-attach the web publisher from
   `NEMO_OO_RICH_URL`.
 - File-backed SQLite state uses a cross-namespace `.active` ownership claim.

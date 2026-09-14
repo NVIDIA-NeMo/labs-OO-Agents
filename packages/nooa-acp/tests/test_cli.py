@@ -93,7 +93,11 @@ def _clean_env() -> dict[str, str]:
     return env
 
 
-def test_legacy_agent_flag_reaches_session_options(stubbed_serve, tmp_path):
+def test_legacy_agent_flag_reaches_session_options(stubbed_serve, tmp_path, monkeypatch):
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user"))
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(tmp_path / ".nooa"))
+    monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "user")
     result = click.testing.CliRunner().invoke(
         command, ["--model", "fixture/model", "--legacy-agent"]
     )

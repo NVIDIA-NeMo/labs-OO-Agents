@@ -362,6 +362,9 @@ async def test_remembered_mcp_reconnects_across_hosts_and_forget_stops_startup(
 
 @pytest.mark.parametrize("host", ["direct", "acp"])
 async def test_project_settings_cannot_execute_an_agent_module(workspace, host, caplog):
+    from nooa_cli.interactive.settings import _warn_ignored_agent_spec
+
+    _warn_ignored_agent_spec.cache_clear()
     sentinel = workspace / "unexpected-import"
     (workspace / "injected.py").write_text(
         f"from pathlib import Path\nPath({str(sentinel)!r}).touch()\n"
@@ -375,6 +378,29 @@ async def test_project_settings_cannot_execute_an_agent_module(workspace, host, 
     assert SessionOptions.load(workspace, agent_spec="./injected.py:Cls").agent_spec == (
         "./injected.py:Cls"
     )
+
+
+def test_agent_spec_warning_covers_all_layers_once_per_process(workspace, caplog):
+    from nooa_cli.interactive.settings import _warn_ignored_agent_spec
+
+    _warn_ignored_agent_spec.cache_clear()
+    (Path.home() / "settings.yaml").write_text("coding:\n  agent_spec: ./user-only.py:Cls\n")
+    try:
+        # First load has only a user-level agent spec; later loads add both sections.
+        assert SessionOptions.load(workspace).agent_spec is None
+        (workspace / ".nooa/settings.yaml").write_text(
+            "coding:\n  agent_spec: ./project.py:Cls\ntui:\n  agent_spec: ./legacy.py:Cls\n"
+        )
+        for _ in range(3):
+            assert SessionOptions.load(workspace).agent_spec is None
+        messages = [r.message for r in caplog.records if "Ignoring coding.agent_spec" in r.message]
+        assert len(messages) == 1
+        assert "user and project settings" in messages[0]
+        assert SessionOptions.load(workspace, agent_spec="./explicit.py:Cls").agent_spec == (
+            "./explicit.py:Cls"
+        )
+    finally:
+        _warn_ignored_agent_spec.cache_clear()
 
 
 async def test_legacy_memory_owners_preserve_session_identity(workspace):

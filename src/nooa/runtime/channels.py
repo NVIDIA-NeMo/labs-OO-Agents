@@ -163,6 +163,13 @@ class JobHandle:
 
         Cancellation of this caller is never mistaken for the expected
         cancellation of the owned job.
+
+        If the job already has a pending cancellation request, wait for it
+        without injecting another CancelledError into its cleanup. A job that
+        deliberately suppresses cancellation and resumes work must call
+        asyncio.current_task().uncancel() to accept a later cancellation
+        request. Otherwise cancel() continues waiting for the job to finish;
+        it does not force termination.
         """
         if self._task.done():
             try:

@@ -351,6 +351,55 @@ async def test_spawn_buffer_false_no_accumulation():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("clear_cancellation", [False, True])
+async def test_repeated_cancel_respects_a_jobs_pending_cancellation(clear_cancellation):
+    qm = QueueManager()
+    qm.queue("work")
+    started = asyncio.Event()
+    resumed = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def job():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            if clear_cancellation:
+                asyncio.current_task().uncancel()
+        resumed.set()
+        try:
+            await release.wait()
+        finally:
+            finished.set()
+
+    handle = qm.spawn(job(), channel="work")
+    callers = []
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        callers.append(asyncio.create_task(handle.cancel()))
+        await asyncio.wait_for(resumed.wait(), timeout=2)
+        callers.append(asyncio.create_task(handle.cancel()))
+        if clear_cancellation:
+            # A job that cleared its first request accepts the second one.
+            await asyncio.wait_for(finished.wait(), timeout=2)
+            await asyncio.wait_for(asyncio.gather(*callers), timeout=2)
+            assert handle.state == "cancelled"
+        else:
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert not finished.is_set()
+            assert all(not caller.done() for caller in callers)
+            assert handle._task.cancelling() == 1
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*callers), timeout=2)
+        await asyncio.wait_for(qm.shutdown(), timeout=2)
+    assert finished.is_set()
+    assert handle._task.done()
+
+
+@pytest.mark.asyncio
 async def test_cancel_does_not_swallow_callers_cancellation():
     qm = QueueManager()
     qm.queue("work")

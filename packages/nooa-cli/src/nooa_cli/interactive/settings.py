@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 from copy import deepcopy
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -14,6 +15,16 @@ from nooa.layered_config import load_layered_yaml
 SETTINGS_FILENAME = "settings.yaml"
 SETTINGS_ENV_VAR = "NEMO_OO_SETTINGS"
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _warn_ignored_agent_spec() -> None:
+    """Report the process-wide agent-selection policy once despite repeated loads."""
+    logger.warning(
+        "Ignoring coding.agent_spec and tui.agent_spec in all settings layers "
+        "(including user and project settings); select custom agents explicitly "
+        "through the host CLI or SessionOptions overrides"
+    )
 
 
 def behavior_fields() -> frozenset[str]:
@@ -48,11 +59,7 @@ def resolve_behavior_settings(data: dict[str, Any]) -> dict[str, Any]:
             logger.warning("Reading legacy tui settings; move shared behavior settings to coding")
         for key, value in section.items():
             if key == "agent_spec":
-                logger.warning(
-                    "Ignoring %s.agent_spec in settings; select custom agents explicitly "
-                    "through the host CLI or SessionOptions overrides",
-                    name,
-                )
+                _warn_ignored_agent_spec()
             if key not in behavior_fields():
                 if name == "coding" and key != "agent_spec":
                     logger.warning("Ignoring unsupported coding setting %r", key)
