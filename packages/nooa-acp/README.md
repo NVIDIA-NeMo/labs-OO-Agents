@@ -2,15 +2,17 @@
 
 **Run the NOOA coding agent inside your editor.** `nooa-acp` is an
 [Agent Client Protocol](https://agentclientprotocol.com) server, so any
-ACP-speaking client — Zed today — can drive the same agent the terminal host
-uses: CodeAct, repository tools, a persistent shell, installed skills, workspace
+ACP-speaking client can drive the shared coding agent: CodeAct, repository
+tools, a persistent shell, installed skills, workspace
 slash commands and durable sessions, with file edits and terminal commands
 surfaced as structured activity.
 
-It hosts `nooa_cli.coding.CodingAgent` directly. Repository instructions
-(`AGENTS.md`), coding tools, summarization, installed `nooa.skills` entry points
-and semantic file and terminal activity therefore have no separate ACP
-implementations — fix something here and the terminal host gets it too.
+The shared factory in `nooa_cli.coding.factory` constructs an
+`ExperimentalCodingAgent` by default. Its single `python_cell` tool executes
+Python that can call the agent's repository and shell tools. Pass
+`--legacy-agent` to use the standard multi-tool `CodingAgent`. Repository instructions (`AGENTS.md`),
+summarization, titles, skills, and turn dispatch are shared Python APIs in
+`nooa_cli.coding` and `nooa_cli.interactive`; they do not import a terminal UI.
 
 This is new and we would like it exercised. If something breaks, please say so.
 
@@ -143,11 +145,19 @@ Open only repositories whose code and conversation history you trust. The
 adapter also advertises session close; closing a live session preserves its
 durable history.
 
-The current stdio adapter hosts those live agents in its own process. That is
-an adapter-private implementation detail rather than part of the durable
-session API: the live-session registry is isolated inside `nooa-acp` so it can
-later be replaced by handles to an agent daemon without changing stored
-sessions, the shared coding agent, or the ACP protocol surface.
+Resume listings omit empty sessions and sessions currently owned by a live
+agent. SQLite ownership also uses a sibling `.active` directory to prevent
+another process from opening the same session. Normal close releases it; a
+crash may leave a claim behind. Recovery requires removing the stale claim
+after confirming that its owning process is no longer running.
+
+The current stdio adapter hosts those live agents in its own process. The core
+`nooa.sessions` runtime owns turn serialization, cancellation-safe cleanup, and
+registration until resources are released. The ACP adapter owns the agent and
+event-bridge bundle and decides when it is ready for client requests: a loaded
+session stays unavailable until transcript replay finishes. These ACP policies
+stay outside the core runtime. The adapter can later use handles to an agent
+daemon without changing stored sessions or the shared coding agent.
 
 Python skill packages use the interpreter's normal import machinery. Multiple
 sessions may use distinct skill package names, but two workspaces must not load
@@ -176,6 +186,55 @@ skills, and standalone Python skills are discovered from each configured root.
 Loaded `@slash_command` methods are advertised through ACP and matching
 `/command arguments` prompts are dispatched through the shared typed command
 router. Command discovery is refreshed when loaded skills change.
+
+### Saved workspace preferences
+
+The shared `SessionOptions` model resolves behavioral settings. Terminal
+presentation settings are outside this model. Both built-in agents use the
+`nooa_cli.coding.agent:CodingAgent` key for memory and reflection preferences;
+historical TUI agent keys are normalized when settings are read. Historical
+`TUIAgent` memory owners are migrated to `CodingAgent`, retaining session
+suffixes and archived records.
+
+The agent's `self.workspace_settings` skill exposes named operations for
+remembering and forgetting skills and MCP definitions, configuring memory and
+reflection, and saving a default model. These write
+`<workspace>/.nooa/settings.yaml` and affect future agents in that workspace.
+Skill and memory changes also apply to the agent making the change. Other live
+agents keep their current state. Ordinary `self.skills.load()` and
+`self.skills.activate()` remain local to the live agent.
+
+Memory requires the optional `nooa[memory]` package. `/memory local` selects a
+session sidecar database; `/memory on` selects the workspace memory store.
+`/reflection on` enables idle reflection once memory is attached. These commands
+and `/skills` are advertised through ACP and use the same controls as the
+workspace settings skill.
+
+Remembering an MCP definition preserves its exact-configuration approval
+requirement. The shared startup helper reconnects remembered servers; an
+unapproved or unavailable server produces a warning while the session opens.
+Client-forwarded servers are session inputs and are not automatically saved as
+workspace defaults. ACP still requires an explicit launch model (`--model` or
+`NOOA_MODEL`), which takes precedence over a saved default.
+
+### Acceptance tests without a terminal UI
+
+From the repository root:
+
+```bash
+uv run pytest packages/nooa-acp/tests/test_shared_sessions.py
+```
+
+These tests run real agents with scripted LLM responses through the shared
+Python dispatcher and the ACP adapter. They hand sessions in both directions,
+checking persistent variables, Todos, titles, active skills, provider reasoning
+retention and cache boundaries. They also exercise workspace preferences and
+MCP subprocesses on session creation, resume, and saved reconnection. Testing a
+particular ACP client's display and session picker still requires that client.
+
+Interactive turn results now use `DONE`, `NEED_INPUT`, and `WAIT`. Custom agents
+that returned the old `GET_USER_INPUT` value must return `NEED_INPUT` instead.
+Interactive agents no longer attach the web publishing skill automatically.
 
 The current adapter accepts text and resource-link prompts plus stdio, HTTP,
 and SSE MCP servers forwarded by an ACP client. ACP-transport MCP proxies,

@@ -40,6 +40,7 @@ with hidden:
     from nooa.config import CodeActConfig  # noqa: F401
     from nooa.runtime.channels import Channel, QueueManager, _ChannelReader
     from nooa.runtime.producers_skill import ProducersSkill
+    from nooa.sessions import SessionHandle
     from nooa.strategies import CodeActStrategy
 
 # Standard library — all visible in REPL
@@ -316,7 +317,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     """
 
     _render_message: Annotated[Callable[[str], None] | None, hidden, nosnapshot]
-    _session_manager: Annotated[Any | None, hidden, nosnapshot]
+    _session_manager: Annotated[SessionHandle | None, hidden, nosnapshot]
     # QueueManager owns the channel registry. Hidden from the LLM by
     # default — the LLM should access individual channels (e.g.
     # ``self.user_messages``) directly, not through a string-keyed
@@ -422,24 +423,11 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         if manager is None:
             raise RuntimeError("This host does not provide session renaming")
 
-        # A title explicitly chosen by the user always wins over an automatic
-        # request that was queued earlier in the turn.
-        info = getattr(manager, "info", None)
-        user_named = bool(
-            getattr(manager, "user_named", False) or getattr(info, "title_is_user_set", False)
-        )
-        if user_named:
-            current = getattr(manager, "name", None) or getattr(info, "title", None)
-            return str(current or normalized)
-
-        rename = getattr(manager, "rename", None)
-        if callable(rename):
-            rename(normalized, user_named=False)
-        else:
-            set_title = getattr(manager, "set_title", None)
-            if not callable(set_title):
-                raise RuntimeError("This host's session manager cannot rename sessions")
-            set_title(normalized, user_set=False)
+        # A title explicitly chosen by the user wins over queued housekeeping.
+        info = manager.info
+        if info.title_is_user_set:
+            return str(info.title or normalized)
+        manager.set_title(normalized, user_set=False)
         return normalized
 
     @hidden

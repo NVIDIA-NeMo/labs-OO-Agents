@@ -40,9 +40,7 @@ class PersistentVars:
 
     def __setattr__(self, key: str, value: Any) -> None:
         if any(key in cls.__dict__ for cls in type(self).__mro__):
-            raise AttributeError(
-                f"{key!r} is reserved by PersistentVars; use set({key!r}, value)"
-            )
+            raise AttributeError(f"{key!r} is reserved by PersistentVars; use set({key!r}, value)")
         self._owner.vars[key] = value
 
     def __delattr__(self, key: str) -> None:
