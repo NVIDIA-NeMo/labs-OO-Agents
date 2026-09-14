@@ -1243,12 +1243,79 @@ async def test_loading_session_is_not_available_until_replay_finishes(tmp_path):
         with pytest.raises(RequestError) as exc_info:
             await adapter.close_session(created.session_id)
         assert exc_info.value.code == _RESOURCE_NOT_FOUND
+        with pytest.raises(RequestError) as exc_info:
+            await adapter.cancel(created.session_id)
+        assert exc_info.value.code == _RESOURCE_NOT_FOUND
         release_replay.set()
         await loading
 
     response = await adapter.prompt(created.session_id, [text_block("now ready")])
     assert response.stop_reason == "end_turn"
     await adapter.close()
+
+
+@pytest.mark.parametrize("failure", ["error", "cancel"])
+async def test_failed_replay_releases_session_and_allows_retry(tmp_path, failure):
+    source = CodingACPAdapter(_completed_llm)
+    source.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await source.new_session(str(tmp_path))
+    await source.close()
+
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    replay_started = asyncio.Event()
+    release_replay = asyncio.Event()
+
+    async def fail_replay(_handle):
+        replay_started.set()
+        await release_replay.wait()
+        raise RuntimeError("replay failed")
+
+    with patch.object(adapter, "_replay_session", side_effect=fail_replay):
+        loading = asyncio.create_task(adapter.load_session(str(tmp_path), created.session_id))
+        await asyncio.wait_for(replay_started.wait(), timeout=5)
+        if failure == "cancel":
+            loading.cancel()
+        else:
+            release_replay.set()
+        with pytest.raises(asyncio.CancelledError if failure == "cancel" else RuntimeError):
+            await loading
+
+    with pytest.raises(RequestError) as exc_info:
+        await adapter.prompt(created.session_id, [text_block("failed session")])
+    assert exc_info.value.code == _RESOURCE_NOT_FOUND
+
+    # Reopen the same durable session: both the resource claim and the ACP
+    # readiness state must recover after failure or caller cancellation.
+    await adapter.load_session(str(tmp_path), created.session_id)
+    response = await adapter.prompt(created.session_id, [text_block("retry")])
+    assert response.stop_reason == "end_turn"
+    await adapter.close()
+
+
+async def test_shutdown_during_replay_does_not_publish_closed_session(tmp_path):
+    source = CodingACPAdapter(_completed_llm)
+    source.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await source.new_session(str(tmp_path))
+    await source.close()
+
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    replay_started = asyncio.Event()
+    release_replay = asyncio.Event()
+
+    async def replay(_handle):
+        replay_started.set()
+        await release_replay.wait()
+
+    with patch.object(adapter, "_replay_session", side_effect=replay):
+        loading = asyncio.create_task(adapter.load_session(str(tmp_path), created.session_id))
+        await asyncio.wait_for(replay_started.wait(), timeout=5)
+        await adapter.close()
+        release_replay.set()
+        with pytest.raises(RequestError) as exc_info:
+            await loading
+        assert exc_info.value.code == _RESOURCE_NOT_FOUND
 
 
 async def test_adapter_loads_durable_session_when_forwarded_mcp_is_unavailable(tmp_path):

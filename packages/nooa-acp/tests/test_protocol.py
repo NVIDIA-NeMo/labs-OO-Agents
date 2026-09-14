@@ -76,6 +76,8 @@ async def test_mcp_handoff_trace_observes_new_and_load_requests(tmp_path):
         session = await connection.new_session(str(tmp_path), mcp_servers=[server])
         await connection.close_session(session.session_id)
         await connection.load_session(str(tmp_path), session.session_id, mcp_servers=[])
+        # Finish session notifications before the SDK shuts its receive queue.
+        await connection.close_session(session.session_id)
 
         content = trace.read_text()
         assert secret not in content
