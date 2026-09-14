@@ -98,6 +98,45 @@ Return type: int
         assert '{"code"' not in verbose
         assert f'<tool_call name="{tool_name}" id="call_1">' in execution
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("call_in_messages", [False, True])
+    async def test_later_prefill_uses_matching_following_turn(self, call_in_messages):
+        """An earlier completed call must not mask the next prefill's tool name."""
+        earlier = LLMTurn(
+            session_id="abcdef",
+            messages=[],
+            response="",
+            model="test-model",
+            tool_calls=[ToolCall("execute_python", '{"code": "pass"}', "call_1")],
+        )
+        completed = ExecutionTurn("pass", "", None, None, tool_call_id="call_1")
+        prefill = ExecutionTurn("print('task')", "task", None, None, tool_call_id="prefill_2")
+        matching = ToolCall("python_cell", '{"code": "print(\'task\')"}', "prefill_2")
+        following = LLMTurn(
+            session_id="abcdef",
+            messages=[LLMMessage(role="user", content="next task")],
+            response="",
+            model="test-model",
+            tool_calls=[] if call_in_messages else [matching],
+        )
+        if call_in_messages:
+            following.messages.append(
+                LLMMessage(role="assistant", content="", tool_calls=[matching])
+            )
+        session = AgentSession(
+            session_id="abcdef",
+            agent_name="TestAgent",
+            method_name="answer",
+            parent_session_id=None,
+            turns=[earlier, completed, prefill, following],
+        )
+        trace = TraceExplorer([session], "trace.jsonl")
+
+        execution = await trace.get_turn("abcdef", 2)
+
+        assert '<tool_call name="python_cell" id="prefill_2">' in execution
+        assert "## LLM Context (from turn 3)" in execution
+
 
 # =============================================================================
 # Fixtures

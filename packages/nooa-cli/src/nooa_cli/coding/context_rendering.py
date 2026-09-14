@@ -58,6 +58,8 @@ def render_delegated_context(
     value: Any, *, max_chars: int = 8_000, max_depth: int = 4, max_nodes: int = 200
 ) -> str:
     """Render untrusted context without arbitrary repr calls or obvious secrets."""
+    if max_chars <= 0:
+        return ""
     seen: set[int] = set()
     nodes_remaining = max_nodes
 
@@ -142,5 +144,8 @@ def render_delegated_context(
 
     rendered = json.dumps(clean(value, 0), ensure_ascii=False, sort_keys=True)
     if len(rendered) > max_chars:
-        return rendered[: max_chars - len("...[truncated]")] + "...[truncated]"
+        marker = "...[truncated]"
+        if max_chars <= len(marker):
+            return marker[:max_chars]
+        return rendered[: max_chars - len(marker)] + marker
     return rendered
