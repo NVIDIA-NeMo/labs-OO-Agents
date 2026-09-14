@@ -29,7 +29,7 @@ class ToolbarContext:
     session_id: str | None = None
     session_title: str | None = None
     agent: Any = None
-    token_usage: str = "↑ — ↓ — cache —"
+    token_usage: str = "total ↑ — ↓ — cache —"
 
 
 class ToolbarRegistry:
@@ -97,10 +97,29 @@ def _session_label(context: ToolbarContext) -> str:
     return f"[{short_id}]" if short_id else ""
 
 
-def format_token_usage(usage: LLMUsage | None) -> str:
-    """Show the latest response's tokens and the fraction of input read from cache."""
+def accumulate_token_usage(total: LLMUsage | None, usage: LLMUsage | None) -> LLMUsage | None:
+    """Sum reported usage without changing persisted responses or losing known totals."""
     if usage is None:
-        return "↑ — ↓ — cache —"
+        return total
+    if total is None:
+        return usage.model_copy()
+    from nooa.unifiedllm import LLMUsage
+
+    return LLMUsage(
+        input_tokens=total.input_tokens + usage.input_tokens,
+        output_tokens=total.output_tokens + usage.output_tokens,
+        cached_input_tokens=total.cached_input_tokens + usage.cached_input_tokens,
+        cache_write_input_tokens=total.cache_write_input_tokens + usage.cache_write_input_tokens,
+        reasoning_tokens=total.reasoning_tokens + usage.reasoning_tokens,
+        total_tokens=total.total_tokens + usage.total_tokens,
+        cost_usd=total.cost_usd + usage.cost_usd,
+    )
+
+
+def format_token_usage(usage: LLMUsage | None) -> str:
+    """Show session totals and the fraction of total input read from cache."""
+    if usage is None:
+        return "total ↑ — ↓ — cache —"
 
     def count(tokens: int) -> str:
         if tokens >= 1_000_000:
@@ -112,4 +131,4 @@ def format_token_usage(usage: LLMUsage | None) -> str:
     cached = (
         f"{usage.cached_input_tokens / usage.input_tokens:.0%}" if usage.input_tokens > 0 else "—"
     )
-    return f"↑ {count(usage.input_tokens)} ↓ {count(usage.output_tokens)} cache {cached}"
+    return f"total ↑ {count(usage.input_tokens)} ↓ {count(usage.output_tokens)} cache {cached}"
