@@ -42,7 +42,7 @@ def test_token_usage_uses_total_input_and_cache_reads_only():
     )
     context = ToolbarContext("model", Path("."), "", token_usage=format_token_usage(usage))
     assert ToolbarRegistry(load_plugins=False).render(["tokens"], context) == (
-        "↑ 12.3k ↓ 456 cache 80%"
+        "total ↑ 12.3k ↓ 456 cache 80%"
     )
 
 
@@ -51,8 +51,25 @@ def test_token_usage_distinguishes_unknown_usage_from_zero_cache_hits():
 
     from nooa.unifiedllm import LLMUsage
 
-    assert format_token_usage(None) == "↑ — ↓ — cache —"
-    assert format_token_usage(LLMUsage()) == "↑ 0 ↓ 0 cache —"
+    assert format_token_usage(None) == "total ↑ — ↓ — cache —"
+    assert format_token_usage(LLMUsage()) == "total ↑ 0 ↓ 0 cache —"
     assert format_token_usage(LLMUsage(input_tokens=1_200_000, output_tokens=1_500)) == (
-        "↑ 1.2m ↓ 1.5k cache 0%"
+        "total ↑ 1.2m ↓ 1.5k cache 0%"
     )
+
+
+def test_accumulated_usage_preserves_responses_and_weights_cache_percentage():
+    from nooa_cli.tui.toolbar import accumulate_token_usage, format_token_usage
+
+    from nooa.unifiedllm import LLMUsage
+
+    first = LLMUsage(input_tokens=100, output_tokens=10, cached_input_tokens=100)
+    second = LLMUsage(input_tokens=900, output_tokens=90, cache_write_input_tokens=900)
+    total = accumulate_token_usage(None, first)
+    assert total is not first
+    total = accumulate_token_usage(total, second)
+    assert format_token_usage(total) == "total ↑ 1.0k ↓ 100 cache 10%"
+    assert total.cache_write_input_tokens == 900
+    assert accumulate_token_usage(total, None) is total
+    assert first.input_tokens == 100
+    assert second.input_tokens == 900

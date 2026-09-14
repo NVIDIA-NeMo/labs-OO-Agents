@@ -169,11 +169,14 @@ published through the `nooa.skills` entry-point group. Toolbar extensions can
 similarly publish named providers through `nooa_cli.tui.toolbar_items`; users
 select their order with `/toolbar set <item> ...`.
 
-The default toolbar includes `tokens`: `↑ 12.3k ↓ 456 cache 80%` shows input
-and output tokens for the latest completed LLM call, plus the percentage of
-input tokens read from the provider cache (cache writes do not count as hits).
-It updates after each response and restores the latest usage when resuming a
-session. A dash means usage is unavailable. If you have a saved toolbar layout,
+The default toolbar includes `tokens`: `total ↑ 12.3k ↓ 456 cache 80%` shows
+cumulative input and output tokens from the session's recorded LLM responses.
+Cache percentage is total cached input divided by total input, not an average
+of call percentages; cache writes do not count as hits. Totals update after
+each response, restore from recorded history on resume, and reset for a new
+session. Responses without usage leave known totals unchanged; a dash means
+no usage has been reported. Separate worker histories are not included.
+If you have a saved toolbar layout,
 use `/toolbar reset` to adopt the new default, or add `tokens` with `/toolbar set`.
 
 Native and ACP agents have a `self.workspace_settings` skill for workspace

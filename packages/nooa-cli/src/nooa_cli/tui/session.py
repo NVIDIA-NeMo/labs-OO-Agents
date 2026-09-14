@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from nooa import Agent
     from nooa.tools.shell_tools import ShellTools
-    from nooa.unifiedllm import LLMResponse
+    from nooa.unifiedllm import LLMResponse, LLMUsage
 
     from .agent_event_renderer import AgentEventRenderer
     from .commands import CommandRegistry
@@ -337,7 +337,8 @@ class Session:
         from .toolbar import ToolbarRegistry
 
         self._toolbar = ToolbarRegistry()
-        self._token_usage_display = "↑ — ↓ — cache —"
+        self._token_usage_total: LLMUsage | None = None
+        self._token_usage_display = "total ↑ — ↓ — cache —"
         self._initial_outputs = list(initial_outputs or [])
         # Building the next request temporarily replaces context_stats with a
         # version whose provider token count is unknown. Keep the last exact
@@ -665,20 +666,25 @@ class Session:
         return self._session_manager.session_id if self._session_manager else None
 
     def _on_llm_response(self, event: "LLMResponse") -> None:
-        """Refresh usage on completion without scanning history on every repaint."""
-        from .toolbar import format_token_usage
+        """Accumulate completed calls without scanning history on every repaint."""
+        from .toolbar import accumulate_token_usage, format_token_usage
 
-        self._token_usage_display = format_token_usage(event.usage)
+        self._token_usage_total = accumulate_token_usage(self._token_usage_total, event.usage)
+        self._token_usage_display = format_token_usage(self._token_usage_total)
         self._invalidate_app()
 
     def _restore_token_usage(self) -> None:
-        """Load the latest response on resume, or clear usage for a new session."""
-        self._token_usage_display = "↑ — ↓ — cache —"
+        """Rebuild totals once from the session's recorded responses on resume/swap."""
+        from .toolbar import accumulate_token_usage, format_token_usage
+
+        self._token_usage_total = None
         em = getattr(self.agent, "event_manager", None)
         if em is not None:
-            responses = em.filter(type="LLMResponse", limit=1)
-            if responses:
-                self._on_llm_response(responses[-1])
+            for response in em.filter(type="LLMResponse"):
+                self._token_usage_total = accumulate_token_usage(
+                    self._token_usage_total, response.usage
+                )
+        self._token_usage_display = format_token_usage(self._token_usage_total)
         self._invalidate_app()
 
     def _context_usage_label(self) -> str:
@@ -1647,7 +1653,7 @@ class Session:
                 model=model,
                 working_directory=cwd,
                 context_usage=self._context_usage_label(),
-                token_usage=getattr(self, "_token_usage_display", "↑ — ↓ — cache —"),
+                token_usage=getattr(self, "_token_usage_display", "total ↑ — ↓ — cache —"),
                 session_id=manager.session_id if manager is not None else None,
                 session_title=manager.name if manager is not None else None,
                 agent=self.agent,

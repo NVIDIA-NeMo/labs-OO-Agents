@@ -155,18 +155,55 @@ def test_token_usage_updates_restores_and_clears_on_session_change():
     session.agent = SimpleNamespace(event_manager=em)
     session._app = SimpleNamespace(invalidate=Mock())
     session._restore_token_usage()
-    assert session._token_usage_display == "↑ 200 ↓ 20 cache 75%"
+    assert session._token_usage_display == "total ↑ 300 ↓ 30 cache 50%"
 
     unsubscribe = em.on("LLMResponse", session._on_llm_response)
     try:
         em.add(LLMResponse(usage=LLMUsage(input_tokens=400, output_tokens=30)))
-        assert session._token_usage_display == "↑ 400 ↓ 30 cache 0%"
+        assert session._token_usage_display == "total ↑ 700 ↓ 60 cache 21%"
         em.add(LLMResponse())
-        assert session._token_usage_display == "↑ — ↓ — cache —"
-        session._on_llm_response(latest)
+        assert session._token_usage_display == "total ↑ 700 ↓ 60 cache 21%"
+        session._restore_token_usage()
+        assert session._token_usage_display == "total ↑ 700 ↓ 60 cache 21%"
+        assert latest.usage.input_tokens == 200
         session.agent.event_manager = EventManager()
         session._restore_token_usage()
-        assert session._token_usage_display == "↑ — ↓ — cache —"
+        assert session._token_usage_display == "total ↑ — ↓ — cache —"
         assert session._app.invalidate.called
     finally:
         unsubscribe()
+
+
+def test_token_totals_restore_from_reopened_session_storage(tmp_path):
+    from unittest.mock import Mock
+
+    from nooa_cli.tui.session import Session
+
+    from nooa.runtime.event_manager import EventManager
+    from nooa.storage.sqlite import SQLiteStorageManager
+    from nooa.unifiedllm import LLMResponse, LLMUsage
+
+    path = str(tmp_path / "usage.db")
+    storage = SQLiteStorageManager(path)
+    try:
+        em = EventManager(backend=storage.event_backend)
+        em.add(LLMResponse(usage=LLMUsage(input_tokens=100, output_tokens=10)))
+        em.add(LLMResponse())
+        em.add(
+            LLMResponse(usage=LLMUsage(input_tokens=300, output_tokens=20, cached_input_tokens=200))
+        )
+    finally:
+        storage.close()
+    reopened = SQLiteStorageManager(path)
+    try:
+        session = Session.__new__(Session)
+        session.agent = SimpleNamespace(event_manager=EventManager(backend=reopened.event_backend))
+        session._app = SimpleNamespace(invalidate=Mock())
+        session._restore_token_usage()
+        assert session._token_usage_display == "total ↑ 400 ↓ 30 cache 50%"
+        session._app.invalidate.assert_called_once()
+        session.agent.event_manager = EventManager()
+        session._restore_token_usage()
+        assert session._token_usage_display == "total ↑ — ↓ — cache —"
+    finally:
+        reopened.close()

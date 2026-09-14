@@ -1017,7 +1017,7 @@ async def test_session_run_real_local_composition_submit_output_and_exit(monkeyp
         observed["app"] = self
         assert agent.notifications[0]["user_messages"] == ["hello through composition"]
         assert "agent output" in self._fullscreen_transcript.text
-        assert "↑ 1.0k ↓ 50 cache 80%" in session._session_label()
+        assert "total ↑ 1.0k ↓ 50 cache 80%" in session._session_label()
 
     monkeypatch.setattr(TUIApplication, "run_async", exercise_real_app)
 
