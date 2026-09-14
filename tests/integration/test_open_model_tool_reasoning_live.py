@@ -47,7 +47,9 @@ def lookup(key: str) -> int:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("family", MODELS)
-async def test_open_model_tool_reasoning_after_sqlite_resume(family, tmp_path, monkeypatch):
+async def test_open_model_tool_reasoning_after_sqlite_resume(
+    family, tmp_path, monkeypatch, record_property
+):
     monkeypatch.setenv("DISABLE_AIOHTTP_TRANSPORT", "True")
     sent = []
     omitted_status = []
@@ -144,6 +146,9 @@ async def test_open_model_tool_reasoning_after_sqlite_resume(family, tmp_path, m
     assert replay.get("reasoning_content") == raw, "native reasoning field changed on wire"
     assert result.finish_reason == "stop"
     assert result.content
+    record_property("model", MODELS[family])
+    record_property("seed_usage", seed.usage.model_dump_json())
+    record_property("resumed_usage", result.usage.model_dump_json())
     print(
         json.dumps(
             {
