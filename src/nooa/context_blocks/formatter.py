@@ -267,7 +267,10 @@ def _event_block_to_messages(
     if isinstance(block.event, ToolCallEvent):
         event = block.event
         if event.metadata.get("synthetic_type") == "codeact_inline_return":
-            # Framework completion markers are observable, but were never model turns.
+            # Inline return_result() ran inside a Python cell. CodeAct records its
+            # value for traces, but the provider never issued a separate return_result
+            # tool call. Replaying this marker would invent an assistant turn/tool
+            # pair (and duplicate the cell's completion) in subsequent prompts.
             return []
         return [
             RenderedMessage(
