@@ -16,7 +16,7 @@ import pytest
 
 import nooa.sessions.store as store_module
 from nooa.interactive import AgentMessage
-from nooa.sessions import InvalidSessionIdError, SessionNotFoundError, SessionStore
+from nooa.sessions import InvalidSessionIdError, SessionNotFoundError, SessionStarted, SessionStore
 from nooa.storage import SessionAlreadyActiveError
 
 
@@ -53,6 +53,38 @@ def test_create_record_title_list_and_resume(tmp_path):
         ]
     finally:
         resumed.close()
+
+
+def test_legacy_origin_metadata_resumes_with_canonical_host(tmp_path):
+    store = SessionStore(tmp_path)
+    with store.create(session_id="old-metadata", host="acp") as session:
+        session.record_user_message("old conversation")
+
+    # Reproduce the historical on-disk spelling, independent of today's API.
+    connection = sqlite3.connect(store.path_for("old-metadata"))
+    try:
+        (data,) = connection.execute(
+            "SELECT data FROM events WHERE event_type = 'SessionStarted'"
+        ).fetchone()
+        raw = json.loads(data)
+        raw["origin"] = raw.pop("host")
+        connection.execute(
+            "UPDATE events SET data = ? WHERE event_type = 'SessionStarted'",
+            (json.dumps(raw),),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    assert store.list()[0].host == "acp"
+    with store.open("old-metadata") as resumed:
+        assert resumed.info.host == "acp"
+        assert [turn.content for turn in resumed.turns()] == ["old conversation"]
+        started = next(
+            event for event in resumed.events.values() if isinstance(event, SessionStarted)
+        )
+        assert started.host == "acp"
+        assert "origin" not in started.model_dump()
 
 
 def test_session_summary_uses_targeted_queries(tmp_path, monkeypatch):

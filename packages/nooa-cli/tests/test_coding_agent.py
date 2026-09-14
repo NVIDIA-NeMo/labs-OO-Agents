@@ -128,7 +128,7 @@ async def test_coding_agent_declares_the_host_input_channels(tmp_path):
 
     InteractiveAgent only declares user_messages: being dispatcher-driven does
     not imply slash commands (a UI affordance whose registry is in this
-    package) or host continuations such as keep-going.
+    package) or host-provided system input.
     """
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:

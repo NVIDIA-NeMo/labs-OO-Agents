@@ -169,19 +169,29 @@ published through the `nooa.skills` entry-point group. Toolbar extensions can
 similarly publish named providers through `nooa_cli.tui.toolbar_items`; users
 select their order with `/toolbar set <item> ...`.
 
-Keep-going mode is an explicit opt-in. It audits a completed turn with a
-separate judge model and sends an internal continuation only when autonomous
-work remains:
+Native and ACP agents have a `self.workspace_settings` skill for workspace
+preferences. Ask the agent to remember a Python skill for future sessions:
 
-```text
-/keep-going model nemotron3-nano-30b
-/keep-going on
+```python
+await self.workspace_settings.remember_skill("your.skill", directory="/path/to/skills")
+await self.workspace_settings.forget_skill("your.skill")
 ```
 
-Use `/keep-going off` to disable it. New user input supersedes and cancels an
-in-flight audit.
+`remember_skill` activates the skill and saves its ID (and optional discovery directory)
+in the workspace's `.nooa/settings.yaml`. `forget_skill` deactivates it and disables
+automatic activation there. Both reuse `/skills` operations; other live sessions
+retain their state. Package installation and ordinary session-local
+`self.skills.load/activate` are unchanged.
 
-Long-term memory and idle reflection are also explicit opt-ins:
+The same skill also exposes `configure_memory(scope)`,
+`configure_reflection(enabled)`, `remember_mcp(name, auto_connect=True)`,
+`forget_mcp(name)`, `set_default_model(model)`, and `status()`. Register a NOOA
+MCP definition with `self.mcp.register` before remembering it. Persistence does
+not connect or approve a server. Status separates saved defaults from live
+state and omits MCP credentials. An explicit model launch override still wins;
+the current ACP CLI requires such an override.
+
+Long-term memory and idle reflection are explicit opt-ins:
 
 ```text
 /memory on        # project-wide store shared across sessions

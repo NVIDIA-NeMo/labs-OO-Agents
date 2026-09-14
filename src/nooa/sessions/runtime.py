@@ -2,10 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Lifecycle and foreground-turn ownership for live sessions.
 
-The runtime value is intentionally generic. A native terminal may store its
-dispatcher while an ACP adapter stores a bundle containing an agent,
-dispatcher, and event bridge. Core owns only the concurrency invariant: one
-foreground turn per session, independent sessions may run concurrently.
+The runtime value is intentionally generic. This module serializes turns,
+coordinates cleanup, and keeps session identifiers reserved until resources
+are released. Callers decide when a registered session is ready for use.
 """
 
 from __future__ import annotations
@@ -24,7 +23,7 @@ class SessionBusyError(RuntimeError):
 
 
 class SessionRuntimeClosedError(RuntimeError):
-    """Raised when a caller targets a closing or closed session runtime."""
+    """Raised when a caller targets a closing or closed session."""
 
 
 class _RuntimeState(StrEnum):
@@ -34,7 +33,7 @@ class _RuntimeState(StrEnum):
 
 
 class SessionRuntime[T]:
-    """A host-specific runtime value with host-neutral turn and close semantics."""
+    """A live session value with serialized turns and cancellation-safe cleanup."""
 
     def __init__(
         self,
@@ -49,12 +48,13 @@ class SessionRuntime[T]:
         self._turn_lock = asyncio.Lock()
         self._state_lock = asyncio.Lock()
         self._state = _RuntimeState.OPEN
+        self._turn_claims = 0
         self._close_task: asyncio.Task[None] | None = None
 
     @property
     def busy(self) -> bool:
-        """Whether a foreground turn currently owns this session."""
-        return self._turn_lock.locked()
+        """Whether a foreground turn currently owns or is entering this session."""
+        return self._turn_claims > 0
 
     @property
     def is_closed(self) -> bool:
@@ -62,39 +62,42 @@ class SessionRuntime[T]:
 
     @asynccontextmanager
     async def turn(self, *, wait: bool = False) -> AsyncIterator[T]:
-        """Own the session's foreground turn for the duration of the context.
-
-        Args:
-            wait: Queue behind an existing turn when true. When false, fail
-                immediately with :class:`SessionBusyError`.
-        """
+        """Own a turn, rejecting contention unless ``wait=True`` requests queueing."""
         async with self._state_lock:
             if self._state is not _RuntimeState.OPEN:
                 raise SessionRuntimeClosedError(f"Session {self.session_id!r} is not open")
-            if not wait and self._turn_lock.locked():
+            if not wait and self._turn_claims:
                 raise SessionBusyError(f"Session {self.session_id!r} already has an active turn")
+            self._turn_claims += 1
 
-        await self._turn_lock.acquire()
+        acquired = False
         try:
+            await self._turn_lock.acquire()
+            acquired = True
             async with self._state_lock:
                 if self._state is not _RuntimeState.OPEN:
                     raise SessionRuntimeClosedError(f"Session {self.session_id!r} is not open")
             yield self.value
         finally:
-            self._turn_lock.release()
+            if acquired:
+                self._turn_lock.release()
+            async with self._state_lock:
+                self._turn_claims -= 1
 
     async def close(self) -> None:
-        """Wait for the active turn, release resources once, and mark closed."""
+        """Wait for the foreground turn, release resources once, and mark closed."""
         async with self._state_lock:
             if self._close_task is None:
                 if self._state is _RuntimeState.CLOSED:
                     return
                 self._state = _RuntimeState.CLOSING
-                self._close_task = asyncio.create_task(self._close_once())
+                self._close_task = asyncio.create_task(
+                    self._close_once(),
+                    name=f"nooa-session-close-{self.session_id}",
+                )
             close_task = self._close_task
 
-        # Resource cleanup must survive cancellation of an individual host
-        # request. Later close() calls await the same task and see its result.
+        # Resource cleanup must survive cancellation of an individual caller.
         await asyncio.shield(close_task)
 
     async def _close_once(self) -> None:
@@ -124,6 +127,7 @@ class SessionRuntimePool[T]:
 
     def __init__(self) -> None:
         self._runtimes: dict[str, SessionRuntime[T]] = {}
+        self._remove_tasks: dict[str, asyncio.Task[T]] = {}
         self._lock = asyncio.Lock()
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
@@ -156,12 +160,37 @@ class SessionRuntimePool[T]:
             return tuple(self._runtimes)
 
     async def remove(self, session_id: str) -> T:
-        """Close and unregister one runtime, returning its host value."""
-        runtime = await self.get(session_id)
-        await runtime.close()
+        """Close and unregister one runtime, returning its value."""
         async with self._lock:
-            if self._runtimes.get(session_id) is runtime:
-                del self._runtimes[session_id]
+            if session_id not in self._runtimes:
+                raise KeyError(f"Unknown live session {session_id!r}")
+            runtime = self._runtimes[session_id]
+            remove_task = self._remove_tasks.get(session_id)
+            if remove_task is None:
+                remove_task = asyncio.create_task(
+                    self._remove_once(session_id, runtime),
+                    name=f"nooa-session-remove-{session_id}",
+                )
+                self._remove_tasks[session_id] = remove_task
+
+                def _finished(done: asyncio.Task[T]) -> None:
+                    if not done.cancelled():
+                        done.exception()
+
+                remove_task.add_done_callback(_finished)
+
+        # Cancellation of a caller must not make the id reusable while its old
+        # runtime is still active. Concurrent removers share the same cleanup.
+        return await asyncio.shield(remove_task)
+
+    async def _remove_once(self, session_id: str, runtime: SessionRuntime[T]) -> T:
+        try:
+            await runtime.close()
+        finally:
+            async with self._lock:
+                self._remove_tasks.pop(session_id, None)
+                if self._runtimes.get(session_id) is runtime:
+                    del self._runtimes[session_id]
         return runtime.value
 
     async def close(self) -> None:
@@ -170,7 +199,10 @@ class SessionRuntimePool[T]:
             if self._close_task is None:
                 self._closed = True
                 runtimes = list(self._runtimes.values())
-                self._close_task = asyncio.create_task(self._close_all(runtimes))
+                self._close_task = asyncio.create_task(
+                    self._close_all(runtimes),
+                    name="nooa-session-close-sessions",
+                )
             close_task = self._close_task
 
         await asyncio.shield(close_task)

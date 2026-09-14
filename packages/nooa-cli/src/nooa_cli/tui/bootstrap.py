@@ -4,13 +4,27 @@
 
 from __future__ import annotations
 
-import inspect
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from nooa.sessions import SessionResumed
+from nooa_cli.interactive.memory import (
+    configure_tui_memory as configure_tui_memory,
+)
+from nooa_cli.interactive.memory import (
+    resolve_tui_memory_owner as resolve_tui_memory_owner,
+)
+from nooa_cli.interactive.memory import (
+    resolve_tui_memory_scope as resolve_tui_memory_scope,
+)
+from nooa_cli.interactive.memory import (
+    resolve_tui_reflection_enabled as resolve_tui_reflection_enabled,
+)
+from nooa_cli.interactive.memory import (
+    tui_agent_memory_key as tui_agent_memory_key,
+)
 
 from .output import Output, TextOutput
 
@@ -37,15 +51,14 @@ def _instantiate_custom_agent(
     summarization=None,
 ):
     """Instantiate an extension agent with the host arguments it declares."""
-    parameters = inspect.signature(agent_cls).parameters
-    kwargs = {"llm": llm, "storage": storage}
-    if "cwd" in parameters:
-        kwargs["cwd"] = working_directory
-    if "skills_dirs" in parameters:
-        kwargs["skills_dirs"] = skills_dirs
-    if "summarization" in parameters:
-        kwargs["summarization"] = summarization
-    return agent_cls(**kwargs)
+    from types import SimpleNamespace
+
+    from nooa_cli.coding.factory import create_session_agent
+
+    options = SimpleNamespace(
+        working_dir=working_directory, skills_dirs=skills_dirs, summarization=summarization
+    )
+    return create_session_agent(llm=llm, storage=storage, options=options, agent_cls=agent_cls)
 
 
 @dataclass
@@ -73,167 +86,6 @@ def _scaffold_settings(config: Config) -> None:
     target = get_user_dir(SETTINGS_FILENAME)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(render_settings_template(config))
-
-
-def tui_agent_memory_key(agent: Agent, config: Config) -> str:
-    """Return the stable settings key for an agent's memory preferences."""
-    if config.tui.agent_spec and not config.legacy_agent:
-        return config.tui.agent_spec
-    # Keep the historical built-in key so existing memory/reflection preferences
-    # continue to apply when the single-tool implementation becomes the default.
-    return "nooa_cli.tui.agent:TUIAgent"
-
-
-def resolve_tui_memory_owner(agent: Agent, config: Config) -> str:
-    """Return the role portion of this agent's hierarchical memory owner."""
-    key = tui_agent_memory_key(agent, config)
-    per_agent = config.tui.memory_owner_agents.get(key)
-    if per_agent:
-        return per_agent
-    if config.tui.memory_owner:
-        return config.tui.memory_owner
-    if key == "nooa_cli.tui.agent:TUIAgent":
-        return "TUIAgent"
-    return type(agent).__name__
-
-
-def resolve_tui_memory_scope(agent: Agent, config: Config) -> str:
-    """Return the effective memory scope for *agent*."""
-    key = tui_agent_memory_key(agent, config)
-    return config.tui.memory_agents.get(key, config.tui.memory)
-
-
-def resolve_tui_reflection_enabled(agent: Agent, config: Config) -> bool:
-    """Return whether idle reflection is enabled for *agent*."""
-    key = tui_agent_memory_key(agent, config)
-    return bool(config.tui.reflection_agents.get(key, config.tui.reflection))
-
-
-def _teardown_tui_reflection(agent: Agent) -> None:
-    """Tear down the reflection runner before detaching or replacing memory."""
-    runner = getattr(agent, "_tui_reflection_runner", None)
-    if runner is not None:
-        runner.teardown()
-        del agent._tui_reflection_runner
-
-
-def configure_tui_memory(
-    agent: Agent,
-    config: Config,
-    *,
-    agent_db: Path | None,
-    session_id: str | None,
-) -> None:
-    """Install or remove the memory skill according to the TUI configuration."""
-    key = tui_agent_memory_key(agent, config)
-    agent._tui_memory_key = key  # type: ignore[attr-defined]
-    scope = resolve_tui_memory_scope(agent, config)
-
-    _teardown_tui_reflection(agent)
-    existing = getattr(agent, "memory", None)
-    if existing is not None and hasattr(existing, "detach"):
-        try:
-            existing.detach()
-        except Exception:
-            logger.debug("Could not detach the previous memory skill", exc_info=True)
-
-    if scope == "off":
-        skills = getattr(agent, "skills", None)
-        if skills is not None:
-            try:
-                skills.deactivate(["nemo.memory"])
-            except Exception:
-                logger.debug("Could not deactivate memory", exc_info=True)
-        if hasattr(agent, "memory"):
-            try:
-                delattr(agent, "memory")
-            except Exception:
-                logger.debug("Could not remove memory from agent", exc_info=True)
-        return
-
-    if scope not in {"session", "project"}:
-        raise ValueError(
-            f"Unsupported TUI memory scope {scope!r}; use 'off', 'session', or 'project'."
-        )
-
-    from nooa_memory import MemoryConfig
-    from nooa_memory.memory_skill import MemorySkill
-
-    from nooa.paths import get_project_dir
-
-    project_dir = get_project_dir().resolve()
-    if config.tui.memory_path is not None:
-        if config.tui.memory_path.is_absolute():
-            raise ValueError("tui.memory_path must be relative to the project directory")
-        memory_path = (project_dir / config.tui.memory_path).resolve()
-        if project_dir not in memory_path.parents and memory_path != project_dir:
-            raise ValueError("tui.memory_path must stay under the project directory")
-    elif scope == "project":
-        memory_path = (
-            Path(config.agent.working_dir) / ".nooa" / "memory" / "memory.sqlite"
-        ).resolve()
-    else:
-        if session_id is None or agent_db is None:
-            raise RuntimeError("session-scoped memory requires a durable session")
-        memory_path = Path(agent_db).with_name(f"{session_id}-memory.db")
-
-    reflection_enabled = resolve_tui_reflection_enabled(agent, config)
-    memory_kwargs: dict[str, object] = {}
-    if reflection_enabled:
-        from nooa_memory.config import ReflectionPolicy
-
-        # ReflectionRunner owns consolidation while idle; do not also run it
-        # inline in the memory middleware after every response.
-        memory_kwargs["reflection"] = ReflectionPolicy(trigger="manual")
-
-    owner_role = resolve_tui_memory_owner(agent, config)
-    owner = f"{owner_role}@{session_id[:8]}" if session_id else owner_role
-    memory_config = MemoryConfig(
-        enabled=True,
-        path=str(memory_path),
-        owner=owner,
-        **memory_kwargs,
-    )
-
-    skill_kwargs: dict[str, object] = {}
-    episode_writer = None
-    if reflection_enabled and config.tui.reflection_generative:
-        from nooa_memory.generative import llm_episode_writer, llm_reasoner, llm_reconciler
-
-        def _session_llm() -> object:
-            return agent._llm  # type: ignore[attr-defined]
-
-        skill_kwargs = {
-            "reasoner": llm_reasoner(_session_llm),
-            "reconciler": llm_reconciler(_session_llm),
-        }
-        episode_writer = llm_episode_writer(_session_llm)
-
-    skills = getattr(agent, "skills", None)
-    if skills is None:
-        raise RuntimeError("memory requires an agent with a SkillRegistry")
-    skills.register("nemo.memory", MemorySkill(memory_config, **skill_kwargs))
-    skills.activate(["nemo.memory"])
-
-    manager = agent.memory._mgr  # type: ignore[attr-defined]
-    if key != owner_role:
-        renamed = manager.store.rename_owner(key, owner_role)
-        if renamed:
-            manager.store.log_maintenance(
-                "rename_owner",
-                {"from": key, "to": owner_role, "rows": renamed},
-            )
-    manager.session_ref = session_id
-
-    from .reflection_runner import ReflectionRunner
-
-    agent._tui_reflection_runner = ReflectionRunner(  # type: ignore[attr-defined]
-        agent,
-        manager,
-        config.tui,
-        enabled=reflection_enabled,
-        episode_writer=episode_writer,
-    )
 
 
 def _load_llm_registry(messages: list[Output], explicit_paths: list[Path] | None = None) -> None:
@@ -424,57 +276,20 @@ async def bootstrap(
     if set_trace_session is not None:
         set_trace_session(_make_trace_session_name(session_id))
 
-    from .agent import TUIAgent
-    from .experimental_agent import ExperimentalTUIAgent
+    from nooa_cli.coding.factory import create_session_agent
+    from nooa_cli.interactive.options import SessionOptions
 
-    def make_built_in_agent():
-        if config.legacy_agent:
-            return TUIAgent(
-                llm=llm,
-                config=config.agent,
-                skills_dirs=config.tui.skills_dirs,
-                storage=session_manager._storage,
-            )
-        return ExperimentalTUIAgent(
-            llm=llm,
-            cwd=config.agent.working_dir,
-            summarization=config.agent.summarization,
-            skills_dirs=config.tui.skills_dirs,
-            storage=session_manager._storage,
-        )
-
-    if config.tui.agent_spec and not config.legacy_agent:
-        from .config import load_agent_class
-        from .theme import COLORS
-
-        try:
-            agent_cls = load_agent_class(config.tui.agent_spec)
-            agent = _instantiate_custom_agent(
-                agent_cls,
-                llm=llm,
-                storage=session_manager._storage,
-                working_directory=config.agent.working_dir,
-                skills_dirs=config.tui.skills_dirs,
-                summarization=config.agent.summarization,
-            )
-            session_manager.update_agent_cls(type(agent).__name__)
-            messages.append(
-                TextOutput(
-                    f"Loaded custom agent: [{COLORS['green']}]{agent_cls.__name__}[/] "
-                    f"from {config.tui.agent_spec}",
-                    "info",
-                )
-            )
-        except Exception as exc:
-            messages.extend(
-                (
-                    TextOutput(f"Failed to load agent '{config.tui.agent_spec}': {exc}", "error"),
-                    TextOutput("Falling back to default coding agent", "info"),
-                )
-            )
-            agent = make_built_in_agent()
-    else:
-        agent = make_built_in_agent()
+    options = SessionOptions.from_native_config(config)
+    try:
+        agent = create_session_agent(llm=llm, storage=session_manager._storage, options=options)
+    except Exception as exc:
+        if not options.agent_spec or options.legacy_agent:
+            raise
+        messages.append(TextOutput(f"Failed to load agent '{options.agent_spec}': {exc}", "error"))
+        messages.append(TextOutput("Falling back to default coding agent", "info"))
+        options.agent_spec = None
+        agent = create_session_agent(llm=llm, storage=session_manager._storage, options=options)
+    session_manager.update_agent_cls(type(agent).__name__)
 
     restored = False
     if resumed:
@@ -565,64 +380,13 @@ def build_startup_info(result: BootstrapResult) -> Output:
 
 
 def build_registry(result: BootstrapResult, frontend: Frontend) -> CommandRegistry:
+    from nooa_cli.interactive.options import SessionOptions, configure_session_skills
+
     from .commands import CommandRegistry
-    from .mcp_registry import MCPRegistry
 
-    if hasattr(result.agent, "skills"):
-        result.agent.skills.register(  # type: ignore[union-attr]
-            "nemo.mcp",
-            MCPRegistry(
-                mcp_file=result.config.tui.mcp_file,
-                servers=result.config.tui.mcp_servers,
-                watch_settings=True,
-            ),
-        )
-        result.agent.skills.activate(["nemo.mcp"])  # type: ignore[union-attr]
-
-    skills = getattr(result.agent, "skills", None)
-    if skills is not None:
-        discover_dirs = getattr(skills, "discover_skills_dirs", None)
-        if result.config.tui.active_skills and callable(discover_dirs):
-            try:
-                discover_dirs(result.config.tui.skills_dirs)
-            except Exception as exc:
-                result.messages.append(
-                    TextOutput(f"Could not discover configured skills: {exc}", "warning")
-                )
-
-        discovered = set(skills.discovered())
-        for skill_name in result.config.tui.active_skills:
-            if skill_name not in discovered:
-                result.messages.append(
-                    TextOutput(f"Configured skill not found: {skill_name}", "warning")
-                )
-                continue
-            try:
-                skills.activate([skill_name])
-            except Exception as exc:
-                result.messages.append(
-                    TextOutput(f"Could not activate skill {skill_name}: {exc}", "warning")
-                )
-                continue
-            if skill_name not in skills.activated():
-                result.messages.append(
-                    TextOutput(f"Could not activate skill {skill_name}", "warning")
-                )
-
-        for skill_name in result.config.tui.inactive_skills:
-            if skill_name not in skills.activated():
-                continue
-            try:
-                skills.deactivate([skill_name])
-            except Exception as exc:
-                result.messages.append(
-                    TextOutput(f"Could not deactivate skill {skill_name}: {exc}", "warning")
-                )
-                continue
-            if skill_name in skills.activated():
-                result.messages.append(
-                    TextOutput(f"Could not deactivate skill {skill_name}", "warning")
-                )
+    options = SessionOptions.from_native_config(result.config)
+    warnings = configure_session_skills(result.agent, options, live_config=result.config.tui)
+    result.messages.extend(TextOutput(message, "warning") for message in warnings)
 
     if result.session_id is not None:
         try:
@@ -636,7 +400,7 @@ def build_registry(result: BootstrapResult, frontend: Frontend) -> CommandRegist
         config=result.config.tui,
         agent=result.agent,
         frontend=frontend,
-        skills_dirs=result.config.tui.skills_dirs,
+        skills_dirs=options.skills_dirs,
         mcp_file=result.config.tui.mcp_file,
         session_manager=result.session_manager,
         root_config=result.config,

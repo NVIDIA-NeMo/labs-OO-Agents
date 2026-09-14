@@ -131,11 +131,6 @@ class TUIConfig(BaseModel):
     # Show bounded unified diffs for semantic file-edit events.
     show_diffs: bool = True
 
-    # Audit DONE turns and continue autonomously when the configured judge
-    # finds unfinished work. Disabled until explicitly enabled by the user.
-    keep_going: bool = False
-    keep_going_model: str | None = None
-
     # Long-term memory is opt-in and can be scoped to this session or shared
     # by every session rooted in the current project. Per-agent maps let custom
     # agents keep independent choices in the same settings file.
@@ -297,6 +292,8 @@ class Config(BaseModel):
         from .settings import load_settings
 
         # Layers 1-2: dataclass defaults, then layered settings.yaml.
+        # The CLI scopes the project directory before loading; retain explicit
+        # NEMO_OO_PROJECT_DIR overrides for both reads and command writes.
         cfg = load_settings(cls())
 
         # Layer 3: explicit overrides (highest priority)
@@ -336,10 +333,13 @@ class Config(BaseModel):
 
         persisted = [Path(d) for d in cfg.tui.additional_skills_dirs]
         ordered = explicit + persisted + cfg.tui.skills_dirs
-        cfg.tui.skills_dirs = list(dict.fromkeys(ordered))
-
-        # Ignore absent conventional locations.
-        cfg.tui.skills_dirs = [d for d in cfg.tui.skills_dirs if d.exists()]
+        root = Path(cfg.agent.working_dir).expanduser().resolve()
+        resolved = [
+            (d.expanduser() if d.expanduser().is_absolute() else root / d.expanduser()).resolve()
+            for d in ordered
+        ]
+        # Resolve against the session workspace before filtering absent roots.
+        cfg.tui.skills_dirs = [d for d in dict.fromkeys(resolved) if d.is_dir()]
 
         return cfg
 
@@ -404,74 +404,4 @@ def list_models() -> list[str]:
     return sorted(MODELS.keys())
 
 
-def load_agent_class(spec: str) -> type:
-    """Load an agent class from a 'module:ClassName' or './file.py:ClassName' spec.
-
-    Args:
-        spec: Agent spec in the form ``module.path:ClassName`` or
-              ``./path/to/file.py:ClassName`` (absolute paths also work).
-
-    Returns:
-        The agent class (uninstantiated).
-
-    Raises:
-        ValueError: If the spec format is invalid or the class is not an Agent subclass.
-        FileNotFoundError: If a file-path spec points to a missing file.
-        ImportError: If the module cannot be imported.
-        AttributeError: If the class name is not found in the module.
-    """
-    import importlib
-    import importlib.util
-    import sys
-
-    if ":" not in spec:
-        raise ValueError(
-            f"Invalid agent spec '{spec}'. "
-            "Expected 'module.path:ClassName' or './path/to/file.py:ClassName'."
-        )
-
-    module_part, class_name = spec.rsplit(":", 1)
-    class_name = class_name.strip()
-
-    # File path: ends in .py OR contains a path separator OR starts with . / ~
-    is_file = module_part.endswith(".py") or "/" in module_part or module_part.startswith(".")
-    if is_file:
-        file_path = Path(module_part).expanduser().resolve()
-        if not file_path.exists():
-            raise FileNotFoundError(f"Agent module file not found: {file_path}")
-
-        parent_str = str(file_path.parent)
-        inserted = False
-        if parent_str not in sys.path:
-            sys.path.insert(0, parent_str)
-            inserted = True
-
-        try:
-            mod_spec = importlib.util.spec_from_file_location("_tui_custom_agent", file_path)
-            if mod_spec is None or mod_spec.loader is None:
-                raise ImportError(f"Cannot load module from {file_path}")
-            module = importlib.util.module_from_spec(mod_spec)
-            mod_spec.loader.exec_module(module)  # type: ignore[union-attr]
-        finally:
-            if inserted:
-                sys.path.remove(parent_str)
-    else:
-        module = importlib.import_module(module_part)
-
-    cls = getattr(module, class_name, None)
-    if cls is None:
-        raise AttributeError(f"Class '{class_name}' not found in '{module_part}'.")
-
-    # Validate it's an Agent subclass
-    try:
-        from nooa import Agent
-
-        if not (isinstance(cls, type) and issubclass(cls, Agent)):
-            raise ValueError(
-                f"'{class_name}' is not a subclass of a NOOA Agent. "
-                "Make sure your class inherits from Agent."
-            )
-    except ImportError:
-        pass  # Can't validate without nooa; proceed anyway
-
-    return cls
+from nooa_cli.coding.factory import load_agent_class as load_agent_class  # noqa: E402

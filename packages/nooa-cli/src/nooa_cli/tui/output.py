@@ -211,8 +211,6 @@ class StopReasonOutput:
             return "waiting"
         if str(self.kind) == "DONE":
             return "done"
-        if str(self.kind) == "KEEP_GOING":
-            return "keep going"
         if str(self.kind) == "NEED_INPUT":
             return "need input"
         return "paused"
@@ -297,11 +295,7 @@ class HistoryReplay:
     said before.  Frontends should render this in a visually dimmed / muted
     style to distinguish it from the live conversation.
 
-    When rich content is interleaved with history (session resume inside
-    ``nooa-term``), one session's history may be split into several
-    ``HistoryReplay`` chunks with ``_RichReplayPayload`` objects between them.
-    ``show_header`` / ``show_footer`` control which chunk renders the enclosing
-    rule bars so they appear exactly once around the whole block.
+    ``show_header`` / ``show_footer`` control the enclosing rule bars.
     """
 
     turns: list[HistoryTurn]
@@ -374,24 +368,6 @@ class RichOutput:
             "title": self.title,
             "fallback_text": self.fallback_text,
         }
-
-
-# ---------------------------------------------------------------------------
-# _RichReplayPayload — internal sentinel for interleaved rich-content replay
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _RichReplayPayload:
-    """Carry a raw WebPublisher payload through an output list.
-
-    Not part of the public ``Output`` union — intercepted by ``CommandHandler``
-    and the ``--continue`` startup path before reaching any frontend renderer.
-    Each instance is POSTed to ``NEMO_OO_RICH_URL`` in sequence so that plots
-    appear at their correct inline positions between history turns.
-    """
-
-    payload: dict
 
 
 # ---------------------------------------------------------------------------

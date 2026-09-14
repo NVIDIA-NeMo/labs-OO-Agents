@@ -166,10 +166,6 @@ def test_slash_case_insensitive(completer):
             "/reflection ",
             ["/reflection on", "/reflection off", "/reflection now"],
         ),
-        (
-            "/keep-going ",
-            ["/keep-going on", "/keep-going off", "/keep-going model"],
-        ),
     ],
 )
 def test_compact_help_command_families_complete_actions(completer, text, expected):

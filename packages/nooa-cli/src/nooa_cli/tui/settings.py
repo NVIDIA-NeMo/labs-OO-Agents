@@ -7,10 +7,10 @@ live in ``settings.yaml`` next to ``llm_config.yaml`` and ``secrets.yaml``,
 share the same directories, and are discovered through the same
 :func:`nooa.layered_config.load_layered_yaml` helper.
 
-The file is a direct serialisation of the :class:`Config` model tree
-(``tui:`` / ``agent:`` sections, Pydantic field names), so it
-round-trips: :func:`dump_settings` writes a config and :func:`load_settings`
-reads it back identically.
+Behavior is persisted under ``coding:`` for both interactive hosts;
+presentation stays under ``tui:``. Legacy ``tui:`` behavior and
+``agent.summarization`` remain readable. :func:`dump_settings` writes a config
+and :func:`load_settings` reads it back identically.
 
 Precedence (low → high, last wins) is the shared layered chain:
 
@@ -34,9 +34,20 @@ from __future__ import annotations
 import logging
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
+
+# Compatibility exports: behavior writes now use the shared canonical namespace.
+from nooa_cli.interactive.settings import (
+    delete_settings_value as delete_settings_value,
+)
+from nooa_cli.interactive.settings import (
+    settings_path as settings_path,
+)
+from nooa_cli.interactive.settings import (
+    write_settings_updates as write_settings_updates,
+)
 
 if TYPE_CHECKING:
     from .config import Config
@@ -85,20 +96,31 @@ def _coerce_theme(value: Any) -> str:
 _SKIP_FIELDS = {"tui.skills_dirs", "no_splash", "no_trace", "legacy_agent"}
 
 
-def load_settings(cfg: Config) -> Config:
+def load_settings(cfg: Config, *, workspace: str | Path | None = None) -> Config:
     """Apply layered ``settings.yaml`` onto *cfg* in place and return it.
 
     Reads the merged settings dict (user → project → env, last wins,
     ``null`` deletes) and sets matching config fields. Unknown keys
     are warned about and skipped so a stale file never crashes startup.
     """
-    from nooa.layered_config import load_layered_yaml
+    from nooa_cli.interactive.settings import (
+        behavior_fields,
+        load_settings_data,
+        resolve_behavior_settings,
+    )
 
-    data = load_layered_yaml(SETTINGS_FILENAME, SETTINGS_ENV_VAR)
+    data = load_settings_data(workspace)
     for section in ("tui", "agent"):
         sect = data.get(section)
         if isinstance(sect, dict):
+            excluded = behavior_fields() if section == "tui" else {"summarization"}
+            sect = {key: value for key, value in sect.items() if key not in excluded}
             _apply_section(getattr(cfg, section), sect, section)
+    behavior = resolve_behavior_settings(data)
+    summarization = behavior.pop("summarization", None)
+    if isinstance(summarization, dict):
+        _apply_section(cfg.agent.summarization, summarization, "agent.summarization")
+    _apply_section(cfg.tui, behavior, "tui")
     return cfg
 
 
@@ -126,10 +148,13 @@ def settings_to_dict(cfg: Config) -> dict[str, Any]:
     a config built by applying ``settings_to_dict(Config())`` back.
     Paths become strings; ``skills_dirs`` and runtime flags are omitted.
     """
-    return {
-        "tui": _model_to_dict(cfg.tui, "tui"),
-        "agent": _model_to_dict(cfg.agent, "agent"),
-    }
+    from nooa_cli.interactive.settings import behavior_fields
+
+    tui = _model_to_dict(cfg.tui, "tui")
+    agent = _model_to_dict(cfg.agent, "agent")
+    coding = {key: tui.pop(key) for key in list(tui) if key in behavior_fields()}
+    coding["summarization"] = agent.pop("summarization")
+    return {"tui": tui, "agent": agent, "coding": coding}
 
 
 def _model_to_dict(obj: BaseModel, prefix: str) -> dict[str, Any]:
@@ -172,103 +197,10 @@ def settings_present() -> bool:
     return bool(layered_paths(SETTINGS_FILENAME, SETTINGS_ENV_VAR))
 
 
-def settings_path(scope: Literal["project", "user"] = "project") -> Path:
-    """Return the writable ``settings.yaml`` path for *scope*."""
-    from nooa.paths import get_project_dir, get_user_dir
-
-    if scope == "project":
-        return get_project_dir(SETTINGS_FILENAME)
-    if scope == "user":
-        return get_user_dir(SETTINGS_FILENAME)
-    raise ValueError(f"Unknown settings scope: {scope!r}")
-
-
-def write_settings_updates(
-    updates: dict[tuple[str, ...], Any],
-    *,
-    scope: Literal["project", "user"] = "project",
-    dry_run: bool = False,
-) -> tuple[Path, dict[str, Any]]:
-    """Apply nested setting updates to one writable settings file.
-
-    ``updates`` maps dotted-path tuples like ``("tui", "default_model")``
-    to YAML-friendly values. Existing sibling keys are preserved. When
-    ``dry_run`` is true, the returned data is what would be written.
-    """
-    import yaml
-
-    path = settings_path(scope)
-    data: dict[str, Any] = {}
-    if path.exists():
-        loaded = yaml.safe_load(path.read_text())
-        if isinstance(loaded, dict):
-            data = loaded
-
-    for setting_path, value in updates.items():
-        _set_mapping_path(data, list(setting_path), value)
-
-    if not dry_run:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(yaml.safe_dump(data, sort_keys=False))
-    return path, data
-
-
-def delete_settings_value(
-    setting_path: tuple[str, ...],
-    *,
-    scope: Literal["project", "user"] = "project",
-    dry_run: bool = False,
-) -> tuple[Path, dict[str, Any], bool]:
-    """Delete one nested setting while preserving all sibling settings."""
-    import yaml
-
-    path = settings_path(scope)
-    data: dict[str, Any] = {}
-    if path.exists():
-        loaded = yaml.safe_load(path.read_text())
-        if isinstance(loaded, dict):
-            data = loaded
-
-    current: dict[str, Any] = data
-    parents: list[tuple[dict[str, Any], str]] = []
-    for part in setting_path[:-1]:
-        child = current.get(part)
-        if not isinstance(child, dict):
-            return path, data, False
-        parents.append((current, part))
-        current = child
-    deleted = current.pop(setting_path[-1], None) is not None
-    if not deleted:
-        return path, data, False
-
-    for parent, key in reversed(parents):
-        child = parent.get(key)
-        if isinstance(child, dict) and not child:
-            parent.pop(key)
-        else:
-            break
-    if not dry_run:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(yaml.safe_dump(data, sort_keys=False))
-    return path, data, True
-
-
-def _set_mapping_path(data: dict[str, Any], path: list[str], value: Any) -> None:
-    """Set ``data[path[0]]...[path[-1]]`` creating dictionaries as needed."""
-    current = data
-    for part in path[:-1]:
-        child = current.get(part)
-        if not isinstance(child, dict):
-            child = {}
-            current[part] = child
-        current = child
-    current[path[-1]] = value
-
-
 # Commented scaffold written on first run. Everything is commented out so
 # the file documents the schema without overriding any defaults.
 SETTINGS_TEMPLATE = """\
-# NVIDIA Labs Object Oriented Agents (NOOA) — TUI settings
+# NVIDIA Labs Object Oriented Agents (NOOA) — interactive settings
 #
 # Layered, last wins:
 #   1. built-in defaults
@@ -279,24 +211,9 @@ SETTINGS_TEMPLATE = """\
 # All keys are optional; uncomment only what you want to change.
 # `null` removes a key inherited from a lower layer.
 
-tui:
+coding:
   # LLM model alias (from the unifiedllm registry) or a litellm model name.
   # default_model: {default_model}
-
-  # Color palette. Use /theme to browse; /theme <id> applies directly.
-  # Custom Base16/Base24 YAML themes load from user/project .nooa/themes/.
-  # theme: mocha
-
-  # Show the agent's Python execution panels.
-  # show_python: false
-
-  # Show bounded unified diffs when coding tools edit files.
-  # show_diffs: true
-
-  # Audit DONE turns and continue when autonomous work remains.
-  # Configure the judge model before enabling this.
-  # keep_going: false
-  # keep_going_model: nemotron3-nano-30b
 
   # Long-term memory. "project" shares one store across project sessions;
   # "session" uses a sidecar database for only the current session.
@@ -312,20 +229,11 @@ tui:
   # reflection_debounce_s: 10.0
   # reflection_grace_s: 0.5
 
-  # Vi keybindings in the input prompt.
-  # vi_mode: false
-
   # Additional skill roots. Prefer /skills add <directory> so these are
-  # discovered immediately and saved here for future TUI runs.
+  # discovered immediately and saved here for both interactive hosts.
   # additional_skills_dirs: []
   # active_skills: []    # re-activate these before SessionResumed hooks run
   # inactive_skills: []  # keep explicitly deactivated skills inactive on restart
-
-  # Write trace files here (relative to project root, or ":project:").
-  # trace_dir: .nooa/traces
-
-  # Ordered toolbar items. Built-ins: time, model, cwd, context, session.
-  # toolbar_items: [time, model, context, session]
 
   # MCP servers, declared inline (preferred over a separate .mcp.json).
   # Keep secrets in the host environment. The TUI resolves ${VAR} only after
@@ -339,11 +247,29 @@ tui:
   #     headers:
   #       Authorization: "Bearer ${MAAS_API_KEY}"
 
-# agent:
-#   working_dir: "."
-#   summarization:
-#     policy: token_budget   # token_budget | none
-#     max_tokens: null       # null = 80% of the model's context window
+  # summarization:
+  #   policy: token_budget   # token_budget | none
+  #   max_tokens: null       # null = 80% of the model's context window
+
+tui:
+  # Color palette. Use /theme to browse; /theme <id> applies directly.
+  # Custom Base16/Base24 YAML themes load from user/project .nooa/themes/.
+  # theme: mocha
+
+  # Show the agent's Python execution panels.
+  # show_python: false
+
+  # Show bounded unified diffs when coding tools edit files.
+  # show_diffs: true
+
+  # Vi keybindings in the input prompt.
+  # vi_mode: false
+
+  # Write trace files here (relative to project root, or ":project:").
+  # trace_dir: .nooa/traces
+
+  # Ordered toolbar items. Built-ins: time, model, cwd, context, session.
+  # toolbar_items: [time, model, context, session]
 """
 
 
