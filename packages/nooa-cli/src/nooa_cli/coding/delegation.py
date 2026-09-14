@@ -60,8 +60,11 @@ class CodingWorker(
         install_summarizer(summarization or SummarizationConfig(), self)
 
     async def close(self) -> None:
-        """Release the worker's shell without closing the controller-owned LLM."""
-        await self.shell.close()
+        """Drain background summaries and close the shell, leaving the LLM to its owner."""
+        try:
+            await self.aclose()
+        finally:
+            await self.shell.close()
 
     @strategy(
         CodeActStrategy(
