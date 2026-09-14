@@ -21,7 +21,7 @@ def test_create_record_title_list_and_resume(tmp_path):
     store = SessionStore(tmp_path)
     session = store.create(
         session_id="session-one",
-        origin="tui",
+        host="tui",
         model="test/model",
         agent="CodingAgent",
         working_directory="/workspace",
@@ -33,7 +33,7 @@ def test_create_record_title_list_and_resume(tmp_path):
 
     info = store.list()[0]
     assert info.id == "session-one"
-    assert info.origin == "tui"
+    assert info.host == "tui"
     assert info.model == "test/model"
     assert info.agent == "CodingAgent"
     assert info.working_directory == "/workspace"
@@ -257,7 +257,7 @@ def test_reads_legacy_tui_session_events(tmp_path):
     connection.close()
 
     info = store.get("legacy")
-    assert info.origin == "tui"
+    assert info.host == "tui"
     assert info.model == "legacy/model"
     assert info.agent == "TUIAgent"
     assert info.working_directory == "/legacy"
