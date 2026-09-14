@@ -138,8 +138,11 @@ class BenchAgent(
 
     @_hidden
     async def close(self) -> None:
-        """Close the active shell without closing the externally owned LLM."""
-        await self.shell.close()
+        """Drain background summaries and close the shell, leaving the LLM to its owner."""
+        try:
+            await self.aclose()
+        finally:
+            await self.shell.close()
 
     async def _run_evaluation(self, task_input: dict) -> dict:
         """Entry point called by the Harbor runner."""
