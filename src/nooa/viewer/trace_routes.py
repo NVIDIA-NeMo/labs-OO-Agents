@@ -649,7 +649,8 @@ async def run_inference(request: InferenceRequest):
 
         if model_config and model_config.get("endpoint"):
             kwargs["api_base"] = model_config["endpoint"]
-            kwargs["model"] = f"openai/{request.model}"
+            # Keep the previous explicit OpenAI route's wire model name.
+            kwargs["model"] = f"openai/{request.model.removeprefix('openai/')}"
 
         if model_config:
             api_key = resolve_api_key_from_config(
