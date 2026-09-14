@@ -5,6 +5,7 @@
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
 import click.testing
 import pytest
@@ -16,8 +17,9 @@ def stubbed_serve(monkeypatch):
     """Capture the llm_factory the command builds instead of serving."""
     captured = {}
 
-    def fake_serve(llm_factory):
+    def fake_serve(llm_factory, **kwargs):
         captured["llm_factory"] = llm_factory
+        captured.update(kwargs)
         return "coroutine-placeholder"
 
     monkeypatch.setattr("nooa_acp.server.serve", fake_serve)
@@ -82,7 +84,25 @@ def _console_script() -> str:
 def _clean_env() -> dict[str, str]:
     env = dict(os.environ)
     env.pop("NOOA_MODEL", None)
+    root = Path(__file__).resolve().parents[3]
+    sources = [root / "src"] + [
+        root / "packages" / package / "src"
+        for package in ("nooa-cli", "nooa-acp", "nooa-memory", "nooa-bench")
+    ]
+    env["PYTHONPATH"] = os.pathsep.join(str(path) for path in sources)
     return env
+
+
+def test_legacy_agent_flag_reaches_session_options(stubbed_serve, tmp_path, monkeypatch):
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user"))
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(tmp_path / ".nooa"))
+    monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "user")
+    result = click.testing.CliRunner().invoke(
+        command, ["--model", "fixture/model", "--legacy-agent"]
+    )
+    assert result.exit_code == 0, result.output
+    assert stubbed_serve["options_factory"](tmp_path).legacy_agent is True
 
 
 def test_console_script_is_installed_and_runnable():

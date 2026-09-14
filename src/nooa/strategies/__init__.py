@@ -17,6 +17,7 @@ from nooa.strategies.codeact import (
     retry_text_only_response,
     return_text_as_result,
 )
+from nooa.strategies.codeact_experimental import CodeActExperimental
 from nooa.strategies.codeact_lite import CodeActLiteStrategy
 from nooa.strategies.composite import CompositeStrategy
 from nooa.strategies.current_call import CurrentCall
@@ -103,6 +104,7 @@ __all__ = [
     "TextOnlyResponseHandler",
     "retry_text_only_response",
     "return_text_as_result",
+    "CodeActExperimental",
     "CodeActLiteStrategy",
     "ReflexionStrategy",
     "PredictStrategy",

@@ -39,6 +39,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from nooa.agentdoc._structured import format_type as _format_type
 from nooa.context_blocks import DynamicContext, EventBase, ResultStatus, ToolCallEvent, ToolResult
+from nooa.context_blocks.events import CODEACT_INLINE_RETURN
 from nooa.context_blocks.exceptions import BlockSyntaxError
 from nooa.decorators import strategy
 from nooa.errors import GenerationError
@@ -617,7 +618,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         parts = [
             "## Execution Context",
             "",
-            "These names are already in scope inside `execute_python()` (state "
+            f"These names are already in scope inside `{self._python_tool_name()}()` (state "
             "persists across cells) — call them, don't re-import or re-define. "
             "Use `doc(name)` to inspect any type or function in detail.",
             "",
@@ -629,10 +630,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         if in_scope_only:
             parts.append(f"Also in scope: {', '.join(sorted(in_scope_only))}.")
 
-        parts.append(
-            "Always available without import: `self`, `print()`, `pprint()`, `doc()`, "
-            "`return_result()`, plus stdlib `asyncio` and `typing`."
-        )
+        parts.append(self._always_available_text())
 
         return "\n".join(parts)
 
@@ -660,6 +658,34 @@ Standard Python builtins and agent instance (`self`) are available."""
             return doc(*[obj for _, obj in ordered], inline_depth=0)
         except Exception:
             return ", ".join(name for name, _ in ordered)
+
+    def _always_available_text(self) -> str:
+        return (
+            "Always available without import: `self`, `print()`, `pprint()`, `doc()`, "
+            "`return_result()`, plus stdlib `asyncio` and `typing`."
+        )
+
+    def _python_tool_name(self) -> str:
+        """Return the model-facing name of the Python cell tool."""
+        return "execute_python"
+
+    def _build_tools(self, return_type: Any, method_name: str) -> list[Tool]:
+        """Build the model-facing tools for a generation turn."""
+        return [
+            self._build_execute_python_tool(),
+            self._build_return_result_tool(return_type, method_name),
+        ]
+
+    def _supports_return_result(self) -> bool:
+        """Whether return_result is accepted as a provider tool call."""
+        return True
+
+    def _available_tool_names(self) -> str:
+        return "execute_python, return_result"
+
+    def _python_output_value(self, result: Any) -> Any:
+        """Select the value exposed as the cell's Jupyter-style output."""
+        return result.returned_value if result.has_return and not result.error else None
 
     @strategy(TemplateStrategy())
     async def strategy_instructions(self, runtime: RuntimeServices) -> str:
@@ -695,7 +721,9 @@ Standard Python builtins and agent instance (`self`) are available."""
         cleaned = [normalize(v) for v in values]
         ```
 
-        ## Fan-out generation
+        ## Delegation
+
+        ### LLM calls
 
         For per-item LLM work over a list, decorate a standalone async function with `@strategy(PredictStrategy())` and an ellipsis body. `asyncio.gather` runs the calls in parallel.
 
@@ -709,7 +737,9 @@ Standard Python builtins and agent instance (`self`) are available."""
         return_result(codes)
         ```
 
-        For iterative sub-tasks that need code execution, use `@strategy(CodeActStrategy())`. The sub-task must be strictly simpler than the current call to avoid infinite recursion.
+        ### Subagents
+
+        If `self` exposes a delegation method, use it for bounded work that benefits from an independent context; inspect its documentation with `doc(...)`. For other iterative sub-tasks that need code execution, use `@strategy(CodeActStrategy())`. A delegated task must be strictly simpler than the current call to avoid infinite recursion.
 
         ## Restrictions (will throw)
 
@@ -838,6 +868,9 @@ Standard Python builtins and agent instance (`self`) are available."""
         # Seed session_locals from caller-provided dict (persistent stack)
         if call.session_locals is not None:
             session.session_locals.update(call.session_locals)
+        # Expose this live dictionary to dynamic context renderers. Unlike
+        # call.session_locals, this also receives names defined by model cells.
+        object.__setattr__(call, "execution_locals", session.session_locals)
 
         # Build builtins for code execution
         _init_hm = get_harness_metrics()
@@ -850,10 +883,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             if self.config.execution_backend == "sandbox":
                 session.sandbox_executor = self._create_sandbox_executor(runtime, call, builtins)
 
-            # Build both tools
-            execute_python_tool = self._build_execute_python_tool()
-            return_result_tool = self._build_return_result_tool(return_type, call.method_name)
-            tools = [execute_python_tool, return_result_tool]
+            tools = self._build_tools(return_type, call.method_name)
 
             # Use the task event's tag as the call ID so the LLM sees a stable reference.
             # _build_task_message reads only method_name/docstring, so it's safe to build
@@ -1243,7 +1273,9 @@ Standard Python builtins and agent instance (`self`) are available."""
             # Parse arguments
             try:
                 args = json.loads(tool_call.arguments)
-            except json.JSONDecodeError as e:
+                if not isinstance(args, dict):
+                    raise ValueError("tool arguments must be a JSON object")
+            except ValueError as e:
                 session.record_error()
                 runtime.event_manager.add(
                     Error(content=f"Invalid arguments for tool `{tool_call.name}`: {e}")
@@ -1263,7 +1295,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             )
 
             # Handle based on tool name
-            if tool_call.name == "execute_python":
+            if tool_call.name == self._python_tool_name():
                 # Execute Python code
                 result = await self._handle_execute_python(
                     runtime,
@@ -1285,7 +1317,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     # Task completed via inline return_result()
                     return _ToolCallsResult(completed=True, final_value=result[1])
 
-            elif tool_call.name == "return_result":
+            elif tool_call.name == "return_result" and self._supports_return_result():
                 # Return the final result
                 try:
                     validated, error_msg = self._handle_return_result(
@@ -1355,7 +1387,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     # Update ToolCallEvent to reflect the translation
                     runtime.event_manager.update(
                         tool_call_event_id,
-                        name="execute_python",
+                        name=self._python_tool_name(),
                         arguments={"code": translated_code},
                     )
                     translated_args = {"code": translated_code}
@@ -1381,7 +1413,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                         result=ToolResult(
                             tool_call_id=tool_call.id,
                             content=f"Unknown tool `{tool_call.name}`. "
-                            f"Available tools: execute_python, return_result",
+                            f"Available tools: {self._available_tool_names()}",
                             result_status=ResultStatus.ERROR,
                         ),
                     )
@@ -1666,9 +1698,8 @@ Standard Python builtins and agent instance (`self`) are available."""
                         )
                     )
                     get_harness_metrics().explicit_return_completed()
-                    # Emit a synthetic return_result ToolCallEvent so the
-                    # final answer is visible in the trajectory; see the
-                    # inline-return_result path above.
+                    # Record a trace-only completion marker. Both CodeAct variants
+                    # omit this marker from provider replay: it was not an LLM call.
                     self._emit_synthetic_inline_return(runtime, validated)
                     logger.info("[CODEACT] Auto-completed task from explicit return statement")
                     return ("TASK_COMPLETE", validated)
@@ -1698,7 +1729,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 stdout=result.stdout,
                 stderr=result.stderr,
                 error=error_text,
-                value=result.returned_value if result.has_return and not result.error else None,
+                value=self._python_output_value(result),
                 explicit_return=result.explicit_return if result.has_return else False,
                 execution_status=final_status,
                 images=result.images,
@@ -1931,7 +1962,8 @@ Standard Python builtins and agent instance (`self`) are available."""
         ``metadata.synthetic = True`` and
         ``metadata.synthetic_type = "codeact_inline_return"`` so
         downstream consumers can distinguish framework-emitted markers
-        from genuine LLM tool_calls if desired.
+        from genuine LLM tool_calls. Both CodeAct variants retain this event for
+        traces and exports; provider replay omits it to avoid inventing a call.
         """
         tool_call_id = f"codeact_inline_{uuid4().hex[:8]}"
         # _jsonable() recurses unguarded — a self-referential dict/list
@@ -1959,7 +1991,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 ),
                 metadata={
                     "synthetic": True,
-                    "synthetic_type": "codeact_inline_return",
+                    "synthetic_type": CODEACT_INLINE_RETURN,
                 },
             )
         )
@@ -2311,7 +2343,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             return ""
 
         return Tool(
-            name="execute_python",
+            name=self._python_tool_name(),
             description=(
                 "Execute Python code in the agent's environment. "
                 "Variables persist across calls. "
@@ -2599,7 +2631,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         prefill_event_id = runtime.event_manager.add(
             ToolCallEvent(
                 tool_call_id=prefill_id,
-                name="execute_python",
+                name=self._python_tool_name(),
                 arguments={"code": code},
                 result=None,  # Will be updated after execution
                 metadata={"prefill": True, "prefill_type": prefill_type},
@@ -2989,12 +3021,8 @@ Standard Python builtins and agent instance (`self`) are available."""
         if agent_module:
             builtins.update(self._extract_module_context(agent_module, agent=runtime.agent))
 
-        # Add strategy builtins (these override any module-level names)
-        builtins.update(
-            {
-                "return_result": return_result,
-            }
-        )
+        # Add strategy builtins (these override any module-level names).
+        builtins.update({"return_result": return_result})
 
         # Add method parameters as variables.
         # call.kwargs is already the fully merged positional+keyword mapping
