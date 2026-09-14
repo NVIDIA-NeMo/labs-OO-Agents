@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for live per-session runtime lifecycle."""
+"""Tests for generic live-session turn ownership and resource cleanup."""
 
 from __future__ import annotations
 
@@ -15,6 +15,9 @@ from nooa.sessions import (
     SessionRuntimePool,
 )
 
+# Bounds a hang, not the expected duration.
+_HANG_TIMEOUT = 30
+
 
 class _RuntimeValue:
     def __init__(self) -> None:
@@ -26,11 +29,44 @@ class _RuntimeValue:
 
 async def test_same_session_rejects_a_second_foreground_turn():
     runtime = SessionRuntime("one", object())
+
+    async def _claim_again() -> None:
+        async with runtime.turn():
+            pass
+
     async with runtime.turn():
         assert runtime.busy is True
+        # Bounded: if turns start queueing instead of failing fast — the exact
+        # regression — this wedges on the inner lock and hangs the suite.
         with pytest.raises(SessionBusyError):
+            await asyncio.wait_for(_claim_again(), timeout=_HANG_TIMEOUT)
+
+
+async def test_simultaneous_turn_claims_do_not_queue():
+    """Exactly one simultaneous caller wins; the other fails rather than queues."""
+    runtime = SessionRuntime("one", object())
+    start = asyncio.Event()
+    release = asyncio.Event()
+    outcomes: list[str] = []
+
+    async def claim() -> None:
+        await start.wait()
+        try:
             async with runtime.turn():
-                pass
+                outcomes.append("entered")
+                await release.wait()
+        except SessionBusyError:
+            outcomes.append("busy")
+
+    tasks = [asyncio.create_task(claim()) for _ in range(2)]
+    start.set()
+    while not outcomes:
+        await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(*tasks)
+
+    assert sorted(outcomes) == ["busy", "entered"]
 
 
 async def test_waiting_turn_runs_after_current_turn():
@@ -58,6 +94,29 @@ async def test_waiting_turn_runs_after_current_turn():
     assert order == ["first-enter", "first-exit", "second-enter"]
 
 
+async def test_cancelled_waiting_turn_releases_its_claim():
+    runtime = SessionRuntime("one", object())
+    queued = asyncio.Event()
+
+    async def wait_for_turn():
+        queued.set()
+        async with runtime.turn(wait=True):
+            pytest.fail("Cancelled waiter must not enter the turn")
+
+    async with runtime.turn():
+        waiter = asyncio.create_task(wait_for_turn())
+        await queued.wait()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert runtime.busy is True
+
+    assert runtime.busy is False
+    async with runtime.turn():
+        assert runtime.busy is True
+    await runtime.close()
+
+
 async def test_different_sessions_run_foreground_turns_concurrently():
     pool: SessionRuntimePool[str] = SessionRuntimePool()
     first = await pool.add("first", "A")
@@ -72,7 +131,10 @@ async def test_different_sessions_run_foreground_turns_concurrently():
                 both_entered.set()
             await both_entered.wait()
 
-    await asyncio.wait_for(asyncio.gather(run(first), run(second)), timeout=1)
+    # Deadlock detector: if the two sessions serialized, neither would reach
+    # both_entered and the gather would hang. Generous so a loaded runner
+    # cannot flake it; a real serialization bug still fails, just later.
+    await asyncio.wait_for(asyncio.gather(run(first), run(second)), timeout=30)
     assert entered == {"A", "B"}
     await pool.close()
 
@@ -91,7 +153,10 @@ async def test_close_waits_for_active_turn_and_is_idempotent():
     turn_task = asyncio.create_task(active_turn())
     await turn_started.wait()
     close_task = asyncio.create_task(runtime.close())
-    await asyncio.sleep(0)
+    # A single yield is satisfied by scheduling latency — _close_once has not
+    # even started — so it passes with the turn lock removed entirely.
+    for _ in range(20):
+        await asyncio.sleep(0)
     assert close_task.done() is False
     assert value.close_calls == 0
     release_turn.set()
@@ -147,3 +212,56 @@ async def test_pool_remove_and_close_release_each_runtime_once():
     assert second_value.close_calls == 1
     with pytest.raises(SessionRuntimeClosedError):
         await pool.add("third", _RuntimeValue())
+
+
+async def test_remove_unregisters_even_when_teardown_fails():
+    """A failing close must not strand the session id in the pool.
+
+    Leaving the entry registered would prevent reuse of its identifier and
+    return a closed runtime to later callers.
+    """
+
+    class _Failing:
+        async def close(self) -> None:
+            raise RuntimeError("teardown blew up")
+
+    pool: SessionRuntimePool[_Failing] = SessionRuntimePool()
+    await pool.add("one", _Failing())
+
+    with pytest.raises(RuntimeError, match="teardown blew up"):
+        await pool.remove("one")
+
+    assert await pool.ids() == ()
+    with pytest.raises(KeyError):
+        await pool.get("one")
+
+
+async def test_cancelled_remove_keeps_id_reserved_until_teardown_finishes():
+    """Cancellation must not expose the id while its old runtime is still live."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _Slow:
+        async def close(self) -> None:
+            started.set()
+            await release.wait()
+
+    pool: SessionRuntimePool[_Slow] = SessionRuntimePool()
+    await pool.add("one", _Slow())
+
+    remover = asyncio.create_task(pool.remove("one"))
+    await asyncio.wait_for(started.wait(), timeout=_HANG_TIMEOUT)
+    remover.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await remover
+
+    assert await pool.ids() == ("one",)
+    with pytest.raises(ValueError, match="already registered"):
+        await pool.add("one", _Slow())
+
+    release.set()
+    for _ in range(20):
+        if await pool.ids() == ():
+            break
+        await asyncio.sleep(0)
+    assert await pool.ids() == ()

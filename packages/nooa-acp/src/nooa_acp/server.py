@@ -69,17 +69,17 @@ from nooa_cli.sessions import (
 
 from nooa.errors import GenerationError
 from nooa.mcp import MCPManager, MCPTool
-from nooa.sessions import SessionResumed
-from nooa.slash_dispatch import CoercionError
-from nooa.storage.sqlite import SessionAlreadyActiveError, is_sqlite_database_active
-from nooa.unifiedllm import UnifiedLLM
-from nooa_acp._mcp_trace import MCPHandoffTrace
-from nooa_acp._runtime import (
+from nooa.sessions import (
     SessionBusyError,
+    SessionResumed,
     SessionRuntime,
     SessionRuntimeClosedError,
     SessionRuntimePool,
 )
+from nooa.slash_dispatch import CoercionError
+from nooa.storage.sqlite import SessionAlreadyActiveError, is_sqlite_database_active
+from nooa.unifiedllm import UnifiedLLM
+from nooa_acp._mcp_trace import MCPHandoffTrace
 from nooa_acp.dispatcher import InteractiveSessionDispatcher
 from nooa_acp.event_bridge import ACPEventBridge
 
@@ -104,6 +104,8 @@ class _ACPSession:
     commands_sent_on_prompt: bool = False
     restored: bool = False
     policy: LocalTurnPolicy | None = None
+    # ACP requests must not interleave with the transcript replay on load.
+    ready: bool = False
 
     def __post_init__(self) -> None:
         self.cancel_complete.set()
@@ -220,6 +222,7 @@ class CodingACPAdapter:
             handle.close()
             self._store(root).delete(handle.id)
             raise
+        runtime.value.ready = True
         self._defer_bootstrap_updates(runtime.value)
         return NewSessionResponse(session_id=handle.id)
 
@@ -247,20 +250,20 @@ class CodingACPAdapter:
             ) from None
         runtime: SessionRuntime[_ACPSession] | None = None
         try:
-            runtime = await self._create_runtime(
-                handle, root, mcp_servers, available=False, restore=True
-            )
+            runtime = await self._create_runtime(handle, root, mcp_servers, restore=True)
             # After the replay, never during it: replay writes straight to the
             # client while the bridge pump drains bootstrap updates, so every
             # await here would otherwise let a commands update or an MCP warning
             # land in the middle of the restored conversation.
             await self._replay_session(handle)
-            await self._sessions.publish(session_id)
+            if runtime.is_closed:
+                raise RequestError.resource_not_found(session_id)
+            runtime.value.ready = True
             self._defer_bootstrap_updates(runtime.value)
         except BaseException:
             if runtime is not None:
                 with suppress(KeyError):
-                    await self._sessions.remove(session_id, include_unavailable=True)
+                    await self._sessions.remove(session_id)
             else:
                 handle.close()
             raise
@@ -318,6 +321,7 @@ class CodingACPAdapter:
 
     async def close_session(self, session_id: str, **kwargs: Any) -> CloseSessionResponse:
         del kwargs
+        await self._get_runtime(session_id)
         try:
             await self._sessions.remove(session_id)
         except KeyError:
@@ -478,7 +482,6 @@ class CodingACPAdapter:
         mcp_servers: list[Any] | None,
         *,
         llm: UnifiedLLM | None = None,
-        available: bool = True,
         options: SessionOptions | None = None,
         restore: bool = False,
     ) -> SessionRuntime[_ACPSession]:
@@ -575,7 +578,7 @@ class CodingACPAdapter:
                 lambda available: bridge.publish(_available_commands_update(available)),
             )
             try:
-                runtime = await self._sessions.add(handle.id, value, available=available)
+                runtime = await self._sessions.add(handle.id, value)
                 return runtime
             except ValueError:
                 raise RequestError.invalid_request(
@@ -649,9 +652,12 @@ class CodingACPAdapter:
 
     async def _get_runtime(self, session_id: str) -> SessionRuntime[_ACPSession]:
         try:
-            return await self._sessions.get(session_id)
+            runtime = await self._sessions.get(session_id)
         except KeyError:
             raise RequestError.resource_not_found(session_id) from None
+        if not runtime.value.ready:
+            raise RequestError.resource_not_found(session_id)
+        return runtime
 
     @staticmethod
     def _defer_bootstrap_updates(session: _ACPSession) -> None:
