@@ -546,8 +546,14 @@ def write_model_alias(
             replacement = "\n".join(
                 [replacement_lines[0], *(f"  {line}" for line in replacement_lines[1:])]
             )
+            text_ends_nl = source.endswith("\n")
             suffix = source[value_node.end_mark.index :]
-            if suffix and not suffix.startswith("\n"):
+            if not suffix and text_ends_nl:
+                # The replaced alias was the file's last entry: PyYAML's value-node
+                # end mark swallows the final newline, so restore it to keep
+                # replace-from-EOF from stripping the trailing newline.
+                replacement = f"{replacement}\n"
+            elif suffix and not suffix.startswith("\n"):
                 replacement = f"{replacement}\n  "
             updated = f"{source[: alias_node.start_mark.index]}{replacement}{suffix}"
         else:

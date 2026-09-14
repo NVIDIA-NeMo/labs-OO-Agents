@@ -204,6 +204,30 @@ def test_write_model_alias_replaces_existing_when_requested(tmp_path) -> None:
     assert loaded["models"]["sibling"]["model_name"] == "openai/sibling"
 
 
+
+def test_write_model_alias_replace_last_entry_keeps_trailing_newline(tmp_path) -> None:
+    path = tmp_path / "llm_config.yaml"
+    path.write_text(
+        "# team registry\n"
+        "models:\n"
+        "  existing:\n"
+        "    model_name: openai/existing\n"
+        "    api_base: http://localhost:11434/v1\n",  # file ends with newline
+    )
+    entry = registry_entry("existing", "http://localhost:11434/v1")
+
+    assert model_alias_exists(path, "existing") is True
+    write_model_alias(path, "existing", entry, replace=True)
+
+    text = path.read_text()
+    # Replacing the only/last entry must not strip the file's trailing newline.
+    assert text.endswith("\n")
+    loaded = yaml.safe_load(text)
+    assert loaded["models"]["existing"] == {
+        "model_name": "openai/existing",
+        "api_base": "http://localhost:11434/v1",
+    }
+
 def test_registry_entry_uses_openai_prefix_for_openai_compatible_server() -> None:
     assert registry_entry("qwen3:1.7b", "http://localhost:11434/v1") == {
         "model_name": "openai/qwen3:1.7b",
